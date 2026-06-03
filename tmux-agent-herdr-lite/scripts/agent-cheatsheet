@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+cat <<'EOF'
+TMUX AGENT COCKPIT CHEATSHEET
+
+Agent state / Herdr-like routing
+  agent-pane <name> <command>       launch/register an agent pane
+  agent-status-scan                 refresh pane status
+  agent-status-summary              compact status line
+  agent-dashboard                   full status + key help
+  agent-jump blocked|working|idle|done
+
+Human-friendly tmux keys
+  prefix ?        dashboard/help popup
+  prefix m        command menu
+  prefix g        jump blocked agent
+  prefix W/I/D    jump working / idle / done agent
+  prefix G        refresh scan
+  prefix S        choose session/window/pane tree
+  prefix | / -    split horizontal / vertical
+  prefix h/j/k/l  move between panes
+  prefix H/J/K/L  resize panes
+  prefix z        zoom pane
+  prefix Space    cycle layout
+  prefix r        reload tmux config
+
+Copy/search
+  prefix [        copy mode
+  /               search in copy mode
+  v/y             vi-style selection/yank if copy-mode-vi is active
+EOF

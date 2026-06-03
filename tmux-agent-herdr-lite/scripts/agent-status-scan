@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+PANE_DIR="$ROOT/panes"
+STATE="$ROOT/state.json"
+IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
+mkdir -p "$PANE_DIR"
+
+python3 - "$PANE_DIR" "$STATE" "$IDLE_SECONDS" <<'PY'
+import hashlib, json, os, re, subprocess, sys, time
+from datetime import datetime, timezone
+
+pane_dir, state_path, idle_s = sys.argv[1], sys.argv[2], int(sys.argv[3])
+now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+now_ts = time.time()
+
+blocked_patterns = [
+    r'AGENT_STATUS:\s*blocked', r'approval required', r'do you want to continue',
+    r'continue\?\s*\[?[yn]/?n?\]?', r'proceed\?', r'press enter', r'waiting for user',
+    r'need(s)? permission', r'password:', r'passphrase', r'permission denied',
+    r'rate limit', r'too many attempts', r'\b429\b', r'clarification needed',
+]
+done_patterns = [
+    r'AGENT_STATUS:\s*done', r'task complete', r'\bdone\b', r'all tests passed',
+    r'no changes needed', r'process exited', r'exit_code=0',
+]
+error_patterns = [r'traceback', r'uncaught exception', r'command failed', r'exit_code=[1-9]']
+
+def sh(args):
+    return subprocess.run(args, text=True, capture_output=True)
+
+def pane_exists(pane_id):
+    r = sh(['tmux','display-message','-p','-t',pane_id,'#{pane_id}'])
+    return r.returncode == 0
+
+def capture(pane_id):
+    r = sh(['tmux','capture-pane','-p','-J','-t',pane_id])
+    return r.stdout if r.returncode == 0 else ''
+
+def classify(text, meta):
+    low = text.lower()
+    for p in blocked_patterns:
+        if re.search(p, low, re.I): return 'blocked'
+    for p in error_patterns:
+        if re.search(p, low, re.I): return 'blocked'
+    for p in done_patterns:
+        if re.search(p, low, re.I): return 'done'
+    h = hashlib.sha256(text.encode('utf-8', 'ignore')).hexdigest()
+    if h != meta.get('last_hash',''):
+        meta['last_hash'] = h
+        meta['last_changed_at'] = now
+        return 'working'
+    last = meta.get('last_changed_at') or meta.get('created_at') or now
+    try:
+        last_ts = datetime.fromisoformat(last.replace('Z','+00:00')).timestamp()
+    except Exception:
+        last_ts = now_ts
+    if now_ts - last_ts > idle_s:
+        return 'idle'
+    return meta.get('status','working') or 'working'
+
+items=[]
+for fn in sorted(os.listdir(pane_dir)):
+    if not fn.endswith('.json'): continue
+    path=os.path.join(pane_dir,fn)
+    try:
+        meta=json.load(open(path))
+    except Exception:
+        continue
+    pane_id=meta.get('pane_id')
+    if not pane_id or not pane_exists(pane_id):
+        meta['status']='unknown'
+    else:
+        text=capture(pane_id)
+        meta['status']=classify(text, meta)
+    meta['updated_at']=now
+    json.dump(meta, open(path,'w'), indent=2)
+    items.append(meta)
+
+json.dump({'updated_at': now, 'items': items}, open(state_path,'w'), indent=2)
+PY

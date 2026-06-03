@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-pane: launch/register a command in tmux for Herdr-lite agent supervision.
+# Usage: agent-pane <name> <command...>
+
+NAME="${1:-}"
+if [[ -z "$NAME" ]]; then
+  echo "usage: agent-pane <name> <command...>" >&2
+  exit 64
+fi
+shift || true
+if [[ $# -eq 0 ]]; then
+  echo "agent-pane: command required" >&2
+  exit 64
+fi
+
+SESSION="${AGENT_TMUX_SESSION:-agents}"
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+PANE_DIR="$ROOT/panes"
+mkdir -p "$PANE_DIR"
+
+CMD="$*"
+SAFE_NAME="$(printf '%s' "$NAME" | tr -cs '[:alnum:]_.-' '-' | sed 's/^-//; s/-$//')"
+[[ -n "$SAFE_NAME" ]] || SAFE_NAME="agent"
+
+# Create session if absent.
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  tmux new-session -d -s "$SESSION" -n control
+fi
+
+# Create a window for this agent. If name exists, create unique suffix.
+WIN="$SAFE_NAME"
+if tmux list-windows -t "$SESSION" -F '#W' | grep -Fxq "$WIN"; then
+  WIN="${SAFE_NAME}-$(date +%H%M%S)"
+fi
+
+tmux new-window -d -t "$SESSION" -n "$WIN"
+PANE_ID="$(tmux display-message -p -t "$SESSION:$WIN" '#{pane_id}')"
+
+# Store metadata before launch so scanner can see it immediately.
+META="$PANE_DIR/${PANE_ID#%}.json"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 - "$META" <<PY
+import json,sys,os
+path=sys.argv[1]
+data={
+  "name": os.environ.get("AGENT_NAME", "$NAME"),
+  "session": "$SESSION",
+  "window": "$WIN",
+  "pane_id": "$PANE_ID",
+  "command": "$CMD",
+  "status": "working",
+  "created_at": "$NOW",
+  "updated_at": "$NOW",
+  "last_hash": "",
+  "last_changed_at": "$NOW",
+}
+open(path,"w").write(json.dumps(data, indent=2))
+PY
+
+# Launch command. Keep shell open after exit so output remains inspectable.
+tmux send-keys -t "$PANE_ID" "printf 'AGENT_STATUS: working name=%q\\n' '$NAME'; $CMD; rc=\$?; printf '\\nAGENT_STATUS: done exit_code=%s\\n' \"\$rc\"; exec \$SHELL" C-m
+
+echo "$PANE_ID"

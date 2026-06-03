@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Zellij-like discoverable command menu for the tmux agent cockpit.
+# Must be run inside tmux.
+if [[ -z "${TMUX:-}" ]]; then
+  echo "agent-menu: run inside tmux" >&2
+  exit 1
+fi
+
+tmux display-menu -T "Agent Cockpit" \
+  "⚠ Jump blocked" b "run-shell '~/.local/bin/agent-jump blocked'" \
+  "● Jump working" w "run-shell '~/.local/bin/agent-jump working'" \
+  "○ Jump idle" i "run-shell '~/.local/bin/agent-jump idle'" \
+  "✓ Jump done" d "run-shell '~/.local/bin/agent-jump done'" \
+  "" \
+  "Refresh status" r "run-shell '~/.local/bin/agent-status-scan'" \
+  "Dashboard" ? "display-popup -E -w 90% -h 80% '~/.local/bin/agent-dashboard; printf \"\\nPress Enter...\"; read'" \
+  "Choose tree" s "choose-tree -Zw" \
+  "New window" n "command-prompt -p 'window name' 'new-window -n %%'" \
+  "Split horizontal" '|' "split-window -h" \
+  "Split vertical" '-' "split-window -v" \
+  "Toggle zoom" z "resize-pane -Z" \
+  "Cycle layout" Space "next-layout" \
+  "Kill pane" x "confirm-before -p 'kill pane #P? (y/n)' kill-pane"

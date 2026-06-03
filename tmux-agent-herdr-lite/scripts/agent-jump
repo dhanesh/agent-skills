@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_STATUS="${1:-blocked}"
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+STATE="$ROOT/state.json"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+
+if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
+
+PANE_ID="$(python3 - "$STATE" "$TARGET_STATUS" <<'PY'
+import json, os, sys
+state, wanted = sys.argv[1], sys.argv[2]
+if not os.path.exists(state): raise SystemExit(1)
+items=json.load(open(state)).get('items',[])
+for it in items:
+    if it.get('status') == wanted and it.get('pane_id'):
+        print(it['pane_id'])
+        raise SystemExit
+raise SystemExit(1)
+PY
+)" || {
+  echo "agent-jump: no pane with status '$TARGET_STATUS'" >&2
+  exit 1
+}
+
+tmux switch-client -t "$PANE_ID" 2>/dev/null || tmux select-pane -t "$PANE_ID"

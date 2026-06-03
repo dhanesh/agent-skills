@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+STATE="$ROOT/state.json"
+
+if [[ -x "$SCAN" ]]; then
+  "$SCAN" >/dev/null 2>&1 || true
+fi
+
+python3 - "$STATE" <<'PY'
+import json,sys,os,datetime
+state_path=sys.argv[1]
+icons={"blocked":"⚠","working":"●","done":"✓","idle":"○","unknown":"?","error":"✖"}
+order={"blocked":0,"error":1,"working":2,"idle":3,"done":4,"unknown":5}
+print("TMUX AGENT COCKPIT")
+print("="*70)
+if not os.path.exists(state_path):
+    print("No state file yet. Start panes with: agent-pane <name> <command>")
+    sys.exit(0)
+try:
+    data=json.load(open(state_path))
+except Exception as e:
+    print(f"Cannot read state: {e}")
+    sys.exit(1)
+panes=data.get("panes", []) if isinstance(data,dict) else data
+if not panes:
+    print("No registered panes. Start panes with: agent-pane <name> <command>")
+    sys.exit(0)
+for p in sorted(panes, key=lambda x:(order.get(x.get('status','unknown'),9), x.get('name',''))):
+    status=p.get('status','unknown')
+    name=p.get('name','?')
+    pane=p.get('pane_id','?')
+    win=p.get('window','?')
+    updated=p.get('updated_at') or p.get('last_changed_at') or ''
+    reason=p.get('reason') or p.get('matched_pattern') or ''
+    print(f"{icons.get(status,'?')} {status:<8} {name:<22} pane={pane:<6} window={win:<18} {updated}")
+    if reason:
+        print(f"    reason: {reason}")
+print("\nKEYS")
+print("  prefix g    jump blocked        prefix W/I/D  jump working/idle/done")
+print("  prefix m    action menu          prefix ?      this dashboard")
+print("  prefix |/-  split pane           prefix h/j/k/l navigate panes")
+print("  prefix H/J/K/L resize pane       prefix z      zoom pane")
+print("  prefix Space cycle layouts       prefix S      choose session/tree")
+PY

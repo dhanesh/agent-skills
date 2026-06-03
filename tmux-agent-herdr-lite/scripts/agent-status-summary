@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+STATE="$ROOT/state.json"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+
+# Scan opportunistically. Keep status bar quiet on errors.
+if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
+
+python3 - "$STATE" <<'PY'
+import json, os, sys
+state=sys.argv[1]
+if not os.path.exists(state):
+    print('agents:-')
+    raise SystemExit
+try:
+    items=json.load(open(state)).get('items',[])
+except Exception:
+    print('agents:?')
+    raise SystemExit
+icons={'blocked':'⚠','working':'●','done':'✓','idle':'○','unknown':'?'}
+parts=[]
+for it in items:
+    name=(it.get('name') or it.get('window') or it.get('pane_id') or '?')[:14]
+    st=it.get('status','unknown')
+    parts.append(f"{icons.get(st,'?')}{name}:{st}")
+print(' '.join(parts) if parts else 'agents:-')
+PY

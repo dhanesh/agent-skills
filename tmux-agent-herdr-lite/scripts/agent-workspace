@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Create/attach a human-friendly tmux agent cockpit: control + scratch windows,
+# with mouse/status/menu bindings supplied by tmux-agent.conf.
+SESSION="${AGENT_TMUX_SESSION:-agents}"
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  tmux new-session -d -s "$SESSION" -n control
+  tmux send-keys -t "$SESSION:control" "clear; echo 'Agent cockpit ready'; echo 'Use agent-pane <name> <command> to launch agents'; echo 'prefix ? dashboard, prefix m menu, prefix g jump blocked'" C-m
+  tmux new-window -d -t "$SESSION" -n scratch
+  tmux send-keys -t "$SESSION:scratch" "clear; echo 'Scratch window'" C-m
+fi
+
+if [[ -n "${TMUX:-}" ]]; then
+  tmux switch-client -t "$SESSION"
+else
+  tmux attach-session -t "$SESSION"
+fi
