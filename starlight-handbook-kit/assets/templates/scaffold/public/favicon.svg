@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Handbook">
+  <rect width="32" height="32" rx="7" fill="#1f2937"/>
+  <!-- two opposing arrows: the tradeoff -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 12 H24"/>
+    <path d="M20 8 L24 12 L20 16"/>
+    <path d="M25 20 H8"/>
+    <path d="M12 16 L8 20 L12 24"/>
+  </g>
+</svg>

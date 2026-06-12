@@ -1,0 +1,92 @@
+---
+title: Topic Title (replace me)
+description: One-sentence summary of this topic (replace me).
+last_reviewed: "2026-01-01"
+decision_guidance: true
+---
+{/* TEMPLATE_VERSION: 1.1.0 */}
+{/*
+  CANONICAL TOPIC TEMPLATE (U1 / RT-4 — BINDING).
+  Authors: copy this file into src/content/docs/<cluster>/<topic>.mdx and fill it in.
+
+  Frontmatter MUST stay as the first thing in the file (the `---` block on line 1):
+  Astro content collections require it there. This version marker and the author
+  notes therefore sit BELOW the frontmatter — a verbatim copy of this file builds
+  into a real page as-is. (Do not move the marker above the frontmatter; doing so
+  makes Astro silently skip the page.)
+
+  KEEP THE SECTION ORDER FIXED — the nine "##" headings below must stay in this
+  exact sequence so every topic reads consistently and the CI drift-check passes.
+  If you change the section skeleton (add/remove/reorder headings), you MUST bump
+  the TEMPLATE_VERSION marker above, because the drift-check keys off it.
+
+  Mermaid is imported below (the "## Diagram" section uses it). For the "## Try it"
+  widgets, uncomment the imports you need. Import path depth assumes a page at
+  src/content/docs/<cluster>/<topic>.mdx (components are three levels up):
+
+  import DecisionTree from '../../../components/DecisionTree';
+  import CompareMatrix from '../../../components/CompareMatrix';
+  import WhenWhyTabs from '../../../components/WhenWhyTabs';
+  import TradeoffSlider from '../../../components/TradeoffSlider';
+*/}
+
+import Mermaid from '../../../components/Mermaid.astro';
+
+## Overview
+
+Briefly introduce the topic: what problem space it addresses and why a reader
+should care. Two or three sentences.
+
+## Mental model
+
+Give the reader a single durable mental model or analogy for the concept.
+
+## Types / Variants
+
+Enumerate the major variants, flavors, or implementations and how they differ.
+
+## When to use / When NOT
+
+- **Use when:** ...
+- **Avoid when:** ...
+
+## Tradeoffs
+
+Summarize the key tradeoffs (consistency, latency, cost, complexity, operational
+burden). A table works well here.
+
+| Option | Pros | Cons |
+| ------ | ---- | ---- |
+| A      | ...  | ...  |
+| B      | ...  | ...  |
+
+## Diagram
+
+Use the `<Mermaid>` component to show the architecture or flow. It is static-first:
+the raw source renders as readable text without JavaScript, then hydrates to an SVG.
+
+IMPORTANT: always use the `<Mermaid>` component for diagrams. Do NOT put the diagram
+in a fenced code block — Starlight's Expressive Code renders a fenced mermaid block
+as syntax-highlighted *code*, not a diagram (a common mistake).
+
+<Mermaid code={`graph TD
+  Client[Client] -->|request| Service[Service]
+  Service -->|read/write| Store[(Data Store)]
+  Service -->|cache lookup| Cache[(Cache)]`} />
+
+## Try it
+
+Drop interactive widgets here to make the guidance explorable. Examples:
+
+{/* <DecisionTree client:visible root={ ...see DecisionTree.tsx props... } /> */}
+{/* <CompareMatrix client:visible columns={[]} rows={[]} cells={[]} /> */}
+{/* <WhenWhyTabs client:visible tabs={[]} /> */}
+{/* <TradeoffSlider client:visible stops={[]} /> */}
+
+## Real-world examples
+
+Cite concrete systems or companies that apply this concept and how.
+
+## Further reading
+
+- [Link title](https://example.com) — short note on why it is worth reading.

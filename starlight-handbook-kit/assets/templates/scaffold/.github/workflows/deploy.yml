@@ -1,0 +1,50 @@
+name: Deploy to GitHub Pages
+
+# Builds the static site and publishes it to GitHub Pages on every push to main.
+# Target host: {{GH_PAGES_HOST}} (served under the base path set in astro.config.mjs).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; let an in-progress run finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      # Build AND run all verify gates (incl. internal-link integrity); produces
+      # ./dist. A broken link / failed gate fails the deploy before publishing.
+      - name: Build & verify
+        run: npm run verify
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
