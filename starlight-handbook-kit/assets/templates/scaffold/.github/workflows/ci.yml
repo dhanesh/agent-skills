@@ -71,6 +71,12 @@ jobs:
       - name: Mermaid diagrams
         run: npm run verify:mermaid
 
+      # Topics stay within their volatility review window. Undated/malformed
+      # last_reviewed fails the build (fail-closed); merely overdue is a
+      # non-blocking warning.
+      - name: Content freshness
+        run: npm run verify:freshness
+
       - name: Upload static site
         uses: actions/upload-artifact@v4
         with:

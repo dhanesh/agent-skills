@@ -1,6 +1,6 @@
 ---
 name: starlight-handbook-kit
-description: "Scaffold or extend a decision-oriented Astro + Starlight documentation handbook where every topic follows a fixed nine-section skeleton, diagrams and widgets are static-first and accessible, and an eight-gate CI suite makes agent-authored content safe. Use when standing up a new handbook/knowledge-base site, or when adding a cluster (a group of topics) or a single topic page to an existing site that already follows this pattern."
+description: "Scaffold or extend a decision-oriented Astro + Starlight documentation handbook where every topic follows a fixed nine-section skeleton, diagrams and widgets are static-first and accessible, and a nine-gate CI suite makes agent-authored content safe. Use when standing up a new handbook/knowledge-base site, or when adding a cluster (a group of topics) or a single topic page to an existing site that already follows this pattern."
 x-spec-version: 1.0
 ---
 
@@ -9,7 +9,7 @@ x-spec-version: 1.0
 Build and grow a decision-oriented engineering handbook: an Astro + Starlight
 static site where every topic is shaped identically (a fixed nine-section
 skeleton), diagrams and interactive widgets render usefully **without
-JavaScript**, and eight dependency-free CI gates fail the build the moment a page
+JavaScript**, and nine dependency-free CI gates fail the build the moment a page
 drifts from the contract. The gates are what make it safe to let an agent author
 content — a dropped page, an undated topic, a fenced-mermaid mistake, or a broken
 link all fail loudly instead of shipping.
@@ -61,10 +61,10 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
 
    ```sh
    npm install
-   npm run verify   # astro build + all 8 integrity gates
+   npm run verify   # astro build + all 9 integrity gates
    ```
 
-   A fresh scaffold passes all eight gates out of the box: it ships one example
+   A fresh scaffold passes all nine gates out of the box: it ships one example
    cluster (`example-cluster/`) with an overview and one topic, plus the hidden
    `_demo/widgets.mdx` page the accessibility gate inspects. **Do not delete
    `_demo/widgets.mdx`** — the a11y/no-JS gate reads its built HTML.
@@ -83,7 +83,10 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
    `src/content/docs/<cluster>/<topic-slug>.mdx`. (In the skill, the canonical
    copy is `assets/templates/scaffold/templates/topic.mdx`.)
 2. Fill in the frontmatter: `title`, `description`, and `last_reviewed` (an ISO
-   `YYYY-MM-DD` date — **required** by the B2 gate).
+   `YYYY-MM-DD` date — **required** by the frontmatter and freshness gates).
+   Optionally set `volatility: stable | volatile` (defaults to `volatile`) to
+   pick the review window the freshness gate measures against — `volatile` = 12
+   months, `stable` = 24.
 3. Fill in all **nine `##` sections, in this exact order**:
    `Overview`, `Mental model`, `Types / Variants`, `When to use / When NOT`,
    `Tradeoffs`, `Diagram`, `Try it`, `Real-world examples`, `Further reading`.
@@ -114,9 +117,9 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
 
 ---
 
-## The eight gates (why authoring is safe)
+## The nine gates (why authoring is safe)
 
-`npm run verify` builds the site, then runs eight checks. Each pairs a design
+`npm run verify` builds the site, then runs nine checks. Each pairs a design
 invariant with a script that fails CI when violated:
 
 | Gate (npm script) | Enforces |
@@ -129,6 +132,13 @@ invariant with a script that fails CI when violated:
 | `verify:artifacts` | No tool-call artifacts leaked into authored MDX |
 | `verify:links` | Every internal link resolves to a built file (base-aware) |
 | `verify:mermaid` | Diagrams use `<Mermaid>`, never a fenced mermaid block |
+| `verify:freshness` | Topics stay within their `volatility` review window — undated/malformed fails the build, overdue warns |
+
+The freshness gate fails **closed** on a missing or malformed `last_reviewed`
+(an integrity violation), but a topic merely *overdue* for review is a
+non-blocking warning — staleness shouldn't make the site un-buildable purely by
+the passage of time. Pin `FRESHNESS_NOW=YYYY-MM-DD` to make it deterministic in
+tests.
 
 If you change the nine-section skeleton on purpose, bump the `TEMPLATE_VERSION`
 marker in `templates/topic.mdx` — the template-integrity gate keys off it.

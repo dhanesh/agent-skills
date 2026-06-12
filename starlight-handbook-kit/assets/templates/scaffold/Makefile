@@ -23,6 +23,6 @@ preview: install
 check: install
 	npm run check
 
-# Full CI gate: build + all 8 integrity checks.
+# Full CI gate: build + all 9 integrity checks.
 verify: install
 	npm run verify
