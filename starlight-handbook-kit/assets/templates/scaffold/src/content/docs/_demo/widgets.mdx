@@ -1,0 +1,116 @@
+---
+title: Interactive Widget Demo
+description: Demo page exercising all four interactive widgets with sample data.
+sidebar:
+  hidden: true
+---
+
+import CompareMatrix from '../../../components/CompareMatrix';
+import WhenWhyTabs from '../../../components/WhenWhyTabs';
+import DecisionTree from '../../../components/DecisionTree';
+import TradeoffSlider from '../../../components/TradeoffSlider';
+
+This page exercises the four interactive widgets. Each is **static-first**: it
+renders complete, usable content with JavaScript disabled, and progressively
+enhances when hydrated.
+
+## CompareMatrix — message brokers
+
+<CompareMatrix
+  client:visible
+  caption="Kafka vs RabbitMQ vs SQS"
+  columns={['Kafka', 'RabbitMQ', 'SQS']}
+  rows={[
+    {
+      criterion: 'Model',
+      cells: ['Log / partitioned stream', 'Queue / exchange', 'Managed queue'],
+    },
+    {
+      criterion: 'Ordering',
+      cells: ['Per-partition', 'Per-queue', 'FIFO queues only'],
+    },
+    {
+      criterion: 'Replay',
+      cells: ['Yes (offset-based)', 'No (consumed = gone)', 'No'],
+    },
+    {
+      criterion: 'Ops burden',
+      cells: ['High (self-managed)', 'Medium', 'None (serverless)'],
+    },
+    {
+      criterion: 'Throughput',
+      cells: ['Very high', 'Moderate', 'High (auto-scaled)'],
+    },
+  ]}
+/>
+
+## WhenWhyTabs — CDNs
+
+<WhenWhyTabs
+  client:visible
+  caption="When to use a CDN"
+  tabs={[
+    {
+      label: 'When to use',
+      content:
+        'Use a CDN when serving static or cacheable assets to a geographically distributed audience, or to offload origin traffic for popular content.',
+    },
+    {
+      label: 'Why',
+      content:
+        'Edge caching cuts latency by serving from a nearby PoP, reduces origin load and egress cost, and absorbs traffic spikes and some DDoS volume.',
+    },
+    {
+      label: 'Why NOT',
+      content:
+        'Avoid for highly dynamic, per-user, or strongly-consistent content where stale edge copies cause correctness issues; cache invalidation also adds operational complexity.',
+    },
+  ]}
+/>
+
+## DecisionTree — cache eviction policy
+
+<DecisionTree
+  client:visible
+  caption="Which cache eviction policy?"
+  root={{
+    question: 'Is your access pattern dominated by recency (recently used items are reused soon)?',
+    branches: [
+      {
+        label: 'Yes, recency matters',
+        next: { leaf: { recommendation: 'LRU', detail: 'Evict the least-recently-used entry. Great default for temporal locality.' } },
+      },
+      {
+        label: 'No — frequency matters more',
+        next: {
+          question: 'Do a small set of keys account for most hits (hot keys)?',
+          branches: [
+            {
+              label: 'Yes, clear hot keys',
+              next: { leaf: { recommendation: 'LFU', detail: 'Evict the least-frequently-used entry to keep hot keys resident.' } },
+            },
+            {
+              label: 'No clear pattern / want simplicity',
+              next: { leaf: { recommendation: 'FIFO or Random', detail: 'When neither recency nor frequency dominates, a simple FIFO/Random policy is cheap and predictable.' } },
+            },
+          ],
+        },
+      },
+    ],
+  }}
+/>
+
+## TradeoffSlider — consistency vs availability
+
+<TradeoffSlider
+  client:visible
+  caption="Consistency ↔ Availability"
+  leftAxis="Strong consistency"
+  rightAxis="High availability"
+  stops={[
+    { label: 'Linearizable', description: 'Every read sees the latest write; reject requests during partitions (CP).' },
+    { label: 'Read-your-writes', description: 'A client always sees its own writes; weaker cross-client guarantees.' },
+    { label: 'Bounded staleness', description: 'Reads may lag writes by a bounded window; balances both ends.' },
+    { label: 'Eventual', description: 'Replicas converge over time; stay available under partitions (AP).' },
+  ]}
+/>

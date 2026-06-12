@@ -1,0 +1,37 @@
+{
+  "name": "{{PKG_NAME}}",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "verify": "astro build && node scripts/check-template-integrity.mjs && node scripts/check-pages-built.mjs && node scripts/check-content-frontmatter.mjs && node scripts/check-pages-skeleton.mjs && node scripts/check-a11y-nojs.mjs && node scripts/check-no-artifacts.mjs && node scripts/check-internal-links.mjs && node scripts/check-no-fenced-mermaid.mjs",
+    "verify:template": "node scripts/check-template-integrity.mjs",
+    "verify:pages": "node scripts/check-pages-built.mjs",
+    "verify:frontmatter": "node scripts/check-content-frontmatter.mjs",
+    "verify:skeleton": "node scripts/check-pages-skeleton.mjs",
+    "verify:a11y": "node scripts/check-a11y-nojs.mjs",
+    "astro": "astro",
+    "verify:artifacts": "node scripts/check-no-artifacts.mjs",
+    "verify:links": "node scripts/check-internal-links.mjs",
+    "verify:mermaid": "node scripts/check-no-fenced-mermaid.mjs"
+  },
+  "dependencies": {
+    "@astrojs/react": "^4.4.0",
+    "@astrojs/starlight": "^0.36.0",
+    "astro": "^5.16.0",
+    "mermaid": "^11.4.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.9",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

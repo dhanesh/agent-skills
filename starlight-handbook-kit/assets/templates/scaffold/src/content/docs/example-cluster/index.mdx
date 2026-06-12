@@ -1,0 +1,92 @@
+---
+title: Example Cluster
+description: A worked example cluster overview — duplicate this directory to start your own cluster.
+last_reviewed: "2026-01-01"
+decision_guidance: true
+---
+
+import Mermaid from '../../../components/Mermaid.astro';
+import WhenWhyTabs from '../../../components/WhenWhyTabs';
+
+## Overview
+
+This is a cluster **overview** page. A cluster groups related topics under one
+directory; its `index.mdx` orients the reader and links onward to the topic
+pages. Replace this prose with a real introduction to your cluster's problem
+space and why it matters. The overview page follows the same nine-section
+skeleton as every topic, so the whole site reads consistently.
+
+## Mental model
+
+Give the reader one durable mental model for the cluster as a whole — the single
+idea that ties its topics together. Here, the mental model is simply: *a cluster
+is a directory of topics that share a theme, and every page in it is shaped the
+same way so you can scan for the decision, not just the definition.*
+
+## Types / Variants
+
+Enumerate the topics in this cluster and how they relate. For the scaffold there
+is one:
+
+- **Example topic** — a fully filled-in topic page you can copy as a starting
+  point for real content.
+
+## When to use / When NOT
+
+- **Use this scaffold when:** you want a decision-oriented handbook where every
+  topic is shaped identically and CI guarantees that shape.
+- **Avoid when:** you need free-form, long-form prose with no fixed structure —
+  the nine-section skeleton would fight you.
+
+## Tradeoffs
+
+The fixed skeleton trades authoring freedom for consistency and machine-checkability.
+
+| Option | Pros | Cons |
+| ------ | ---- | ---- |
+| Fixed skeleton (this kit) | Consistent, scannable, CI-enforced | Less freedom per page |
+| Free-form docs | Maximum flexibility | Drifts; no decision framing |
+
+## Diagram
+
+<Mermaid code={`graph TD
+  Cluster[Cluster: a directory] --> Index[index.mdx overview]
+  Cluster --> Topic1[topic-a.mdx]
+  Cluster --> Topic2[topic-b.mdx]
+  Index -->|links onward| Topic1
+  Index -->|links onward| Topic2`} />
+
+## Try it
+
+<WhenWhyTabs
+  client:visible
+  caption="How a cluster is organized"
+  tabs={[
+    {
+      label: 'The directory',
+      content:
+        'A cluster is one directory under src/content/docs/. Its name becomes the URL slug. Everything inside it shares that prefix.',
+    },
+    {
+      label: 'The overview',
+      content:
+        'index.mdx is the cluster overview (this page). It routes to the bare cluster slug and orients the reader before the topic pages.',
+    },
+    {
+      label: 'The topics',
+      content:
+        'Each other .mdx file is one topic, copied from templates/topic.mdx, following the fixed nine-section skeleton.',
+    },
+  ]}
+/>
+
+## Real-world examples
+
+A real handbook might have clusters like "Caching", "Databases", or "Networking",
+each with five or six topic pages. The structure scales to dozens of clusters
+without any page drifting from the shared shape.
+
+## Further reading
+
+- [Starlight documentation](https://starlight.astro.build/) — the framework this kit is built on.
+- [Astro content collections](https://docs.astro.build/en/guides/content-collections/) — how pages are routed and validated.

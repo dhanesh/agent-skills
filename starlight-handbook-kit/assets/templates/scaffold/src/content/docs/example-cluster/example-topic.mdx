@@ -1,0 +1,86 @@
+---
+title: Example Topic
+description: A fully filled-in example topic — copy templates/topic.mdx to create your own.
+last_reviewed: "2026-01-01"
+decision_guidance: true
+---
+
+import Mermaid from '../../../components/Mermaid.astro';
+import CompareMatrix from '../../../components/CompareMatrix';
+
+## Overview
+
+This is a **topic** page: the unit of content in the handbook. It demonstrates
+the nine-section skeleton every topic must follow. Replace this with a real topic
+— what problem space it addresses and why a reader should care.
+
+## Mental model
+
+Give the reader one durable mental model or analogy. For "how to author a topic",
+the model is: *copy the template, keep the nine headings in order, fill each one,
+and let CI prove you did.*
+
+## Types / Variants
+
+Enumerate the major variants of the thing this topic covers and how they differ.
+For authoring, the variants are the two interactive surfaces you can drop in: a
+static-first **diagram** (Mermaid) and static-first **widgets** (the four React
+islands).
+
+## When to use / When NOT
+
+- **Use a widget when:** the guidance is genuinely explorable (a comparison, a
+  decision, a spectrum) and benefits from interaction.
+- **Avoid a widget when:** plain prose or a table says it more clearly — every
+  widget must also read perfectly with JavaScript disabled.
+
+## Tradeoffs
+
+Summarize the key tradeoffs. A table works well.
+
+| Surface | Pros | Cons |
+| ------- | ---- | ---- |
+| Mermaid diagram | Shows structure/flow at a glance | Must use the `<Mermaid>` component, never a fenced block |
+| React widget | Interactive, explorable | More markup; must stay readable with no JS |
+
+## Diagram
+
+Use the `<Mermaid>` component. It is static-first: the raw source renders as
+readable text without JavaScript, then hydrates to an SVG. Never put a diagram in
+a fenced code block — Starlight renders that as syntax-highlighted *code*, not a
+diagram.
+
+<Mermaid code={`graph TD
+  Template[templates/topic.mdx] -->|copy| Page[your-topic.mdx]
+  Page -->|fill 9 sections| Content[Authored content]
+  Content -->|npm run verify| Gates[8 CI gates]
+  Gates -->|pass| Ship[Ship it]`} />
+
+## Try it
+
+<CompareMatrix
+  client:visible
+  caption="The four interactive widgets"
+  columns={['DecisionTree', 'CompareMatrix', 'WhenWhyTabs', 'TradeoffSlider']}
+  rows={[
+    {
+      criterion: 'Best for',
+      cells: ['Guided decisions', 'Option comparison', 'When/Why/Why-NOT', 'A spectrum of tradeoffs'],
+    },
+    {
+      criterion: 'No-JS fallback',
+      cells: ['Nested outline', 'Full table', 'Stacked sections', 'Ordered list'],
+    },
+  ]}
+/>
+
+## Real-world examples
+
+In a real handbook, this page would cover one concrete topic (e.g. "cache
+eviction policies") and cite systems that apply it. Keep examples concrete:
+name the system and how it uses the concept.
+
+## Further reading
+
+- [MDX in Astro](https://docs.astro.build/en/guides/integrations-guide/mdx/) — authoring components inside Markdown.
+- [Mermaid syntax](https://mermaid.js.org/intro/) — the diagram language used by the `<Mermaid>` component.

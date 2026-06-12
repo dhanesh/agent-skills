@@ -1,0 +1,48 @@
+---
+/**
+ * Mermaid.astro — static-first diagram island (U3 / RT-3).
+ *
+ * Renders the raw diagram source inside <pre class="mermaid"> so it is
+ * readable with NO JavaScript (and survives static-only deployment).
+ * The companion client script (loaded via client:visible semantics — see
+ * the inline module below) hydrates in the browser and draws the SVG using
+ * the `mermaid` npm package.
+ *
+ * No headless browser / playwright / puppeteer is used at build time.
+ *
+ * Usage in MDX:
+ *   import Mermaid from '../../components/Mermaid.astro';
+ *   <Mermaid code={`graph TD; A-->B;`} />
+ */
+interface Props {
+  /** Raw mermaid diagram source. */
+  code: string;
+}
+const { code } = Astro.props;
+---
+
+<pre class="mermaid" data-mermaid-island>{code}</pre>
+
+<script>
+  // Hydrate only in the browser. Dynamic import keeps mermaid out of the
+  // critical path; runs once the bundle loads on the client.
+  import mermaid from 'mermaid';
+
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+
+  const render = () => {
+    const nodes = document.querySelectorAll<HTMLElement>(
+      'pre.mermaid[data-mermaid-island]:not([data-mermaid-done])'
+    );
+    nodes.forEach((n) => n.setAttribute('data-mermaid-done', 'true'));
+    if (nodes.length > 0) {
+      void mermaid.run({ nodes });
+    }
+  };
+
+  if (document.readyState !== 'loading') {
+    render();
+  } else {
+    document.addEventListener('DOMContentLoaded', render);
+  }
+</script>

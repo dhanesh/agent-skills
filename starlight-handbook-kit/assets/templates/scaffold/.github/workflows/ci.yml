@@ -1,0 +1,79 @@
+name: CI
+
+# Build gate on every PR and push to main (RT-9 / T6 / O2):
+# a contributor's broken MDX or a silently-dropped page must fail here,
+# before merge/deploy — never ship a broken site.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & integrity checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Reproducible install from the committed lockfile (T2 / S2).
+      - name: Install (npm ci)
+        run: npm ci
+
+      # Type/diagnostics check.
+      - name: Astro check
+        run: npm run check
+
+      # Canonical template integrity: TEMPLATE_VERSION + 9-section skeleton in order
+      # (RT-4 / RT-10 / O3 — docs-repo half of the template drift defense).
+      - name: Template integrity
+        run: npm run verify:template
+
+      # Static build (T4 / RT-11) — must exit 0.
+      - name: Build
+        run: npm run build
+
+      # Build integrity: every routable content page actually rendered to dist/.
+      # Catches silently-dropped pages that `astro build` would not fail on (RT-9 / T6).
+      - name: All pages rendered
+        run: npm run verify:pages
+
+      # Every content page carries dated, reviewable guidance (B2 invariant).
+      - name: Content frontmatter (last_reviewed)
+        run: npm run verify:frontmatter
+
+      # Every topic follows the fixed 9-section skeleton (U1 invariant).
+      - name: Page skeleton
+        run: npm run verify:skeleton
+
+      # Widgets stay readable without JS + keep a11y affordances (U3 invariant).
+      - name: A11y & no-JS baseline
+        run: npm run verify:a11y
+
+      # No tool-call artifacts leaked into authored content (content hygiene).
+      - name: Content hygiene
+        run: npm run verify:artifacts
+
+      # Every internal link resolves to a built file (base-aware) — catches
+      # broken hrefs, base-path mistakes, typo'd slugs.
+      - name: Internal links
+        run: npm run verify:links
+
+      # Diagrams use the <Mermaid> component — a fenced mermaid block renders as
+      # code, not a diagram.
+      - name: Mermaid diagrams
+        run: npm run verify:mermaid
+
+      - name: Upload static site
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
