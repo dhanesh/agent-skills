@@ -2,6 +2,7 @@
 title: Topic Title (replace me)
 description: One-sentence summary of this topic (replace me).
 last_reviewed: "2026-01-01"
+volatility: volatile
 decision_guidance: true
 ---
 {/* TEMPLATE_VERSION: 1.1.0 */}
@@ -14,6 +15,12 @@ decision_guidance: true
   notes therefore sit BELOW the frontmatter — a verbatim copy of this file builds
   into a real page as-is. (Do not move the marker above the frontmatter; doing so
   makes Astro silently skip the page.)
+
+  `last_reviewed` (ISO YYYY-MM-DD) is REQUIRED — the freshness gate fails the
+  build if it is missing or malformed. `volatility` sets the review window:
+  `volatile` (the default if you omit it) wants a review every 12 months,
+  `stable` every 24. Going past the window is a non-blocking WARNING, not a
+  failure — keep the date current as you revise the page.
 
   KEEP THE SECTION ORDER FIXED — the nine "##" headings below must stay in this
   exact sequence so every topic reads consistently and the CI drift-check passes.
