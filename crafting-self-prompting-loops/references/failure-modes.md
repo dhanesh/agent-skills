@@ -20,6 +20,7 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 | 6 | Context rot / state bloat | Carried state grows until it confuses the loop | LSC-4, LSC-9 | (a), (b) |
 | 7 | Cost blowout | Token/iteration spend explodes | **LSC-9**, LSC-3 | (b), (c) |
 | 8 | Multi-agent deadlock / over-fanout | Agents wait on each other or spawn unboundedly | LSC-3, LSC-9, LSC-2 | (c) |
+| 9 | Evaluation degradation / sycophancy | Self-grading inflates perceived quality while real quality stalls or falls | **LSC-5**, LSC-2 | (a), (b), (c) |
 
 ---
 
@@ -34,7 +35,7 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 
 - **Symptom:** Each round looks locally reasonable, but after many iterations the output addresses a different problem than the one stated. The loop "optimized" its way off-target.
 - **Cause:** The goal (**LSC-1**) is restated, paraphrased, or re-derived from carried state each round instead of being pinned in the trusted channel. Small per-round reinterpretations compound.
-- **Mitigation:** Keep `GOAL` / `SUCCESS_DEFINITION` verbatim in the fixed control channel and re-inject it unchanged every iteration (**LSC-1**, **LSC-7** trusted channel). Measure progress against the *original* goal, not the latest restatement of it (**LSC-5**). In (d), the human checkpoint is the drift catch — surface the original goal alongside current state at every gate.
+- **Mitigation:** Keep `GOAL` / `SUCCESS_DEFINITION` verbatim in the fixed control channel and re-inject it unchanged every iteration (**LSC-1**, **LSC-7** trusted channel). Measure progress against the *original* goal, not the latest restatement of it (**LSC-5**). For autonomous loops, **ground each step in a real observation** — structure the loop as reason→act→observe so external feedback corrects the plan before the next step rather than letting the model reason from a drifting internal state (ReAct, Yao et al. 2022). In (d), the human checkpoint is the drift catch — surface the original goal alongside current state at every gate.
 - **Most prone:** (a) long refinement chains; (b) long autonomous runs.
 
 ### 3. Premature stop
@@ -56,6 +57,9 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 - **Symptom:** A tool result, web page, file, or another agent's message contains text like "ignore previous instructions / now do X," and the loop obeys it — executing actions the author never authorized.
 - **Cause:** Carried content (model output, tool returns, external/web text) is concatenated into the prompt and read as **instructions** instead of **data**. The two channels (LSC-7) are mixed. This is the core security vulnerability of any self-prompting loop.
 - **Mitigation:** Enforce the **LSC-7** two-channel model rigorously. The `TRUSTED_CONTROL_CHANNEL` is the fixed, author-written prompt that drives iteration; everything carried forward goes in the `UNTRUSTED_DATA_CHANNEL` and is wrapped/marked as DATA the prompt *reasons about*, never commands it obeys (`DATA_WRAPPING`). Mental model: the loop is a **trusted harness re-invoking itself**, not a model literally running its own output. Back it with pre-action validation so injected content can't trigger a consequential action without passing checks (**LSC-6**), and gate irreversible actions on a human (**LSC-8**).
+  - **Wrapping is not a wall.** Delimiting/datamarking lowers injection probability but does not remove it — a model can be talked past its delimiters (Spotlighting 2024; CaMeL 2025). The real defense is *architectural*: derive control flow from the trusted prompt before touching untrusted data, treat **all** tool output (and values extracted from it) as untrusted, and apply least-privilege tools so injection has nothing consequential to trigger (OWASP LLM06).
+  - **Lethal-trifecta check (Willison 2025):** if the loop has all of (1) private-data access, (2) untrusted-content exposure, (3) external-communication ability, it is an exfiltration tool waiting to happen — **break one leg.**
+  - **Reach for a secure pattern, least→most permissive:** Action-Selector → Plan-Then-Execute → Map-Reduce → Dual-LLM → Code-Then-Execute/CaMeL → Context-Minimization. Default to the most restrictive that still meets the loop's utility need (see [`spec.md`](./spec.md) LSC-7 ladder, [`literature.md`](./literature.md) §E).
 - **Most prone:** (b) tool/web-using loops; (c) inter-agent messages treated as commands.
 
 ### 6. Context rot / state bloat
@@ -77,7 +81,15 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 - **Symptom:** Deadlock — agents each wait on another's output, nothing advances. Or over-fanout — agents spawn sub-agents which spawn more, growing the population without bound.
 - **Cause:** No aggregate cap across the agent group; circular dependencies in who-waits-on-whom; spawning with no depth/population limit. Each agent may individually look bounded while the *group* is not.
 - **Mitigation:** Apply **LSC-3** at the *aggregate* level — a cap on total iterations/tokens/wall-clock and on agent count/spawn depth across the whole group, in the harness. Give the group a shared stop condition and consensus/all-subtasks-resolved signal so it can terminate (**LSC-2**). Budget **per agent and in aggregate** (**LSC-9**). Detect no-progress at the group level (cross-agent review/voting) to break stalls (**LSC-5**). Break wait-cycles with timeouts on inter-agent waits.
+- **What the data says (MAST, Cemri et al. 2025):** across 7 frameworks, multi-agent failures are **~42% specification/system-design, ~37% inter-agent misalignment, ~21% task-verification** — structural, not model-IQ — and tactical prompt tweaks recovered only **9–15%**. So: (1) the dominant fix is *design*, not a smarter model or better prompt; (2) use **typed/structured message contracts** between agents, not free-form NL chaining, to stop one agent's error cascading into the next (MetaGPT); (3) **re-assert each agent's role + objective every turn** and halt on role inversion — assistants drift into *issuing* instructions ("role flipping", CAMEL); (4) add an **independent verification stage** with concrete pass/fail criteria — producers hallucinate success (MAST FC3). Multi-agent also burns **~15× the tokens** of a single chat (Anthropic 2025), so only go multi-agent when subtasks are independent/parallel *and* cheaply verifiable; otherwise keep one agent.
 - **Most prone:** (c) exclusively — this is the multi-agent-specific class.
+
+### 9. Evaluation degradation / sycophancy
+
+- **Symptom:** The loop's progress metric (**LSC-5**) keeps reporting improvement, but the output isn't actually getting better — and on objective tasks it may be getting *worse* while the self-score climbs. A model "reviewing" its own work ratifies it.
+- **Cause:** Intrinsic self-critique with no external signal degrades performance on objective tasks (Huang et al. 2023), and a model grading its own generations amplifies self-bias each round (Xu et al. 2024). The loop optimizes *perceived* quality, which is not the goal. Closely tied to premature-stop (#3): an optimistic self-judge declares "done" early.
+- **Mitigation:** Give the evaluation **external leverage** (**LSC-5**): prefer a tool/verifier over an opinion (run the tests, query the source, compute the constraint — CRITIC, Reflexion); if model-based, use a *separate* evaluator (different model, or an authorship-blinded prompt) — never let the generator be its own judge. Bind the stop signal to a verifier passing, not a self-score (**LSC-2**). For verifiable tasks, baseline parallel sampling+vote before iterating at all (see [`literature.md`](./literature.md) §A–B).
+- **Most prone:** (a) self-refinement (its core risk), (b) autonomous self-assessment, (c) producer-agents self-certifying.
 
 ---
 
@@ -118,8 +130,8 @@ For (d) human-checkpointed loops, align idle cadence to human availability — l
 ### Different model for review
 
 - Use a **separate, often cheaper, model for self-evaluation / review passes** (LSC-5).
-- **Two reasons:** (1) avoids **shared-bias** — a model grading its own output tends to ratify it, masking premature-stop (Part A #3) and drift (Part A #2); a different model is a genuine second opinion. (2) **cost** — review passes are frequent; running them on a cheaper model cuts the per-round bill substantially.
-- This makes self-evaluation (LSC-5) both more honest and cheaper at once.
+- **Two reasons:** (1) avoids **shared-bias** — a model grading its own output tends to ratify it (self-bias is measurable and *amplifies* across refinement rounds, Xu et al. 2024), masking premature-stop (Part A #3), drift (Part A #2), and evaluation degradation (Part A #9); a different model is a genuine second opinion. (2) **cost** — review passes are frequent; running them on a cheaper model cuts the per-round bill substantially.
+- This makes self-evaluation (LSC-5) both more honest and cheaper at once. Best of all, replace the model-judge with a **tool/verifier** where one exists — intrinsic self-critique without an external signal can degrade objective-task performance outright (Huang et al. 2023; CRITIC).
 
 ### Cost & cadence checklist (yes/no)
 

@@ -97,7 +97,9 @@ while True:
 - **Deadlock** — A waits on B, B waits on A. → topological/ordering rule in the orchestrator so dependencies resolve in sequence; aggregate backstop (LSC-3) fires even on a stuck graph.
 - **Oscillation between agents** — a debate pair flip-flops without converging. → quorum/tie-break rule in the judge (LSC-5) + hard per-exchange turn cap; judge's verdict final after K rounds.
 - **Runaway in aggregate** — each agent bounded, the orchestration isn't. → budget per-agent AND aggregate (LSC-9), aggregate authoritative.
-- **Drift via miscommunication** — a garbled/injected peer message steers the group off-goal. → LSC-6 message validation + LSC-7 treating peer output strictly as DATA, so a malicious message can't issue commands.
+- **Drift via miscommunication** — a garbled/injected peer message steers the group off-goal. → LSC-6 message validation + LSC-7 treating peer output strictly as DATA, so a malicious message can't issue commands. Prefer **typed/structured handoffs** over free-form chat to stop one agent's error cascading (MetaGPT).
+- **Role flipping** — an agent drifts from its assigned role and starts *issuing* instructions instead of doing its job (CAMEL). → re-assert each agent's role + objective every turn; detect and halt on role inversion.
+- **Hallucinated success** — a producer agent self-certifies work that isn't done (MAST FC3, ~21% of multi-agent failures). → add an **independent** verification stage (separate agent/pass) with concrete pass/fail criteria; the producer never certifies itself. See `references/literature.md` §D.
 
 ## Before you run
 

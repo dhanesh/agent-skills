@@ -99,6 +99,7 @@ while True:
 - **Premature stop** — claims success without checking. → tie LSC-2 to an objective re-run of SUCCESS_DEFINITION, not the model's say-so.
 - **Drift off-goal** — wanders onto a tangent over many turns. → re-state GOAL in carried state every turn; LSC-5 checks progress against the goal, not just the local sub-task.
 - **Oscillation** — action A undoes action B repeatedly. → no-progress counter on state; escalate/stop after N non-advancing turns.
+- **Task-list explosion / re-derivation** — upfront over-decomposition or re-solving solved sub-tasks (the classic BabyAGI failure). → decompose *lazily* — try to execute a sub-goal first, decompose only when it fails (ADaPT); persist successful, self-verified action sequences and check that memory before re-deriving (Voyager). Carry a memory of past failures into retries (Reflexion). See `references/literature.md` §C.
 
 ## Before you run
 

@@ -82,7 +82,7 @@ STATE_MECHANISM: <scratchpad | structured state object | prior output | other>
 
 **In plain words:** Each round the loop checks whether it's actually getting closer to the goal, and notices if it isn't.
 
-**Why it matters:** Without per-round progress assessment the loop can churn forever or quit early without knowing it's stuck.
+**Why it matters:** Without per-round progress assessment the loop can churn forever or quit early without knowing it's stuck. The signal must have **external leverage** — intrinsic self-critique with no external check degrades objective-task performance and self-bias compounds each round (see [`literature.md`](./literature.md) §A); prefer a tool/verifier or a separate/blinded evaluator over a model grading its own work.
 
 **Slot:**
 ```
@@ -118,7 +118,7 @@ OUTPUT_VALIDATION: <how structured output is validated before use>
 
 **In plain words:** The loop's own author-written instructions are kept separate from anything the model produces or pulls in, and that carried content is treated as information to reason about, never as new commands to obey.
 
-**Why it matters:** This is the security backbone and the correct mental model — a self-prompting loop is a trusted harness re-invoking itself, not a model literally running its own output; mixing the channels is the prompt-injection vulnerability.
+**Why it matters:** This is the security backbone and the correct mental model — a self-prompting loop is a trusted harness re-invoking itself, not a model literally running its own output; mixing the channels is the prompt-injection vulnerability. Note that the `DATA_WRAPPING` is necessary but **not sufficient** — delimiting lowers injection probability, it doesn't remove it. Back it with least-privilege tools (LSC-6), a human gate (LSC-8), and a lethal-trifecta check (see [`literature.md`](./literature.md) §E).
 
 **Slot:**
 ```
@@ -211,4 +211,5 @@ RUNAWAY_MITIGATION: <handling never stopping / non-termination>
 - The same ten ideas as terse, per-item design rules: [`spec.md`](./spec.md)
 - How each family specializes the ten items: [`families.md`](./families.md)
 - Failure modes + cost/cadence for LSC-9/LSC-10: [`failure-modes.md`](./failure-modes.md)
+- Research grounding for every non-obvious rule (citations → slot): [`literature.md`](./literature.md)
 - Fill-in scaffolds: [`../assets/templates/`](../assets/templates/)
