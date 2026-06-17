@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContextLedger",
+  "description": "Bounded, scored, tiered cache for agent working context. Hot tier <= budget; cold tier persisted; high-salience kinds preserved verbatim to prevent rot.",
+  "type": "object",
+  "required": ["clock", "cards"],
+  "properties": {
+    "clock": { "type": "number", "description": "Logical clock (tick per ingest). Deterministic — NOT wall-clock." },
+    "weights": {
+      "type": "object",
+      "description": "Scoring weights tuned by the optimization loop (LSC-5).",
+      "properties": {
+        "recency": { "type": "number" },
+        "frequency": { "type": "number" },
+        "task_sim": { "type": "number" },
+        "kind": { "type": "number" },
+        "size": { "type": "number" }
+      }
+    },
+    "cards": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/card" }
+    }
+  },
+  "$defs": {
+    "card": {
+      "type": "object",
+      "required": ["id", "kind", "content", "provenance", "tokens"],
+      "properties": {
+        "id": { "type": "string", "description": "sha1(kind+normalized content)[:16] — stable identity for dedupe/upsert." },
+        "kind": {
+          "type": "string",
+          "enum": ["decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note"],
+          "description": "decision/constraint/open_question/task_state/file_ref are LOSSLESS-preserved on compaction."
+        },
+        "content": { "type": "string" },
+        "provenance": {
+          "type": "string",
+          "enum": ["trusted", "untrusted"],
+          "description": "untrusted = tool output / web / files / other agents. Rendered inside <data> blocks (two-channel boundary, LSC-7)."
+        },
+        "pinned": { "type": "boolean", "description": "Never evicted; score = +inf. Use for invariants that must never rot." },
+        "access_count": { "type": "integer", "minimum": 1 },
+        "last_accessed": { "type": "number" },
+        "created": { "type": "number" },
+        "tokens": { "type": "integer", "minimum": 1, "description": "Estimated token cost (budget accounting)." }
+      }
+    }
+  }
+}
