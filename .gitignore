@@ -1,2 +1,4 @@
 
 .context/
+__pycache__/
+*.pyc
