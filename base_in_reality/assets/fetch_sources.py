@@ -154,3 +154,58 @@ NORMALIZERS = {
     "openalex": normalize_openalex,
     "semanticscholar": normalize_semanticscholar,
 }
+
+import argparse
+import sys
+import time
+from urllib.request import Request, urlopen
+
+USER_AGENT = (
+    "base_in_reality/1.0 (research-grounding audit; "
+    "+https://github.com/dhanesh/agent-skills)"
+)
+
+
+def fetch(url, timeout=20):
+    req = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted scholarly APIs)
+        return resp.read()
+
+
+def fetch_source(source, query, limit=5, sleep=1.0, fetcher=fetch):
+    source = source.lower()
+    if source == "pubmed":
+        ids = json.loads(fetcher(build_query_url("pubmed", query, limit)))
+        idlist = (ids.get("esearchresult") or {}).get("idlist") or []
+        if not idlist:
+            return []
+        if sleep:
+            time.sleep(sleep)
+        params = urlencode({"db": "pubmed", "retmode": "json", "id": ",".join(idlist)})
+        summary = fetcher(
+            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?{params}")
+        return normalize_pubmed(summary)
+    raw = fetcher(build_query_url(source, query, limit))
+    return NORMALIZERS[source](raw)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description="Query a keyless scholarly source; emit normalized JSON records.")
+    p.add_argument("--source", required=True, choices=SOURCES)
+    p.add_argument("--query", required=True)
+    p.add_argument("--limit", type=int, default=5)
+    args = p.parse_args(argv)
+    try:
+        records = fetch_source(args.source, args.query, args.limit)
+    except Exception as e:  # noqa: BLE001 — surface any fetch/parse error as JSON
+        json.dump({"error": str(e), "source": args.source}, sys.stderr)
+        sys.stderr.write("\n")
+        return 2
+    json.dump(records, sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

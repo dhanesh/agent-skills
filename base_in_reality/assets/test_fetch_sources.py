@@ -128,5 +128,32 @@ class Normalizers(unittest.TestCase):
         self.assertEqual(set(fs.NORMALIZERS), set(fs.SOURCES))
 
 
+class FetchSource(unittest.TestCase):
+    def test_crossref_uses_fetcher(self):
+        calls = []
+
+        def fake(url, timeout=20):
+            calls.append(url)
+            return CROSSREF_JSON
+
+        recs = fs.fetch_source("crossref", "apr", 2, fetcher=fake)
+        self.assertEqual(recs[0]["title"], "Reducing Balance APR")
+        self.assertIn("api.crossref.org", calls[0])
+
+    def test_pubmed_two_step(self):
+        seq = [b'{"esearchresult":{"idlist":["111"]}}', PUBMED_JSON]
+
+        def fake(url, timeout=20):
+            return seq.pop(0)
+
+        recs = fs.fetch_source("pubmed", "sepsis", 1, sleep=0, fetcher=fake)
+        self.assertEqual(recs[0]["url"], "https://pubmed.ncbi.nlm.nih.gov/111/")
+
+    def test_main_help_exits_zero(self):
+        with self.assertRaises(SystemExit) as cm:
+            fs.main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
