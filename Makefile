@@ -14,11 +14,11 @@ list-skills:
 gate: clean
 	@rc=0; for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \
-		sh $(GATES)/validate-skill.sh "$$d" | tail -1 || rc=1; \
-		sh $(GATES)/scan-leaks.sh "$$d" | tail -1 || rc=1; \
+		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
-			sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" | tail -1 || rc=1; \
+			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 			rm -rf "$$scratch"; \
 		fi; \
 	done; \
@@ -26,19 +26,19 @@ gate: clean
 
 validate:
 	@rc=0; for d in $(SKILLS); do \
-		sh $(GATES)/validate-skill.sh "$$d" | tail -1 || rc=1; \
+		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 	done; exit $$rc
 
 scan-leaks: clean
 	@rc=0; for d in $(SKILLS); do \
-		sh $(GATES)/scan-leaks.sh "$$d" | tail -1 || rc=1; \
+		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 	done; exit $$rc
 
 dry-run:
 	@rc=0; for d in $(SKILLS); do \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
-			sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" | tail -1 || rc=1; \
+			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 			rm -rf "$$scratch"; \
 		fi; \
 	done; exit $$rc

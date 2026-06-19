@@ -31,6 +31,6 @@ For every candidate `VIOLATION` or `DEVIATION`, the workflow runs an adversarial
 1. Spawn ≥3 independent refuter sub-agents (or reasoning passes). Each refuter operates on a distinct lens — at minimum: (a) factual correctness of the claim-as-stated, (b) applicability of the cited source to the specific code context, (c) severity calibration.
 2. Each refuter defaults to `refuted: true` when uncertain. The burden of proof is on the finding, not the refuter.
 3. If ≥2 of the 3 refuters return `refuted: true`, the verdict is downgraded to `UNCONFIRMED`.
-4. The refutation outcome — number of refuters, individual verdicts, dominant rationale — is recorded in the `refutation` field of the evidence object.
+4. The refutation outcome — number of refuters, individual verdicts, dominant rationale — is recorded in the `refutation` field of the finding object.
 
 This protocol prevents a single confident-but-wrong retrieval from elevating a speculative observation to a `VIOLATION`. When in doubt, report `UNCONFIRMED`.

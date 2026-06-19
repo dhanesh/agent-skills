@@ -26,6 +26,16 @@
           "abstract_only": {"type": "boolean", "description": "True if only the abstract (not full text) was available."}
         }
       }
+    },
+    "downgraded": {"type": "boolean", "description": "True if the refutation pass downgraded the verdict to UNCONFIRMED."},
+    "refutation": {
+      "type": "object",
+      "description": "Outcome of the adversarial refutation pass.",
+      "properties": {
+        "refuters": {"type": "integer"},
+        "verdicts": {"type": "array", "items": {"type": "boolean"}},
+        "rationale": {"type": "string"}
+      }
     }
   },
   "allOf": [

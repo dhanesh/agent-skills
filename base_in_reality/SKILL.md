@@ -2,7 +2,6 @@
 name: base-in-reality
 description: "Validate a repository's codebase, architecture, and business logic against real-world knowledge from authoritative sources (arxiv, PubMed, Google Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar) plus standards bodies (NIST, IETF/RFC, OWASP, ISO, sector regulators). Use when you want a research-grounded audit that flags algorithms, architectural choices, or business rules that violate established norms, standards, or best practices — each finding tied to a real, fetched citation. Read-only by default; emits a severity-graded cited report. Extracts falsifiable claims across algo/arch/biz layers, routes each to the right source class, verifies against fetched evidence, and adversarially refutes before reporting. Not a linter, SAST, or CVE scanner — it reasons about norms, not syntax."
 x-spec-version: 1.0
-# license: <SPDX-id>   # set before publishing — see references/publishing.md
 ---
 
 # base-in-reality

@@ -10,7 +10,7 @@ import fetch_sources as fs
 class BuildQueryURL(unittest.TestCase):
     def test_arxiv(self):
         u = fs.build_query_url("arxiv", "merkle tree", 5)
-        self.assertTrue(u.startswith("http://export.arxiv.org/api/query?"))
+        self.assertTrue(u.startswith("https://export.arxiv.org/api/query?"))
         self.assertIn("search_query=all%3Amerkle+tree", u)
         self.assertIn("max_results=5", u)
 

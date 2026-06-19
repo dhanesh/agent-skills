@@ -19,7 +19,7 @@ def build_query_url(source: str, query: str, limit: int = 5) -> str:
     source = source.lower()
     if source == "arxiv":
         params = urlencode({"search_query": f"all:{query}", "start": 0, "max_results": limit})
-        return f"http://export.arxiv.org/api/query?{params}"
+        return f"https://export.arxiv.org/api/query?{params}"
     if source == "pubmed":
         params = urlencode({"db": "pubmed", "retmode": "json", "retmax": limit, "term": query})
         return f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?{params}"
