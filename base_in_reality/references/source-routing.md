@@ -17,10 +17,13 @@ This document specifies which source classes to consult for each claim type enco
 
 ## Using fetch_sources.py
 
-Invoke the fetcher directly:
+Invoke the fetcher directly. Use the helper's ABSOLUTE path — verify subagents run from the
+target repo, not this skill's directory, so a relative `assets/...` path will not resolve (see
+"Locating the source helper" in `SKILL.md`):
 
 ```bash
-uv run assets/fetch_sources.py --source <s> --query "<q>" --limit <n>
+uv run "$FETCH" --source <s> --query "<q>" --limit <n>
+# $FETCH = <this skill's base dir>/assets/fetch_sources.py
 ```
 
 Valid `--source` values:

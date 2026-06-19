@@ -64,6 +64,10 @@ const VERDICT = {
 }
 
 const maxClaims = (args && args.maxClaims) || 40
+// Absolute path to this skill's fetch_sources.py. Verify subagents run from the TARGET repo,
+// so a skill-relative 'assets/...' path will not resolve — pass the absolute path via
+// args.fetcherPath, e.g. Workflow({ args: { fetcherPath: '/abs/.../base-in-reality/assets/fetch_sources.py' } }).
+const fetcherPath = (args && args.fetcherPath) || 'assets/fetch_sources.py'
 
 phase('Extract')
 const extracted = await agent(
@@ -79,8 +83,10 @@ log(`extracted ${claims.length} claim(s) across domains: ${(extracted?.domains |
 const results = await pipeline(
   claims,
   (c) => agent(
-    'Verify this claim against AUTHORITATIVE sources. Use assets/fetch_sources.py for keyless ' +
-    'APIs (arxiv/pubmed/crossref/openalex/semanticscholar), then WebSearch/WebFetch for ' +
+    'Verify this claim against AUTHORITATIVE sources. For keyless APIs ' +
+    '(arxiv/pubmed/crossref/openalex/semanticscholar) run the bundled helper by its ABSOLUTE ' +
+    `path: \`uv run "${fetcherPath}" --source <s> --query "<q>" --limit <n>\` (you run from the ` +
+    'target repo, so a relative assets/... path will NOT resolve). Then WebSearch/WebFetch for ' +
     'standards (NIST/RFC/OWASP) and Scholar/JSTOR. You MAY only cite sources you actually ' +
     'fetched this run. If you cannot ground it, verdict=UNCONFIRMED. Claim: ' +
     JSON.stringify(c),
