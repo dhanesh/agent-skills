@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "base_in_reality finding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claim", "layer", "location", "verdict", "severity", "citations", "recommended_fix"],
+  "properties": {
+    "claim": {"type": "string", "description": "Falsifiable assertion about what the code does."},
+    "layer": {"enum": ["algo", "arch", "biz"]},
+    "location": {"type": "string", "description": "file:line or region the claim was extracted from."},
+    "domain": {"type": "string"},
+    "verdict": {"enum": ["VIOLATION", "DEVIATION", "OUTDATED", "UNCONFIRMED"]},
+    "severity": {"enum": ["critical", "high", "medium", "low"]},
+    "recommended_fix": {"type": "string"},
+    "citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "url", "fetched"],
+        "properties": {
+          "title": {"type": "string"},
+          "url": {"type": "string"},
+          "doi": {"type": ["string", "null"]},
+          "quote": {"type": "string", "description": "Supporting passage from the source."},
+          "fetched": {"type": "boolean", "description": "True only if this URL/DOI was retrieved in-session."},
+          "abstract_only": {"type": "boolean", "description": "True if only the abstract (not full text) was available."}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "comment": "Grounding invariant: VIOLATION/DEVIATION require at least one fetched citation.",
+      "if": {"properties": {"verdict": {"enum": ["VIOLATION", "DEVIATION"]}}},
+      "then": {
+        "properties": {
+          "citations": {
+            "minItems": 1,
+            "contains": {"properties": {"fetched": {"const": true}}, "required": ["fetched"]}
+          }
+        }
+      }
+    }
+  ]
+}
