@@ -343,15 +343,14 @@ GraphQL APIs are modeled as a **single** `POST /graphql` mock entry. Individual 
 
 ### Match strategy
 
-Use `match.body.jsonpath` to extract the `operationName` field, then key each scenario on the operation name:
+Route on transport only — `method` and `path`. The parent entry's `match` does NOT route by operation name; operation dispatch happens exclusively via `scenarios[].when.body`. Optionally add `match.body.partial` to narrow the entry to requests that carry an `operationName` key (a truthy presence check, not a per-operation router):
 
 ```jsonc
 {
   "id": "graphql-endpoint",
   "match": {
     "method": "POST",
-    "path": "/graphql",
-    "body": { "jsonpath": "$.operationName" }
+    "path": "/graphql"
   },
   "response": {
     "kind": "static",
