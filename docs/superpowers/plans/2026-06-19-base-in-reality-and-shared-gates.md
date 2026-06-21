@@ -1,21 +1,21 @@
-# base_in_reality Skill + Shared Skill Gates — Implementation Plan
+# base-in-reality Skill + Shared Skill Gates — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a read-only, research-grounded repo-audit skill (`base_in_reality`) AND a repo-wide skill-quality gate (vendored validate/scan-leaks/dry-run scripts + Makefile + PR CI) that all skills in this repo must pass.
+**Goal:** Ship a read-only, research-grounded repo-audit skill (`base-in-reality`) AND a repo-wide skill-quality gate (vendored validate/scan-leaks/dry-run scripts + Makefile + PR CI) that all skills in this repo must pass.
 
-**Architecture:** Two parts. **Part A** vendors repo2skill's gate scripts into `scripts/gates/`, wraps them in a `Makefile` that discovers every skill dir (any top-level dir with a `SKILL.md`), fixes the two existing skills that currently fail, and runs the gate on PRs via GitHub Actions. **Part B** builds `base_in_reality` as a prompt-driven, multi-agent audit skill: a stdlib-only Python source-fetch helper, a finding JSON schema, an optional Workflow accelerator, three reference docs, a runtime report skeleton, and the SKILL.md orchestration — validated by Part A's `make gate-skill`.
+**Architecture:** Two parts. **Part A** vendors repo2skill's gate scripts into `scripts/gates/`, wraps them in a `Makefile` that discovers every skill dir (any top-level dir with a `SKILL.md`), fixes the two existing skills that currently fail, and runs the gate on PRs via GitHub Actions. **Part B** builds `base-in-reality` as a prompt-driven, multi-agent audit skill: a stdlib-only Python source-fetch helper, a finding JSON schema, an optional Workflow accelerator, three reference docs, a runtime report skeleton, and the SKILL.md orchestration — validated by Part A's `make gate-skill`.
 
 **Tech Stack:** POSIX `sh` (gate scripts), GNU `make`, GitHub Actions, Python 3.9+ stdlib only (run via `uv`), Node (optional, for `.mjs` syntax check), Markdown.
 
 ## Global Constraints
 
 - **Gate must stay green on `main`.** Part A wires `make gate` into PR CI; every skill dir must pass `validate-skill.sh` + `scan-leaks.sh` (and `dry-run-replay.sh` *only if* it has a `PARAMETERS.md`). Fix existing failures (A3) before enabling CI (A4).
-- **Python is stdlib-only, run via `uv`.** No third-party deps anywhere in `base_in_reality`. Scripts carry PEP 723 inline metadata (`dependencies = []`) and run with `uv run <file>`. Never `pip`/`pytest`/`jsonschema`/`requests`.
-- **`base_in_reality` is read-only by default.** It never edits code. The only write path is `--annotate`, which inserts comment markers only.
+- **Python is stdlib-only, run via `uv`.** No third-party deps anywhere in `base-in-reality`. Scripts carry PEP 723 inline metadata (`dependencies = []`) and run with `uv run <file>`. Never `pip`/`pytest`/`jsonschema`/`requests`.
+- **`base-in-reality` is read-only by default.** It never edits code. The only write path is `--annotate`, which inserts comment markers only.
 - **No fabricated citations (load-bearing invariant).** Every finding's evidence must be a URL/DOI fetched in-session. Ungrounded ⇒ verdict capped at `UNCONFIRMED`, never `VIOLATION`/`DEVIATION`.
-- **Skill `name` field is kebab-case.** Directory is `base_in_reality` (used by `npx skills add --skill base_in_reality`); frontmatter `name:` MUST be `base-in-reality` (the standard rejects `_`). These intentionally differ.
-- **No `assets/templates/` + no `PARAMETERS.md` for `base_in_reality`.** It has no install-time substitution parameters, so `validate-skill.sh` bijection SKIPs and `dry-run-replay.sh` is N/A. The report skeleton uses `<angle-bracket>` runtime fill markers, never `{{UPPER_SNAKE}}`.
+- **Skill `name` field is kebab-case.** Directory is `base-in-reality` (used by `npx skills add --skill base-in-reality`); frontmatter `name:` is `base-in-reality` (the standard rejects `_`). Directory and name match, consistent with every other skill in the repo. *(The directory was originally created as `base_in_reality`; it was renamed to kebab-case after the fact — see the "rename skill dir" change.)*
+- **No `assets/templates/` + no `PARAMETERS.md` for `base-in-reality`.** It has no install-time substitution parameters, so `validate-skill.sh` bijection SKIPs and `dry-run-replay.sh` is N/A. The report skeleton uses `<angle-bracket>` runtime fill markers, never `{{UPPER_SNAKE}}`.
 - **Frontmatter carries `x-spec-version: 1.0`** (matches repo2skill's template).
 - **Gate script source of truth:** `/Users/dhanesh/.agents/skills/repo2skill/scripts/` (copy verbatim; do not re-author).
 - Commit after every task. Conventional-commit messages.
@@ -140,7 +140,7 @@ dry-run:
 		fi; \
 	done; exit $$rc
 
-# Gate a single skill: make gate-skill SKILL=base_in_reality
+# Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill:
 	@test -n "$(SKILL)" || { echo "usage: make gate-skill SKILL=<dir>"; exit 2; }
 	@sh $(GATES)/validate-skill.sh "$(SKILL)"
@@ -294,22 +294,22 @@ git commit -m "ci: run skill quality gates on pull requests"
 
 ---
 
-# PART B — base_in_reality skill
+# PART B — base-in-reality skill
 
-All Part B files live under `base_in_reality/`.
+All Part B files live under `base-in-reality/`.
 
 ### Task B1: Source-fetch helper — query-URL builder (TDD)
 
 **Files:**
-- Create: `base_in_reality/assets/fetch_sources.py`
-- Test: `base_in_reality/assets/test_fetch_sources.py`
+- Create: `base-in-reality/assets/fetch_sources.py`
+- Test: `base-in-reality/assets/test_fetch_sources.py`
 
 **Interfaces:**
 - Produces: `SOURCES` tuple; `build_query_url(source: str, query: str, limit: int = 5) -> str` (raises `ValueError` on unknown source). Consumed by Task B2/B3.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `base_in_reality/assets/test_fetch_sources.py`:
+Create `base-in-reality/assets/test_fetch_sources.py`:
 
 ```python
 # /// script
@@ -363,19 +363,19 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: FAIL/ERROR — `ModuleNotFoundError: No module named 'fetch_sources'`
 
 - [ ] **Step 3: Write the minimal implementation**
 
-Create `base_in_reality/assets/fetch_sources.py`:
+Create `base-in-reality/assets/fetch_sources.py`:
 
 ```python
 # /// script
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""fetch_sources.py — keyless scholarly-source query helper for base_in_reality.
+"""fetch_sources.py — keyless scholarly-source query helper for base-in-reality.
 
 Queries arxiv, PubMed, Crossref, OpenAlex, or Semantic Scholar and prints a
 normalized JSON array of records to stdout. Stdlib-only (urllib/json/xml) so it
@@ -414,14 +414,14 @@ def build_query_url(source: str, query: str, limit: int = 5) -> str:
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: `Ran 6 tests` … `OK`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add base_in_reality/assets/fetch_sources.py base_in_reality/assets/test_fetch_sources.py
-git commit -m "feat(base_in_reality): add keyless source query-URL builder"
+git add base-in-reality/assets/fetch_sources.py base-in-reality/assets/test_fetch_sources.py
+git commit -m "feat(base-in-reality): add keyless source query-URL builder"
 ```
 
 ---
@@ -429,8 +429,8 @@ git commit -m "feat(base_in_reality): add keyless source query-URL builder"
 ### Task B2: Source-fetch helper — response normalizers (TDD)
 
 **Files:**
-- Modify: `base_in_reality/assets/fetch_sources.py`
-- Modify: `base_in_reality/assets/test_fetch_sources.py`
+- Modify: `base-in-reality/assets/fetch_sources.py`
+- Modify: `base-in-reality/assets/test_fetch_sources.py`
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -438,7 +438,7 @@ git commit -m "feat(base_in_reality): add keyless source query-URL builder"
 
 - [ ] **Step 1: Add failing tests**
 
-Append to `base_in_reality/assets/test_fetch_sources.py` (before the `if __name__` block):
+Append to `base-in-reality/assets/test_fetch_sources.py` (before the `if __name__` block):
 
 ```python
 ARXIV_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -528,12 +528,12 @@ class Normalizers(unittest.TestCase):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: ERRORs — `AttributeError: module 'fetch_sources' has no attribute 'normalize_arxiv'`
 
 - [ ] **Step 3: Add the implementation**
 
-Append to `base_in_reality/assets/fetch_sources.py` (after `build_query_url`, before any `__main__`):
+Append to `base-in-reality/assets/fetch_sources.py` (after `build_query_url`, before any `__main__`):
 
 ```python
 import json
@@ -655,14 +655,14 @@ NORMALIZERS = {
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: `Ran 13 tests` … `OK`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add base_in_reality/assets/fetch_sources.py base_in_reality/assets/test_fetch_sources.py
-git commit -m "feat(base_in_reality): add per-source response normalizers"
+git add base-in-reality/assets/fetch_sources.py base-in-reality/assets/test_fetch_sources.py
+git commit -m "feat(base-in-reality): add per-source response normalizers"
 ```
 
 ---
@@ -670,8 +670,8 @@ git commit -m "feat(base_in_reality): add per-source response normalizers"
 ### Task B3: Source-fetch helper — network fetch + CLI
 
 **Files:**
-- Modify: `base_in_reality/assets/fetch_sources.py`
-- Modify: `base_in_reality/assets/test_fetch_sources.py`
+- Modify: `base-in-reality/assets/fetch_sources.py`
+- Modify: `base-in-reality/assets/test_fetch_sources.py`
 
 **Interfaces:**
 - Consumes: `build_query_url`, `NORMALIZERS`, `normalize_pubmed` from B1/B2.
@@ -711,7 +711,7 @@ class FetchSource(unittest.TestCase):
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: ERRORs — `AttributeError: module 'fetch_sources' has no attribute 'fetch_source'`
 
 - [ ] **Step 3: Implement fetch + fetch_source + main**
@@ -725,7 +725,7 @@ import time
 from urllib.request import Request, urlopen
 
 USER_AGENT = (
-    "base_in_reality/1.0 (research-grounding audit; "
+    "base-in-reality/1.0 (research-grounding audit; "
     "+https://github.com/dhanesh/agent-skills)"
 )
 
@@ -777,19 +777,19 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py`
 Expected: `Ran 16 tests` … `OK`
 
 - [ ] **Step 5: (Optional, network) Smoke-test a live query**
 
-Run: `cd base_in_reality/assets && uv run fetch_sources.py --source openalex --query "raft consensus" --limit 2`
+Run: `cd base-in-reality/assets && uv run fetch_sources.py --source openalex --query "raft consensus" --limit 2`
 Expected: a JSON array of 2 records with `title`/`url` fields. (Skip if offline — not part of the gate.)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add base_in_reality/assets/fetch_sources.py base_in_reality/assets/test_fetch_sources.py
-git commit -m "feat(base_in_reality): add network fetch + CLI to source helper"
+git add base-in-reality/assets/fetch_sources.py base-in-reality/assets/test_fetch_sources.py
+git commit -m "feat(base-in-reality): add network fetch + CLI to source helper"
 ```
 
 ---
@@ -797,15 +797,15 @@ git commit -m "feat(base_in_reality): add network fetch + CLI to source helper"
 ### Task B4: Finding JSON schema + validation test
 
 **Files:**
-- Create: `base_in_reality/assets/findings.schema.json`
-- Test: `base_in_reality/assets/test_findings_schema.py`
+- Create: `base-in-reality/assets/findings.schema.json`
+- Test: `base-in-reality/assets/test_findings_schema.py`
 
 **Interfaces:**
 - Produces: a draft-07 schema for a single finding object. Subagents (Task B8) and the optional Workflow (B5) emit objects conforming to it.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `base_in_reality/assets/test_findings_schema.py`:
+Create `base-in-reality/assets/test_findings_schema.py`:
 
 ```python
 # /// script
@@ -861,17 +861,17 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cd base_in_reality/assets && uv run test_findings_schema.py`
+Run: `cd base-in-reality/assets && uv run test_findings_schema.py`
 Expected: ERROR — `FileNotFoundError: ... findings.schema.json`
 
 - [ ] **Step 3: Write the schema**
 
-Create `base_in_reality/assets/findings.schema.json`:
+Create `base-in-reality/assets/findings.schema.json`:
 
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "base_in_reality finding",
+  "title": "base-in-reality finding",
   "type": "object",
   "additionalProperties": false,
   "required": ["claim", "layer", "location", "verdict", "severity", "citations", "recommended_fix"],
@@ -918,14 +918,14 @@ Create `base_in_reality/assets/findings.schema.json`:
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `cd base_in_reality/assets && uv run test_findings_schema.py`
+Run: `cd base-in-reality/assets && uv run test_findings_schema.py`
 Expected: `Ran 6 tests` … `OK`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add base_in_reality/assets/findings.schema.json base_in_reality/assets/test_findings_schema.py
-git commit -m "feat(base_in_reality): add finding JSON schema with grounding invariant"
+git add base-in-reality/assets/findings.schema.json base-in-reality/assets/test_findings_schema.py
+git commit -m "feat(base-in-reality): add finding JSON schema with grounding invariant"
 ```
 
 ---
@@ -933,16 +933,16 @@ git commit -m "feat(base_in_reality): add finding JSON schema with grounding inv
 ### Task B5: Optional Workflow accelerator
 
 **Files:**
-- Create: `base_in_reality/assets/workflow.mjs`
+- Create: `base-in-reality/assets/workflow.mjs`
 
 **Interfaces:**
 - Consumes: conceptually, the finding shape from B4 (mirrored inline as a JS schema literal — the Workflow runtime can't read the JSON file).
 - Produces: a self-contained Claude Code Workflow script. `.mjs` so `node --check` validates the ESM `export const meta`.
 
-- [ ] **Step 1: Write `base_in_reality/assets/workflow.mjs`**
+- [ ] **Step 1: Write `base-in-reality/assets/workflow.mjs`**
 
 ```javascript
-// Optional Claude Code Workflow accelerator for base_in_reality.
+// Optional Claude Code Workflow accelerator for base-in-reality.
 // Feed this to the Workflow tool. It fans out per-claim verification and
 // adversarial refutation deterministically. The skill works without it
 // (see SKILL.md for the portable prompt-driven path).
@@ -1053,14 +1053,14 @@ return results.filter(Boolean)
 
 - [ ] **Step 2: Syntax-check (skip if node absent)**
 
-Run: `command -v node >/dev/null && node --check base_in_reality/assets/workflow.mjs && echo "node-check ok" || echo "node absent — skipped"`
+Run: `command -v node >/dev/null && node --check base-in-reality/assets/workflow.mjs && echo "node-check ok" || echo "node absent — skipped"`
 Expected: `node-check ok` (or the skip line on machines without node)
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add base_in_reality/assets/workflow.mjs
-git commit -m "feat(base_in_reality): add optional Workflow accelerator"
+git add base-in-reality/assets/workflow.mjs
+git commit -m "feat(base-in-reality): add optional Workflow accelerator"
 ```
 
 ---
@@ -1068,9 +1068,9 @@ git commit -m "feat(base_in_reality): add optional Workflow accelerator"
 ### Task B6: Reference docs (routing, verdicts, domains)
 
 **Files:**
-- Create: `base_in_reality/references/source-routing.md`
-- Create: `base_in_reality/references/verdict-rubric.md`
-- Create: `base_in_reality/references/domains.md`
+- Create: `base-in-reality/references/source-routing.md`
+- Create: `base-in-reality/references/verdict-rubric.md`
+- Create: `base-in-reality/references/domains.md`
 
 **Interfaces:**
 - Produces: three reference docs linked from SKILL.md (Task B8). No `{{...}}` tokens, no secrets.
@@ -1153,17 +1153,17 @@ Required sections:
 
 Run:
 ```bash
-grep -q "Claim-class" base_in_reality/references/source-routing.md && \
-grep -q "UNCONFIRMED" base_in_reality/references/verdict-rubric.md && \
-grep -q "Norms surface" base_in_reality/references/domains.md && echo "refs ok"
+grep -q "Claim-class" base-in-reality/references/source-routing.md && \
+grep -q "UNCONFIRMED" base-in-reality/references/verdict-rubric.md && \
+grep -q "Norms surface" base-in-reality/references/domains.md && echo "refs ok"
 ```
 Expected: `refs ok`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add base_in_reality/references/
-git commit -m "docs(base_in_reality): add source-routing, verdict-rubric, domains references"
+git add base-in-reality/references/
+git commit -m "docs(base-in-reality): add source-routing, verdict-rubric, domains references"
 ```
 
 ---
@@ -1171,15 +1171,15 @@ git commit -m "docs(base_in_reality): add source-routing, verdict-rubric, domain
 ### Task B7: Runtime report skeleton
 
 **Files:**
-- Create: `base_in_reality/assets/report-skeleton.md`
+- Create: `base-in-reality/assets/report-skeleton.md`
 
 **Interfaces:**
 - Produces: the Markdown skeleton the skill fills at audit time. Uses `<angle-bracket>` fill markers ONLY (never `{{UPPER_SNAKE}}`, to keep `validate-skill.sh` bijection a SKIP).
 
-- [ ] **Step 1: Write `base_in_reality/assets/report-skeleton.md`**
+- [ ] **Step 1: Write `base-in-reality/assets/report-skeleton.md`**
 
 ```markdown
-# base_in_reality audit — <repo-name>
+# base-in-reality audit — <repo-name>
 
 **Date:** <YYYY-MM-DD> · **Scope:** <whole repo | diff since `<ref>` | layer:<algo|arch|biz>> · **Max claims:** <N>
 
@@ -1221,14 +1221,14 @@ git commit -m "docs(base_in_reality): add source-routing, verdict-rubric, domain
 
 - [ ] **Step 2: Verify no install-time tokens leaked in**
 
-Run: `grep -c '{{[A-Z0-9_]*}}' base_in_reality/assets/report-skeleton.md`
+Run: `grep -c '{{[A-Z0-9_]*}}' base-in-reality/assets/report-skeleton.md`
 Expected: `0`
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add base_in_reality/assets/report-skeleton.md
-git commit -m "feat(base_in_reality): add runtime report skeleton"
+git add base-in-reality/assets/report-skeleton.md
+git commit -m "feat(base-in-reality): add runtime report skeleton"
 ```
 
 ---
@@ -1236,14 +1236,14 @@ git commit -m "feat(base_in_reality): add runtime report skeleton"
 ### Task B8: SKILL.md + README.md (the orchestration) → gate the skill
 
 **Files:**
-- Create: `base_in_reality/SKILL.md`
-- Create: `base_in_reality/README.md`
+- Create: `base-in-reality/SKILL.md`
+- Create: `base-in-reality/README.md`
 
 **Interfaces:**
-- Consumes: every `base_in_reality/references/*` and `base_in_reality/assets/*` file (all must already exist — they do, per B1–B7) so `validate-skill.sh` finds no dangling references.
-- Produces: the skill entrypoint. After this task `make gate-skill SKILL=base_in_reality` passes.
+- Consumes: every `base-in-reality/references/*` and `base-in-reality/assets/*` file (all must already exist — they do, per B1–B7) so `validate-skill.sh` finds no dangling references.
+- Produces: the skill entrypoint. After this task `make gate-skill SKILL=base-in-reality` passes.
 
-- [ ] **Step 1: Write `base_in_reality/SKILL.md`**
+- [ ] **Step 1: Write `base-in-reality/SKILL.md`**
 
 ```markdown
 ---
@@ -1360,13 +1360,13 @@ it performs stages 2/4/5 with parallel fan-out; the steps below are the portable
 
 VERIFY the `description` is ≤1024 characters before continuing:
 
-Run: `awk '/^description:/{sub(/^description: *"/,"");sub(/" *$/,"");print length($0)}' base_in_reality/SKILL.md`
+Run: `awk '/^description:/{sub(/^description: *"/,"");sub(/" *$/,"");print length($0)}' base-in-reality/SKILL.md`
 Expected: a number ≤ 1024. (If it exceeds, trim the description text and re-check.)
 
-- [ ] **Step 2: Write `base_in_reality/README.md`**
+- [ ] **Step 2: Write `base-in-reality/README.md`**
 
 ```markdown
-# base_in_reality
+# base-in-reality
 
 A read-only, research-grounded repository audit skill. It validates a repo's **codebase,
 architecture, and business logic** against real-world knowledge — academic literature
@@ -1380,7 +1380,7 @@ reported as `UNCONFIRMED`, never as violations — there is no fabricated author
 ## Install
 
 ```bash
-npx skills add dhanesh/agent-skills --skill base_in_reality
+npx skills add dhanesh/agent-skills --skill base-in-reality
 ```
 
 ## What it does
@@ -1402,8 +1402,8 @@ See `SKILL.md` for the full procedure, flags, and invariants.
 
 - [ ] **Step 3: Gate the skill**
 
-Run: `make gate-skill SKILL=base_in_reality`
-Expected: `VALIDATION_RESULT: PASS` and `SCAN_RESULT: PASS — ... base_in_reality` (no `DRY_RUN_RESULT` line — base_in_reality has no PARAMETERS.md, so dry-run is correctly skipped).
+Run: `make gate-skill SKILL=base-in-reality`
+Expected: `VALIDATION_RESULT: PASS` and `SCAN_RESULT: PASS — ... base-in-reality` (no `DRY_RUN_RESULT` line — base-in-reality has no PARAMETERS.md, so dry-run is correctly skipped).
 
 If `validate` reports a dangling reference, the named file is missing — create it per the
 relevant Part-B task before proceeding.
@@ -1411,8 +1411,8 @@ relevant Part-B task before proceeding.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add base_in_reality/SKILL.md base_in_reality/README.md
-git commit -m "feat(base_in_reality): add SKILL.md orchestration and README"
+git add base-in-reality/SKILL.md base-in-reality/README.md
+git commit -m "feat(base-in-reality): add SKILL.md orchestration and README"
 ```
 
 ---
@@ -1424,14 +1424,14 @@ git commit -m "feat(base_in_reality): add SKILL.md orchestration and README"
 
 **Interfaces:**
 - Consumes: the green per-skill gate from B8 and Part A's `make gate`.
-- Produces: the repo README advertises `base_in_reality`; the whole repo passes `make gate`.
+- Produces: the repo README advertises `base-in-reality`; the whole repo passes `make gate`.
 
 - [ ] **Step 1: Add the install example to the repo README**
 
 In `README.md`, under the `## Install` examples list, add:
 
 ```bash
-npx skills add dhanesh/agent-skills --skill base_in_reality
+npx skills add dhanesh/agent-skills --skill base-in-reality
 ```
 
 - [ ] **Step 2: Add the skills-table row**
@@ -1439,31 +1439,31 @@ npx skills add dhanesh/agent-skills --skill base_in_reality
 In the `## Skills` table in `README.md`, add this row (keep column alignment with existing rows):
 
 ```markdown
-| [`base_in_reality`](base_in_reality/) | Read-only, research-grounded repo audit — extracts falsifiable claims across algorithm/architecture/business-logic layers, routes each to authoritative sources (arxiv, PubMed, Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar + NIST/RFC/OWASP/ISO/regulators), verifies against fetched evidence, and adversarially refutes before emitting a severity-graded cited report. No fabricated citations: ungrounded claims are reported as `UNCONFIRMED`. |
+| [`base-in-reality`](base-in-reality/) | Read-only, research-grounded repo audit — extracts falsifiable claims across algorithm/architecture/business-logic layers, routes each to authoritative sources (arxiv, PubMed, Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar + NIST/RFC/OWASP/ISO/regulators), verifies against fetched evidence, and adversarially refutes before emitting a severity-graded cited report. No fabricated citations: ungrounded claims are reported as `UNCONFIRMED`. |
 ```
 
 - [ ] **Step 3: Run the full repo gate (everything must be green)**
 
 Run: `make gate; echo "rc=$?"`
-Expected: every skill (including `base_in_reality`) shows `VALIDATION_RESULT: PASS` and `SCAN_RESULT: PASS`; final `rc=0`.
+Expected: every skill (including `base-in-reality`) shows `VALIDATION_RESULT: PASS` and `SCAN_RESULT: PASS`; final `rc=0`.
 
 - [ ] **Step 4: Run the Python suites once more (regression)**
 
-Run: `cd base_in_reality/assets && uv run test_fetch_sources.py && uv run test_findings_schema.py && cd -`
+Run: `cd base-in-reality/assets && uv run test_fetch_sources.py && uv run test_findings_schema.py && cd -`
 Expected: both end in `OK`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add README.md
-git commit -m "docs: list base_in_reality in repo README"
+git commit -m "docs: list base-in-reality in repo README"
 ```
 
 - [ ] **Step 6: Finish the branch**
 
 Invoke the `superpowers:finishing-a-development-branch` skill to decide how to integrate
 (PR vs merge). The branch is `feat/base-in-reality-skill`. The PR description should note
-both deliverables: the `base_in_reality` skill and the repo-wide shared gates + CI.
+both deliverables: the `base-in-reality` skill and the repo-wide shared gates + CI.
 
 ---
 
@@ -1473,7 +1473,7 @@ both deliverables: the `base_in_reality` skill and the repo-wide shared gates + 
   taxonomy, output (report + optional `--annotate`), and the optional Workflow are all
   realized in Tasks B1-B8. The user's added request (shared gates on PRs + Makefile) is
   Part A (A1-A4).
-- **Why no `dry-run-replay` for base_in_reality:** it has no `PARAMETERS.md` by design
+- **Why no `dry-run-replay` for base-in-reality:** it has no `PARAMETERS.md` by design
   (no install-time substitution). `dry-run-replay.sh` hard-errors without one, so the
   Makefile and `make gate-skill` correctly skip it for that skill. This is not a gap.
 - **Type consistency:** the record dict keys (`source,title,authors,year,venue,id,url,doi,
