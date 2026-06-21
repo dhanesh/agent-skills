@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "base_in_reality finding",
+  "title": "base-in-reality finding",
   "type": "object",
   "additionalProperties": false,
   "required": ["claim", "layer", "location", "verdict", "severity", "citations", "recommended_fix"],

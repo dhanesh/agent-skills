@@ -1,6 +1,6 @@
 # Verdict & Evidence Rubric
 
-All findings produced by a `base_in_reality` audit carry exactly one verdict and one severity. This document defines both enumerations, the grounding invariant that governs them, and the adversarial refutation protocol that prevents false positives.
+All findings produced by a `base-in-reality` audit carry exactly one verdict and one severity. This document defines both enumerations, the grounding invariant that governs them, and the adversarial refutation protocol that prevents false positives.
 
 ## Verdicts
 

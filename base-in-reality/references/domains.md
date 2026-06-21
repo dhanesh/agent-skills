@@ -1,6 +1,6 @@
 # Domains & Norms Surface
 
-The `base_in_reality` skill auto-detects the domain(s) present in a codebase by scanning for the signals listed below. Domain detection drives which source classes and authority standards are consulted during the audit. Multiple domains may be active simultaneously; the skill merges their norms surfaces.
+The `base-in-reality` skill auto-detects the domain(s) present in a codebase by scanning for the signals listed below. Domain detection drives which source classes and authority standards are consulted during the audit. Multiple domains may be active simultaneously; the skill merges their norms surfaces.
 
 ## Detection signals
 

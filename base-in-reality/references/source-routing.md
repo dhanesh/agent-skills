@@ -1,6 +1,6 @@
 # Source Routing
 
-This document specifies which source classes to consult for each claim type encountered during a `base_in_reality` audit. The router is deterministic: given a claim class, consult the primary keyless APIs first, then the authority sources listed in the standards column. The goal is the highest-authority citation reachable without human login; keyless APIs (Semantic Scholar, OpenAlex, PubMed, arXiv, CrossRef) are preferred for speed and reproducibility. Standards bodies are consulted when a claim touches compliance, cryptographic requirements, or protocol specifications where peer-reviewed literature alone is insufficient.
+This document specifies which source classes to consult for each claim type encountered during a `base-in-reality` audit. The router is deterministic: given a claim class, consult the primary keyless APIs first, then the authority sources listed in the standards column. The goal is the highest-authority citation reachable without human login; keyless APIs (Semantic Scholar, OpenAlex, PubMed, arXiv, CrossRef) are preferred for speed and reproducibility. Standards bodies are consulted when a claim touches compliance, cryptographic requirements, or protocol specifications where peer-reviewed literature alone is insufficient.
 
 ## Claim-class → source-class
 
