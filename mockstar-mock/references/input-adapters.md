@@ -122,7 +122,10 @@ collection has incomplete saved responses or you need fine-grained control.
      only when their body differs meaningfully (skip near-duplicates).
 7. `provenance.locator` — `entry[<n>]` where `<n>` is the 0-based index of the first
    entry in the group that contributed the record.
-8. `confidence: "grounded"` for all HAR-derived records (real traffic was observed).
+8. `confidence` — `"grounded"` when `entry.response.content.text` is present and
+   non-empty (the response body was captured); `"inferred"` when the response body is
+   absent or empty (e.g. redirects, cached/filtered captures where the body was not
+   recorded).
 9. `statefulHints` — when the group contains a `POST` that is followed (by timestamp) by
    a `GET` to the same resource path, set `statefulHints` to
    `"POST creates, GET returns it"`.
@@ -190,7 +193,15 @@ the SDL or operation files becomes one entry in `responses[]`:
   ```
 
   When the operation file uses anonymous operations, fall back to matching on the first word
-  of the `query` string (e.g. `partial: "query GetUser"`).
+  of the `query` string:
+
+  ```json
+  {
+    "when": {
+      "body": { "partial": "query GetUser" }
+    }
+  }
+  ```
 
 - `status: 200` for all operations (GraphQL always returns 200; errors are in the body).
 
@@ -203,9 +214,11 @@ populate `auth` accordingly.
 **`provenance.locator`** — operation name (e.g. `GetUser`) from the SDL type or the
 operation file name.
 
-**`confidence`** — `"grounded"` when an example response is available (operation file with
-a `# @response` annotation or `*.response.json` companion file); `"inferred"` when the
-response shape is derived purely from the SDL type definitions.
+**`confidence`** — A `responses[].body` populated solely from SDL type definitions
+(nullable scalars → `null`, lists → single-element array, etc.) is **synthesized, not
+observed**: set `confidence: "inferred"` regardless of whether an operation file exists.
+Set `confidence: "grounded"` only when an operation file carries an explicit example or
+`# @response` annotation (or a `*.response.json` companion file is present).
 
 ---
 
@@ -271,7 +284,9 @@ When two records share the same `(method, path)`:
   `status: 404` entry, keep it; add a lower-priority status only if it is absent.
 - If `confidence` differs, take the higher-priority record's `confidence`.
 - Append a `_conflicts` annotation (not part of the schema; for the coverage report only)
-  listing which fields were dropped and from which source.
+  listing which fields were dropped and from which source. This annotation MUST be stripped
+  from every record before the Endpoint Inventory is validated against `inventory.schema.json`
+  or consumed downstream — it exists solely to feed the coverage report.
 
 **`--max-endpoints` enforcement.** When the merged array exceeds the `--max-endpoints`
 limit (default: unlimited), drop records in reverse priority order (prose-inferred first,
