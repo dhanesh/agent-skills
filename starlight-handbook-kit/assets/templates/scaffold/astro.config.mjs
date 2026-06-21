@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import { unified } from '@astrojs/markdown-remark';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
 
@@ -48,7 +49,13 @@ export default defineConfig({
   site: '{{GH_PAGES_HOST}}',
   base: BASE,
   markdown: {
-    rehypePlugins: [[rehypeBaseLinks, { base: BASE }]],
+    // Astro 6 deprecated the top-level `markdown.rehypePlugins` (removed in a
+    // future major); the plugin pipeline now lives on a `processor`. `unified()`
+    // is Astro's default processor, so GFM/SmartyPants and Starlight's own
+    // remark/rehype plugins are preserved — we only add the base-link rewrite.
+    processor: unified({
+      rehypePlugins: [[rehypeBaseLinks, { base: BASE }]],
+    }),
   },
   integrations: [
     react(),
