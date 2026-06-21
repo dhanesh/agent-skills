@@ -36,8 +36,9 @@ crafting-self-prompting-loops/
 ├── references/
 │   ├── checklist.md             the canonical 10-item spine (LSC-1..LSC-10)
 │   ├── spec.md                  per-item design rules + decision criteria (terse, the extraction source)
-│   ├── families.md              family-selection decision tree + per-family table
-│   └── failure-modes.md         8 failure modes + cost/cadence playbook
+│   ├── families.md              family-selection decision tree + per-family table + research refinements
+│   ├── failure-modes.md         9 failure modes + cost/cadence playbook
+│   └── literature.md            research grounding: each finding → citation → which LSC slot it hardens
 ├── assets/templates/            5 fill-in scaffolds (base + one per family)
 │   ├── base-loop.template.md
 │   ├── self-refinement.template.md
@@ -63,7 +64,7 @@ The non-negotiable three are **LSC-3** (a hard stop the model can't override), *
 
 ## Provenance & validation
 
-Extracted from the `self-prompting-loop` learning tool in this repo (`docs/spec.md` is the source). Validated with a with-skill vs baseline benchmark across four family test cases:
+Extracted from the `self-prompting-loop` learning tool in this repo (`docs/spec.md` is the source), then hardened against the research literature — see [`references/literature.md`](./references/literature.md), which ties every non-obvious design rule to a citation (Reflexion, Self-Refine, CRITIC, the "LLMs Cannot Self-Correct Reasoning Yet" negative result, Self-Consistency, ReAct, ADaPT, Voyager, the MAST multi-agent failure taxonomy, Anthropic's multi-agent cost findings, CaMeL, Spotlighting, the lethal trifecta, and the secure-pattern ladder). Validated with a with-skill vs baseline benchmark across four family test cases:
 
 | Metric | With skill | Baseline |
 |---|---|---|

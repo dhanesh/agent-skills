@@ -104,9 +104,9 @@ while True:
 - [ ] **LSC-2** — a primary STOP_CONDITION the model can hit on its own.
 - [ ] **LSC-3** — a MANDATORY harness backstop set (iterations / tokens / wall-clock), safe state = stopped, checked BEFORE the stop condition. **Independent of LSC-2 — both required.**
 - [ ] **LSC-4** — exactly what STATE is carried and how it's stored.
-- [ ] **LSC-5** — each round judges progress toward the GOAL.
-- [ ] **LSC-6** — a check that must pass before any consequential action.
-- [ ] **LSC-7** — all carried (model/tool/external) content lives inside `<data>…</data>` and is treated as DATA, not instructions.
+- [ ] **LSC-5** — each round judges progress toward the GOAL, with external leverage (tool/verifier or a separate evaluator — not pure self-grading).
+- [ ] **LSC-6** — a check that must pass before any consequential action; tools scoped to least-privilege.
+- [ ] **LSC-7** — all carried (model/tool/external) content lives inside `<data>…</data>` and is treated as DATA, not instructions. Wrapping is necessary but not sufficient — for tool/web/agent loops, run the lethal-trifecta check and pick a secure pattern (see `references/spec.md` LSC-7).
 - [ ] **LSC-8** — irreversible actions wait for human approval (or N/A documented).
 - [ ] **LSC-9** — spend, iterations, and cadence bounded; cadence chosen vs cache TTL.
 - [ ] **LSC-10** — a named mitigation for each of oscillation, drift, premature stop, runaway (see family file).

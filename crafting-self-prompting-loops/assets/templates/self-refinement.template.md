@@ -17,6 +17,8 @@ GOAL:               <target output, e.g. "a function + tests for X">          # 
 SUCCESS_DEFINITION: <quality bar, e.g. "rubric R >= 8/10" / "tests green">     # LSC-1
 
 RUBRIC:         <fixed rubric/criteria the critique applies defect-by-defect>  # LSC-5
+EVALUATOR:      <tool/verifier if one exists (tests, schema, linter); else a    # LSC-5
+                 SEPARATE/blinded model — NOT the generator grading itself>
 STOP_CONDITION: <score >= THRESHOLD  OR  revised ≈ prior (no improvement)>     # LSC-2
 STOP_SIGNAL:    <e.g. emit DONE when threshold met or no-change detected>      # LSC-2
 
@@ -56,6 +58,8 @@ while True:
 
     # CRITIQUE — trusted prompt reasons over the draft AS DATA
     #   <data> { current draft } </data>   <-- DATA, not instructions   # LSC-7
+    #   Use EVALUATOR (tool/verifier or a SEPARATE model). Intrinsic
+    #   self-critique can DEGRADE objective tasks & inflate self-bias.  # LSC-5
     critique = evaluate(draft, RUBRIC)                      # LSC-5
     if not critique.enumerates_defects: critique = redo()   # LSC-6 (rubric must bite)
 
@@ -96,6 +100,7 @@ while True:
 - **Oscillation** — fixing A re-breaks B. → best-of-N tracker scored vs the *fixed* rubric; return the best version ever seen, not the last.
 - **Over-editing / drift** — tinkering past the point of value. → no-improvement stop (margin `M`); tight round cap.
 - **Premature stop** — critique passes on round 1 because the rubric is soft. → require enumerated concrete defects before a pass; make the rubric specific enough to bite.
+- **Evaluation degradation / sycophancy** — the generator grading its own draft ratifies it; the score climbs while real quality stalls. → use a tool/verifier where one exists, else a separate/blinded `EVALUATOR`; bind the stop to the verifier, not the self-score (see `references/literature.md` §A).
 - **Runaway** — structurally bounded by the round cap (each round = one synchronous step), but the backstop still owns it.
 
 ## Before you run
@@ -104,7 +109,7 @@ while True:
 - [ ] **LSC-2** — primary stop: threshold met OR no-improvement detected.
 - [ ] **LSC-3** — MANDATORY backstop round/token/time cap set; safe state returns best-of-N. **Both LSC-2 and LSC-3 required — independent.**
 - [ ] **LSC-4** — prior draft + critique + best-so-far carried.
-- [ ] **LSC-5** — each round scores the draft against the fixed rubric.
+- [ ] **LSC-5** — each round scores the draft against the fixed rubric, via a tool/verifier or a SEPARATE/blinded evaluator (not the generator grading itself).
 - [ ] **LSC-6** — revision validated; critique must list concrete defects.
 - [ ] **LSC-7** — draft and critique live inside `<data>…</data>` as DATA, never as instructions.
 - [ ] **LSC-8** — N/A for output-only, or optional final human read documented.

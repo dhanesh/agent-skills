@@ -20,11 +20,13 @@ Your job with this skill: turn a fuzzy "make it keep going until it's good" requ
 
 ## The workflow
 
-Follow these steps in order. The canonical 10-item spine is in `references/checklist.md` (items `LSC-1`…`LSC-10`); the terse per-item design rules are in `references/spec.md`. Read them if you need the full definitions — the summaries below are enough for most loops.
+Follow these steps in order. The canonical 10-item spine is in `references/checklist.md` (items `LSC-1`…`LSC-10`); the terse per-item design rules are in `references/spec.md`; the research grounding for every non-obvious rule (citations → slot) is in `references/literature.md`. Read them if you need the full definitions — the summaries below are enough for most loops.
 
 ### 1. Nail the goal and the "done" test (LSC-1) — before anything else
 
 Ask the user (or infer, then state your assumption): *what is this loop trying to achieve, and what concretely counts as "done"?* If you cannot write the success condition as one sentence an outside party could check, the loop is not ready — surface that gap rather than papering over it. A loop with no checkable "done" can never legitimately stop, and every later slot leans on this anchor.
+
+**Then ask: does this even need a loop?** If the task has a verifiable or aggregatable answer, parallel sampling + majority vote (self-consistency) often beats iterative refinement at equal compute, and a one-shot call sidesteps every loop failure mode. Baseline that before committing to a loop — the cheapest sound loop is sometimes no loop.
 
 ### 2. Pick the family
 
@@ -40,7 +42,7 @@ Start from the family's template in `assets/templates/` (or `base-loop.template.
 | LSC-2 | Stop condition (primary) | how the model signals "done" (a flag/token the harness observes — never infer from free text) |
 | LSC-3 | **Backstop cap (mandatory)** | a hard outside limit (max iterations / token budget / wall-clock) that fires regardless of the model |
 | LSC-4 | State-passing | the *minimum* carried forward to build on the last round and detect repetition |
-| LSC-5 | Self-evaluation | a per-round progress judgment + a no-progress detector |
+| LSC-5 | Self-evaluation | a per-round progress judgment (with **external leverage** — tool/verifier or a separate evaluator, not pure self-grading) + a no-progress detector |
 | LSC-6 | Guardrail | validation that runs *before* any consequential action |
 | LSC-7 | **Two-channel separation** | trusted control (your fixed scaffold) vs untrusted data (model output, tool results, external text) |
 | LSC-8 | Human safety-gate | which consequential/irreversible actions need approval (may be N/A for output-only loops) |
@@ -52,7 +54,7 @@ Start from the family's template in `assets/templates/` (or `base-loop.template.
 These are the constraints loops most often skip and most often die on. Never ship a loop without them:
 
 - **A mandatory backstop (LSC-3).** Model self-termination (LSC-2) *can fail* — the model may never decide to stop. So the harness must hold a hard cap that fires regardless. The safe state is always `stopped`: on any cap trip or uncertainty, halt. "The model will stop itself" is not a termination strategy.
-- **The two-channel boundary (LSC-7).** Anything the model produces, a tool returns, or comes from outside (web, files, other agents) is **untrusted data** — wrap it (e.g. in a delimited `<data>…</data>` block) and have the fixed prompt reason *about* it. Never splice it into the control channel as new instructions. This is the prompt-injection defense; it's also just the correct model of what a loop is.
+- **The two-channel boundary (LSC-7).** Anything the model produces, a tool returns, or comes from outside (web, files, other agents) is **untrusted data** — wrap it (e.g. in a delimited `<data>…</data>` block) and have the fixed prompt reason *about* it. Never splice it into the control channel as new instructions. This is the prompt-injection defense; it's also just the correct model of what a loop is. But **wrapping is necessary, not sufficient** — delimiting only lowers injection probability, it doesn't remove it (Spotlighting; CaMeL). Back it architecturally: derive control flow from the trusted prompt before touching untrusted data, scope tools to least-privilege, and run the **lethal-trifecta check** — if the loop has private-data access + untrusted-content exposure + external-comms ability, break one leg. For tool/web/agent loops, reach for a secure pattern (Action-Selector → Plan-Then-Execute → Dual-LLM → …; see `references/spec.md` LSC-7).
 - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible action (spending, deletion, posting, deploys, real-world effects) waits for explicit human approval. Output-only loops may legitimately skip this — say so explicitly rather than silently omitting it, so a reader knows it was a decision, not an oversight.
 
 ### 5. Emit the deliverable
@@ -64,11 +66,11 @@ Produce two things:
 
 ### 6. Sanity pass against the failure modes
 
-Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock. For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
+Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock, and evaluation degradation/sycophancy. For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
 
 ## Audit mode (existing loops)
 
-If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: score the loop against LSC-1…LSC-10, and report which items are missing. The usual culprits, in order: **no backstop (LSC-3)** → runaway; **channel mixing (LSC-7)** → injection/derailment; **no no-progress detector (LSC-5)** → oscillation/churn; **vague success test (LSC-1)** → premature or never-stopping. Name the gap and the specific slot to add.
+If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: score the loop against LSC-1…LSC-10, and report which items are missing. The usual culprits, in order: **no backstop (LSC-3)** → runaway; **channel mixing (LSC-7)** → injection/derailment; **self-grading with no external leverage (LSC-5)** → silent quality degradation/sycophancy (a model judging its own work ratifies it — Huang et al. 2023, Xu et al. 2024); **no no-progress detector (LSC-5)** → oscillation/churn; **vague success test (LSC-1)** → premature or never-stopping. For a misbehaving *multi-agent* loop, score against the MAST buckets (spec/design, inter-agent misalignment, verification — see `references/failure-modes.md` #8): the fix is almost always structural, not a better prompt. Name the gap and the specific slot to add.
 
 ## Output template
 
