@@ -1,9 +1,9 @@
-# base_in_reality — Design Spec
+# base-in-reality — Design Spec
 
 **Date:** 2026-06-19
 **Status:** Approved (brainstorming) → ready for implementation plan
 **Authoring tool:** `repo2skill` machinery (SKILL.md conventions, parameterized templates, `validate-skill.sh` / `scan-leaks.sh` / `dry-run-replay.sh` quality gate)
-**Repo:** `dhanesh/agent-skills` (personal skills collection, installed via `npx skills add dhanesh/agent-skills --skill base_in_reality`)
+**Repo:** `dhanesh/agent-skills` (personal skills collection, installed via `npx skills add dhanesh/agent-skills --skill base-in-reality`)
 
 ---
 
@@ -204,7 +204,7 @@ location:
 ## 9. Files
 
 ```
-base_in_reality/
+base-in-reality/
   SKILL.md                          # trigger description + 6-stage portable orchestration,
                                     #   invariants, verdict taxonomy, flags
   references/
