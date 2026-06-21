@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.mockstar-mock.dev/inventory.schema.json",
+  "title": "Endpoint Inventory IR",
+  "type": "object",
+  "required": ["endpoints"],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+      "description": "Target mockstar tenant directory (default 'default')."
+    },
+    "endpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["method", "path", "responses", "provenance", "confidence"],
+        "properties": {
+          "method": {
+            "type": "string",
+            "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]
+          },
+          "path": {
+            "type": "string",
+            "description": "Hono-style path with :param captures, e.g. /users/:id. GraphQL is modeled as POST /graphql."
+          },
+          "auth": {
+            "type": "object",
+            "description": "Auth match hints, e.g. { header: 'authorization', startsWith: 'Bearer ' }.",
+            "properties": {
+              "header": { "type": "string" },
+              "startsWith": { "type": "string" }
+            }
+          },
+          "request": {
+            "type": "object",
+            "properties": {
+              "contentType": { "type": "string" },
+              "schema": { "type": "object" },
+              "example": {},
+              "match": {
+                "type": "object",
+                "description": "Body/query/header match predicates lifted to mockstar match.* (equals/partial/jsonpath)."
+              }
+            }
+          },
+          "responses": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["status", "body"],
+              "properties": {
+                "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                "headers": { "type": "object" },
+                "body": {},
+                "when": {
+                  "type": "object",
+                  "description": "If present, this response becomes a mockstar scenario (scenarios[].when on params/query/headers/body)."
+                }
+              }
+            }
+          },
+          "statefulHints": {
+            "type": "string",
+            "description": "Free-text note that this endpoint participates in stateful flow (e.g. 'POST creates, GET returns it'). Drives dynamic handler inference."
+          },
+          "webhookHints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": { "type": "string" },
+                "event": { "type": "string" }
+              }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "required": ["source", "locator"],
+            "properties": {
+              "source": { "type": "string", "description": "Input file path or URL this record came from." },
+              "locator": { "type": "string", "description": "JSON pointer, line range, heading, or operationId within the source." }
+            }
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["grounded", "inferred"],
+            "description": "grounded = explicit in a source; inferred = reasoned from context (flagged in the coverage report)."
+          }
+        }
+      }
+    }
+  }
+}
