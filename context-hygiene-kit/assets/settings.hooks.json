@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/stop.sh",
-            "timeout": 15000
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/stop.sh",
+            "timeout": 15
           }
         ]
       }
@@ -18,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/precompact.sh",
-            "timeout": 30000
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/precompact.sh",
+            "timeout": 30
           }
         ]
       }
@@ -30,8 +30,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/hooks/session_start.sh",
-            "timeout": 30000
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/session_start.sh",
+            "timeout": 30
           }
         ]
       }

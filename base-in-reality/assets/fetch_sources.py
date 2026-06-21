@@ -2,20 +2,34 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""fetch_sources.py — keyless scholarly-source query helper for base-in-reality.
+"""fetch_sources.py — scholarly-source query helper for base-in-reality.
 
 Queries arxiv, PubMed, Crossref, OpenAlex, or Semantic Scholar and prints a
 normalized JSON array of records to stdout. Stdlib-only (urllib/json/xml) so it
 runs anywhere via `uv run fetch_sources.py --source <s> --query "<q>"`.
+
+Keyless by default. Optional, opt-in credentials via environment variables (none
+required for arxiv / PubMed / Crossref):
+  - S2_API_KEY       Semantic Scholar key -> sent as the `x-api-key` header.
+                     Unauthenticated S2 access is heavily throttled and often
+                     returns HTTP 429; set a key for reliable use.
+  - OPENALEX_API_KEY OpenAlex key -> sent as the `api_key` query param. As of
+                     2026 OpenAlex meters free usage and removed the polite pool
+                     / email param; a (free) key is recommended for volume.
+  - CROSSREF_MAILTO  contact email -> joins Crossref's polite pool (added to the
+                     User-Agent and as a `mailto` query param).
 """
 from __future__ import annotations
 
+import os
 from urllib.parse import urlencode
 
 SOURCES = ("arxiv", "pubmed", "crossref", "openalex", "semanticscholar")
 
 
-def build_query_url(source: str, query: str, limit: int = 5) -> str:
+def build_query_url(source: str, query: str, limit: int = 5, *,
+                    openalex_key: str | None = None,
+                    mailto: str | None = None) -> str:
     source = source.lower()
     if source == "arxiv":
         params = urlencode({"search_query": f"all:{query}", "start": 0, "max_results": limit})
@@ -24,11 +38,15 @@ def build_query_url(source: str, query: str, limit: int = 5) -> str:
         params = urlencode({"db": "pubmed", "retmode": "json", "retmax": limit, "term": query})
         return f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?{params}"
     if source == "crossref":
-        params = urlencode({"rows": limit, "query": query})
-        return f"https://api.crossref.org/works?{params}"
+        params = {"rows": limit, "query": query}
+        if mailto:
+            params["mailto"] = mailto
+        return f"https://api.crossref.org/works?{urlencode(params)}"
     if source == "openalex":
-        params = urlencode({"per_page": limit, "search": query})
-        return f"https://api.openalex.org/works?{params}"
+        params = {"per_page": limit, "search": query}
+        if openalex_key:
+            params["api_key"] = openalex_key
+        return f"https://api.openalex.org/works?{urlencode(params)}"
     if source == "semanticscholar":
         params = urlencode({
             "limit": limit,
@@ -160,14 +178,29 @@ import sys
 import time
 from urllib.request import Request, urlopen
 
-USER_AGENT = (
-    "base-in-reality/1.0 (research-grounding audit; "
-    "+https://github.com/dhanesh/agent-skills)"
+_BASE_USER_AGENT = (
+    "base-in-reality/1.1 (research-grounding audit; "
+    "+https://github.com/dhanesh/agent-skills"
 )
 
 
+def _env(name):
+    v = os.environ.get(name)
+    return v.strip() if v and v.strip() else None
+
+
+def _user_agent():
+    mailto = _env("CROSSREF_MAILTO")
+    return _BASE_USER_AGENT + (f"; mailto:{mailto})" if mailto else ")")
+
+
 def fetch(url, timeout=20):
-    req = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+    headers = {"User-Agent": _user_agent(), "Accept": "*/*"}
+    if "semanticscholar.org" in url:
+        key = _env("S2_API_KEY")
+        if key:
+            headers["x-api-key"] = key
+    req = Request(url, headers=headers)
     with urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted scholarly APIs)
         return resp.read()
 
@@ -185,13 +218,16 @@ def fetch_source(source, query, limit=5, sleep=1.0, fetcher=fetch):
         summary = fetcher(
             f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?{params}")
         return normalize_pubmed(summary)
-    raw = fetcher(build_query_url(source, query, limit))
+    raw = fetcher(build_query_url(
+        source, query, limit,
+        openalex_key=_env("OPENALEX_API_KEY"), mailto=_env("CROSSREF_MAILTO")))
     return NORMALIZERS[source](raw)
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        description="Query a keyless scholarly source; emit normalized JSON records.")
+        description="Query a scholarly source (keyless by default; optional API "
+                    "keys via env); emit normalized JSON records.")
     p.add_argument("--source", required=True, choices=SOURCES)
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=5)
