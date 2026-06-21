@@ -43,7 +43,7 @@ dry-run:
 		fi; \
 	done; exit $$rc
 
-# Gate a single skill: make gate-skill SKILL=base_in_reality
+# Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill:
 	@test -n "$(SKILL)" || { echo "usage: make gate-skill SKILL=<dir>"; exit 2; }
 	@sh $(GATES)/validate-skill.sh "$(SKILL)"

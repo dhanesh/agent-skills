@@ -1,4 +1,4 @@
-// Optional Claude Code Workflow accelerator for base_in_reality.
+// Optional Claude Code Workflow accelerator for base-in-reality.
 // Feed this to the Workflow tool. It fans out per-claim verification and
 // adversarial refutation deterministically. The skill works without it
 // (see SKILL.md for the portable prompt-driven path).

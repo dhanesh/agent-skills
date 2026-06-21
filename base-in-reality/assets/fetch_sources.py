@@ -2,7 +2,7 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""fetch_sources.py — keyless scholarly-source query helper for base_in_reality.
+"""fetch_sources.py — keyless scholarly-source query helper for base-in-reality.
 
 Queries arxiv, PubMed, Crossref, OpenAlex, or Semantic Scholar and prints a
 normalized JSON array of records to stdout. Stdlib-only (urllib/json/xml) so it
@@ -161,7 +161,7 @@ import time
 from urllib.request import Request, urlopen
 
 USER_AGENT = (
-    "base_in_reality/1.0 (research-grounding audit; "
+    "base-in-reality/1.0 (research-grounding audit; "
     "+https://github.com/dhanesh/agent-skills)"
 )
 

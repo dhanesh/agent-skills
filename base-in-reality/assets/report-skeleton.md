@@ -1,4 +1,4 @@
-# base_in_reality audit — <repo-name>
+# base-in-reality audit — <repo-name>
 
 **Date:** <YYYY-MM-DD> · **Scope:** <whole repo | diff since `<ref>` | layer:<algo|arch|biz>> · **Max claims:** <N>
 

@@ -1,4 +1,4 @@
-# base_in_reality
+# base-in-reality
 
 A read-only, research-grounded repository audit skill. It validates a repo's **codebase,
 architecture, and business logic** against real-world knowledge — academic literature
@@ -12,7 +12,7 @@ reported as `UNCONFIRMED`, never as violations — there is no fabricated author
 ## Install
 
 ```bash
-npx skills add dhanesh/agent-skills --skill base_in_reality
+npx skills add dhanesh/agent-skills --skill base-in-reality
 ```
 
 ## What it does

@@ -58,7 +58,6 @@ subagent's prompt:
   `FETCH="<skill-base-dir>/assets/fetch_sources.py"`.
 - If you don't have the base directory, discover it:
   `FETCH=$(find ~/.claude ~/.config ~/.agents -path '*base-in-reality*/assets/fetch_sources.py' 2>/dev/null | head -1)`
-  (also try `*base_in_reality*` — the install directory may use an underscore).
 - Verify it resolves: `uv run "$FETCH" --source openalex --query test --limit 1` should emit JSON.
 - Hand subagents the literal absolute `$FETCH` value — never a relative `assets/`-prefixed form.
 
