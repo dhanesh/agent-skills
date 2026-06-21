@@ -24,7 +24,7 @@ try:
 except Exception as e:
     print(f"Cannot read state: {e}")
     sys.exit(1)
-panes=data.get("panes", []) if isinstance(data,dict) else data
+panes=data.get("items", []) if isinstance(data,dict) else data
 if not panes:
     print("No registered panes. Start panes with: agent-pane <name> <command>")
     sys.exit(0)
