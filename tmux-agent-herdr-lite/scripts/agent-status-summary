@@ -19,7 +19,7 @@ try:
 except Exception:
     print('agents:?')
     raise SystemExit
-icons={'blocked':'⚠','working':'●','done':'✓','idle':'○','unknown':'?'}
+icons={'blocked':'⚠','error':'✖','working':'●','done':'✓','idle':'○','unknown':'?'}
 parts=[]
 for it in items:
     name=(it.get('name') or it.get('window') or it.get('pane_id') or '?')[:14]
