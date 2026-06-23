@@ -14,6 +14,10 @@ for f in agent-pane agent-status-scan agent-status-summary agent-jump agent-dash
   echo "installed $BIN_DIR/$f"
 done
 
+# Library module imported by agent-status-scan (must sit alongside it on PATH).
+cp "$SKILL_DIR/scripts/agent_classify.py" "$BIN_DIR/agent_classify.py"
+echo "installed $BIN_DIR/agent_classify.py"
+
 cp "$SKILL_DIR/assets/tmux-agent.conf" "$TMUX_AGENT_DIR/tmux-agent.conf"
 echo "installed $TMUX_AGENT_DIR/tmux-agent.conf"
 

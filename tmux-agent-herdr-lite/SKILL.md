@@ -44,7 +44,7 @@ The installer copies executable scripts to `~/.local/bin`, writes tmux config to
 - `agent-status-summary` — print compact status for tmux status bar.
 - `agent-dashboard` — print full dashboard and key help.
 - `agent-menu` — open a tmux display-menu with common actions.
-- `agent-jump blocked|working|idle|done` — jump to the first pane in that state.
+- `agent-jump blocked|error|working|idle|done` — jump to the first pane in that state.
 - `agent-cheatsheet` — print keybindings and commands.
 
 Runtime state is stored under `~/.tmux/agent-panes/`.
@@ -58,6 +58,7 @@ prefix ?        dashboard/help popup
 prefix m        command menu
 prefix S        session/window/pane tree
 prefix g        jump first blocked agent
+prefix E        jump first error (crashed) agent
 prefix G        refresh agent statuses
 prefix W/I/D    jump working / idle / done agent
 prefix | / -    split horizontal / vertical
@@ -113,11 +114,18 @@ It also enables mouse support, vi copy mode, top pane border titles, a compact s
 
 Statuses are routing hints, not truth:
 
+- `error` — a crash or non-zero exit (traceback, `command failed`, `exit_code=N` where N≠0). Distinct from `blocked`: a crashed agent needs a look, not an answer.
 - `blocked` — approval prompt, question, password prompt, permission/rate-limit issue, or explicit blocked marker.
 - `working` — pane output changed recently and the pane still exists.
 - `idle` — pane still exists but output has not changed beyond the idle threshold.
 - `done` — completion marker or exited-looking output.
 - `unknown` — metadata or pane lookup is incomplete.
+
+Classification matches only the **tail** (last few non-empty lines) of the visible pane, so a token
+that has scrolled out of the current prompt region no longer pins a status. Explicit `AGENT_STATUS:`
+sentinels and real failure signals win over loose word heuristics, and active output (`working`)
+takes precedence over advisory words like a bare `done` or `429`. The classifier lives in
+`scripts/agent_classify.py` (pure, unit-tested by `scripts/test_agent_classify.py`).
 
 For better accuracy, instruct coding agents to print explicit markers:
 
