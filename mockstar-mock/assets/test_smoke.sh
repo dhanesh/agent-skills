@@ -50,22 +50,22 @@ if [ "$DOCKER_AVAILABLE" -eq 1 ]; then
   if ! docker image inspect "$IMAGE" >/dev/null 2>&1 && ! docker pull "$IMAGE" >/dev/null 2>&1; then
     echo "SKIP: docker smoke (image unreachable)"
   else
-    # Build a mocks dir from the petstore fixture
+    # Build a mocks dir from the petstore fixture using documented layout (<out>/mocks/<tenant>/)
     DOCKER_MOCKS="$(mktemp -d)"
     trap 'cleanup_docker_tmp' EXIT
-    if ! bunx mockstar import "$FIXTURE" "$DOCKER_MOCKS" --tenant=default >/dev/null 2>&1; then
+    if ! bunx mockstar import "$FIXTURE" "$DOCKER_MOCKS/mocks" --tenant=default >/dev/null 2>&1; then
       echo "SKIP: docker smoke (mockstar import failed)"
     else
       # Write a routes file: GET /pets -> 200
       DOCKER_ROUTES="$(mktemp)"
       printf 'GET\t/pets\t200\n' > "$DOCKER_ROUTES"
 
-      # Run smoke.sh in docker mode; use a distinct port to avoid conflicts
+      # Run smoke.sh in docker mode; first arg is the mocks config-root (<out>/mocks)
       DOCKER_SMOKE_PORT="${MOCKSTAR_SMOKE_DOCKER_TEST_PORT:-3918}"
       if MOCKSTAR_SMOKE_RUNTIME=docker \
          MOCKSTAR_SMOKE_PORT="$DOCKER_SMOKE_PORT" \
          MOCKSTAR_SMOKE_IMAGE="$IMAGE" \
-         sh "$SMOKE" "$DOCKER_MOCKS" "$DOCKER_ROUTES"; then
+         sh "$SMOKE" "$DOCKER_MOCKS/mocks" "$DOCKER_ROUTES"; then
         echo "PASS: docker smoke GET /pets -> 200"
       else
         echo "FAIL: docker smoke did not return expected 200"; exit 1

@@ -212,17 +212,17 @@ For each endpoint in the merged Endpoint Inventory, generate a mockstar JSON moc
 **Native path (preferred for OpenAPI and losslessly-liftable inputs):**
 
 ```
-bunx mockstar import <spec-file> <out-dir> --tenant=<tenant>
+bunx mockstar import <spec-file> <out>/mocks --tenant=<tenant>
 ```
 
-The importer writes mock JSON files to `<out-dir>/<tenant>/`. Use this path for:
+The importer writes mock JSON files to `<out>/mocks/<tenant>/`. Use this path for:
 - Raw OpenAPI 3.x inputs (most complete).
 - Postman or HAR inputs that have been converted to OpenAPI 3.x without data loss.
 
 **Hand-authored path (for everything else):**
 
 For curl, GraphQL, prose, and any Postman/HAR that could not be losslessly lifted, generate
-mock JSON entries by hand per `references/mockstar-mapping.md`:
+mock JSON entries by hand per `references/mockstar-mapping.md` and write them to `<out>/mocks/<tenant>/`:
 
 - Map `method` + `path` → `match.method` + `match.path`.
 - Map `auth` → `match.headers` predicate.
@@ -243,7 +243,7 @@ Prefer literal example values in the initial output; Tier 2 token rewriting is d
 Run mockstar's enhance pass over the generated mocks directory:
 
 ```
-bunx mockstar enhance <out>/<tenant>
+bunx mockstar enhance <out>/mocks/<tenant>
 ```
 
 When an OpenAPI input exists, add `--spec <openapi-file>` so the enhancer can cross-reference
@@ -262,7 +262,7 @@ rewriting that changes `confidence` from `"grounded"` to `"inferred"`.
 
 Unless `--no-verify` is set:
 
-1. Write a routes TSV file at `<out>/routes.tsv` with one line per endpoint:
+1. Write a routes TSV file at `<out>/mocks/routes.tsv` with one line per endpoint:
    ```
    METHOD<TAB>/path<TAB>EXPECTED_STATUS
    ```
@@ -273,10 +273,10 @@ Unless `--no-verify` is set:
    resolved runtime environment:
    ```sh
    # local runtime
-   MOCKSTAR_SMOKE_RUNTIME=local sh "$SMOKE" <out> <out>/routes.tsv
+   MOCKSTAR_SMOKE_RUNTIME=local sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
 
    # docker runtime
-   MOCKSTAR_SMOKE_RUNTIME=docker MOCKSTAR_SMOKE_IMAGE=<image> sh "$SMOKE" <out> <out>/routes.tsv
+   MOCKSTAR_SMOKE_RUNTIME=docker MOCKSTAR_SMOKE_IMAGE=<image> sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
    ```
 
    `assets/smoke.sh` boots mockstar via the chosen runtime. Both paths poll `GET /health`

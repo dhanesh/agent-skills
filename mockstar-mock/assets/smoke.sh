@@ -5,6 +5,9 @@
 #   sh smoke.sh <out-dir> <routes-file>          # boot mockstar, then smoke
 #   sh smoke.sh --routes-only <routes-file>      # smoke against MOCKSTAR_SMOKE_BASE_URL (no boot)
 #
+# First positional arg ($OUT) is the mocks config-root — the dir containing <tenant>/ subdirs.
+# Handlers are expected at its sibling: ${OUT%/*}/handlers  (e.g. <out>/mocks -> <out>/handlers).
+#
 # routes-file: one line per route -> METHOD<TAB>PATH<TAB>EXPECTED_STATUS
 #
 # Runtime:
@@ -49,7 +52,7 @@ else
 
     # Boot container — if docker run fails (image unreachable etc.), skip gracefully
     CID=""
-    if ! CID="$(docker run -d --rm -p "${PORT}:3000" $VOL_ARGS "$IMAGE" 2>/tmp/mockstar-docker-smoke.log)"; then
+    if ! CID="$(docker run -d --rm -p "${PORT}:3000" -e MOCKSTAR_DETERMINISTIC=1 $VOL_ARGS "$IMAGE" 2>/tmp/mockstar-docker-smoke.log)"; then
       echo "SKIP: docker unavailable"
       exit 0
     fi
