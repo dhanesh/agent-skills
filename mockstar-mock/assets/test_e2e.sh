@@ -11,7 +11,7 @@ OUT="$(mktemp -d)"
 OUT2="$(mktemp -d)"
 trap 'rm -rf "$OUT" "$OUT2"' EXIT
 
-if ! bunx mockstar import "$FIX" "$OUT" --tenant default >/tmp/e2e-import.log 2>&1; then
+if ! bunx mockstar import "$FIX" "$OUT" --tenant=default >/tmp/e2e-import.log 2>&1; then
   echo "FAIL: mockstar import"; cat /tmp/e2e-import.log; exit 1
 fi
 echo "PASS: import produced mocks"
