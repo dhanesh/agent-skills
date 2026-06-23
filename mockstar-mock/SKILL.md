@@ -341,6 +341,33 @@ bunx mockstar mocks/
 bunx mockstar mocks/ --deterministic --no-watch --port 3000
 ```
 
+### Docker delivery
+
+When `--runtime docker` or `auto` resolves to Docker, the skill emits **two** delivery artifacts:
+
+**(a) Mount command (local dev — no build step):**
+
+```sh
+docker run --rm -p 3000:3000 \
+  -v "<abs>/mocks:/config/mocks:ro" \
+  -v "<abs>/handlers:/config/handlers:ro" \
+  <image>
+```
+
+Drop the `-v handlers` bind-mount when no dynamic handlers exist. `<abs>` is the absolute path to the output directory; `<image>` is the resolved ref from Stage 0 (tag or digest).
+
+**(b) Baked image (share / CI):**
+
+The skill renders `assets/Dockerfile.template` — filling `<TAG>` with the detected image ref/digest from Stage 0 — and writes it as `Dockerfile` in the output directory root. Build and run with:
+
+```sh
+docker build -t <name> . && docker run --rm -p 3000:3000 <name>
+```
+
+The template (`assets/Dockerfile.template`) copies `mocks/` into `/config/mocks` (and optionally `handlers/` into `/config/handlers`) and inherits the base image's `ENTRYPOINT`/`CMD`, which serves `/config/mocks` on port 3000.
+
+**Air-gap fallback (Stage 0 runtime resolution):** if `docker manifest inspect <image>` fails due to no network but the image is already present locally, `docker image inspect <image>` is sufficient to treat docker as available. The coverage report notes whether the image ref was verified remotely or resolved from the local cache.
+
 ## References
 
 - `references/input-adapters.md` — per-format extraction rules and merge/dedupe logic.

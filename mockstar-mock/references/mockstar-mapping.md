@@ -317,6 +317,29 @@ Tier 2 tokens are `{{ … }}` expressions in `response.body` and `response.heade
 | `{{tenant}}` | Tenant identifier for the request |
 | `{{requestId}}` | Per-request UUID assigned by mockstar |
 
+### `$schema` stamp
+
+Generated mock files SHOULD carry a top-level `$schema` field pinned to:
+
+```
+https://schemas.mockstar.dev/v0.<N>/mock.json
+```
+
+where `N` is the detected mockstar minor version from Stage 0 (e.g. `v0.1` for mockstar `0.1.x`). This enables editor autocomplete (JSON Schema validation in VS Code / JetBrains) and ensures boot-time Zod validation and editor tooling agree on the same schema version.
+
+Example:
+
+```jsonc
+{
+  "$schema": "https://schemas.mockstar.dev/v0.1/mock.json",
+  "id": "get-user-by-id",
+  "match": { "method": "GET", "path": "/users/:id" },
+  "response": { "kind": "static", "status": 200, "body": { "id": "{{request.params.id}}" } }
+}
+```
+
+---
+
 ### Generator strategy
 
 **Prefer literal example values** in the initial generated output and let `mockstar enhance` (Stage 4) rewrite IDs and timestamps automatically. This keeps the generated JSON readable and avoids over-tokenization:
