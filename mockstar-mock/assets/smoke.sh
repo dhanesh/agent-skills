@@ -19,7 +19,7 @@ else
   { [ -n "$OUT" ] && [ -n "$ROUTES" ]; } || { echo "usage: smoke.sh <out-dir> <routes-file>" >&2; exit 2; }
   PORT="${MOCKSTAR_SMOKE_PORT:-3917}"
   BASE="http://127.0.0.1:$PORT"
-  bunx mockstar serve "$OUT" --deterministic --no-watch --port "$PORT" >/tmp/mockstar-smoke.log 2>&1 &
+  bunx mockstar "$OUT" --deterministic --no-watch --port "$PORT" >/tmp/mockstar-smoke.log 2>&1 &
   SERVER=$!
   trap 'kill "$SERVER" 2>/dev/null || true' EXIT
   # wait up to ~10s for readiness
