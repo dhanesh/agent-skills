@@ -64,10 +64,12 @@ generating.
 - `--no-verify` — skip Stage 5 boot-and-smoke verification (the generated project is not started).
 - `--deterministic` — passed through to `bunx mockstar` during smoke testing; disables random Faker values for reproducible responses.
 - `--max-endpoints N` — cap the merged Endpoint Inventory at N records; excess are dropped in reverse-priority order and reported.
+- `--runtime auto|local|docker` — selects how mockstar is invoked (default: `auto`). `auto` prefers Docker (the `ghcr.io/dhanesh/mockstar` image) when the Docker daemon is reachable and the image is available, else falls back to local `bunx mockstar`. `local` always uses `bunx mockstar`. `docker` always uses Docker and fails fast if the daemon is down.
+- `--image <ref>` — the Docker image reference used when `--runtime` is `docker` or `auto` resolves to Docker (default: `ghcr.io/dhanesh/mockstar:latest`). For reproducibility, pin by digest: `ghcr.io/dhanesh/mockstar@sha256:<digest>`.
 
 ## Procedure
 
-Run these six stages in order. Fan out subagents where noted.
+Run these stages in order. Fan out subagents where noted.
 
 **Locating asset helpers (do this first).** The bundled helpers `assets/extract_text.py` and
 `assets/smoke.sh` are referenced by paths relative to this skill's directory, but subagents
@@ -83,6 +85,52 @@ absolute paths into every subagent prompt:
 - Verify: `uv run "$EXTRACT" --help` should print usage.
 - Hand subagents the literal absolute `$EXTRACT` and `$SMOKE` values — never a relative
   `assets/`-prefixed form.
+
+---
+
+### Stage 0 — Compatibility preflight
+
+Before any other work, resolve the runtime environment and validate the live CLI surface.
+
+**1. Resolve runtime.**
+
+Evaluate `--runtime`:
+- `local` — use `bunx mockstar` directly.
+- `docker` — use the Docker image (`--image` value). Fail fast if `docker version` (server) is
+  unreachable.
+- `auto` (default) — prefer Docker: run `docker version` and confirm the server is reachable,
+  then confirm the image is reachable via `docker manifest inspect <image>`. If either check
+  fails, fall back to `local` and note the fallback in the coverage report.
+
+Record the resolved runtime (local or docker) and the image ref when docker is chosen.
+
+**2. Detect mockstar version.**
+
+- Local: `bunx mockstar version` — capture the printed version string.
+- Docker: `docker run --rm <image> version` — capture the printed version string.
+
+Record the version. Note the known caveat: the CLI's printed version may lag the package
+version (treat it as advisory, not definitive).
+
+**3. Validate the live CLI surface.**
+
+Run the help command for the chosen runtime:
+- Local: `bunx mockstar help`
+- Docker: `docker run --rm <image> help`
+
+Confirm that `import`, `enhance`, and serve-as-default are all present in the output. For
+`mockstar import`, **discover the real `--tenant` flag form from the live help output** rather
+than assuming. The skill's default assumption is the equals form `--tenant=<name>` (verified
+for current mockstar), but if the live surface shows a different form, prefer the live surface
+and note the drift in the coverage report's "Runtime & compatibility" section.
+
+**Principle:** when the live CLI surface contradicts this skill's baked-in assumptions, prefer
+the live truth and flag the drift in the coverage report.
+
+**4. Record findings.**
+
+Record the detected runtime, mockstar version, and image ref/digest in the coverage report's
+"Runtime & compatibility" section (see `references/coverage-report.md`).
 
 ---
 
@@ -221,16 +269,20 @@ Unless `--no-verify` is set:
    Use the primary (no-`when`) status code from the Endpoint Inventory. For endpoints without
    a grounded status, use `200`.
 
-2. Run the smoke suite using the absolute `$SMOKE` path resolved in Stage 1:
-   ```
-   sh "$SMOKE" <out> <out>/routes.tsv
+2. Run the smoke suite using the absolute `$SMOKE` path resolved in Stage 1, passing the
+   resolved runtime environment:
+   ```sh
+   # local runtime
+   MOCKSTAR_SMOKE_RUNTIME=local sh "$SMOKE" <out> <out>/routes.tsv
+
+   # docker runtime
+   MOCKSTAR_SMOKE_RUNTIME=docker MOCKSTAR_SMOKE_IMAGE=<image> sh "$SMOKE" <out> <out>/routes.tsv
    ```
 
-   `assets/smoke.sh` boots mockstar with `bunx mockstar <out> --deterministic --no-watch --port <PORT>`,
-   waits up to 10 seconds for readiness, then curls every route and checks the HTTP status code.
-   Set `MOCKSTAR_SMOKE_PORT` if you need a non-default smoke port. Do NOT use
-   `bunx mockstar serve` — `serve` is not a valid subcommand; the default command boots the
-   server.
+   `assets/smoke.sh` boots mockstar via the chosen runtime. Both paths poll `GET /health`
+   for readiness before testing routes. Set `MOCKSTAR_SMOKE_PORT` if you need a non-default
+   smoke port. Do NOT use `bunx mockstar serve` — `serve` is not a valid subcommand; the
+   default command boots the server.
 
 3. For any `FAIL` lines from the smoke run, inspect the generated config, fix the entry, and
    re-run until all routes pass. Do not ship a project with smoke failures.
@@ -254,13 +306,15 @@ Write `MOCKSTAR-COVERAGE.md` to the output directory root, following the templat
 
 ## Output layout
 
-Default layout (when `--into` is not set, `<service>` is derived from the primary spec's title
-or the target URL hostname):
+The config-root is a `mocks/` directory containing one `<tenant>/` subdirectory per tenant,
+with a sibling `handlers/` directory for dynamic handlers. Default layout (when `--into` is
+not set, `<service>` is derived from the primary spec's title or the target URL hostname):
 
 ```
 mock-<service>/
-  <tenant>/           # mockstar mock JSON files (e.g. users.json, orders.json)
-    handlers/         # TypeScript dynamic handler files (--fidelity full only)
+  mocks/
+    <tenant>/         # mockstar mock JSON files (e.g. users.json, orders.json)
+  handlers/           # TypeScript dynamic handler files (--fidelity full only)
   routes.tsv          # routes used for smoke testing
   MOCKSTAR-COVERAGE.md
 ```
@@ -269,17 +323,22 @@ With `--into <dir>`:
 
 ```
 <dir>/
-  <tenant>/
-    handlers/
+  mocks/
+    <tenant>/
+  handlers/
   routes.tsv
   MOCKSTAR-COVERAGE.md
 ```
 
-Boot the server from the output root:
+The config-root maps directly to the runtime:
+- **Local:** `bunx mockstar mocks/ --handlers handlers/`
+- **Docker:** mount `mocks/` → `/config/mocks` and `handlers/` → `/config/handlers`
+
+Boot the server locally from the output root:
 
 ```
-bunx mockstar <out-dir>
-bunx mockstar <out-dir> --deterministic --no-watch --port 3000
+bunx mockstar mocks/
+bunx mockstar mocks/ --deterministic --no-watch --port 3000
 ```
 
 ## References
