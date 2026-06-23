@@ -58,6 +58,15 @@ API-mocking / developer-tooling. Norms surface: the mockstar CLI + config schema
 
 F1 and F5 are both **drift** between baked-in skill text and the moving mockstar target. The durable fix is a **compatibility preflight** in the skill (see the conversation): before generating, detect the installed mockstar version (`bunx mockstar version`) and validate the CLI surface it will use against live `bunx mockstar help` / the exported config JSON Schema (`dist/schema.json` / the `$schema` URL), preferring live truth over baked-in claims and recording the detected version in the coverage report.
 
+## Resolution status (2026-06-24)
+
+All findings resolved on branch `skill/mockstar-mock` (plan `2026-06-24-mockstar-mock-v2-runtime-and-fixes.md`):
+
+- **F1** — fixed: every `mockstar import` now uses `--tenant=<name>` (equals); `test_e2e.sh` adds a non-default-tenant (`--tenant=acme`) regression assertion that verifies mocks land in `acme/` (GREEN against real mockstar).
+- **F2/F3/F4** — fixed: enhance wording (boot is the Zod validator), URL handling (curl/WebFetch, not `extract_text.py`), and the port-note wording all corrected in SKILL.md.
+- **F5** — fixed: plan/spec docs de-pinned to "0.1.x stable"; the shipped skill hardcodes no version.
+- **Systemic** — implemented: a Stage 0 compatibility preflight detects the runtime + mockstar version and validates the live CLI surface (discovering the real `--tenant` form) before generating; the coverage report records runtime/version/digest; first-class **Docker** runtime added (image `ghcr.io/dhanesh/mockstar`, `/health` smoke, mount + bake `Dockerfile` artifacts), Docker-preferred by default.
+
 ## Dropped-claims log
 
 None — claim set was within scope; both layers (mockstar-behavior, external-format) covered.
