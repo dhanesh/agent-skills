@@ -59,7 +59,7 @@ generating.
 ## Flags
 
 - `--into <dir>` — output directory for the generated mockstar project (default: `mock-<service-name>` in cwd).
-- `--tenant <name>` — mockstar tenant name passed to `mockstar import` and used as the mocks subdirectory (default: `default`).
+- `--tenant <name>` — mockstar tenant name used as the mocks subdirectory (default: `default`). **Important:** when passed to `mockstar import`, the equals form `--tenant=<name>` is required — the space form is silently ignored by the importer.
 - `--fidelity full|static` — `full` generates scenarios, dynamic handlers, and webhooks from IR hints; `static` emits one default response per endpoint only (default: `full`).
 - `--no-verify` — skip Stage 5 boot-and-smoke verification (the generated project is not started).
 - `--deterministic` — passed through to `bunx mockstar` during smoke testing; disables random Faker values for reproducible responses.
@@ -100,10 +100,25 @@ Examine every provided input and classify each by type using these detection sig
 | `.graphql` / `.gql` extension, or `{"data":{"__schema":...}}` | GraphQL SDL / introspection |
 | `.md`, `.pdf`, `.docx`, plain text, or `http(s)://` URL | Prose documentation |
 
-For binary inputs (PDF, DOCX) and documentation URLs, convert to plain text before proceeding:
+For binary inputs (PDF, DOCX) and local text files, convert to plain text before proceeding:
 
 ```
-uv run "$EXTRACT" <input-file-or-url>
+uv run "$EXTRACT" <local-file>
+```
+
+For **documentation URLs**, fetch the content first with `curl -L` (or WebFetch), save it to a
+temp file, then pass the temp file to `$EXTRACT` if it is binary, or use it directly if it is
+already plain text or Markdown. **Never pass a URL directly to `$EXTRACT`** — the helper
+handles only local `.pdf`, `.docx`, `.txt`, `.md`, and `.markdown` files; a URL causes exit 3
+("unsupported extension").
+
+```sh
+# URL: fetch first, then optionally extract
+curl -L -o /tmp/apidoc.md "https://example.com/api-docs"
+# /tmp/apidoc.md is already text — use directly as prose source
+
+# Binary (PDF, DOCX): use $EXTRACT
+uv run "$EXTRACT" /path/to/spec.pdf
 ```
 
 `assets/extract_text.py` emits the extracted text to stdout; capture it to a temp file and use
@@ -149,7 +164,7 @@ For each endpoint in the merged Endpoint Inventory, generate a mockstar JSON moc
 **Native path (preferred for OpenAPI and losslessly-liftable inputs):**
 
 ```
-bunx mockstar import <spec-file> <out-dir> --tenant <tenant>
+bunx mockstar import <spec-file> <out-dir> --tenant=<tenant>
 ```
 
 The importer writes mock JSON files to `<out-dir>/<tenant>/`. Use this path for:
@@ -187,9 +202,11 @@ When an OpenAPI input exists, add `--spec <openapi-file>` so the enhancer can cr
 the schema for more accurate placeholder selection.
 
 The enhancer rewrites hardcoded IDs and timestamps to Tier 2 tokens (`{{faker.uuid}}`,
-`{{now.iso}}`, `{{id("prefix_", 14)}}`, etc.) and validates that all generated files are
-schema-conformant. Review its diff — the coverage report flags any Tier 2 rewriting that
-changes `confidence` from `"grounded"` to `"inferred"`.
+`{{now.iso}}`, `{{id("prefix_", 14)}}`, etc.) and writes a `_mockstarGenerated` manifest
+(idempotent — safe to re-run). It does **not** validate schema conformance; that is proven
+by the Stage-5 boot, where mockstar validates every config file with Zod and fails fast on
+any invalid entry. Review the enhancer's diff — the coverage report flags any Tier 2
+rewriting that changes `confidence` from `"grounded"` to `"inferred"`.
 
 ---
 
@@ -211,9 +228,9 @@ Unless `--no-verify` is set:
 
    `assets/smoke.sh` boots mockstar with `bunx mockstar <out> --deterministic --no-watch --port <PORT>`,
    waits up to 10 seconds for readiness, then curls every route and checks the HTTP status code.
-   Pass `--deterministic` via the environment variable `MOCKSTAR_SMOKE_PORT` if you need a
-   non-default port. Do NOT use `bunx mockstar serve` — `serve` is not a valid subcommand;
-   the default command boots the server.
+   Set `MOCKSTAR_SMOKE_PORT` if you need a non-default smoke port. Do NOT use
+   `bunx mockstar serve` — `serve` is not a valid subcommand; the default command boots the
+   server.
 
 3. For any `FAIL` lines from the smoke run, inspect the generated config, fix the entry, and
    re-run until all routes pass. Do not ship a project with smoke failures.

@@ -34,7 +34,7 @@ After installing the skill, invoke it from Claude Code by describing what you wa
 ```
 
 ```
-/mockstar-mock --into ./petstore-mock --tenant acme petstore.yaml
+/mockstar-mock --into ./petstore-mock --tenant=acme petstore.yaml
 ```
 
 The skill produces a ready-to-run mockstar project. Boot it with:
@@ -49,7 +49,7 @@ bunx mockstar ./my-mock --deterministic --no-watch --port 3000
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--into <dir>` | `mock-<service>` | Output directory |
-| `--tenant <name>` | `default` | Tenant name for `mockstar import` |
+| `--tenant=<name>` | `default` | Tenant name for `mockstar import` (equals form required; space form is silently ignored by the importer) |
 | `--fidelity full\|static` | `full` | Full generates scenarios/handlers/webhooks; static is one response per route |
 | `--no-verify` | off | Skip boot-and-smoke verification |
 | `--deterministic` | off | Disable Faker randomness for reproducible responses |
