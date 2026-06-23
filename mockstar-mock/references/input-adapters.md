@@ -182,23 +182,24 @@ the SDL or operation files becomes one entry in `responses[]`:
 
 - `body` — the example response shape derived from the schema type (nullable scalars → `null`
   placeholder; lists → single-element array of the item type).
-- `when` — a match predicate on the request body so it becomes a mockstar scenario:
+- `when` — an attribute-keyed body predicate so it becomes a mockstar scenario.
+  For named operations, use the `operationName` attribute with an exact-equality shorthand:
 
   ```json
   {
     "when": {
-      "body": { "jsonpath": "$.operationName", "equals": "GetUser" }
+      "body": { "operationName": "GetUser" }
     }
   }
   ```
 
-  When the operation file uses anonymous operations, fall back to matching on the first word
-  of the `query` string:
+  When the operation file uses anonymous operations (no `operationName`), fall back to
+  matching on the `query` attribute with a `contains` predicate object:
 
   ```json
   {
     "when": {
-      "body": { "partial": "query GetUser" }
+      "body": { "query": { "contains": "query GetUser" } }
     }
   }
   ```
@@ -228,7 +229,7 @@ Set `confidence: "grounded"` only when an operation file carries an explicit exa
 
 - **PDF / DOCX** — convert to plain text via `assets/extract_text.py` (implemented in
   Task 5) before extraction. Pass the output file path as the prose source.
-- **URL** — fetch the page with `assets/fetch_url.py` (or `curl -L`) to obtain HTML/text;
+- **URL** — fetch the page with `curl -L` (or `WebFetch`) to obtain HTML/text;
   strip HTML tags to get readable prose.
 - **Markdown** — use directly; no conversion needed.
 
