@@ -28,9 +28,9 @@ Every finding's evidence must be a URL/DOI the agent fetched **this session**. A
 
 For every candidate `VIOLATION` or `DEVIATION`, the workflow runs an adversarial refutation pass before the verdict is finalized. The pass works as follows:
 
-1. Spawn ≥3 independent refuter sub-agents (or reasoning passes). Each refuter operates on a distinct lens — at minimum: (a) factual correctness of the claim-as-stated, (b) applicability of the cited source to the specific code context, (c) severity calibration.
+1. Spawn ≥3 independent refuter sub-agents (or reasoning passes). Each refuter MUST operate on a **distinct lens** — at minimum: (a) factual correctness of the claim-as-stated, (b) applicability of the cited source to the specific code context, (c) severity calibration. The lenses are what decorrelate the refuters: a plain majority vote over refuters that share the same prompt (and the same underlying model) is brittle under *confabulation consensus*, where correlated bias drives the ensemble to the same wrong rationale. Keep the lenses genuinely different; where the budget allows, prefer **distinct models** across refuters so the votes can be treated as near-independent.
 2. Each refuter defaults to `refuted: true` when uncertain. The burden of proof is on the finding, not the refuter.
-3. If ≥2 of the 3 refuters return `refuted: true`, the verdict is downgraded to `UNCONFIRMED`.
+3. **Aggregation.** Downgrade to `UNCONFIRMED` when ≥2 of the 3 refuters return `refuted: true`. Because a 2-of-3 vote over a same-model ensemble is the weak baseline, calibrate by severity: require **unanimity (3-of-3 *non*-refute)** to keep a `critical`/`high`-severity `VIOLATION`, and weight a refuter's vote by the strength of the evidence it brings (a refuter that cites a fetched source over-application beats one that only asserts doubt). This trades a little recall for precision exactly where a false positive is most costly.
 4. The refutation outcome — number of refuters, individual verdicts, dominant rationale — is recorded in the `refutation` field of the finding object.
 
-This protocol prevents a single confident-but-wrong retrieval from elevating a speculative observation to a `VIOLATION`. When in doubt, report `UNCONFIRMED`.
+This protocol prevents a single confident-but-wrong retrieval from elevating a speculative observation to a `VIOLATION`, and prevents a correlated-bias ensemble from rubber-stamping one. When in doubt, report `UNCONFIRMED`.

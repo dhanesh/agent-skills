@@ -67,9 +67,10 @@ export default function TradeoffSlider({
               max={max}
               step={1}
               value={index}
-              aria-valuemin={0}
-              aria-valuemax={max}
-              aria-valuenow={index}
+              // Native min/max/value already expose valuemin/valuemax/valuenow;
+              // ARIA-in-HTML says authors SHOULD NOT duplicate them (UAs ignore
+              // the copies). Only aria-valuetext adds meaning here — the numeric
+              // index is not human-meaningful, so we surface the stop's label.
               aria-valuetext={active ? active.label : undefined}
               onChange={(e) => setIndex(Number(e.target.value))}
             />
