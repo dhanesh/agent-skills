@@ -9,6 +9,14 @@
 - Endpoints mocked: <n> (grounded <g> / inferred <i>)
 - Verified: <boot PASS|FAIL>, routes smoked <ok>/<total>
 
+## Runtime & compatibility
+
+- Runtime used: <local | docker>
+- mockstar version detected: <version> (note: CLI-printed version may lag the package — advisory)
+- Docker image + digest (when docker): <ghcr.io/dhanesh/mockstar:tag @ sha256:…>
+- CLI-surface preflight: <ok | drift noted: …> (including discovered `mockstar import` tenant flag form)
+- Schema / boot validation: <PASS | FAIL> (Stage-5 boot is the authoritative Zod validator)
+
 ## Endpoints
 
 | Method | Path | Mock file | Source | Locator | Confidence |
