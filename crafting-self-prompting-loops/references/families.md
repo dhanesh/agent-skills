@@ -43,6 +43,7 @@ Each rule below traces to a finding in [`literature.md`](./literature.md); apply
 - *Before building the loop, check you need one.* For verifiable/aggregatable answers, parallel sampling + majority vote (self-consistency) often beats iterative refinement at equal compute — baseline it first (§B).
 - *The evaluator needs external leverage.* Intrinsic self-critique degrades objective-task performance and self-bias compounds each round — prefer a tool/verifier, or a separate/blinded evaluator; never let the generator be its own judge (§A). This is the family's defining risk (failure mode #9).
 - *Scope intrinsic-only refinement to subjective/stylistic outputs with a capable base model;* for reasoning, switch to tool-grounded critique.
+- *Give the loop an escape from local edits.* Plain draft→revise is incremental-only and can't recover from a fundamentally wrong draft; add a bounded redraft/explore branch (restart from scratch) triggered when the evaluator flags a fundamental defect or progress stalls — best-of-N keeps the prior best. The limiting factor is discriminative judgment about what merits a redraft, so anchor the trigger to the external signal, not the generator (§C).
 
 **Autonomous task (b):**
 - *Ground each step in a real observation* — reason→act→observe (ReAct) curbs drift and hallucination far better than reasoning from internal state (§C).

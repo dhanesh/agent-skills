@@ -45,10 +45,18 @@ MAX_ITERATIONS:  <cost round cap, e.g. 4>                                      #
 TOKEN_BUDGET:    <modest>                                                      # LSC-9
 CADENCE:         immediate / back-to-back (synchronous; keeps cache warm)      # LSC-9
 
+# OPTIONAL explore branch — incremental revision is local-edit-only and can't
+# escape a fundamentally wrong draft. Add ONLY if a draft can be wrong at the
+# root (not just rough). The redraft DECISION rides on the EVALUATOR signal,
+# not the generator's whim — discriminative judgment is the limiting factor.  # LSC-10
+REDRAFT_TRIGGER: <evaluator flags a FUNDAMENTAL defect, OR progress stalls>    # LSC-10
+MAX_REDRAFTS:    <small cap, e.g. 1–2; each redraft is a fresh draft, ×cost>   # LSC-10 / LSC-9
+
 # ── LOOP ─────────────────────────────────────────────────────
 draft       = generate(GOAL)
 best_so_far = draft
 rounds      = 0
+redrafts    = 0
 while True:
 
     # STOP CHECKS — backstop first; safe state returns BEST-of-N
@@ -72,11 +80,19 @@ while True:
     if not OUTPUT_VALIDATION(revised):                      # LSC-6
         revised = draft                                     # reject-and-keep-prior
 
-    if critique.score - score(best_so_far) < M:             # LSC-5 / LSC-10
-        return best_so_far                                  # no-improvement stop
     if better(revised, best_so_far): best_so_far = revised  # best-of-N tracking
 
-    draft   = revised                                       # LSC-4
+    # EXPLORE vs EXPLOIT — when the evaluator flags a FUNDAMENTAL defect or
+    # progress stalls, incremental revision just polishes a doomed draft.
+    # REDRAFT from scratch instead of tinkering — bounded by MAX_REDRAFTS;
+    # best-of-N keeps the prior best safe, so a worse redraft never loses.   # LSC-10
+    if REDRAFT_TRIGGER(critique) or critique.score - score(best_so_far) < M: # LSC-5 / LSC-10
+        if redrafts < MAX_REDRAFTS:
+            draft = generate(GOAL, avoid=best_so_far)       # fresh start (explore)
+            redrafts += 1; rounds += 1; continue
+        return best_so_far                                  # exhausted → no-improvement stop
+
+    draft   = revised                                       # LSC-4 (exploit)
     rounds += 1
 ```
 
@@ -90,6 +106,7 @@ while True:
 | `BACKSTOP_*` / `SAFE_STATE` | Hard round/token/time cap; return best-of-N | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Prior draft + critique + best-so-far | LSC-4 |
 | `NO_PROGRESS_DETECTION` / margin `M` | When to stop because it's not improving | LSC-5 |
+| `REDRAFT_TRIGGER` / `MAX_REDRAFTS` (optional) | Explore branch: restart from scratch on a fundamental defect | LSC-10 |
 | `OUTPUT_VALIDATION` / `PRE_ACTION_CHECKS` | Validate revision; force concrete defects | LSC-6 |
 | `<data>…</data>` wrapping | Draft + critique treated as DATA | LSC-7 |
 | `GATED_ACTIONS` (optional) | Final human read before publish | LSC-8 |
@@ -100,6 +117,7 @@ while True:
 - **Oscillation** — fixing A re-breaks B. → best-of-N tracker scored vs the *fixed* rubric; return the best version ever seen, not the last.
 - **Over-editing / drift** — tinkering past the point of value. → no-improvement stop (margin `M`); tight round cap.
 - **Premature stop** — critique passes on round 1 because the rubric is soft. → require enumerated concrete defects before a pass; make the rubric specific enough to bite.
+- **Local-edit trap (fundamental error)** — incremental revision can't fix a draft that's wrong at the root; it polishes a doomed approach round after round. → optional REDRAFT/explore branch that restarts from scratch when the evaluator flags a fundamental defect or progress stalls (bounded by `MAX_REDRAFTS`; best-of-N keeps the prior best). Gate the redraft on the evaluator's judgment, not the generator's — see `references/literature.md` §C.
 - **Evaluation degradation / sycophancy** — the generator grading its own draft ratifies it; the score climbs while real quality stalls. → use a tool/verifier where one exists, else a separate/blinded `EVALUATOR`; bind the stop to the verifier, not the self-score (see `references/literature.md` §A).
 - **Runaway** — structurally bounded by the round cap (each round = one synchronous step), but the backstop still owns it.
 
@@ -115,3 +133,4 @@ while True:
 - [ ] **LSC-8** — N/A for output-only, or optional final human read documented.
 - [ ] **LSC-9** — rounds, tokens, cadence bounded.
 - [ ] **LSC-10** — mitigations named for oscillation, drift, premature stop, runaway.
+- [ ] **LSC-10 (optional)** — if a draft can be fundamentally wrong, a bounded evaluator-triggered REDRAFT/explore branch wired up; else incremental-only is a deliberate choice.
