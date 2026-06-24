@@ -24,8 +24,8 @@ A loop can blend families (e.g. an autonomous loop with a human gate on deploys)
 |---|---|---|---|---|
 | **Self-refinement / reflexion** | draft → critique → revise, until rubric passes or no improvement | usually optional (output-only) | oscillation, over-editing, drift from rubric | `assets/templates/self-refinement.template.md` |
 | **Autonomous task** | goal → act → assess → (self-pace) → repeat until done/budget | **required** before side-effecting/irreversible actions | runaway cost, premature stop, drift | `assets/templates/autonomous.template.md` |
-| **Multi-agent** | orchestrator spawns workers → collects → re-plans → loops | gate actions that escape the agent group | deadlock, cross-agent oscillation, over-fanout/cost | `assets/templates/multi-agent.template.md` |
-| **Human-checkpointed** | act → gate (human approve?) → continue / abort | the **defining feature** — every checkpoint is human-approved | stalls waiting on humans; premature stop | `assets/templates/human-checkpointed.template.md` |
+| **Multi-agent** | orchestrator spawns workers → collects → re-plans → loops | gate actions that escape the agent group | deadlock, cross-agent oscillation, over-fanout/cost, false consensus | `assets/templates/multi-agent.template.md` |
+| **Human-checkpointed** | act → gate (human approve?) → continue / abort | the **defining feature** — every checkpoint is human-approved | stalls waiting on humans; premature stop; oversight degradation / rubber-stamping | `assets/templates/human-checkpointed.template.md` |
 
 ## Slot tendencies by family
 
@@ -57,7 +57,10 @@ Each rule below traces to a finding in [`literature.md`](./literature.md); apply
 - *Default to a single agent.* Multi-agent burns ~15× the tokens and wins only when subtasks are independent/parallel **and** cheaply verifiable; tightly-coupled work (most coding) stays single-agent (§D).
 - *Most failures are structural* (~42% spec/design, ~37% inter-agent misalignment, ~21% verification; MAST) — design termination, role boundaries, and verification as architecture, not prompt patches.
 - *Use typed/structured message contracts* between agents (MetaGPT), *re-assert role + objective each turn* and halt on role inversion (CAMEL), and *add an independent verification stage* — producers hallucinate success (MAST FC3).
+- *Consensus is not correctness.* Cross-agent agreement can be correlated error: debate amplifies shared biases after round 1, and agents converge confidently on the same wrong rationale. Don't use agreement as a quality signal — prefer a meta-judge or evidence-based arbitration that can pick a well-supported minority over an open debate that ratifies the majority, and keep rounds few (§D).
 
 **Human-checkpointed (d):**
 - *The checkpoint is your drift/premature-stop catch* — surface the original `SUCCESS_DEFINITION` alongside current state at every gate so the human can spot drift.
-- *Guard against rubber-stamping* — give the human a concrete pass/fail bar to check, not "looks good?", and align idle cadence to human availability (long idle ticks; eat the cache miss).
+- *The gate is a fallible component — assume it degrades.* An unaided human gate loses accuracy *exactly when it matters*: reviewers grow more confident even when wrong, and agree with the agent more as it looks more capable (*Confirmation bias*, AAAI 2025). The fix that empirically helped: a concrete pass/fail bar + the strongest **disconfirming** / both-sided evidence, not the model's preferred plan; and don't lean on the gate as the sole catch as models scale — pair with an external verifier. (Full treatment plus the deferral and corrigibility levers in §F.)
+- *Defer selectively — don't gate everything or nothing.* Human attention is a depletable budget; over-gating trains click-through, under-gating removes the catch. Gate on calibrated model uncertainty *and* irreversibility/stakes; batch or skip low-risk steps (learning-to-defer). Budget human queries like tokens and align idle cadence to human availability (long idle ticks; eat the cache miss).
+- *Stay interruptible between gates (corrigibility).* The loop must accept correction *between* preplanned checkpoints, not only at them, and never be structured to race past a pending human decision; on interrupt, fold the human's input into trusted state as ground truth (Off-Switch Game; §F).
