@@ -41,7 +41,7 @@ Start from the family's template in `assets/templates/` (or `base-loop.template.
 | LSC-1 | Goal / success definition | the checkable "done" from step 1 |
 | LSC-2 | Stop condition (primary) | how the model signals "done" (a flag/token the harness observes — never infer from free text) |
 | LSC-3 | **Backstop cap (mandatory)** | a hard outside limit (max iterations / token budget / wall-clock) that fires regardless of the model |
-| LSC-4 | State-passing | the *minimum* carried forward to build on the last round and detect repetition |
+| LSC-4 | State-passing | the *minimum sufficient for correction* carried forward — enough to build on the last round and detect repetition, with feedback diagnostic enough to fix the next attempt (minimal noise, not minimal signal) |
 | LSC-5 | Self-evaluation | a per-round progress judgment (with **external leverage** — tool/verifier or a separate evaluator, not pure self-grading) + a no-progress detector |
 | LSC-6 | Guardrail | validation that runs *before* any consequential action |
 | LSC-7 | **Two-channel separation** | trusted control (your fixed scaffold) vs untrusted data (model output, tool results, external text) |

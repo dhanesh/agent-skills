@@ -14,7 +14,7 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 |---|---|---|---|---|
 | 1 | Oscillation | Flip-flops between two states, never settles | LSC-4, LSC-5 | (a), (c) |
 | 2 | Drift | Slowly wanders off the original goal | LSC-1, LSC-5 | (a), (b) |
-| 3 | Premature stop | Quits before the goal is actually met | LSC-1, LSC-2 | (b), (d) |
+| 3 | Premature stop | Quits before the goal is actually met (optimistic-stop *or* give-up-stop) | LSC-1, LSC-2, LSC-5 | (b), (d) |
 | 4 | Runaway / non-termination | Never stops on its own | **LSC-3**, LSC-9 | (b), (c) |
 | 5 | Prompt-injection via carried content | Carried output/tool/web text gets obeyed as instructions | **LSC-7**, LSC-6 | (b), (c) |
 | 6 | Context rot / state bloat | Carried state grows until it confuses the loop | LSC-4, LSC-9 | (a), (b) |
@@ -41,9 +41,11 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 ### 3. Premature stop
 
 - **Symptom:** The loop emits its stop signal and halts while the success definition is demonstrably unmet — partial output declared "done."
-- **Cause:** Stop condition is proxied by something weaker than the goal ("no errors," "looks plausible," "ran out of obvious next steps") rather than the concrete acceptance bar. Self-evaluation is optimistic.
-- **Mitigation:** Bind `STOP_CONDITION` directly to `SUCCESS_DEFINITION` — stop only when the checkable "done" condition holds (**LSC-2** ← **LSC-1**). Add a final-gate validation that the success criteria are met before honoring the stop signal (**LSC-6**). In (d), make goal-completion a human-confirmed checkpoint (**LSC-8**).
-- **Most prone:** (b) multi-step tasks that "feel finished"; (d) humans rubber-stamping checkpoints.
+- **Two distinct sub-modes, with opposite fixes — diagnose which one before reaching for a lever:**
+  - **Optimistic-stop:** an over-confident self-judge declares "done" while the goal is unmet. Cause: the stop condition is proxied by something weaker than the goal ("no errors," "looks plausible") rather than the concrete acceptance bar. **Fix:** bind `STOP_CONDITION` directly to `SUCCESS_DEFINITION` — stop only when the checkable "done" holds (**LSC-2** ← **LSC-1**), plus a final-gate validation before honoring the stop signal (**LSC-6**). Tightening the gate is correct here.
+  - **Give-up-stop:** the model abandons a *still-reachable* goal — quits after one good jump or after a few failed attempts (local optimum), even though more improvement exists. **A stricter stop-gate makes this worse.** Fix instead by *nudging it to continue*: when the no-progress detector hasn't actually tripped, have the harness re-prompt "keep exploring — these options remain" before accepting the stop (ComPilot's *Interaction Loop Handler* recovered real gains this way), and on a genuine local optimum, **restart the whole loop and take the best** (see failure mode #1 and the autonomous refinements in [`families.md`](./families.md)). For tool-grounded autonomous loops with a cheap verifier, this is the *more common* premature-stop mode. (**LSC-5**, **LSC-10**)
+- **Mitigation (both):** make stop honest and goal-bound (**LSC-2/LSC-6**); in (d), make goal-completion a human-confirmed checkpoint (**LSC-8**).
+- **Most prone:** (b) multi-step tasks that "feel finished" (optimistic) or stall in a local optimum (give-up); (d) humans rubber-stamping checkpoints.
 
 ### 4. Runaway / non-termination
 
