@@ -66,7 +66,7 @@ Produce two things:
 
 ### 6. Sanity pass against the failure modes
 
-Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock, and evaluation degradation/sycophancy. For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
+Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock, evaluation degradation/sycophancy, and oversight degradation/rubber-stamping (human-checkpointed). For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
 
 ## Audit mode (existing loops)
 
