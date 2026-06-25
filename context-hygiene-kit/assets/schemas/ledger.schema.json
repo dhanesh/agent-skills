@@ -30,8 +30,8 @@
         "id": { "type": "string", "description": "sha1(kind+normalized content)[:16] — stable identity for dedupe/upsert." },
         "kind": {
           "type": "string",
-          "enum": ["decision", "constraint", "lesson", "fact", "file_ref", "task_state", "open_question", "note"],
-          "description": "decision/constraint/lesson/open_question/task_state/file_ref are LOSSLESS-preserved on compaction. `lesson` is a model-distilled generalizable guideline (from feedback/critique); all other lossless kinds are deterministic captures."
+          "enum": ["decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note"],
+          "description": "decision/constraint/open_question/task_state/file_ref are LOSSLESS-preserved on compaction."
         },
         "content": { "type": "string" },
         "provenance": {

@@ -73,12 +73,9 @@ def _neutralize_fences(content: str) -> str:
     payload's "</data>" can no longer form a real closing fence."""
     return _DATA_FENCE_RE.sub(lambda m: f"&lt;{m.group(1)}data&gt;", content)
 
-KINDS = ("decision", "constraint", "lesson", "fact", "file_ref", "task_state", "open_question", "note")
+KINDS = ("decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note")
 # Kinds that are LOSSLESS-preserved on compaction (rot-proof). Order = digest priority.
-# `lesson` is the one MODEL-DISTILLED lossless kind: a generalizable guideline the
-# curator synthesizes from feedback/critique (episodic -> semantic), not a deterministic
-# capture. See references/capture.md "Lessons: the distilled kind".
-LOSSLESS_KINDS = ("decision", "constraint", "lesson", "open_question", "task_state", "file_ref")
+LOSSLESS_KINDS = ("decision", "constraint", "open_question", "task_state", "file_ref")
 
 _WORD = re.compile(r"[a-z0-9_./:-]+")
 
@@ -129,7 +126,7 @@ class ContextLedger:
         "size": 0.3,       # penalty per token (favor dense, cheap-to-keep cards)
     }
     KIND_PRIOR = {  # structural salience prior in [0,1]
-        "decision": 1.0, "constraint": 1.0, "lesson": 0.95, "open_question": 0.9,
+        "decision": 1.0, "constraint": 1.0, "open_question": 0.9,
         "task_state": 0.8, "file_ref": 0.6, "fact": 0.5, "note": 0.3,
     }
     DECAY_LAMBDA = 0.15  # per logical tick

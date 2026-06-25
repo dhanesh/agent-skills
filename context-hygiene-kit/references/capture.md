@@ -25,37 +25,6 @@ It is the lossless analogue of a local-model session-summariser: instead of aski
 
 Markers must **begin the (stripped) line**, followed by `:` or `-`. To deliberately persist a fact, write the marker line as you make the decision — e.g. `DECISION: pins get first claim but the budget is a hard cap`. This is the lowest-friction capture path; the explicit `context_ledger.py ingest` CLI covers anything the markers miss.
 
-## Lessons: the one distilled (model-curated) kind
-
-Every kind above is captured **deterministically and verbatim** — that is the kit's
-anti-rot guarantee, and the harvester never paraphrases. There is one deliberate
-exception: the `lesson` kind. A `lesson` is a *generalizable guideline distilled from
-feedback or a critique* — "before adding a NOT NULL column, backfill first" — not a
-record of what happened but a rule for what to do next time.
-
-This is the [Memory-as-a-Tool](https://arxiv.org/abs/2601.05960) idea (Gallego, 2025,
-MemAgents @ ICLR 2026): amortize expensive self-correction by distilling a transient
-critique **once** into a reusable rule, then reading it back instead of re-deriving it
-each session. It treats memory as a curated "lessons learned" journal rather than a raw
-log — exactly the episodic→semantic consolidation that journal-style memory needs.
-
-Two rules keep this from reopening the rot hole the kit exists to close:
-
-1. **Distillation is model work, so it lives ONLY on the model-curated path** — step 2b
-   of `assets/curate_loop.md`, run under `/loop`. The deterministic `harvest.py` never
-   manufactures a `lesson`; it only ever captures the verbatim kinds. So the "no lossy
-   summariser" guarantee (below) still holds for everything that is a *record*. Lessons
-   are the one place a model is *intended* to abstract, because a guideline's value is
-   precisely its generality — and the curator must dedupe/resolve conflicts on write so
-   the journal stays high-signal rather than accumulating near-duplicate rules.
-2. **A lesson is a rule, never carried instructions.** Feedback arriving from tools, the
-   user, or other agents is UNTRUSTED `<data>` while being distilled (LSC-7); the
-   resulting `lesson` card is trusted scaffold the curator authored, the same status as
-   a `decision` it wrote. Raw untrusted feedback is never ingested as a `lesson` directly.
-
-`lesson` is LOSSLESS-preserved (priority just under `decision`/`constraint`), so a
-distilled rule survives compaction verbatim once written.
-
 ## Trust boundary (LSC-7)
 
 Only the **trusted channel** is harvested:

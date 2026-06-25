@@ -1,16 +1,19 @@
 ---
 name: context-hygiene-kit
 description: >-
-  Installs a bounded, scored, tiered context cache that keeps a Claude Code project's working
-  memory lean (anti-bloat) and rot-proof across compactions (anti-rot). Drops in a stdlib-only
-  Python ledger, a deterministic per-turn transcript harvester, and three lifecycle hooks
-  (Stop / PreCompact / SessionStart) wired via .claude/settings.json — so a digest of ranked,
-  verbatim-preserved decisions loads at session start instead of replaying raw history, and
-  durable facts survive an abrupt session close (crash, kill -9, closed terminal). Use when a
-  long agent session loses important decisions after compaction, when context keeps growing
-  until responses degrade, when you want durable rot-proof working memory per project, or when
-  you want to replace a lossy local-model session-summariser with a deterministic lossless one.
-  Not for ordinary app caching, RAG vector stores, or LLM prompt-caching config.
+  One-time SETUP that installs durable context management into a Claude Code project (or your
+  global ~/.claude config): a bounded, scored, tiered cache that keeps working memory lean
+  (anti-bloat) and rot-proof across compactions (anti-rot). It drops in a stdlib-only Python
+  ledger, a deterministic per-turn transcript harvester, and three lifecycle hooks
+  (Stop / PreCompact / SessionStart) wired into settings.json — and AFTER install those hooks
+  run automatically every turn, so you invoke this skill ONCE to set things up, not repeatedly
+  during work. Use when setting up, installing, configuring, verifying, or uninstalling context
+  hygiene for a project or globally; when the user asks to "set up context management", "stop my
+  context from bloating", "avoid context rot", "make Claude remember decisions across
+  compaction", "persist working memory across sessions", or to replace a lossy local-model
+  session-summariser with a deterministic lossless one. Not an ongoing per-turn skill (the
+  installed hooks handle that); not for ordinary app caching, RAG vector stores, or LLM
+  prompt-caching config.
 ---
 
 # Context Hygiene Kit
@@ -26,13 +29,27 @@ The whole kit is one data structure — a `ContextLedger` (bounded scored cache 
 
 ## Install
 
-Run the installer against the target project (defaults to the current directory):
+This is a **one-time setup**. Ask the user which scope they want, then run the installer once:
 
 ```bash
-scripts/install.sh /path/to/project
+scripts/install.sh /path/to/project   # PROJECT scope — just this repo (default: cwd)
+scripts/install.sh --global            # GLOBAL scope — every project, via ~/.claude
 ```
 
-It is idempotent and does five things: copies the core files (`context_ledger.py`, `harvest.py`, `optimize_weights.py`, `curate_loop.md`, `test_context_ledger.py`) to the project root and the hooks to `hooks/`; **additively** merges three hooks into `.claude/settings.json` (existing hooks are preserved); gitignores the runtime `.context/` cache; seeds `.context/anchor.txt`; and **runs the 16-test suite as an install gate** — the kit's guarantees are only real if those pass. Tell the user to restart Claude Code so the new hooks load.
+Both modes are idempotent and do the same core work: copy the core files (`context_ledger.py`, `harvest.py`, `optimize_weights.py`, `curate_loop.md`, `test_context_ledger.py`) plus `hooks/`, **additively** merge the three hooks into the right `settings.json` (existing hooks preserved), and **run the 17-test suite as an install gate** — the kit's guarantees are only real if those pass. They differ only in *where*:
+
+| | **Project** (default) | **Global** (`--global`) |
+|---|---|---|
+| Scripts + hooks land in | the project root | `~/.claude/context-hygiene/` |
+| Hooks registered in | `<project>/.claude/settings.json` (`${CLAUDE_PROJECT_DIR}` paths) | `~/.claude/settings.json` (absolute paths) |
+| Covers | just that repo | every project, no per-repo setup |
+| Memory (`.context/`) | seeded in the project now | **per-project**, auto-created in each project's own dir on the first turn |
+
+Memory is **always per-project** — even a global install keeps each repo's `.context/` separate (memories never bleed across repos). After either install, **tell the user to restart Claude Code** so the hooks load; for a global install, also remind them to add `.context/` to each repo's `.gitignore` (the project installer does this automatically).
+
+Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `settings.hooks.json` next to the target settings for manual merge).
+
+> After setup you do **not** re-invoke this skill — the three hooks run automatically every turn. Re-run the installer only to reconfigure, switch scope, or repair.
 
 Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `.claude/settings.hooks.json` for manual merge).
 
@@ -57,13 +74,11 @@ Only **high-precision, deterministic** signals — anything fuzzier would re-int
 
 To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X because Y`) in a turn — the Stop hook harvests it. This is the lowest-friction path; prefer it. The full convention is in `references/capture.md`.
 
-The one model-curated kind is `lesson` — a *generalizable guideline distilled from feedback/critique* (e.g. "backfill before adding a NOT NULL column"). It is written only on the `/loop curate_loop.md` path (step 2b), never by the deterministic harvester, so the no-summariser guarantee below still holds for every *record* kind. This is the "memory-as-a-tool" amortization of [Gallego 2025](https://arxiv.org/abs/2601.05960): distill an expensive critique once, read the rule back instead of re-deriving it. See `references/capture.md` → "Lessons: the one distilled kind".
-
 ## The three non-negotiables (do not weaken these)
 
 1. **The token budget is a HARD cap (anti-bloat).** `curate()` asserts `hot_tokens <= B`. Pinned cards get *first claim* on the budget but cannot overflow it — excess pins spill to cold and raise `pins_over_budget` (an LSC-8 human-gate signal), so anti-bloat is never silently traded for anti-rot.
 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection control is harvest-side: only the **trusted channel** (user + assistant text) is ingested; `tool_result`/`tool_use` blocks are never harvested and markers must start the line, so untrusted text cannot smuggle one. As a **secondary, best-effort** layer, any untrusted card content that is ranked in is rendered inside `<data>…</data>` (OWASP LLM01 "segregate/denote external content") with embedded fence tokens neutralized so it can't break out — the curator *ranks* card content, never executes it. The `<data>` fence is a soft delimiter, **not** a complete boundary: if untrusted content must ever reach a tool-capable downstream model, prefer a dual-LLM/quarantine pattern over relying on the fence.
-3. **Records are deterministic-capture-only; rules are the lone exception.** No model summarises the session *history*: the harvester extracts verbatim signals, and if you are tempted to add free-prose "decision extraction", don't — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers. The single sanctioned place a model abstracts is the `lesson` kind — a forward-looking *rule* distilled from feedback, written only on the `/loop curate_loop.md` path, where generality is the point and the curator dedupes on write. Every kind that is a *record of what happened* stays verbatim.
+3. **Deterministic capture only.** No model summarises the session. The harvester extracts verbatim signals. If you are tempted to add free-prose "decision extraction", don't — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers.
 
 ## Operating it
 
@@ -74,4 +89,4 @@ The one model-curated kind is `lesson` — a *generalizable guideline distilled 
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_context_ledger.py` (16 tests — budget invariant, pin spill, rot survival, two-channel fencing, idempotent ingest, harvester capture + injection boundary). If any fail, the guarantees above do not hold — fix before relying on the kit.
+Always confirm the gate passed: `python3 test_context_ledger.py` (17 tests — budget invariant, pin spill, rot survival, two-channel fencing, idempotent ingest, harvester capture + injection boundary). If any fail, the guarantees above do not hold — fix before relying on the kit.
