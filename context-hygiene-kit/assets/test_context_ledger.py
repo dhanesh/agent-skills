@@ -94,7 +94,7 @@ class RotPrevention(unittest.TestCase):
         # Guards against someone silently demoting a rot-proof kind to compactable.
         self.assertEqual(
             set(LOSSLESS_KINDS),
-            {"decision", "constraint", "open_question", "task_state", "file_ref"},
+            {"decision", "constraint", "lesson", "open_question", "task_state", "file_ref"},
         )
 
 

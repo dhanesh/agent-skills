@@ -57,11 +57,13 @@ Only **high-precision, deterministic** signals — anything fuzzier would re-int
 
 To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X because Y`) in a turn — the Stop hook harvests it. This is the lowest-friction path; prefer it. The full convention is in `references/capture.md`.
 
+The one model-curated kind is `lesson` — a *generalizable guideline distilled from feedback/critique* (e.g. "backfill before adding a NOT NULL column"). It is written only on the `/loop curate_loop.md` path (step 2b), never by the deterministic harvester, so the no-summariser guarantee below still holds for every *record* kind. This is the "memory-as-a-tool" amortization of [Gallego 2025](https://arxiv.org/abs/2601.05960): distill an expensive critique once, read the rule back instead of re-deriving it. See `references/capture.md` → "Lessons: the one distilled kind".
+
 ## The three non-negotiables (do not weaken these)
 
 1. **The token budget is a HARD cap (anti-bloat).** `curate()` asserts `hot_tokens <= B`. Pinned cards get *first claim* on the budget but cannot overflow it — excess pins spill to cold and raise `pins_over_budget` (an LSC-8 human-gate signal), so anti-bloat is never silently traded for anti-rot.
 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection control is harvest-side: only the **trusted channel** (user + assistant text) is ingested; `tool_result`/`tool_use` blocks are never harvested and markers must start the line, so untrusted text cannot smuggle one. As a **secondary, best-effort** layer, any untrusted card content that is ranked in is rendered inside `<data>…</data>` (OWASP LLM01 "segregate/denote external content") with embedded fence tokens neutralized so it can't break out — the curator *ranks* card content, never executes it. The `<data>` fence is a soft delimiter, **not** a complete boundary: if untrusted content must ever reach a tool-capable downstream model, prefer a dual-LLM/quarantine pattern over relying on the fence.
-3. **Deterministic capture only.** No model summarises the session. The harvester extracts verbatim signals. If you are tempted to add free-prose "decision extraction", don't — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers.
+3. **Records are deterministic-capture-only; rules are the lone exception.** No model summarises the session *history*: the harvester extracts verbatim signals, and if you are tempted to add free-prose "decision extraction", don't — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers. The single sanctioned place a model abstracts is the `lesson` kind — a forward-looking *rule* distilled from feedback, written only on the `/loop curate_loop.md` path, where generality is the point and the curator dedupes on write. Every kind that is a *record of what happened* stays verbatim.
 
 ## Operating it
 
