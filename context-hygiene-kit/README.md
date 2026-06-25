@@ -11,7 +11,7 @@ Installed into a target project, the kit gives you:
 1. **A bounded scored ledger** (`context_ledger.py`) — a token-budget-capped cache; `curate()` is a hard-capped greedy knapsack. Eviction caps the window forever (no bloat); high-salience kinds (decisions, constraints, file:line refs) are preserved **verbatim** (no rot).
 2. **Deterministic per-turn capture** (`harvest.py`) — no model. Captures the latest request, `MARKER:` lines, and `file:line` refs from the **trusted channel only**, so an abrupt close costs at most one in-flight turn.
 3. **Three lifecycle hooks**, merged additively into `.claude/settings.json`: `Stop` (capture + flush), `PreCompact` (anti-rot curate), `SessionStart` (anti-bloat digest load).
-4. **An install gate** — the 16-test suite runs on install; the guarantees only ship if it's green.
+4. **An install gate** — the 17-test suite runs on install; the guarantees only ship if it's green.
 
 ## Two failure modes, one mechanism
 
@@ -32,14 +32,17 @@ It deliberately does **not** trigger for ordinary application caching, RAG / vec
 npx skills add dhanesh/agent-skills --skill context-hygiene-kit
 ```
 
-Then run the installer against a project (idempotent; gates on the test suite):
+Then run the installer **once** — pick project scope (just this repo) or global scope (every project). Both are idempotent and gate on the test suite:
 
 ```bash
-scripts/install.sh /path/to/project
+scripts/install.sh /path/to/project   # PROJECT — this repo only (default: cwd)
+scripts/install.sh --global           # GLOBAL  — all projects, hooks in ~/.claude
 # restart Claude Code so the hooks load
 ```
 
-Requires `python3` (stdlib only — no pip installs) and `jq` for clean settings merging (falls back to a manual-merge file without it).
+A global install puts the scripts + hooks in `~/.claude/context-hygiene/` and registers them in `~/.claude/settings.json`, so every project is covered with no per-repo setup. **Memory stays per-project either way** — each repo gets its own `.context/`, created automatically in its working dir on the first turn, so memories never bleed between unrelated projects. (Global installs don't touch per-repo `.gitignore`; add `.context/` yourself.)
+
+After setup the three hooks run automatically every turn — you don't re-invoke the skill. Requires `python3` (stdlib only — no pip installs) and `jq` for clean settings merging (falls back to a manual-merge file without it).
 
 ## How it works — three cadences
 
@@ -65,7 +68,7 @@ context-hygiene-kit/
 │   ├── harvest.py                deterministic transcript -> ledger capture
 │   ├── optimize_weights.py       bounded coordinate-ascent weight tuner (converges + halts)
 │   ├── curate_loop.md            trusted /loop control prompt (DONE flag + hard BACKSTOP)
-│   ├── test_context_ledger.py    16-test suite (the install gate)
+│   ├── test_context_ledger.py    17-test suite (the install gate)
 │   ├── schemas/ledger.schema.json   the ledger data contract
 │   ├── hooks/{stop,precompact,session_start}.sh
 │   └── settings.hooks.json       the hooks block install.sh merges into settings.json
@@ -81,7 +84,7 @@ context-hygiene-kit/
 
 ## Provenance & validation
 
-Extracted from the `context_bloat_rot` reference implementation. Every guarantee is backed by `test_context_ledger.py` (16 tests, stdlib-only, deterministic), run as an install gate:
+Extracted from the `context_bloat_rot` reference implementation. Every guarantee is backed by `test_context_ledger.py` (17 tests, stdlib-only, deterministic), run as an install gate:
 
 - **Budget invariant:** 5 011 cards → `hot_tokens ≤ budget`; pins alone cannot exceed the budget (they spill + flag).
 - **Rot prevention:** a pinned decision survives 5 000 newer cards; lossless kinds render verbatim.
