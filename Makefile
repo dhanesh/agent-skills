@@ -5,7 +5,7 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate validate scan-leaks dry-run playbook list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -16,6 +16,7 @@ gate: clean
 		printf '\n=== %s ===\n' "$$d"; \
 		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
 			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
@@ -43,11 +44,20 @@ dry-run:
 		fi; \
 	done; exit $$rc
 
+# Lint every skill against "The Prompting Playbook" conventions (full output).
+# Promote the two advisories (PP-5/PP-6) to hard failures: make playbook PLAYBOOK_FLAGS=--strict
+playbook:
+	@rc=0; for d in $(SKILLS); do \
+		printf '\n=== %s ===\n' "$$d"; \
+		sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) || rc=1; \
+	done; exit $$rc
+
 # Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill:
 	@test -n "$(SKILL)" || { echo "usage: make gate-skill SKILL=<dir>"; exit 2; }
 	@sh $(GATES)/validate-skill.sh "$(SKILL)"
 	@sh $(GATES)/scan-leaks.sh "$(SKILL)"
+	@sh $(GATES)/prompting-playbook.sh "$(SKILL)" $(PLAYBOOK_FLAGS)
 	@if [ -f "$(SKILL)/PARAMETERS.md" ]; then \
 		scratch=$$(mktemp -d); \
 		sh $(GATES)/dry-run-replay.sh "$(SKILL)" "$$scratch"; \
