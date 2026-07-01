@@ -81,9 +81,9 @@ BUILD_MANIFEST_FILES = {
     "package.json": "npm-manifest", "composer.json": "composer",
     "pyproject.toml": "pyproject", "pipfile": "pipfile", "cargo.toml": "cargo",
     "go.mod": "go-mod", "pom.xml": "maven", "chart.yaml": "helm-chart",
-    ".gitlab-ci.yml": "gitlab-ci",
+    ".gitlab-ci.yml": "gitlab-ci", "packages.config": "csproj",
 }
-MANIFEST_LANGS = set(BUILD_MANIFEST_FILES.values()) | {"gradle", "pip-requirements"}
+MANIFEST_LANGS = set(BUILD_MANIFEST_FILES.values()) | {"gradle", "pip-requirements", "csproj"}
 # Tier-2 stdlib prefixes / system modules skipped as external deps.
 KOTLIN_STDLIB = {"kotlin", "kotlinx", "java", "javax", "jakarta"}
 SCALA_STDLIB = {"scala", "java", "javax"}
@@ -204,8 +204,8 @@ def _extract_go(text, rel):
         if p in seen:
             continue
         seen.add(p)
-        if "." in p.split("/")[0]:            # has a domain in the first segment → external
-            out.append(("depends_on", _norm_go_pkg(p), "external"))
+        if "." in p.split("/")[0]:            # has a domain → local module OR external (decided at link)
+            out.append(("imports", p, "go"))
     return out
 
 
@@ -475,6 +475,18 @@ def _extract_maven(text, rel):
     return out
 
 
+def _extract_csproj(text, rel):
+    # .NET project file / packages.config → precise NuGet artifacts + local project refs
+    out = []
+    for m in re.findall(r'<PackageReference\s+[^>]*?Include="([^"]+)"', text):
+        out.append(("depends_on", m, "external"))
+    for m in re.findall(r'<package\s+[^>]*?id="([^"]+)"', text):     # packages.config
+        out.append(("depends_on", m, "external"))
+    for m in re.findall(r'<ProjectReference\s+[^>]*?Include="([^"]+)"', text):
+        out.append(("references", m.replace("\\", "/"), "file"))     # local project reference
+    return out
+
+
 def _extract_gradle(text, rel):
     out = []
     for m in re.findall(
@@ -514,7 +526,7 @@ BUILD_EXTRACTORS = {
     "pyproject": _extract_pyproject, "pip-requirements": _extract_pip_requirements,
     "pipfile": _extract_pipfile, "cargo": _extract_cargo, "go-mod": _extract_gomod,
     "maven": _extract_maven, "gradle": _extract_gradle, "helm-chart": _extract_helm,
-    "gitlab-ci": _extract_gitlab,
+    "gitlab-ci": _extract_gitlab, "csproj": _extract_csproj,
 }
 
 
@@ -1203,11 +1215,14 @@ class WorldModel:
         basename_index = {}
         for rel, _, _ in collected:
             basename_index.setdefault(os.path.basename(rel), []).append(rel)
+        go_module, go_pkg = self._go_index(collected, root)   # go.mod module path + package→files
         ctx = {
             "relset": relset,
             "basename": basename_index,
             "mod": self._python_module_index(relset),
             "java": self._java_class_index(collected),   # FQN -> rel (reads `package` decls)
+            "go_module": go_module,
+            "go_pkg": go_pkg,
         }
 
         # 2) register entities
@@ -1241,6 +1256,29 @@ class WorldModel:
             print(f"world-model build: capped at {max_files} files; {dropped} not scanned "
                   f"(raise --max-files to include them)", file=sys.stderr)
         return stats
+
+    @staticmethod
+    def _go_index(collected, root):
+        """(module_path, {package_import_path: [rel .go files]}) from a root go.mod, so a Go
+        import of the module's own package resolves to the local files that comprise it."""
+        module = None
+        gomod = os.path.join(root, "go.mod")
+        if os.path.exists(gomod):
+            try:
+                m = re.search(r"^module\s+(\S+)", open(gomod, errors="replace").read(), re.M)
+                if m:
+                    module = m.group(1)
+            except OSError:
+                pass
+        pkg = {}
+        if module:
+            for rel, _ap, lang in collected:
+                if lang != "go":
+                    continue
+                d = os.path.dirname(rel).replace(os.sep, "/")
+                imp = module if d == "" else f"{module}/{d}"   # a Go package == its directory
+                pkg.setdefault(imp, []).append(rel)
+        return module, pkg
 
     @staticmethod
     def _python_module_index(relset):
@@ -1286,6 +1324,8 @@ class WorldModel:
             return "pip-requirements"
         if base.endswith(".gradle") or base.endswith(".gradle.kts"):
             return "gradle"
+        if base.endswith(".csproj") or base.endswith(".fsproj") or base.endswith(".vbproj"):
+            return "csproj"
         if base in BUILD_SPECIAL_FILENAMES:
             return BUILD_SPECIAL_FILENAMES[base]
         if base.startswith("dockerfile.") or base.startswith("containerfile."):
@@ -1361,12 +1401,39 @@ class WorldModel:
             return basename_index[name][0]
         return None
 
+    def _link_go(self, rel, target, ctx, counters):
+        """A Go import: if it belongs to this module (per go.mod), link to the local .go files
+        of that package (file→file); otherwise it's an external module dependency."""
+        mod = ctx.get("go_module")
+        if mod and (target == mod or target.startswith(mod + "/")):
+            n = 0
+            for f in ctx["go_pkg"].get(target, []):
+                if f == rel:
+                    continue
+                iid = self.add_interaction(rel, "imports", f, subj_kind="file", obj_kind="file")
+                self.add_evidence("interaction", iid, "static", f"{rel}: import {target}",
+                                  agent="build", activity="build_from_repo", weight=0.6)
+                n += 1
+            return n
+        if counters["deps"] >= BUILD_MAX_REFS_PER_FILE:
+            return 0
+        name = _norm_go_pkg(target)
+        ref_id = self.upsert_entity("referent", name)
+        rsym = self.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (ref_id,)).fetchone()["symbol_id"]
+        iid = self.add_interaction(rel, "depends_on", rsym, subj_kind="file", obj_kind="referent")
+        self.add_evidence("interaction", iid, "static", f"{rel} depends_on {name}",
+                          agent="build", activity="build_from_repo", weight=0.5)
+        counters["deps"] += 1
+        return 1
+
     def _link(self, rel, predicate, target, kind, ctx, counters):
         """Create one structural edge: a file→file edge if the target resolves to a scanned
         file, else (for dependency kinds) a file→referent `depends_on` edge."""
         target = (target or "").strip()
         if not target:
             return 0
+        if kind == "go":
+            return self._link_go(rel, target, ctx, counters)
         tgt_file = None
         if kind in BUILD_LOCAL_KINDS:
             tgt_file = self._resolve_target_file(rel, target, kind, ctx)
