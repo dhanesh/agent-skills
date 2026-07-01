@@ -36,15 +36,39 @@ normative confidence. See `references/confidence-model.md` for the epistemics an
 `references/schema.md` for the data model. The design rationale is in
 `docs/superpowers/specs/2026-07-01-world-model-ledger-design.md`.
 
-## Install
+## Install & operate
 
-This is a **one-time setup**. Ask the user which scope they want, then run the installer once:
+**Detect the install state first — before asking anything.** The skill is already installed if
+`~/.claude/world-model-ledger/wm.py` exists (GLOBAL) or `./wm.py` + `./world_model.py` exist in
+the project (PROJECT). Then route by how you were invoked; the full flag table is in
+`references/parameters.md`.
+
+### `--seed` / `--prune` — operate on an existing install (NO scope question, NO re-install)
+
+If the skill is already installed and you were asked to **seed** or **prune**, do exactly that
+against the current repo and **stop** — do not run the full installer and do not ask which
+scope to use (that decision was already made at install time):
+
+```bash
+scripts/install.sh --seed     # build THIS repo's model (files + structural edges)
+scripts/install.sh --prune    # build + soft-invalidate edges for deleted/renamed files
+```
+
+These short-circuit to `python3 "$WM/wm.py" build . [--prune]` (where `$WM` is `.` for a
+project install, else `~/.claude/world-model-ledger`), create and gitignore `.world-model/`,
+and report `entities_added` / `interactions_added`. They are idempotent — safe to re-run
+anytime on an installed model.
+
+### First-time install (the ONLY path that chooses scope)
+
+Only when the skill is **not yet installed** (or the user explicitly asks to (re)install), ask
+which scope, then run the installer once:
 
 ```bash
 scripts/install.sh /path/to/project      # PROJECT scope — just this repo (default: cwd)
 scripts/install.sh --global               # GLOBAL scope — every project, via ~/.claude
 scripts/install.sh --with-constraints     # also load the optional starter constraint pack
-scripts/install.sh --seed                 # also run a repo-wide build now (avoids a cold start)
+scripts/install.sh --seed                 # install AND seed the repo in one go
 ```
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
@@ -53,8 +77,8 @@ Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, 
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
-Claude Code** so the hooks load. You do **not** re-invoke this skill afterward — the hooks run
-automatically every turn.
+Claude Code** so the hooks load. You do **not** re-invoke this skill to install afterward — the
+hooks run automatically; `--seed`/`--prune` remain available anytime to (re)build the model.
 
 ## How it works — four hooks, three cadences
 
@@ -143,6 +167,7 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `references/schema.md` — the SQLite data model and query patterns.
 - `references/capture.md` — markers, the `wm` CLI, and the trust boundary.
 - `references/contradiction-loop.md` — detect → propose → improve, and the constraint kinds.
+- `references/parameters.md` — every install/operate flag and `wm` command, and when to use each.
 
 ## Assets
 
