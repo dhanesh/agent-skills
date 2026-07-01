@@ -231,7 +231,9 @@ class WorldModel:
             return f"referent:{name}"
         if kind == "module":
             return f"module:{name}"
-        # symbol: name-within-file (v1 resolution depth; SCIP upgrade path noted in spec)
+        # symbol: name-within-file (v1 resolution depth). SCIP-inspired, NOT SCIP-conformant
+        # (SCIP grammar is `<scheme> <package> <descriptor>+`); the SCIP upgrade path is noted
+        # in the design spec.
         return f"sym:{path or '?'}#{name}"
 
     def _resolve_entity(self, token, default_kind="symbol"):
@@ -527,18 +529,45 @@ class WorldModel:
             self.derive(m["fact_kind"], m["fact_id"])
 
     # ── retrieval (pre-call hook + `wm query`) ──────────────────────────────────
-    def query_touching(self, token, budget=25):
-        """Return facts touching a file/symbol, partitioned validated/unverified/contradicted."""
+    def _reachable_nodes(self, seed_ids, max_depth=1):
+        """Entity ids within `max_depth` hops of any seed, over LIVE interactions, either
+        direction. Depth-capped recursive CTE; UNION dedups so cycles can't loop forever."""
+        if not seed_ids:
+            return set()
+        seed_union = " UNION ALL ".join("SELECT ? AS node, 0 AS depth" for _ in seed_ids)
+        sql = f"""
+        WITH RECURSIVE reach(node, depth) AS (
+          {seed_union}
+          UNION
+          SELECT CASE WHEN e.subject_id = r.node THEN e.object_id ELSE e.subject_id END,
+                 r.depth + 1
+          FROM reach r JOIN interaction e
+            ON (e.subject_id = r.node OR e.object_id = r.node)
+           AND e.invalidated_at IS NULL
+          WHERE r.depth < ?
+        )
+        SELECT DISTINCT node FROM reach
+        """
+        rows = self.conn.execute(sql, list(seed_ids) + [max_depth]).fetchall()
+        return {row["node"] for row in rows}
+
+    def query_touching(self, token, budget=25, hops=1):
+        """Return facts in the `hops`-hop neighborhood of a file/symbol, partitioned
+        validated/unverified/contradicted. `hops=1` is the direct-incident neighborhood;
+        `hops=2` pulls one more ring via the recursive-CTE walk (see `_reachable_nodes`)."""
         ent_ids = self._entities_for_token(token)
         result = {"validated": [], "unverified": [], "contradicted": [], "token": token}
         if not ent_ids:
             return result
-        qmarks = ",".join("?" * len(ent_ids))
+        reached = self._reachable_nodes(ent_ids, max_depth=hops) or set(ent_ids)
+        qmarks = ",".join("?" * len(reached))
+        reached_list = list(reached)
+        # induced-subgraph edges: both endpoints within the neighborhood, ranked by trust
         rows = self.conn.execute(
             f"SELECT i.*, se.name AS s, oe.name AS o FROM interaction i "
             f"JOIN entity se ON se.id=i.subject_id JOIN entity oe ON oe.id=i.object_id "
-            f"WHERE i.invalidated_at IS NULL AND (i.subject_id IN ({qmarks}) OR i.object_id IN ({qmarks})) "
-            f"ORDER BY i.normative_conf DESC", ent_ids + ent_ids).fetchall()
+            f"WHERE i.invalidated_at IS NULL AND i.subject_id IN ({qmarks}) AND i.object_id IN ({qmarks}) "
+            f"ORDER BY i.normative_conf DESC", reached_list + reached_list).fetchall()
         for r in rows:
             item = {"fact": f"{r['s']} {r['predicate']} {r['o']}",
                     "observed": r["observed_conf"], "normative": r["normative_conf"]}

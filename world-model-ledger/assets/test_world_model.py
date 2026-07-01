@@ -186,6 +186,29 @@ class TestRetrieval(Base):
         self.assertIn("a imports c", facts_unverified)
 
 
+class TestGraphTraversal(Base):
+    def test_recursive_cte_is_cycle_safe(self):
+        # a -> b -> c -> a  (a cycle): the depth-capped UNION walk must terminate.
+        self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_interaction("b", "calls", "c")
+        self.wm.add_interaction("c", "calls", "a")
+        seed = self.wm._entities_for_token("a")
+        reached = self.wm._reachable_nodes(seed, max_depth=5)  # > cycle length
+        self.assertGreaterEqual(len(reached), 3)  # terminates, returns the ring
+
+    def test_two_hop_neighborhood(self):
+        # a -> b -> c : a 1-hop query sees a-b; a 2-hop query also sees b-c.
+        self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_interaction("b", "calls", "c")
+        one = self.wm.query_touching("a", hops=1)
+        two = self.wm.query_touching("a", hops=2)
+        one_facts = [x["fact"] for v in ("validated", "unverified", "contradicted") for x in one[v]]
+        two_facts = [x["fact"] for v in ("validated", "unverified", "contradicted") for x in two[v]]
+        self.assertIn("a calls b", one_facts)
+        self.assertNotIn("b calls c", one_facts)
+        self.assertIn("b calls c", two_facts)
+
+
 class TestReferents(Base):
     def test_map_creates_referent_edge_unverified(self):
         import argparse

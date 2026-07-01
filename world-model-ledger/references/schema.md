@@ -7,8 +7,8 @@ constants); this is the map.
 ## Tables
 
 - **`entity`** — nodes. `kind ∈ {symbol, file, module, referent}`. A `symbol_id` gives stable
-  identity (SCIP-style `sym:<path>#<name>`, `file:<path>`, `referent:<name>`) so a fact
-  survives edits. **Real-world referents** (external services, APIs, data stores, domain
+  identity (SCIP-**inspired**, not SCIP-conformant: `sym:<path>#<name>`, `file:<path>`,
+  `referent:<name>`; v1 resolves symbols by name-within-file) so a fact survives edits. **Real-world referents** (external services, APIs, data stores, domain
   concepts) are `kind='referent'`, linked from code by a `realizes` interaction.
 - **`interaction`** — edges (`subject → predicate → object`), e.g. `calls`, `imports`,
   `depends_on`, `implements`, `reads`, `writes`, `uses`, `realizes`. Carries

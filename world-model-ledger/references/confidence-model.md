@@ -34,6 +34,18 @@ Thresholds and weights live in one config block at the top of `assets/world_mode
 (`TAU_VALIDATE`, `ENTRENCHMENT_RANK`, the kind sets) so the epistemics are tunable without
 touching logic.
 
+### Known limitation: noisy-OR assumes independent evidence
+
+`noisy_or` treats each evidence row as an *independent* observation (the
+independence-of-causal-influence assumption). Correlated evidence therefore inflates
+confidence. Exact duplicates cannot double-count — the `evidence` table has
+`UNIQUE(fact_kind, fact_id, evidence_kind, ref, polarity)`, so re-recording the same pointer is
+idempotent. Residual correlation (e.g. a `file_loc` and a `static` row for the *same* line, or
+two sources that copied each other) can still mildly over-count `observed_conf`. This is a
+deliberate v1 simplification; a TruthFinder-style dampening factor for correlated sources is the
+documented upgrade path. It does **not** affect the core invariant — normative confidence is
+still gated on oracle evidence regardless of how observation evidence fuses.
+
 ## Why two axes and not one
 
 A single conflated "confidence" scalar (as in NELL) cannot express the one thing this skill
