@@ -1,0 +1,70 @@
+# world-model-ledger
+
+A persistent, SQLite-backed **world model** for a coding agent. It remembers what an agent
+learns about a codebase across turns and sessions — **entities** (symbols, files, modules, and
+real-world referents like external services / APIs / data stores), the **interactions**
+between them, and the **constraints** that should hold — and, for every interaction and
+constraint, tracks *how sure we are it exists*, *how sure we are it is correct*, *whether it's
+been validated*, and *what evidence backs it*.
+
+The point of the whole thing: **code-observed relationships are not treated as ground truth.**
+Two independent confidence axes (`observed` vs `normative`) plus a validation status let the
+model distinguish *"we saw this in the code"* from *"we verified this is correct"* — so it can
+flag what is merely observed-but-unverified, detect contradictions, propose located fixes, and
+raise its own correctness as the session does real work.
+
+## Install
+
+```bash
+npx skills add dhanesh/agent-skills --skill world-model-ledger
+```
+
+Then run the one-time installer (project or global scope):
+
+```bash
+scripts/install.sh /path/to/project      # just this repo (default: cwd)
+scripts/install.sh --global               # every project, via ~/.claude
+scripts/install.sh --with-constraints     # also load the optional starter constraints
+```
+
+Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
+merging. Restart Claude Code afterward so the hooks load. The install runs a 21-test gate.
+
+## What gets installed
+
+- **Four lifecycle hooks** wired into `settings.json`:
+  - **PreToolUse** — before an edit, summarizes the model's ✓validated / ?unverified /
+    ✗contradicted items for the touched files/symbols.
+  - **PostToolUse** — registers touched files and sweeps constraints, without inventing facts.
+  - **Stop** — harvests the agent's markers, consolidates confidence, refreshes the digest.
+  - **SessionStart** — injects the digest so a resumed session starts aware of contradictions.
+- **A stdlib-Python store + `wm` CLI** (`world_model.py`, `wm.py`) — entities / interactions /
+  constraints / evidence / contradictions in one SQLite file at `.world-model/model.db`
+  (gitignored, per project).
+
+## Using it
+
+Record facts inline with marker lines (harvested every turn) or the `wm` CLI:
+
+```
+WM-OBSERVE: hash_pw uses bcrypt @ auth/hash.py:14
+WM-VALIDATED: hash_pw uses bcrypt by test:tests/test_auth.py::test_hash
+WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {subject} uses weak hash {matched} | violation
+WM-MAPS: billing/refund.py -> stripe/refunds-api
+```
+
+```bash
+python3 wm.py stats                 # validated / unverified / contradicted counts
+python3 wm.py contradictions --open # open contradictions + proposed fixes
+cat .world-model/digest.md          # the current digest
+```
+
+## How it's built
+
+Grounded in prior art — Google Knowledge Vault's observed-vs-truth split, the test-oracle
+problem, W3C PROV, AGM/JTMS/ATMS belief revision, SHACL constraint validation, SCIP/Kythe
+symbol models, and standard SQLite FTS5 / recursive-CTE patterns. The full design is in
+[`docs/superpowers/specs/2026-07-01-world-model-ledger-design.md`](../docs/superpowers/specs/2026-07-01-world-model-ledger-design.md),
+and each subsystem is documented under [`references/`](references/).
+
+See [`SKILL.md`](SKILL.md) for the agent-facing usage and invariants.
