@@ -37,14 +37,27 @@ class TestSchema(Base):
         # The CI/dev environment ships FTS5; the store still works without it (LIKE fallback).
         self.assertTrue(self.wm.has_fts)
 
+    def test_scip_shaped_symbol_ids(self):
+        # ids follow SCIP's `<scheme> <package> <descriptor>+` shape with descriptor suffixes
+        fid = self.wm.upsert_entity("file", "auth/hash.py", path="auth/hash.py")
+        f = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (fid,)).fetchone()
+        self.assertTrue(f["symbol_id"].startswith("wml . ") and f["symbol_id"].endswith("/"))
+        mid = self.wm.upsert_entity("symbol", "hash_pw", path="auth/hash.py", entity_type="function")
+        m = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (mid,)).fetchone()
+        self.assertTrue(m["symbol_id"].endswith("hash_pw()."))   # SCIP method suffix
+        rid = self.wm.upsert_entity("referent", "stripe/refunds-api")
+        r = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (rid,)).fetchone()
+        self.assertTrue(r["symbol_id"].startswith("wml-referent . "))
+
 
 class TestTwoAxisInvariant(Base):
     """The load-bearing guarantee: code observation never raises normative_conf."""
 
     def test_observation_raises_observed_not_normative(self):
+        # two INDEPENDENT sources (different files) accumulate above a single sighting
         iid = self.wm.add_interaction("a", "calls", "b")
         self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
-        self.wm.add_evidence("interaction", iid, "static", "a.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", iid, "static", "b.py:2", weight=0.9)
         r = self._iv(iid)
         self.assertGreater(r["observed_conf"], 0.9)
         self.assertEqual(r["normative_conf"], 0.0)
@@ -74,6 +87,22 @@ class TestDerivation(Base):
         self.assertAlmostEqual(W.noisy_or([0.5]), 0.5)
         self.assertAlmostEqual(W.noisy_or([0.5, 0.5]), 0.75)
         self.assertLess(W.noisy_or([0.9, 0.9, 0.9]), 1.0)
+
+    def test_correlated_evidence_is_dampened(self):
+        # two sightings of the SAME source (same file) must NOT inflate observed_conf...
+        same = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", same, "file_loc", "mod.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", same, "static", "mod.py:40", weight=0.9)
+        self.assertAlmostEqual(self._iv(same)["observed_conf"], 0.9)  # max within source, not 0.99
+        # ...whereas two DIFFERENT sources fuse independently (noisy-OR)
+        diff = self.wm.add_interaction("c", "calls", "d")
+        self.wm.add_evidence("interaction", diff, "file_loc", "one.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", diff, "static", "two.py:1", weight=0.9)
+        self.assertGreater(self._iv(diff)["observed_conf"], 0.9)
+
+    def test_grouped_noisy_or_helper(self):
+        self.assertAlmostEqual(W.grouped_noisy_or([("s", 0.9), ("s", 0.9)]), 0.9)
+        self.assertGreater(W.grouped_noisy_or([("a", 0.9), ("b", 0.9)]), 0.9)
 
     def test_refute_lowers_normative_and_contradicts(self):
         iid = self.wm.add_interaction("a", "calls", "b")

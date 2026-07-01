@@ -177,6 +177,24 @@ def noisy_or(weights) -> float:
     return round(1.0 - p, 6)
 
 
+def _evidence_source(ref) -> str:
+    """The correlated 'source' of an evidence pointer — the file/path portion before ':'
+    (e.g. 'auth/hash.py:14' → 'auth/hash.py'), else the whole ref. Two sightings that share
+    a source are treated as correlated, not independent (TruthFinder copying-source intuition)."""
+    head = (ref or "").split(":", 1)[0]
+    return head if ("/" in head or "." in head) else (ref or "")
+
+
+def grouped_noisy_or(pairs) -> float:
+    """Fuse (source, weight) evidence: CORRELATED within a source (take the max, so repeated
+    sightings of the same file don't inflate), INDEPENDENT across sources (noisy-OR). This
+    dampens the naive noisy-OR's over-count when evidence is not independent."""
+    best = {}
+    for src, w in pairs:
+        best[src] = max(best.get(src, 0.0), w)
+    return noisy_or(best.values())
+
+
 class WorldModel:
     def __init__(self, path: str):
         self.path = path
@@ -206,7 +224,7 @@ class WorldModel:
     def upsert_entity(self, kind, name, symbol_id=None, path=None, lang=None,
                       entity_type=None, attrs=None) -> int:
         if symbol_id is None:
-            symbol_id = self._default_symbol_id(kind, name, path)
+            symbol_id = self._default_symbol_id(kind, name, path, entity_type)
         ts = now()
         cur = self.conn.execute("SELECT id FROM entity WHERE symbol_id=?", (symbol_id,))
         row = cur.fetchone()
@@ -223,18 +241,26 @@ class WorldModel:
              json.dumps(attrs) if attrs else None, ts, ts))
         return cur.lastrowid
 
-    @staticmethod
-    def _default_symbol_id(kind, name, path):
+    # SCIP descriptor suffixes (github.com/sourcegraph/scip): '/' namespace, '#' type,
+    # '().' method, '.' term. We follow SCIP's `<scheme> <package> <descriptor>+` grammar
+    # SHAPE so ids are parseable/greppable and closer to conformant; the `package` field is
+    # the placeholder '.' (SCIP's missing-value token) until a real manager/name/version is
+    # resolved (the full-conformance upgrade path noted in the design spec).
+    _SCIP_SUFFIX = {"class": "#", "type": "#", "interface": "#", "struct": "#",
+                    "enum": "#", "method": "().", "function": "()."}
+
+    @classmethod
+    def _default_symbol_id(cls, kind, name, path, entity_type=None):
         if kind == "file":
-            return f"file:{path or name}"
-        if kind == "referent":
-            return f"referent:{name}"
+            return f"wml . {path or name}/"          # file as a namespace descriptor
         if kind == "module":
-            return f"module:{name}"
-        # symbol: name-within-file (v1 resolution depth). SCIP-inspired, NOT SCIP-conformant
-        # (SCIP grammar is `<scheme> <package> <descriptor>+`); the SCIP upgrade path is noted
-        # in the design spec.
-        return f"sym:{path or '?'}#{name}"
+            return f"wml . {name}/"
+        if kind == "referent":
+            return f"wml-referent . {name}/"         # external scheme for real-world referents
+        # symbol: <path-namespace><name><descriptor-suffix>; v1 resolves by name-within-file
+        ns = f"{path}/" if path else ""
+        suffix = cls._SCIP_SUFFIX.get((entity_type or "").lower(), ".")
+        return f"wml . {ns}{name}{suffix}"
 
     def _resolve_entity(self, token, default_kind="symbol"):
         """Accept a symbol_id, a name, or a path; create a stub if unknown."""
@@ -323,24 +349,26 @@ class WorldModel:
         if frow["invalidated_at"] is not None:
             return
         ev = self.conn.execute(
-            "SELECT evidence_kind, polarity, weight FROM evidence WHERE fact_kind=? AND fact_id=?",
+            "SELECT evidence_kind, polarity, weight, ref FROM evidence WHERE fact_kind=? AND fact_id=?",
             (fact_kind, fact_id)).fetchall()
 
-        obs_w, norm_w, refute_w, ranks = [], [], [], [0]
+        obs_pairs, norm_pairs, refute_w, ranks = [], [], [], [0]
         for e in ev:
-            k, pol, w = e["evidence_kind"], e["polarity"], e["weight"]
+            k, pol, w, ref = e["evidence_kind"], e["polarity"], e["weight"], e["ref"]
             if pol == "refutes":
                 refute_w.append(w)
                 continue
+            src = _evidence_source(ref)
             if k in OBSERVATION_KINDS:
-                obs_w.append(w)
+                obs_pairs.append((src, w))
             if k in ORACLE_KINDS:
-                norm_w.append(w)
+                norm_pairs.append((src, w))
             ranks.append(ENTRENCHMENT_RANK.get(k, 0))
 
-        observed = noisy_or(obs_w)
+        # grouped fusion: correlated within a source, independent across (dampens over-count)
+        observed = grouped_noisy_or(obs_pairs)
         refute_mass = noisy_or(refute_w)
-        normative = round(noisy_or(norm_w) * (1.0 - refute_mass), 6)
+        normative = round(grouped_noisy_or(norm_pairs) * (1.0 - refute_mass), 6)
         entrench = max(ranks)
 
         open_contra = self.conn.execute(

@@ -111,6 +111,24 @@ Reported `UNCONFIRMED` — defensible design choices for which no authoritative 
   pattern, but `sqlite.org/fts5.html` was 403, so external confirmation is `UNCONFIRMED`. (A
   functional test exercises FTS insert/sync indirectly.)
 
+## Post-audit remediation (follow-up)
+
+After the audit, findings 2 and 4 were addressed in code rather than left as notes:
+
+- **Finding 2 (SCIP DEVIATION) — remediated.** `_default_symbol_id` now emits ids that follow
+  SCIP's `<scheme> <package> <descriptor>+` grammar shape with SCIP descriptor suffixes
+  (`/` namespace, `#` type, `().` method, `.` term); e.g. `wml . auth/hash.py/hash_pw().`. The
+  `package` remains the placeholder `.` pending manager/version resolution, so it is
+  grammar-shaped and greppable but still not fully interoperable — an honest partial fix. Test:
+  `TestSchema.test_scip_shaped_symbol_ids`.
+- **Finding 4 (noisy-OR correlated evidence) — remediated.** Confidence fusion now uses
+  `grouped_noisy_or`: evidence is grouped by source (the file/path of its `ref`), correlated
+  sightings within a source take the max (no double-count), and only distinct sources are fused
+  with noisy-OR — the TruthFinder copying-source intuition at fusion time. Tests:
+  `TestDerivation.test_correlated_evidence_is_dampened`, `test_grouped_noisy_or_helper`.
+
+Gate after remediation: 26/26.
+
 ## Sources appendix
 
 1. SCIP protobuf schema — Sourcegraph — https://raw.githubusercontent.com/sourcegraph/scip/main/scip.proto (fetched)

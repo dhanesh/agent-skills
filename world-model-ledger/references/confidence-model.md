@@ -18,10 +18,12 @@ interaction and constraint keeps two independent confidence numbers plus a statu
 On every evidence write the parent fact is recomputed — the score can never drift from the
 audit trail:
 
-- `observed_conf = noisy_or(weights of 'supports' evidence whose kind ∈ observation set)`
-  where `noisy_or(ws) = 1 − Π(1 − wᵢ)` — independent sightings accumulate and **saturate**
-  toward 1 without ever exceeding it.
-- `normative_conf = noisy_or(oracle 'supports' weights) × (1 − noisy_or('refutes' weights))`
+- `observed_conf = grouped_noisy_or(observation 'supports' evidence, keyed by source)` where
+  `noisy_or(ws) = 1 − Π(1 − wᵢ)` — independent sightings accumulate and **saturate** toward 1
+  without exceeding it. Evidence is first grouped by *source* (the file/path of its `ref`):
+  correlated sightings within one source take the **max** (they don't double-count), and only
+  distinct sources are fused with noisy-OR (see the dampening note below).
+- `normative_conf = grouped_noisy_or(oracle 'supports') × (1 − noisy_or('refutes' weights))`
   — refuting evidence pulls it back down.
 - `validation`:
   1. member of an **open contradiction**, or any live **refutes** evidence → `contradicted`
@@ -34,17 +36,25 @@ Thresholds and weights live in one config block at the top of `assets/world_mode
 (`TAU_VALIDATE`, `ENTRENCHMENT_RANK`, the kind sets) so the epistemics are tunable without
 touching logic.
 
-### Known limitation: noisy-OR assumes independent evidence
+### Correlated-evidence dampening
 
-`noisy_or` treats each evidence row as an *independent* observation (the
-independence-of-causal-influence assumption). Correlated evidence therefore inflates
-confidence. Exact duplicates cannot double-count — the `evidence` table has
-`UNIQUE(fact_kind, fact_id, evidence_kind, ref, polarity)`, so re-recording the same pointer is
-idempotent. Residual correlation (e.g. a `file_loc` and a `static` row for the *same* line, or
-two sources that copied each other) can still mildly over-count `observed_conf`. This is a
-deliberate v1 simplification; a TruthFinder-style dampening factor for correlated sources is the
-documented upgrade path. It does **not** affect the core invariant — normative confidence is
-still gated on oracle evidence regardless of how observation evidence fuses.
+Plain `noisy_or` assumes every evidence row is an *independent* observation
+(independence-of-causal-influence), so correlated evidence would inflate confidence. Two
+guards prevent that:
+
+1. **Exact duplicates** cannot double-count — the `evidence` table has
+   `UNIQUE(fact_kind, fact_id, evidence_kind, ref, polarity)`, so re-recording the same pointer
+   is idempotent.
+2. **Same-source correlation** is dampened by `grouped_noisy_or`: evidence is grouped by its
+   *source* (the file/path portion of `ref`, e.g. `auth/hash.py:14` → `auth/hash.py`); within a
+   source the **max** weight is taken (a `file_loc` and a `static` row for the same file count
+   once), and only *distinct* sources are fused with noisy-OR. This is the TruthFinder
+   copying-source intuition applied at fusion time.
+
+Residual correlation across genuinely distinct sources that nonetheless copied each other is not
+modelled (a full source-reliability estimator is the upgrade path). Crucially, none of this
+touches the core invariant — normative confidence is still gated on oracle evidence regardless
+of how observation evidence fuses.
 
 ## Why two axes and not one
 
