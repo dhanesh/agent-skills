@@ -648,7 +648,36 @@ class WorldModel:
             "SELECT id FROM entity WHERE name LIKE ? OR path LIKE ? LIMIT 50", (like, like)).fetchall()]
 
     # ── repo-wide build / seeding (deterministic, observation-only) ─────────────
-    def build_from_repo(self, root=".", max_files=5000):
+    def _prune_vanished_build_edges(self, root):
+        """Soft-invalidate build-origin edges whose anchored file no longer exists on disk
+        (deleted/renamed). Only edges whose evidence is EXCLUSIVELY build-origin are touched —
+        any edge the agent has observed or validated (i.e. carries non-`build` evidence) is
+        left alone, so pruning can never destroy agent work. Never hard-deletes (soft-invalidate
+        → `stale`), and never prunes an edge merely because a file was skipped by the scan (it
+        checks the filesystem, not the scan set)."""
+        rows = self.conn.execute(
+            "SELECT i.id, se.path AS s_path, oe.path AS o_path "
+            "FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE i.invalidated_at IS NULL "
+            "  AND EXISTS (SELECT 1 FROM evidence e WHERE e.fact_kind='interaction' "
+            "              AND e.fact_id=i.id AND e.agent='build') "
+            "  AND NOT EXISTS (SELECT 1 FROM evidence e WHERE e.fact_kind='interaction' "
+            "                  AND e.fact_id=i.id AND COALESCE(e.agent,'') <> 'build')"
+        ).fetchall()
+        ts = now()
+        pruned = 0
+        for r in rows:
+            s_gone = r["s_path"] and not os.path.exists(os.path.join(root, r["s_path"]))
+            o_gone = r["o_path"] and not os.path.exists(os.path.join(root, r["o_path"]))
+            if s_gone or o_gone:
+                self.conn.execute(
+                    "UPDATE interaction SET invalidated_at=?, validation='stale', updated_at=? WHERE id=?",
+                    (ts, ts, r["id"]))
+                pruned += 1
+        return pruned
+
+    def build_from_repo(self, root=".", max_files=5000, prune=False):
         """Walk a repository once and seed the model: register source files as entities
         and record STRUCTURAL interactions (Python imports; generic file references from
         shell/config/docs). Everything is recorded as OBSERVATION only — observed_conf
@@ -709,6 +738,9 @@ class WorldModel:
             else:
                 edges += self._seed_file_references(rel, text, relset, basename_index)
 
+        # Optional: soft-invalidate build-origin edges for files that vanished (opt-in).
+        pruned = self._prune_vanished_build_edges(root) if prune else 0
+
         stats = self.consolidate()
         stats["build"] = {
             "files_registered": len(collected), "edges": edges, "dropped_files": dropped,
@@ -717,6 +749,7 @@ class WorldModel:
             "entities_updated": len(collected) - (_n("entity") - before_e),
             "interactions_added": _n("interaction") - before_i,
             "evidence_added": _n("evidence") - before_ev,
+            "pruned_stale_edges": pruned,
             "root": root,
         }
         if dropped:
@@ -1072,12 +1105,13 @@ def cmd_touch(wm, a):
 
 def cmd_build(wm, a):
     """Repo-wide world building: deterministic structural scan, observation-only."""
-    stats = wm.build_from_repo(a.path, max_files=a.max_files)
+    stats = wm.build_from_repo(a.path, max_files=a.max_files, prune=a.prune)
     wm.conn.commit()
     b = stats["build"]
     print(json.dumps(stats, indent=2))
+    extra = f"; pruned {b['pruned_stale_edges']} vanished-file edge(s)" if a.prune else ""
     print(f"built: {b['files_registered']} files, {b['edges']} structural edges "
-          f"(all observed/unverified — validate with tests/docs to raise correctness)",
+          f"(all observed/unverified — validate with tests/docs to raise correctness){extra}",
           file=sys.stderr)
 
 
@@ -1161,6 +1195,9 @@ def build_parser():
     bd.add_argument("path", nargs="?", default=".", help="repo root to scan (default: cwd)")
     bd.add_argument("--max-files", dest="max_files", type=int, default=5000,
                     help="cap files scanned; surplus is logged, never silently dropped")
+    bd.add_argument("--prune", action="store_true",
+                    help="soft-invalidate build-origin edges for files that vanished "
+                         "(never touches agent-observed/validated facts; never hard-deletes)")
     bd.set_defaults(func=cmd_build)
 
     sub.add_parser("stats", help="validated/unverified/contradicted counts").set_defaults(func=cmd_stats)

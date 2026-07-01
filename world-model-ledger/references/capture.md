@@ -19,6 +19,15 @@ downgrade a fact you have already validated (a re-added edge is just another obs
 oracle evidence still stands). The build result reports `entities_added` / `interactions_added`
 / `evidence_added` — all `0` on an unchanged repo — so a re-run is transparently a no-op.
 
+**Pruning deleted/renamed files (`--prune`, opt-in).** By default `build` is purely additive, so
+edges for files you delete or rename linger. `wm build --prune` soft-invalidates
+(`invalidated_at` + `stale`, **never** hard-deletes) build-origin edges whose anchored file no
+longer exists on disk. It is deliberately conservative: it prunes an edge **only if the edge's
+evidence is exclusively build-origin** — anything the agent has observed or validated (any
+non-`build` evidence) is protected and left live, even if its file vanished. It checks the
+filesystem, not the scan set, so a file merely skipped by `--max-files` or an ignore rule is
+never pruned. The build result reports `pruned_stale_edges`.
+
 ## (a) Marker lines — lowest friction
 
 Write these at the **start of a line** in your (assistant) turn; the Stop hook harvests them.
@@ -47,7 +56,7 @@ normative confidence.
 ## (b) `wm` CLI — precise / scriptable
 
 ```
-wm build [path] [--max-files N]                       # repo-wide seed: files + structural edges (observation-only)
+wm build [path] [--max-files N] [--prune]             # repo-wide seed: files + structural edges (observation-only)
 wm observe <subj> <pred> <obj> [--evidence file:line] [--conf 0.7]
 wm constraint <name> <kind> "<message>" --predicate <p> --params '<json>' [--severity ...]
 wm validate "<subj>,<pred>,<obj>" --by test:<id>|ci:<run>|doc:<path>|human   # raises normative

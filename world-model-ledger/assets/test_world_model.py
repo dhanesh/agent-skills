@@ -348,6 +348,67 @@ class TestBuild(Base):
         self.assertGreaterEqual(stats["build"]["dropped_files"], 1)  # no silent truncation
 
 
+class TestBuildPrune(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "pkg"))
+        open(os.path.join(d, "pkg", "__init__.py"), "w").close()
+        with open(os.path.join(d, "pkg", "core.py"), "w") as f:
+            f.write("VALUE = 1\n")
+        with open(os.path.join(d, "pkg", "app.py"), "w") as f:
+            f.write("from pkg.core import VALUE\n")   # app imports core
+        return d
+
+    def _edge(self, s, p, o):
+        return self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate=? AND oe.path=?",
+            (s, p, o)).fetchone()
+
+    def test_prune_is_opt_in(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        os.remove(os.path.join(d, "pkg", "core.py"))    # delete the imported file
+        stats = self.wm.build_from_repo(d)              # default: NO prune
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)
+        self.assertIsNone(self._edge("pkg/app.py", "imports", "pkg/core.py")["invalidated_at"])
+
+    def test_prune_soft_invalidates_vanished_edges(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        edge_id = self._edge("pkg/app.py", "imports", "pkg/core.py")["id"]
+        os.remove(os.path.join(d, "pkg", "core.py"))
+        stats = self.wm.build_from_repo(d, prune=True)
+        self.assertGreaterEqual(stats["build"]["pruned_stale_edges"], 1)
+        row = self.wm.conn.execute("SELECT * FROM interaction WHERE id=?", (edge_id,)).fetchone()
+        self.assertEqual(row["validation"], "stale")
+        self.assertIsNotNone(row["invalidated_at"])
+        self.assertIsNotNone(row)                        # soft delete — row still present
+
+    def test_prune_never_touches_agent_validated_edges(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        edge_id = self._edge("pkg/app.py", "imports", "pkg/core.py")["id"]
+        # agent validates it (non-build oracle evidence)
+        self.wm.add_evidence("interaction", edge_id, "test", "tests/t.py::x", weight=0.9)
+        self.assertEqual(
+            self.wm.conn.execute("SELECT validation FROM interaction WHERE id=?", (edge_id,)).fetchone()["validation"],
+            "validated")
+        os.remove(os.path.join(d, "pkg", "core.py"))     # file vanishes anyway
+        stats = self.wm.build_from_repo(d, prune=True)
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)   # protected
+        row = self.wm.conn.execute("SELECT * FROM interaction WHERE id=?", (edge_id,)).fetchone()
+        self.assertEqual(row["validation"], "validated")            # untouched
+        self.assertIsNone(row["invalidated_at"])
+
+    def test_prune_ignores_present_files(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        stats = self.wm.build_from_repo(d, prune=True)   # nothing deleted
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)
+
+
 class TestProjectRules(Base):
     def test_validated_constraint_surfaces_in_precall(self):
         cid = self.wm.add_constraint("no-weak-hash", "forbids", "weak hash {matched}",
