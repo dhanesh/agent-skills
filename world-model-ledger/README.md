@@ -28,7 +28,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 54-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 57-test gate.
 
 ## What gets installed
 
