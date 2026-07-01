@@ -4,12 +4,26 @@ The update path is **hybrid**: deterministic hooks capture the *skeleton* (which
 were touched, at low confidence); the agent enriches the graph *explicitly*. A model never
 guesses facts inside a hook — that is how you get invented facts.
 
-To avoid a cold start, `wm build [path]` seeds the whole repo in one deterministic pass —
-registering every source file plus structural edges (Python imports; file references from
-shell/config/docs). Like the hooks, it is **observation only**: `observed_conf` rises but
-`normative_conf` stays 0 and status stays `unverified` (a bulk scan is a sighting, not a
-correctness judgement), and an edge is added only when both endpoints are real files it found.
-Structural referents (external services/APIs) are still added by the agent via `wm map`.
+To avoid a cold start, `wm build [path]` seeds the whole repo in one deterministic pass with
+**language-aware extraction**:
+
+- **Local edges** (file → file): `imports` / `includes` / `references`, resolved to a real
+  scanned file. Covers Python (`import`/`from`, incl. relative), Ruby (`require_relative`),
+  JavaScript/TypeScript (relative `import`/`require`), Rust (`mod`), plus shell `source`, Make
+  `include`, Dockerfile `COPY`, and generic path mentions in docs/config.
+- **External dependency edges** (file → `depends_on` → *referent*): a dependency literally
+  declared in the source — a package (JS/TS `import 'react'`, Ruby `gem`, Rust `use <crate>`,
+  Go `import "github.com/…"`, Python third-party `import`), a container image
+  (Dockerfile `FROM`, compose/k8s `image:`), a CI action (GitHub Actions `uses:`), or a
+  Terraform module `source`. Language stdlibs (Go `fmt`, Rust `std`, Python `os`) are skipped.
+
+Like the hooks, it is **observation only**: `observed_conf` rises but `normative_conf` stays 0
+and status stays `unverified` — a *declared* dependency is a sighting, not proof it is correct
+or desirable. No invented facts: a file→file edge is added only when the target resolves to a
+real scanned file, and every `depends_on` referent is a literal token from the source
+(`FROM`/`uses`/`import`). `build` now auto-creates these **dependency** referents; *semantic /
+domain* referents (business concepts, higher-level services) still come from the agent via
+`wm map`. External deps are capped per file and deduped (one referent, many `depends_on` edges).
 
 **Re-run safety.** Every write is an upsert on a stable key — entities on `symbol_id`,
 interactions on `(subject, predicate, object)`, evidence on `(fact, kind, ref, polarity)` —
