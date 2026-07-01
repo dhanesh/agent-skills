@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Install gate for world-model-ledger. Stdlib unittest; no pip, no network.
+
+If any of these fail, the skill's guarantees do not hold — fix before relying on it.
+Run:  python3 test_world_model.py
+"""
+import os
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import world_model as W
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.wm = W.WorldModel(os.path.join(self.tmp, "m.db"))
+
+    def tearDown(self):
+        self.wm.close()
+
+    def _iv(self, iid):
+        return self.wm.conn.execute("SELECT * FROM interaction WHERE id=?", (iid,)).fetchone()
+
+
+class TestSchema(Base):
+    def test_tables_exist(self):
+        names = {r["name"] for r in self.wm.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for t in ("entity", "interaction", "constraint_", "evidence",
+                  "contradiction", "contradiction_member"):
+            self.assertIn(t, names)
+
+    def test_fts_available_here(self):
+        # The CI/dev environment ships FTS5; the store still works without it (LIKE fallback).
+        self.assertTrue(self.wm.has_fts)
+
+    def test_scip_shaped_symbol_ids(self):
+        # ids follow SCIP's `<scheme> <package> <descriptor>+` shape with descriptor suffixes
+        fid = self.wm.upsert_entity("file", "auth/hash.py", path="auth/hash.py")
+        f = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (fid,)).fetchone()
+        self.assertTrue(f["symbol_id"].startswith("wml . ") and f["symbol_id"].endswith("/"))
+        mid = self.wm.upsert_entity("symbol", "hash_pw", path="auth/hash.py", entity_type="function")
+        m = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (mid,)).fetchone()
+        self.assertTrue(m["symbol_id"].endswith("hash_pw()."))   # SCIP method suffix
+        rid = self.wm.upsert_entity("referent", "stripe/refunds-api")
+        r = self.wm.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (rid,)).fetchone()
+        self.assertTrue(r["symbol_id"].startswith("wml-referent . "))
+
+
+class TestTwoAxisInvariant(Base):
+    """The load-bearing guarantee: code observation never raises normative_conf."""
+
+    def test_observation_raises_observed_not_normative(self):
+        # two INDEPENDENT sources (different files) accumulate above a single sighting
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", iid, "static", "b.py:2", weight=0.9)
+        r = self._iv(iid)
+        self.assertGreater(r["observed_conf"], 0.9)
+        self.assertEqual(r["normative_conf"], 0.0)
+        self.assertEqual(r["validation"], "unverified")
+
+    def test_only_oracle_evidence_validates(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", iid, "test", "t::x", weight=0.8)
+        r = self._iv(iid)
+        self.assertGreaterEqual(r["normative_conf"], W.TAU_VALIDATE)
+        self.assertEqual(r["validation"], "validated")
+
+    def test_agent_assert_is_observation_only(self):
+        # An agent asserting an edge is an observation claim — it must NOT validate it.
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "agent_assert", "x", weight=1.0)
+        r = self._iv(iid)
+        self.assertGreater(r["observed_conf"], 0.0)
+        self.assertEqual(r["normative_conf"], 0.0)
+        self.assertEqual(r["validation"], "unverified")
+
+
+class TestDerivation(Base):
+    def test_noisy_or_saturates(self):
+        self.assertAlmostEqual(W.noisy_or([]), 0.0)
+        self.assertAlmostEqual(W.noisy_or([0.5]), 0.5)
+        self.assertAlmostEqual(W.noisy_or([0.5, 0.5]), 0.75)
+        self.assertLess(W.noisy_or([0.9, 0.9, 0.9]), 1.0)
+
+    def test_correlated_evidence_is_dampened(self):
+        # two sightings of the SAME source (same file) must NOT inflate observed_conf...
+        same = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", same, "file_loc", "mod.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", same, "static", "mod.py:40", weight=0.9)
+        self.assertAlmostEqual(self._iv(same)["observed_conf"], 0.9)  # max within source, not 0.99
+        # ...whereas two DIFFERENT sources fuse independently (noisy-OR)
+        diff = self.wm.add_interaction("c", "calls", "d")
+        self.wm.add_evidence("interaction", diff, "file_loc", "one.py:1", weight=0.9)
+        self.wm.add_evidence("interaction", diff, "static", "two.py:1", weight=0.9)
+        self.assertGreater(self._iv(diff)["observed_conf"], 0.9)
+
+    def test_grouped_noisy_or_helper(self):
+        self.assertAlmostEqual(W.grouped_noisy_or([("s", 0.9), ("s", 0.9)]), 0.9)
+        self.assertGreater(W.grouped_noisy_or([("a", 0.9), ("b", 0.9)]), 0.9)
+
+    def test_refute_lowers_normative_and_contradicts(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "test", "t::x", weight=0.8)  # validated
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+        self.wm.add_evidence("interaction", iid, "test", "t::y", polarity="refutes", weight=0.9)
+        r = self._iv(iid)
+        self.assertEqual(r["validation"], "contradicted")
+        self.assertLess(r["normative_conf"], W.TAU_VALIDATE)
+
+    def test_entrenchment_tracks_strongest_evidence(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "static", "a.py:1")
+        self.assertEqual(self._iv(iid)["entrenchment"], 1)
+        self.wm.add_evidence("interaction", iid, "human", "confirmed", weight=0.9)
+        self.assertEqual(self._iv(iid)["entrenchment"], 4)
+
+
+class TestIdempotency(Base):
+    def test_duplicate_interaction_not_double_counted(self):
+        i1 = self.wm.add_interaction("a", "calls", "b")
+        i2 = self.wm.add_interaction("a", "calls", "b")
+        self.assertEqual(i1, i2)
+
+    def test_duplicate_evidence_idempotent(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
+        before = self._iv(iid)["observed_conf"]
+        self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
+        self.assertEqual(self._iv(iid)["observed_conf"], before)
+        n = self.wm.conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
+        self.assertEqual(n, 1)
+
+
+class TestSoftInvalidation(Base):
+    def test_stale_marks_not_deletes(self):
+        iid = self.wm.add_interaction("f", "calls", "g", subj_kind="symbol")
+        # anchor the subject to a path so the stale sweep can find it
+        sid = self._iv(iid)["subject_id"]
+        self.wm.conn.execute("UPDATE entity SET path=? WHERE id=?", ("mod.py", sid))
+        n = self.wm.mark_stale_for_path("mod.py")
+        self.assertEqual(n, 1)
+        r = self._iv(iid)
+        self.assertEqual(r["validation"], "stale")
+        self.assertIsNotNone(r["invalidated_at"])
+        # row still present (soft delete)
+        self.assertIsNotNone(self._iv(iid))
+
+    def test_derive_skips_invalidated(self):
+        iid = self.wm.add_interaction("f", "calls", "g")
+        sid = self._iv(iid)["subject_id"]
+        self.wm.conn.execute("UPDATE entity SET path=? WHERE id=?", ("mod.py", sid))
+        self.wm.mark_stale_for_path("mod.py")
+        # new evidence must not un-stale it
+        self.wm.add_evidence("interaction", iid, "test", "t::x", weight=0.9)
+        self.assertEqual(self._iv(iid)["validation"], "stale")
+
+
+class TestContradiction(Base):
+    def test_forbids_detects_and_proposes(self):
+        self.wm.add_constraint(
+            "no-weak-hash", "forbids", "{subject} {predicate} {object} — forbidden ({matched})",
+            scope_predicate="uses", params={"patterns": ["md5", "sha1"]})
+        iid = self.wm.add_interaction("reset_pw", "uses", "sha1")
+        self.wm.add_evidence("interaction", iid, "file_loc", "auth.py:22", weight=0.9)
+        opened = self.wm.evaluate_constraints()
+        self.assertEqual(len(opened), 1)
+        c = self.wm.conn.execute("SELECT * FROM contradiction WHERE id=?", (opened[0],)).fetchone()
+        self.assertIn("sha1", c["message"])
+        self.assertTrue(c["proposed_fix"])
+        # the member interaction is now flagged contradicted
+        self.assertEqual(self._iv(iid)["validation"], "contradicted")
+
+    def test_contradiction_dedups(self):
+        self.wm.add_constraint("nw", "forbids", "{object}", scope_predicate="uses",
+                               params={"patterns": ["md5"]})
+        self.wm.add_interaction("x", "uses", "md5")
+        self.assertEqual(len(self.wm.evaluate_constraints()), 1)
+        self.assertEqual(len(self.wm.evaluate_constraints()), 0)  # no duplicate open row
+
+    def test_cardinality_functional(self):
+        self.wm.add_constraint("one-owner", "functional", "{subject} has multiple: {values}",
+                               scope_predicate="owned_by", params={"maxCount": 1})
+        self.wm.add_interaction("table_users", "owned_by", "team_a")
+        self.wm.add_interaction("table_users", "owned_by", "team_b")
+        self.assertEqual(len(self.wm.evaluate_constraints()), 1)
+
+    def test_resolution_clears_contradicted(self):
+        self.wm.add_constraint("nw", "forbids", "{object}", scope_predicate="uses",
+                               params={"patterns": ["md5"]})
+        iid = self.wm.add_interaction("x", "uses", "md5")
+        self.wm.add_evidence("interaction", iid, "test", "t::x", weight=0.9)
+        cid = self.wm.evaluate_constraints()[0]
+        self.assertEqual(self._iv(iid)["validation"], "contradicted")
+        self.wm.resolve_contradiction(cid, "fixed_code")
+        # after resolution the oracle evidence stands again
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+
+
+class TestRetrieval(Base):
+    def test_query_partitions(self):
+        v = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", v, "test", "t::x", weight=0.9)
+        u = self.wm.add_interaction("a", "imports", "c")
+        self.wm.add_evidence("interaction", u, "file_loc", "a.py:1", weight=0.9)
+        res = self.wm.query_touching("a")
+        facts_validated = [x["fact"] for x in res["validated"]]
+        facts_unverified = [x["fact"] for x in res["unverified"]]
+        self.assertIn("a calls b", facts_validated)
+        self.assertIn("a imports c", facts_unverified)
+
+
+class TestGraphTraversal(Base):
+    def test_recursive_cte_is_cycle_safe(self):
+        # a -> b -> c -> a  (a cycle): the depth-capped UNION walk must terminate.
+        self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_interaction("b", "calls", "c")
+        self.wm.add_interaction("c", "calls", "a")
+        seed = self.wm._entities_for_token("a")
+        reached = self.wm._reachable_nodes(seed, max_depth=5)  # > cycle length
+        self.assertGreaterEqual(len(reached), 3)  # terminates, returns the ring
+
+    def test_two_hop_neighborhood(self):
+        # a -> b -> c : a 1-hop query sees a-b; a 2-hop query also sees b-c.
+        self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_interaction("b", "calls", "c")
+        one = self.wm.query_touching("a", hops=1)
+        two = self.wm.query_touching("a", hops=2)
+        one_facts = [x["fact"] for v in ("validated", "unverified", "contradicted") for x in one[v]]
+        two_facts = [x["fact"] for v in ("validated", "unverified", "contradicted") for x in two[v]]
+        self.assertIn("a calls b", one_facts)
+        self.assertNotIn("b calls c", one_facts)
+        self.assertIn("b calls c", two_facts)
+
+
+class TestBuild(Base):
+    def _mini_repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "pkg"))
+        open(os.path.join(d, "pkg", "__init__.py"), "w").close()
+        with open(os.path.join(d, "pkg", "core.py"), "w") as f:
+            f.write("VALUE = 1\n")
+        with open(os.path.join(d, "pkg", "app.py"), "w") as f:
+            f.write("from pkg.core import VALUE\nimport pkg.core\n")
+        with open(os.path.join(d, "run.sh"), "w") as f:
+            f.write('#!/bin/sh\npython3 pkg/app.py\n')
+        return d
+
+    def test_build_registers_files_and_imports(self):
+        d = self._mini_repo()
+        stats = self.wm.build_from_repo(d)
+        self.assertGreaterEqual(stats["build"]["files_registered"], 4)
+        # the python import edge exists
+        edge = self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='pkg/app.py' AND i.predicate='imports' AND oe.path='pkg/core.py'"
+        ).fetchone()
+        self.assertIsNotNone(edge)
+        # the shell reference edge exists (run.sh -> pkg/app.py)
+        ref = self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='run.sh' AND i.predicate='references' AND oe.path='pkg/app.py'"
+        ).fetchone()
+        self.assertIsNotNone(ref)
+
+    def test_build_is_observation_only(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        # every seeded interaction is observed-but-unverified — a bulk scan never validates
+        rows = self.wm.conn.execute(
+            "SELECT observed_conf, normative_conf, validation FROM interaction").fetchall()
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+            self.assertGreater(r["observed_conf"], 0.0)
+
+    def _counts(self):
+        c = self.wm.conn.execute
+        return (c("SELECT COUNT(*) n FROM entity").fetchone()["n"],
+                c("SELECT COUNT(*) n FROM interaction").fetchone()["n"],
+                c("SELECT COUNT(*) n FROM evidence").fetchone()["n"])
+
+    def test_build_is_idempotent_across_multiple_runs(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        base = self._counts()
+        # run it two MORE times — counts must not budge (pure upsert, no dupes, no deletes)
+        for _ in range(2):
+            stats = self.wm.build_from_repo(d)
+            self.assertEqual(self._counts(), base)
+            self.assertEqual(stats["build"]["entities_added"], 0)
+            self.assertEqual(stats["build"]["interactions_added"], 0)
+            self.assertEqual(stats["build"]["evidence_added"], 0)
+
+    def test_build_preserves_first_seen_and_bumps_last_seen(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        row1 = self.wm.conn.execute(
+            "SELECT first_seen, last_seen FROM entity WHERE path='pkg/core.py'").fetchone()
+        self.wm.build_from_repo(d)  # re-run
+        row2 = self.wm.conn.execute(
+            "SELECT first_seen, last_seen FROM entity WHERE path='pkg/core.py'").fetchone()
+        self.assertEqual(row1["first_seen"], row2["first_seen"])   # never reset
+        self.assertGreaterEqual(row2["last_seen"], row1["last_seen"])
+
+    def test_build_adds_only_the_new_file_on_second_run(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        before = self._counts()
+        with open(os.path.join(d, "pkg", "extra.py"), "w") as f:
+            f.write("from pkg.core import VALUE\n")   # one new file with one import edge
+        stats = self.wm.build_from_repo(d)
+        self.assertEqual(stats["build"]["entities_added"], 1)      # exactly the new file
+        self.assertGreaterEqual(stats["build"]["interactions_added"], 1)
+        e_after, i_after, _ = self._counts()
+        self.assertEqual(e_after, before[0] + 1)                   # nothing else duplicated
+
+    def test_build_does_not_clobber_agent_validated_facts(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        # agent validates the import edge with oracle (test) evidence → normative up, validated
+        iid = self.wm.conn.execute(
+            "SELECT i.id FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='pkg/app.py' AND i.predicate='imports' AND oe.path='pkg/core.py'"
+        ).fetchone()["id"]
+        self.wm.add_evidence("interaction", iid, "test", "tests/test_app.py::t", weight=0.9)
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+        # a subsequent build (which re-adds the same edge as an OBSERVATION) must not
+        # downgrade it — oracle evidence stands, so it stays validated.
+        self.wm.build_from_repo(d)
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+        self.assertGreaterEqual(self._iv(iid)["normative_conf"], W.TAU_VALIDATE)
+
+    def test_build_reports_truncation(self):
+        d = self._mini_repo()
+        stats = self.wm.build_from_repo(d, max_files=2)
+        self.assertEqual(stats["build"]["files_registered"], 2)
+        self.assertGreaterEqual(stats["build"]["dropped_files"], 1)  # no silent truncation
+
+
+class TestBuildPrune(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "pkg"))
+        open(os.path.join(d, "pkg", "__init__.py"), "w").close()
+        with open(os.path.join(d, "pkg", "core.py"), "w") as f:
+            f.write("VALUE = 1\n")
+        with open(os.path.join(d, "pkg", "app.py"), "w") as f:
+            f.write("from pkg.core import VALUE\n")   # app imports core
+        return d
+
+    def _edge(self, s, p, o):
+        return self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate=? AND oe.path=?",
+            (s, p, o)).fetchone()
+
+    def test_prune_is_opt_in(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        os.remove(os.path.join(d, "pkg", "core.py"))    # delete the imported file
+        stats = self.wm.build_from_repo(d)              # default: NO prune
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)
+        self.assertIsNone(self._edge("pkg/app.py", "imports", "pkg/core.py")["invalidated_at"])
+
+    def test_prune_soft_invalidates_vanished_edges(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        edge_id = self._edge("pkg/app.py", "imports", "pkg/core.py")["id"]
+        os.remove(os.path.join(d, "pkg", "core.py"))
+        stats = self.wm.build_from_repo(d, prune=True)
+        self.assertGreaterEqual(stats["build"]["pruned_stale_edges"], 1)
+        row = self.wm.conn.execute("SELECT * FROM interaction WHERE id=?", (edge_id,)).fetchone()
+        self.assertEqual(row["validation"], "stale")
+        self.assertIsNotNone(row["invalidated_at"])
+        self.assertIsNotNone(row)                        # soft delete — row still present
+
+    def test_prune_never_touches_agent_validated_edges(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        edge_id = self._edge("pkg/app.py", "imports", "pkg/core.py")["id"]
+        # agent validates it (non-build oracle evidence)
+        self.wm.add_evidence("interaction", edge_id, "test", "tests/t.py::x", weight=0.9)
+        self.assertEqual(
+            self.wm.conn.execute("SELECT validation FROM interaction WHERE id=?", (edge_id,)).fetchone()["validation"],
+            "validated")
+        os.remove(os.path.join(d, "pkg", "core.py"))     # file vanishes anyway
+        stats = self.wm.build_from_repo(d, prune=True)
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)   # protected
+        row = self.wm.conn.execute("SELECT * FROM interaction WHERE id=?", (edge_id,)).fetchone()
+        self.assertEqual(row["validation"], "validated")            # untouched
+        self.assertIsNone(row["invalidated_at"])
+
+    def test_prune_ignores_present_files(self):
+        d = self._repo()
+        self.wm.build_from_repo(d)
+        stats = self.wm.build_from_repo(d, prune=True)   # nothing deleted
+        self.assertEqual(stats["build"]["pruned_stale_edges"], 0)
+
+
+class TestProjectRules(Base):
+    def test_validated_constraint_surfaces_in_precall(self):
+        cid = self.wm.add_constraint("no-weak-hash", "forbids", "weak hash {matched}",
+                                     scope_predicate="uses", params={"patterns": ["md5", "sha1"]})
+        # unvalidated constraint does NOT appear as a project rule
+        self.assertEqual(self.wm.project_rules(), [])
+        self.wm.add_evidence("constraint", cid, "human", "confirmed", weight=0.9)  # validate it
+        rules = self.wm.project_rules()
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["name"], "no-weak-hash")
+        # and it appears in the pre-call for a file with no recorded edges yet
+        txt = self.wm.precall(["brand/new_file.py"])
+        self.assertIn("no-weak-hash", txt)
+        self.assertIn("md5", txt)
+
+
+class TestReferents(Base):
+    def test_map_creates_referent_edge_unverified(self):
+        import argparse
+        a = argparse.Namespace(symbol="billing/refund.py", to="stripe/refunds-api")
+        W.cmd_map(self.wm, a)
+        ref = self.wm.conn.execute("SELECT * FROM entity WHERE kind='referent'").fetchone()
+        self.assertEqual(ref["name"], "stripe/refunds-api")
+        edge = self.wm.conn.execute(
+            "SELECT * FROM interaction WHERE predicate='realizes'").fetchone()
+        # mapping is a claim → observed but NOT normatively validated
+        self.assertEqual(edge["validation"], "unverified")
+        self.assertEqual(edge["normative_conf"], 0.0)
+
+
+class TestConsolidateAndStats(Base):
+    def test_consolidate_and_stats_shape(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "test", "t::x", weight=0.9)
+        s = self.wm.consolidate()
+        self.assertIn("interactions", s)
+        self.assertEqual(s["interactions"]["validated"], 1)
+        self.assertIn("open_contradictions", s)
+
+    def test_improvement_measurable(self):
+        # unverified → validated raises the validated ratio (acceptance: correctness improves)
+        iid = self.wm.add_interaction("a", "calls", "b")
+        self.wm.add_evidence("interaction", iid, "file_loc", "a.py:1", weight=0.9)
+        self.assertEqual(self.wm.stats()["interactions"]["validated"], 0)
+        self.wm.add_evidence("interaction", iid, "human", "confirmed", weight=0.9)
+        self.assertEqual(self.wm.stats()["interactions"]["validated"], 1)
+
+
+class TestTrustBoundary(Base):
+    """Evidence kinds are constrained; unknown/forged kinds are rejected at the API."""
+
+    def test_unknown_evidence_kind_rejected(self):
+        iid = self.wm.add_interaction("a", "calls", "b")
+        with self.assertRaises(ValueError):
+            self.wm.add_evidence("interaction", iid, "totally_made_up", "x")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
