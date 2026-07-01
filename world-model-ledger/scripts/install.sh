@@ -6,7 +6,7 @@
 #   scripts/install.sh [TARGET_DIR]         project install (default: current directory)
 #   scripts/install.sh --global             global install into ~/.claude (all projects)
 #   scripts/install.sh --with-constraints   also load the optional starter constraint pack
-#   scripts/install.sh --seed               repo-wide build now (files + structural edges)
+#   scripts/install.sh --seed               repo-wide build of the CURRENT repo now (works with --global too)
 #
 # Both modes are idempotent and run the test suite as an install gate.
 #
@@ -111,6 +111,20 @@ PY
     ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" build . 2>&1 \
         | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' )
   fi
+fi
+
+# --seed under GLOBAL scope: the global block above installs no per-repo store, so seed the
+# CURRENT repo explicitly (this is what the user means by "--seed"). Other projects still get
+# their own .world-model/ lazily — run `build .` in each to seed them.
+if [[ "$MODE" == "global" && "$SEED" == "1" ]]; then
+  REPO="$PWD"
+  grep -qxF '.world-model/' "$REPO/.gitignore" 2>/dev/null || \
+    printf '\n# world-model-ledger runtime store\n.world-model/\n' >> "$REPO/.gitignore"
+  mkdir -p "$REPO/.world-model"
+  echo "→ seeding current repo ($REPO):"
+  ( cd "$REPO" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" build . 2>&1 \
+      | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' )
+  echo "  (other projects start empty — run 'python3 $KIT_HOME/wm.py build .' in each to seed)"
 fi
 
 # 4. Install gate — the guarantees are only real if these pass.

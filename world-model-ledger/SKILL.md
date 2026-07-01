@@ -49,7 +49,7 @@ scripts/install.sh --seed                 # also run a repo-wide build now (avoi
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 38-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 54-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -72,11 +72,19 @@ enriches it explicitly (a model never guesses facts inside a hook). Full convent
 `references/capture.md`.
 
 0. **(Optional) Seed the model repo-wide.** On a fresh install, run
-   `python3 wm.py build .` to register every source file and its structural edges (Python
-   imports; file references from shell/config/docs) in one deterministic pass — this avoids the
-   cold start where the model is empty until the agent has touched files. Everything is recorded
-   as **observation only** (`observed_conf` rises; `normative_conf` stays 0, `unverified`) — a
-   bulk scan is a sighting, never a correctness judgement. **Safe to re-run:** writes are upserts
+   `python3 wm.py build .` to register every source file and its structural edges in one
+   deterministic, **language-aware** pass — this avoids the cold start where the model is empty
+   until the agent has touched files. Local imports become file→file edges
+   (`imports`/`includes`/`references`) and external dependencies become file→referent
+   `depends_on` edges, across Python, Ruby, JavaScript/TypeScript, Go, Rust, Java, C/C++, C#,
+   PHP, Kotlin, Swift, Dart, Scala, Elixir, the DevOps stack (Dockerfile, docker-compose/K8s,
+   GitHub Actions, Terraform, Make, shell), and **dependency manifests** (`package.json`,
+   `requirements.txt`/`pyproject.toml`, `go.mod`, `Cargo.toml`, `pom.xml`/`build.gradle`,
+   `composer.json`, `Chart.yaml`, `.gitlab-ci.yml`) for precise declared dependencies.
+   Everything is
+   recorded as **observation only** (`observed_conf` rises; `normative_conf` stays 0,
+   `unverified`) — a declared dependency is a sighting, never a correctness judgement. **Safe to
+   re-run:** writes are upserts
    on stable keys, so a re-build only *adds new* files/edges or *refreshes existing* ones — it
    never duplicates or deletes rows, and never downgrades a fact you have already validated. Each
    run reports `entities_added` / `interactions_added` (both `0` on an unchanged repo). Add
@@ -122,7 +130,7 @@ rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (38 tests — the two-axis
+Always confirm the gate passed: `python3 test_world_model.py` (54 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -144,5 +152,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 38-test install gate.
+- `assets/test_world_model.py` — the 54-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.

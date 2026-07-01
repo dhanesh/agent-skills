@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -65,6 +66,485 @@ BUILD_LANG_BY_EXT = {
 }
 BUILD_MAX_BYTES = 1_000_000
 BUILD_MAX_REFS_PER_FILE = 40
+
+# Extra extensions for language-aware extraction (beyond BUILD_LANG_BY_EXT above).
+BUILD_LANG_BY_EXT.update({
+    ".mjs": "javascript", ".cjs": "javascript", ".rake": "ruby", ".gemspec": "ruby",
+    ".tf": "terraform", ".tfvars": "terraform", ".hcl": "hcl",
+    ".cc": "cpp", ".cxx": "cpp", ".hh": "cpp", ".hxx": "cpp", ".ipp": "cpp",
+    # Tier-2 languages
+    ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".dart": "dart",
+    ".scala": "scala", ".sc": "scala", ".ex": "elixir", ".exs": "elixir",
+})
+# Dependency MANIFESTS (Tier-3), detected by exact filename → precise `depends_on` edges.
+BUILD_MANIFEST_FILES = {
+    "package.json": "npm-manifest", "composer.json": "composer",
+    "pyproject.toml": "pyproject", "pipfile": "pipfile", "cargo.toml": "cargo",
+    "go.mod": "go-mod", "pom.xml": "maven", "chart.yaml": "helm-chart",
+    ".gitlab-ci.yml": "gitlab-ci",
+}
+MANIFEST_LANGS = set(BUILD_MANIFEST_FILES.values()) | {"gradle", "pip-requirements"}
+# Tier-2 stdlib prefixes / system modules skipped as external deps.
+KOTLIN_STDLIB = {"kotlin", "kotlinx", "java", "javax", "jakarta"}
+SCALA_STDLIB = {"scala", "java", "javax"}
+SWIFT_SYSTEM = {"Foundation", "UIKit", "SwiftUI", "Combine", "Swift", "Dispatch",
+                "CoreData", "CoreGraphics", "CoreLocation", "MapKit", "AVFoundation",
+                "os", "XCTest", "Testing"}
+ELIXIR_STDLIB = {"Enum", "Map", "String", "List", "Keyword", "Logger", "GenServer",
+                 "Application", "Supervisor", "Process", "Task", "Agent", "IO", "Kernel",
+                 "Integer", "Float", "Stream", "Regex", "File", "Path", "System", "Registry"}
+# Files with no/ambiguous extension, matched by (lowercased) basename or path.
+BUILD_SPECIAL_FILENAMES = {
+    "dockerfile": "dockerfile", "containerfile": "dockerfile",
+    "makefile": "make", "gnumakefile": "make",
+    "gemfile": "ruby", "rakefile": "ruby",
+}
+# Languages whose edges come ONLY from the language extractor (running the generic
+# file-reference scan on real code would add noisy string-literal edges).
+CODE_LANGS = {"python", "javascript", "typescript", "ruby", "go", "rust",
+              "java", "c", "cpp", "csharp", "php",
+              "kotlin", "swift", "dart", "scala", "elixir"}
+JAVA_STDLIB_PREFIXES = {"java", "javax", "jakarta", "sun", "jdk"}
+CS_STDLIB_PREFIXES = {"System", "Microsoft"}   # Microsoft.* is often a real dep, but noisy → skip by default
+PHP_APP_NAMESPACES = {"App", "Tests", "Test", "Database"}
+# Python top-level modules we don't record as external dependencies (stdlib noise).
+PY_STDLIB = {
+    "os", "sys", "re", "json", "math", "time", "datetime", "typing", "collections",
+    "itertools", "functools", "subprocess", "pathlib", "argparse", "logging", "sqlite3",
+    "abc", "io", "enum", "dataclasses", "unittest", "tempfile", "shutil", "random",
+    "hashlib", "base64", "copy", "string", "threading", "asyncio", "http", "urllib",
+    "socket", "struct", "csv", "xml", "html", "contextlib", "warnings", "traceback",
+    "inspect", "importlib", "glob", "ast", "textwrap", "operator", "uuid", "secrets",
+    "decimal", "fractions", "statistics", "queue", "signal", "select", "gc", "weakref",
+}
+RUST_INTERNAL = {"crate", "super", "self", "std", "core", "alloc"}
+
+
+def _norm_js_pkg(spec):
+    if spec.startswith("@"):
+        return "/".join(spec.split("/")[:2])
+    return spec.split("/")[0]
+
+
+def _norm_go_pkg(p):
+    parts = p.split("/")
+    return "/".join(parts[:3]) if len(parts) >= 3 and "." in parts[0] else p
+
+
+def _toplevel(target):
+    return re.split(r"[./]", target)[0]
+
+
+# ── per-language structural extractors: text -> [(predicate, target, kind)] ──────
+# kind ∈ {'file' (path), 'module' (may resolve local, else external dep),
+#         'module_local' (relative import; local-only), 'external' (always a dependency)}
+def _extract_python(text, rel):
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    pkg_parts = os.path.dirname(rel).split(os.sep) if os.path.dirname(rel) else []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.split(".")[0] not in PY_STDLIB:
+                    out.append(("imports", a.name, "module"))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:                    # relative import → resolve against this package
+                base = pkg_parts[:len(pkg_parts) - (node.level - 1)] if node.level > 1 else pkg_parts
+                dotted = ".".join(base + (node.module.split(".") if node.module else []))
+                out.append(("imports", dotted, "module_local"))
+                for a in node.names:
+                    out.append(("imports", f"{dotted}.{a.name}", "module_local"))
+            elif node.module and node.module.split(".")[0] not in PY_STDLIB:
+                out.append(("imports", node.module, "module"))
+                for a in node.names:
+                    out.append(("imports", f"{node.module}.{a.name}", "module"))
+    return out
+
+
+def _extract_js(text, rel):
+    specs = []
+    specs += re.findall(r"""\bfrom\s*['"]([^'"]+)['"]""", text)          # import/export ... from 'x'
+    specs += re.findall(r"""\brequire\(\s*['"]([^'"]+)['"]\s*\)""", text)
+    specs += re.findall(r"""\bimport\(\s*['"]([^'"]+)['"]\s*\)""", text)  # dynamic import
+    specs += re.findall(r"""^\s*import\s+['"]([^'"]+)['"]""", text, re.M)  # bare `import 'x'`
+    out, seen = [], set()
+    for spec in specs:
+        if spec in seen:
+            continue
+        seen.add(spec)
+        if spec.startswith(".") or spec.startswith("/"):
+            out.append(("imports", spec, "file"))
+        else:
+            out.append(("depends_on", _norm_js_pkg(spec), "external"))
+    return out
+
+
+def _extract_ruby(text, rel):
+    out = []
+    for t in re.findall(r"""require_relative\s+['"]([^'"]+)['"]""", text):
+        out.append(("imports", t, "file"))
+    for t in re.findall(r"""(?<![\w_])require\s+['"]([^'"]+)['"]""", text):
+        out.append(("imports", t, "module"))
+    for t in re.findall(r"""^\s*gem\s+['"]([^'"]+)['"]""", text, re.M):     # Gemfile / gemspec
+        out.append(("depends_on", t, "external"))
+    return out
+
+
+def _extract_go(text, rel):
+    paths = []
+    for block in re.findall(r"import\s*\(([^)]*)\)", text, re.S):
+        paths += re.findall(r'"([^"]+)"', block)
+    paths += re.findall(r'import\s+(?:[\w.]+\s+)?"([^"]+)"', text)
+    out, seen = [], set()
+    for p in paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        if "." in p.split("/")[0]:            # has a domain in the first segment → external
+            out.append(("depends_on", _norm_go_pkg(p), "external"))
+    return out
+
+
+def _extract_rust(text, rel):
+    out = []
+    for name in re.findall(r"^\s*(?:pub\s+)?mod\s+([A-Za-z_]\w*)\s*;", text, re.M):
+        out.append(("includes", name, "file"))
+    seen = set()
+    for seg in re.findall(r"^\s*(?:pub\s+)?use\s+([A-Za-z_]\w*)", text, re.M):
+        if seg in RUST_INTERNAL or seg in seen:
+            continue
+        seen.add(seg)
+        out.append(("depends_on", seg, "external"))
+    return out
+
+
+def _extract_dockerfile(text, rel):
+    out = []
+    for img in re.findall(r"^\s*FROM\s+(\S+)", text, re.I | re.M):
+        out.append(("depends_on", img, "external"))
+    for argline in re.findall(r"^\s*(?:COPY|ADD)\s+(.+)$", text, re.I | re.M):
+        if "--from=" in argline:
+            continue
+        toks = [t for t in argline.split() if not t.startswith("--")]
+        if len(toks) >= 2 and not toks[0].startswith(("http", "\"", "$")) and "*" not in toks[0]:
+            out.append(("references", toks[0], "file"))
+    return out
+
+
+def _extract_compose(text, rel):        # docker-compose / k8s / any yaml with image:
+    return [("depends_on", m, "external")
+            for m in re.findall(r"""^\s*image:\s*["']?([^\s"'#]+)""", text, re.M | re.I)]
+
+
+def _extract_actions(text, rel):
+    out = []
+    for u in re.findall(r"""^\s*-?\s*uses:\s*["']?([^\s"'#]+)""", text, re.M):
+        if u.startswith(".") or u.startswith("/"):
+            out.append(("references", u, "file"))
+        else:
+            out.append(("depends_on", u, "external"))
+    return out
+
+
+def _extract_terraform(text, rel):
+    out = []
+    for s in re.findall(r'source\s*=\s*"([^"]+)"', text):
+        if s.startswith(".") or s.startswith("/"):
+            out.append(("references", s, "file"))
+        else:
+            out.append(("depends_on", s, "external"))
+    return out
+
+
+def _extract_make(text, rel):
+    out = []
+    for line in re.findall(r"^\s*[-]?include\s+(.+)$", text, re.M):
+        for f in line.split():
+            out.append(("references", f, "file"))
+    return out
+
+
+def _extract_shell(text, rel):
+    return [("includes", m[1], "file")
+            for m in re.findall(r"""^\s*(?:source|\.)\s+(["']?)([\w./$\-]+\.(?:sh|bash))\1""",
+                                text, re.M)]
+
+
+def _extract_java(text, rel):
+    # `import a.b.C;` → resolve to a repo class (kind 'java') else external artifact.
+    out = []
+    for imp in re.findall(r"^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;", text, re.M):
+        out.append(("imports", imp[:-2] if imp.endswith(".*") else imp, "java"))
+    return out
+
+
+def _extract_c(text, rel):
+    out = []
+    for q in re.findall(r'#\s*include\s+"([^"]+)"', text):          # local header
+        out.append(("includes", q, "file"))
+    for a in re.findall(r"#\s*include\s+<([^>]+)>", text):          # system/library header
+        if "/" in a:                                               # e.g. <boost/asio.hpp>, <gtest/gtest.h>
+            out.append(("depends_on", a.split("/")[0], "external"))
+        # bare <stdio.h>/<vector> stdlib headers are skipped (noise)
+    return out
+
+
+def _extract_csharp(text, rel):
+    out = []
+    for u in re.findall(r"^\s*using\s+(?:static\s+)?([\w.]+)\s*;", text, re.M):
+        if " = " in u:                                             # `using X = A.B;` alias — skip
+            continue
+        out.append(("imports", u, "csharp"))
+    return out
+
+
+def _extract_php(text, rel):
+    out = []
+    for m in re.findall(r"""(?:require|include)(?:_once)?\s*\(?\s*['"]([^'"]+\.php)['"]""", text):
+        out.append(("includes", m, "file"))                        # local include (reliable)
+    for u in re.findall(r"^\s*use\s+\\?([\\\w]+)", text, re.M):     # namespace import
+        out.append(("imports", u, "php_ns"))
+    return out
+
+
+# ── Tier-2 languages (Kotlin, Swift, Dart, Scala, Elixir) ────────────────────────
+def _extract_kotlin(text, rel):
+    out = []
+    for imp in re.findall(r"^\s*import\s+([\w.]+(?:\.\*)?)", text, re.M):
+        imp = imp[:-2] if imp.endswith(".*") else imp
+        segs = imp.split(".")
+        if segs[0] in KOTLIN_STDLIB:
+            continue
+        out.append(("depends_on", ".".join(segs[:2]), "external"))
+    return out
+
+
+def _extract_swift(text, rel):
+    out = []
+    for m in re.findall(r"^\s*import\s+(?:class\s+|struct\s+|func\s+|enum\s+)?([A-Za-z_]\w*)", text, re.M):
+        if m not in SWIFT_SYSTEM:
+            out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_dart(text, rel):
+    out = []
+    for spec in re.findall(r"""(?:import|export)\s+['"]([^'"]+)['"]""", text):
+        if spec.startswith("dart:"):
+            continue
+        if spec.startswith("package:"):
+            out.append(("depends_on", spec[len("package:"):].split("/")[0], "external"))
+        else:
+            out.append(("imports", spec, "file"))       # relative .dart file
+    return out
+
+
+def _extract_scala(text, rel):
+    out = []
+    for imp in re.findall(r"^\s*import\s+([\w.]+)", text, re.M):
+        segs = imp.split(".")
+        if segs[0] in SCALA_STDLIB:
+            continue
+        out.append(("depends_on", ".".join(segs[:2]), "external"))
+    return out
+
+
+def _extract_elixir(text, rel):
+    out, seen = [], set()
+    for m in re.findall(r"^\s*(?:alias|import|use|require)\s+([A-Z][\w.]*)", text, re.M):
+        top = m.split(".")[0]
+        if top in ELIXIR_STDLIB or top in seen:
+            continue
+        seen.add(top)
+        out.append(("depends_on", top, "external"))
+    return out
+
+
+# ── Tier-3 dependency manifests (precise declared dependencies) ──────────────────
+def _toml_load(text):
+    try:
+        import tomllib
+        return tomllib.loads(text)
+    except Exception:
+        return None
+
+
+def _json_load(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_npm(text, rel):
+    d = _json_load(text) or {}
+    out = []
+    for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        for name in (d.get(k) or {}):
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_composer(text, rel):
+    d = _json_load(text) or {}
+    out = []
+    for k in ("require", "require-dev"):
+        for name in (d.get(k) or {}):
+            if name == "php" or name.startswith("ext-"):
+                continue
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_pyproject(text, rel):
+    d = _toml_load(text)
+    out = []
+    if not d:
+        return out
+    proj = d.get("project", {}) or {}
+    for dep in proj.get("dependencies", []) or []:
+        m = re.match(r"[A-Za-z0-9._-]+", dep)
+        if m:
+            out.append(("depends_on", m.group(0), "external"))
+    for grp in (proj.get("optional-dependencies", {}) or {}).values():
+        for dep in grp:
+            m = re.match(r"[A-Za-z0-9._-]+", dep)
+            if m:
+                out.append(("depends_on", m.group(0), "external"))
+    for name in (d.get("tool", {}).get("poetry", {}).get("dependencies", {}) or {}):
+        if name.lower() != "python":
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_pip_requirements(text, rel):
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "-", "git+", "http", ".", "/")):
+            continue
+        m = re.match(r"[A-Za-z0-9._-]+", line)
+        if m:
+            out.append(("depends_on", m.group(0), "external"))
+    return out
+
+
+def _extract_pipfile(text, rel):
+    d = _toml_load(text)
+    out = []
+    if d:
+        for sec in ("packages", "dev-packages"):
+            for name in (d.get(sec, {}) or {}):
+                out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_cargo(text, rel):
+    d = _toml_load(text)
+    out = []
+    if d:
+        for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for name in (d.get(sec, {}) or {}):
+                out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_gomod(text, rel):
+    out = []
+    for blk in re.findall(r"require\s*\(([^)]*)\)", text, re.S):
+        for line in blk.splitlines():
+            m = re.match(r"\s*(\S+)\s+v", line)
+            if m:
+                out.append(("depends_on", m.group(1), "external"))
+    for m in re.findall(r"^\s*require\s+([^\s(]+)\s+v", text, re.M):
+        out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_maven(text, rel):
+    out = []
+    for dep in re.findall(r"<dependency>(.*?)</dependency>", text, re.S):
+        g = re.search(r"<groupId>([^<]+)</groupId>", dep)
+        a = re.search(r"<artifactId>([^<]+)</artifactId>", dep)
+        if g and a:
+            out.append(("depends_on", f"{g.group(1).strip()}:{a.group(1).strip()}", "external"))
+    return out
+
+
+def _extract_gradle(text, rel):
+    out = []
+    for m in re.findall(
+            r"""\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|"""
+            r"""androidTestImplementation|kapt|ksp|annotationProcessor)\s*[\(\s]\s*"""
+            r"""["']([\w.\-]+:[\w.\-]+)(?::[\w.\-]+)?["']""", text):
+        out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_helm(text, rel):
+    return [("depends_on", n, "external")
+            for n in re.findall(r"""-\s*name:\s*["']?([\w.\-]+)""", text)]
+
+
+def _extract_gitlab(text, rel):
+    out = []
+    for img in re.findall(r"""^\s*image:\s*["']?([^\s"'#]+)""", text, re.M | re.I):
+        out.append(("depends_on", img, "external"))
+    for inc in re.findall(r"""^\s*-?\s*local:\s*["']?([^\s"'#]+)""", text, re.M):
+        out.append(("references", inc, "file"))
+    return out
+
+
+BUILD_EXTRACTORS = {
+    "python": _extract_python, "javascript": _extract_js, "typescript": _extract_js,
+    "ruby": _extract_ruby, "go": _extract_go, "rust": _extract_rust,
+    "java": _extract_java, "c": _extract_c, "cpp": _extract_c,
+    "csharp": _extract_csharp, "php": _extract_php,
+    "kotlin": _extract_kotlin, "swift": _extract_swift, "dart": _extract_dart,
+    "scala": _extract_scala, "elixir": _extract_elixir,
+    "dockerfile": _extract_dockerfile, "compose": _extract_compose,
+    "github-actions": _extract_actions, "terraform": _extract_terraform,
+    "make": _extract_make, "shell": _extract_shell,
+    # manifests
+    "npm-manifest": _extract_npm, "composer": _extract_composer,
+    "pyproject": _extract_pyproject, "pip-requirements": _extract_pip_requirements,
+    "pipfile": _extract_pipfile, "cargo": _extract_cargo, "go-mod": _extract_gomod,
+    "maven": _extract_maven, "gradle": _extract_gradle, "helm-chart": _extract_helm,
+    "gitlab-ci": _extract_gitlab,
+}
+
+
+def _external_name(kind, target):
+    """Map an unresolved import to an external dependency name (or None to skip stdlib)."""
+    if kind == "external":
+        return target
+    if kind == "module":                       # python / ruby → top-level package
+        return _toplevel(target)
+    if kind == "java":
+        segs = target.split(".")
+        if segs[0] in JAVA_STDLIB_PREFIXES:
+            return None
+        return ".".join(segs[:2])              # coarse artifact group (precise deps need pom/gradle)
+    if kind == "csharp":
+        segs = target.split(".")
+        if segs[0] in CS_STDLIB_PREFIXES:
+            return None
+        return ".".join(segs[:2])
+    if kind == "php_ns":
+        segs = target.split("\\")
+        if segs[0] in PHP_APP_NAMESPACES:
+            return None
+        return segs[0]                         # vendor namespace
+    return _toplevel(target)
+
+
+# Kinds that first try to resolve to a local file, and kinds eligible to become external deps.
+BUILD_LOCAL_KINDS = {"file", "module", "module_local", "java"}
+BUILD_EXTERNAL_KINDS = {"external", "module", "java", "csharp", "php_ns"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entity (
@@ -678,14 +1158,16 @@ class WorldModel:
         return pruned
 
     def build_from_repo(self, root=".", max_files=5000, prune=False):
-        """Walk a repository once and seed the model: register source files as entities
-        and record STRUCTURAL interactions (Python imports; generic file references from
-        shell/config/docs). Everything is recorded as OBSERVATION only — observed_conf
-        rises, but normative_conf stays 0 and validation stays 'unverified' (a bulk scan
-        is a sighting, never a correctness judgement). Idempotent; re-running refreshes.
-        Honors the no-invented-facts rule: an edge is added only when BOTH endpoints are
-        real files found in this scan."""
-        import ast
+        """Walk a repository once and seed the model: register source files as entities and
+        record STRUCTURAL interactions with LANGUAGE-AWARE extraction — local imports/includes
+        as file→file edges (`imports`/`includes`/`references`) and external dependencies as
+        file→referent `depends_on` edges. Covers Python, Ruby, JavaScript/TypeScript, Go, Rust,
+        and the DevOps stack (Dockerfile, docker-compose/K8s, GitHub Actions, Terraform, Make,
+        shell). Everything is recorded as OBSERVATION only — observed_conf rises, but
+        normative_conf stays 0 and validation stays 'unverified' (a declared dependency is a
+        sighting, never a correctness judgement). Idempotent; re-running refreshes. No invented
+        facts: a file→file edge is added only when the target resolves to a real scanned file;
+        external `depends_on` targets are literal declarations in the source (FROM/uses/import)."""
         root = os.path.abspath(root)
 
         # 1) enumerate registerable source files (skip vendored/build dirs, binaries, huge files)
@@ -693,8 +1175,9 @@ class WorldModel:
         for dirpath, dirs, fnames in os.walk(root):
             dirs[:] = [d for d in dirs if d not in BUILD_IGNORE_DIRS]
             for fn in fnames:
-                ext = os.path.splitext(fn)[1].lower()
-                if ext not in BUILD_LANG_BY_EXT:
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                lang = self._detect_lang(rel)
+                if lang is None:
                     continue
                 ap = os.path.join(dirpath, fn)
                 try:
@@ -702,7 +1185,7 @@ class WorldModel:
                         continue
                 except OSError:
                     continue
-                collected.append((os.path.relpath(ap, root), ap, ext))
+                collected.append((rel, ap, lang))
         collected.sort()
         dropped = 0
         if len(collected) > max_files:
@@ -720,23 +1203,25 @@ class WorldModel:
         basename_index = {}
         for rel, _, _ in collected:
             basename_index.setdefault(os.path.basename(rel), []).append(rel)
-        mod_index = self._python_module_index(relset)
+        ctx = {
+            "relset": relset,
+            "basename": basename_index,
+            "mod": self._python_module_index(relset),
+            "java": self._java_class_index(collected),   # FQN -> rel (reads `package` decls)
+        }
 
         # 2) register entities
-        for rel, _ap, ext in collected:
-            self.upsert_entity("file", os.path.basename(rel), path=rel, lang=BUILD_LANG_BY_EXT[ext])
+        for rel, _ap, lang in collected:
+            self.upsert_entity("file", os.path.basename(rel), path=rel, lang=lang)
 
-        # 3) structural edges
+        # 3) structural edges (language-aware)
         edges = 0
-        for rel, ap, ext in collected:
+        for rel, ap, lang in collected:
             try:
                 text = open(ap, "r", errors="replace").read()
             except OSError:
                 continue
-            if ext == ".py":
-                edges += self._seed_python_imports(rel, text, mod_index, ast)
-            else:
-                edges += self._seed_file_references(rel, text, relset, basename_index)
+            edges += self._seed_edges(rel, text, lang, ctx)
 
         # Optional: soft-invalidate build-origin edges for files that vanished (opt-in).
         pruned = self._prune_vanished_build_edges(root) if prune else 0
@@ -771,46 +1256,137 @@ class WorldModel:
                 idx[".".join(parts)] = rel
         return idx
 
-    def _seed_python_imports(self, rel, text, mod_index, ast):
-        n = 0
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return 0
-        pkg_parts = os.path.dirname(rel).split(os.sep) if os.path.dirname(rel) else []
+    @staticmethod
+    def _java_class_index(collected):
+        """fully-qualified Java class name -> rel path, from each file's `package` decl, so
+        `import com.foo.Bar;` resolves to the file defining that class (source root agnostic)."""
+        idx = {}
+        for rel, ap, lang in collected:
+            if lang != "java":
+                continue
+            try:
+                head = open(ap, "r", errors="replace").read(4096)
+            except OSError:
+                continue
+            m = re.search(r"^\s*package\s+([\w.]+)\s*;", head, re.M)
+            cls = os.path.splitext(os.path.basename(rel))[0]
+            fqn = f"{m.group(1)}.{cls}" if m else cls
+            idx[fqn] = rel
+        return idx
 
-        def resolve(dotted):
-            parts = dotted.split(".")
-            while parts:                       # longest-prefix match against real modules
-                cand = ".".join(parts)
-                if cand in mod_index and mod_index[cand] != rel:
-                    return mod_index[cand]
-                parts = parts[:-1]
-            return None
+    @staticmethod
+    def _detect_lang(rel):
+        """Language tag for a repo file, by special filename / manifest / path / extension."""
+        base = os.path.basename(rel).lower()
+        norm = "/" + rel.replace(os.sep, "/")
+        # dependency manifests (exact filename / pattern) take precedence over extension
+        if base in BUILD_MANIFEST_FILES:
+            return BUILD_MANIFEST_FILES[base]
+        if base.startswith("requirements") and base.endswith(".txt"):
+            return "pip-requirements"
+        if base.endswith(".gradle") or base.endswith(".gradle.kts"):
+            return "gradle"
+        if base in BUILD_SPECIAL_FILENAMES:
+            return BUILD_SPECIAL_FILENAMES[base]
+        if base.startswith("dockerfile.") or base.startswith("containerfile."):
+            return "dockerfile"
+        ext = os.path.splitext(base)[1]
+        if ext in (".yml", ".yaml"):
+            if "/.github/workflows/" in norm:
+                return "github-actions"
+            if base.startswith("docker-compose") or base.startswith("compose"):
+                return "compose"
+        return BUILD_LANG_BY_EXT.get(ext)
 
-        for node in ast.walk(tree):
-            targets = []
-            if isinstance(node, ast.Import):
-                targets = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:                 # relative import → resolve against this package
-                    base = pkg_parts[:len(pkg_parts) - (node.level - 1)] if node.level > 1 else pkg_parts
-                    dotted = ".".join(base + (node.module.split(".") if node.module else []))
-                    targets = [dotted] + [f"{dotted}.{a.name}" for a in node.names]
-                else:
-                    targets = [node.module or ""] + \
-                              [f"{node.module}.{a.name}" for a in node.names if node.module]
-            for t in targets:
-                if not t:
+    def _seed_edges(self, rel, text, lang, ctx):
+        """Run the language extractor for `lang`, resolve each edge to a real file or an
+        external dependency referent, and record it (observation-only)."""
+        counters = {"deps": 0}
+        edges = 0
+        extractor = BUILD_EXTRACTORS.get(lang)
+        if extractor:
+            seen = set()
+            for predicate, target, kind in extractor(text, rel):
+                key = (predicate, target, kind)
+                if key in seen:
                     continue
-                tgt = resolve(t)
-                if tgt:
-                    iid = self.add_interaction(rel, "imports", tgt, subj_kind="file", obj_kind="file")
-                    self.add_evidence("interaction", iid, "static", f"{rel}: import {t}",
-                                      agent="build", activity="build_from_repo", weight=0.6)
-                    n += 1
-                    break                      # one edge per import statement is enough
-        return n
+                seen.add(key)
+                edges += self._link(rel, predicate, target, kind, ctx, counters)
+        # non-code, non-manifest files also get the generic file-reference scan (docs/config)
+        if lang not in CODE_LANGS and lang not in MANIFEST_LANGS:
+            edges += self._seed_file_references(rel, text, ctx["relset"], ctx["basename"])
+        return edges
+
+    def _resolve_target_file(self, rel, target, kind, ctx):
+        """Resolve an import/reference target to a real scanned file, or None."""
+        relset, basename_index = ctx["relset"], ctx["basename"]
+        if kind == "java":
+            cand = ctx["java"].get(target)
+            return cand if cand and cand != rel else None
+        if kind in ("module", "module_local"):
+            cand = ctx["mod"].get(target)
+            if cand and cand != rel:
+                return cand
+            base = target.replace(".", "/")
+            for e in (".py", ".rb"):
+                for p in (base + e, os.path.join(base, "__init__" + e)):
+                    if p in relset and p != rel:
+                        return p
+            return None
+        # kind == 'file': a path, possibly relative to the importing file
+        importer_dir = os.path.dirname(rel)
+        t = target.strip().strip("'\"")
+        bases = [os.path.normpath(os.path.join(importer_dir, t)),
+                 os.path.normpath(t.lstrip("/"))]
+        # Prefer the importer's OWN extension so a Rust `mod helper` resolves to helper.rs,
+        # not a sibling helper.rb, when same-named files of different languages coexist.
+        own = os.path.splitext(rel)[1].lower()
+        default = [".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".rb", ".rs",
+                   ".go", ".py", ".sh", ".bash", ".tf", ".mk",
+                   ".h", ".hpp", ".hh", ".c", ".cpp", ".cc", ".php", ".java"]
+        exts = [""] + ([own] if own in default else []) + [e for e in default if e != own]
+        idx_files = ("index.js", "index.ts", "mod.rs", "__init__.py")
+        for b in bases:
+            for e in exts:
+                c = b + e
+                if c in relset and c != rel:
+                    return c
+            for idx in idx_files:
+                c = os.path.join(b, idx)
+                if c in relset and c != rel:
+                    return c
+        name = os.path.basename(t)
+        if "." in name and name in basename_index and len(basename_index[name]) == 1 \
+                and basename_index[name][0] != rel:
+            return basename_index[name][0]
+        return None
+
+    def _link(self, rel, predicate, target, kind, ctx, counters):
+        """Create one structural edge: a file→file edge if the target resolves to a scanned
+        file, else (for dependency kinds) a file→referent `depends_on` edge."""
+        target = (target or "").strip()
+        if not target:
+            return 0
+        tgt_file = None
+        if kind in BUILD_LOCAL_KINDS:
+            tgt_file = self._resolve_target_file(rel, target, kind, ctx)
+        if tgt_file:
+            iid = self.add_interaction(rel, predicate, tgt_file, subj_kind="file", obj_kind="file")
+            self.add_evidence("interaction", iid, "static", f"{rel}: {predicate} {target}",
+                              agent="build", activity="build_from_repo", weight=0.6)
+            return 1
+        if kind not in BUILD_EXTERNAL_KINDS:       # module_local / unresolved file → skip
+            return 0
+        name = _external_name(kind, target)
+        if not name or counters["deps"] >= BUILD_MAX_REFS_PER_FILE:
+            return 0
+        ref_id = self.upsert_entity("referent", name)
+        rsym = self.conn.execute("SELECT symbol_id FROM entity WHERE id=?", (ref_id,)).fetchone()["symbol_id"]
+        iid = self.add_interaction(rel, "depends_on", rsym, subj_kind="file", obj_kind="referent")
+        self.add_evidence("interaction", iid, "static", f"{rel} depends_on {name}",
+                          agent="build", activity="build_from_repo", weight=0.5)
+        counters["deps"] += 1
+        return 1
 
     def _seed_file_references(self, rel, text, relset, basename_index):
         """Non-Python files: link to another repo file they mention by path or unique basename

@@ -14,7 +14,9 @@ constants); this is the map.
   missing-value token) until a real manager/name/version is resolved — so ids are
   parseable/greppable and close to conformant, though not yet fully SCIP-interoperable. v1
   resolves symbols by name-within-file. **Real-world referents** (external services, APIs, data stores, domain
-  concepts) are `kind='referent'`, linked from code by a `realizes` interaction.
+  concepts) are `kind='referent'`: linked from code by a `realizes` interaction (agent-recorded,
+  semantic) or a `depends_on` interaction (auto-recorded by `wm build` for a package / container
+  image / CI action / Terraform module literally declared in the source).
 - **`interaction`** — edges (`subject → predicate → object`), e.g. `calls`, `imports`,
   `depends_on`, `implements`, `reads`, `writes`, `uses`, `realizes`. Carries
   `observed_conf`, `normative_conf`, `validation`, `entrenchment`, and `invalidated_at`

@@ -348,6 +348,226 @@ class TestBuild(Base):
         self.assertGreaterEqual(stats["build"]["dropped_files"], 1)  # no silent truncation
 
 
+class TestBuildLanguages(Base):
+    def _poly(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            fp = os.path.join(d, p)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w").write(s)
+        w("app/index.js", "import React from 'react'\nimport {x} from './util'\nconst y=require('lodash')\n")
+        w("app/util.js", "export const z=1\n")
+        w("app/main.go", 'package main\nimport (\n "fmt"\n "github.com/gin-gonic/gin"\n)\n')
+        w("app/lib.rs", "mod helper;\nuse serde::Serialize;\nuse std::fmt;\n")
+        w("app/helper.rs", "pub fn h(){}\n")
+        w("app/server.rb", "require 'sinatra'\nrequire_relative 'helper'\n")
+        w("app/helper.rb", "def h; end\n")
+        w("Dockerfile", "FROM node:18\nCOPY app/index.js /app/\n")
+        w("docker-compose.yml", "services:\n  web:\n    image: postgres:16\n")
+        w(".github/workflows/ci.yml", "jobs:\n  b:\n    steps:\n      - uses: actions/checkout@v4\n")
+        w("infra/main.tf", 'module "vpc" {\n  source = "terraform-aws-modules/vpc/aws"\n}\n')
+        return d
+
+    def _has(self, s, p, o_name):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path=? AND i.predicate=? AND (oe.path=? OR oe.name=?) AND i.invalidated_at IS NULL",
+            (s, p, o_name, o_name)).fetchone() is not None
+
+    def test_local_import_edges_resolve_to_files(self):
+        d = self._poly(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("app/index.js", "imports", "app/util.js"))   # JS relative
+        self.assertTrue(self._has("app/server.rb", "imports", "app/helper.rb"))  # Ruby require_relative
+        self.assertTrue(self._has("app/lib.rs", "includes", "app/helper.rs"))   # Rust mod
+        self.assertTrue(self._has("Dockerfile", "references", "app/index.js"))  # Docker COPY
+
+    def test_external_dependencies_become_referents(self):
+        d = self._poly(); self.wm.build_from_repo(d)
+        for subj, dep in [("app/index.js", "react"), ("app/index.js", "lodash"),
+                          ("app/main.go", "github.com/gin-gonic/gin"), ("app/lib.rs", "serde"),
+                          ("app/server.rb", "sinatra"), ("Dockerfile", "node:18"),
+                          ("docker-compose.yml", "postgres:16"),
+                          (".github/workflows/ci.yml", "actions/checkout@v4"),
+                          ("infra/main.tf", "terraform-aws-modules/vpc/aws")]:
+            self.assertTrue(self._has(subj, "depends_on", dep), f"{subj} -> {dep}")
+        # dependency targets are referents, not files
+        r = self.wm.conn.execute("SELECT kind FROM entity WHERE name='react'").fetchone()
+        self.assertEqual(r["kind"], "referent")
+
+    def test_stdlib_is_not_recorded_as_dependency(self):
+        d = self._poly(); self.wm.build_from_repo(d)
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='fmt'").fetchone())  # Go stdlib
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='std'").fetchone())  # Rust std
+
+    def test_dependency_edges_are_observation_only(self):
+        d = self._poly(); self.wm.build_from_repo(d)
+        for r in self.wm.conn.execute(
+                "SELECT normative_conf, validation FROM interaction WHERE predicate='depends_on'").fetchall():
+            self.assertEqual(r["normative_conf"], 0.0)      # a declared dep is a sighting, not a proof
+            self.assertEqual(r["validation"], "unverified")
+
+    def test_language_extraction_is_idempotent(self):
+        d = self._poly(); self.wm.build_from_repo(d)
+        counts = (self.wm.conn.execute("SELECT COUNT(*) n FROM entity").fetchone()["n"],
+                  self.wm.conn.execute("SELECT COUNT(*) n FROM interaction").fetchone()["n"])
+        stats = self.wm.build_from_repo(d)
+        self.assertEqual(stats["build"]["entities_added"], 0)
+        self.assertEqual(stats["build"]["interactions_added"], 0)
+
+
+class TestBuildTier1(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            fp = os.path.join(d, p)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w").write(s)
+        w("com/foo/App.java", "package com.foo;\nimport com.foo.Util;\n"
+                              "import org.springframework.boot.SpringApplication;\nimport java.util.List;\n")
+        w("com/foo/Util.java", "package com.foo;\npublic class Util {}\n")
+        w("main.c", '#include "inc/helper.h"\n#include <boost/asio.hpp>\n#include <stdio.h>\n')
+        w("inc/helper.h", "int helper();\n")
+        w("cs/Program.cs", "using System.Linq;\nusing Newtonsoft.Json;\n")
+        w("php/index.php", "<?php\nrequire_once 'php/lib.php';\n"
+                           "use Symfony\\Component\\HttpFoundation\\Request;\nuse App\\Model\\User;\n")
+        w("php/lib.php", "<?php\nfunction lib(){}\n")
+        return d
+
+    def _has(self, s, p, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path=? AND i.predicate=? AND (oe.path=? OR oe.name=?) AND i.invalidated_at IS NULL",
+            (s, p, o, o)).fetchone() is not None
+
+    def test_java_local_fqn_and_external(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("com/foo/App.java", "imports", "com/foo/Util.java"))   # FQN → file
+        self.assertTrue(self._has("com/foo/App.java", "depends_on", "org.springframework"))
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name LIKE 'java.util%'").fetchone())
+
+    def test_c_local_include_and_library(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("main.c", "includes", "inc/helper.h"))          # #include "..."
+        self.assertTrue(self._has("main.c", "depends_on", "boost"))               # <boost/asio.hpp>
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='stdio.h'").fetchone())  # <stdio.h> skipped
+
+    def test_csharp_external_and_system_skip(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("cs/Program.cs", "depends_on", "Newtonsoft.Json"))
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name LIKE 'System%'").fetchone())
+
+    def test_php_local_include_and_vendor_use(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("php/index.php", "includes", "php/lib.php"))     # require_once
+        self.assertTrue(self._has("php/index.php", "depends_on", "Symfony"))       # use vendor ns
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='App'").fetchone())  # app ns skipped
+
+    def test_tier1_edges_observation_only(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        for r in self.wm.conn.execute("SELECT normative_conf, validation FROM interaction").fetchall():
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+
+
+class TestBuildTier2(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            fp = os.path.join(d, p)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w").write(s)
+        w("App.kt", "package a\nimport retrofit2.Retrofit\nimport kotlin.collections.List\n")
+        w("View.swift", "import SwiftUI\nimport Alamofire\n")
+        w("main.dart", "import 'package:http/http.dart';\nimport 'util.dart';\nimport 'dart:async';\n")
+        w("util.dart", "void u(){}\n")
+        w("Main.scala", "import cats.effect.IO\nimport scala.collection.mutable\n")
+        w("m.ex", "defmodule M do\n  use Phoenix.Controller\n  alias Enum\nend\n")
+        return d
+
+    def _dep(self, s, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate='depends_on' AND oe.name=?",
+            (s, o)).fetchone() is not None
+
+    def _absent(self, name):
+        return self.wm.conn.execute("SELECT 1 FROM entity WHERE name=?", (name,)).fetchone() is None
+
+    def test_tier2_external_deps(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._dep("App.kt", "retrofit2.Retrofit"))     # Kotlin
+        self.assertTrue(self._dep("View.swift", "Alamofire"))          # Swift
+        self.assertTrue(self._dep("main.dart", "http"))                # Dart package:
+        self.assertTrue(self._dep("Main.scala", "cats.effect"))        # Scala
+        self.assertTrue(self._dep("m.ex", "Phoenix"))                  # Elixir
+
+    def test_dart_local_import_resolves(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='main.dart' AND i.predicate='imports' AND oe.path='util.dart'").fetchone())
+
+    def test_tier2_stdlib_skipped(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        for n in ("kotlin.collections", "scala.collection", "Enum", "SwiftUI"):
+            self.assertTrue(self._absent(n), n)
+
+
+class TestBuildManifests(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            open(os.path.join(d, p), "w").write(s)
+        w("package.json", '{"dependencies":{"react":"^18"},"devDependencies":{"jest":"^29"}}')
+        w("requirements.txt", "requests==2.31\nflask>=2\n# c\n-r other.txt\n")
+        w("Cargo.toml", '[dependencies]\nserde = "1"\ntokio = { version = "1" }\n')
+        w("go.mod", "module example.com/app\nrequire (\n\tgithub.com/gin-gonic/gin v1.9.1\n)\n")
+        w("pom.xml", "<project><dependencies><dependency><groupId>org.springframework</groupId>"
+                     "<artifactId>spring-core</artifactId></dependency></dependencies></project>")
+        w("build.gradle", 'dependencies {\n  implementation("com.squareup.okhttp3:okhttp:4.9.0")\n}\n')
+        w("composer.json", '{"require":{"symfony/console":"^6","php":"^8"}}')
+        return d
+
+    def _dep(self, s, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate='depends_on' AND oe.name=?",
+            (s, o)).fetchone() is not None
+
+    def test_manifests_yield_precise_deps(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._dep("package.json", "react"))
+        self.assertTrue(self._dep("package.json", "jest"))
+        self.assertTrue(self._dep("requirements.txt", "requests"))
+        self.assertTrue(self._dep("requirements.txt", "flask"))
+        self.assertTrue(self._dep("Cargo.toml", "serde"))
+        self.assertTrue(self._dep("go.mod", "github.com/gin-gonic/gin"))
+        self.assertTrue(self._dep("pom.xml", "org.springframework:spring-core"))
+        self.assertTrue(self._dep("build.gradle", "com.squareup.okhttp3:okhttp"))
+        self.assertTrue(self._dep("composer.json", "symfony/console"))
+
+    def test_manifest_skips_and_observation_only(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        # composer 'php' pseudo-package and requirements '-r' line are not deps
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='php'").fetchone())
+        for r in self.wm.conn.execute("SELECT normative_conf, validation FROM interaction").fetchall():
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+
+    def test_manifests_idempotent(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        stats = self.wm.build_from_repo(d)
+        self.assertEqual(stats["build"]["interactions_added"], 0)
+        self.assertEqual(stats["build"]["entities_added"], 0)
+
+
 class TestBuildPrune(Base):
     def _repo(self):
         import tempfile
