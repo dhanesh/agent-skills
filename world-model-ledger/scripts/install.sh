@@ -6,9 +6,12 @@
 #   scripts/install.sh [TARGET_DIR]         project install (default: current directory)
 #   scripts/install.sh --global             global install into ~/.claude (all projects)
 #   scripts/install.sh --with-constraints   also load the optional starter constraint pack
-#   scripts/install.sh --seed               repo-wide build of the CURRENT repo now (works with --global too)
+#   scripts/install.sh --seed               build the CURRENT repo's world model now
+#   scripts/install.sh --prune              build the CURRENT repo, pruning vanished-file edges
 #
-# Both modes are idempotent and run the test suite as an install gate.
+# --seed / --prune are OPERATE actions: if the skill is ALREADY installed (globally or in this
+# project) they just (re)build the current repo's model and exit — no re-install, no scope
+# needed. Only a first-time install asks for scope. Both modes are idempotent and gate on tests.
 #
 #   PROJECT mode: copies the store + CLI + harvester + hooks into the project root,
 #   merges the four hooks into <project>/.claude/settings.json (preserving existing
@@ -26,16 +29,45 @@ MODE="project"
 TARGET="$PWD"
 WITH_CONSTRAINTS=0
 SEED=0
+PRUNE=0
 for arg in "$@"; do
   case "$arg" in
     --global|-g) MODE="global" ;;
     --with-constraints) WITH_CONSTRAINTS=1 ;;
     --seed) SEED=1 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --prune) PRUNE=1 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     -*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *) TARGET="$arg" ;;
   esac
 done
+
+# ── Operate-only fast path ───────────────────────────────────────────────────
+# If the caller only wants to seed/prune and the skill is ALREADY installed
+# (project-local files, or a global ~/.claude install), just (re)build the CURRENT
+# repo's model and exit — no re-copy, no settings merge, no scope decision needed.
+if { [ "$SEED" = 1 ] || [ "$PRUNE" = 1 ]; } && [ "$MODE" = "project" ] && [ "$WITH_CONSTRAINTS" = 0 ]; then
+  WM=""
+  if [ -f "$PWD/wm.py" ] && [ -f "$PWD/world_model.py" ]; then
+    WM="$PWD"
+  elif [ -f "$HOME/.claude/world-model-ledger/wm.py" ]; then
+    WM="$HOME/.claude/world-model-ledger"
+  fi
+  if [ -n "$WM" ]; then
+    note=""; [ "$PRUNE" = 1 ] && note=" (with --prune)"
+    echo "→ world-model-ledger already installed ($WM) — building this repo's model$note (no re-install)"
+    grep -qxF '.world-model/' "$PWD/.gitignore" 2>/dev/null || \
+      printf '\n# world-model-ledger runtime store\n.world-model/\n' >> "$PWD/.gitignore"
+    mkdir -p "$PWD/.world-model"
+    args="build ."; [ "$PRUNE" = 1 ] && args="build . --prune"
+    python3 "$WM/world_model.py" --db ".world-model/model.db" $args 2>&1 \
+      | grep -E '"(files_registered|edges|entities_added|interactions_added|pruned_stale_edges)"' \
+      | sed 's/^/  •/' || true
+    echo "✓ done (existing install; hooks already active)."
+    exit 0
+  fi
+  # not installed anywhere → fall through to a first-time install (+ seed).
+fi
 
 if [[ "$MODE" == "global" ]]; then
   KIT_HOME="$HOME/.claude/world-model-ledger"
@@ -106,24 +138,26 @@ print(f"  • loaded {len(pack['constraints'])} starter constraint(s)")
 PY
     )
   fi
-  if [[ "$SEED" == "1" ]]; then
+  if [[ "$SEED" == "1" || "$PRUNE" == "1" ]]; then
     # Repo-wide world building: register files + structural edges (observation-only).
-    ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" build . 2>&1 \
-        | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' )
+    ba="build ."; [[ "$PRUNE" == "1" ]] && ba="build . --prune"
+    ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
+        | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' || true )
   fi
 fi
 
 # --seed under GLOBAL scope: the global block above installs no per-repo store, so seed the
 # CURRENT repo explicitly (this is what the user means by "--seed"). Other projects still get
 # their own .world-model/ lazily — run `build .` in each to seed them.
-if [[ "$MODE" == "global" && "$SEED" == "1" ]]; then
+if [[ "$MODE" == "global" && ( "$SEED" == "1" || "$PRUNE" == "1" ) ]]; then
   REPO="$PWD"
   grep -qxF '.world-model/' "$REPO/.gitignore" 2>/dev/null || \
     printf '\n# world-model-ledger runtime store\n.world-model/\n' >> "$REPO/.gitignore"
   mkdir -p "$REPO/.world-model"
+  ba="build ."; [[ "$PRUNE" == "1" ]] && ba="build . --prune"
   echo "→ seeding current repo ($REPO):"
-  ( cd "$REPO" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" build . 2>&1 \
-      | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' )
+  ( cd "$REPO" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
+      | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' || true )
   echo "  (other projects start empty — run 'python3 $KIT_HOME/wm.py build .' in each to seed)"
 fi
 
