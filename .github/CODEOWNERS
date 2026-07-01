@@ -1,0 +1,13 @@
+# Code owners for dhanesh/agent-skills.
+# Owners are auto-requested for review on PRs that touch matching paths.
+# (A meaningful review gate also needs branch protection enabled in repo settings:
+#  require the `skill-gates` check + at least one approving review before merge.)
+
+# Everything, by default.
+*                       @dhanesh
+
+# Shared quality gates and CI — changes here affect every skill.
+/Makefile               @dhanesh
+/scripts/gates/         @dhanesh
+/.github/               @dhanesh
+</content>
