@@ -662,9 +662,35 @@ class WorldModel:
             "open_contradictions": open_contra,
         }
 
+    def project_rules(self, budget=6):
+        """Validated, project-wide constraints (not tied to one file) that a coding agent
+        should honor whenever it edits code — surfaced in every pre-call so a rule stated
+        once is enforced everywhere, not just where an edge already exists."""
+        rows = self.conn.execute(
+            "SELECT name, kind, scope_predicate, params, severity, message_tmpl, normative_conf "
+            "FROM constraint_ WHERE invalidated_at IS NULL AND validation='validated' "
+            "ORDER BY CASE severity WHEN 'violation' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, "
+            "normative_conf DESC LIMIT ?", (budget,)).fetchall()
+        out = []
+        for r in rows:
+            params = r["params"] or "{}"
+            pats = ""
+            try:
+                p = json.loads(params)
+                if p.get("patterns"):
+                    pats = f" — forbids: {', '.join(p['patterns'])}"
+                elif p.get("maxCount") is not None:
+                    pats = f" — max {p['maxCount']} per {r['scope_predicate']}"
+            except json.JSONDecodeError:
+                pass
+            out.append({"name": r["name"], "kind": r["kind"], "severity": r["severity"],
+                        "scope": r["scope_predicate"], "detail": pats})
+        return out
+
     def precall(self, tokens, budget=8):
         """Markdown summary for the pre-call hook: what we believe about the files/
-        symbols about to be touched, partitioned ✓validated / ?unverified / ✗contradicted."""
+        symbols about to be touched, partitioned ✓validated / ?unverified / ✗contradicted,
+        plus validated project-wide rules that apply to any edit."""
         seen = set()
         val, unv, con = [], [], []
         for tok in tokens:
@@ -679,9 +705,14 @@ class WorldModel:
                 key = x.get("contradiction") or x.get("fact")
                 if key not in seen:
                     seen.add(key); con.append(x)
-        if not (val or unv or con):
+        rules = self.project_rules()
+        if not (val or unv or con or rules):
             return ""
         L = [f"world-model — what we already believe about: {', '.join(tokens)}", ""]
+        if rules:
+            L.append("◆ VALIDATED PROJECT RULES (apply to any edit):")
+            for r in rules:
+                L.append(f"  - [{r['severity']}] {r['name']} ({r['kind']}{r['detail']})")
         if con:
             L.append("✗ CONTRADICTED (resolve before trusting this code):")
             for x in con[:budget]:

@@ -48,7 +48,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 26-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 27-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -110,7 +110,7 @@ rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (26 tests — the two-axis
+Always confirm the gate passed: `python3 test_world_model.py` (27 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, measurable
 improvement). If any fail, the
@@ -132,5 +132,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 26-test install gate.
+- `assets/test_world_model.py` — the 27-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.

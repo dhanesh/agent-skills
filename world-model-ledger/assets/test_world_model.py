@@ -238,6 +238,22 @@ class TestGraphTraversal(Base):
         self.assertIn("b calls c", two_facts)
 
 
+class TestProjectRules(Base):
+    def test_validated_constraint_surfaces_in_precall(self):
+        cid = self.wm.add_constraint("no-weak-hash", "forbids", "weak hash {matched}",
+                                     scope_predicate="uses", params={"patterns": ["md5", "sha1"]})
+        # unvalidated constraint does NOT appear as a project rule
+        self.assertEqual(self.wm.project_rules(), [])
+        self.wm.add_evidence("constraint", cid, "human", "confirmed", weight=0.9)  # validate it
+        rules = self.wm.project_rules()
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["name"], "no-weak-hash")
+        # and it appears in the pre-call for a file with no recorded edges yet
+        txt = self.wm.precall(["brand/new_file.py"])
+        self.assertIn("no-weak-hash", txt)
+        self.assertIn("md5", txt)
+
+
 class TestReferents(Base):
     def test_map_creates_referent_edge_unverified(self):
         import argparse

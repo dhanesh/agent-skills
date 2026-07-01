@@ -28,7 +28,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 26-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 27-test gate.
 
 ## What gets installed
 
@@ -66,5 +66,16 @@ problem, W3C PROV, AGM/JTMS/ATMS belief revision, SHACL constraint validation, S
 symbol models, and standard SQLite FTS5 / recursive-CTE patterns. The full design is in
 [`docs/superpowers/specs/2026-07-01-world-model-ledger-design.md`](../docs/superpowers/specs/2026-07-01-world-model-ledger-design.md),
 and each subsystem is documented under [`references/`](references/).
+
+## Does it improve outcomes?
+
+A controlled with/without eval (24 agent runs, deterministic graders) is in
+[`eval/`](eval/), with results in
+[`docs/world-model-ledger/2026-07-01-outcome-eval.md`](../docs/world-model-ledger/2026-07-01-outcome-eval.md).
+Headline: on a task whose key fact was **non-local** (a deprecated dependency knowable only via
+the model), surfacing the pre-call context moved the agent from **0/2 → 2/2**; when the info was
+already visible in the repo it made no difference (ceiling), and it caused **no harm** when it
+had nothing relevant. The model aids outcomes specifically by delivering knowledge the agent
+doesn't already have in context.
 
 See [`SKILL.md`](SKILL.md) for the agent-facing usage and invariants.
