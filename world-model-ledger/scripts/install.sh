@@ -6,6 +6,7 @@
 #   scripts/install.sh [TARGET_DIR]         project install (default: current directory)
 #   scripts/install.sh --global             global install into ~/.claude (all projects)
 #   scripts/install.sh --with-constraints   also load the optional starter constraint pack
+#   scripts/install.sh --seed               repo-wide build now (files + structural edges)
 #
 # Both modes are idempotent and run the test suite as an install gate.
 #
@@ -24,10 +25,12 @@ ASSETS="$SKILL_DIR/assets"
 MODE="project"
 TARGET="$PWD"
 WITH_CONSTRAINTS=0
+SEED=0
 for arg in "$@"; do
   case "$arg" in
     --global|-g) MODE="global" ;;
     --with-constraints) WITH_CONSTRAINTS=1 ;;
+    --seed) SEED=1 ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     -*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *) TARGET="$arg" ;;
@@ -102,6 +105,11 @@ wm.conn.commit(); wm.close()
 print(f"  • loaded {len(pack['constraints'])} starter constraint(s)")
 PY
     )
+  fi
+  if [[ "$SEED" == "1" ]]; then
+    # Repo-wide world building: register files + structural edges (observation-only).
+    ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" build . 2>&1 \
+        | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' )
   fi
 fi
 

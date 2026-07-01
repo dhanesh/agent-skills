@@ -4,6 +4,14 @@ The update path is **hybrid**: deterministic hooks capture the *skeleton* (which
 were touched, at low confidence); the agent enriches the graph *explicitly*. A model never
 guesses facts inside a hook — that is how you get invented facts.
 
+To avoid a cold start, `wm build [path]` seeds the whole repo in one deterministic pass —
+registering every source file plus structural edges (Python imports; file references from
+shell/config/docs). Like the hooks, it is **observation only**: `observed_conf` rises but
+`normative_conf` stays 0 and status stays `unverified` (a bulk scan is a sighting, not a
+correctness judgement), and an edge is added only when both endpoints are real files it found.
+Idempotent, so re-running just refreshes. Structural referents (external services/APIs) are
+still added by the agent via `wm map`.
+
 ## (a) Marker lines — lowest friction
 
 Write these at the **start of a line** in your (assistant) turn; the Stop hook harvests them.
@@ -32,6 +40,7 @@ normative confidence.
 ## (b) `wm` CLI — precise / scriptable
 
 ```
+wm build [path] [--max-files N]                       # repo-wide seed: files + structural edges (observation-only)
 wm observe <subj> <pred> <obj> [--evidence file:line] [--conf 0.7]
 wm constraint <name> <kind> "<message>" --predicate <p> --params '<json>' [--severity ...]
 wm validate "<subj>,<pred>,<obj>" --by test:<id>|ci:<run>|doc:<path>|human   # raises normative

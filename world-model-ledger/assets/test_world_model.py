@@ -238,6 +238,69 @@ class TestGraphTraversal(Base):
         self.assertIn("b calls c", two_facts)
 
 
+class TestBuild(Base):
+    def _mini_repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "pkg"))
+        open(os.path.join(d, "pkg", "__init__.py"), "w").close()
+        with open(os.path.join(d, "pkg", "core.py"), "w") as f:
+            f.write("VALUE = 1\n")
+        with open(os.path.join(d, "pkg", "app.py"), "w") as f:
+            f.write("from pkg.core import VALUE\nimport pkg.core\n")
+        with open(os.path.join(d, "run.sh"), "w") as f:
+            f.write('#!/bin/sh\npython3 pkg/app.py\n')
+        return d
+
+    def test_build_registers_files_and_imports(self):
+        d = self._mini_repo()
+        stats = self.wm.build_from_repo(d)
+        self.assertGreaterEqual(stats["build"]["files_registered"], 4)
+        # the python import edge exists
+        edge = self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='pkg/app.py' AND i.predicate='imports' AND oe.path='pkg/core.py'"
+        ).fetchone()
+        self.assertIsNotNone(edge)
+        # the shell reference edge exists (run.sh -> pkg/app.py)
+        ref = self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='run.sh' AND i.predicate='references' AND oe.path='pkg/app.py'"
+        ).fetchone()
+        self.assertIsNotNone(ref)
+
+    def test_build_is_observation_only(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        # every seeded interaction is observed-but-unverified — a bulk scan never validates
+        rows = self.wm.conn.execute(
+            "SELECT observed_conf, normative_conf, validation FROM interaction").fetchall()
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+            self.assertGreater(r["observed_conf"], 0.0)
+
+    def test_build_is_idempotent(self):
+        d = self._mini_repo()
+        s1 = self.wm.build_from_repo(d)
+        n_int_1 = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
+        n_ev_1 = self.wm.conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
+        s2 = self.wm.build_from_repo(d)  # re-run
+        n_int_2 = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
+        n_ev_2 = self.wm.conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
+        self.assertEqual(n_int_1, n_int_2)
+        self.assertEqual(n_ev_1, n_ev_2)
+
+    def test_build_reports_truncation(self):
+        d = self._mini_repo()
+        stats = self.wm.build_from_repo(d, max_files=2)
+        self.assertEqual(stats["build"]["files_registered"], 2)
+        self.assertGreaterEqual(stats["build"]["dropped_files"], 1)  # no silent truncation
+
+
 class TestProjectRules(Base):
     def test_validated_constraint_surfaces_in_precall(self):
         cid = self.wm.add_constraint("no-weak-hash", "forbids", "weak hash {matched}",

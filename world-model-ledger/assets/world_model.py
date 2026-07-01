@@ -51,6 +51,21 @@ ENTRENCHMENT_RANK = {
 
 VALIDATIONS = ("unverified", "validated", "contradicted", "stale")
 
+# Repo-wide `build` (seeding) — deterministic structural scan, observation-only.
+BUILD_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".world-model", ".venv",
+                     "venv", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+                     ".idea", ".vscode", ".tox", ".next", "target", "vendor"}
+BUILD_LANG_BY_EXT = {
+    ".py": "python", ".sh": "shell", ".bash": "shell", ".js": "javascript",
+    ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript", ".go": "go",
+    ".rs": "rust", ".rb": "ruby", ".java": "java", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".hpp": "cpp", ".cs": "csharp", ".php": "php", ".md": "markdown", ".json": "json",
+    ".yaml": "yaml", ".yml": "yaml", ".toml": "toml", ".cfg": "ini", ".ini": "ini",
+    ".sql": "sql", ".mk": "make",
+}
+BUILD_MAX_BYTES = 1_000_000
+BUILD_MAX_REFS_PER_FILE = 40
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entity (
   id           INTEGER PRIMARY KEY,
@@ -632,6 +647,149 @@ class WorldModel:
         return [r["id"] for r in self.conn.execute(
             "SELECT id FROM entity WHERE name LIKE ? OR path LIKE ? LIMIT 50", (like, like)).fetchall()]
 
+    # ── repo-wide build / seeding (deterministic, observation-only) ─────────────
+    def build_from_repo(self, root=".", max_files=5000):
+        """Walk a repository once and seed the model: register source files as entities
+        and record STRUCTURAL interactions (Python imports; generic file references from
+        shell/config/docs). Everything is recorded as OBSERVATION only — observed_conf
+        rises, but normative_conf stays 0 and validation stays 'unverified' (a bulk scan
+        is a sighting, never a correctness judgement). Idempotent; re-running refreshes.
+        Honors the no-invented-facts rule: an edge is added only when BOTH endpoints are
+        real files found in this scan."""
+        import ast
+        root = os.path.abspath(root)
+
+        # 1) enumerate registerable source files (skip vendored/build dirs, binaries, huge files)
+        collected = []
+        for dirpath, dirs, fnames in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in BUILD_IGNORE_DIRS]
+            for fn in fnames:
+                ext = os.path.splitext(fn)[1].lower()
+                if ext not in BUILD_LANG_BY_EXT:
+                    continue
+                ap = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getsize(ap) > BUILD_MAX_BYTES:
+                        continue
+                except OSError:
+                    continue
+                collected.append((os.path.relpath(ap, root), ap, ext))
+        collected.sort()
+        dropped = 0
+        if len(collected) > max_files:
+            dropped = len(collected) - max_files
+            collected = collected[:max_files]
+
+        relset = {rel for rel, _, _ in collected}
+        basename_index = {}
+        for rel, _, _ in collected:
+            basename_index.setdefault(os.path.basename(rel), []).append(rel)
+        mod_index = self._python_module_index(relset)
+
+        # 2) register entities
+        for rel, _ap, ext in collected:
+            self.upsert_entity("file", os.path.basename(rel), path=rel, lang=BUILD_LANG_BY_EXT[ext])
+
+        # 3) structural edges
+        edges = 0
+        for rel, ap, ext in collected:
+            try:
+                text = open(ap, "r", errors="replace").read()
+            except OSError:
+                continue
+            if ext == ".py":
+                edges += self._seed_python_imports(rel, text, mod_index, ast)
+            else:
+                edges += self._seed_file_references(rel, text, relset, basename_index)
+
+        stats = self.consolidate()
+        stats["build"] = {"files_registered": len(collected), "edges": edges,
+                          "dropped_files": dropped, "root": root}
+        if dropped:
+            print(f"world-model build: capped at {max_files} files; {dropped} not scanned "
+                  f"(raise --max-files to include them)", file=sys.stderr)
+        return stats
+
+    @staticmethod
+    def _python_module_index(relset):
+        """dotted-module -> rel path, so `import a.b` can resolve to a real file."""
+        idx = {}
+        for rel in relset:
+            if not rel.endswith(".py"):
+                continue
+            parts = rel[:-3].split(os.sep)
+            if parts and parts[-1] == "__init__":
+                parts = parts[:-1]
+            if parts:
+                idx[".".join(parts)] = rel
+        return idx
+
+    def _seed_python_imports(self, rel, text, mod_index, ast):
+        n = 0
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return 0
+        pkg_parts = os.path.dirname(rel).split(os.sep) if os.path.dirname(rel) else []
+
+        def resolve(dotted):
+            parts = dotted.split(".")
+            while parts:                       # longest-prefix match against real modules
+                cand = ".".join(parts)
+                if cand in mod_index and mod_index[cand] != rel:
+                    return mod_index[cand]
+                parts = parts[:-1]
+            return None
+
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Import):
+                targets = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:                 # relative import → resolve against this package
+                    base = pkg_parts[:len(pkg_parts) - (node.level - 1)] if node.level > 1 else pkg_parts
+                    dotted = ".".join(base + (node.module.split(".") if node.module else []))
+                    targets = [dotted] + [f"{dotted}.{a.name}" for a in node.names]
+                else:
+                    targets = [node.module or ""] + \
+                              [f"{node.module}.{a.name}" for a in node.names if node.module]
+            for t in targets:
+                if not t:
+                    continue
+                tgt = resolve(t)
+                if tgt:
+                    iid = self.add_interaction(rel, "imports", tgt, subj_kind="file", obj_kind="file")
+                    self.add_evidence("interaction", iid, "static", f"{rel}: import {t}",
+                                      agent="build", activity="build_from_repo", weight=0.6)
+                    n += 1
+                    break                      # one edge per import statement is enough
+        return n
+
+    def _seed_file_references(self, rel, text, relset, basename_index):
+        """Non-Python files: link to another repo file they mention by path or unique basename
+        (shell hook -> script, Makefile -> gate, SKILL.md -> asset, ...)."""
+        import re as _re
+        n = 0
+        seen = set()
+        for m in _re.findall(r"[\w./$\-]*[\w\-]+\.(?:py|sh|bash|js|ts|md|json|ya?ml|toml|sql|mk)", text):
+            name = os.path.basename(m.replace("$KIT_HOME/", "").replace("${CLAUDE_PROJECT_DIR}/", ""))
+            tgt = None
+            # exact repo-relative path?
+            cand_rel = os.path.normpath(m).lstrip("./")
+            if cand_rel in relset and cand_rel != rel:
+                tgt = cand_rel
+            elif name in basename_index and len(basename_index[name]) == 1 and basename_index[name][0] != rel:
+                tgt = basename_index[name][0]   # unambiguous basename only (avoid false links)
+            if tgt and tgt not in seen:
+                seen.add(tgt)
+                iid = self.add_interaction(rel, "references", tgt, subj_kind="file", obj_kind="file")
+                self.add_evidence("interaction", iid, "static", f"{rel} -> {name}",
+                                  agent="build", activity="build_from_repo", weight=0.5)
+                n += 1
+                if n >= BUILD_MAX_REFS_PER_FILE:
+                    break
+        return n
+
     # ── consolidation (Stop hook) ───────────────────────────────────────────────
     def consolidate(self):
         """Full pass: re-derive live facts, evaluate constraints, refresh nothing else.
@@ -898,6 +1056,17 @@ def cmd_touch(wm, a):
     print(json.dumps({"entity_id": eid, "path": a.path}))
 
 
+def cmd_build(wm, a):
+    """Repo-wide world building: deterministic structural scan, observation-only."""
+    stats = wm.build_from_repo(a.path, max_files=a.max_files)
+    wm.conn.commit()
+    b = stats["build"]
+    print(json.dumps(stats, indent=2))
+    print(f"built: {b['files_registered']} files, {b['edges']} structural edges "
+          f"(all observed/unverified — validate with tests/docs to raise correctness)",
+          file=sys.stderr)
+
+
 def cmd_stats(wm, a):
     print(json.dumps(wm.stats(), indent=2))
 
@@ -973,6 +1142,12 @@ def build_parser():
 
     tp = sub.add_parser("touch", help="register a touched file (post-call skeleton)")
     tp.add_argument("path"); tp.set_defaults(func=cmd_touch)
+
+    bd = sub.add_parser("build", help="repo-wide seed: register files + structural edges (observation-only)")
+    bd.add_argument("path", nargs="?", default=".", help="repo root to scan (default: cwd)")
+    bd.add_argument("--max-files", dest="max_files", type=int, default=5000,
+                    help="cap files scanned; surplus is logged, never silently dropped")
+    bd.set_defaults(func=cmd_build)
 
     sub.add_parser("stats", help="validated/unverified/contradicted counts").set_defaults(func=cmd_stats)
     sub.add_parser("consolidate", help="re-derive + evaluate constraints (Stop hook)").set_defaults(func=cmd_consolidate)

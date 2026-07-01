@@ -28,7 +28,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 27-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 31-test gate.
 
 ## What gets installed
 
@@ -44,7 +44,12 @@ merging. Restart Claude Code afterward so the hooks load. The install runs a 27-
 
 ## Using it
 
-Record facts inline with marker lines (harvested every turn) or the `wm` CLI:
+Seed the whole repo once (optional, avoids a cold start), then record facts inline with
+marker lines (harvested every turn) or the `wm` CLI:
+
+```bash
+python3 wm.py build .    # register files + structural edges (observation-only, idempotent)
+```
 
 ```
 WM-OBSERVE: hash_pw uses bcrypt @ auth/hash.py:14
