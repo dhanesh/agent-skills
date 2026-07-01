@@ -473,6 +473,101 @@ class TestBuildTier1(Base):
             self.assertEqual(r["validation"], "unverified")
 
 
+class TestBuildTier2(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            fp = os.path.join(d, p)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w").write(s)
+        w("App.kt", "package a\nimport retrofit2.Retrofit\nimport kotlin.collections.List\n")
+        w("View.swift", "import SwiftUI\nimport Alamofire\n")
+        w("main.dart", "import 'package:http/http.dart';\nimport 'util.dart';\nimport 'dart:async';\n")
+        w("util.dart", "void u(){}\n")
+        w("Main.scala", "import cats.effect.IO\nimport scala.collection.mutable\n")
+        w("m.ex", "defmodule M do\n  use Phoenix.Controller\n  alias Enum\nend\n")
+        return d
+
+    def _dep(self, s, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate='depends_on' AND oe.name=?",
+            (s, o)).fetchone() is not None
+
+    def _absent(self, name):
+        return self.wm.conn.execute("SELECT 1 FROM entity WHERE name=?", (name,)).fetchone() is None
+
+    def test_tier2_external_deps(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._dep("App.kt", "retrofit2.Retrofit"))     # Kotlin
+        self.assertTrue(self._dep("View.swift", "Alamofire"))          # Swift
+        self.assertTrue(self._dep("main.dart", "http"))                # Dart package:
+        self.assertTrue(self._dep("Main.scala", "cats.effect"))        # Scala
+        self.assertTrue(self._dep("m.ex", "Phoenix"))                  # Elixir
+
+    def test_dart_local_import_resolves(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='main.dart' AND i.predicate='imports' AND oe.path='util.dart'").fetchone())
+
+    def test_tier2_stdlib_skipped(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        for n in ("kotlin.collections", "scala.collection", "Enum", "SwiftUI"):
+            self.assertTrue(self._absent(n), n)
+
+
+class TestBuildManifests(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            open(os.path.join(d, p), "w").write(s)
+        w("package.json", '{"dependencies":{"react":"^18"},"devDependencies":{"jest":"^29"}}')
+        w("requirements.txt", "requests==2.31\nflask>=2\n# c\n-r other.txt\n")
+        w("Cargo.toml", '[dependencies]\nserde = "1"\ntokio = { version = "1" }\n')
+        w("go.mod", "module example.com/app\nrequire (\n\tgithub.com/gin-gonic/gin v1.9.1\n)\n")
+        w("pom.xml", "<project><dependencies><dependency><groupId>org.springframework</groupId>"
+                     "<artifactId>spring-core</artifactId></dependency></dependencies></project>")
+        w("build.gradle", 'dependencies {\n  implementation("com.squareup.okhttp3:okhttp:4.9.0")\n}\n')
+        w("composer.json", '{"require":{"symfony/console":"^6","php":"^8"}}')
+        return d
+
+    def _dep(self, s, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id WHERE se.path=? AND i.predicate='depends_on' AND oe.name=?",
+            (s, o)).fetchone() is not None
+
+    def test_manifests_yield_precise_deps(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._dep("package.json", "react"))
+        self.assertTrue(self._dep("package.json", "jest"))
+        self.assertTrue(self._dep("requirements.txt", "requests"))
+        self.assertTrue(self._dep("requirements.txt", "flask"))
+        self.assertTrue(self._dep("Cargo.toml", "serde"))
+        self.assertTrue(self._dep("go.mod", "github.com/gin-gonic/gin"))
+        self.assertTrue(self._dep("pom.xml", "org.springframework:spring-core"))
+        self.assertTrue(self._dep("build.gradle", "com.squareup.okhttp3:okhttp"))
+        self.assertTrue(self._dep("composer.json", "symfony/console"))
+
+    def test_manifest_skips_and_observation_only(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        # composer 'php' pseudo-package and requirements '-r' line are not deps
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='php'").fetchone())
+        for r in self.wm.conn.execute("SELECT normative_conf, validation FROM interaction").fetchall():
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+
+    def test_manifests_idempotent(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        stats = self.wm.build_from_repo(d)
+        self.assertEqual(stats["build"]["interactions_added"], 0)
+        self.assertEqual(stats["build"]["entities_added"], 0)
+
+
 class TestBuildPrune(Base):
     def _repo(self):
         import tempfile

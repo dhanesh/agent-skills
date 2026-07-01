@@ -11,17 +11,22 @@ To avoid a cold start, `wm build [path]` seeds the whole repo in one determinist
   scanned file. Covers Python (`import`/`from`, incl. relative), Ruby (`require_relative`),
   JavaScript/TypeScript (relative `import`/`require`), Rust (`mod`), Java
   (`import` resolved by fully-qualified class name via each file's `package` declaration, source-root
-  agnostic), C/C++ (`#include "…"`), PHP (`require`/`include`), plus shell `source`, Make
-  `include`, Dockerfile `COPY`, and generic path mentions in docs/config.
+  agnostic), C/C++ (`#include "…"`), PHP (`require`/`include`), Dart (relative `import`), plus
+  shell `source`, Make `include`, Dockerfile `COPY`, and generic path mentions in docs/config.
 - **External dependency edges** (file → `depends_on` → *referent*): a dependency literally
   declared in the source — a package (JS/TS `import 'react'`, Ruby `gem`, Rust `use <crate>`,
   Go `import "github.com/…"`, Python third-party `import`, Java `import org.springframework.…`,
-  C# `using Newtonsoft.Json`, PHP `use Symfony\…`, C/C++ library headers `#include <boost/…>`),
+  C# `using Newtonsoft.Json`, PHP `use Symfony\…`, C/C++ library headers `#include <boost/…>`,
+  Kotlin/Scala `import`, Swift `import <Module>`, Dart `package:`, Elixir `use`/`alias`),
   a container image (Dockerfile `FROM`, compose/k8s `image:`), a CI action (GitHub Actions
-  `uses:`), or a Terraform module `source`. Language stdlibs (Go `fmt`, Rust `std`, Python `os`,
-  `java.*`/`javax.*`, C# `System.*`, PHP `App\` app namespace, bare `<stdio.h>`) are skipped.
-  Java/C#/PHP external names are coarse (package prefix / vendor namespace); precise artifacts
-  need manifest parsing (`pom.xml`/`.csproj`/`composer.json`), a planned follow-up.
+  `uses:`), or a Terraform module `source`. Language stdlibs/system modules are skipped
+  (`fmt`, `std`, `os`, `java.*`/`javax.*`, `System.*`, PHP `App\`, `kotlin.*`, `scala.*`,
+  `SwiftUI`/`Foundation`, `dart:*`, bare `<stdio.h>`).
+- **Dependency manifests** → **precise** `depends_on` edges from the declared list (more
+  reliable than scanning imports): `package.json`, `requirements.txt`, `pyproject.toml`,
+  `Pipfile`, `go.mod`, `Cargo.toml`, `pom.xml`, `build.gradle(.kts)`, `composer.json`,
+  `Chart.yaml`, `.gitlab-ci.yml`. (Source-scanned Java/C#/PHP/Kotlin/Scala external names are
+  *coarse* — a package/vendor prefix — so the manifests are the canonical dependency source.)
 
 Like the hooks, it is **observation only**: `observed_conf` rises but `normative_conf` stays 0
 and status stays `unverified` — a *declared* dependency is a sighting, not proof it is correct

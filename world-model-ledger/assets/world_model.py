@@ -72,7 +72,27 @@ BUILD_LANG_BY_EXT.update({
     ".mjs": "javascript", ".cjs": "javascript", ".rake": "ruby", ".gemspec": "ruby",
     ".tf": "terraform", ".tfvars": "terraform", ".hcl": "hcl",
     ".cc": "cpp", ".cxx": "cpp", ".hh": "cpp", ".hxx": "cpp", ".ipp": "cpp",
+    # Tier-2 languages
+    ".kt": "kotlin", ".kts": "kotlin", ".swift": "swift", ".dart": "dart",
+    ".scala": "scala", ".sc": "scala", ".ex": "elixir", ".exs": "elixir",
 })
+# Dependency MANIFESTS (Tier-3), detected by exact filename → precise `depends_on` edges.
+BUILD_MANIFEST_FILES = {
+    "package.json": "npm-manifest", "composer.json": "composer",
+    "pyproject.toml": "pyproject", "pipfile": "pipfile", "cargo.toml": "cargo",
+    "go.mod": "go-mod", "pom.xml": "maven", "chart.yaml": "helm-chart",
+    ".gitlab-ci.yml": "gitlab-ci",
+}
+MANIFEST_LANGS = set(BUILD_MANIFEST_FILES.values()) | {"gradle", "pip-requirements"}
+# Tier-2 stdlib prefixes / system modules skipped as external deps.
+KOTLIN_STDLIB = {"kotlin", "kotlinx", "java", "javax", "jakarta"}
+SCALA_STDLIB = {"scala", "java", "javax"}
+SWIFT_SYSTEM = {"Foundation", "UIKit", "SwiftUI", "Combine", "Swift", "Dispatch",
+                "CoreData", "CoreGraphics", "CoreLocation", "MapKit", "AVFoundation",
+                "os", "XCTest", "Testing"}
+ELIXIR_STDLIB = {"Enum", "Map", "String", "List", "Keyword", "Logger", "GenServer",
+                 "Application", "Supervisor", "Process", "Task", "Agent", "IO", "Kernel",
+                 "Integer", "Float", "Stream", "Regex", "File", "Path", "System", "Registry"}
 # Files with no/ambiguous extension, matched by (lowercased) basename or path.
 BUILD_SPECIAL_FILENAMES = {
     "dockerfile": "dockerfile", "containerfile": "dockerfile",
@@ -82,7 +102,8 @@ BUILD_SPECIAL_FILENAMES = {
 # Languages whose edges come ONLY from the language extractor (running the generic
 # file-reference scan on real code would add noisy string-literal edges).
 CODE_LANGS = {"python", "javascript", "typescript", "ruby", "go", "rust",
-              "java", "c", "cpp", "csharp", "php"}
+              "java", "c", "cpp", "csharp", "php",
+              "kotlin", "swift", "dart", "scala", "elixir"}
 JAVA_STDLIB_PREFIXES = {"java", "javax", "jakarta", "sun", "jdk"}
 CS_STDLIB_PREFIXES = {"System", "Microsoft"}   # Microsoft.* is often a real dep, but noisy → skip by default
 PHP_APP_NAMESPACES = {"App", "Tests", "Test", "Database"}
@@ -290,14 +311,210 @@ def _extract_php(text, rel):
     return out
 
 
+# ── Tier-2 languages (Kotlin, Swift, Dart, Scala, Elixir) ────────────────────────
+def _extract_kotlin(text, rel):
+    out = []
+    for imp in re.findall(r"^\s*import\s+([\w.]+(?:\.\*)?)", text, re.M):
+        imp = imp[:-2] if imp.endswith(".*") else imp
+        segs = imp.split(".")
+        if segs[0] in KOTLIN_STDLIB:
+            continue
+        out.append(("depends_on", ".".join(segs[:2]), "external"))
+    return out
+
+
+def _extract_swift(text, rel):
+    out = []
+    for m in re.findall(r"^\s*import\s+(?:class\s+|struct\s+|func\s+|enum\s+)?([A-Za-z_]\w*)", text, re.M):
+        if m not in SWIFT_SYSTEM:
+            out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_dart(text, rel):
+    out = []
+    for spec in re.findall(r"""(?:import|export)\s+['"]([^'"]+)['"]""", text):
+        if spec.startswith("dart:"):
+            continue
+        if spec.startswith("package:"):
+            out.append(("depends_on", spec[len("package:"):].split("/")[0], "external"))
+        else:
+            out.append(("imports", spec, "file"))       # relative .dart file
+    return out
+
+
+def _extract_scala(text, rel):
+    out = []
+    for imp in re.findall(r"^\s*import\s+([\w.]+)", text, re.M):
+        segs = imp.split(".")
+        if segs[0] in SCALA_STDLIB:
+            continue
+        out.append(("depends_on", ".".join(segs[:2]), "external"))
+    return out
+
+
+def _extract_elixir(text, rel):
+    out, seen = [], set()
+    for m in re.findall(r"^\s*(?:alias|import|use|require)\s+([A-Z][\w.]*)", text, re.M):
+        top = m.split(".")[0]
+        if top in ELIXIR_STDLIB or top in seen:
+            continue
+        seen.add(top)
+        out.append(("depends_on", top, "external"))
+    return out
+
+
+# ── Tier-3 dependency manifests (precise declared dependencies) ──────────────────
+def _toml_load(text):
+    try:
+        import tomllib
+        return tomllib.loads(text)
+    except Exception:
+        return None
+
+
+def _json_load(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _extract_npm(text, rel):
+    d = _json_load(text) or {}
+    out = []
+    for k in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        for name in (d.get(k) or {}):
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_composer(text, rel):
+    d = _json_load(text) or {}
+    out = []
+    for k in ("require", "require-dev"):
+        for name in (d.get(k) or {}):
+            if name == "php" or name.startswith("ext-"):
+                continue
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_pyproject(text, rel):
+    d = _toml_load(text)
+    out = []
+    if not d:
+        return out
+    proj = d.get("project", {}) or {}
+    for dep in proj.get("dependencies", []) or []:
+        m = re.match(r"[A-Za-z0-9._-]+", dep)
+        if m:
+            out.append(("depends_on", m.group(0), "external"))
+    for grp in (proj.get("optional-dependencies", {}) or {}).values():
+        for dep in grp:
+            m = re.match(r"[A-Za-z0-9._-]+", dep)
+            if m:
+                out.append(("depends_on", m.group(0), "external"))
+    for name in (d.get("tool", {}).get("poetry", {}).get("dependencies", {}) or {}):
+        if name.lower() != "python":
+            out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_pip_requirements(text, rel):
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "-", "git+", "http", ".", "/")):
+            continue
+        m = re.match(r"[A-Za-z0-9._-]+", line)
+        if m:
+            out.append(("depends_on", m.group(0), "external"))
+    return out
+
+
+def _extract_pipfile(text, rel):
+    d = _toml_load(text)
+    out = []
+    if d:
+        for sec in ("packages", "dev-packages"):
+            for name in (d.get(sec, {}) or {}):
+                out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_cargo(text, rel):
+    d = _toml_load(text)
+    out = []
+    if d:
+        for sec in ("dependencies", "dev-dependencies", "build-dependencies"):
+            for name in (d.get(sec, {}) or {}):
+                out.append(("depends_on", name, "external"))
+    return out
+
+
+def _extract_gomod(text, rel):
+    out = []
+    for blk in re.findall(r"require\s*\(([^)]*)\)", text, re.S):
+        for line in blk.splitlines():
+            m = re.match(r"\s*(\S+)\s+v", line)
+            if m:
+                out.append(("depends_on", m.group(1), "external"))
+    for m in re.findall(r"^\s*require\s+([^\s(]+)\s+v", text, re.M):
+        out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_maven(text, rel):
+    out = []
+    for dep in re.findall(r"<dependency>(.*?)</dependency>", text, re.S):
+        g = re.search(r"<groupId>([^<]+)</groupId>", dep)
+        a = re.search(r"<artifactId>([^<]+)</artifactId>", dep)
+        if g and a:
+            out.append(("depends_on", f"{g.group(1).strip()}:{a.group(1).strip()}", "external"))
+    return out
+
+
+def _extract_gradle(text, rel):
+    out = []
+    for m in re.findall(
+            r"""\b(?:implementation|api|compileOnly|runtimeOnly|testImplementation|"""
+            r"""androidTestImplementation|kapt|ksp|annotationProcessor)\s*[\(\s]\s*"""
+            r"""["']([\w.\-]+:[\w.\-]+)(?::[\w.\-]+)?["']""", text):
+        out.append(("depends_on", m, "external"))
+    return out
+
+
+def _extract_helm(text, rel):
+    return [("depends_on", n, "external")
+            for n in re.findall(r"""-\s*name:\s*["']?([\w.\-]+)""", text)]
+
+
+def _extract_gitlab(text, rel):
+    out = []
+    for img in re.findall(r"""^\s*image:\s*["']?([^\s"'#]+)""", text, re.M | re.I):
+        out.append(("depends_on", img, "external"))
+    for inc in re.findall(r"""^\s*-?\s*local:\s*["']?([^\s"'#]+)""", text, re.M):
+        out.append(("references", inc, "file"))
+    return out
+
+
 BUILD_EXTRACTORS = {
     "python": _extract_python, "javascript": _extract_js, "typescript": _extract_js,
     "ruby": _extract_ruby, "go": _extract_go, "rust": _extract_rust,
     "java": _extract_java, "c": _extract_c, "cpp": _extract_c,
     "csharp": _extract_csharp, "php": _extract_php,
+    "kotlin": _extract_kotlin, "swift": _extract_swift, "dart": _extract_dart,
+    "scala": _extract_scala, "elixir": _extract_elixir,
     "dockerfile": _extract_dockerfile, "compose": _extract_compose,
     "github-actions": _extract_actions, "terraform": _extract_terraform,
     "make": _extract_make, "shell": _extract_shell,
+    # manifests
+    "npm-manifest": _extract_npm, "composer": _extract_composer,
+    "pyproject": _extract_pyproject, "pip-requirements": _extract_pip_requirements,
+    "pipfile": _extract_pipfile, "cargo": _extract_cargo, "go-mod": _extract_gomod,
+    "maven": _extract_maven, "gradle": _extract_gradle, "helm-chart": _extract_helm,
+    "gitlab-ci": _extract_gitlab,
 }
 
 
@@ -1059,9 +1276,16 @@ class WorldModel:
 
     @staticmethod
     def _detect_lang(rel):
-        """Language tag for a repo file, by special filename / path / extension (or None)."""
+        """Language tag for a repo file, by special filename / manifest / path / extension."""
         base = os.path.basename(rel).lower()
         norm = "/" + rel.replace(os.sep, "/")
+        # dependency manifests (exact filename / pattern) take precedence over extension
+        if base in BUILD_MANIFEST_FILES:
+            return BUILD_MANIFEST_FILES[base]
+        if base.startswith("requirements") and base.endswith(".txt"):
+            return "pip-requirements"
+        if base.endswith(".gradle") or base.endswith(".gradle.kts"):
+            return "gradle"
         if base in BUILD_SPECIAL_FILENAMES:
             return BUILD_SPECIAL_FILENAMES[base]
         if base.startswith("dockerfile.") or base.startswith("containerfile."):
@@ -1088,8 +1312,8 @@ class WorldModel:
                     continue
                 seen.add(key)
                 edges += self._link(rel, predicate, target, kind, ctx, counters)
-        # non-code files also get the generic file-reference scan (docs/config/scripts)
-        if lang not in CODE_LANGS:
+        # non-code, non-manifest files also get the generic file-reference scan (docs/config)
+        if lang not in CODE_LANGS and lang not in MANIFEST_LANGS:
             edges += self._seed_file_references(rel, text, ctx["relset"], ctx["basename"])
         return edges
 
