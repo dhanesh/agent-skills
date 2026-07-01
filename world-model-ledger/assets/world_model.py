@@ -71,6 +71,7 @@ BUILD_MAX_REFS_PER_FILE = 40
 BUILD_LANG_BY_EXT.update({
     ".mjs": "javascript", ".cjs": "javascript", ".rake": "ruby", ".gemspec": "ruby",
     ".tf": "terraform", ".tfvars": "terraform", ".hcl": "hcl",
+    ".cc": "cpp", ".cxx": "cpp", ".hh": "cpp", ".hxx": "cpp", ".ipp": "cpp",
 })
 # Files with no/ambiguous extension, matched by (lowercased) basename or path.
 BUILD_SPECIAL_FILENAMES = {
@@ -80,7 +81,11 @@ BUILD_SPECIAL_FILENAMES = {
 }
 # Languages whose edges come ONLY from the language extractor (running the generic
 # file-reference scan on real code would add noisy string-literal edges).
-CODE_LANGS = {"python", "javascript", "typescript", "ruby", "go", "rust"}
+CODE_LANGS = {"python", "javascript", "typescript", "ruby", "go", "rust",
+              "java", "c", "cpp", "csharp", "php"}
+JAVA_STDLIB_PREFIXES = {"java", "javax", "jakarta", "sun", "jdk"}
+CS_STDLIB_PREFIXES = {"System", "Microsoft"}   # Microsoft.* is often a real dep, but noisy → skip by default
+PHP_APP_NAMESPACES = {"App", "Tests", "Test", "Database"}
 # Python top-level modules we don't record as external dependencies (stdlib noise).
 PY_STDLIB = {
     "os", "sys", "re", "json", "math", "time", "datetime", "typing", "collections",
@@ -248,13 +253,81 @@ def _extract_shell(text, rel):
                                 text, re.M)]
 
 
+def _extract_java(text, rel):
+    # `import a.b.C;` → resolve to a repo class (kind 'java') else external artifact.
+    out = []
+    for imp in re.findall(r"^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;", text, re.M):
+        out.append(("imports", imp[:-2] if imp.endswith(".*") else imp, "java"))
+    return out
+
+
+def _extract_c(text, rel):
+    out = []
+    for q in re.findall(r'#\s*include\s+"([^"]+)"', text):          # local header
+        out.append(("includes", q, "file"))
+    for a in re.findall(r"#\s*include\s+<([^>]+)>", text):          # system/library header
+        if "/" in a:                                               # e.g. <boost/asio.hpp>, <gtest/gtest.h>
+            out.append(("depends_on", a.split("/")[0], "external"))
+        # bare <stdio.h>/<vector> stdlib headers are skipped (noise)
+    return out
+
+
+def _extract_csharp(text, rel):
+    out = []
+    for u in re.findall(r"^\s*using\s+(?:static\s+)?([\w.]+)\s*;", text, re.M):
+        if " = " in u:                                             # `using X = A.B;` alias — skip
+            continue
+        out.append(("imports", u, "csharp"))
+    return out
+
+
+def _extract_php(text, rel):
+    out = []
+    for m in re.findall(r"""(?:require|include)(?:_once)?\s*\(?\s*['"]([^'"]+\.php)['"]""", text):
+        out.append(("includes", m, "file"))                        # local include (reliable)
+    for u in re.findall(r"^\s*use\s+\\?([\\\w]+)", text, re.M):     # namespace import
+        out.append(("imports", u, "php_ns"))
+    return out
+
+
 BUILD_EXTRACTORS = {
     "python": _extract_python, "javascript": _extract_js, "typescript": _extract_js,
     "ruby": _extract_ruby, "go": _extract_go, "rust": _extract_rust,
+    "java": _extract_java, "c": _extract_c, "cpp": _extract_c,
+    "csharp": _extract_csharp, "php": _extract_php,
     "dockerfile": _extract_dockerfile, "compose": _extract_compose,
     "github-actions": _extract_actions, "terraform": _extract_terraform,
     "make": _extract_make, "shell": _extract_shell,
 }
+
+
+def _external_name(kind, target):
+    """Map an unresolved import to an external dependency name (or None to skip stdlib)."""
+    if kind == "external":
+        return target
+    if kind == "module":                       # python / ruby → top-level package
+        return _toplevel(target)
+    if kind == "java":
+        segs = target.split(".")
+        if segs[0] in JAVA_STDLIB_PREFIXES:
+            return None
+        return ".".join(segs[:2])              # coarse artifact group (precise deps need pom/gradle)
+    if kind == "csharp":
+        segs = target.split(".")
+        if segs[0] in CS_STDLIB_PREFIXES:
+            return None
+        return ".".join(segs[:2])
+    if kind == "php_ns":
+        segs = target.split("\\")
+        if segs[0] in PHP_APP_NAMESPACES:
+            return None
+        return segs[0]                         # vendor namespace
+    return _toplevel(target)
+
+
+# Kinds that first try to resolve to a local file, and kinds eligible to become external deps.
+BUILD_LOCAL_KINDS = {"file", "module", "module_local", "java"}
+BUILD_EXTERNAL_KINDS = {"external", "module", "java", "csharp", "php_ns"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entity (
@@ -913,7 +986,12 @@ class WorldModel:
         basename_index = {}
         for rel, _, _ in collected:
             basename_index.setdefault(os.path.basename(rel), []).append(rel)
-        mod_index = self._python_module_index(relset)
+        ctx = {
+            "relset": relset,
+            "basename": basename_index,
+            "mod": self._python_module_index(relset),
+            "java": self._java_class_index(collected),   # FQN -> rel (reads `package` decls)
+        }
 
         # 2) register entities
         for rel, _ap, lang in collected:
@@ -926,7 +1004,7 @@ class WorldModel:
                 text = open(ap, "r", errors="replace").read()
             except OSError:
                 continue
-            edges += self._seed_edges(rel, text, lang, mod_index, relset, basename_index)
+            edges += self._seed_edges(rel, text, lang, ctx)
 
         # Optional: soft-invalidate build-origin edges for files that vanished (opt-in).
         pruned = self._prune_vanished_build_edges(root) if prune else 0
@@ -962,6 +1040,24 @@ class WorldModel:
         return idx
 
     @staticmethod
+    def _java_class_index(collected):
+        """fully-qualified Java class name -> rel path, from each file's `package` decl, so
+        `import com.foo.Bar;` resolves to the file defining that class (source root agnostic)."""
+        idx = {}
+        for rel, ap, lang in collected:
+            if lang != "java":
+                continue
+            try:
+                head = open(ap, "r", errors="replace").read(4096)
+            except OSError:
+                continue
+            m = re.search(r"^\s*package\s+([\w.]+)\s*;", head, re.M)
+            cls = os.path.splitext(os.path.basename(rel))[0]
+            fqn = f"{m.group(1)}.{cls}" if m else cls
+            idx[fqn] = rel
+        return idx
+
+    @staticmethod
     def _detect_lang(rel):
         """Language tag for a repo file, by special filename / path / extension (or None)."""
         base = os.path.basename(rel).lower()
@@ -978,7 +1074,7 @@ class WorldModel:
                 return "compose"
         return BUILD_LANG_BY_EXT.get(ext)
 
-    def _seed_edges(self, rel, text, lang, mod_index, relset, basename_index):
+    def _seed_edges(self, rel, text, lang, ctx):
         """Run the language extractor for `lang`, resolve each edge to a real file or an
         external dependency referent, and record it (observation-only)."""
         counters = {"deps": 0}
@@ -991,17 +1087,20 @@ class WorldModel:
                 if key in seen:
                     continue
                 seen.add(key)
-                edges += self._link(rel, predicate, target, kind, mod_index,
-                                    relset, basename_index, counters)
+                edges += self._link(rel, predicate, target, kind, ctx, counters)
         # non-code files also get the generic file-reference scan (docs/config/scripts)
         if lang not in CODE_LANGS:
-            edges += self._seed_file_references(rel, text, relset, basename_index)
+            edges += self._seed_file_references(rel, text, ctx["relset"], ctx["basename"])
         return edges
 
-    def _resolve_target_file(self, rel, target, kind, mod_index, relset, basename_index):
+    def _resolve_target_file(self, rel, target, kind, ctx):
         """Resolve an import/reference target to a real scanned file, or None."""
+        relset, basename_index = ctx["relset"], ctx["basename"]
+        if kind == "java":
+            cand = ctx["java"].get(target)
+            return cand if cand and cand != rel else None
         if kind in ("module", "module_local"):
-            cand = mod_index.get(target)
+            cand = ctx["mod"].get(target)
             if cand and cand != rel:
                 return cand
             base = target.replace(".", "/")
@@ -1019,7 +1118,8 @@ class WorldModel:
         # not a sibling helper.rb, when same-named files of different languages coexist.
         own = os.path.splitext(rel)[1].lower()
         default = [".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".rb", ".rs",
-                   ".go", ".py", ".sh", ".bash", ".tf", ".mk"]
+                   ".go", ".py", ".sh", ".bash", ".tf", ".mk",
+                   ".h", ".hpp", ".hh", ".c", ".cpp", ".cc", ".php", ".java"]
         exts = [""] + ([own] if own in default else []) + [e for e in default if e != own]
         idx_files = ("index.js", "index.ts", "mod.rs", "__init__.py")
         for b in bases:
@@ -1037,23 +1137,23 @@ class WorldModel:
             return basename_index[name][0]
         return None
 
-    def _link(self, rel, predicate, target, kind, mod_index, relset, basename_index, counters):
+    def _link(self, rel, predicate, target, kind, ctx, counters):
         """Create one structural edge: a file→file edge if the target resolves to a scanned
-        file, else (for module/external kinds) a file→referent `depends_on` edge."""
+        file, else (for dependency kinds) a file→referent `depends_on` edge."""
         target = (target or "").strip()
         if not target:
             return 0
         tgt_file = None
-        if kind in ("file", "module", "module_local"):
-            tgt_file = self._resolve_target_file(rel, target, kind, mod_index, relset, basename_index)
+        if kind in BUILD_LOCAL_KINDS:
+            tgt_file = self._resolve_target_file(rel, target, kind, ctx)
         if tgt_file:
             iid = self.add_interaction(rel, predicate, tgt_file, subj_kind="file", obj_kind="file")
             self.add_evidence("interaction", iid, "static", f"{rel}: {predicate} {target}",
                               agent="build", activity="build_from_repo", weight=0.6)
             return 1
-        if kind not in ("external", "module"):     # module_local / file that didn't resolve → skip
+        if kind not in BUILD_EXTERNAL_KINDS:       # module_local / unresolved file → skip
             return 0
-        name = target if kind == "external" else _toplevel(target)
+        name = _external_name(kind, target)
         if not name or counters["deps"] >= BUILD_MAX_REFS_PER_FILE:
             return 0
         ref_id = self.upsert_entity("referent", name)

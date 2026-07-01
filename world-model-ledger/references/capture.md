@@ -9,13 +9,19 @@ To avoid a cold start, `wm build [path]` seeds the whole repo in one determinist
 
 - **Local edges** (file → file): `imports` / `includes` / `references`, resolved to a real
   scanned file. Covers Python (`import`/`from`, incl. relative), Ruby (`require_relative`),
-  JavaScript/TypeScript (relative `import`/`require`), Rust (`mod`), plus shell `source`, Make
+  JavaScript/TypeScript (relative `import`/`require`), Rust (`mod`), Java
+  (`import` resolved by fully-qualified class name via each file's `package` declaration, source-root
+  agnostic), C/C++ (`#include "…"`), PHP (`require`/`include`), plus shell `source`, Make
   `include`, Dockerfile `COPY`, and generic path mentions in docs/config.
 - **External dependency edges** (file → `depends_on` → *referent*): a dependency literally
   declared in the source — a package (JS/TS `import 'react'`, Ruby `gem`, Rust `use <crate>`,
-  Go `import "github.com/…"`, Python third-party `import`), a container image
-  (Dockerfile `FROM`, compose/k8s `image:`), a CI action (GitHub Actions `uses:`), or a
-  Terraform module `source`. Language stdlibs (Go `fmt`, Rust `std`, Python `os`) are skipped.
+  Go `import "github.com/…"`, Python third-party `import`, Java `import org.springframework.…`,
+  C# `using Newtonsoft.Json`, PHP `use Symfony\…`, C/C++ library headers `#include <boost/…>`),
+  a container image (Dockerfile `FROM`, compose/k8s `image:`), a CI action (GitHub Actions
+  `uses:`), or a Terraform module `source`. Language stdlibs (Go `fmt`, Rust `std`, Python `os`,
+  `java.*`/`javax.*`, C# `System.*`, PHP `App\` app namespace, bare `<stdio.h>`) are skipped.
+  Java/C#/PHP external names are coarse (package prefix / vendor namespace); precise artifacts
+  need manifest parsing (`pom.xml`/`.csproj`/`composer.json`), a planned follow-up.
 
 Like the hooks, it is **observation only**: `observed_conf` rises but `normative_conf` stays 0
 and status stays `unverified` — a *declared* dependency is a sighting, not proof it is correct

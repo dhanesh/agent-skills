@@ -417,6 +417,62 @@ class TestBuildLanguages(Base):
         self.assertEqual(stats["build"]["interactions_added"], 0)
 
 
+class TestBuildTier1(Base):
+    def _repo(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        def w(p, s):
+            fp = os.path.join(d, p)
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            open(fp, "w").write(s)
+        w("com/foo/App.java", "package com.foo;\nimport com.foo.Util;\n"
+                              "import org.springframework.boot.SpringApplication;\nimport java.util.List;\n")
+        w("com/foo/Util.java", "package com.foo;\npublic class Util {}\n")
+        w("main.c", '#include "inc/helper.h"\n#include <boost/asio.hpp>\n#include <stdio.h>\n')
+        w("inc/helper.h", "int helper();\n")
+        w("cs/Program.cs", "using System.Linq;\nusing Newtonsoft.Json;\n")
+        w("php/index.php", "<?php\nrequire_once 'php/lib.php';\n"
+                           "use Symfony\\Component\\HttpFoundation\\Request;\nuse App\\Model\\User;\n")
+        w("php/lib.php", "<?php\nfunction lib(){}\n")
+        return d
+
+    def _has(self, s, p, o):
+        return self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path=? AND i.predicate=? AND (oe.path=? OR oe.name=?) AND i.invalidated_at IS NULL",
+            (s, p, o, o)).fetchone() is not None
+
+    def test_java_local_fqn_and_external(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("com/foo/App.java", "imports", "com/foo/Util.java"))   # FQN → file
+        self.assertTrue(self._has("com/foo/App.java", "depends_on", "org.springframework"))
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name LIKE 'java.util%'").fetchone())
+
+    def test_c_local_include_and_library(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("main.c", "includes", "inc/helper.h"))          # #include "..."
+        self.assertTrue(self._has("main.c", "depends_on", "boost"))               # <boost/asio.hpp>
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='stdio.h'").fetchone())  # <stdio.h> skipped
+
+    def test_csharp_external_and_system_skip(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("cs/Program.cs", "depends_on", "Newtonsoft.Json"))
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name LIKE 'System%'").fetchone())
+
+    def test_php_local_include_and_vendor_use(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        self.assertTrue(self._has("php/index.php", "includes", "php/lib.php"))     # require_once
+        self.assertTrue(self._has("php/index.php", "depends_on", "Symfony"))       # use vendor ns
+        self.assertIsNone(self.wm.conn.execute("SELECT 1 FROM entity WHERE name='App'").fetchone())  # app ns skipped
+
+    def test_tier1_edges_observation_only(self):
+        d = self._repo(); self.wm.build_from_repo(d)
+        for r in self.wm.conn.execute("SELECT normative_conf, validation FROM interaction").fetchall():
+            self.assertEqual(r["normative_conf"], 0.0)
+            self.assertEqual(r["validation"], "unverified")
+
+
 class TestBuildPrune(Base):
     def _repo(self):
         import tempfile
