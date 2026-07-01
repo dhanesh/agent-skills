@@ -9,8 +9,15 @@ registering every source file plus structural edges (Python imports; file refere
 shell/config/docs). Like the hooks, it is **observation only**: `observed_conf` rises but
 `normative_conf` stays 0 and status stays `unverified` (a bulk scan is a sighting, not a
 correctness judgement), and an edge is added only when both endpoints are real files it found.
-Idempotent, so re-running just refreshes. Structural referents (external services/APIs) are
-still added by the agent via `wm map`.
+Structural referents (external services/APIs) are still added by the agent via `wm map`.
+
+**Re-run safety.** Every write is an upsert on a stable key — entities on `symbol_id`,
+interactions on `(subject, predicate, object)`, evidence on `(fact, kind, ref, polarity)` —
+and `build` issues no `DELETE`. So repeated runs only *add new* rows or *refresh existing* ones
+(`first_seen` preserved, `last_seen` bumped); they never duplicate, never delete, and never
+downgrade a fact you have already validated (a re-added edge is just another observation; its
+oracle evidence still stands). The build result reports `entities_added` / `interactions_added`
+/ `evidence_added` — all `0` on an unchanged repo — so a re-run is transparently a no-op.
 
 ## (a) Marker lines — lowest friction
 

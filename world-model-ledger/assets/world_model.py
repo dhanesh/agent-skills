@@ -680,6 +680,13 @@ class WorldModel:
             dropped = len(collected) - max_files
             collected = collected[:max_files]
 
+        # Snapshot row counts so we can report ADDED-vs-UPDATED. Re-running never
+        # duplicates: entities key on symbol_id, interactions on (subject,predicate,object),
+        # evidence on (fact,kind,ref,polarity) — every write is an upsert, nothing is deleted.
+        def _n(t):
+            return self.conn.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"]
+        before_e, before_i, before_ev = _n("entity"), _n("interaction"), _n("evidence")
+
         relset = {rel for rel, _, _ in collected}
         basename_index = {}
         for rel, _, _ in collected:
@@ -703,8 +710,15 @@ class WorldModel:
                 edges += self._seed_file_references(rel, text, relset, basename_index)
 
         stats = self.consolidate()
-        stats["build"] = {"files_registered": len(collected), "edges": edges,
-                          "dropped_files": dropped, "root": root}
+        stats["build"] = {
+            "files_registered": len(collected), "edges": edges, "dropped_files": dropped,
+            # deltas prove re-runs only add/update: on an unchanged repo both are 0.
+            "entities_added": _n("entity") - before_e,
+            "entities_updated": len(collected) - (_n("entity") - before_e),
+            "interactions_added": _n("interaction") - before_i,
+            "evidence_added": _n("evidence") - before_ev,
+            "root": root,
+        }
         if dropped:
             print(f"world-model build: capped at {max_files} files; {dropped} not scanned "
                   f"(raise --max-files to include them)", file=sys.stderr)

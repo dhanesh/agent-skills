@@ -283,16 +283,63 @@ class TestBuild(Base):
             self.assertEqual(r["validation"], "unverified")
             self.assertGreater(r["observed_conf"], 0.0)
 
-    def test_build_is_idempotent(self):
+    def _counts(self):
+        c = self.wm.conn.execute
+        return (c("SELECT COUNT(*) n FROM entity").fetchone()["n"],
+                c("SELECT COUNT(*) n FROM interaction").fetchone()["n"],
+                c("SELECT COUNT(*) n FROM evidence").fetchone()["n"])
+
+    def test_build_is_idempotent_across_multiple_runs(self):
         d = self._mini_repo()
-        s1 = self.wm.build_from_repo(d)
-        n_int_1 = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
-        n_ev_1 = self.wm.conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
-        s2 = self.wm.build_from_repo(d)  # re-run
-        n_int_2 = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
-        n_ev_2 = self.wm.conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
-        self.assertEqual(n_int_1, n_int_2)
-        self.assertEqual(n_ev_1, n_ev_2)
+        self.wm.build_from_repo(d)
+        base = self._counts()
+        # run it two MORE times — counts must not budge (pure upsert, no dupes, no deletes)
+        for _ in range(2):
+            stats = self.wm.build_from_repo(d)
+            self.assertEqual(self._counts(), base)
+            self.assertEqual(stats["build"]["entities_added"], 0)
+            self.assertEqual(stats["build"]["interactions_added"], 0)
+            self.assertEqual(stats["build"]["evidence_added"], 0)
+
+    def test_build_preserves_first_seen_and_bumps_last_seen(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        row1 = self.wm.conn.execute(
+            "SELECT first_seen, last_seen FROM entity WHERE path='pkg/core.py'").fetchone()
+        self.wm.build_from_repo(d)  # re-run
+        row2 = self.wm.conn.execute(
+            "SELECT first_seen, last_seen FROM entity WHERE path='pkg/core.py'").fetchone()
+        self.assertEqual(row1["first_seen"], row2["first_seen"])   # never reset
+        self.assertGreaterEqual(row2["last_seen"], row1["last_seen"])
+
+    def test_build_adds_only_the_new_file_on_second_run(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        before = self._counts()
+        with open(os.path.join(d, "pkg", "extra.py"), "w") as f:
+            f.write("from pkg.core import VALUE\n")   # one new file with one import edge
+        stats = self.wm.build_from_repo(d)
+        self.assertEqual(stats["build"]["entities_added"], 1)      # exactly the new file
+        self.assertGreaterEqual(stats["build"]["interactions_added"], 1)
+        e_after, i_after, _ = self._counts()
+        self.assertEqual(e_after, before[0] + 1)                   # nothing else duplicated
+
+    def test_build_does_not_clobber_agent_validated_facts(self):
+        d = self._mini_repo()
+        self.wm.build_from_repo(d)
+        # agent validates the import edge with oracle (test) evidence → normative up, validated
+        iid = self.wm.conn.execute(
+            "SELECT i.id FROM interaction i JOIN entity se ON se.id=i.subject_id "
+            "JOIN entity oe ON oe.id=i.object_id "
+            "WHERE se.path='pkg/app.py' AND i.predicate='imports' AND oe.path='pkg/core.py'"
+        ).fetchone()["id"]
+        self.wm.add_evidence("interaction", iid, "test", "tests/test_app.py::t", weight=0.9)
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+        # a subsequent build (which re-adds the same edge as an OBSERVATION) must not
+        # downgrade it — oracle evidence stands, so it stays validated.
+        self.wm.build_from_repo(d)
+        self.assertEqual(self._iv(iid)["validation"], "validated")
+        self.assertGreaterEqual(self._iv(iid)["normative_conf"], W.TAU_VALIDATE)
 
     def test_build_reports_truncation(self):
         d = self._mini_repo()

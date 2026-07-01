@@ -49,7 +49,7 @@ scripts/install.sh --seed                 # also run a repo-wide build now (avoi
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 31-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 34-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -76,7 +76,10 @@ enriches it explicitly (a model never guesses facts inside a hook). Full convent
    imports; file references from shell/config/docs) in one deterministic pass — this avoids the
    cold start where the model is empty until the agent has touched files. Everything is recorded
    as **observation only** (`observed_conf` rises; `normative_conf` stays 0, `unverified`) — a
-   bulk scan is a sighting, never a correctness judgement. Idempotent; re-run anytime.
+   bulk scan is a sighting, never a correctness judgement. **Safe to re-run:** writes are upserts
+   on stable keys, so a re-build only *adds new* files/edges or *refreshes existing* ones — it
+   never duplicates or deletes rows, and never downgrades a fact you have already validated. Each
+   run reports `entities_added` / `interactions_added` (both `0` on an unchanged repo).
 1. **Record what you observe.** When you confirm a relationship, emit a marker line —
    `WM-OBSERVE: hash_pw uses bcrypt @ auth/hash.py:14` — or call
    `python3 wm.py observe hash_pw uses bcrypt --evidence auth/hash.py:14`. This raises
@@ -117,7 +120,7 @@ rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (31 tests — the two-axis
+Always confirm the gate passed: `python3 test_world_model.py` (34 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -139,5 +142,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 31-test install gate.
+- `assets/test_world_model.py` — the 34-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.
