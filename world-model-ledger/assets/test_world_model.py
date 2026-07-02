@@ -784,6 +784,27 @@ class TestExecEdgeParsing(unittest.TestCase):
         self.assertIn(("bash", "referent", "a.sh"), edges)
         self.assertIn(("python3", "referent", "t.py"), edges)
 
+    def test_quoted_operator_does_not_split(self):
+        # a `|` inside a quoted arg is a regex alternation, NOT a pipeline separator
+        edges = W.parse_exec_edges("grep -E '^(lint|check):' Makefile", self._repo("Makefile"))
+        self.assertEqual(edges, [("grep", "referent", "Makefile")])
+
+    def test_real_pipeline_still_splits_quote_aware(self):
+        edges = W.parse_exec_edges("grep '^a|b' f.txt | bash run.sh",
+                                   self._repo("f.txt", "run.sh"))
+        self.assertIn(("grep", "referent", "f.txt"), edges)
+        self.assertIn(("bash", "referent", "run.sh"), edges)
+
+    def test_verifier_detection_ignores_quoted_words(self):
+        vre = W.verifier_re_from_env()
+        # 'check' inside a quoted grep pattern is data, not a verifier signal
+        self.assertFalse(W._is_verifier_invocation("grep -E '^(lint|check):' Makefile", vre))
+        # bareword make targets / test files ARE verifier signals
+        self.assertTrue(W._is_verifier_invocation("make check", vre))
+        self.assertTrue(W._is_verifier_invocation("make test", vre))
+        self.assertTrue(W._is_verifier_invocation("bash x_test.sh", vre))
+        self.assertTrue(W._is_verifier_invocation("shellcheck a.sh", vre))
+
     def test_predicate_by_target_kind(self):
         self.assertEqual(W._predicate_for("reaper.sh"), "executes")
         self.assertEqual(W._predicate_for("bin/tool"), "executes")     # no ext → executes
@@ -832,6 +853,13 @@ class TestExecutionChannel(Base):
         self.assertEqual(r0["oracle"], 1)
         r = self._one("pytest", "executes", "tests/test_x.py")
         self.assertEqual(r["validation"], "contradicted")
+
+    def test_quoted_verb_not_treated_as_verifier(self):
+        # exit 0 but the only 'check' is inside a quoted arg → observation, no promotion
+        c = self.wm.observe_execution("grep -E '^(lint|check):' Makefile", exit_code=0,
+                                      is_repo_file=lambda t: t == "Makefile")
+        self.assertEqual(c["oracle"], 0)
+        self.assertEqual(self._one("grep", "executes", "Makefile")["validation"], "unverified")
 
     def test_unknown_exit_skips_oracle(self):
         c = self.wm.observe_execution("bash a_test.sh", exit_code=None,
@@ -1013,6 +1041,14 @@ class TestVerifierFromTranscript(Base):
             self._result("t6", is_error=False, content="deploy.sh: totally broken"))
         self._run(tp, {"deploy.sh"})
         self.assertEqual(self._iv("shellcheck", "deploy.sh")["validation"], "validated")
+
+    def test_quoted_verb_command_not_promoted(self):
+        # the Bug #2 case: a grep with 'check' in a quoted regex must not promote
+        tp = self._transcript(
+            self._use("t8", "grep -E '^(lint|check):' Makefile"),
+            self._result("t8", is_error=False))
+        c = self._run(tp, {"Makefile"})
+        self.assertEqual(c["validated"], 0)
 
     def test_idempotent_across_reruns(self):
         tp = self._transcript(

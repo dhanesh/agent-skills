@@ -180,7 +180,7 @@ def harvest_verifier_runs(wm: WorldModel, path: Path, max_rows: int,
     oracle (same conservative rule as exit_code=None). The command names the code edge;
     only its exit status crosses into normative_conf, so the two-axis invariant holds.
     Best-effort and idempotent (observe_execution keys on identity)."""
-    from world_model import verifier_re_from_env  # local import: same module family
+    from world_model import verifier_re_from_env, _is_verifier_invocation  # same module family
     vre = verifier_re if verifier_re is not None else verifier_re_from_env()
     counts = {"validated": 0, "contradicted": 0}
     try:
@@ -215,7 +215,7 @@ def harvest_verifier_runs(wm: WorldModel, path: Path, max_rows: int,
             if b.get("type") != "tool_result":
                 continue
             command = cmd_by_id.get(b.get("tool_use_id"))
-            if not command or not vre.search(command):
+            if not command or not _is_verifier_invocation(command, vre):
                 continue
             ie = b.get("is_error")
             if ie is True:

@@ -76,8 +76,8 @@ RUNNERS = {
     "npm", "npx", "pnpm", "yarn", "make", "just", "task",
     "go", "cargo", "gradle", "mvn", "dotnet", "java",
 }
-# Segment separators in a shell command line (best-effort split; NOT a shell parser).
-_SEG_SPLIT = re.compile(r"\|\||&&|[|;&\n]")
+# Pipeline/list operator chars that separate command segments (quote-aware; see _split_segments).
+_SEG_OPS = {";", "&", "|"}
 # Leading tokens that wrap the real command (stripped before reading argv[0]).
 _CMD_WRAPPERS = {"sudo", "env", "time", "command", "exec", "nohup", "nice", "xargs", "then", "do"}
 # Target extensions treated as executable code (→ `executes`); others (config/data) → `reads`.
@@ -108,6 +108,84 @@ def _predicate_for(target: str) -> str:
     return "executes" if (ext in _EXEC_EXTS or ext == "") else "reads"
 
 
+def _split_segments(command):
+    """Quote-aware split of a shell command into segments; each is a list of
+    (value, quoted) argv tokens. `value` has any surrounding quotes stripped (for path /
+    arg matching); `quoted` flags a quoted token so verifier detection can treat its
+    contents as data, not a command word.
+
+    Pipeline/list operators (`; & | && ||`) and real newlines separate segments; the same
+    characters INSIDE quotes do NOT (so `grep '^(a|b):' f` stays one segment). Backslash
+    line-continuations are collapsed first so a multi-line invocation isn't mis-split on
+    the bare newline. Non-posix lex (keeps quote chars) → best-effort, never a real shell.
+    """
+    command = re.sub(r"\\\r?\n", " ", command or "")
+    segments = []
+    for line in command.split("\n"):        # a real newline still separates statements
+        if not line.strip():
+            continue
+        try:
+            lex = shlex.shlex(line, posix=False, punctuation_chars=True)
+            lex.whitespace_split = True
+            toks = list(lex)
+        except ValueError:
+            toks = line.split()
+        cur = []
+        for t in toks:
+            if t and set(t) <= _SEG_OPS:     # a run of ; & | (e.g. '|', '&&', ';') → separator
+                if cur:
+                    segments.append(cur)
+                    cur = []
+                continue
+            quoted = bool(t) and t[0] in ("'", '"')
+            val = t[1:-1] if (quoted and len(t) >= 2 and t[-1] == t[0]) else t
+            cur.append((val, quoted))
+        if cur:
+            segments.append(cur)
+    return segments
+
+
+def _strip_wrappers(vals):
+    """Drop leading env-assignments (FOO=bar) and command wrappers (sudo/env/time/…)."""
+    while vals and (
+        (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", vals[0]) and not vals[0].startswith(("/", "."))) or
+        vals[0] in _CMD_WRAPPERS
+    ):
+        vals = vals[1:]
+    return vals
+
+
+def _segment_edges(seg, is_repo_file):
+    """(subject, subject_kind, object) execution edges from ONE quote-aware segment."""
+    vals = _strip_wrappers([v for v, _q in seg])
+    if not vals:
+        return []
+    argv0 = vals[0]
+    base = os.path.basename(argv0)
+    # option-looking args (leading '-') are dropped; is_repo_file rejects non-paths anyway.
+    targets = [t for t in vals[1:] if not t.startswith("-") and is_repo_file(t)]
+    if base in RUNNERS:
+        subj, subj_kind = base, "referent"
+    elif is_repo_file(argv0):
+        subj, subj_kind = argv0, "file"
+    else:
+        subj, subj_kind = base, "referent"     # external tool with repo-file args
+    return [(subj, subj_kind, t) for t in targets if t != argv0]
+
+
+def _segment_is_verifier(seg, verifier_re):
+    """True iff THIS segment is a verifier invocation. Quoted args are data, not signal
+    (so `grep '^(lint|check):' f` is not a verifier), and a verifier verb in ANOTHER
+    segment can't leak in — `grep … ; shellcheck --version` promotes nothing for grep."""
+    return bool(verifier_re.search(" ".join(v for v, q in seg if not q)))
+
+
+def _is_verifier_invocation(command, verifier_re):
+    """True iff ANY segment of the command is a verifier invocation. Whole-command
+    pre-filter only; the precise gate is the per-segment check in observe_execution."""
+    return any(_segment_is_verifier(seg, verifier_re) for seg in _split_segments(command))
+
+
 def parse_exec_edges(command, is_repo_file):
     """Parse a shell command into (subject, subject_kind, object) execution edges.
 
@@ -118,44 +196,11 @@ def parse_exec_edges(command, is_repo_file):
       - external tool     → repo-file target         e.g. `kubectl apply -f ns.yaml`
     Commands with no repo-file target (e.g. `ls`, `kubectl get pods`) yield nothing —
     high precision, low noise. The subject_kind distinguishes a repo file from a tool.
+    Segmentation is quote-aware (see `_split_segments`).
     """
-    # Collapse shell line-continuations (`\<newline>` = whitespace) BEFORE segment
-    # splitting, else a multi-line invocation (`shellcheck a \\\n  b c`) splits on the
-    # bare newline and each line's first file is mistaken for the command → bogus
-    # `fileA executes fileB` edges. A genuine multi-statement newline still splits.
-    command = re.sub(r"\\\r?\n", " ", command or "")
     edges, seen = [], set()
-    for seg in _SEG_SPLIT.split(command):
-        seg = seg.strip()
-        if not seg:
-            continue
-        try:
-            toks = shlex.split(seg)
-        except ValueError:
-            toks = seg.split()
-        # strip leading env-assignments (FOO=bar) and command wrappers
-        while toks and (
-            (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]) and not toks[0].startswith(("/", "."))) or
-            toks[0] in _CMD_WRAPPERS
-        ):
-            toks = toks[1:]
-        if not toks:
-            continue
-        argv0 = toks[0]
-        base = os.path.basename(argv0)
-        # option-looking args (leading '-') and the value after -f/-c/-m are still
-        # tested by is_repo_file, which rejects non-existent paths, so flags are safe.
-        targets = [t for t in toks[1:] if not t.startswith("-") and is_repo_file(t)]
-        if base in RUNNERS:
-            subj, subj_kind = base, "referent"
-        elif is_repo_file(argv0):
-            subj, subj_kind = argv0, "file"
-        else:
-            subj, subj_kind = base, "referent"     # external tool with repo-file args
-        for t in targets:
-            if t == argv0:
-                continue
-            key = (subj, subj_kind, t)
+    for seg in _split_segments(command):
+        for key in _segment_edges(seg, is_repo_file):
             if key not in seen:
                 seen.add(key)
                 edges.append(key)
@@ -1006,31 +1051,36 @@ class WorldModel:
         edges it ran. Structural parse only; command output is never inspected."""
         if is_repo_file is None:
             is_repo_file = lambda t: bool(t) and os.path.isfile(t)   # noqa: E731
-        edges = parse_exec_edges(command, is_repo_file)
-        counts = {"edges": 0, "runtime": 0, "oracle": 0}
-        if not edges:
-            return counts
         vre = verifier_re if verifier_re is not None else verifier_re_from_env()
-        is_verifier = bool(vre.search(command or ""))
-        for subj, subj_kind, obj in edges:
-            pred = _predicate_for(obj)
-            if subj_kind == "referent":
-                self.upsert_entity("referent", subj)
-            else:
-                self.upsert_entity("file", subj, path=subj)
-            self.upsert_entity("file", obj, path=obj)
-            iid = self.add_interaction(subj, pred, obj, subj_kind=subj_kind, obj_kind="file")
-            self.add_evidence("interaction", iid, "runtime", f"{subj}->{obj}",
-                              polarity="supports", agent=agent, activity="exec", weight=0.6)
-            counts["edges"] += 1
-            counts["runtime"] += 1
-            # Verifier oracle: only a recognised verifier's exit status moves normative_conf,
-            # and only on code (`executes`) edges it actually ran.
-            if is_verifier and exit_code is not None and pred == "executes":
-                pol = "supports" if int(exit_code) == 0 else "refutes"
-                self.add_evidence("interaction", iid, "test", f"verifier:{obj}",
-                                  polarity=pol, agent=agent, activity="verifier-run", weight=0.8)
-                counts["oracle"] += 1
+        counts = {"edges": 0, "runtime": 0, "oracle": 0}
+        seen = set()
+        # Per SEGMENT: the exit status may only promote edges whose OWN segment is the
+        # verifier — a verifier verb in a sibling segment (`grep … ; shellcheck --version`)
+        # must not validate the grep edge.
+        for seg in _split_segments(command):
+            seg_is_verifier = _segment_is_verifier(seg, vre)
+            for subj, subj_kind, obj in _segment_edges(seg, is_repo_file):
+                if (subj, subj_kind, obj) in seen:
+                    continue
+                seen.add((subj, subj_kind, obj))
+                pred = _predicate_for(obj)
+                if subj_kind == "referent":
+                    self.upsert_entity("referent", subj)
+                else:
+                    self.upsert_entity("file", subj, path=subj)
+                self.upsert_entity("file", obj, path=obj)
+                iid = self.add_interaction(subj, pred, obj, subj_kind=subj_kind, obj_kind="file")
+                self.add_evidence("interaction", iid, "runtime", f"{subj}->{obj}",
+                                  polarity="supports", agent=agent, activity="exec", weight=0.6)
+                counts["edges"] += 1
+                counts["runtime"] += 1
+                # Verifier oracle: only a recognised verifier's exit status moves normative_conf,
+                # and only on code (`executes`) edges the verifier segment actually ran.
+                if seg_is_verifier and exit_code is not None and pred == "executes":
+                    pol = "supports" if int(exit_code) == 0 else "refutes"
+                    self.add_evidence("interaction", iid, "test", f"verifier:{obj}",
+                                      polarity=pol, agent=agent, activity="verifier-run", weight=0.8)
+                    counts["oracle"] += 1
         self.conn.commit()
         return counts
 
