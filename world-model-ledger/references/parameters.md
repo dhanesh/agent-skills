@@ -41,8 +41,16 @@ The operate actions above are thin wrappers over the CLI; you can also call it d
 | `observe / validate / refute / map / constraint` | Record facts (see `references/capture.md`). |
 | `contradictions [--open] [--touching P]` · `resolve <id> --as …` | Review + resolve contradictions. |
 | `precall <path…>` · `query --touching P` | What the pre-call hook surfaces for a file/symbol. |
+| `exec --command "<cmd>" [--exit-code N]` | Observe an execution → runtime edges + verifier oracle. `--from-hook` reads the PostToolUse JSON from stdin (how the hook calls it); `--digest PATH` refreshes the digest. |
 | `stats` · `consolidate` · `digest` · `export` | Inspect / re-derive / dump the model. |
 | `--db PATH` (global) | Override the DB path (default `.world-model/model.db`, or `$WM_DB`). |
+
+## Environment variables
+
+| Var | Default | What it does |
+|---|---|---|
+| `WM_DB` | `.world-model/model.db` | DB path when `--db` is not passed. |
+| `WM_VERIFIER_RE` | see `DEFAULT_VERIFIER_RE` in `world_model.py` | Regex (case-insensitive) deciding which Bash commands count as **verifiers** whose exit status writes `test` oracle evidence. Deliberately build-tool-agnostic — matches `test`/`spec`/`check`/`lint`/`pytest`/`shellcheck`/… so `make test` promotes but `make build` does not. A bad pattern falls back to the default (never breaks the hook). |
 
 (There is no top-level `PARAMETERS.md` because this repo reserves that filename for
 template-placeholder bijection, which this skill has none of; this reference serves the same

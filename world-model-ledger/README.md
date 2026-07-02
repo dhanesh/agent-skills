@@ -28,16 +28,21 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 57-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 79-test gate.
 
 ## What gets installed
 
 - **Four lifecycle hooks** wired into `settings.json`:
   - **PreToolUse** — before an edit, summarizes the model's ✓validated / ?unverified /
     ✗contradicted items for the touched files/symbols.
-  - **PostToolUse** — registers touched files and sweeps constraints, without inventing facts.
-  - **Stop** — harvests the agent's markers, consolidates confidence, refreshes the digest.
-  - **SessionStart** — injects the digest so a resumed session starts aware of contradictions.
+  - **PostToolUse (universal, matcher `*`)** — the single observer for the whole tool stream:
+    files any tool reads/edits become entities; `Bash` commands become `runtime`
+    `executes`/`reads` edges (a recognised verifier's exit status → oracle evidence,
+    green → validated, red → contradicted); fetched URLs become referents. Input only, never
+    output — no invented facts.
+  - **Stop** — harvests any optional markers, consolidates confidence, refreshes the digest.
+  - **SessionStart** — **auto-bootstraps** an empty model (create + seed on first run), then
+    injects the digest so a resumed session starts aware of contradictions.
 - **A stdlib-Python store + `wm` CLI** (`world_model.py`, `wm.py`) — entities / interactions /
   constraints / evidence / contradictions in one SQLite file at `.world-model/model.db`
   (gitignored, per project).
