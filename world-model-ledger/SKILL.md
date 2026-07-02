@@ -9,10 +9,13 @@ description: >-
   pointers (tests, docs, file:line, commits). The load-bearing rule: code-observed
   relationships are NOT treated as ground truth — only oracle evidence (tests/CI/docs/human)
   raises normative confidence, so the model can flag what is merely observed-but-unverified.
-  Wires four lifecycle hooks: a PreToolUse hook that summarizes relevant validated / unverified
-  / contradicted items for the files or symbols about to be edited; a PostToolUse hook that
-  extracts touched files and updates records without inventing facts; and Stop/SessionStart
-  hooks that consolidate and inject a digest. After install these run automatically — you
+  Capture is fully automatic and zero-config — no markers to emit, no env vars to set. Wires
+  four lifecycle hooks: a PreToolUse hook that summarizes relevant validated / unverified /
+  contradicted items for the files or symbols about to be edited; a UNIVERSAL PostToolUse hook
+  that observes what EVERY tool call reveals — files any tool reads/edits become entities, Bash
+  commands become runtime execute/read edges (with a recognised verifier's exit status promoted
+  to oracle evidence), and fetched URLs become external referents; and Stop/SessionStart hooks
+  that consolidate, auto-bootstrap the model on first run, and inject a digest. After install these run automatically — you
   invoke this skill ONCE to set up. Use when the user wants an agent to remember a codebase
   across sessions, detect contradictions, propose fixes, and improve its model's correctness
   over time; when they say "give the agent a world model", "track what's verified vs assumed",
@@ -73,7 +76,7 @@ scripts/install.sh --seed                 # install AND seed the repo in one go
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 57-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 79-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -85,17 +88,22 @@ hooks run automatically; `--seed`/`--prune` remain available anytime to (re)buil
 | Hook | Fires | Job |
 |---|---|---|
 | **PreToolUse** → `hooks/pretooluse.sh` | before an edit | retrieve & summarize the model's ✓validated / ?unverified / ✗contradicted items for the touched file(s)/symbol(s); inject as context. Read-only. |
-| **PostToolUse** → `hooks/posttooluse.sh` | after an edit | extract the touched file(s), register them, run a cheap constraint sweep — **without inventing interactions**. Optional incremental marker harvest when `WM_INCREMENTAL=1`. |
-| **Stop** → `hooks/stop.sh` | every turn | the summarization home: harvest the agent's markers from the trusted channel, consolidate (re-derive confidence + evaluate constraints), refresh `.world-model/digest.md`. |
-| **SessionStart** → `hooks/session_start.sh` | session start/resume | inject the digest (open contradictions + newest unverified) so a resumed session starts aware. |
+| **PostToolUse** → `hooks/posttooluse-observe.sh` | after **every** tool call | the universal observer: register the entities/edges the call reveals — files any tool reads/edits → entities; `Bash` → `runtime` `executes`/`reads` edges + verifier oracle (green→validated, red→contradicted); URLs → referents. Tool **input** only (never output); no invented facts. |
+| **Stop** → `hooks/stop.sh` | every turn | the summarization home: harvest any optional markers from the trusted channel, consolidate (re-derive confidence + evaluate constraints), refresh `.world-model/digest.md`. |
+| **SessionStart** → `hooks/session_start.sh` | session start/resume | **auto-bootstrap** the model on first run (create + seed `.world-model/`, no manual step), then inject the digest so a resumed session starts aware of contradictions. |
 
 ## Operating procedure — how the agent maintains the model
 
-The update path is **hybrid**: hooks capture the skeleton deterministically; the agent
-enriches it explicitly (a model never guesses facts inside a hook). Full conventions are in
+The model maintains itself: the universal `PostToolUse` hook captures entities and behavioural
+edges from **every tool call** automatically, and `SessionStart` auto-bootstraps the repo model
+on first run — **no markers required, no env to set.** The steps below are an **optional
+precision layer**: the agent *may* emit markers to add high-value facts the hooks can't infer
+(a semantic mapping, a validated oracle, a constraint), but nothing forces it to, and the model
+is useful with zero markers. A model never guesses facts inside a hook. Full conventions are in
 `references/capture.md`.
 
-0. **(Optional) Seed the model repo-wide.** On a fresh install, run
+0. **(Usually automatic) Seed the model repo-wide.** `SessionStart` auto-seeds a fresh repo, so
+   this is normally already done. To (re)seed explicitly, run
    `python3 wm.py build .` to register every source file and its structural edges in one
    deterministic, **language-aware** pass — this avoids the cold start where the model is empty
    until the agent has touched files. Local imports become file→file edges
@@ -114,7 +122,8 @@ enriches it explicitly (a model never guesses facts inside a hook). Full convent
    run reports `entities_added` / `interactions_added` (both `0` on an unchanged repo). Add
    `--prune` to soft-invalidate build-origin edges for files you have since deleted or renamed
    (opt-in; never hard-deletes, and never touches an edge the agent has observed or validated).
-1. **Record what you observe.** When you confirm a relationship, emit a marker line —
+1. **(Optional) Record what you observe.** The hooks already capture files, executions, and
+   fetched URLs automatically. To add a relationship the hooks can't infer, emit a marker line —
    `WM-OBSERVE: hash_pw uses bcrypt @ auth/hash.py:14` — or call
    `python3 wm.py observe hash_pw uses bcrypt --evidence auth/hash.py:14`. This raises
    *observed* confidence only; the fact stays `unverified` until an oracle backs it.
@@ -140,9 +149,10 @@ normative correctness improves over time. The loop is detailed in
 1. **Code observation never raises normative confidence.** A hook may set `observed_conf` high,
    but `normative_conf` moves *only* on oracle evidence. This is the whole point — the model
    must be able to say "observed, but unverified."
-2. **No invented facts in hooks.** Hooks capture only what is deterministically parseable
-   (touched files, test results, explicit markers). Richer interactions come from the agent's
-   own markers/CLI, never from a model summarizing inside a hook.
+2. **No invented facts in hooks.** Hooks capture only what is deterministically parseable from
+   the trusted channel — files any tool names, executions parsed from a Bash command's argv,
+   verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions come
+   from the agent's own markers/CLI, never from a model summarizing inside a hook.
 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into facts
    or evidence, so untrusted output cannot forge a marker (a regression test guards this).
 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get
@@ -154,7 +164,7 @@ rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (57 tests — the two-axis
+Always confirm the gate passed: `python3 test_world_model.py` (79 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -177,5 +187,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 57-test install gate.
+- `assets/test_world_model.py` — the 79-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.

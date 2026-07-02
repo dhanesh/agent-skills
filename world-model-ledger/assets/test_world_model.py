@@ -736,5 +736,180 @@ class TestTrustBoundary(Base):
             self.wm.add_evidence("interaction", iid, "totally_made_up", "x")
 
 
+class TestExecEdgeParsing(unittest.TestCase):
+    """parse_exec_edges is structural, high-precision, and never inspects output."""
+
+    def _repo(self, *files):
+        s = set(files)
+        return lambda t: t in s
+
+    def test_runner_executes_repo_script(self):
+        edges = W.parse_exec_edges("bash platform/reaper/reaper.sh --dry-run",
+                                   self._repo("platform/reaper/reaper.sh"))
+        self.assertEqual(edges, [("bash", "referent", "platform/reaper/reaper.sh")])
+
+    def test_no_repo_file_yields_nothing(self):
+        # `ls`, `kubectl get pods` name no repo file → no edge (precision over recall)
+        self.assertEqual(W.parse_exec_edges("kubectl get pods -A", self._repo("a.sh")), [])
+        self.assertEqual(W.parse_exec_edges("ls -la", self._repo("a.sh")), [])
+
+    def test_external_tool_reads_config(self):
+        edges = W.parse_exec_edges("kubectl apply -f platform/namespaces.yaml",
+                                   self._repo("platform/namespaces.yaml"))
+        self.assertEqual(edges, [("kubectl", "referent", "platform/namespaces.yaml")])
+
+    def test_env_prefix_and_wrappers_stripped(self):
+        edges = W.parse_exec_edges("FOO=1 sudo python3 scripts/x.py", self._repo("scripts/x.py"))
+        self.assertEqual(edges, [("python3", "referent", "scripts/x.py")])
+
+    def test_pipeline_segments_split(self):
+        edges = W.parse_exec_edges("cat a | bash run.sh && python3 t.py",
+                                   self._repo("run.sh", "t.py"))
+        self.assertIn(("bash", "referent", "run.sh"), edges)
+        self.assertIn(("python3", "referent", "t.py"), edges)
+
+    def test_predicate_by_target_kind(self):
+        self.assertEqual(W._predicate_for("reaper.sh"), "executes")
+        self.assertEqual(W._predicate_for("bin/tool"), "executes")     # no ext → executes
+        self.assertEqual(W._predicate_for("config.yaml"), "reads")
+
+    def test_verifier_regex_is_build_tool_agnostic(self):
+        vre = W.verifier_re_from_env()
+        for pos in ("make test", "npm test", "pytest tests/", "bash x_test.sh", "shellcheck a.sh", "make lint"):
+            self.assertTrue(vre.search(pos), pos)
+        for neg in ("make build", "python3 deploy.py", "kubectl get pods", "ls contest/"):
+            self.assertFalse(vre.search(neg), neg)
+
+
+class TestExecutionChannel(Base):
+    """The execution channel raises observed_conf; only a verifier's exit moves normative."""
+
+    def _one(self, subj, pred, obj):
+        r = self.wm.conn.execute(
+            "SELECT i.* FROM interaction i JOIN entity s ON s.id=i.subject_id "
+            "JOIN entity o ON o.id=i.object_id WHERE s.name=? AND i.predicate=? AND o.path=?",
+            (subj, pred, obj)).fetchone()
+        return r
+
+    def test_plain_execution_is_observation_only(self):
+        # exit 0 but NOT a verifier → runtime observation, normative stays 0
+        c = self.wm.observe_execution("bash deploy.sh", exit_code=0,
+                                      is_repo_file=lambda t: t == "deploy.sh")
+        self.assertEqual(c["edges"], 1)
+        self.assertEqual(c["oracle"], 0)
+        r = self._one("bash", "executes", "deploy.sh")
+        self.assertGreater(r["observed_conf"], 0.0)
+        self.assertEqual(r["normative_conf"], 0.0)
+        self.assertEqual(r["validation"], "unverified")
+
+    def test_green_verifier_validates(self):
+        c = self.wm.observe_execution("bash reaper_test.sh", exit_code=0,
+                                      is_repo_file=lambda t: t == "reaper_test.sh")
+        self.assertEqual(c["oracle"], 1)
+        r = self._one("bash", "executes", "reaper_test.sh")
+        self.assertGreaterEqual(r["normative_conf"], W.TAU_VALIDATE)
+        self.assertEqual(r["validation"], "validated")
+
+    def test_red_verifier_contradicts(self):
+        r0 = self.wm.observe_execution("pytest tests/test_x.py", exit_code=1,
+                                       is_repo_file=lambda t: t == "tests/test_x.py")
+        self.assertEqual(r0["oracle"], 1)
+        r = self._one("pytest", "executes", "tests/test_x.py")
+        self.assertEqual(r["validation"], "contradicted")
+
+    def test_unknown_exit_skips_oracle(self):
+        c = self.wm.observe_execution("bash a_test.sh", exit_code=None,
+                                      is_repo_file=lambda t: t == "a_test.sh")
+        self.assertEqual(c["oracle"], 0)
+        self.assertEqual(self._one("bash", "executes", "a_test.sh")["normative_conf"], 0.0)
+
+    def test_idempotent_reruns(self):
+        f = lambda t: t == "run.sh"   # noqa: E731
+        self.wm.observe_execution("bash run.sh", exit_code=0, is_repo_file=f)
+        self.wm.observe_execution("bash run.sh", exit_code=0, is_repo_file=f)
+        n = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction WHERE predicate='executes'").fetchone()["c"]
+        self.assertEqual(n, 1)
+
+    def test_extract_from_hook_command_and_exit(self):
+        raw = '{"tool_input":{"command":"bash x.sh"},"tool_response":{"exit_code":0}}'
+        self.assertEqual(W.extract_exec_from_hook(raw), ("bash x.sh", 0))
+        raw2 = '{"tool_input":{"command":"pytest"},"tool_response":{"is_error":true}}'
+        self.assertEqual(W.extract_exec_from_hook(raw2), ("pytest", 1))
+        self.assertEqual(W.extract_exec_from_hook("not json"), ("", None))
+
+
+class TestUniversalCapture(Base):
+    """observe_tool registers what ANY tool reveals — from input only, scoped to the repo."""
+
+    def _mkfile(self, rel, body="x"):
+        p = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as fh:
+            fh.write(body)
+        return p
+
+    def test_read_registers_repo_file_entity(self):
+        p = self._mkfile("src/a.py")
+        c = self.wm.observe_tool("Read", {"file_path": p}, root=self.tmp)
+        self.assertEqual(c["files"], 1)
+        r = self.wm.conn.execute("SELECT kind FROM entity WHERE path=?", ("src/a.py",)).fetchone()
+        self.assertEqual(r["kind"], "file")
+
+    def test_external_file_not_registered(self):
+        ext = os.path.join(tempfile.mkdtemp(), "outside.py")
+        with open(ext, "w") as fh:
+            fh.write("x")
+        c = self.wm.observe_tool("Read", {"file_path": ext}, root=self.tmp)
+        self.assertEqual(c["files"], 0)   # outside the repo root → ignored, no littering
+
+    def test_nonexistent_path_ignored(self):
+        c = self.wm.observe_tool("Read", {"file_path": os.path.join(self.tmp, "ghost.py")}, root=self.tmp)
+        self.assertEqual(c["files"], 0)
+
+    def test_webfetch_registers_referent(self):
+        c = self.wm.observe_tool("WebFetch", {"url": "https://api.stripe.com/v1/refunds"}, root=self.tmp)
+        self.assertEqual(c["referents"], 1)
+        r = self.wm.conn.execute("SELECT 1 FROM entity WHERE kind='referent' AND name=?",
+                                 ("api.stripe.com/v1",)).fetchone()
+        self.assertIsNotNone(r)
+
+    def test_mcp_tool_with_file_path_captured(self):
+        p = self._mkfile("lib/x.ts")
+        c = self.wm.observe_tool("mcp__server__read_file", {"file_path": p}, root=self.tmp)
+        self.assertEqual(c["files"], 1)   # future/unknown tools captured generically
+
+    def test_bash_routes_to_execution(self):
+        p = self._mkfile("run.sh")
+        c = self.wm.observe_tool("Bash", {"command": "bash " + p}, root=self.tmp)
+        self.assertGreaterEqual(c["edges"], 1)
+
+    def test_extract_tool_from_hook(self):
+        raw = '{"tool_name":"Read","tool_input":{"file_path":"a.py"},"tool_response":{}}'
+        tn, ti, _ = W.extract_tool_from_hook(raw)
+        self.assertEqual(tn, "Read")
+        self.assertEqual(ti["file_path"], "a.py")
+        self.assertEqual(W.extract_tool_from_hook("nonsense"), ("", {}, None))
+
+    def test_url_referent_shapes(self):
+        self.assertEqual(W._url_referent("https://x.io/a/b/c"), "x.io/a")
+        self.assertEqual(W._url_referent("https://x.io"), "x.io")
+        self.assertIsNone(W._url_referent("not-a-url"))
+
+
+class TestBootstrap(Base):
+    """bootstrap seeds an empty model from the repo, then no-ops (idempotent)."""
+
+    def test_seeds_then_noops(self):
+        self._f = os.path.join(self.tmp, "pkg", "a.py")
+        os.makedirs(os.path.dirname(self._f))
+        with open(self._f, "w") as fh:
+            fh.write("import os\n")
+        r1 = self.wm.bootstrap(self.tmp)
+        self.assertTrue(r1["seeded"])
+        self.assertGreater(self.wm.conn.execute("SELECT COUNT(*) c FROM entity").fetchone()["c"], 0)
+        r2 = self.wm.bootstrap(self.tmp)
+        self.assertFalse(r2["seeded"])   # already populated → no-op
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

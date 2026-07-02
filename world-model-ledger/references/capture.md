@@ -82,6 +82,50 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 `WM-VALIDATED` with a non-oracle kind is ignored — only `test|ci|doc|human` can raise
 normative confidence.
 
+## (a0) Automatic capture — the universal observer (zero-config)
+
+The primary capture path needs **no markers and no env vars**. A single `PostToolUse` hook
+(`posttooluse-observe.sh`, matcher `*`) fires after *every* tool call and records what that call
+reveals, from the tool **input** only (trusted, agent-authored — never the output):
+
+- **Any tool naming a repo file** (`Read`, `Grep`, `Glob`, `Edit`, `Write`, notebook, or any
+  MCP tool with a `file_path`/`path`) → that file is registered as an **entity** (a node
+  sighting: it is part of the world). Observation only — no invented edge.
+- **`Bash`** → the command is parsed into runtime `executes`/`reads` **edges** (see below).
+- **`WebFetch`/`WebSearch` URLs** → an external **referent** the agent consulted.
+
+On top of that, **`SessionStart` auto-bootstraps** the model on first run: in a git repo with no
+`.world-model/` yet, it creates and seeds it (`build .`) with zero manual steps. So the model
+starts populated and keeps growing from the agent's ordinary activity — markers (below) are an
+*optional* precision layer, never required.
+
+### The execution sub-channel — *"what executes what"*
+
+Edits are only half of behaviour; execution is the other half. The Bash branch parses each
+command — **structurally, never its output** — into runtime edges, with no marker and no opt-in
+flag:
+
+- `bash reaper.sh`, `python3 build.py`, `uv run x.py` → `<runner> --executes--> <repo script>`
+- `kubectl apply -f ns.yaml`, `docker build -f Dockerfile` → `<tool> --reads--> <repo file>`
+
+These carry **`runtime` evidence — an observation kind** — so `observed_conf` rises while
+`normative_conf` stays 0 (watching something run proves it *happens*, not that it is *correct*).
+Commands that name no repo file (`ls`, `kubectl get pods`) produce nothing — precision over recall.
+
+The **one** way execution touches `normative_conf`: a recognised **verifier** command's exit
+status. When the command matches the verifier pattern (`$WM_VERIFIER_RE`, default matches
+`test`/`spec`/`check`/`lint`/`pytest`/`shellcheck`/… — build-tool-agnostic, so `make test`
+matches but `make build` does not), its exit code writes **`test` oracle evidence** on the code
+edge it ran: `0` → `supports` (→ `validated`), non-zero → `refutes` (→ `contradicted`). So a
+green test run promotes facts and a red one flags a contradiction — with zero marker discipline.
+Exit code is best-effort from the hook payload; when unknown, the observation is still recorded
+and only the oracle is skipped.
+
+**Limit (honest):** a hook sees *invocation + exit status*, not intra-process calls. It captures
+"the agent ran reaper.sh and it exited 0," not "reaper.sh calls kubectl internally" — that needs
+static parse (`wm build`) or syscall tracing (out of scope). Invocation-level observation is
+already the behavioural signal edits cannot provide.
+
 ## (b) `wm` CLI — precise / scriptable
 
 ```
@@ -95,6 +139,7 @@ wm contradictions [--open] [--touching <path>]        # list + proposed fixes
 wm resolve  <id> --as retract|supersede|fixed_code|defer
 wm query    --touching <path|symbol>                  # what the pre-call hook shows
 wm precall  <path...>                                 # markdown pre-call summary
+wm exec     --command "<cmd>" [--exit-code N]         # observe an execution (or --from-hook, from stdin JSON)
 wm stats | wm consolidate | wm digest | wm export
 ```
 
@@ -104,8 +149,11 @@ default `.world-model/model.db`.)
 ## The trust boundary (load-bearing)
 
 Only the **trusted channel** feeds facts: user text, assistant text, and the tool *inputs the
-agent chose*. **`tool_result` / `tool_use` content is never harvested** — a file's contents
-or a command's output cannot smuggle a `WM-...` marker or forge evidence (a regression test
-asserts an injected marker in a `tool_result` is rejected). Markers must start the line, so
-echoed text mid-sentence cannot inject one. Evidence kinds are a closed set; an unknown kind
-is rejected at the API. This mirrors the two-channel rule in `context-hygiene-kit`.
+agent chose* (including the Bash **command** it ran — an action it authored, like a `file_path`).
+**`tool_result` / `tool_use` content is never harvested** — a file's contents or a command's
+**output** cannot smuggle a `WM-...` marker or forge evidence (a regression test asserts an
+injected marker in a `tool_result` is rejected). The execution channel parses command *structure*
+(argv), never output, and emits only the fixed `executes`/`reads` predicates — it cannot mint an
+arbitrary edge from free text. Markers must start the line, so echoed text mid-sentence cannot
+inject one. Evidence kinds are a closed set; an unknown kind is rejected at the API. This mirrors
+the two-channel rule in `context-hygiene-kit`.

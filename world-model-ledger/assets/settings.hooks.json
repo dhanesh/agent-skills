@@ -14,12 +14,12 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PROJECT_DIR}/hooks/posttooluse.sh",
-            "timeout": 20
+            "command": "${CLAUDE_PROJECT_DIR}/hooks/posttooluse-observe.sh",
+            "timeout": 15
           }
         ]
       }

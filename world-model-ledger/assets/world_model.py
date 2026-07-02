@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -51,6 +52,191 @@ ENTRENCHMENT_RANK = {
 }
 
 VALIDATIONS = ("unverified", "validated", "contradicted", "stale")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution channel — observe BEHAVIOUR, not just mutation.
+#
+# An edit hook only sees files change; "what executes what" is a property of the
+# system *running*. This channel parses the agent's Bash commands (structurally,
+# never their output) into `executes`/`reads` edges backed by `runtime` evidence
+# — an OBSERVATION kind, so it raises observed_conf and NEVER normative_conf
+# (the core invariant holds: watching something run proves it happens, not that
+# it is correct). The ONLY way execution touches normative_conf is a recognised
+# *verifier* command's exit status: green → `test` oracle 'supports' (→ validated),
+# red → 'refutes' (→ contradicted). Verifier recognition is a configurable regex,
+# never a hardcoded build tool — `make` matches only when its target is a verifier.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# argv[0] basenames that RUN a target given as an argument (interpreter/wrapper).
+RUNNERS = {
+    "bash", "sh", "zsh", "dash", "ksh",
+    "python", "python2", "python3", "uv", "uvx", "pipx",
+    "node", "nodejs", "deno", "bun", "ts-node", "tsx",
+    "ruby", "perl", "php", "Rscript", "lua",
+    "npm", "npx", "pnpm", "yarn", "make", "just", "task",
+    "go", "cargo", "gradle", "mvn", "dotnet", "java",
+}
+# Segment separators in a shell command line (best-effort split; NOT a shell parser).
+_SEG_SPLIT = re.compile(r"\|\||&&|[|;&\n]")
+# Leading tokens that wrap the real command (stripped before reading argv[0]).
+_CMD_WRAPPERS = {"sudo", "env", "time", "command", "exec", "nohup", "nice", "xargs", "then", "do"}
+# Target extensions treated as executable code (→ `executes`); others (config/data) → `reads`.
+_EXEC_EXTS = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx",
+              ".rb", ".go", ".pl", ".php", ".lua", ".r"}
+# Default verifier signal — build-tool-agnostic; override with $WM_VERIFIER_RE.
+DEFAULT_VERIFIER_RE = (
+    r"(?:\btests?\b|\bspecs?\b|\bcheck\b|\blint\b|\btypecheck\b|"
+    r"\bpytest\b|\bunittest\b|\bjest\b|\bvitest\b|\bmocha\b|\brspec\b|"
+    r"\bphpunit\b|\btox\b|\bnox\b|\bshellcheck\b|\bgotest\b|"
+    r"_test\.|\.test\.|_spec\.|\.spec\.)"
+)
+
+
+def verifier_re_from_env():
+    """Compiled verifier regex — $WM_VERIFIER_RE overrides the default. Falls back to
+    the default on a bad user pattern (never breaks the hook)."""
+    pat = os.environ.get("WM_VERIFIER_RE") or DEFAULT_VERIFIER_RE
+    try:
+        return re.compile(pat, re.IGNORECASE)
+    except re.error:
+        return re.compile(DEFAULT_VERIFIER_RE, re.IGNORECASE)
+
+
+def _predicate_for(target: str) -> str:
+    """`executes` for code targets, `reads` for config/data targets."""
+    ext = os.path.splitext(target)[1].lower()
+    return "executes" if (ext in _EXEC_EXTS or ext == "") else "reads"
+
+
+def parse_exec_edges(command, is_repo_file):
+    """Parse a shell command into (subject, subject_kind, object) execution edges.
+
+    Structural only — reads argv, never command output. `is_repo_file(token)` decides
+    whether a token names a real repo file (injected for testability). Returns edges:
+      - runner (referent) → repo-file target        e.g. `bash reaper.sh`      → (bash, reaper.sh)
+      - repo-file argv[0] → repo-file target         e.g. `./deploy.sh cfg.yaml`
+      - external tool     → repo-file target         e.g. `kubectl apply -f ns.yaml`
+    Commands with no repo-file target (e.g. `ls`, `kubectl get pods`) yield nothing —
+    high precision, low noise. The subject_kind distinguishes a repo file from a tool.
+    """
+    edges, seen = [], set()
+    for seg in _SEG_SPLIT.split(command or ""):
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            toks = shlex.split(seg)
+        except ValueError:
+            toks = seg.split()
+        # strip leading env-assignments (FOO=bar) and command wrappers
+        while toks and (
+            (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]) and not toks[0].startswith(("/", "."))) or
+            toks[0] in _CMD_WRAPPERS
+        ):
+            toks = toks[1:]
+        if not toks:
+            continue
+        argv0 = toks[0]
+        base = os.path.basename(argv0)
+        # option-looking args (leading '-') and the value after -f/-c/-m are still
+        # tested by is_repo_file, which rejects non-existent paths, so flags are safe.
+        targets = [t for t in toks[1:] if not t.startswith("-") and is_repo_file(t)]
+        if base in RUNNERS:
+            subj, subj_kind = base, "referent"
+        elif is_repo_file(argv0):
+            subj, subj_kind = argv0, "file"
+        else:
+            subj, subj_kind = base, "referent"     # external tool with repo-file args
+        for t in targets:
+            if t == argv0:
+                continue
+            key = (subj, subj_kind, t)
+            if key not in seen:
+                seen.add(key)
+                edges.append(key)
+    return edges
+
+
+# Tool-input fields that name a file the agent is working with, across tools/MCP.
+_FILE_INPUT_KEYS = ("file_path", "path", "notebook_path", "filePath", "filename", "file")
+_URL_INPUT_KEYS = ("url", "uri")
+_URL_RE = re.compile(r"^https?://([^/\s]+)(/[^\s?#]*)?", re.IGNORECASE)
+
+
+def _url_referent(url):
+    """A stable referent name for an external URL — host + first path segment
+    (e.g. https://api.stripe.com/v1/refunds → api.stripe.com/v1). None if not a URL."""
+    m = _URL_RE.match(url or "")
+    if not m:
+        return None
+    host = m.group(1)
+    seg = (m.group(2) or "").strip("/").split("/", 1)[0]
+    return f"{host}/{seg}" if seg else host
+
+
+def _repo_rel(path, root):
+    """Repo-relative path if `path` is a real file inside `root`, else None.
+    Keeps capture scoped to the world (the repo), never littering external files."""
+    if not path or not isinstance(path, str):
+        return None
+    try:
+        ap = os.path.abspath(path)
+    except (OSError, ValueError):
+        return None
+    if not os.path.isfile(ap):
+        return None
+    root = os.path.abspath(root)
+    if ap != root and not ap.startswith(root + os.sep):
+        return None
+    return os.path.relpath(ap, root)
+
+
+def extract_exec_from_hook(raw):
+    """Pull (command, exit_code) out of a PostToolUse[Bash] hook JSON payload.
+
+    exit_code is best-effort — Claude Code payloads vary — and None when unknown, in
+    which case the verifier oracle is skipped (observation is still recorded)."""
+    try:
+        d = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return "", None
+    if not isinstance(d, dict):
+        return "", None
+    command = ((d.get("tool_input") or {}).get("command") or "")
+    resp = d.get("tool_response")
+    ec = None
+    if isinstance(resp, dict):
+        for k in ("exit_code", "exitCode", "returncode", "returnCode", "code", "status"):
+            v = resp.get(k)
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, int):
+                ec = v
+                break
+            if isinstance(v, str) and v.lstrip("-").isdigit():
+                ec = int(v)
+                break
+        if ec is None and resp.get("is_error") is True:
+            ec = 1
+    return command, ec
+
+
+def extract_tool_from_hook(raw):
+    """Pull (tool_name, tool_input, exit_code) out of ANY PostToolUse hook payload.
+    exit_code is best-effort (Bash only, usually)."""
+    try:
+        d = json.loads(raw) if raw else {}
+    except (json.JSONDecodeError, TypeError):
+        return "", {}, None
+    if not isinstance(d, dict):
+        return "", {}, None
+    tool_name = d.get("tool_name") or ""
+    tool_input = d.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    _, ec = extract_exec_from_hook(raw)
+    return tool_name, tool_input, ec
+
 
 # Repo-wide `build` (seeding) — deterministic structural scan, observation-only.
 BUILD_IGNORE_DIRS = {".git", "__pycache__", "node_modules", ".world-model", ".venv",
@@ -803,6 +989,105 @@ class WorldModel:
             "INSERT INTO interaction(subject_id,predicate,object_id,created_at,updated_at)"
             " VALUES (?,?,?,?,?)", (sid, predicate, oid, ts, ts))
         return cur.lastrowid
+
+    # ── execution channel (observe behaviour) ───────────────────────────────────
+    def observe_execution(self, command, exit_code=None, verifier_re=None,
+                          is_repo_file=None, agent="exec-hook") -> dict:
+        """Record what a Bash command executed/read as `runtime` OBSERVATION evidence.
+
+        observed_conf rises; normative_conf never does — unless the command is a
+        recognised verifier, in which case its exit status writes `test` oracle
+        evidence (0 → supports/validated, non-0 → refutes/contradicted) on the code
+        edges it ran. Structural parse only; command output is never inspected."""
+        if is_repo_file is None:
+            is_repo_file = lambda t: bool(t) and os.path.isfile(t)   # noqa: E731
+        edges = parse_exec_edges(command, is_repo_file)
+        counts = {"edges": 0, "runtime": 0, "oracle": 0}
+        if not edges:
+            return counts
+        vre = verifier_re if verifier_re is not None else verifier_re_from_env()
+        is_verifier = bool(vre.search(command or ""))
+        for subj, subj_kind, obj in edges:
+            pred = _predicate_for(obj)
+            if subj_kind == "referent":
+                self.upsert_entity("referent", subj)
+            else:
+                self.upsert_entity("file", subj, path=subj)
+            self.upsert_entity("file", obj, path=obj)
+            iid = self.add_interaction(subj, pred, obj, subj_kind=subj_kind, obj_kind="file")
+            self.add_evidence("interaction", iid, "runtime", f"{subj}->{obj}",
+                              polarity="supports", agent=agent, activity="exec", weight=0.6)
+            counts["edges"] += 1
+            counts["runtime"] += 1
+            # Verifier oracle: only a recognised verifier's exit status moves normative_conf,
+            # and only on code (`executes`) edges it actually ran.
+            if is_verifier and exit_code is not None and pred == "executes":
+                pol = "supports" if int(exit_code) == 0 else "refutes"
+                self.add_evidence("interaction", iid, "test", f"verifier:{obj}",
+                                  polarity=pol, agent=agent, activity="verifier-run", weight=0.8)
+                counts["oracle"] += 1
+        self.conn.commit()
+        return counts
+
+    # ── universal tool-call capture (observe the world through ANY tool) ─────────
+    def observe_tool(self, tool_name, tool_input, exit_code=None, root=None) -> dict:
+        """Register the entities/edges a tool call reveals — from ANY tool, not just
+        edits. Reads the tool INPUT only (trusted, agent-authored); never its output.
+
+        - Bash → delegates to observe_execution (behaviour edges + verifier oracle).
+        - Edit/Write/MultiEdit/Read/Grep/Glob/Notebook*/MCP/etc. naming a repo file →
+          register that file as an entity (a node sighting: it is part of the world).
+          Observation only — no invented edge (markers/build/exec add the edges).
+        - WebFetch/WebSearch/… url → register an external `referent` the agent consulted.
+        No markers, no env, no config: purely what the agent's actions reveal."""
+        root = root or os.getcwd()
+        counts = {"files": 0, "referents": 0, "edges": 0}
+        tn, ti = (tool_name or ""), (tool_input or {})
+        if not isinstance(ti, dict):
+            return counts
+        if tn == "Bash":
+            ex = self.observe_execution(ti.get("command", "") or "", exit_code=exit_code)
+            counts["edges"] += ex["edges"]
+            return counts
+        # Any tool naming a repo file → register the node (working-set membership).
+        seen = set()
+        for k in _FILE_INPUT_KEYS:
+            rel = _repo_rel(ti.get(k), root)
+            if rel and rel not in seen:
+                seen.add(rel)
+                self.upsert_entity("file", rel, path=rel)
+                counts["files"] += 1
+        # MultiEdit-style / batched inputs sometimes carry a list of file targets.
+        for k in ("edits", "files", "paths"):
+            v = ti.get(k)
+            if isinstance(v, list):
+                for item in v:
+                    cand = item.get("file_path") if isinstance(item, dict) else item
+                    rel = _repo_rel(cand, root)
+                    if rel and rel not in seen:
+                        seen.add(rel)
+                        self.upsert_entity("file", rel, path=rel)
+                        counts["files"] += 1
+        # URLs → external referents (the real-world things the code/agent depends on).
+        for k in _URL_INPUT_KEYS:
+            ref = _url_referent(ti.get(k))
+            if ref:
+                self.upsert_entity("referent", ref)
+                counts["referents"] += 1
+        if counts["files"] or counts["referents"]:
+            self.conn.commit()
+        return counts
+
+    def bootstrap(self, root=".", max_files=5000) -> dict:
+        """First-run seeding: if the model is empty, build it from the repo. Idempotent —
+        a no-op once seeded. Lets a hook create + populate .world-model with zero manual
+        steps (no install --seed, no env)."""
+        n = self.conn.execute("SELECT COUNT(*) c FROM entity").fetchone()["c"]
+        if n > 0:
+            return {"seeded": False, "entities": n}
+        stats = self.build_from_repo(root, max_files=max_files)
+        self.conn.commit()
+        return {"seeded": True, "build": stats.get("build", {})}
 
     # ── constraints ────────────────────────────────────────────────────────────
     def add_constraint(self, name, kind, message_tmpl, scope_predicate=None,
@@ -1746,6 +2031,62 @@ def cmd_touch(wm, a):
     print(json.dumps({"entity_id": eid, "path": a.path}))
 
 
+def cmd_exec(wm, a):
+    """Observe a Bash execution (runtime evidence + verifier oracle). Thin wrapper
+    over WorldModel.observe_execution; --from-hook reads the PostToolUse JSON on stdin."""
+    command, exit_code = a.command, a.exit_code
+    if a.from_hook:
+        command, exit_code = extract_exec_from_hook(sys.stdin.read())
+    if not command or not command.strip():
+        print(json.dumps({"edges": 0, "runtime": 0, "oracle": 0}))
+        return 0
+    counts = wm.observe_execution(command, exit_code=exit_code, verifier_re=verifier_re_from_env())
+    wm.evaluate_constraints()
+    wm.conn.commit()
+    if a.digest and counts["edges"]:
+        try:
+            os.makedirs(os.path.dirname(a.digest) or ".", exist_ok=True)
+            with open(a.digest, "w") as fh:
+                fh.write(wm.digest())
+        except OSError:
+            pass
+    print(json.dumps(counts))
+    return 0
+
+
+def cmd_observe_tool(wm, a):
+    """Universal capture: register the entities/edges any tool call reveals.
+    --from-hook reads the PostToolUse JSON payload from stdin (how the hook calls it)."""
+    tool_name, tool_input, exit_code = a.tool_name, {}, a.exit_code
+    if a.from_hook:
+        tool_name, tool_input, exit_code = extract_tool_from_hook(sys.stdin.read())
+    elif a.tool_input:
+        try:
+            tool_input = json.loads(a.tool_input)
+        except json.JSONDecodeError:
+            tool_input = {}
+    if not tool_name:
+        print(json.dumps({"files": 0, "referents": 0, "edges": 0}))
+        return 0
+    counts = wm.observe_tool(tool_name, tool_input, exit_code=exit_code)
+    if a.digest and (counts["files"] or counts["referents"] or counts["edges"]):
+        try:
+            os.makedirs(os.path.dirname(a.digest) or ".", exist_ok=True)
+            with open(a.digest, "w") as fh:
+                fh.write(wm.digest())
+        except OSError:
+            pass
+    print(json.dumps(counts))
+    return 0
+
+
+def cmd_bootstrap(wm, a):
+    """First-run seeding — build the repo model if empty. Idempotent."""
+    res = wm.bootstrap(a.path, max_files=a.max_files)
+    print(json.dumps(res))
+    return 0
+
+
 def cmd_build(wm, a):
     """Repo-wide world building: deterministic structural scan, observation-only."""
     stats = wm.build_from_repo(a.path, max_files=a.max_files, prune=a.prune)
@@ -1833,6 +2174,29 @@ def build_parser():
 
     tp = sub.add_parser("touch", help="register a touched file (post-call skeleton)")
     tp.add_argument("path"); tp.set_defaults(func=cmd_touch)
+
+    ex = sub.add_parser("exec", help="observe a Bash execution (runtime evidence + verifier oracle)")
+    ex.add_argument("--command", help="the shell command that ran")
+    ex.add_argument("--exit-code", dest="exit_code", type=int, default=None,
+                    help="exit status (enables the verifier oracle; omit if unknown)")
+    ex.add_argument("--from-hook", dest="from_hook", action="store_true",
+                    help="read the PostToolUse[Bash] JSON payload from stdin instead")
+    ex.add_argument("--digest", help="refresh this digest file after observing")
+    ex.set_defaults(func=cmd_exec)
+
+    ot = sub.add_parser("observe-tool", help="universal capture: register what any tool call reveals")
+    ot.add_argument("--tool-name", dest="tool_name", help="the tool that ran (e.g. Read, WebFetch)")
+    ot.add_argument("--tool-input", dest="tool_input", help="the tool input as a JSON object")
+    ot.add_argument("--exit-code", dest="exit_code", type=int, default=None)
+    ot.add_argument("--from-hook", dest="from_hook", action="store_true",
+                    help="read the PostToolUse JSON payload from stdin instead")
+    ot.add_argument("--digest", help="refresh this digest file after observing")
+    ot.set_defaults(func=cmd_observe_tool)
+
+    bs = sub.add_parser("bootstrap", help="first-run: build the repo model if empty (idempotent)")
+    bs.add_argument("path", nargs="?", default=".", help="repo root to scan (default: cwd)")
+    bs.add_argument("--max-files", dest="max_files", type=int, default=5000)
+    bs.set_defaults(func=cmd_bootstrap)
 
     bd = sub.add_parser("build", help="repo-wide seed: register files + structural edges (observation-only)")
     bd.add_argument("path", nargs="?", default=".", help="repo root to scan (default: cwd)")

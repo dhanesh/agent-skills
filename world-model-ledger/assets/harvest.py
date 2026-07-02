@@ -169,27 +169,19 @@ def main(argv=None):
         for f in args.touched_file:
             wm.upsert_entity("file", f, path=f)
 
-        # In 'post' mode, only harvest markers when incremental updates are enabled.
-        incremental = os.environ.get("WM_INCREMENTAL") == "1"
+        # Always harvest the agent's markers from the trusted channel and consolidate —
+        # in BOTH 'stop' and 'post' modes. (Enrichment is not gated behind an opt-in flag:
+        # observing what happens each turn is the whole point.)
         counts = {}
-        if args.mode == "stop" or incremental:
-            if args.transcript and Path(args.transcript).is_file():
-                rows = load_text_rows(Path(args.transcript), args.max_rows)
-                counts = apply_markers(wm, rows)
+        if args.transcript and Path(args.transcript).is_file():
+            rows = load_text_rows(Path(args.transcript), args.max_rows)
+            counts = apply_markers(wm, rows)
 
-        if args.mode == "stop" or incremental:
-            stats = wm.consolidate()
-        else:
-            # light: constraint sweep over touched entities only
-            wm.evaluate_constraints()
-            wm.conn.commit()
-            stats = wm.stats()
+        stats = wm.consolidate()
 
-        # refresh digest (Stop mode, or incremental)
-        if args.mode == "stop" or incremental:
-            dp = Path(args.digest)
-            dp.parent.mkdir(parents=True, exist_ok=True)
-            dp.write_text(wm.digest())
+        dp = Path(args.digest)
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        dp.write_text(wm.digest())
 
         applied = sum(counts.values()) if counts else 0
         print(f"world-model[{args.mode}]: {applied} marker(s) applied; "
