@@ -78,8 +78,15 @@ RUNNERS = {
 }
 # Pipeline/list operator chars that separate command segments (quote-aware; see _split_segments).
 _SEG_OPS = {";", "&", "|"}
-# Leading tokens that wrap the real command (stripped before reading argv[0]).
-_CMD_WRAPPERS = {"sudo", "env", "time", "command", "exec", "nohup", "nice", "xargs", "then", "do"}
+# Leading tokens that wrap/precede the real command (stripped before reading argv[0]).
+# The shell control words if/elif/while/until/then/do/else are each FOLLOWED by a command,
+# so stripping them exposes the real argv[0] (`if bash x.sh` → `bash x.sh`).
+_CMD_WRAPPERS = {"sudo", "env", "time", "command", "exec", "nohup", "nice", "xargs",
+                 "then", "do", "if", "elif", "while", "until", "else"}
+# Segment argv[0] tokens that run NO program: loop/conditional HEADERS and test builtins.
+# Their operands are loop vars, patterns, or test operands — data, not executed files —
+# so `for f in a.sh b.sh` must NOT emit `for executes a.sh` edges.
+_NON_EXEC_HEADS = {"for", "select", "case", "in", "esac", "done", "fi", "test", "[", "[["}
 # Target extensions treated as executable code (→ `executes`); others (config/data) → `reads`.
 _EXEC_EXTS = {".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx",
               ".rb", ".go", ".pl", ".php", ".lua", ".r"}
@@ -158,8 +165,8 @@ def _strip_wrappers(vals):
 def _segment_edges(seg, is_repo_file):
     """(subject, subject_kind, object) execution edges from ONE quote-aware segment."""
     vals = _strip_wrappers([v for v, _q in seg])
-    if not vals:
-        return []
+    if not vals or vals[0] in _NON_EXEC_HEADS:
+        return []                              # loop/conditional header or test builtin → no exec
     argv0 = vals[0]
     base = os.path.basename(argv0)
     # option-looking args (leading '-') are dropped; is_repo_file rejects non-paths anyway.
