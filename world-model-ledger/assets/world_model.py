@@ -119,8 +119,13 @@ def parse_exec_edges(command, is_repo_file):
     Commands with no repo-file target (e.g. `ls`, `kubectl get pods`) yield nothing —
     high precision, low noise. The subject_kind distinguishes a repo file from a tool.
     """
+    # Collapse shell line-continuations (`\<newline>` = whitespace) BEFORE segment
+    # splitting, else a multi-line invocation (`shellcheck a \\\n  b c`) splits on the
+    # bare newline and each line's first file is mistaken for the command → bogus
+    # `fileA executes fileB` edges. A genuine multi-statement newline still splits.
+    command = re.sub(r"\\\r?\n", " ", command or "")
     edges, seen = [], set()
-    for seg in _SEG_SPLIT.split(command or ""):
+    for seg in _SEG_SPLIT.split(command):
         seg = seg.strip()
         if not seg:
             continue

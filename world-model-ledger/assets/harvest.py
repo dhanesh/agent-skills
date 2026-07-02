@@ -7,10 +7,19 @@ evaluate constraints) and refreshes the digest. This is the hybrid update path:
 deterministic hooks capture the file/symbol skeleton; the agent enriches the
 graph with markers — a model never guesses facts inside a hook.
 
-Trust boundary (load-bearing): only USER + ASSISTANT text is scanned. `tool_use`
-/ `tool_result` blocks are never harvested, so a file's contents or a command's
-output cannot smuggle a `WM-...` marker or forge evidence. Markers must START the
-(stripped) line, so echoed text mid-sentence can't inject one.
+Trust boundary (load-bearing): only USER + ASSISTANT text is scanned for MARKERS.
+`tool_use` / `tool_result` blocks are never harvested for markers, so a file's
+contents or a command's output cannot smuggle a `WM-...` marker or forge evidence.
+Markers must START the (stripped) line, so echoed text mid-sentence can't inject one.
+
+Verifier-oracle pass (see `harvest_verifier_runs`): the ONE sanctioned use of tool
+blocks. Invariant #2 explicitly lists "verifier exit status" as capturable, but the
+Claude Code `PostToolUse[Bash]` payload omits the exit code, so the live observe hook
+cannot record it. We recover it here from the transcript WITHOUT weakening the trust
+boundary: the FACT (what ran, on which repo files) comes from the trusted tool_use
+INPUT (the agent's own argv); the VERDICT comes only from the harness-set `is_error`
+boolean — never from command stdout/stderr, which a command controls and could forge.
+No output content becomes a fact, and marker harvesting still ignores tool blocks.
 
 Markers (one per line, `|`-delimited args are trimmed):
   WM-OBSERVE: <subject> <predicate> <object> [@ <file:line>]
@@ -153,6 +162,75 @@ def apply_markers(wm: WorldModel, rows) -> dict:
     return counts
 
 
+def _content_blocks(row):
+    """The dict content blocks of a transcript row's message (tool_use/tool_result/text)."""
+    content = (row.get("message") or {}).get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def harvest_verifier_runs(wm: WorldModel, path: Path, max_rows: int,
+                          is_repo_file=None, verifier_re=None) -> dict:
+    """Recover the verifier oracle the live PostToolUse hook can't see (no exit code in
+    the Claude Code Bash payload) by reading it from the transcript instead.
+
+    For each Bash tool_result whose paired command (from the trusted tool_use INPUT)
+    matches the verifier regex, map the harness-set `is_error` boolean to an exit code
+    and feed it to `observe_execution` — green (is_error False) → supports/validated,
+    red (True) → refutes/contradicted. `is_error` ABSENT ⇒ verdict unknown ⇒ skip the
+    oracle (same conservative rule as exit_code=None). The command names the code edge;
+    only its exit status crosses into normative_conf, so the two-axis invariant holds.
+    Best-effort and idempotent (observe_execution keys on identity)."""
+    from world_model import verifier_re_from_env  # local import: same module family
+    vre = verifier_re if verifier_re is not None else verifier_re_from_env()
+    counts = {"validated": 0, "contradicted": 0}
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return counts
+    rows = []
+    for line in lines[-max_rows:]:
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    # tool_use_id -> Bash command, from ASSISTANT tool_use blocks (trusted input only).
+    cmd_by_id = {}
+    for row in rows:
+        if row.get("type") != "assistant":
+            continue
+        for b in _content_blocks(row):
+            if b.get("type") == "tool_use" and b.get("name") == "Bash":
+                cid, command = b.get("id"), (b.get("input") or {}).get("command", "")
+                if cid and command:
+                    cmd_by_id[cid] = command
+
+    # Pair each tool_result with its command; the verdict is the harness `is_error` flag.
+    for row in rows:
+        if row.get("type") != "user":
+            continue
+        for b in _content_blocks(row):
+            if b.get("type") != "tool_result":
+                continue
+            command = cmd_by_id.get(b.get("tool_use_id"))
+            if not command or not vre.search(command):
+                continue
+            ie = b.get("is_error")
+            if ie is True:
+                exit_code = 1
+            elif ie is False:
+                exit_code = 0
+            else:
+                continue  # unknown verdict → no oracle (never guess a pass)
+            c = wm.observe_execution(command, exit_code=exit_code, is_repo_file=is_repo_file)
+            if c.get("oracle"):
+                counts["validated" if exit_code == 0 else "contradicted"] += c["oracle"]
+    wm.conn.commit()
+    return counts
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="harvest world-model markers from a transcript")
     p.add_argument("--transcript")
@@ -162,6 +240,8 @@ def main(argv=None):
                    help="register a touched file (post-call skeleton); repeatable")
     p.add_argument("--mode", choices=["stop", "post"], default="stop")
     p.add_argument("--max-rows", type=int, default=40)
+    p.add_argument("--max-tool-rows", type=int, default=300,
+                   help="transcript tail (rows) scanned for verifier tool_use/result pairs")
     args = p.parse_args(argv)
 
     wm = WorldModel(args.db)
@@ -173,9 +253,14 @@ def main(argv=None):
         # in BOTH 'stop' and 'post' modes. (Enrichment is not gated behind an opt-in flag:
         # observing what happens each turn is the whole point.)
         counts = {}
+        vcounts = {}
         if args.transcript and Path(args.transcript).is_file():
             rows = load_text_rows(Path(args.transcript), args.max_rows)
             counts = apply_markers(wm, rows)
+            # Recover the verifier oracle the live hook can't (exit status from the
+            # transcript). Stop mode only: the per-call 'post' path can't see a result yet.
+            if args.mode == "stop":
+                vcounts = harvest_verifier_runs(wm, Path(args.transcript), args.max_tool_rows)
 
         stats = wm.consolidate()
 
@@ -184,7 +269,10 @@ def main(argv=None):
         dp.write_text(wm.digest())
 
         applied = sum(counts.values()) if counts else 0
+        promoted = (vcounts.get("validated", 0) + vcounts.get("contradicted", 0)) if vcounts else 0
         print(f"world-model[{args.mode}]: {applied} marker(s) applied; "
+              f"{promoted} verifier oracle(s) "
+              f"(+{vcounts.get('validated', 0)}/-{vcounts.get('contradicted', 0)}); "
               f"open_contradictions={stats.get('open_contradictions', '?')}", file=sys.stderr)
         return 0
     finally:
