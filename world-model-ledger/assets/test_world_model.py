@@ -795,6 +795,26 @@ class TestExecEdgeParsing(unittest.TestCase):
         self.assertIn(("grep", "referent", "f.txt"), edges)
         self.assertIn(("bash", "referent", "run.sh"), edges)
 
+    def test_shell_keyword_headers_yield_no_edge(self):
+        # `for f in FILES` names loop vars, not executions → no `for executes <file>`
+        self.assertEqual(
+            W.parse_exec_edges("for f in a.sh b.sh c.sh; do echo $f; done",
+                               self._repo("a.sh", "b.sh", "c.sh")),
+            [])
+
+    def test_if_while_strip_to_real_command(self):
+        # if/while/until precede a command → strip them, keep the real exec edge
+        self.assertIn(("bash", "referent", "check.sh"),
+                      W.parse_exec_edges("if bash check.sh; then echo ok; fi", self._repo("check.sh")))
+        self.assertIn(("bash", "referent", "run.sh"),
+                      W.parse_exec_edges("while true; do bash run.sh; done", self._repo("run.sh")))
+
+    def test_test_builtin_is_not_an_exec(self):
+        # `[ -f f ]` / `test` evaluate a condition; they don't execute the file
+        edges = W.parse_exec_edges("[ -f Makefile ] && bash x.sh", self._repo("Makefile", "x.sh"))
+        self.assertNotIn(("[", "referent", "Makefile"), edges)
+        self.assertIn(("bash", "referent", "x.sh"), edges)
+
     def test_verifier_detection_ignores_quoted_words(self):
         vre = W.verifier_re_from_env()
         # 'check' inside a quoted grep pattern is data, not a verifier signal
@@ -853,6 +873,16 @@ class TestExecutionChannel(Base):
         self.assertEqual(r0["oracle"], 1)
         r = self._one("pytest", "executes", "tests/test_x.py")
         self.assertEqual(r["validation"], "contradicted")
+
+    def test_for_loop_verifier_does_not_promote_keyword_edge(self):
+        # regression: `for f in a_test.sh; do shellcheck "$f"; done` must NOT create a
+        # validated `for executes a_test.sh` edge (keyword header + _test. filename match)
+        self.wm.observe_execution('for f in a_test.sh; do shellcheck "$f"; done',
+                                  exit_code=0, is_repo_file=lambda t: t == "a_test.sh")
+        kw = self.wm.conn.execute(
+            "SELECT 1 FROM interaction i JOIN entity s ON s.id=i.subject_id "
+            "WHERE s.name='for'").fetchone()
+        self.assertIsNone(kw)
 
     def test_quoted_verb_not_treated_as_verifier(self):
         # exit 0 but the only 'check' is inside a quoted arg → observation, no promotion
