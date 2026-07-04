@@ -9,7 +9,10 @@ description: >-
   It grades six rails — runnable verifiers (the format/build/test feedback loop), green-CI ground
   truth, a copyable house style, navigable context, scoped trusted tools, and human checkpoints with
   reversibility — from observed repo evidence, and emits a severity-ranked readiness scorecard with a
-  prioritized fix list. Grounded in Spotify's Honk case and this repo's loop/context skills. Not a
+  prioritized fix list. For repos running agents unattended against production, an optional second tier
+  grades four more "operate" rails past the merge boundary — runtime observability/audit, blast-radius
+  containment, deploy-path safety with a kill switch, and continuous re-verification. Grounded in
+  Spotify's Honk case and this repo's loop/context skills. Not a
   linter, SAST, or CI-config generator; it audits the engineering system agents run inside, not the
   code's correctness (use base-in-reality for that) or a single loop's soundness (use
   crafting-self-prompting-loops for that).
@@ -27,9 +30,11 @@ Default mode is **read-only**: observe, score, report. It only writes files when
 
 Reach for this when the question is about the *environment* agents work in, not a specific change: "is our repo agent-ready?", "why do agents keep producing broken or messy PRs here?", "what do we fix so a background agent can merge verified work unattended?". It complements the sibling skills rather than overlapping them — see the relationship table in `references/grounding.md`. Do **not** use it to audit code correctness (that's `base-in-reality`) or to design/repair one agent loop (that's `crafting-self-prompting-loops`); this skill audits the *system* those run inside.
 
-## The six rails
+## The rails — two tiers
 
-Full probe/score/fix detail is in `references/rubric.md`; the evidence for each is in `references/grounding.md`. In brief:
+Full probe/score/fix detail is in `references/rubric.md`; the evidence for each is in `references/grounding.md`. The rails split into two tiers by boundary:
+
+**Tier 1 — Build rails (author → merge).** Always audited. These decide whether an agent can produce a *verified, reviewable PR* at all.
 
 | ID | Rail | One-line test | Load-bearing? |
 |----|------|---------------|---------------|
@@ -40,7 +45,16 @@ Full probe/score/fix detail is in `references/rubric.md`; the evidence for each 
 | R5 | Scoped trusted tools | least-privilege tools, gated destructive actions, trifecta broken |  |
 | R6 | Human checkpoints | PR + meaningful review gate + small reversible diffs + cheap rollback |  |
 
-Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. The total is 0–12, but the **minimum rail matters more than the sum** — R1/R2 are load-bearing, so a repo strong everywhere except the verify→repair loop is still not agent-ready. Lead the report with the weakest rail.
+**Tier 2 — Operate rails (merge → production).** Audited **only when the goal is agents running unattended against a production system** (see step 2). For a repo just onboarding agents to open PRs, Tier 1 is the whole audit.
+
+| ID | Rail | One-line test |
+|----|------|---------------|
+| R7 | Runtime observability & audit | agent runs traced + attributable to a distinct identity + replayable |
+| R8 | Blast-radius containment | ephemeral least-privilege env, egress allowlisted, no standing prod creds/data |
+| R9 | Deploy-path safety & kill switch | staged rollout + automated rollback + spend/rate caps + tested fleet stop |
+| R10 | Continuous re-verification | rails re-checked over time + program metrics + autonomy pauses on regression |
+
+Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. Report the two tiers as **separate subtotals** — Tier 1 is 0–12, Tier 2 is 0–8 — and never fold them together: a repo can be perfectly ready for PR work (Tier 1 = 12) and unsafe to run unattended (Tier 2 = 0). Within Tier 1 the **minimum rail matters more than the sum** — R1/R2 are load-bearing, so a repo strong everywhere except the verify→repair loop is still not agent-ready. Lead the report with the weakest rail in whichever tier is in scope.
 
 ## Workflow
 
@@ -48,23 +62,23 @@ Follow these steps in order. Steps 1–4 are read-only and always run; step 5 wr
 
 ### 1. Scope and detect the stack
 
-Establish the languages, build system, and where an agent would look for instructions (`README`, `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, task runner). State what you found in one line. If the repo is a monorepo, pick the target package(s) and say so.
+Establish the languages, build system, and where an agent would look for instructions (`README`, `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, task runner). State what you found in one line. If the repo is a monorepo, pick the target package(s) and say so. **Decide the tier in scope:** if the user's goal is agents opening PRs a human reviews, audit **Tier 1 only**; if they want agents running *unattended against production*, audit **both tiers**. When it's ambiguous, default to Tier 1 and say you can add the Operate tier if they're heading for unattended operation.
 
 ### 2. Probe each rail from observed evidence
 
-For each of R1…R6, gather the concrete signals named in `references/rubric.md`. Read configs and CI files; check that named commands actually exist. **Run nothing destructive** — confirm a verifier *exists* and is wired, don't execute migrations or deploys. Any rail you cannot back with a file/line is scored as absent and tagged `UNVERIFIED`; never credit a rail on a README claim alone.
+For each rail in scope, gather the concrete signals named in `references/rubric.md`. Read configs and CI files; check that named commands actually exist. For Tier 2, the evidence lives as much in the *agent harness and deploy/runtime config* (CI/CD workflows, sandbox/container setup, feature-flag and rollout config, bot identity, logging/alerting) as in the repo source — probe there too. **Run nothing destructive** — confirm a verifier or control *exists* and is wired, don't execute migrations, deploys, or a kill switch. Any rail you cannot back with a file/line is scored as absent and tagged `UNVERIFIED`; never credit a rail on a README claim alone.
 
 ### 3. Score against the rubric
 
-Assign each rail 0/1/2 strictly from step-2 evidence, citing the path (and line where useful) that justifies the score. When evidence is mixed, score to the weakest blocking signal, not the average — a build command that needs an unobtainable secret to run is a 1, not a 2.
+Assign each rail 0/1/2 strictly from step-2 evidence, citing the path (and line where useful) that justifies the score. When evidence is mixed, score to the weakest blocking signal, not the average — a build command that needs an unobtainable secret to run is a 1, not a 2. Keep the two tiers' subtotals separate; do not average a strong Tier 1 against a weak Tier 2.
 
 ### 4. Emit the readiness scorecard
 
-Produce the deliverable below: the per-rail scores, the load-bearing minimum called out first, and a **prioritized fix list** ordered by leverage (load-bearing rails first, then lowest-scoring). Each fix is concrete and tied to the rail's `Fix` guidance. This is the default output — stop here unless asked to build.
+Produce the deliverable below: the per-rail scores, the load-bearing minimum called out first, and a **prioritized fix list** ordered by leverage (load-bearing rails first, then lowest-scoring). Include the Tier-2 block only when the Operate tier was in scope. Each fix is concrete and tied to the rail's `Fix` guidance. This is the default output — stop here unless asked to build.
 
 ### 5. (Optional) Install the rails — only on request
 
-If the user asks you to *fix* or *set up* the rails, implement the prioritized fixes: e.g. add a single `verify` entrypoint (R1), wire CI to it (R2), write a conventions doc + exemplars (R3), add an architecture map (R4). Keep each change small and reviewable, and route it through the repo's own PR flow. Defer R5/R6 loop-design specifics to `crafting-self-prompting-loops` rather than reinventing them.
+If the user asks you to *fix* or *set up* the rails, implement the prioritized fixes: e.g. add a single `verify` entrypoint (R1), wire CI to it (R2), write a conventions doc + exemplars (R3), add an architecture map (R4). Tier-2 fixes (R7–R10: agent identity + run logging, a sandboxed runtime, a rollout/rollback + kill-switch path, scheduled rail re-verification) usually touch CI/CD and infra config rather than repo source — propose them, but implement only what the repo actually owns. Keep each change small and reviewable, and route it through the repo's own PR flow. Defer R5 and R9's kill-switch loop-design specifics to `crafting-self-prompting-loops` rather than reinventing them.
 
 ### 6. Re-verify what you installed
 
@@ -75,7 +89,7 @@ After any install, re-run the relevant probes and confirm the rail now scores hi
 ALWAYS structure the scorecard like this:
 
 ```
-## Agent-readiness: <repo> — <total>/12  (weakest: R<n> <rail>)
+## Agent-readiness: <repo> — Build <t1>/12  (weakest: R<n> <rail>)
 
 | Rail | Score | Evidence | Gap |
 |------|-------|----------|-----|
@@ -86,8 +100,18 @@ ALWAYS structure the scorecard like this:
 | R5 Scoped trusted tools | … | … | … |
 | R6 Human checkpoints | … | … | … |
 
+<!-- Include this block ONLY when the Operate tier was in scope (unattended/production goal) -->
+### Operate readiness — <t2>/8  (weakest: R<n> <rail>)
+
+| Rail | Score | Evidence | Gap |
+|------|-------|----------|-----|
+| R7 Runtime observability & audit | 0/1/2 | <path:line> | <one line> |
+| R8 Blast-radius containment | … | … | … |
+| R9 Deploy-path safety & kill switch | … | … | … |
+| R10 Continuous re-verification | … | … | … |
+
 ### Verdict
-<one line: is this repo agent-ready? the load-bearing R1/R2 status decides it>
+<one line: is this repo agent-ready? load-bearing R1/R2 decides Build; if Operate is in scope, say plainly whether it is safe to run unattended>
 
 ### Prioritized fixes (highest leverage first)
 1. <rail> — <concrete fix> — <why it moves the needle>
