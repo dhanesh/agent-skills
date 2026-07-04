@@ -95,5 +95,69 @@ The overall readiness score is the sum (0–12), but the *shape* matters more th
 | 2 | PR + meaningful review gate on consequential changes, small reversible diffs, cheap rollback |
 
 **Fix.** Route agent changes through PRs; gate consequential/irreversible actions on human approval (`crafting-self-prompting-loops` LSC-8); keep diffs small and rollback one command away. Make the review *adversarial* — show the verifier result and the diff, not just the agent's summary.
+
+---
+
+# Tier 2 — the Operate rails (merge → production)
+
+R1…R6 get an agent to a **verified, reviewable PR**. That is the whole job when a human merges and a normal release process takes over — so for a repo just onboarding agents to open PRs, **Tier 1 is the entire audit and you stop there.** Score Tier 2 **only when the goal is agents running unattended against a production system** (Honk's actual operating mode): the four rails below govern the surface *past* the merge boundary, where a wrong autonomous change reaches users and no reviewer is watching each one.
+
+These rails are scored the same **0 / 1 / 2** and reported as a **separate subtotal (0–8)** — do not fold them into the Tier-1 total, because a repo can be perfectly agent-ready for PR work (Tier 1 = 12) and completely unsafe to run unattended (Tier 2 = 0). The Tier-2 grounding (`grounding.md` Tier 2) leans more on established operational-safety and security practice than on direct Honk quotes; weight it accordingly.
+
+## R7 — Runtime observability & audit trail
+
+**What it is.** Every agent run and action is logged, attributable, and replayable: you can reconstruct *what* an autonomous change did, *when*, on *whose* authority, and *why*. R6's PR is the audit artifact for the diff; R7 is the audit trail for the *run* behind it. Without it, a bad unattended change is an incident you cannot diagnose.
+
+**Probe.** Are agent runs traced end-to-end (structured logs keyed by a run ID, retained tool-call records)? Is each agent-authored change attributable to a **distinct agent identity** (bot account, signed commits, a `Co-Authored-By`/trailer, labels) rather than indistinguishable from a human's? Are the driving prompts/decisions retained for replay? Is there alerting on anomalous agent behavior?
+
+| Score | Signal |
+|---|---|
+| 0 | agent actions indistinguishable from a human's; no run logs; nothing to replay |
+| 1 | partial trail (e.g. PRs tagged bot-authored) but runs aren't traceable end-to-end, or logs are ephemeral |
+| 2 | structured, retained, queryable audit trail keyed by run ID; distinct agent identity; decisions replayable |
+
+**Fix.** Give the agent a distinct identity (bot account / signed commits / a commit trailer); emit structured run logs with a run ID; retain prompts + tool calls for replay; alert on anomalies. This is the auditability precondition for trusting anything downstream.
+
+## R8 — Blast-radius containment
+
+**What it is.** The environment the agent *runs in* bounds the damage a wrong or compromised run can do — ephemeral sandboxes, least-privilege short-lived credentials, an egress allowlist, and prod-data segregation. R5 scopes the *tools*; R8 scopes the *environment those tools execute in*. A capable agent on a long-lived host with standing prod access is a bounded-only-by-luck blast radius.
+
+**Probe.** Does the agent run in an ephemeral, isolated environment (fresh container/clone) rather than a standing host with persistent access? Is network egress restricted to an allowlist? Are prod credentials/data absent from the agent's environment (or read-only / synthetic)? Is the worst-case blast radius of a single run bounded and written down?
+
+| Score | Signal |
+|---|---|
+| 0 | agent runs on a host with standing prod access + open network; a bad run can reach anything |
+| 1 | some isolation (a container) but prod creds or open egress remain; blast radius not bounded |
+| 2 | ephemeral least-privilege env, egress allowlisted, no standing prod data/creds; worst-case blast radius bounded and documented |
+
+**Fix.** Run agents in ephemeral sandboxes with least-privilege, short-lived credentials; restrict egress to an allowlist; keep prod data out (synthetic or read-only replicas); document the worst-case blast radius so it is a known quantity, not a surprise. This is the containment half of excessive-agency avoidance — R5 narrows *what* it can call, R8 narrows *what that call can reach*.
+
+## R9 — Deploy-path safety & kill switch
+
+**What it is.** Agent changes reach production through a **staged, reversible, and haltable** path: feature-flag / canary / staged rollout with automated rollback on regression, a one-action revert of a shipped change, enforced spend/rate/concurrency caps, and an emergency stop that halts the whole agent fleet. R6's reversibility ends at merge; R9 governs merge → prod and the ability to stop *everything* at once.
+
+**Probe.** Do agent-authored changes deploy via staged/canary rollout with automated rollback on SLO regression? Is rollback of a shipped change a single known action? Are there enforced spend/rate/concurrency limits on the agent program? Is there a documented, *tested* kill switch that halts all agents immediately?
+
+| Score | Signal |
+|---|---|
+| 0 | merges deploy straight to prod; no canary, no rollback story, no caps, no stop |
+| 1 | some staging or manual rollback, but no automated regression rollback, or no fleet-wide kill switch / caps |
+| 2 | staged rollout with automated rollback, one-action revert, enforced spend/rate/concurrency caps, and a tested kill switch |
+
+**Fix.** Gate agent-authored deploys behind feature flags + canary with automated rollback on SLO regression; make rollback one action; enforce spend/rate/concurrency caps; wire *and test* a fleet-wide kill switch. The caps and stop are the operational analog of the loop's hard-stop backstop (`crafting-self-prompting-loops`) lifted from one loop to the whole program.
+
+## R10 — Continuous re-verification & program telemetry
+
+**What it is.** Readiness is **monitored over time**, not assumed from a one-time audit. Two things drift: the rails themselves rot (a required check gets disabled, the architecture map goes stale, a token scope quietly widens), and agent-program quality moves (PR acceptance rate, revert/rollback rate, time-to-green, cost per merged change). R10 re-checks both and pauses autonomy when they regress — it is R1/R2's external-verification discipline lifted from the *single change* to the *whole program*.
+
+**Probe.** Is repo readiness (especially the load-bearing R1/R2) re-verified on a schedule or in CI, so a disabled check / drifted map / widened scope is caught automatically? Are agent-program metrics tracked (merge acceptance, revert rate, MTTR-to-green, cost/change)? Is there a threshold that **pauses autonomy** when quality regresses, rather than waiting for an incident?
+
+| Score | Signal |
+|---|---|
+| 0 | audit is one-time; no ongoing rail checks; no program metrics; regressions surface only as incidents |
+| 1 | some metrics or periodic checks exist, but no automated pause-on-regression, or rail drift goes uncaught |
+| 2 | rails continuously re-verified; program-quality metrics tracked against thresholds; autonomy auto-pauses when they regress |
+
+**Fix.** Put the rail checks in CI or a scheduled job (does `verify` still run? is CI still required-to-merge? did tool scope widen?); track acceptance / revert / time-to-green per agent; set a regression threshold that pauses autonomy and pages a human. The sibling `context-hygiene-kit` and `world-model-ledger` install *continuous* in-session mechanisms — R10 asks for the same continuity around the readiness rails themselves.
 </content>
 </invoke>

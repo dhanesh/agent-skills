@@ -36,16 +36,39 @@ Honk opens **PRs** — agent output lands through a reviewable, reversible path,
 
 ---
 
+## Tier 2 — the Operate rails (merge → production)
+
+R1…R6 get an agent to a *verified, reviewable PR* — the whole job when a human merges and a normal release process takes over. But Honk's actual mode is **unattended operation at scale**, and once no reviewer watches each change, four more rails govern the surface past the merge boundary. These lean more on **established operational-safety and security practice** than on direct Honk quotes; they are tagged accordingly, and the connection to the Honk retrospectives is drawn where it genuinely exists rather than asserted. Score this tier **only** when the goal is autonomous/background operation against a production system.
+
+### §7 — Runtime observability & audit (R7) [E]
+
+An autonomous change you cannot reconstruct is an incident you cannot diagnose. Honk's PR-per-change is itself an audit artifact (§6), but the *run* behind it — prompts, tool calls, decisions — needs to be traceable and replayable for the change to be accountable after the fact. This is standard SRE observability plus the auditability leg of AI-system governance; a **distinct agent identity** is the precondition for attributing a change to the agent at all. → R7 makes an unattended change accountable.
+
+### §8 — Blast-radius containment (R8) [E]
+
+R5 scopes the *toolset*; R8 scopes the *environment the tools run in*. Least-privilege, ephemeral, egress-restricted execution is the containment half of excessive-agency avoidance (OWASP LLM06) and the standard sandbox posture — an agent that never holds standing prod credentials cannot leak or wreck them. Honk confirming builds **in CI across multiple operating systems** (§2) is itself a form of isolated, reproducible execution rather than trusting one local host. → R8 bounds what a wrong run can reach.
+
+### §9 — Deploy-path safety & kill switch (R9) [E]
+
+R6's reversibility stops at merge; production reversibility is **staged rollout + automated rollback + a stop button**. Canary / feature-flag rollout with automated rollback on SLO regression is standard progressive-delivery practice; a fleet-wide kill switch and spend/rate/concurrency caps are the operational analog of the loop's hard-stop backstop (`crafting-self-prompting-loops` — the mandatory termination invariant) lifted from a single loop to the whole program. → R9 is the cheap undo and the emergency stop for the production surface.
+
+### §10 — Continuous re-verification & telemetry (R10) [A/E]
+
+The single strongest Honk signal — end-to-end success moving ~20–30% → ~80% (§1), and later *removing* the LLM judge once build/test/CI carried the signal (§2) — is itself a **program metric watched over time**: you only know a rail worked because you measured the number move. Rails also rot (a required check disabled, a map drifted, a token scope widened). Re-verifying readiness on a schedule and pausing autonomy when program quality (acceptance, revert rate, time-to-green) regresses is R1/R2's external-verification discipline applied to the *program* instead of the single change. Cross-link: `context-hygiene-kit` and `world-model-ledger` already install *continuous* in-session mechanisms; R10 asks for the same continuity around the readiness rails themselves. → R10 keeps "agent-ready" true after the audit, not just on the day of it.
+
+---
+
 ## How this skill relates to the others
 
 This skill is the **environment** audit; the sibling skills build the **loop** that runs in it:
 
 | Concern | Owned by |
 |---|---|
-| Is the *repo* ready for agents? (rails) | **this skill** |
+| Is the *repo* ready for agents? (Tier-1 rails, author→merge) | **this skill** |
+| Is the *agent program* safe to run unattended? (Tier-2 rails, merge→prod) | **this skill** |
 | Is the *loop* sound? (termination, evaluation, injection) | `crafting-self-prompting-loops` |
 | Does in-session context stay lean & rot-proof? | `context-hygiene-kit` |
 | Are the codebase's claims true against real-world norms? | `base-in-reality` |
 
-A rail finding that points at loop design (R5, R6) defers to `crafting-self-prompting-loops` rather than restating it.
+A rail finding that points at loop design (R5, and R9's kill-switch backstop) defers to `crafting-self-prompting-loops` rather than restating it.
 </content>
