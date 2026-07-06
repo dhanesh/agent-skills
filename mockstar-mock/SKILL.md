@@ -1,6 +1,6 @@
 ---
 name: mockstar-mock
-description: "Generate a runnable mockstar mock server for a service from its specs and docs — OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL). Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx mockstar`)."
+description: "Generate a runnable mockstar mock server for a service from its specs and docs — OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL). Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
 x-spec-version: 1.0
 ---
 
@@ -37,17 +37,23 @@ generating.
 
 ## Prerequisites
 
-- `bunx mockstar` available (install: `bun add -g mockstar` or use `bunx` directly with Bun).
+- `bunx @dhaneshpurohit/mockstar` available (install: `bun add -g @dhaneshpurohit/mockstar` or use `bunx`
+  directly with Bun). **Package name matters:** mockstar is published on npm as the scoped package
+  `@dhaneshpurohit/mockstar` (latest ≥ 0.2.2). The *unscoped* `mockstar` on npm is an unrelated
+  project — never invoke bare `bunx mockstar`. Equivalent Docker image: `ghcr.io/dhanesh/mockstar:latest`
+  (`--runtime docker`). The importer's schema-derived bodies and mixed-segment path-param handling
+  require mockstar ≥ 0.2.2; the coverage report records the resolved runtime and version.
 - `uv` available — used to run `assets/extract_text.py` for binary input conversion.
 - `curl` available — used by `assets/smoke.sh` for smoke testing routes.
+- For `--runtime docker`: a reachable Docker daemon and the `ghcr.io/dhanesh/mockstar` image.
 
 ## Invariants (do not violate)
 
 1. **No fabricated endpoints.** Every endpoint in the output must trace to a fetched or provided
    source. If an endpoint is absent from every input, do not emit it.
-2. **Prefer native tooling.** Use `bunx mockstar import` for OpenAPI (and losslessly-liftable
+2. **Prefer native tooling.** Use `bunx @dhaneshpurohit/mockstar import` for OpenAPI (and losslessly-liftable
    Postman/HAR) rather than hand-authoring what the importer can produce. Use
-   `bunx mockstar enhance` for Tier 2 placeholder rewriting rather than hand-tokenizing bodies.
+   `bunx @dhaneshpurohit/mockstar enhance` for Tier 2 placeholder rewriting rather than hand-tokenizing bodies.
 3. **Schema-valid output.** Verification (Stage 5) boots the server. A mock project that fails
    to boot is not a valid deliverable. The `--no-verify` flag skips the boot, which is only
    acceptable in CI pre-check mode where boot is deferred.
@@ -62,9 +68,9 @@ generating.
 - `--tenant <name>` — mockstar tenant name used as the mocks subdirectory (default: `default`). **Important:** when passed to `mockstar import`, the equals form `--tenant=<name>` is required — the space form is silently ignored by the importer.
 - `--fidelity full|static` — `full` generates scenarios, dynamic handlers, and webhooks from IR hints; `static` emits one default response per endpoint only (default: `full`).
 - `--no-verify` — skip Stage 5 boot-and-smoke verification (the generated project is not started).
-- `--deterministic` — passed through to `bunx mockstar` during smoke testing; disables random Faker values for reproducible responses.
+- `--deterministic` — passed through to `bunx @dhaneshpurohit/mockstar` during smoke testing; disables random Faker values for reproducible responses.
 - `--max-endpoints N` — cap the merged Endpoint Inventory at N records; excess are dropped in reverse-priority order and reported.
-- `--runtime auto|local|docker` — selects how mockstar is invoked (default: `auto`). `auto` prefers Docker (the `ghcr.io/dhanesh/mockstar` image) when the Docker daemon is reachable and the image is available, else falls back to local `bunx mockstar`. `local` always uses `bunx mockstar`. `docker` always uses Docker and fails fast if the daemon is down.
+- `--runtime auto|local|docker` — selects how mockstar is invoked (default: `auto`). `auto` prefers Docker (the `ghcr.io/dhanesh/mockstar` image) when the Docker daemon is reachable and the image is available, else falls back to local `bunx @dhaneshpurohit/mockstar`. `local` always uses `bunx @dhaneshpurohit/mockstar`. `docker` always uses Docker and fails fast if the daemon is down.
 - `--image <ref>` — the Docker image reference used when `--runtime` is `docker` or `auto` resolves to Docker (default: `ghcr.io/dhanesh/mockstar:latest`). For reproducibility, pin by digest: `ghcr.io/dhanesh/mockstar@sha256:<digest>`.
 
 ## Procedure
@@ -95,7 +101,7 @@ Before any other work, resolve the runtime environment and validate the live CLI
 **1. Resolve runtime.**
 
 Evaluate `--runtime`:
-- `local` — use `bunx mockstar` directly.
+- `local` — use `bunx @dhaneshpurohit/mockstar` directly.
 - `docker` — use the Docker image (`--image` value). Fail fast if `docker version` (server) is
   unreachable.
 - `auto` (default) — prefer Docker: run `docker version` and confirm the server is reachable,
@@ -106,7 +112,7 @@ Record the resolved runtime (local or docker) and the image ref when docker is c
 
 **2. Detect mockstar version.**
 
-- Local: `bunx mockstar version` — capture the printed version string.
+- Local: `bunx @dhaneshpurohit/mockstar version` — capture the printed version string.
 - Docker: `docker run --rm <image> version` — capture the printed version string.
 
 Record the version. Note the known caveat: the CLI's printed version may lag the package
@@ -115,7 +121,7 @@ version (treat it as advisory, not definitive).
 **3. Validate the live CLI surface.**
 
 Run the help command for the chosen runtime:
-- Local: `bunx mockstar help`
+- Local: `bunx @dhaneshpurohit/mockstar help`
 - Docker: `docker run --rm <image> help`
 
 Confirm that `import`, `enhance`, and serve-as-default are all present in the output. For
@@ -183,7 +189,7 @@ Fan out one subagent per input type. Each subagent follows the adapter rules in
 
 - **OpenAPI** — preferred path: if the sole input is a raw OpenAPI 3.x file and no extra
   examples need merging, skip manual extraction and hand the file directly to
-  `bunx mockstar import` in Stage 3. Manual extraction is needed only when merging additional
+  `bunx @dhaneshpurohit/mockstar import` in Stage 3. Manual extraction is needed only when merging additional
   examples or overriding generated config.
 - **Postman** — walk `item[]` recursively; rewrite `{{var}}` placeholders to Hono `:param`.
   Lift to OpenAPI with `postman-to-openapi` first when saved responses are well-structured.
@@ -212,7 +218,7 @@ For each endpoint in the merged Endpoint Inventory, generate a mockstar JSON moc
 **Native path (preferred for OpenAPI and losslessly-liftable inputs):**
 
 ```
-bunx mockstar import <spec-file> <out>/mocks --tenant=<tenant>
+bunx @dhaneshpurohit/mockstar import <spec-file> <out>/mocks --tenant=<tenant>
 ```
 
 The importer writes mock JSON files to `<out>/mocks/<tenant>/`. Use this path for:
@@ -243,7 +249,7 @@ Prefer literal example values in the initial output; Tier 2 token rewriting is d
 Run mockstar's enhance pass over the generated mocks directory:
 
 ```
-bunx mockstar enhance <out>/mocks/<tenant>
+bunx @dhaneshpurohit/mockstar enhance <out>/mocks/<tenant>
 ```
 
 When an OpenAPI input exists, add `--spec <openapi-file>` so the enhancer can cross-reference
@@ -270,22 +276,33 @@ Unless `--no-verify` is set:
    a grounded status, use `200`.
 
 2. Run the smoke suite using the absolute `$SMOKE` path resolved in Stage 1, passing the
-   resolved runtime environment:
+   resolved runtime environment **and the tenant** via `MOCKSTAR_SMOKE_TENANT`:
    ```sh
    # local runtime
-   MOCKSTAR_SMOKE_RUNTIME=local sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
+   MOCKSTAR_SMOKE_RUNTIME=local MOCKSTAR_SMOKE_TENANT=<tenant> sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
 
    # docker runtime
-   MOCKSTAR_SMOKE_RUNTIME=docker MOCKSTAR_SMOKE_IMAGE=<image> sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
+   MOCKSTAR_SMOKE_RUNTIME=docker MOCKSTAR_SMOKE_IMAGE=<image> MOCKSTAR_SMOKE_TENANT=<tenant> \
+     sh "$SMOKE" <out>/mocks <out>/mocks/routes.tsv
    ```
 
-   `assets/smoke.sh` boots mockstar via the chosen runtime. Both paths poll `GET /health`
-   for readiness before testing routes. Set `MOCKSTAR_SMOKE_PORT` if you need a non-default
-   smoke port. Do NOT use `bunx mockstar serve` — `serve` is not a valid subcommand; the
-   default command boots the server.
+   **Tenant selection is mandatory for any non-`default` tenant.** mockstar resolves a tenant
+   *before* routing (default modes: `path` + `header`). Only the `default` tenant is served at
+   the bare path; a named tenant's routes all 404 at the bare path even though the mocks are
+   valid. `smoke.sh` sends `x-mockstar-tenant: <tenant>` on every probe (header mode) so named
+   tenants resolve — do not skip `MOCKSTAR_SMOKE_TENANT`, or a correct project will look broken
+   and trigger a false fix-loop. See "Tenant selection" under Output layout.
+
+   `assets/smoke.sh` boots mockstar via the chosen runtime. Both paths poll `GET /health` for
+   liveness before testing routes (`/health` is tenant-agnostic; `/ready` reports drain state).
+   Set `MOCKSTAR_SMOKE_PORT` for a non-default smoke port. The server boots via the default
+   command (`bunx @dhaneshpurohit/mockstar <config-root>`); the explicit `serve` subcommand
+   (`bunx @dhaneshpurohit/mockstar serve <config-root>`) is equivalent — both are valid.
 
 3. For any `FAIL` lines from the smoke run, inspect the generated config, fix the entry, and
-   re-run until all routes pass. Do not ship a project with smoke failures.
+   re-run until all routes pass. Do not ship a project with smoke failures. **Before editing a
+   mock in response to a 404, confirm the probe carried the tenant selector** — a bare-path 404
+   on a named tenant is a selector problem, not a mock problem.
 
 ---
 
@@ -330,15 +347,59 @@ With `--into <dir>`:
   MOCKSTAR-COVERAGE.md
 ```
 
-The config-root maps directly to the runtime:
-- **Local:** `bunx mockstar mocks/ --handlers handlers/`
-- **Docker:** mount `mocks/` → `/config/mocks` and `handlers/` → `/config/handlers`
+### Tenant selection (how a consumer reaches the mocks)
 
-Boot the server locally from the output root:
+mockstar runs tenant resolution as the **first** routing step, with default modes `path` and
+`header`. A request that carries no selector falls back to the `default` tenant. So:
+
+- **The `default` tenant** is served at the **bare path** — `GET /pet/findByStatus`.
+- **Any named tenant** (anything other than `default`) is reachable **only** via a selector:
+  - **Path mode:** prefix the path with `/t/<tenant>` — `GET /t/petstore/pet/findByStatus`
+    (the `/t/<tenant>` prefix is stripped before route matching).
+  - **Header mode:** send `x-mockstar-tenant: <tenant>` — `GET /pet/findByStatus` with the header.
+  - (Subdomain mode `<tenant>.host` exists but is off by default.)
+
+**Consequence for this skill:** if `--tenant` is not `default`, every consumer — the smoke test,
+the coverage-report examples, and whoever calls the mock — must use a selector. The coverage
+report's Summary states the tenant and the exact selector to use. When in doubt, use `default`
+as the tenant so bare-path access works with zero configuration. No `mockstar.config.json` is
+required for tenant routing: the CLI `serve` path always enables `path` + `header` modes.
+
+### Ways to run mockstar
+
+The generated `mocks/` config-root is portable across all of mockstar's distribution channels.
+Pick per persona; each honours the same tenant selectors above.
+
+- **Developer — bunx (hot reload):** `bunx @dhaneshpurohit/mockstar mocks/ --handlers handlers/`.
+  Editing a `mocks/<tenant>/*.json` file hot-reloads only that tenant.
+- **Docker (shared/staging/CI):** mount `mocks/` → `/config/mocks` and `handlers/` →
+  `/config/handlers` (see "Docker delivery" below). The container binds `0.0.0.0:3000` and is
+  crash-only — the orchestrator **must** set a restart policy (`--restart=always`, K8s
+  `restartPolicy: Always`, or systemd `Restart=on-failure`). Use `/health` for liveness and
+  `/ready` for load-balancer drain.
+- **SDET — library embed (in-process, no daemon):** import mockstar into a Jest/Vitest/`bun test`
+  suite and point it at the same config-root:
+  ```ts
+  import { launch } from '@dhaneshpurohit/mockstar';
+  const instance = await launch({
+    configRoot: './mocks', handlersDir: './handlers',
+    deterministic: true, watch: false, installCrashHandlers: false,
+  });
+  const res = await instance.server.hono.request('http://localhost/pet/findByStatus', {
+    headers: { 'x-mockstar-tenant': 'petstore' },   // selector, as above
+  });
+  await instance.stop();
+  ```
+- **Offline CI / Windows — compiled binary:** `bun build src/cli.ts --compile --outfile mockstar`
+  then `./mockstar mocks/` (no Bun install needed at run time).
+
+Boot the server locally from the output root (default command; `serve` is an equivalent alias):
 
 ```
-bunx mockstar mocks/
-bunx mockstar mocks/ --deterministic --no-watch --port 3000
+bunx @dhaneshpurohit/mockstar mocks/
+bunx @dhaneshpurohit/mockstar serve mocks/ --deterministic --no-watch --port 3000
+# named tenant, path mode:   curl http://127.0.0.1:3000/t/<tenant>/<path>
+# named tenant, header mode: curl -H 'x-mockstar-tenant: <tenant>' http://127.0.0.1:3000/<path>
 ```
 
 ### Docker delivery

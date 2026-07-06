@@ -10,10 +10,22 @@
 #
 # routes-file: one line per route -> METHOD<TAB>PATH<TAB>EXPECTED_STATUS
 #
+# Tenant selection (MOCKSTAR_SMOKE_TENANT, default 'default'):
+#   mockstar resolves a tenant BEFORE routing. Only the 'default' tenant is served at
+#   the bare path; every other tenant is reachable only via a selector. This script
+#   uses header mode — it sends `x-mockstar-tenant: <tenant>` on every route probe
+#   (harmless for 'default'). Without it, a named tenant's routes all 404 even though
+#   the mocks are valid. See references/mockstar-mapping.md "Tenant selection".
+#
+# Path params: `:seg` segments in a route are substituted with `1` before probing
+#   (e.g. /pet/:petId -> /pet/1) so Hono param routes actually match.
+#
 # Runtime:
-#   MOCKSTAR_SMOKE_RUNTIME=local   (default) — bunx mockstar <out> --deterministic --no-watch --port <PORT>
+#   MOCKSTAR_SMOKE_RUNTIME=local   (default) — bunx @dhaneshpurohit/mockstar <out> --deterministic --no-watch --port <PORT>
 #   MOCKSTAR_SMOKE_RUNTIME=docker  — docker run ghcr.io/dhanesh/mockstar (override with MOCKSTAR_SMOKE_IMAGE)
 set -eu
+
+TENANT="${MOCKSTAR_SMOKE_TENANT:-default}"
 
 routes_only=0
 if [ "${1:-}" = "--routes-only" ]; then
@@ -73,7 +85,7 @@ else
 
   else
     # local path (default)
-    bunx mockstar "$OUT" --deterministic --no-watch --port "$PORT" >/tmp/mockstar-smoke.log 2>&1 &
+    bunx @dhaneshpurohit/mockstar "$OUT" --deterministic --no-watch --port "$PORT" >/tmp/mockstar-smoke.log 2>&1 &
     SERVER=$!
     trap 'kill "$SERVER" 2>/dev/null || true' EXIT
     # Poll /health first (treat any HTTP status as "up")
@@ -92,7 +104,11 @@ rc=0
 while IFS="$(printf '\t')" read -r METHOD PATHPART EXPECT; do
   [ -n "${METHOD:-}" ] || continue
   case "$METHOD" in \#*) continue;; esac
-  GOT="$(curl -s -o /dev/null -w '%{http_code}' -X "$METHOD" "$BASE$PATHPART")"
+  # Substitute Hono `:param` segments with a concrete value so param routes match.
+  PROBE="$(printf '%s' "$PATHPART" | sed 's#/:[a-zA-Z0-9_]*#/1#g')"
+  # Select the tenant via header mode (works identically for local + docker; the
+  # 'default' tenant is unaffected). A named tenant 404s at the bare path without this.
+  GOT="$(curl -s -o /dev/null -w '%{http_code}' -H "x-mockstar-tenant: $TENANT" -X "$METHOD" "$BASE$PROBE")"
   if [ "$GOT" = "$EXPECT" ]; then
     echo "PASS: $METHOD $PATHPART -> $GOT"
   else

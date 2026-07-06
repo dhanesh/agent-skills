@@ -214,7 +214,7 @@ When an IR endpoint record has a `statefulHints` field, the generator produces a
 ```ts
 // handlers/postOrders.ts
 import type { Context } from 'hono';
-import type { HandlerHelpers } from '@dhanesh/mockstar';
+import type { HandlerHelpers } from '@dhaneshpurohit/mockstar';
 
 // In-memory store — resets on server restart. Replace with a persistent
 // store if cross-request durability is required.
@@ -455,3 +455,30 @@ In the Endpoint Inventory, GraphQL endpoints appear as `POST /graphql` records. 
 ```
 
 The generator assigns `priority: 0` by default. Increase it manually (or via a post-processing rule) when a more-specific entry would otherwise be shadowed by a catch-all.
+
+## Tenant selection
+
+mockstar resolves the tenant as the **first** routing step, before any path matching. The CLI
+`serve` path enables two modes by default (`path` + `header`); no `mockstar.config.json` is
+required. A request with no selector falls back to the `default` tenant.
+
+| Mode | How the consumer selects tenant `<t>` | Example |
+|---|---|---|
+| Header (default) | `x-mockstar-tenant: <t>` request header | `curl -H 'x-mockstar-tenant: petstore' /pet/1` |
+| Path (default) | `/t/<t>` path prefix (stripped before matching) | `curl /t/petstore/pet/1` |
+| Subdomain (off by default) | `<t>.host` | `curl -H 'Host: petstore.local' /pet/1` |
+| _none_ | falls back to the `default` tenant, served at the bare path | `curl /pet/1` (tenant `default`) |
+
+**Rule:** the mock files live at `mocks/<tenant>/*.json`, but the *directory* name is not part of
+the request URL. Reaching a mock in `mocks/petstore/` requires one of the selectors above unless
+the tenant is literally `default`. `assets/smoke.sh` uses header mode via `MOCKSTAR_SMOKE_TENANT`.
+The coverage report must print the tenant and the concrete selector a consumer needs.
+
+### Importer path-template quirk (pre-0.2.2 only)
+
+mockstar **≥ 0.2.2** `import` converts any OpenAPI path segment that *contains* a `{param}` to a
+whole-segment `:param` — `/pets/{id}` → `/pets/:id` and `/specs/{provider}/{api}.json` →
+`/specs/:provider/:api`. On **pre-0.2.2** builds a brace that was only a *substring* of a segment
+(`{api}.json`) was left URL-encoded (`%7Bapi%7D.json`) and matched no real request. If you are
+pinned to such a version, hand-fix those entries after import (rewrite the segment to a clean
+`:param`) and flag them in the coverage report's Gaps section; on current mockstar no fix is needed.
