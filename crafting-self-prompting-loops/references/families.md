@@ -18,6 +18,8 @@ Is a human required in the loop's path before it may act?
 
 A loop can blend families (e.g. an autonomous loop with a human gate on deploys). Pick the *dominant* shape for the scaffold, then add the relevant slot from the other family.
 
+**Orthogonal axis — the trigger.** Family says *who drives whom*; it doesn't say *what starts each round or what stops the whole thing* (a user prompt, a completion condition, a time interval, an external event). When the target runtime is Claude Code, that second axis picks the primitive (`/goal`, `/loop`, Routines, composition) — see [`claude-code-primitives.md`](./claude-code-primitives.md) for the trigger taxonomy and each primitive's slot coverage.
+
 ## Family reference
 
 | Family | Loop shape | LSC-8 gate posture | Dominant failure modes (LSC-10) | Template |

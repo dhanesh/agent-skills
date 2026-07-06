@@ -38,6 +38,7 @@ crafting-self-prompting-loops/
 │   ├── spec.md                  per-item design rules + decision criteria (terse, the extraction source)
 │   ├── families.md              family-selection decision tree + per-family table + research refinements
 │   ├── failure-modes.md         9 failure modes + cost/cadence playbook
+│   ├── claude-code-primitives.md  native primitives (/goal, /loop, Routines) → which LSC slots each covers/leaves open
 │   └── literature.md            research grounding: each finding → citation → which LSC slot it hardens
 ├── assets/templates/            5 fill-in scaffolds (base + one per family)
 │   ├── base-loop.template.md
