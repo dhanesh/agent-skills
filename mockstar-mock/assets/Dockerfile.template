@@ -1,0 +1,22 @@
+# Dockerfile.template — bake-in image template for the mockstar-mock skill
+#
+# Usage: the skill replaces <TAG> with the detected image ref or digest before
+# writing this file as `Dockerfile` in the output directory.
+#
+# For reproducibility, pin the base by digest rather than a mutable tag:
+#   FROM ghcr.io/dhanesh/mockstar@sha256:<digest>
+# The digest is recorded in Stage 0 of the coverage report's "Runtime & compatibility"
+# section. Using a digest ensures bit-for-bit reproducible builds across environments.
+#
+# ENTRYPOINT and CMD are already set in the base image:
+#   ENTRYPOINT ["bun", "./dist/cli.js"]
+#   CMD ["/config/mocks"]
+# The container serves /config/mocks on port 3000 (non-root uid 10001).
+
+FROM ghcr.io/dhanesh/mockstar:<TAG>
+
+# Copy generated mocks into the container (required)
+COPY --chown=10001:10001 mocks/ /config/mocks/
+
+# Copy named handlers (optional — only needed when dynamic handlers exist)
+# COPY --chown=10001:10001 handlers/ /config/handlers/

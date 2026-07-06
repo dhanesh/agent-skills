@@ -1,0 +1,2 @@
+GET	/pets	200
+GET	/pets/pet_abc123	200

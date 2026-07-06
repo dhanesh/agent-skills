@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info: { title: Petstore Mini, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              example: [{ id: "pet_abc123", name: "Rex" }]
+  /pets/{id}:
+    get:
+      operationId: getPet
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              example: { id: "pet_abc123", name: "Rex" }
