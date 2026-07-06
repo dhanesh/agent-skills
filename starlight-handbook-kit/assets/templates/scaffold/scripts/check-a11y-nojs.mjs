@@ -50,7 +50,7 @@ if (!existsSync(DEMO_HTML)) {
 // ---- 2. A11y affordances in component source ----
 const A11Y = [
   { file: 'WhenWhyTabs.tsx', needs: [/role=["']tablist["']/, /role=["']tab["']/], desc: 'ARIA tablist pattern' },
-  { file: 'TradeoffSlider.tsx', needs: [/type=["']range["']/, /aria-valuenow/], desc: 'native range slider + aria-valuenow' },
+  { file: 'TradeoffSlider.tsx', needs: [/type=["']range["']/, /aria-valuetext/], desc: 'native range slider + aria-valuetext' },
   { file: 'DecisionTree.tsx', needs: [/<button/], desc: 'real <button> controls' },
   { file: 'CompareMatrix.tsx', needs: [/<table/], desc: 'semantic <table>' },
 ];

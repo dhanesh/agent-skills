@@ -1,0 +1,29 @@
+{
+  "_comment": "Optional starter constraint pack. OFF by default — install with `scripts/install.sh --with-constraints`, or load later via `python3 world_model.py` + these rows. Each is a low-normative-confidence prior; validate or delete per your project. Deliberately tiny and generic.",
+  "constraints": [
+    {
+      "name": "no-weak-password-hash",
+      "kind": "forbids",
+      "scope_predicate": "uses",
+      "params": {"patterns": ["md5", "sha1"]},
+      "severity": "violation",
+      "message_tmpl": "{subject} {predicate} {object} — weak hash '{matched}' for security-sensitive hashing"
+    },
+    {
+      "name": "no-eval-of-external-input",
+      "kind": "forbids",
+      "scope_predicate": "calls",
+      "params": {"patterns": ["eval", "exec"]},
+      "severity": "warning",
+      "message_tmpl": "{subject} {predicate} {object} — dynamic eval/exec is a common injection sink; confirm input is trusted"
+    },
+    {
+      "name": "single-owner-per-table",
+      "kind": "functional",
+      "scope_predicate": "owned_by",
+      "params": {"maxCount": 1},
+      "severity": "warning",
+      "message_tmpl": "{subject} has multiple owners: {values} — ownership should be singular"
+    }
+  ]
+}

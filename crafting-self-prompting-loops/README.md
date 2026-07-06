@@ -38,6 +38,7 @@ crafting-self-prompting-loops/
 │   ├── spec.md                  per-item design rules + decision criteria (terse, the extraction source)
 │   ├── families.md              family-selection decision tree + per-family table + research refinements
 │   ├── failure-modes.md         9 failure modes + cost/cadence playbook
+│   ├── claude-code-primitives.md  native primitives (/goal, /loop, Routines) → which LSC slots each covers/leaves open
 │   └── literature.md            research grounding: each finding → citation → which LSC slot it hardens
 ├── assets/templates/            5 fill-in scaffolds (base + one per family)
 │   ├── base-loop.template.md
@@ -72,3 +73,16 @@ Extracted from the `self-prompting-loop` learning tool in this repo (`docs/spec.
 | Avg tokens / run | 44k (±4k) | 73k (±104k) |
 
 The skill's measured value concentrates where baselines silently fail: the **two-channel injection defense** (baseline missed it in all 4 cases) and **backstops the user didn't explicitly ask for**.
+
+### Delta eval — Claude Code primitives update (July 2026)
+
+When [`references/claude-code-primitives.md`](./references/claude-code-primitives.md) was added (folding in the Claude Code team's loop taxonomy: `/goal`, `/loop`, Routines), the change was smoke-tested with a blind A/B eval: 3 loop-shaped requests (goal-based, unattended cloud routine, PR polling) × 2 skill variants (before/after, staged under neutral names), each output graded by a fresh-context judge against a fixed checklist — 3 *delta* assertions per case (what the update should add) + 2 *regression* assertions (backstop, two-channel).
+
+| Metric | Before | After |
+|---|---|---|
+| All assertions | 14/15 | **15/15** |
+| Delta assertions | 8/9 | **9/9** |
+| Regression assertions | 6/6 | 6/6 |
+| Generation tokens (3 cases) | ≈188k | ≈192k |
+
+The one before-variant failure was exactly the targeted gap: on a "keep working until tests pass" request it built a sound Stop-hook loop but never surfaced native `/goal`; the after-variant presented `/goal` first-class with its two caveats (transcript-only evaluator → the condition must show the check; the turn clause is a soft stop → real caps behind it). Caveats: n=1 per cell, single judge per output — a smoke test, not a benchmark; and the before-variant isn't knowledge-free (the agent environment exposes some primitives), which sharpens rather than weakens the finding — ambient knowledge alone did *not* surface `/goal`.

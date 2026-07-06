@@ -46,6 +46,7 @@ SAFE_STATE: stopped
 
 Design rule: implement at least one backstop in the harness, independent of LSC-2; the model is never trusted to be the sole terminator, and SAFE_STATE is always `stopped`.
 Decision criteria: set each cap above the expected legitimate run length but below the point of unacceptable cost/runaway; when in doubt, halt.
+Runtime note (Claude Code): the SDK's `max_turns` / `max_budget_usd` and `/loop`'s 7-day auto-expiry are real harness-level backstops; `/goal`'s "or stop after N turns" clause is **not** — it's judged by the evaluator model, i.e. an LSC-2 soft stop. See [`claude-code-primitives.md`](./claude-code-primitives.md).
 
 ## LSC-4: State-passing
 
@@ -72,8 +73,8 @@ Design rule: produce a PROGRESS_METRIC every round and define NO_PROGRESS_DETECT
 Decision criteria: pick a metric tied to SUCCESS_DEFINITION (critique score, sub-goal completion, vote); set the no-progress threshold (e.g. N rounds without improvement) from acceptable churn cost.
 
 **Evaluation must have external leverage (the single biggest correctness gap).** Intrinsic self-critique with no external signal *degrades* performance on objective tasks (Huang et al. 2023), and a model grading its own output amplifies self-bias each round — perceived quality rises while real quality stalls (Xu et al. 2024). So the evaluation signal must carry leverage the generator lacked:
-- **Prefer a tool/verifier over an opinion** — run the code, execute the tests, query the source, compute the constraint, and feed concrete failures back (CRITIC; Reflexion's gains came from a real pass/fail signal, not introspection).
-- **If the check must be model-based, use a *separate* evaluator** — a different model, or at minimum an authorship-blinded critique prompt; the generator must not be its own judge. (This is also the cost win in [`failure-modes.md`](./failure-modes.md) Part B — honesty and cost align.)
+- **Prefer a tool/verifier over an opinion** — run the code, execute the tests, query the source, compute the constraint, and feed concrete failures back (CRITIC; Reflexion's gains came from a real pass/fail signal, not introspection). At production scale this *is* the loop: Spotify's Honk agent moved PR success from ~20–30% to ~80% purely by adding a format/build/test verify→repair loop (wired as a Claude Code Stop hook so the agent cannot stop on unverified output) — no model change. See [`literature.md`](./literature.md) §A.
+- **If the check must be model-based, use a *separate* evaluator** — a different model, or at minimum an authorship-blinded critique prompt; the generator must not be its own judge. The Claude Code team states the same rule for review stages: a reviewer agent with *fresh context* is less biased because it isn't influenced by the generator's reasoning. Claude Code's `/goal` ships this shape natively (a separate small model judges the condition each turn) — but its evaluator is transcript-only, so the condition must include a stated, tool-backed check or it degrades into trusting the generator's claims (see [`claude-code-primitives.md`](./claude-code-primitives.md)). (This is also the cost win in [`failure-modes.md`](./failure-modes.md) Part B — honesty and cost align.) Treat an LLM judge as a *bootstrap*: it can get a loop working (Honk used one to reach ~80%, then **removed** it once deterministic build/test/CI verifiers carried the signal), but retire it toward a real verifier rather than enshrining it as the permanent evaluator.
 - **A same-model self-check on the same task buys little** — generation skill does not transfer to reliable self-verification (*Mind the Gap* 2025).
 - **Scope intrinsic-only refinement to subjective/stylistic outputs with a capable base model** (Self-Refine); for reasoning, use tool-grounded critique or sampling+vote.
 
@@ -152,7 +153,8 @@ CACHE_AWARENESS: <how pacing respects the prompt-cache TTL, e.g. ~5 min>
 ```
 
 Design rule: set TOKEN_BUDGET, MAX_ITERATIONS (cost, distinct from the LSC-3 safety cap), and CADENCE explicitly; pace against CACHE_AWARENESS, not a round number.
-Decision criteria: choose CADENCE so re-invocation lands within the prompt-cache TTL (~5 min) to reuse cached context; size budgets to the task's value.
+Decision criteria: choose CADENCE so re-invocation lands within the prompt-cache TTL (~5 min) to reuse cached context; size budgets to the task's value. Also match CADENCE to how often the *watched thing actually changes* — never run a recurring loop more often than its inputs move.
+Cost levers (Claude Code team guidance): **pilot before a large run** — gauge token usage on a small slice before fanning out; **ship scripts for deterministic sub-steps** instead of re-deriving them by reasoning each round; **tier models** — smaller/faster models for routine stages, the most capable for judgment calls; **instrument** with `/usage`, bare `/goal` (turns + spend), and `/workflows` (per-agent spend). See [`claude-code-primitives.md`](./claude-code-primitives.md).
 
 ## LSC-10: Failure-mode handling
 

@@ -1,0 +1,4 @@
+eval_model.db
+prompts/
+out/
+__pycache__/

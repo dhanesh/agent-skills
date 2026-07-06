@@ -53,8 +53,25 @@ from typing import Iterable
 # it only ranks and renders it as data. "untrusted" provenance can be ranked but
 # is rendered inside a fenced <data> block in the digest so a downstream model
 # treats it as data, not instructions.
+#
+# The LOAD-BEARING control is harvest-side: tool_result/tool_use blocks are never
+# ingested and markers must start the line (see harvest.py). The <data> fence is a
+# SECONDARY, best-effort soft delimiter (OWASP LLM01 "segregate/denote external
+# content") — not a complete boundary. Because it is a textual fence, untrusted
+# content containing a literal "</data>" could otherwise close it early and smuggle
+# trailing text outside the fence, so _neutralize_fences() escapes any fence tokens
+# in untrusted content before it is wrapped.
 TRUSTED = "trusted"        # your fixed scaffold, your own committed decisions
 UNTRUSTED = "untrusted"    # tool output, web text, file contents, other agents
+
+_DATA_FENCE_RE = re.compile(r"<(/?)data>", re.IGNORECASE)
+
+
+def _neutralize_fences(content: str) -> str:
+    """Escape <data>/</data> tokens in untrusted content so it cannot break out
+    of the fence. Angle brackets of the fence token become HTML entities; a
+    payload's "</data>" can no longer form a real closing fence."""
+    return _DATA_FENCE_RE.sub(lambda m: f"&lt;{m.group(1)}data&gt;", content)
 
 KINDS = ("decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note")
 # Kinds that are LOSSLESS-preserved on compaction (rot-proof). Order = digest priority.
@@ -244,9 +261,11 @@ class ContextLedger:
                 pin = " 📌" if c.pinned else ""
                 if c.provenance == UNTRUSTED:
                     # Two-channel boundary: render untrusted content as fenced DATA.
+                    # Neutralize any embedded fence tokens so the content cannot
+                    # break out of the <data> block.
                     lines.append(f"- (untrusted){pin}")
                     lines.append("  <data>")
-                    lines.append(f"  {c.content}")
+                    lines.append(f"  {_neutralize_fences(c.content)}")
                     lines.append("  </data>")
                 else:
                     lines.append(f"- {c.content}{pin}")
@@ -257,7 +276,7 @@ class ContextLedger:
             lines.append("## Other context (compactable)")
             for c in sorted(misc, key=lambda c: -c.access_count)[:50]:
                 if c.provenance == UNTRUSTED:
-                    lines.append("- (untrusted) <data>" + c.content + "</data>")
+                    lines.append("- (untrusted) <data>" + _neutralize_fences(c.content) + "</data>")
                 else:
                     lines.append(f"- {c.content}")
             lines.append("")

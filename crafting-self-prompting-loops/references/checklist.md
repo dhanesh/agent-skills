@@ -211,5 +211,6 @@ RUNAWAY_MITIGATION: <handling never stopping / non-termination>
 - The same ten ideas as terse, per-item design rules: [`spec.md`](./spec.md)
 - How each family specializes the ten items: [`families.md`](./families.md)
 - Failure modes + cost/cadence for LSC-9/LSC-10: [`failure-modes.md`](./failure-modes.md)
+- Claude Code primitives (`/goal`, `/loop`, Routines) mapped to slots: [`claude-code-primitives.md`](./claude-code-primitives.md)
 - Research grounding for every non-obvious rule (citations → slot): [`literature.md`](./literature.md)
 - Fill-in scaffolds: [`../assets/templates/`](../assets/templates/)

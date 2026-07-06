@@ -14,13 +14,14 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 |---|---|---|---|---|
 | 1 | Oscillation | Flip-flops between two states, never settles | LSC-4, LSC-5 | (a), (c) |
 | 2 | Drift | Slowly wanders off the original goal | LSC-1, LSC-5 | (a), (b) |
-| 3 | Premature stop | Quits before the goal is actually met | LSC-1, LSC-2 | (b), (d) |
+| 3 | Premature stop | Quits before the goal is actually met (optimistic-stop *or* give-up-stop) | LSC-1, LSC-2, LSC-5 | (b), (d) |
 | 4 | Runaway / non-termination | Never stops on its own | **LSC-3**, LSC-9 | (b), (c) |
 | 5 | Prompt-injection via carried content | Carried output/tool/web text gets obeyed as instructions | **LSC-7**, LSC-6 | (b), (c) |
 | 6 | Context rot / state bloat | Carried state grows until it confuses the loop | LSC-4, LSC-9 | (a), (b) |
 | 7 | Cost blowout | Token/iteration spend explodes | **LSC-9**, LSC-3 | (b), (c) |
 | 8 | Multi-agent deadlock / over-fanout | Agents wait on each other or spawn unboundedly | LSC-3, LSC-9, LSC-2 | (c) |
 | 9 | Evaluation degradation / sycophancy | Self-grading inflates perceived quality while real quality stalls or falls | **LSC-5**, LSC-2 | (a), (b), (c) |
+| 10 | Oversight degradation / rubber-stamping | Human gate stays in place but approvals go reflexive — performative, not protective | **LSC-8**, LSC-5 | (d), (b) |
 
 ---
 
@@ -41,9 +42,11 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 ### 3. Premature stop
 
 - **Symptom:** The loop emits its stop signal and halts while the success definition is demonstrably unmet — partial output declared "done."
-- **Cause:** Stop condition is proxied by something weaker than the goal ("no errors," "looks plausible," "ran out of obvious next steps") rather than the concrete acceptance bar. Self-evaluation is optimistic.
-- **Mitigation:** Bind `STOP_CONDITION` directly to `SUCCESS_DEFINITION` — stop only when the checkable "done" condition holds (**LSC-2** ← **LSC-1**). Add a final-gate validation that the success criteria are met before honoring the stop signal (**LSC-6**). In (d), make goal-completion a human-confirmed checkpoint (**LSC-8**).
-- **Most prone:** (b) multi-step tasks that "feel finished"; (d) humans rubber-stamping checkpoints.
+- **Two distinct sub-modes, with opposite fixes — diagnose which one before reaching for a lever:**
+  - **Optimistic-stop:** an over-confident self-judge declares "done" while the goal is unmet. Cause: the stop condition is proxied by something weaker than the goal ("no errors," "looks plausible") rather than the concrete acceptance bar. **Fix:** bind `STOP_CONDITION` directly to `SUCCESS_DEFINITION` — stop only when the checkable "done" holds (**LSC-2** ← **LSC-1**), plus a final-gate validation before honoring the stop signal (**LSC-6**). Tightening the gate is correct here.
+  - **Give-up-stop:** the model abandons a *still-reachable* goal — quits after one good jump or after a few failed attempts (local optimum), even though more improvement exists. **A stricter stop-gate makes this worse.** Fix instead by *nudging it to continue*: when the no-progress detector hasn't actually tripped, have the harness re-prompt "keep exploring — these options remain" before accepting the stop (ComPilot's *Interaction Loop Handler* recovered real gains this way), and on a genuine local optimum, **restart the whole loop and take the best** (see failure mode #1 and the autonomous refinements in [`families.md`](./families.md)). For tool-grounded autonomous loops with a cheap verifier, this is the *more common* premature-stop mode. (**LSC-5**, **LSC-10**)
+- **Mitigation (both):** make stop honest and goal-bound (**LSC-2/LSC-6**); in (d), make goal-completion a human-confirmed checkpoint (**LSC-8**).
+- **Most prone:** (b) multi-step tasks that "feel finished" (optimistic) or stall in a local optimum (give-up); (d) humans rubber-stamping checkpoints.
 
 ### 4. Runaway / non-termination
 
@@ -82,6 +85,7 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 - **Cause:** No aggregate cap across the agent group; circular dependencies in who-waits-on-whom; spawning with no depth/population limit. Each agent may individually look bounded while the *group* is not.
 - **Mitigation:** Apply **LSC-3** at the *aggregate* level — a cap on total iterations/tokens/wall-clock and on agent count/spawn depth across the whole group, in the harness. Give the group a shared stop condition and consensus/all-subtasks-resolved signal so it can terminate (**LSC-2**). Budget **per agent and in aggregate** (**LSC-9**). Detect no-progress at the group level (cross-agent review/voting) to break stalls (**LSC-5**). Break wait-cycles with timeouts on inter-agent waits.
 - **What the data says (MAST, Cemri et al. 2025):** across 7 frameworks, multi-agent failures are **~42% specification/system-design, ~37% inter-agent misalignment, ~21% task-verification** — structural, not model-IQ — and tactical prompt tweaks recovered only **9–15%**. So: (1) the dominant fix is *design*, not a smarter model or better prompt; (2) use **typed/structured message contracts** between agents, not free-form NL chaining, to stop one agent's error cascading into the next (MetaGPT); (3) **re-assert each agent's role + objective every turn** and halt on role inversion — assistants drift into *issuing* instructions ("role flipping", CAMEL); (4) add an **independent verification stage** with concrete pass/fail criteria — producers hallucinate success (MAST FC3). Multi-agent also burns **~15× the tokens** of a single chat (Anthropic 2025), so only go multi-agent when subtasks are independent/parallel *and* cheaply verifiable; otherwise keep one agent.
+- **Consensus is not correctness (related to #9).** Agreement across agents can be *correlated error*: debate **amplifies** shared biases after the first round (*Judging with Many Minds*), and agents converge confidently on the same wrong rationale (*AgentAuditor*). → don't use cross-agent agreement as a quality signal; prefer a meta-judge or evidence-based arbitration that can pick a well-supported minority over an open debate that ratifies the majority, and keep rounds few. See [`literature.md`](./literature.md) §D. (LSC-5)
 - **Most prone:** (c) exclusively — this is the multi-agent-specific class.
 
 ### 9. Evaluation degradation / sycophancy
@@ -90,6 +94,14 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 - **Cause:** Intrinsic self-critique with no external signal degrades performance on objective tasks (Huang et al. 2023), and a model grading its own generations amplifies self-bias each round (Xu et al. 2024). The loop optimizes *perceived* quality, which is not the goal. Closely tied to premature-stop (#3): an optimistic self-judge declares "done" early.
 - **Mitigation:** Give the evaluation **external leverage** (**LSC-5**): prefer a tool/verifier over an opinion (run the tests, query the source, compute the constraint — CRITIC, Reflexion); if model-based, use a *separate* evaluator (different model, or an authorship-blinded prompt) — never let the generator be its own judge. Bind the stop signal to a verifier passing, not a self-score (**LSC-2**). For verifiable tasks, baseline parallel sampling+vote before iterating at all (see [`literature.md`](./literature.md) §A–B).
 - **Most prone:** (a) self-refinement (its core risk), (b) autonomous self-assessment, (c) producer-agents self-certifying.
+
+### 10. Oversight degradation / rubber-stamping
+
+- **Symptom:** The human gate is present and every action is "approved," but approvals are reflexive — the human skims and signs off. Tell-tales: longer runs of similar cases get rubber-stamped, trust *rises* as the agent looks more capable, the reviewer's confidence climbs after a cursory look. The gate provides an *illusion* of control, not control. This is the human-checkpointed family's defining risk and the one its existence is supposed to prevent.
+- **Cause:** Automation/confirmation bias (*Confirmation bias: A challenge for scalable oversight*, AAAI 2025) — the human is shown only the model's preferred plan with no disconfirming evidence and no concrete bar, so the path of least resistance is to agree; agreement with stronger agents *rises* while accuracy *falls*. Over-gating compounds it: too many trivial gates train click-through. The apparent safety of the gate masks that it has stopped catching anything (**LSC-8** present but inert).
+- **Mitigation:** Make each gate a **real decision, adversarial to itself** — present the concrete pass/fail bar + the original `SUCCESS_DEFINITION` + the strongest *disconfirming* evidence or arguments for both sides, never just "approve this?" (**LSC-8** ← **LSC-1**; the both-sided framing is the one intervention that helped when the model was wrong). **Defer selectively** (learning-to-defer): gate on calibrated model uncertainty *and* irreversibility/stakes; batch or skip low-risk steps so attention lands where it matters (**LSC-8**, **LSC-9**) — don't gate everything. Keep the loop **interruptible between gates** and fold corrections in as ground truth (corrigibility). Assume approval quality *falls* as the agent gets more impressive, and as model capability scales the human's knowledge edge erodes — so don't lean on the gate as the sole catch; pair it with an external verifier where one exists (**LSC-5**).
+- **Detection (don't just name it — measure it):** log the approve/block ratio over time (a ratio that only climbs is a tell), and **red-team the gate with canaries** — periodically route a known-bad plan through it and check whether the human actually blocks it. A gate that never blocks anything, including planted failures, has degraded to a rubber stamp regardless of how it looks.
+- **Most prone:** (d) human-checkpointed by construction; (b) autonomous loops with a nominal human gate that is rarely exercised.
 
 ---
 

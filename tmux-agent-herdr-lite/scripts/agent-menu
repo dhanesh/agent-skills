@@ -10,6 +10,7 @@ fi
 
 tmux display-menu -T "Agent Cockpit" \
   "⚠ Jump blocked" b "run-shell '~/.local/bin/agent-jump blocked'" \
+  "✖ Jump error" e "run-shell '~/.local/bin/agent-jump error'" \
   "● Jump working" w "run-shell '~/.local/bin/agent-jump working'" \
   "○ Jump idle" i "run-shell '~/.local/bin/agent-jump idle'" \
   "✓ Jump done" d "run-shell '~/.local/bin/agent-jump done'" \

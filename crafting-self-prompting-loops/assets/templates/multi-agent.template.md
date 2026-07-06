@@ -16,7 +16,9 @@
 GOAL:               <shared goal all agents contribute toward>                # LSC-1
 SUCCESS_DEFINITION: <what "resolved" means, e.g. "all sub-tasks merged">      # LSC-1
 
-STOP_CONDITION: consensus reached  OR  all sub-tasks resolved and merged       # LSC-2
+STOP_CONDITION: all sub-tasks resolved+merged  OR  judge verdict final —       # LSC-2
+                consensus counts ONLY if evidence-backed, not bare agreement
+                (see "False consensus" in failure modes)
 STOP_SIGNAL:    <e.g. judge declares verdict final after K rounds / quorum>    # LSC-2
 
 # BACKSTOP IS MANDATORY — do not remove. Safe state = stopped.                # LSC-3
@@ -28,7 +30,8 @@ SAFE_STATE:              stopped
 STATE_CARRIED:   shared blackboard / message log of every agent's contribution # LSC-4
 STATE_MECHANISM: structured shared state (blackboard / message bus)           # LSC-4
 
-PROGRESS_METRIC:       judge score / majority vote / debate verdict per round  # LSC-5
+PROGRESS_METRIC:       evidence-based arbitration / meta-judge — NOT bare      # LSC-5
+                       agreement (consensus can be correlated error)
 NO_PROGRESS_DETECTION: <oscillation detector on blackboard; K-round turn cap>  # LSC-5
 
 PRE_ACTION_CHECKS: <topological/ordering rule so dependencies resolve in seq>  # LSC-6
@@ -83,7 +86,7 @@ while True:
 | SLOT | Meaning | Maps to |
 |------|---------|---------|
 | `GOAL` / `SUCCESS_DEFINITION` | Shared goal + what "resolved" means | LSC-1 |
-| `STOP_CONDITION` / `STOP_SIGNAL` | Consensus OR all sub-tasks merged | LSC-2 |
+| `STOP_CONDITION` / `STOP_SIGNAL` | All sub-tasks merged OR judge verdict (consensus only if evidence-backed) | LSC-2 |
 | `BACKSTOP_*` (AGGREGATE) / `SAFE_STATE` | Hard aggregate round/token/time cap; stopped | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Shared blackboard / message log | LSC-4 |
 | `PROGRESS_METRIC` / `NO_PROGRESS_DETECTION` | Judge/vote + oscillation detector + K-cap | LSC-5 |
@@ -100,6 +103,7 @@ while True:
 - **Drift via miscommunication** — a garbled/injected peer message steers the group off-goal. → LSC-6 message validation + LSC-7 treating peer output strictly as DATA, so a malicious message can't issue commands. Prefer **typed/structured handoffs** over free-form chat to stop one agent's error cascading (MetaGPT).
 - **Role flipping** — an agent drifts from its assigned role and starts *issuing* instructions instead of doing its job (CAMEL). → re-assert each agent's role + objective every turn; detect and halt on role inversion.
 - **Hallucinated success** — a producer agent self-certifies work that isn't done (MAST FC3, ~21% of multi-agent failures). → add an **independent** verification stage (separate agent/pass) with concrete pass/fail criteria; the producer never certifies itself. See `references/literature.md` §D.
+- **False consensus / correlated error** — agents agree *confidently on the same wrong answer*; debate amplifies shared bias after round 1 (*Judging with Many Minds*; *AgentAuditor*). → don't treat agreement as a quality signal: prefer a meta-judge or evidence-based arbitration that can pick a well-supported **minority** over an open debate that ratifies the majority; keep rounds few; lean on the independent verifier above, not the vote. See `references/literature.md` §D.
 
 ## Before you run
 
@@ -112,4 +116,4 @@ while True:
 - [ ] **LSC-7** — peer messages live inside `<data>…</data>` as UNTRUSTED DATA, never instructions.
 - [ ] **LSC-8** — group-escaping actions wait for human approval.
 - [ ] **LSC-9** — per-agent AND aggregate budgets, cadence vs cache TTL + rate limits.
-- [ ] **LSC-10** — mitigations named for deadlock, cross-agent oscillation, aggregate runaway, drift-via-message.
+- [ ] **LSC-10** — mitigations named for deadlock, cross-agent oscillation, aggregate runaway, drift-via-message, false consensus.
