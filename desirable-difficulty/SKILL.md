@@ -65,11 +65,13 @@ technical system or codebase, apply the adapted version in
 [references/codebase-learning.md](references/codebase-learning.md) instead.
 
 1. **Diagnose.** Ask what the learner currently does and what the goal is (memorization,
-   conceptual understanding, skill/judgment, or understanding a system). Run each current
-   habit through the diagnostic test and say which ones force generation and which only
-   produce fluency.
-2. **Pretest.** Before any reading, have the learner attempt a few questions cold. Even
-   wrong guesses improve later retention by priming encoding.
+   conceptual understanding, skill/judgment, or understanding a system) — via the
+   structured question tool where one exists (see "Use the agent's surface"). Run each
+   current habit through the diagnostic test and say which ones force generation and
+   which only produce fluency.
+2. **Pretest.** Before any reading, have the learner attempt a few questions cold and
+   commit answers before seeing any feedback. Even wrong guesses improve later retention
+   by priming encoding.
 3. **First exposure.** Read / watch / walk the material *once*. No highlighting.
 4. **Retrieve.** Close the source. Blank-page brain dump of everything recalled, then
    check against the source. The gaps found are the study agenda.
@@ -87,6 +89,34 @@ technical system or codebase, apply the adapted version in
    diagnostic test gets replaced with a generative equivalent before you hand the plan
    over.
 
+## Use the agent's surface
+
+The coaching loop is interactive — use the host agent's capabilities where they exist
+instead of flattening everything into prose. Per-capability rules and the learning-science
+nuances behind them are in [references/agent-surface.md](references/agent-surface.md);
+load it before the first pretest. The defaults:
+
+- **Structured question tool** (e.g. `AskUserQuestion`) available → run the diagnosis,
+  pretests, retrieval checks, and interval calibration through it, one round at a time,
+  with the learner committing an answer before any feedback. Prefer free-recall prompts
+  over multiple choice when a free-text path exists — recognition is the weakest form of
+  retrieval. Reserve the tool for generation-forcing or plan-changing questions, not
+  permission-seeking.
+- **Artifacts / rendered pages** available → render the learning plan and self-quiz sheet
+  as an artifact when the learner will revisit it across sessions (the normal case for
+  spaced retrieval); skip it when it would only duplicate the chat.
+- **Scheduling / reminders / calendar** available → offer to turn the schedule's rows into
+  one-shot reminders whose message is a retrieval prompt; confirm before creating
+  anything that notifies later or touches an external calendar.
+- **Filesystem** available → persist the plan to a file and offer TSV exports for
+  flashcard tools.
+- Capability absent → degrade gracefully to plain conversation: ask, wait for the answer
+  in the next turn, keep the schedule inside the plan document.
+
+The diagnostic test governs tool choice too: adopt a capability when it increases
+commitment-before-feedback, plan persistence, or the odds a session happens; skip the
+ceremony otherwise.
+
 ## Deliverable
 
 Produce a concrete **learning plan**, not a survey of cognitive psychology. It contains:
@@ -101,7 +131,8 @@ Produce a concrete **learning plan**, not a survey of cognitive psychology. It c
 
 Offer to operationalize it into the learner's existing system — an Anki deck, a calendar
 of review sessions, Zettelkasten prompts, or an onboarding checklist — rather than leaving
-it abstract.
+it abstract, and deliver it on the best surface the harness offers (artifact, file, or
+chat) per "Use the agent's surface".
 
 ## How to behave
 

@@ -27,6 +27,10 @@ npx skills add dhanesh/agent-skills --skill desirable-difficulty
    shortens the next interval.
 5. For codebases and technical systems, switches to the trace → reconstruct-from-memory →
    5-Whys playbook (`references/codebase-learning.md`).
+6. Uses the host agent's surface where available — interactive question tools (e.g.
+   `AskUserQuestion`) for commit-before-feedback quizzing, artifacts for the revisitable
+   plan and self-quiz sheet, and reminder/calendar tools to make review sessions actually
+   fire — degrading gracefully to plain chat when a capability is absent.
 
 ## Output
 
@@ -42,6 +46,8 @@ operationalized into Anki, calendar sessions, or an onboarding checklist.
   2013; 2021 meta-analysis: 242 studies, ~169k participants).
 - `references/question-frameworks.md` — Bloom's ladder, QFT, QAR, 5 Whys.
 - `references/codebase-learning.md` — the domain playbook for learning a system.
+- `references/agent-surface.md` — how to map the loop onto host-agent capabilities
+  (question UIs, artifacts, schedulers, files) with graceful fallbacks.
 - `assets/spaced_schedule.py` (+ `test_spaced_schedule.py`) — schedule generator,
   stdlib-only.
 
