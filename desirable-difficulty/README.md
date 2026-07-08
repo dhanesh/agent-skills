@@ -47,7 +47,9 @@ operationalized into Anki, calendar sessions, or an onboarding checklist.
 - `references/question-frameworks.md` — Bloom's ladder, QFT, QAR, 5 Whys.
 - `references/codebase-learning.md` — the domain playbook for learning a system.
 - `references/agent-surface.md` — how to map the loop onto host-agent capabilities
-  (question UIs, artifacts, schedulers, files) with graceful fallbacks.
+  (question UIs, artifacts, schedulers, files) with graceful fallbacks, including a
+  scenario→format table matching material types to visual and questioning formats
+  (diagram diffing, predict-the-graph, image occlusion, faded worked examples, …).
 - `assets/spaced_schedule.py` (+ `test_spaced_schedule.py`) — schedule generator,
   stdlib-only.
 

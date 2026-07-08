@@ -86,6 +86,26 @@ Styles: Concepts and Evidence*). Preferences exist; matching instruction to them
 improve learning. Correct the misconception plainly and never build a plan around it —
 this is the one place a flat rule is justified, because the premise itself is false.
 
+## Format-specific evidence (for the scenario table in agent-surface.md)
+
+- **Worked-example effect** (Sweller & Cooper, 1985; cognitive load theory): novices
+  learn problem-solving procedures faster from studying worked examples than from
+  unassisted problem-solving — but the advantage requires self-explaining each step,
+  reverses as expertise grows (the *expertise reversal effect*), and fading steps out
+  (backward fading) manages the transition.
+- **Concept mapping caveat** (Karpicke & Blunt, 2011, *Science*): plain retrieval
+  practice produced better performance on both verbatim and inference questions than
+  concept mapping during study — even on a concept-mapping test. Concept maps are
+  justified only as retrieval (drawn from memory) or as the answer key to diff against.
+- **Predict-observe-explain / prediction-before-observation**: committing a prediction
+  before seeing the data or demonstration improves conceptual learning versus observing
+  first — the classroom-demonstration literature (e.g. Crouch, Fagen, Callan & Mazur,
+  2004) found students who predicted outcomes learned from demos that otherwise produced
+  no measurable gain. This is what justifies "sketch the graph before it renders".
+- **Cloze / production over recognition**: generating the missing item (production)
+  yields stronger retention than picking it from options (recognition) — the generation
+  effect (Slamecka & Graf, 1978) applied to card formats.
+
 ## Naming note
 
 "Desirable difficulties" is Robert A. Bjork's term (1994) for conditions of practice that

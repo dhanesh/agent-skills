@@ -85,6 +85,52 @@ Keep one page per topic and regenerate it as the learner's model improves (e.g. 
 second, contrasting path when interleaving begins) rather than producing a new artifact
 per session — a stable page becomes the learner's answer key across the whole schedule.
 
+## Matching the visual/question format to the material
+
+Codebases and algorithms are one scenario; other material types have their own best
+format. The invariant is the same everywhere — the learner commits a prediction or
+reconstruction before the visual confirms or corrects — only the artifact shape changes.
+
+| Material | Visual format | Question format |
+|---|---|---|
+| Codebase / algorithm | architecture + sequence diagram, stepped state | reconstruct-then-diff, predict next step |
+| Process, timeline, causal chain | timeline / causal map, stages collapsed | sequencing ("order these"), "what had to happen before X?" |
+| Quantitative relationship | chart revealed after a sketch/prediction | predict-the-graph, "what happens to Y if X doubles?" |
+| Spatial / labeled material | diagram with labels occluded behind toggles | name-the-region before reveal |
+| Dense relational domain (law, medicine, regulation) | concept map as answer key only | blank-map reconstruction, cross-link "why" questions |
+| Problem-solving procedure (math, physics) | faded worked example, steps reveal one at a time | predict the next step; solve the faded gap |
+| Verbatim facts / language | little visual value — go straight to cards | cloze deletion; production over recognition |
+| Judgment / diagnosis (cases, incidents) | decision tree revealed node-by-node | contrasting case pairs, interleaved; commit a call, then compare |
+
+Nuances worth honoring per row:
+
+- **Processes and timelines** (history, biology, postmortems): the generative act is
+  *ordering and causal linking*, not recalling isolated events. Predict-observe-explain
+  works here — the learner states what stage comes next and why before it uncollapses.
+- **Quantitative material**: render the chart only after the learner sketches or states
+  the expected shape ("goes up then saturates"); prediction-before-observation is the
+  whole value, and a chart shown first is Tier 3 reading with better typography.
+- **Spatial/labeled material** (anatomy, geography, hardware pinouts, UI layouts): this
+  is image occlusion — the mechanism behind Anki's image-occlusion cards. Hide the
+  labels, not the picture.
+- **Dense relational domains**: honest caveat, say it out loud — Karpicke & Blunt (2011,
+  *Science*) found plain retrieval practice *outperformed* concept mapping as a study
+  activity. Concept maps earn their keep only when drawn from memory or used as the diff
+  target, so treat a provided map exactly like the codebase ground-truth diagram: for
+  checking, not studying.
+- **Problem-solving procedures**: the worked-example effect (Sweller) means novices learn
+  faster from studied examples than from unassisted problem-solving — but only with
+  self-explanation of each step, and only early. Fade steps out as competence grows
+  (backward fading: hide the last step first), which is exactly what a progressive-reveal
+  artifact can do.
+- **Judgment domains**: the skill being trained is *choosing*, so interleave contrasting
+  cases and require a committed call (via the question tool) before revealing the
+  expert's branch of the decision tree.
+
+When material spans rows, pick the format for the learning goal, not the surface topic —
+a regulation memorized verbatim is a cloze card; the same regulation applied to cases is
+a decision tree.
+
 ## Scheduling and reminders
 
 The spaced schedule only works if the sessions actually happen. Where the harness has

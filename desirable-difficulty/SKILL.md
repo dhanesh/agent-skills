@@ -108,7 +108,10 @@ load it before the first pretest. The defaults:
   algorithm, prefer a self-contained HTML explainer with diagrams (architecture, sequence,
   step-by-step algorithm state) built as a retrieval scaffold — the learner reconstructs
   from memory first and diffs against it, with layers and answers collapsed behind
-  interaction rather than shown up front.
+  interaction rather than shown up front. Other material types get their own format
+  (timelines with predict-next-stage, predict-the-graph charts, label-occluded diagrams,
+  blank-map concept reconstruction, faded worked examples, node-by-node decision trees) —
+  match via the scenario table in the reference file.
 - **Scheduling / reminders / calendar** available → offer to turn the schedule's rows into
   one-shot reminders whose message is a retrieval prompt; confirm before creating
   anything that notifies later or touches an external calendar.
