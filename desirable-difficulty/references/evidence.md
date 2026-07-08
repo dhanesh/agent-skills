@@ -112,3 +112,11 @@ this is the one place a flat rule is justified, because the premise itself is fa
 feel harder and slow down short-term performance but improve long-term retention and
 transfer — spacing, interleaving, testing, and generation are the canonical four. It is
 the concept the skill's one diagnostic test operationalizes.
+
+The term carries its own calibration caveat (Bjork & Bjork, 2011): a difficulty is
+desirable only when the learner has the background to overcome it — otherwise it is just
+difficulty, producing frustration and failure rather than encoding. This is why the
+skill graduates commitment (gauge questions before full reconstruction) instead of
+demanding maximal generation from the first session: answering a targeted question is
+already generation, and the heavy variants earn their place only once earlier retrieval
+succeeds.

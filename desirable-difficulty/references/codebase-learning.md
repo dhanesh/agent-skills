@@ -20,9 +20,12 @@ each pass is followed by retrieval.
    Where the harness renders HTML, generate the ground-truth diagram as a self-contained
    visual-explainer artifact (see `agent-surface.md`) — sequence diagram of the traced
    path, component map with layers collapsed behind interaction — and make it the diff
-   target for this and every later reconstruction session. Order matters: the learner
-   draws first, then opens the artifact; generating it before their attempt turns
-   retrieval back into reading.
+   target across the whole schedule. Graduate the commitment: in the first session,
+   retrieval can be a handful of committed answers through the question tool ("which
+   component owns X?"), with the artifact expanding region by region as feedback — that
+   is already generation, without demanding a cold full re-draw an hour after first
+   contact. Escalate to the blank-page re-draw in later spaced sessions, once the
+   question rounds show the model is holding; from then on, draw first, artifact second.
 4. **Question & explain = 5 Whys on the surprises.** For each part that surprised you,
    chase the mechanism: why is this boundary here? why does this call go through a queue?
    Self-explain how each answer connects to what you already knew about the system.
