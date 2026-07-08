@@ -49,9 +49,41 @@ retrieval is multi-session by design:
   the starter question set in one place the learner can keep open.
 - A self-quiz sheet: questions up front, answers collapsed/at the bottom, so it stays
   usable as a retrieval prompt rather than becoming reading material.
+- A **visual explainer** for a codebase or algorithm — see the next section.
 
 Skip the artifact for one-shot advice, a single question, or a plan the learner asked to
 have as plain text — an artifact that merely duplicates the chat adds friction, not value.
+
+## Visual explainers (HTML + diagrams) for codebases and algorithms
+
+When the subject is a codebase, an architecture, or an algorithm and the harness can
+render HTML, an explainer page with diagrams usually beats prose: architecture and
+sequence diagrams for the traced path, a state-by-state walkthrough for an algorithm
+(e.g. the array at each step of a sort, the pointer positions, the invariant that holds).
+Build it self-contained — inline SVG or CSS diagrams, no external scripts or assets — so
+it renders anywhere and keeps working offline.
+
+The learning-science constraint is *when and how* the diagram appears, because a diagram
+handed over up front is just prettier rereading. Structure the page around the workflow:
+
+- **First exposure (step 3 of the workflow):** the diagram may lead — one traced path,
+  one algorithm run — but keep it to a single walkthrough, and end the page with the
+  retrieval instruction ("close this page and re-draw the flow from memory").
+- **As the answer key (steps 4 and 7):** this is the high-leverage use. The learner
+  reconstructs the architecture or algorithm from memory *first* (whiteboard, blank
+  file); the artifact's ground-truth diagram is what they diff against. Say explicitly
+  that the page is for checking, not for studying.
+- **Progressive reveal inside the page:** collapse layers behind interaction
+  (`<details>`/`<summary>`, or a "reveal" toggle) — component names hidden until clicked,
+  the next algorithm step hidden until the learner predicts it. Each click should follow
+  a guess, so the page itself enforces commitment-before-feedback.
+- **Embed the question set in the page:** next to each diagram region, the "what would
+  break if…" / "why is this boundary here?" questions from the frameworks file, with
+  answers collapsed.
+
+Keep one page per topic and regenerate it as the learner's model improves (e.g. add the
+second, contrasting path when interleaving begins) rather than producing a new artifact
+per session — a stable page becomes the learner's answer key across the whole schedule.
 
 ## Scheduling and reminders
 

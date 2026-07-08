@@ -17,6 +17,12 @@ each pass is followed by retrieval.
 3. **Retrieve = reconstruct from memory.** Close the editor. Draw the architecture on a
    whiteboard or blank file from memory: components, boundaries, and the path just
    traced. Then diff the drawing against reality. The mismatches are the study agenda.
+   Where the harness renders HTML, generate the ground-truth diagram as a self-contained
+   visual-explainer artifact (see `agent-surface.md`) — sequence diagram of the traced
+   path, component map with layers collapsed behind interaction — and make it the diff
+   target for this and every later reconstruction session. Order matters: the learner
+   draws first, then opens the artifact; generating it before their attempt turns
+   retrieval back into reading.
 4. **Question & explain = 5 Whys on the surprises.** For each part that surprised you,
    chase the mechanism: why is this boundary here? why does this call go through a queue?
    Self-explain how each answer connects to what you already knew about the system.

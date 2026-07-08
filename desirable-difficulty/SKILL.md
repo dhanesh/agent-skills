@@ -104,7 +104,11 @@ load it before the first pretest. The defaults:
   permission-seeking.
 - **Artifacts / rendered pages** available → render the learning plan and self-quiz sheet
   as an artifact when the learner will revisit it across sessions (the normal case for
-  spaced retrieval); skip it when it would only duplicate the chat.
+  spaced retrieval); skip it when it would only duplicate the chat. For a codebase or
+  algorithm, prefer a self-contained HTML explainer with diagrams (architecture, sequence,
+  step-by-step algorithm state) built as a retrieval scaffold — the learner reconstructs
+  from memory first and diffs against it, with layers and answers collapsed behind
+  interaction rather than shown up front.
 - **Scheduling / reminders / calendar** available → offer to turn the schedule's rows into
   one-shot reminders whose message is a retrieval prompt; confirm before creating
   anything that notifies later or touches an external calendar.
