@@ -64,15 +64,26 @@ Build it self-contained — inline SVG or CSS diagrams, no external scripts or a
 it renders anywhere and keeps working offline.
 
 The learning-science constraint is *when and how* the diagram appears, because a diagram
-handed over up front is just prettier rereading. Structure the page around the workflow:
+handed over up front is just prettier rereading. But calibrate the other direction too:
+a difficulty is desirable only when the learner can overcome it (Bjork's own caveat).
+Demanding a blank-page reconstruction from someone who met the material an hour ago
+isn't rigor, it's a wall — and it wastes the assistance an agent can give. The
+commitment the research requires scales with the learner's stage, and answering a few
+targeted questions already *is* generation. Climb this ladder:
 
-- **First exposure (step 3 of the workflow):** the diagram may lead — one traced path,
-  one algorithm run — but keep it to a single walkthrough, and end the page with the
-  retrieval instruction ("close this page and re-draw the flow from memory").
-- **As the answer key (steps 4 and 7):** this is the high-leverage use. The learner
-  reconstructs the architecture or algorithm from memory *first* (whiteboard, blank
-  file); the artifact's ground-truth diagram is what they diff against. Say explicitly
-  that the page is for checking, not for studying.
+- **First contact — the overview leads.** Walk the diagram once (one traced path, one
+  algorithm run), then gauge understanding with two or three questions through the
+  question tool: "which component owns X?", "what happens to the array next?". Each
+  committed answer gets its feedback by expanding the relevant artifact region — the
+  artifact's job at this stage is to *correct and deepen* the model the questions just
+  exposed, not to be withheld.
+- **Early review sessions — questions first, artifact second.** Open cold with the
+  question round (no walkthrough this time); uncollapse diagram regions as feedback per
+  answer. Still low-friction, still commitment-before-feedback.
+- **Later review sessions — reconstruct, then diff.** Once recall is holding (~80% on
+  the question rounds), escalate to the full desirable difficulty: blank-page or
+  whiteboard reconstruction with the artifact as the diff target, explicitly framed as
+  for checking rather than studying.
 - **Progressive reveal inside the page:** collapse layers behind interaction
   (`<details>`/`<summary>`, or a "reveal" toggle) — component names hidden until clicked,
   the next algorithm step hidden until the learner predicts it. Each click should follow

@@ -106,9 +106,11 @@ load it before the first pretest. The defaults:
   as an artifact when the learner will revisit it across sessions (the normal case for
   spaced retrieval); skip it when it would only duplicate the chat. For a codebase or
   algorithm, prefer a self-contained HTML explainer with diagrams (architecture, sequence,
-  step-by-step algorithm state) built as a retrieval scaffold — the learner reconstructs
-  from memory first and diffs against it, with layers and answers collapsed behind
-  interaction rather than shown up front. Other material types get their own format
+  step-by-step algorithm state) built as a retrieval scaffold with commitment graduated
+  to the learner's stage: at first contact the overview leads and a few gauge questions
+  are the generative act, with the artifact expanding to correct and deepen each answer;
+  only later spaced sessions escalate to reconstruct-from-memory-then-diff. Layers and
+  answers stay collapsed behind interaction. Other material types get their own format
   (timelines with predict-next-stage, predict-the-graph charts, label-occluded diagrams,
   blank-map concept reconstruction, faded worked examples, node-by-node decision trees) —
   match via the scenario table in the reference file.
