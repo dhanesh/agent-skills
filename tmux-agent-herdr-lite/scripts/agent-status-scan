@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 pane_dir, state_path, idle_s, mod_dir = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 sys.path.insert(0, mod_dir)
-from agent_classify import classify  # noqa: E402  (path set above)
+from agent_classify import classify_explain, infer_agent  # noqa: E402  (path set above)
 
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 now_ts = time.time()
@@ -24,27 +24,76 @@ def sh(args):
     return subprocess.run(args, text=True, capture_output=True)
 
 def pane_exists(pane_id):
+    # Compare the echoed id: some tmux builds exit 0 with empty output for a
+    # dead pane target, so the return code alone is not trustworthy.
     r = sh(['tmux','display-message','-p','-t',pane_id,'#{pane_id}'])
-    return r.returncode == 0
+    return r.returncode == 0 and r.stdout.strip() == pane_id
 
 def capture(pane_id):
     r = sh(['tmux','capture-pane','-p','-J','-t',pane_id])
     return r.stdout if r.returncode == 0 else ''
 
-def status_for(text, meta):
+def pane_title(pane_id):
+    # Agents set the terminal title via OSC 0/2 (Herdr reads the same signal:
+    # a braille-spinner title means the agent is streaming).
+    r = sh(['tmux','display-message','-p','-t',pane_id,'#{pane_title}'])
+    return r.stdout.strip() if r.returncode == 0 else ''
+
+def focused_panes():
+    # Active pane of each attached client's current window — "viewed" panes.
+    r = sh(['tmux','list-clients','-F','#{session_name}'])
+    if r.returncode != 0 or not r.stdout.strip():
+        return set()
+    panes = set()
+    for sess in set(r.stdout.split()):
+        p = sh(['tmux','display-message','-p','-t',sess,'#{pane_id}'])
+        if p.returncode == 0 and p.stdout.strip():
+            panes.add(p.stdout.strip())
+    return panes
+
+FOCUSED = focused_panes()
+
+def status_for(text, title, meta):
     # Compute activity (hash change) and idle here; the classifier stays pure.
     h = hashlib.sha256(text.encode('utf-8', 'ignore')).hexdigest()
     changed = h != meta.get('last_hash', '')
     if changed:
         meta['last_hash'] = h
         meta['last_changed_at'] = now
+        meta.pop('done_viewed_hash', None)
     last = meta.get('last_changed_at') or meta.get('created_at') or now
     try:
         last_ts = datetime.fromisoformat(last.replace('Z', '+00:00')).timestamp()
     except Exception:
         last_ts = now_ts
     idle_elapsed = now_ts - last_ts
-    return classify(text, changed, idle_elapsed, idle_s, meta.get('status', 'working'))
+    agent = meta.get('agent') or infer_agent(meta.get('command', ''))
+    status, reason = classify_explain(text, changed, idle_elapsed, idle_s,
+                                      meta.get('status', 'working'),
+                                      agent=agent, title=title)
+    meta['reason'] = reason
+    # Herdr semantics: 'done' persists until the human views the pane, then it
+    # becomes 'idle'. Viewing is "pane focused in an attached client"; the
+    # viewed hash pins the demotion until new output arrives.
+    if status == 'done':
+        if meta.get('done_viewed_hash') == h:
+            status = 'idle'
+        elif meta.get('pane_id') in FOCUSED:
+            meta['done_viewed_hash'] = h
+            status = 'idle'
+    return status
+
+def notify(meta, status):
+    # Fire-and-forget toast/sound on transitions needing attention (Herdr's
+    # request/done cues). agent-notify itself suppresses focused panes.
+    hook = os.path.join(mod_dir, 'agent-notify')
+    if not os.access(hook, os.X_OK):
+        return
+    try:
+        subprocess.Popen([hook, meta.get('name') or meta.get('window') or '?', status],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 items=[]
 for fn in sorted(os.listdir(pane_dir)):
@@ -54,12 +103,15 @@ for fn in sorted(os.listdir(pane_dir)):
         meta=json.load(open(path))
     except Exception:
         continue
+    prev=meta.get('status','unknown')
     pane_id=meta.get('pane_id')
     if not pane_id or not pane_exists(pane_id):
         meta['status']='unknown'
     else:
         text=capture(pane_id)
-        meta['status']=status_for(text, meta)
+        meta['status']=status_for(text, pane_title(pane_id), meta)
+    if meta['status'] != prev and meta['status'] in ('blocked','error','done'):
+        notify(meta, meta['status'])
     meta['updated_at']=now
     json.dump(meta, open(path,'w'), indent=2)
     items.append(meta)

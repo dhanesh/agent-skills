@@ -33,9 +33,10 @@ for p in sorted(panes, key=lambda x:(order.get(x.get('status','unknown'),9), x.g
     name=p.get('name','?')
     pane=p.get('pane_id','?')
     win=p.get('window','?')
+    agent=p.get('agent') or '-'
     updated=p.get('updated_at') or p.get('last_changed_at') or ''
     reason=p.get('reason') or p.get('matched_pattern') or ''
-    print(f"{icons.get(status,'?')} {status:<8} {name:<22} pane={pane:<6} window={win:<18} {updated}")
+    print(f"{icons.get(status,'?')} {status:<8} {name:<20} agent={agent:<9} pane={pane:<6} window={win:<14} {updated}")
     if reason:
         print(f"    reason: {reason}")
 print("\nKEYS")
@@ -45,4 +46,8 @@ print("  prefix m    action menu          prefix ?      this dashboard")
 print("  prefix |/-  split pane           prefix h/j/k/l navigate panes")
 print("  prefix H/J/K/L resize pane       prefix z      zoom pane")
 print("  prefix Space cycle layouts       prefix S      choose session/tree")
+print("  prefix Tab  last pane")
+print("\nCOORDINATION  agent-list --json | agent-read | agent-send | agent-run")
+print("              agent-wait --status/--match | agent-explain | agent-resume")
+print("              agent-worktree create <branch> --window")
 PY

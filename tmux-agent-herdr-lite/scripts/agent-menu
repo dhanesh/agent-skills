@@ -18,6 +18,8 @@ tmux display-menu -T "Agent Cockpit" \
   "Refresh status" r "run-shell '~/.local/bin/agent-status-scan'" \
   "Dashboard" ? "display-popup -E -w 90% -h 80% '~/.local/bin/agent-dashboard; printf \"\\nPress Enter...\"; read'" \
   "Choose tree" s "choose-tree -Zw" \
+  "New worktree window" t "command-prompt -p 'worktree branch' \"run-shell '~/.local/bin/agent-worktree create %% --window || ~/.local/bin/agent-worktree open %%'\"" \
+  "Resume dead agents" u "run-shell '~/.local/bin/agent-resume'" \
   "New window" n "command-prompt -p 'window name' 'new-window -n %%'" \
   "Split horizontal" '|' "split-window -h" \
   "Split vertical" '-' "split-window -v" \

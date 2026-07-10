@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-run: send a command line to an agent pane and press Enter atomically
+# (Herdr `pane run` — preferred over separate send-text + send-keys Enter).
+# Usage: agent-run <name|window|pane-id> <command...>
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-run <name|pane> <command...>" >&2; exit 64; }
+shift
+[[ $# -gt 0 ]] || { echo "agent-run: command required" >&2; exit 64; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANE_ID="$(python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import resolve  # noqa: E402
+try:
+    print(resolve(sys.argv[2])["pane_id"])
+except LookupError as e:
+    print(f"agent-run: {e}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+)"
+
+tmux send-keys -l -t "$PANE_ID" "$*"
+tmux send-keys -t "$PANE_ID" Enter

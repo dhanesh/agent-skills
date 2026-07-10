@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-wait: block until an agent reaches a status or its output matches a
+# pattern (Herdr `agent wait` / `wait output` / `wait agent-status`).
+# Usage:
+#   agent-wait <name|window|pane-id> --status blocked|working|idle|done|error [--timeout S] [--interval S]
+#   agent-wait <name|window|pane-id> --match <regex> [--source visible|recent] [--timeout S] [--interval S]
+# Exits 0 when the condition is met, 1 on timeout, 64 on usage error.
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-wait <name|pane> --status <s>|--match <regex> [--timeout S] [--interval S]" >&2; exit 64; }
+shift
+
+WANT_STATUS=""
+MATCH=""
+SOURCE="visible"
+TIMEOUT="${AGENT_WAIT_TIMEOUT:-300}"
+INTERVAL="${AGENT_WAIT_INTERVAL:-5}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status) WANT_STATUS="${2:?--status needs a value}"; shift 2 ;;
+    --match) MATCH="${2:?--match needs a regex}"; shift 2 ;;
+    --source) SOURCE="${2:?--source needs visible|recent}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
+    --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
+    *) echo "agent-wait: unknown option $1" >&2; exit 64 ;;
+  esac
+done
+if [[ -z "$WANT_STATUS" && -z "$MATCH" ]] || [[ -n "$WANT_STATUS" && -n "$MATCH" ]]; then
+  echo "agent-wait: pass exactly one of --status or --match" >&2
+  exit 64
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+
+resolve_pane() {
+  python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import resolve  # noqa: E402
+try:
+    print(resolve(sys.argv[2])["pane_id"])
+except LookupError as e:
+    print(f"agent-wait: {e}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+current_status() {
+  python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import resolve  # noqa: E402
+try:
+    print(resolve(sys.argv[2]).get("status", "unknown"))
+except LookupError:
+    print("unknown")
+PY
+}
+
+PANE_ID="$(resolve_pane)"
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
+
+while true; do
+  if [[ -n "$WANT_STATUS" ]]; then
+    if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
+    STATUS="$(current_status)"
+    if [[ "$STATUS" == "$WANT_STATUS" ]]; then
+      echo "$STATUS"
+      exit 0
+    fi
+  else
+    CAPTURE=(tmux capture-pane -p -J -t "$PANE_ID")
+    [[ "$SOURCE" == "recent" ]] && CAPTURE+=(-S -2000)
+    if "${CAPTURE[@]}" 2>/dev/null | grep -Eq -- "$MATCH"; then
+      exit 0
+    fi
+  fi
+  if (( $(date +%s) >= DEADLINE )); then
+    echo "agent-wait: timeout after ${TIMEOUT}s waiting on '$TARGET'" >&2
+    exit 1
+  fi
+  sleep "$INTERVAL"
+done

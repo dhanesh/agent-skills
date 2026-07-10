@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-send: send input to another agent's pane (Herdr `pane send-text` / `pane send-keys`).
+# Usage:
+#   agent-send <name|window|pane-id> <text...>          literal text, NO Enter
+#   agent-send <name|window|pane-id> --keys <key...>    tmux key names (Enter, C-c, Escape, Up)
+# Sending text without Enter lets you answer an in-pane prompt precisely;
+# use agent-run to submit a full command atomically.
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-send <name|pane> <text...> | --keys <key...>" >&2; exit 64; }
+shift
+[[ $# -gt 0 ]] || { echo "agent-send: text or --keys required" >&2; exit 64; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANE_ID="$(python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import resolve  # noqa: E402
+try:
+    print(resolve(sys.argv[2])["pane_id"])
+except LookupError as e:
+    print(f"agent-send: {e}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+)"
+
+if [[ "$1" == "--keys" ]]; then
+  shift
+  [[ $# -gt 0 ]] || { echo "agent-send: --keys requires at least one key" >&2; exit 64; }
+  tmux send-keys -t "$PANE_ID" "$@"
+else
+  # -l = literal: text is not interpreted as key names and Enter is NOT appended.
+  tmux send-keys -l -t "$PANE_ID" "$*"
+fi

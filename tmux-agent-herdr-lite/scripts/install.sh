@@ -8,18 +8,40 @@ TMUX_CONF="${HOME}/.tmux.conf"
 
 mkdir -p "$BIN_DIR" "$TMUX_AGENT_DIR/panes"
 
-for f in agent-pane agent-status-scan agent-status-summary agent-jump agent-dashboard agent-menu agent-workspace agent-cheatsheet; do
+for f in agent-pane agent-status-scan agent-status-summary agent-jump agent-dashboard \
+         agent-menu agent-workspace agent-cheatsheet agent-list agent-read agent-send \
+         agent-run agent-wait agent-explain agent-notify agent-resume agent-worktree; do
   cp "$SKILL_DIR/scripts/$f" "$BIN_DIR/$f"
   chmod +x "$BIN_DIR/$f"
   echo "installed $BIN_DIR/$f"
 done
 
-# Library module imported by agent-status-scan (must sit alongside it on PATH).
-cp "$SKILL_DIR/scripts/agent_classify.py" "$BIN_DIR/agent_classify.py"
-echo "installed $BIN_DIR/agent_classify.py"
+# Library modules imported by the scripts (must sit alongside them on PATH).
+for m in agent_classify.py agent_registry.py; do
+  cp "$SKILL_DIR/scripts/$m" "$BIN_DIR/$m"
+  echo "installed $BIN_DIR/$m"
+done
 
 cp "$SKILL_DIR/assets/tmux-agent.conf" "$TMUX_AGENT_DIR/tmux-agent.conf"
 echo "installed $TMUX_AGENT_DIR/tmux-agent.conf"
+
+# Optional persistence layer: only wired up when TPM is already installed,
+# so a plain install needs no network. See assets/tmux-agent-persistence.conf.
+cp "$SKILL_DIR/assets/tmux-agent-persistence.conf" "$TMUX_AGENT_DIR/tmux-agent-persistence.conf"
+echo "installed $TMUX_AGENT_DIR/tmux-agent-persistence.conf"
+if [[ -d "$HOME/.tmux/plugins/tpm" ]]; then
+  PERSIST_LINE="source-file $TMUX_AGENT_DIR/tmux-agent-persistence.conf"
+  if [[ -f "$TMUX_CONF" ]] && grep -Fxq "$PERSIST_LINE" "$TMUX_CONF"; then
+    echo "tmux config already sources tmux-agent-persistence.conf"
+  else
+    printf '%s\n' "$PERSIST_LINE" >> "$TMUX_CONF"
+    echo "added persistence source line to $TMUX_CONF (press prefix+I to install plugins)"
+  fi
+else
+  echo "TPM not found; skipping session-persistence plugins (tmux-resurrect/continuum)."
+  echo "To enable later: git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm,"
+  echo "add: run '~/.tmux/plugins/tpm/tpm' to ~/.tmux.conf, rerun this installer."
+fi
 
 SOURCE_LINE="source-file $TMUX_AGENT_DIR/tmux-agent.conf"
 if [[ -f "$TMUX_CONF" ]] && grep -Fxq "$SOURCE_LINE" "$TMUX_CONF"; then

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-list: list registered agent panes with status.
+# Usage: agent-list [--json] [--no-scan]
+# --json emits one machine-readable JSON document (for agents); default is a table.
+
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+JSON=0
+DO_SCAN=1
+for arg in "$@"; do
+  case "$arg" in
+    --json) JSON=1 ;;
+    --no-scan) DO_SCAN=0 ;;
+    *) echo "usage: agent-list [--json] [--no-scan]" >&2; exit 64 ;;
+  esac
+done
+
+if [[ "$DO_SCAN" -eq 1 && -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
+
+python3 - "$SCRIPT_DIR" "$JSON" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import load_records  # noqa: E402
+
+records = load_records()
+if sys.argv[2] == "1":
+    print(json.dumps({"agents": records}, indent=2))
+    raise SystemExit
+if not records:
+    print("no registered agents (start one with: agent-pane <name> <command>)")
+    raise SystemExit
+print(f"{'STATUS':<8} {'NAME':<22} {'PANE':<7} {'WINDOW':<18} UPDATED")
+for r in records:
+    print(f"{r.get('status','?'):<8} {r.get('name','?'):<22} "
+          f"{r.get('pane_id','?'):<7} {r.get('window','?'):<18} "
+          f"{r.get('updated_at','')}")
+PY
