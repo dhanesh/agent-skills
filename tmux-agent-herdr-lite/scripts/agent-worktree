@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-worktree: give each agent an isolated git worktree, Herdr-style.
+# Checkouts live under $AGENT_WORKTREE_DIR/<repo>/<branch-slug> and open as a
+# tmux window in the cockpit session, so parallel agents never fight over one
+# working copy.
+#
+# Usage:
+#   agent-worktree create <branch> [--base <ref>] [--repo <path>] [--window]
+#   agent-worktree open   <branch> [--repo <path>]
+#   agent-worktree remove <branch> [--repo <path>] [--force]
+#   agent-worktree list   [--repo <path>]
+#
+# create: reuse the branch if it exists, else branch from --base (default HEAD).
+# remove: runs `git worktree remove` only — the branch itself is never deleted.
+
+CMD="${1:-}"
+case "$CMD" in
+  create|open|remove|list) shift ;;
+  *) echo "usage: agent-worktree create|open|remove|list ..." >&2; exit 64 ;;
+esac
+
+BRANCH=""
+if [[ "$CMD" != "list" ]]; then
+  BRANCH="${1:-}"
+  [[ -n "$BRANCH" ]] || { echo "agent-worktree $CMD: branch required" >&2; exit 64; }
+  shift
+fi
+
+REPO="$PWD"
+BASE="HEAD"
+FORCE=0
+OPEN_WINDOW=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO="${2:?--repo needs a path}"; shift 2 ;;
+    --base) BASE="${2:?--base needs a ref}"; shift 2 ;;
+    --force) FORCE=1; shift ;;
+    --window) OPEN_WINDOW=1; shift ;;
+    *) echo "agent-worktree: unknown option $1" >&2; exit 64 ;;
+  esac
+done
+
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || {
+  echo "agent-worktree: $REPO is not a git repository" >&2; exit 1; }
+
+REPO_TOP="$(git -C "$REPO" rev-parse --show-toplevel)"
+REPO_NAME="$(basename "$REPO_TOP")"
+WT_ROOT="${AGENT_WORKTREE_DIR:-$HOME/.tmux/agent-panes/worktrees}"
+SLUG="$(printf '%s' "$BRANCH" | tr -cs '[:alnum:]_.-' '-' | sed 's/^-//; s/-$//')"
+WT_PATH="$WT_ROOT/$REPO_NAME/$SLUG"
+SESSION="${AGENT_TMUX_SESSION:-agents}"
+
+# For open/remove, trust git's own branch->path mapping over the recomputed
+# slug: distinct branches (feat/x vs feat-x) can share a slug, and the
+# checkout may have been created outside this tool.
+branch_checkout_path() {
+  git -C "$REPO_TOP" worktree list --porcelain | awk -v want="refs/heads/$BRANCH" '
+    /^worktree /   { path = substr($0, 10) }
+    /^branch /     { if ($2 == want) { print path; exit } }'
+}
+if [[ "$CMD" == "open" || "$CMD" == "remove" ]]; then
+  FOUND="$(branch_checkout_path)"
+  [[ -n "$FOUND" ]] && WT_PATH="$FOUND"
+fi
+
+open_window() {
+  # Open (or reuse) a cockpit window whose shell starts in the worktree, so
+  # a follow-up agent-pane/agent-run inherits the isolated checkout.
+  command -v tmux >/dev/null 2>&1 || return 0
+  tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n control
+  local win="wt-$SLUG"
+  if ! tmux list-windows -t "$SESSION" -F '#W' | grep -Fxq "$win"; then
+    tmux new-window -d -t "$SESSION" -n "$win" -c "$WT_PATH"
+  fi
+  echo "window: $SESSION:$win"
+}
+
+case "$CMD" in
+  list)
+    git -C "$REPO_TOP" worktree list
+    ;;
+  create)
+    mkdir -p "$(dirname "$WT_PATH")"
+    if [[ -d "$WT_PATH" ]]; then
+      echo "agent-worktree: $WT_PATH already exists (use open)" >&2; exit 1
+    fi
+    if git -C "$REPO_TOP" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git -C "$REPO_TOP" worktree add "$WT_PATH" "$BRANCH"
+    else
+      git -C "$REPO_TOP" worktree add -b "$BRANCH" "$WT_PATH" "$BASE"
+    fi
+    echo "worktree: $WT_PATH"
+    if [[ "$OPEN_WINDOW" -eq 1 ]]; then
+      open_window
+    fi
+    ;;
+  open)
+    [[ -d "$WT_PATH" ]] || { echo "agent-worktree: no checkout at $WT_PATH (use create)" >&2; exit 1; }
+    echo "worktree: $WT_PATH"
+    open_window
+    ;;
+  remove)
+    [[ -d "$WT_PATH" ]] || { echo "agent-worktree: no checkout at $WT_PATH" >&2; exit 1; }
+    if [[ "$FORCE" -eq 1 ]]; then
+      git -C "$REPO_TOP" worktree remove --force "$WT_PATH"
+    else
+      git -C "$REPO_TOP" worktree remove "$WT_PATH"
+    fi
+    echo "removed: $WT_PATH (branch '$BRANCH' kept)"
+    ;;
+esac

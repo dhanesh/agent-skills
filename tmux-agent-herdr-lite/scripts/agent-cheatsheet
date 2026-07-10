@@ -3,22 +3,39 @@ cat <<'EOF'
 TMUX AGENT COCKPIT CHEATSHEET
 
 Agent state / Herdr-like routing
-  agent-pane <name> <command>       launch/register an agent pane
+  agent-pane [--agent k] [--cwd d] <name> <cmd>   launch/register an agent pane
   agent-status-scan                 refresh pane status
   agent-status-summary              compact status line
   agent-dashboard                   full status + key help
-  agent-jump blocked|working|idle|done
+  agent-jump blocked|error|working|idle|done
+  agent-explain <name|pane>         why did this pane classify that way?
+
+Agent-to-agent coordination (Herdr socket-API equivalents)
+  agent-list [--json]               registry + statuses, machine-readable
+  agent-read <name> [--lines N] [--source recent]   read another pane
+  agent-send <name> <text>          type into a pane (no Enter)
+  agent-send <name> --keys Enter    press keys (Enter, C-c, Escape...)
+  agent-run <name> <command>        send command + Enter atomically
+  agent-wait <name> --status done   block until status (or --match <regex>)
+
+Persistence / isolation
+  agent-resume [--dry-run]          relaunch dead agents after server restart
+  agent-resume <name> --session-id <id>   native resume (claude --resume ...)
+  agent-worktree create <branch> --window  isolated git worktree + window
+  agent-worktree open|remove|list
 
 Human-friendly tmux keys
   prefix ?        dashboard/help popup
-  prefix m        command menu
+  prefix m        command menu (jump/worktree/resume/split/kill)
   prefix g        jump blocked agent
+  prefix E        jump error (crashed) agent
   prefix W/I/D    jump working / idle / done agent
   prefix G        refresh scan
   prefix S        choose session/window/pane tree
   prefix | / -    split horizontal / vertical
   prefix h/j/k/l  move between panes
   prefix H/J/K/L  resize panes
+  prefix Tab      last pane
   prefix z        zoom pane
   prefix Space    cycle layout
   prefix r        reload tmux config
@@ -27,4 +44,8 @@ Copy/search
   prefix [        copy mode
   /               search in copy mode
   v/y             vi-style selection/yank if copy-mode-vi is active
+
+Notifications (set in the environment tmux server sees)
+  AGENT_NOTIFY=tmux|system|off      toast channel (default tmux)
+  AGENT_NOTIFY_SOUND=on|off         audio cue; blocked/error beep twice
 EOF

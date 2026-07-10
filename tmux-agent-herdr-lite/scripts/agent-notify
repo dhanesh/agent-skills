@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-notify: surface an agent status transition to the human (Herdr's
+# toast + sound behavior, ported to tmux). Called by agent-status-scan when a
+# pane enters blocked/error/done; also usable directly for custom alerts.
+#
+# Usage: agent-notify <name> <status> [message]
+#
+# Channels (env-configured, mirroring Herdr [ui.toast]/[ui.sound]):
+#   AGENT_NOTIFY=tmux|system|off   toast channel (default tmux display-message;
+#                                  system adds notify-send/osascript when present)
+#   AGENT_NOTIFY_SOUND=on|off      audible cue (default on; falls back to the
+#                                  terminal bell when no audio player exists)
+# Focused-pane suppression is the caller's job: agent-status-scan already
+# knows which panes are viewed and skips the call for them (Herdr suppresses
+# active-tab toasts the same way). A manual invocation always notifies.
+
+NAME="${1:-}"
+STATUS="${2:-}"
+MESSAGE="${3:-}"
+[[ -n "$NAME" && -n "$STATUS" ]] || { echo "usage: agent-notify <name> <status> [message]" >&2; exit 64; }
+
+MODE="${AGENT_NOTIFY:-tmux}"
+SOUND="${AGENT_NOTIFY_SOUND:-on}"
+[[ "$MODE" == "off" ]] && exit 0
+
+TEXT="agent $NAME: $STATUS${MESSAGE:+ — $MESSAGE}"
+
+# Toast: tmux status-line message; optionally a desktop notification too.
+if command -v tmux >/dev/null 2>&1; then
+  tmux display-message -d 4000 "$TEXT" 2>/dev/null || tmux display-message "$TEXT" 2>/dev/null || true
+fi
+if [[ "$MODE" == "system" ]]; then
+  if command -v notify-send >/dev/null 2>&1; then
+    notify-send "tmux agents" "$TEXT" || true
+  elif command -v osascript >/dev/null 2>&1; then
+    osascript -e "display notification \"$TEXT\" with title \"tmux agents\"" || true
+  fi
+fi
+
+# Sound: done gets a single cue, blocked/error a double "needs attention" cue.
+if [[ "$SOUND" == "on" ]]; then
+  BEEPS=1
+  [[ "$STATUS" == "blocked" || "$STATUS" == "error" ]] && BEEPS=2
+  PLAYED=0
+  for player in paplay pw-play afplay; do
+    if command -v "$player" >/dev/null 2>&1; then
+      SAMPLE=""
+      for s in /usr/share/sounds/freedesktop/stereo/complete.oga \
+               /usr/share/sounds/freedesktop/stereo/bell.oga \
+               /System/Library/Sounds/Glass.aiff; do
+        [[ -f "$s" ]] && { SAMPLE="$s"; break; }
+      done
+      if [[ -n "$SAMPLE" ]]; then
+        for _ in $(seq "$BEEPS"); do "$player" "$SAMPLE" >/dev/null 2>&1 || true; done
+        PLAYED=1
+      fi
+      break
+    fi
+  done
+  if [[ "$PLAYED" -eq 0 ]] && command -v tmux >/dev/null 2>&1; then
+    # Terminal bell reaches the attached client even over SSH.
+    for _ in $(seq "$BEEPS"); do tmux run-shell 'printf \\a' 2>/dev/null || true; done
+  fi
+fi

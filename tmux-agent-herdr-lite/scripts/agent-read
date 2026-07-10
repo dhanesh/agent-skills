@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-read: print another agent pane's terminal output (Herdr `pane read`).
+# Usage: agent-read <name|window|pane-id> [--lines N] [--source visible|recent]
+#   visible (default)  the rendered screen, as a human sees it
+#   recent             includes scrollback history (unwrapped lines)
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-read <name|pane> [--lines N] [--source visible|recent]" >&2; exit 64; }
+shift
+
+LINES=0
+SOURCE="visible"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --lines) LINES="${2:?--lines needs a number}"; shift 2 ;;
+    --source) SOURCE="${2:?--source needs visible|recent}"; shift 2 ;;
+    *) echo "agent-read: unknown option $1" >&2; exit 64 ;;
+  esac
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PANE_ID="$(python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id)"
+
+CAPTURE=(tmux capture-pane -p -J -t "$PANE_ID")
+if [[ "$SOURCE" == "recent" ]]; then
+  CAPTURE+=(-S -2000)
+fi
+
+# Trim trailing blank screen rows so --lines returns content, not the empty
+# bottom of the viewport.
+if [[ "$LINES" -gt 0 ]]; then
+  "${CAPTURE[@]}" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' | tail -n "$LINES"
+else
+  "${CAPTURE[@]}" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+fi

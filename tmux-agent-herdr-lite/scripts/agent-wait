@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-wait: block until an agent reaches a status or its output matches a
+# pattern (Herdr `agent wait` / `wait output` / `wait agent-status`).
+# Usage:
+#   agent-wait <name|window|pane-id> --status blocked|working|idle|done|error [--timeout S] [--interval S]
+#   agent-wait <name|window|pane-id> --match <regex> [--source visible|recent] [--timeout S] [--interval S]
+# Exits 0 when the condition is met, 1 on timeout, 64 on usage error.
+# Herdr parity: --status idle also matches 'done' (a finished-but-unviewed
+# pane IS idle from a coordinator's perspective) — use --status idle to wait
+# for an agent's prompt, --status done to wait for a completed task.
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-wait <name|pane> --status <s>|--match <regex> [--timeout S] [--interval S]" >&2; exit 64; }
+shift
+
+WANT_STATUS=""
+MATCH=""
+SOURCE="visible"
+TIMEOUT="${AGENT_WAIT_TIMEOUT:-300}"
+INTERVAL="${AGENT_WAIT_INTERVAL:-5}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --status) WANT_STATUS="${2:?--status needs a value}"; shift 2 ;;
+    --match) MATCH="${2:?--match needs a regex}"; shift 2 ;;
+    --source) SOURCE="${2:?--source needs visible|recent}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:?--timeout needs seconds}"; shift 2 ;;
+    --interval) INTERVAL="${2:?--interval needs seconds}"; shift 2 ;;
+    *) echo "agent-wait: unknown option $1" >&2; exit 64 ;;
+  esac
+done
+if [[ -z "$WANT_STATUS" && -z "$MATCH" ]] || [[ -n "$WANT_STATUS" && -n "$MATCH" ]]; then
+  echo "agent-wait: pass exactly one of --status or --match" >&2
+  exit 64
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+
+# Validate the target up front so a typo fails fast, not at timeout.
+python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id >/dev/null
+
+current_status() {
+  python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" status 2>/dev/null || echo unknown
+}
+
+status_matches() {
+  # Herdr parity: 'idle' is satisfied by idle OR done (finished-and-unviewed).
+  [[ "$1" == "$WANT_STATUS" ]] && return 0
+  [[ "$WANT_STATUS" == "idle" && "$1" == "done" ]] && return 0
+  return 1
+}
+
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
+
+while true; do
+  if [[ -n "$WANT_STATUS" ]]; then
+    if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
+    STATUS="$(current_status)"
+    if status_matches "$STATUS"; then
+      echo "$STATUS"
+      exit 0
+    fi
+  else
+    # Reuse agent-read so 'recent' depth and capture flags live in one place.
+    if "$SCRIPT_DIR/agent-read" "$TARGET" --source "$SOURCE" 2>/dev/null | grep -Eq -- "$MATCH"; then
+      exit 0
+    fi
+  fi
+  if (( $(date +%s) >= DEADLINE )); then
+    echo "agent-wait: timeout after ${TIMEOUT}s waiting on '$TARGET'" >&2
+    exit 1
+  fi
+  sleep "$INTERVAL"
+done

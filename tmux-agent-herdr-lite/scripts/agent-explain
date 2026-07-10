@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-explain: show why a pane classified the way it did (Herdr `agent explain`).
+# Usage: agent-explain <name|window|pane-id>
+# Prints the detection inputs (agent manifest, pane title, live tail) and the
+# decision with its matched rule, so a wrong status can be debugged instead of
+# guessed at.
+
+TARGET="${1:-}"
+[[ -n "$TARGET" ]] || { echo "usage: agent-explain <name|pane>" >&2; exit 64; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
+IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
+
+python3 - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" "$ROOT" <<'PY'
+import hashlib, os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from agent_registry import resolve  # noqa: E402
+from agent_classify import classify_explain, infer_agent, tail, load_manifests  # noqa: E402
+
+target, idle_s, root = sys.argv[2], int(sys.argv[3]), sys.argv[4]
+manifests = load_manifests(os.path.join(root, 'detect'))
+try:
+    meta = resolve(target)
+except LookupError as e:
+    print(f"agent-explain: {e}", file=sys.stderr)
+    raise SystemExit(1)
+
+pane_id = meta["pane_id"]
+
+def sh(args):
+    r = subprocess.run(args, text=True, capture_output=True)
+    return r.stdout if r.returncode == 0 else ""
+
+text = sh(["tmux", "capture-pane", "-p", "-J", "-t", pane_id])
+title = sh(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_title}"]).strip()
+agent = meta.get("agent") or infer_agent(meta.get("command", ""))
+
+# changed=False + idle_elapsed=0 shows what the *stationary* screen classifies
+# as — the same signals the scanner sees between output bursts.
+status, reason = classify_explain(text, False, 0, idle_s,
+                                  meta.get("status", "working"),
+                                  agent=agent, title=title, manifests=manifests)
+
+print(f"target:   {meta.get('name')} ({pane_id}, window {meta.get('window')})")
+print(f"agent:    {agent or '(none — generic heuristics)'}"
+      + ("" if not agent or agent in manifests else "  [no manifest for this agent]"))
+print(f"title:    {title or '(empty)'}")
+print(f"command:  {meta.get('command','')}")
+print(f"recorded: {meta.get('status')} ({meta.get('reason','no reason recorded')})")
+note = ""
+if status == "done":
+    h = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
+    if meta.get("done_viewed_hash") == h:
+        note = " (already viewed — the scanner records this as idle)"
+print(f"now:      {status} — {reason}{note}")
+print("\ntail (detection region):")
+for ln in tail(text, 15).splitlines():
+    print(f"  | {ln}")
+PY

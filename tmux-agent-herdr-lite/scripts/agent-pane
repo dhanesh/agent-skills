@@ -2,11 +2,27 @@
 set -euo pipefail
 
 # agent-pane: launch/register a command in tmux for Herdr-lite agent supervision.
-# Usage: agent-pane <name> <command...>
+# Usage: agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>
+#   --agent  detection manifest to use. Kinds are the AGENT_MANIFESTS keys in
+#            agent_classify.py: claude, codex, gemini, opencode (kilo), amp,
+#            cursor, copilot, droid, cline, devin, kimi, kiro, grok, hermes,
+#            qodercli, antigravity, pi. Aliases like claude-code/cursor-agent
+#            are normalized. Inferred from the command if omitted.
+#   --cwd    working directory for the new window (e.g. an agent-worktree path).
+
+AGENT_KIND=""
+CWD=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent) AGENT_KIND="${2:?--agent needs a kind}"; shift 2 ;;
+    --cwd) CWD="${2:?--cwd needs a directory}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 
 NAME="${1:-}"
 if [[ -z "$NAME" ]]; then
-  echo "usage: agent-pane <name> <command...>" >&2
+  echo "usage: agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>" >&2
   exit 64
 fi
 shift || true
@@ -18,6 +34,7 @@ fi
 SESSION="${AGENT_TMUX_SESSION:-agents}"
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 PANE_DIR="$ROOT/panes"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$PANE_DIR"
 
 CMD="$*"
@@ -35,26 +52,37 @@ if tmux list-windows -t "$SESSION" -F '#W' | grep -Fxq "$WIN"; then
   WIN="${SAFE_NAME}-$(date +%H%M%S)"
 fi
 
-tmux new-window -d -t "$SESSION" -n "$WIN"
+NEW_WINDOW=(tmux new-window -d -t "$SESSION" -n "$WIN")
+[[ -n "$CWD" ]] && NEW_WINDOW+=(-c "$CWD")
+"${NEW_WINDOW[@]}"
 PANE_ID="$(tmux display-message -p -t "$SESSION:$WIN" '#{pane_id}')"
 
-# Store metadata before launch so scanner can see it immediately.
+# Store metadata before launch so scanner can see it immediately. All values
+# travel as argv so quotes/backslashes in the command can't break the JSON.
 META="$PANE_DIR/${PANE_ID#%}.json"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python3 - "$META" <<PY
-import json,sys,os
-path=sys.argv[1]
+python3 - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" "$CMD" \
+  "${AGENT_NAME:-$NAME}" "$SESSION" "$WIN" "$PANE_ID" "$NOW" <<'PY'
+import json,sys
+path, mod_dir, agent, cwd, cmd, name, session, win, pane_id, now = sys.argv[1:11]
+sys.path.insert(0, mod_dir)
+from agent_classify import AGENT_ALIASES, infer_agent
+# Normalize aliases (claude-code -> claude) so an explicit --agent hits the
+# manifest table the same way an inferred one does.
+agent = AGENT_ALIASES.get(agent, agent)
 data={
-  "name": os.environ.get("AGENT_NAME", "$NAME"),
-  "session": "$SESSION",
-  "window": "$WIN",
-  "pane_id": "$PANE_ID",
-  "command": "$CMD",
+  "name": name,
+  "session": session,
+  "window": win,
+  "pane_id": pane_id,
+  "command": cmd,
+  "agent": agent or infer_agent(cmd),
+  "cwd": cwd,
   "status": "working",
-  "created_at": "$NOW",
-  "updated_at": "$NOW",
+  "created_at": now,
+  "updated_at": now,
   "last_hash": "",
-  "last_changed_at": "$NOW",
+  "last_changed_at": now,
 }
 open(path,"w").write(json.dumps(data, indent=2))
 PY
