@@ -10,11 +10,13 @@ A tmux-based agent cockpit that combines **Zellij-like human ergonomics** with *
 npx skills add dhanesh/agent-skills --skill tmux-agent-herdr-lite
 ```
 
-Then run the installer from the skill directory to copy scripts and wire up your tmux config:
+Invoking the skill (e.g. `/tmux-agent-herdr-lite` in Claude Code) runs the installer for you. To run it by hand instead:
 
 ```bash
 bash scripts/install.sh
 ```
+
+Nothing is copied onto your PATH and there are no new commands to learn: the installer generates a tmux config that references the skill's scripts in place, and everything human-facing lives behind tmux keybindings, the `prefix m` menu (launch an agent, jump by status, worktrees, resume), the `prefix ?` dashboard, and the status bar. The `agent-*` scripts are the API your coding agents use to coordinate with each other.
 
 ## What it sets up
 

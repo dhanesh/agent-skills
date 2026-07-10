@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Idempotent installer — safe (and intended) to run on every skill
+# invocation. It copies nothing onto PATH: the generated tmux config points
+# straight at this skill's scripts/ directory, so the human surface is
+# entirely tmux keybindings, the prefix+m menu, and the status bar, and skill
+# updates take effect on the next config reload.
+
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_DIR="${HOME}/.local/bin"
+AGENT_BIN="$SKILL_DIR/scripts"
 TMUX_AGENT_DIR="${HOME}/.tmux/agent-panes"
 TMUX_CONF="${HOME}/.tmux.conf"
 
@@ -35,30 +41,27 @@ ensure_sourced_before_tpm() {
   fi
 }
 
-mkdir -p "$BIN_DIR" "$TMUX_AGENT_DIR/panes"
+mkdir -p "$TMUX_AGENT_DIR/panes"
+chmod +x "$AGENT_BIN"/agent-* 2>/dev/null || true
 
-for f in agent-pane agent-status-scan agent-status-summary agent-jump agent-dashboard \
-         agent-menu agent-workspace agent-cheatsheet agent-list agent-read agent-send \
-         agent-run agent-wait agent-explain agent-notify agent-resume agent-worktree; do
-  cp "$SKILL_DIR/scripts/$f" "$BIN_DIR/$f"
-  chmod +x "$BIN_DIR/$f"
-  echo "installed $BIN_DIR/$f"
+# Retire copies made by older versions of this installer so stale scripts on
+# PATH can't shadow the in-place ones the config now references.
+for f in "$HOME/.local/bin"/agent-pane "$HOME/.local/bin"/agent-status-scan; do
+  if [[ -f "$f" ]] && grep -q 'Herdr-lite' "$f" 2>/dev/null; then
+    echo "note: $HOME/.local/bin contains copies from an older install; they are no longer used."
+    break
+  fi
 done
 
-# Library modules imported by the scripts (must sit alongside them on PATH).
-for m in agent_classify.py agent_registry.py; do
-  cp "$SKILL_DIR/scripts/$m" "$BIN_DIR/$m"
-  echo "installed $BIN_DIR/$m"
-done
-
-cp "$SKILL_DIR/assets/tmux-agent.conf" "$TMUX_AGENT_DIR/tmux-agent.conf"
-echo "installed $TMUX_AGENT_DIR/tmux-agent.conf"
+# Generate the tmux config with this skill's script directory baked in.
+sed "s|@AGENT_BIN@|$AGENT_BIN|g" "$SKILL_DIR/assets/tmux-agent.conf" \
+  > "$TMUX_AGENT_DIR/tmux-agent.conf"
+echo "generated $TMUX_AGENT_DIR/tmux-agent.conf (scripts referenced in place from $AGENT_BIN)"
 ensure_sourced_before_tpm "source-file $TMUX_AGENT_DIR/tmux-agent.conf"
 
 # Optional persistence layer: only wired up when TPM is already installed,
 # so a plain install needs no network. See assets/tmux-agent-persistence.conf.
 cp "$SKILL_DIR/assets/tmux-agent-persistence.conf" "$TMUX_AGENT_DIR/tmux-agent-persistence.conf"
-echo "installed $TMUX_AGENT_DIR/tmux-agent-persistence.conf"
 if [[ -d "$HOME/.tmux/plugins/tpm" ]]; then
   ensure_sourced_before_tpm "source-file $TMUX_AGENT_DIR/tmux-agent-persistence.conf"
   echo "persistence layer wired (press prefix+I inside tmux to install the plugins)"
@@ -72,4 +75,4 @@ if command -v tmux >/dev/null 2>&1; then
   tmux source-file "$TMUX_CONF" 2>/dev/null || true
 fi
 
-echo "done. Start with: agent-workspace"
+echo "done. Inside tmux: prefix ? = dashboard, prefix m = menu (launch agents, worktrees, resume)."

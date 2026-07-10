@@ -6,8 +6,8 @@ set -euo pipefail
 # --json emits one machine-readable JSON document (for agents); default is a table.
 
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
-SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN="${AGENT_STATUS_SCAN:-$SCRIPT_DIR/agent-status-scan}"
 
 JSON=0
 DO_SCAN=1

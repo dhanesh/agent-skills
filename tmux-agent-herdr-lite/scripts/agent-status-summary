@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 STATE="$ROOT/state.json"
-SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN="${AGENT_STATUS_SCAN:-$SCRIPT_DIR/agent-status-scan}"
 
 # Scan opportunistically. Keep status bar quiet on errors.
 if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
