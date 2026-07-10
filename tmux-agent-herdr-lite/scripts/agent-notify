@@ -12,8 +12,9 @@ set -euo pipefail
 #                                  system adds notify-send/osascript when present)
 #   AGENT_NOTIFY_SOUND=on|off      audible cue (default on; falls back to the
 #                                  terminal bell when no audio player exists)
-# Notifications for the currently focused pane are skipped — you are already
-# looking at it (Herdr suppresses toasts for the active tab the same way).
+# Focused-pane suppression is the caller's job: agent-status-scan already
+# knows which panes are viewed and skips the call for them (Herdr suppresses
+# active-tab toasts the same way). A manual invocation always notifies.
 
 NAME="${1:-}"
 STATUS="${2:-}"
@@ -25,25 +26,6 @@ SOUND="${AGENT_NOTIFY_SOUND:-on}"
 [[ "$MODE" == "off" ]] && exit 0
 
 TEXT="agent $NAME: $STATUS${MESSAGE:+ — $MESSAGE}"
-
-# Skip if the agent's pane is focused in an attached client.
-if command -v tmux >/dev/null 2>&1 && tmux list-clients 2>/dev/null | grep -q .; then
-  ACTIVE="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  TARGET_PANE="$(python3 - "$SCRIPT_DIR" "$NAME" <<'PY' 2>/dev/null || true
-import sys
-sys.path.insert(0, sys.argv[1])
-from agent_registry import resolve  # noqa: E402
-try:
-    print(resolve(sys.argv[2])["pane_id"])
-except LookupError:
-    pass
-PY
-)"
-  if [[ -n "$ACTIVE" && -n "$TARGET_PANE" && "$ACTIVE" == "$TARGET_PANE" ]]; then
-    exit 0
-  fi
-fi
 
 # Toast: tmux status-line message; optionally a desktop notification too.
 if command -v tmux >/dev/null 2>&1; then

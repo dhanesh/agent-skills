@@ -74,6 +74,17 @@ AGENT_CASES = [
      "working", "claude", "", "done"),
     ("claude prompt box when never working -> idle",
      "╭──────╮\n│ ❯    │\n╰──────╯", False, 0, "idle", "claude", "", "idle"),
+    # A rejected approval (blocked -> Esc -> prompt box) is not a completion.
+    ("claude prompt box after blocked -> idle, not done",
+     "╭──────╮\n│ ❯    │\n╰──────╯", False, 0, "blocked", "claude", "", "idle"),
+    # done persists across scans until the scanner's viewed-demotion.
+    ("claude prompt box with prev done stays done",
+     "╭──────╮\n│ ❯    │\n╰──────╯", False, 0, "done", "claude", "", "done"),
+    # Strict-blocked exception: a live interactive prompt at the very bottom
+    # (a subprocess asking for a password) still routes to blocked.
+    ("claude pane at a password prompt -> blocked",
+     "running deploy...\n$ sudo systemctl restart app\nPassword:", False, 5,
+     "working", "claude", "", "blocked"),
     # Herdr strict-blocked: loose words on a known agent's screen don't block —
     # an agent *talking about* rate limits stays classified by chrome/fallback.
     ("claude discussing '429' stays non-blocked (strict-blocked)",

@@ -14,23 +14,14 @@ shift
 [[ $# -gt 0 ]] || { echo "agent-send: text or --keys required" >&2; exit 64; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANE_ID="$(python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from agent_registry import resolve  # noqa: E402
-try:
-    print(resolve(sys.argv[2])["pane_id"])
-except LookupError as e:
-    print(f"agent-send: {e}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-)"
+PANE_ID="$(python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id)"
 
 if [[ "$1" == "--keys" ]]; then
   shift
   [[ $# -gt 0 ]] || { echo "agent-send: --keys requires at least one key" >&2; exit 64; }
-  tmux send-keys -t "$PANE_ID" "$@"
+  tmux send-keys -t "$PANE_ID" -- "$@"
 else
-  # -l = literal: text is not interpreted as key names and Enter is NOT appended.
-  tmux send-keys -l -t "$PANE_ID" "$*"
+  # -l = literal: text is not interpreted as key names and Enter is NOT
+  # appended. -- keeps text starting with '-' out of tmux's flag parser.
+  tmux send-keys -l -t "$PANE_ID" -- "$*"
 fi

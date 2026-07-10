@@ -21,17 +21,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANE_ID="$(python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from agent_registry import resolve  # noqa: E402
-try:
-    print(resolve(sys.argv[2])["pane_id"])
-except LookupError as e:
-    print(f"agent-read: {e}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-)"
+PANE_ID="$(python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id)"
 
 CAPTURE=(tmux capture-pane -p -J -t "$PANE_ID")
 if [[ "$SOURCE" == "recent" ]]; then

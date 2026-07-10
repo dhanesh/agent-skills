@@ -14,29 +14,37 @@ set -euo pipefail
 # Usage:
 #   agent-resume            relaunch all dead registered agents
 #   agent-resume --dry-run  print what would be relaunched
-#   agent-resume <name> --session-id <id>   relaunch one agent, resuming its
-#                                            native CLI session
+#   agent-resume <name> [--session-id <id>] [--force]   relaunch one agent;
+#     --session-id resumes its native CLI session; --force replaces it even
+#     if its pane is still alive.
 
 DRY=0
+FORCE=0
 TARGET=""
 SESSION_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY=1; shift ;;
+    --force) FORCE=1; shift ;;
     --session-id) SESSION_ID="${2:?--session-id needs a value}"; shift 2 ;;
     *) TARGET="$1"; shift ;;
   esac
 done
+if [[ -n "$SESSION_ID" && -z "$TARGET" ]]; then
+  echo "agent-resume: --session-id needs a target agent (agent-resume <name> --session-id <id>)" >&2
+  exit 64
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_PANE="${AGENT_PANE_BIN:-$SCRIPT_DIR/agent-pane}"
 
-python3 - "$SCRIPT_DIR" "$DRY" "$TARGET" "$SESSION_ID" "$AGENT_PANE" <<'PY'
-import json, os, shlex, subprocess, sys
+python3 - "$SCRIPT_DIR" "$DRY" "$FORCE" "$TARGET" "$SESSION_ID" "$AGENT_PANE" <<'PY'
+import os, shlex, subprocess, sys
 sys.path.insert(0, sys.argv[1])
-from agent_registry import load_records, pane_dir  # noqa: E402
+from agent_registry import load_records, pane_alive, record_path, resolve  # noqa: E402
 
-dry, target, session_id, agent_pane = sys.argv[2] == "1", sys.argv[3], sys.argv[4], sys.argv[5]
+dry, force = sys.argv[2] == "1", sys.argv[3] == "1"
+target, session_id, agent_pane = sys.argv[4], sys.argv[5], sys.argv[6]
 
 # Herdr src/agent_resume.rs plan(): how each agent CLI reopens a session.
 RESUME_FLAGS = {
@@ -48,13 +56,6 @@ RESUME_FLAGS = {
     "opencode": lambda i: ["opencode", "--session", i],
     "gemini": lambda i: ["gemini", "--resume", i],
 }
-
-def pane_alive(pane_id):
-    # Compare the echoed id: some tmux builds exit 0 with empty output for a
-    # dead pane target, so the return code alone is not trustworthy.
-    r = subprocess.run(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"],
-                       capture_output=True, text=True)
-    return r.returncode == 0 and r.stdout.strip() == pane_id
 
 def relaunch(rec, resume_id=""):
     cmd = rec.get("command", "")
@@ -76,23 +77,35 @@ def relaunch(rec, resume_id=""):
     if dry:
         print("would run:", " ".join(shlex.quote(a) for a in argv))
         return
-    subprocess.run(argv, check=True)
-    # The old record now points at a dead pane; agent-pane wrote a fresh one.
-    old = os.path.join(pane_dir(), rec.get("pane_id", "%_")[1:] + ".json")
-    if os.path.exists(old):
+    new_pane = subprocess.run(argv, check=True, capture_output=True,
+                              text=True).stdout.strip()
+    # Drop the dead record — unless tmux reissued the same pane id to the
+    # replacement, in which case the old path IS the fresh record.
+    old = record_path(rec.get("pane_id", "%_"))
+    if new_pane and old != record_path(new_pane) and os.path.exists(old):
         os.unlink(old)
     print(f"resumed {rec.get('name')} ({cmd})")
 
-records = load_records()
 if target:
-    picked = [r for r in records if r.get("name") == target or r.get("window") == target]
-    if not picked:
-        print(f"agent-resume: no record named '{target}'", file=sys.stderr)
+    try:
+        rec = resolve(target)
+    except LookupError as e:
+        print(f"agent-resume: {e}", file=sys.stderr)
         raise SystemExit(1)
-    relaunch(picked[0], session_id)
+    if pane_alive(rec.get("pane_id", "")):
+        if not force:
+            print(f"agent-resume: '{rec.get('name')}' is still running in "
+                  f"{rec.get('pane_id')} — pass --force to replace it", file=sys.stderr)
+            raise SystemExit(1)
+        if not dry:
+            # Replace means replace: kill the old pane so two agents never
+            # share one native CLI session.
+            subprocess.run(["tmux", "kill-pane", "-t", rec["pane_id"]],
+                           capture_output=True)
+    relaunch(rec, session_id)
     raise SystemExit(0)
 
-dead = [r for r in records if not pane_alive(r.get("pane_id", ""))]
+dead = [r for r in load_records() if not pane_alive(r.get("pane_id", ""))]
 if not dead:
     print("all registered agents are still running; nothing to resume")
     raise SystemExit(0)

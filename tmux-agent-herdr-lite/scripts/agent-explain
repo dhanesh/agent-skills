@@ -15,7 +15,7 @@ ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
 
 python3 - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" "$ROOT" <<'PY'
-import os, subprocess, sys
+import hashlib, os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from agent_registry import resolve  # noqa: E402
 from agent_classify import classify_explain, infer_agent, tail, load_manifests  # noqa: E402
@@ -50,7 +50,12 @@ print(f"agent:    {agent or '(none — generic heuristics)'}"
 print(f"title:    {title or '(empty)'}")
 print(f"command:  {meta.get('command','')}")
 print(f"recorded: {meta.get('status')} ({meta.get('reason','no reason recorded')})")
-print(f"now:      {status} — {reason}")
+note = ""
+if status == "done":
+    h = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()
+    if meta.get("done_viewed_hash") == h:
+        note = " (already viewed — the scanner records this as idle)"
+print(f"now:      {status} — {reason}{note}")
 print("\ntail (detection region):")
 for ln in tail(text, 15).splitlines():
     print(f"  | {ln}")

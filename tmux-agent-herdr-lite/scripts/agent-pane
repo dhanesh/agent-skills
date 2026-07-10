@@ -3,8 +3,11 @@ set -euo pipefail
 
 # agent-pane: launch/register a command in tmux for Herdr-lite agent supervision.
 # Usage: agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>
-#   --agent  detection manifest to use (claude, codex, gemini, opencode, amp,
-#            cursor, copilot, droid, cline). Inferred from the command if omitted.
+#   --agent  detection manifest to use. Kinds are the AGENT_MANIFESTS keys in
+#            agent_classify.py: claude, codex, gemini, opencode (kilo), amp,
+#            cursor, copilot, droid, cline, devin, kimi, kiro, grok, hermes,
+#            qodercli, antigravity, pi. Aliases like claude-code/cursor-agent
+#            are normalized. Inferred from the command if omitted.
 #   --cwd    working directory for the new window (e.g. an agent-worktree path).
 
 AGENT_KIND=""
@@ -63,7 +66,10 @@ python3 - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" "$CMD" \
 import json,sys
 path, mod_dir, agent, cwd, cmd, name, session, win, pane_id, now = sys.argv[1:11]
 sys.path.insert(0, mod_dir)
-from agent_classify import infer_agent
+from agent_classify import AGENT_ALIASES, infer_agent
+# Normalize aliases (claude-code -> claude) so an explicit --agent hits the
+# manifest table the same way an inferred one does.
+agent = AGENT_ALIASES.get(agent, agent)
 data={
   "name": name,
   "session": session,

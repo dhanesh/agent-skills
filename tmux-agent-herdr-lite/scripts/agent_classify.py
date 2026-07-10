@@ -428,14 +428,20 @@ def classify_explain(text, changed, idle_elapsed, idle_s, prev_status='working',
         region = tail(text, 15)
         state, rule_id = _eval_manifest(manifest, region, title)
         if state == 'idle':
-            # Herdr maps finished-and-unviewed to done; a fresh prompt that
-            # was never working is just idle.
-            done = prev_status in ('working', 'blocked', 'done')
+            # Herdr maps finished-and-unviewed to done. Only a pane that was
+            # actually working graduates to done; a fresh prompt, or a prompt
+            # reappearing after a rejected approval (blocked), is just idle.
+            done = prev_status in ('working', 'done')
             return ('done' if done else 'idle'), f'manifest {agent}/{rule_id}'
         if state:
             return state, f'manifest {agent}/{rule_id}'
         if changed:
             return 'working', 'output changed'
+        # No chrome matched and the pane is quiescent: a live interactive
+        # prompt in the last lines (password:, [y/N] from a subprocess the
+        # agent spawned) still needs a human, even under strict-blocked.
+        if _hit(BLOCKED_STRONG, tail(text, 3)):
+            return 'blocked', 'interactive prompt at pane bottom (non-manifest)'
         if idle_elapsed > idle_s:
             return 'idle', f'quiescent > {idle_s}s (known agent, no chrome matched)'
         return (prev_status or 'working'), 'no signal; kept previous status'

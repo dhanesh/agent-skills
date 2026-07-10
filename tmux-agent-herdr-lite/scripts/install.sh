@@ -33,6 +33,12 @@ if [[ -d "$HOME/.tmux/plugins/tpm" ]]; then
   PERSIST_LINE="source-file $TMUX_AGENT_DIR/tmux-agent-persistence.conf"
   if [[ -f "$TMUX_CONF" ]] && grep -Fxq "$PERSIST_LINE" "$TMUX_CONF"; then
     echo "tmux config already sources tmux-agent-persistence.conf"
+  elif [[ -f "$TMUX_CONF" ]] && grep -Eq "run(-shell)? .*tpm/tpm" "$TMUX_CONF"; then
+    # @plugin declarations must precede the tpm run line, so insert above it.
+    awk -v line="$PERSIST_LINE" '
+      !done && $0 ~ /run(-shell)? .*tpm\/tpm/ { print line; done=1 }
+      { print }' "$TMUX_CONF" > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
+    echo "inserted persistence source line before tpm run in $TMUX_CONF (press prefix+I to install plugins)"
   else
     printf '%s\n' "$PERSIST_LINE" >> "$TMUX_CONF"
     echo "added persistence source line to $TMUX_CONF (press prefix+I to install plugins)"

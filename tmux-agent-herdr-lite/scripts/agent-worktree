@@ -52,6 +52,19 @@ SLUG="$(printf '%s' "$BRANCH" | tr -cs '[:alnum:]_.-' '-' | sed 's/^-//; s/-$//'
 WT_PATH="$WT_ROOT/$REPO_NAME/$SLUG"
 SESSION="${AGENT_TMUX_SESSION:-agents}"
 
+# For open/remove, trust git's own branch->path mapping over the recomputed
+# slug: distinct branches (feat/x vs feat-x) can share a slug, and the
+# checkout may have been created outside this tool.
+branch_checkout_path() {
+  git -C "$REPO_TOP" worktree list --porcelain | awk -v want="refs/heads/$BRANCH" '
+    /^worktree /   { path = substr($0, 10) }
+    /^branch /     { if ($2 == want) { print path; exit } }'
+}
+if [[ "$CMD" == "open" || "$CMD" == "remove" ]]; then
+  FOUND="$(branch_checkout_path)"
+  [[ -n "$FOUND" ]] && WT_PATH="$FOUND"
+fi
+
 open_window() {
   # Open (or reuse) a cockpit window whose shell starts in the worktree, so
   # a follow-up agent-pane/agent-run inherits the isolated checkout.
@@ -79,7 +92,9 @@ case "$CMD" in
       git -C "$REPO_TOP" worktree add -b "$BRANCH" "$WT_PATH" "$BASE"
     fi
     echo "worktree: $WT_PATH"
-    [[ "$OPEN_WINDOW" -eq 1 ]] && open_window
+    if [[ "$OPEN_WINDOW" -eq 1 ]]; then
+      open_window
+    fi
     ;;
   open)
     [[ -d "$WT_PATH" ]] || { echo "agent-worktree: no checkout at $WT_PATH (use create)" >&2; exit 1; }

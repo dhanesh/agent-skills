@@ -11,17 +11,7 @@ shift
 [[ $# -gt 0 ]] || { echo "agent-run: command required" >&2; exit 64; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANE_ID="$(python3 - "$SCRIPT_DIR" "$TARGET" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from agent_registry import resolve  # noqa: E402
-try:
-    print(resolve(sys.argv[2])["pane_id"])
-except LookupError as e:
-    print(f"agent-run: {e}", file=sys.stderr)
-    raise SystemExit(1)
-PY
-)"
+PANE_ID="$(python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id)"
 
-tmux send-keys -l -t "$PANE_ID" "$*"
+tmux send-keys -l -t "$PANE_ID" -- "$*"
 tmux send-keys -t "$PANE_ID" Enter

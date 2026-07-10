@@ -25,34 +25,34 @@ now_ts = time.time()
 def sh(args):
     return subprocess.run(args, text=True, capture_output=True)
 
-def pane_exists(pane_id):
-    # Compare the echoed id: some tmux builds exit 0 with empty output for a
-    # dead pane target, so the return code alone is not trustworthy.
-    r = sh(['tmux','display-message','-p','-t',pane_id,'#{pane_id}'])
-    return r.returncode == 0 and r.stdout.strip() == pane_id
-
 def capture(pane_id):
     r = sh(['tmux','capture-pane','-p','-J','-t',pane_id])
     return r.stdout if r.returncode == 0 else ''
 
-def pane_title(pane_id):
-    # Agents set the terminal title via OSC 0/2 (Herdr reads the same signal:
-    # a braille-spinner title means the agent is streaming).
-    r = sh(['tmux','display-message','-p','-t',pane_id,'#{pane_title}'])
-    return r.stdout.strip() if r.returncode == 0 else ''
+def all_pane_titles():
+    # One subprocess answers both "does this pane exist" and "what is its
+    # title" for every pane (agents set titles via OSC 0/2 — Herdr reads the
+    # same signal: a braille-spinner title means the agent is streaming).
+    r = sh(['tmux','list-panes','-a','-F','#{pane_id}\t#{pane_title}'])
+    if r.returncode != 0:
+        return {}
+    titles = {}
+    for line in r.stdout.splitlines():
+        pane_id, _, title = line.partition('\t')
+        if pane_id:
+            titles[pane_id] = title
+    return titles
 
 def focused_panes():
-    # Active pane of each attached client's current window — "viewed" panes.
-    r = sh(['tmux','list-clients','-F','#{session_name}'])
-    if r.returncode != 0 or not r.stdout.strip():
+    # Active pane of each attached client — "viewed" panes. Format expansion
+    # runs in the client's context, so one call is enough (and session names
+    # with spaces can't corrupt the targets).
+    r = sh(['tmux','list-clients','-F','#{pane_id}'])
+    if r.returncode != 0:
         return set()
-    panes = set()
-    for sess in set(r.stdout.split()):
-        p = sh(['tmux','display-message','-p','-t',sess,'#{pane_id}'])
-        if p.returncode == 0 and p.stdout.strip():
-            panes.add(p.stdout.strip())
-    return panes
+    return {p for p in r.stdout.splitlines() if p}
 
+TITLES = all_pane_titles()
 FOCUSED = focused_panes()
 
 def status_for(text, title, meta):
@@ -76,11 +76,13 @@ def status_for(text, title, meta):
     meta['reason'] = reason
     # Herdr semantics: 'done' persists until the human views the pane, then it
     # becomes 'idle'. Viewing is "pane focused in an attached client"; the
-    # viewed hash pins the demotion until new output arrives.
+    # viewed hash pins the demotion until new output arrives. Demotion only
+    # applies to an already-persisted 'done' so the transition itself is
+    # observable for at least one scan (agent-wait, notifications).
     if status == 'done':
         if meta.get('done_viewed_hash') == h:
             status = 'idle'
-        elif meta.get('pane_id') in FOCUSED:
+        elif meta.get('pane_id') in FOCUSED and meta.get('status') == 'done':
             meta['done_viewed_hash'] = h
             status = 'idle'
     return status
@@ -107,12 +109,15 @@ for fn in sorted(os.listdir(pane_dir)):
         continue
     prev=meta.get('status','unknown')
     pane_id=meta.get('pane_id')
-    if not pane_id or not pane_exists(pane_id):
+    if not pane_id or pane_id not in TITLES:
         meta['status']='unknown'
     else:
         text=capture(pane_id)
-        meta['status']=status_for(text, pane_title(pane_id), meta)
-    if meta['status'] != prev and meta['status'] in ('blocked','error','done'):
+        meta['status']=status_for(text, TITLES[pane_id].strip(), meta)
+    # Herdr suppresses toasts for the active tab: skip focused panes here
+    # rather than re-deriving focus inside agent-notify.
+    if (meta['status'] != prev and meta['status'] in ('blocked','error','done')
+            and pane_id not in FOCUSED):
         notify(meta, meta['status'])
     meta['updated_at']=now
     json.dump(meta, open(path,'w'), indent=2)

@@ -84,17 +84,23 @@ Send a command line and press Enter atomically. Preferred for commands.
 ### `agent-wait <target> --status <s> | --match <regex> [--timeout S] [--interval S] [--source visible|recent]`
 Block until the agent reaches a status or its output matches an extended
 regex. Exit 0 on success, 1 on timeout (default 300s; also settable via
-`AGENT_WAIT_TIMEOUT`/`AGENT_WAIT_INTERVAL`).
+`AGENT_WAIT_TIMEOUT`/`AGENT_WAIT_INTERVAL`). Herdr parity: `--status idle`
+is also satisfied by `done` — use `idle` to wait for an agent's prompt to be
+ready, `done` to wait for a finished task. If a human might view the pane
+while you wait, prefer `--match` on an explicit output marker: focusing a
+`done` pane demotes it to `idle` (viewed) on the following scan.
 
 ## Persistence and isolation
 
-### `agent-resume [--dry-run]` / `agent-resume <name> --session-id <id>`
+### `agent-resume [--dry-run]` / `agent-resume <name> [--session-id <id>] [--force]`
 Relaunch registered agents whose panes no longer exist (after a tmux server
 restart), in their saved cwd with their saved agent kind. With
 `--session-id`, rewrite the command using the agent's native resume flag
 (Herdr's resume table): `claude --resume <id>`, `codex resume <id>`,
 `cursor-agent --resume <id>`, `copilot --resume=<id>`, `droid --resume <id>`,
-`opencode --session <id>`, `gemini --resume <id>`.
+`opencode --session <id>`, `gemini --resume <id>`. A single target whose pane
+is still alive is refused unless `--force`, which kills the old pane first so
+two agents never share one native session.
 
 ### `agent-worktree create|open|remove|list <branch> [--repo <path>] [--base <ref>] [--force] [--window]`
 Git-worktree isolation per agent. Checkouts live under
@@ -107,7 +113,8 @@ never deletes the branch (`--force` for dirty checkouts).
 
 ### `agent-notify <name> <status> [message]`
 Toast + sound for a status transition (called by the scanner; scriptable like
-`herdr notification show`). Skips when the pane is focused. Config:
+`herdr notification show`). The scanner skips it for panes you are already
+viewing; a manual invocation always notifies. Config:
 
 - `AGENT_NOTIFY=tmux|system|off` — `tmux` shows a status-line message;
   `system` adds `notify-send`/`osascript`; `off` silences everything.
