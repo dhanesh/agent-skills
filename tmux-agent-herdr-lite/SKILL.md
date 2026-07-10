@@ -70,7 +70,8 @@ prefix S        session/window/pane tree
 prefix g        jump first blocked agent
 prefix E        jump first error (crashed) agent
 prefix G        refresh agent statuses
-prefix W/I/D    jump working / idle / done agent
+prefix W/i/D    jump working / idle / done agent (idle also matches done;
+                prefix I is left untouched for TPM's plugin installer)
 prefix | / -    split horizontal / vertical
 prefix h/j/k/l  select pane left/down/up/right
 prefix H/J/K/L  resize pane left/down/up/right

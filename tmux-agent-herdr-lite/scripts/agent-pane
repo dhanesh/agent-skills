@@ -52,9 +52,15 @@ if tmux list-windows -t "$SESSION" -F '#W' | grep -Fxq "$WIN"; then
   WIN="${SAFE_NAME}-$(date +%H%M%S)"
 fi
 
+# Run the wrapper as the window's command instead of typing it with
+# send-keys: a typed command is echoed by the shell, and the echoed
+# 'AGENT_STATUS: done' literal in the wrapper would pin a silent
+# long-running command as done. The shell stays open after exit so output
+# remains inspectable. POSIX printf only — tmux runs this via sh -c.
+WRAP="printf 'AGENT_STATUS: working name=%s\\n' '$SAFE_NAME'; $CMD; rc=\$?; printf '\\nAGENT_STATUS: done exit_code=%s\\n' \"\$rc\"; exec \"\${SHELL:-/bin/sh}\""
 NEW_WINDOW=(tmux new-window -d -t "$SESSION" -n "$WIN")
 [[ -n "$CWD" ]] && NEW_WINDOW+=(-c "$CWD")
-"${NEW_WINDOW[@]}"
+"${NEW_WINDOW[@]}" -- "$WRAP"
 PANE_ID="$(tmux display-message -p -t "$SESSION:$WIN" '#{pane_id}')"
 
 # Store metadata before launch so scanner can see it immediately. All values
@@ -86,8 +92,5 @@ data={
 }
 open(path,"w").write(json.dumps(data, indent=2))
 PY
-
-# Launch command. Keep shell open after exit so output remains inspectable.
-tmux send-keys -t "$PANE_ID" "printf 'AGENT_STATUS: working name=%q\\n' '$NAME'; $CMD; rc=\$?; printf '\\nAGENT_STATUS: done exit_code=%s\\n' \"\$rc\"; exec \$SHELL" C-m
 
 echo "$PANE_ID"

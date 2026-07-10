@@ -25,7 +25,7 @@ bash scripts/install.sh
 - **Agent-to-agent coordination** — `agent-list --json`, `agent-read`, `agent-send` (no Enter), `agent-run` (with Enter), and `agent-wait --status/--match`: the shell equivalent of Herdr's socket API, so one agent can drive and monitor its siblings.
 - **Notifications** — transitions into `blocked`/`error`/`done` fire a tmux toast (optionally a desktop notification) and a sound cue with terminal-bell fallback; suppressed when you're already looking at the pane.
 - **Persistence and isolation** — `agent-resume` relaunches dead agents after a tmux server restart, using native session resume (`claude --resume`, `codex resume`, …) when you pass a session id; `agent-worktree` gives each agent an isolated git worktree; optional tmux-resurrect/tmux-continuum config restores layouts across reboots (wired automatically when TPM is present).
-- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix g/E/W/I/D` bind the states to keys; a compact fleet summary lives in the tmux status bar.
+- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix g/E/W/i/D` bind the states to keys (`idle` also matches finished-but-unviewed `done` panes; capital `I` is left to TPM's plugin installer); a compact fleet summary lives in the tmux status bar.
 
 ## Prerequisites
 

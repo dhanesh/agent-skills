@@ -29,7 +29,8 @@ Human-friendly tmux keys
   prefix m        command menu (jump/worktree/resume/split/kill)
   prefix g        jump blocked agent
   prefix E        jump error (crashed) agent
-  prefix W/I/D    jump working / idle / done agent
+  prefix W/i/D    jump working / idle / done agent (idle matches done too;
+                  prefix I stays TPM's plugin-install key)
   prefix G        refresh scan
   prefix S        choose session/window/pane tree
   prefix | / -    split horizontal / vertical

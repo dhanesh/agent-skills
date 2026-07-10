@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# agent-jump: focus the first pane in a given state.
+# Usage: agent-jump blocked|error|working|idle|done
+# Herdr parity: 'idle' also matches 'done' (finished-and-unviewed) — and
+# jumping to a done pane views it, so the next scan demotes it to idle.
+# Exits 1 when no pane matches (with a status-line message when inside tmux).
+
 TARGET_STATUS="${1:-blocked}"
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 STATE="$ROOT/state.json"
@@ -13,15 +19,23 @@ import json, os, sys
 state, wanted = sys.argv[1], sys.argv[2]
 if not os.path.exists(state): raise SystemExit(1)
 items=json.load(open(state)).get('items',[])
+accept = {wanted, 'done'} if wanted == 'idle' else {wanted}
 for it in items:
-    if it.get('status') == wanted and it.get('pane_id'):
+    if it.get('status') in accept and it.get('pane_id'):
         print(it['pane_id'])
         raise SystemExit
 raise SystemExit(1)
 PY
 )" || {
-  echo "agent-jump: no pane with status '$TARGET_STATUS'" >&2
+  MSG="agent-jump: no pane with status '$TARGET_STATUS'"
+  echo "$MSG" >&2
+  tmux display-message "$MSG" 2>/dev/null || true
   exit 1
 }
 
-tmux switch-client -t "$PANE_ID" 2>/dev/null || tmux select-pane -t "$PANE_ID"
+# Actually navigate: select the pane and its window, and move this client's
+# session if needed (switch-client alone only resolves the session — it does
+# not change the active window or pane).
+tmux select-pane -t "$PANE_ID"
+tmux select-window -t "$PANE_ID"
+tmux switch-client -t "$PANE_ID" 2>/dev/null || true
