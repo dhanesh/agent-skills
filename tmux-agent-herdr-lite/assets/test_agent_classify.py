@@ -6,12 +6,14 @@ Lives in assets/ so `make gate` discovers it. Covers:
   finding the original rewrite remediated), and
 - the per-agent screen manifests ported from Herdr src/detect/manifests/*.toml.
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
-from agent_classify import classify, classify_explain, infer_agent  # noqa: E402
+from agent_classify import classify, classify_explain, infer_agent, load_manifests  # noqa: E402
 
 IDLE = 120
 CASES = [
@@ -112,6 +114,37 @@ AGENT_CASES = [
      "plain transcript", False, 300, "working", "claude", "", "idle"),
     ("claude no chrome, active -> working",
      "plain transcript", True, 0, "working", "claude", "", "working"),
+
+    # Second wave of manifests (herdr parity: devin, kimi, kiro, grok,
+    # hermes, qodercli, antigravity, pi).
+    ("devin trust prompt -> blocked",
+     "Do you trust the authors of this directory?\nYes, trust", False, 0,
+     "working", "devin", "", "blocked"),
+    ("devin prompt footer -> done after working",
+     "context: 40%\n❭ Ask Devin to build", False, 0, "working", "devin", "", "done"),
+    ("kimi approval panel -> blocked",
+     "Run this command?\n▶ approve\n↵ confirm", False, 0, "working", "kimi", "", "blocked"),
+    ("kimi moon spinner -> working",
+     "some output\n🌗", False, 300, "working", "kimi", "", "working"),
+    ("kiro requires approval -> blocked",
+     "This tool requires approval\nyes, single permission", False, 0,
+     "working", "kiro", "", "blocked"),
+    ("grok option gutter -> blocked",
+     "┃  2 (○) Yes, proceed", False, 0, "working", "grok", "", "blocked"),
+    ("grok braille+stop chip -> working",
+     "⠹ Generating [stop]", False, 300, "working", "grok", "", "working"),
+    ("grok bare prompt hints -> done after working",
+     "ctrl+.:shortcuts", False, 0, "working", "grok", "", "done"),
+    ("hermes dangerous command -> blocked",
+     "Dangerous command detected\nenter to confirm", False, 0,
+     "working", "hermes", "", "blocked"),
+    ("qodercli awaiting approval -> blocked",
+     "Awaiting approval: allow or reject", False, 0, "working", "qodercli", "", "blocked"),
+    ("antigravity permission -> blocked",
+     "Requesting permission for: shell command", False, 0,
+     "working", "antigravity", "", "blocked"),
+    ("pi Working... -> working",
+     "Working...", False, 300, "working", "pi", "", "working"),
 ]
 
 INFER_CASES = [
@@ -123,6 +156,8 @@ INFER_CASES = [
     ("cursor-agent -p 'fix tests'", "cursor"),
     ("opencode", "opencode"),
     ("/usr/local/bin/gemini", "gemini"),
+    ("agy", "antigravity"),
+    ("kimi-code", "kimi"),
     ("", ""),
 ]
 
@@ -148,6 +183,33 @@ class TestInferAgent(unittest.TestCase):
         for cmd, want in INFER_CASES:
             with self.subTest(cmd or "(empty)"):
                 self.assertEqual(infer_agent(cmd), want)
+
+
+class TestManifestOverrides(unittest.TestCase):
+    def test_missing_dir_returns_builtins(self):
+        m = load_manifests("/nonexistent/path")
+        self.assertIn("claude", m)
+
+    def test_override_replaces_agent_rules(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "claude.json"), "w") as f:
+                json.dump([{"id": "custom", "state": "blocked", "priority": 500,
+                            "all": [["contains", "my bespoke approval text"]]}], f)
+            m = load_manifests(d)
+            got, reason = classify_explain(
+                "please review: my bespoke approval text", False, 0, IDLE,
+                "working", agent="claude", manifests=m)
+            self.assertEqual(got, "blocked")
+            self.assertIn("custom", reason)
+            # The built-in rules for claude were replaced, not merged.
+            self.assertEqual([r["id"] for r in m["claude"]], ["custom"])
+
+    def test_broken_override_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "claude.json"), "w") as f:
+                f.write("{not json")
+            m = load_manifests(d)
+            self.assertGreater(len(m["claude"]), 1)  # built-ins intact
 
 
 if __name__ == "__main__":

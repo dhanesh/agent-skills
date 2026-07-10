@@ -171,6 +171,87 @@ AGENT_MANIFESTS = {
         {'id': 'default_working', 'state': 'working', 'priority': -10,
          'all': [('regex', r'\S')]},
     ],
+    'devin': [
+        {'id': 'workspace_trust_prompt', 'state': 'blocked', 'priority': 300,
+         'all': [('contains', 'do you trust the authors of this directory?')]},
+        {'id': 'permission_prompt', 'state': 'blocked', 'priority': 290,
+         'all': [('contains', 'approve once'), ('contains', 'esc cancel')]},
+        {'id': 'running_tools_working', 'state': 'working', 'priority': 200,
+         'any': [('contains', 'running tools'), ('contains', 'esc to interrupt'),
+                 ('contains', 'guide devin while it works')]},
+        {'id': 'live_prompt_idle', 'state': 'idle', 'priority': 100,
+         'all': [('line', r'^\s*❭')]},
+    ],
+    'kimi': [
+        {'id': 'approval_panel', 'state': 'blocked', 'priority': 400,
+         'all': [('contains', '↵ confirm')],
+         'any': [('contains', 'run this command?'), ('contains', 'write this file?'),
+                 ('contains', 'apply these edits?'), ('contains', 'stop this task?'),
+                 ('contains', 'ready to build with this plan?')]},
+        {'id': 'question_panel', 'state': 'blocked', 'priority': 390,
+         'all': [('contains', '↑↓ select'), ('contains', 'esc cancel')]},
+        {'id': 'legacy_approval_panel', 'state': 'blocked', 'priority': 300,
+         'all': [('contains', 'requesting approval'), ('contains', 'reject')]},
+        {'id': 'moon_spinner_working', 'state': 'working', 'priority': 100,
+         'all': [('line', r'^\s*(🌕|🌖|🌗|🌘|🌑|🌒|🌓|🌔)\s*$')]},
+        {'id': 'braille_spinner_working', 'state': 'working', 'priority': 90,
+         'all': [('line', r'^\s*[⠁-⣿]+\s*(thinking\.\.\.|working\.\.\.|using )')]},
+    ],
+    'kiro': [
+        {'id': 'tool_approval', 'state': 'blocked', 'priority': 300,
+         'all': [('contains', 'requires approval')]},
+        {'id': 'subagent_approval', 'state': 'blocked', 'priority': 290,
+         'all': [('contains', 'pending from subagents')]},
+        {'id': 'working_marker', 'state': 'working', 'priority': 100,
+         'all': [('contains', 'kiro is working')]},
+        {'id': 'tool_spinner_working', 'state': 'working', 'priority': 90,
+         'all': [('contains', 'esc to cancel'), ('line', r'^\s*(◔|◑|◕|●)\s+\w')]},
+    ],
+    'grok': [
+        {'id': 'option_dialog_blocked', 'state': 'blocked', 'priority': 320,
+         'all': [('line', r'^\s*┃\s+[0-9a-z]+\s+\([●○]\)\s')]},
+        {'id': 'permission_hints_blocked', 'state': 'blocked', 'priority': 310,
+         'all': [('contains', ':select'), ('contains', 'ctrl+o:yolo')]},
+        {'id': 'permission_scope_selector', 'state': 'blocked', 'priority': 300,
+         'all': [('contains', 'yes, proceed'), ('contains', 'no, reject')]},
+        # Anchored on the [stop] chip: Grok's splash logo is drawn in braille,
+        # so a bare spinner glyph is not evidence of work.
+        {'id': 'spinner_status_working', 'state': 'working', 'priority': 200,
+         'all': [('line', r'^\s*[⠁-⣿]\s.*\[stop\]\s*$')]},
+        {'id': 'esc_cancel_working', 'state': 'working', 'priority': 190,
+         'all': [('contains', 'esc:cancel')]},
+        {'id': 'prompt_hints_idle', 'state': 'idle', 'priority': 100,
+         'all': [('contains', 'ctrl+.:shortcuts')],
+         'none': [('contains', 'esc:cancel'), ('contains', 'ctrl+c:cancel')]},
+    ],
+    'hermes': [
+        {'id': 'dangerous_command_approval', 'state': 'blocked', 'priority': 300,
+         'any': [('contains', 'dangerous command'), ('contains', 'allow once'),
+                 ('contains', 'allow for this session')]},
+        {'id': 'interrupt_status_working', 'state': 'working', 'priority': 100,
+         'any': [('contains', 'msg=interrupt'), ('contains', 'ctrl+c cancel')]},
+    ],
+    'qodercli': [
+        {'id': 'confirmation_or_input_blocker', 'state': 'blocked', 'priority': 300,
+         'any': [('contains', 'waiting for user confirmation'),
+                 ('contains', 'awaiting approval'), ('contains', 'permission required'),
+                 ('contains', 'allow once or always?'), ('contains', 'asking user'),
+                 ('contains', 'enter your response'), ('contains', 'shell awaiting input')]},
+        {'id': 'cancel_hint_working', 'state': 'working', 'priority': 100,
+         'all': [('contains', '(esc to cancel,')]},
+        {'id': 'spinner_working', 'state': 'working', 'priority': 90,
+         'all': [('line', r'^\s*[⠁-⣿]\s+.*\w')]},
+    ],
+    'antigravity': [
+        {'id': 'permission_prompt', 'state': 'blocked', 'priority': 300,
+         'all': [('contains', 'requesting permission for:')]},
+        {'id': 'spinner_working', 'state': 'working', 'priority': 100,
+         'all': [('line', r'^\s*[⠁-⣿]+\s+\w+ing\b')]},
+    ],
+    'pi': [
+        {'id': 'working_literal', 'state': 'working', 'priority': 100,
+         'all': [('contains', 'working...')]},
+    ],
 }
 
 # CLI binary names → manifest key (Herdr identify_agent, trimmed to the
@@ -185,10 +266,63 @@ AGENT_ALIASES = {
     'copilot': 'copilot', 'github-copilot': 'copilot',
     'droid': 'droid',
     'cline': 'cline',
+    'devin': 'devin', 'devin-cli': 'devin',
+    'kimi': 'kimi', 'kimi-code': 'kimi',
+    'kiro': 'kiro', 'kiro-cli': 'kiro',
+    'grok': 'grok', 'grok-build': 'grok',
+    'hermes': 'hermes', 'hermes-agent': 'hermes',
+    'qodercli': 'qodercli', 'qoder': 'qodercli',
+    'agy': 'antigravity', 'antigravity': 'antigravity', 'antigravity-cli': 'antigravity',
+    'pi': 'pi',
 }
 
 _WRAPPERS = {'env', 'uv', 'uvx', 'npx', 'node', 'bun', 'python', 'python3',
              'sh', 'bash', 'zsh', 'fish'}
+
+
+def load_manifests(override_dir=None):
+    """Built-in manifests merged with user overrides (Herdr local-override parity).
+
+    ``override_dir`` (typically ``$AGENT_TMUX_ROOT/detect``) may hold one JSON
+    file per agent — ``claude.json`` etc. — whose contents replace that
+    agent's built-in rule list entirely, like Herdr's
+    ``agent-detection/<agent>.toml``. Rules use the same shape as
+    :data:`AGENT_MANIFESTS` with matchers as 2-item lists::
+
+        [{"id": "my_rule", "state": "blocked", "priority": 500,
+          "all": [["contains", "custom approval text"]]}]
+
+    Unreadable files are ignored (a broken override must not take the
+    scanner down).
+    """
+    import json
+    import os
+    manifests = dict(AGENT_MANIFESTS)
+    if not override_dir or not os.path.isdir(override_dir):
+        return manifests
+    for fn in sorted(os.listdir(override_dir)):
+        if not fn.endswith('.json'):
+            continue
+        agent = fn[:-5]
+        try:
+            with open(os.path.join(override_dir, fn)) as f:
+                rules = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rules, list):
+            continue
+        cleaned = []
+        for rule in rules:
+            if not isinstance(rule, dict) or 'state' not in rule or 'priority' not in rule:
+                continue
+            for key in ('all', 'any', 'none'):
+                rule[key] = [tuple(m) for m in rule.get(key, [])
+                             if isinstance(m, (list, tuple)) and len(m) == 2]
+            rule.setdefault('id', 'override')
+            cleaned.append(rule)
+        if cleaned:
+            manifests[agent] = cleaned
+    return manifests
 
 
 def infer_agent(command):
@@ -252,7 +386,7 @@ def _eval_manifest(rules, region, title):
 
 
 def classify_explain(text, changed, idle_elapsed, idle_s, prev_status='working',
-                     agent='', title=''):
+                     agent='', title='', manifests=None):
     """Classify a pane and say why. Returns ``(status, reason)``.
 
     Args:
@@ -289,7 +423,7 @@ def classify_explain(text, changed, idle_elapsed, idle_s, prev_status='working',
     if re.search(r'AGENT_STATUS:\s*blocked', low, re.I):
         return 'blocked', 'sentinel AGENT_STATUS: blocked'
 
-    manifest = AGENT_MANIFESTS.get(agent)
+    manifest = (manifests if manifests is not None else AGENT_MANIFESTS).get(agent)
     if manifest:
         region = tail(text, 15)
         state, rule_id = _eval_manifest(manifest, region, title)
@@ -320,7 +454,7 @@ def classify_explain(text, changed, idle_elapsed, idle_s, prev_status='working',
 
 
 def classify(text, changed, idle_elapsed, idle_s, prev_status='working',
-             agent='', title=''):
+             agent='', title='', manifests=None):
     """Classify a pane's status; see :func:`classify_explain` for semantics."""
     return classify_explain(text, changed, idle_elapsed, idle_s, prev_status,
-                            agent, title)[0]
+                            agent, title, manifests)[0]

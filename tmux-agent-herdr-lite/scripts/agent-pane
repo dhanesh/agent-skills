@@ -54,28 +54,29 @@ NEW_WINDOW=(tmux new-window -d -t "$SESSION" -n "$WIN")
 "${NEW_WINDOW[@]}"
 PANE_ID="$(tmux display-message -p -t "$SESSION:$WIN" '#{pane_id}')"
 
-# Store metadata before launch so scanner can see it immediately.
+# Store metadata before launch so scanner can see it immediately. All values
+# travel as argv so quotes/backslashes in the command can't break the JSON.
 META="$PANE_DIR/${PANE_ID#%}.json"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python3 - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" <<PY
-import json,sys,os
-path, mod_dir, agent, cwd = sys.argv[1:5]
+python3 - "$META" "$SCRIPT_DIR" "$AGENT_KIND" "$CWD" "$CMD" \
+  "${AGENT_NAME:-$NAME}" "$SESSION" "$WIN" "$PANE_ID" "$NOW" <<'PY'
+import json,sys
+path, mod_dir, agent, cwd, cmd, name, session, win, pane_id, now = sys.argv[1:11]
 sys.path.insert(0, mod_dir)
 from agent_classify import infer_agent
-cmd = "$CMD"
 data={
-  "name": os.environ.get("AGENT_NAME", "$NAME"),
-  "session": "$SESSION",
-  "window": "$WIN",
-  "pane_id": "$PANE_ID",
+  "name": name,
+  "session": session,
+  "window": win,
+  "pane_id": pane_id,
   "command": cmd,
   "agent": agent or infer_agent(cmd),
   "cwd": cwd,
   "status": "working",
-  "created_at": "$NOW",
-  "updated_at": "$NOW",
+  "created_at": now,
+  "updated_at": now,
   "last_hash": "",
-  "last_changed_at": "$NOW",
+  "last_changed_at": now,
 }
 open(path,"w").write(json.dumps(data, indent=2))
 PY

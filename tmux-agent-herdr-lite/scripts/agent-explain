@@ -14,13 +14,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
 IDLE_SECONDS="${AGENT_IDLE_SECONDS:-120}"
 
-python3 - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" <<'PY'
-import subprocess, sys
+python3 - "$SCRIPT_DIR" "$TARGET" "$IDLE_SECONDS" "$ROOT" <<'PY'
+import os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from agent_registry import resolve  # noqa: E402
-from agent_classify import classify_explain, infer_agent, tail, AGENT_MANIFESTS  # noqa: E402
+from agent_classify import classify_explain, infer_agent, tail, load_manifests  # noqa: E402
 
-target, idle_s = sys.argv[2], int(sys.argv[3])
+target, idle_s, root = sys.argv[2], int(sys.argv[3]), sys.argv[4]
+manifests = load_manifests(os.path.join(root, 'detect'))
 try:
     meta = resolve(target)
 except LookupError as e:
@@ -41,11 +42,11 @@ agent = meta.get("agent") or infer_agent(meta.get("command", ""))
 # as — the same signals the scanner sees between output bursts.
 status, reason = classify_explain(text, False, 0, idle_s,
                                   meta.get("status", "working"),
-                                  agent=agent, title=title)
+                                  agent=agent, title=title, manifests=manifests)
 
 print(f"target:   {meta.get('name')} ({pane_id}, window {meta.get('window')})")
 print(f"agent:    {agent or '(none — generic heuristics)'}"
-      + ("" if not agent or agent in AGENT_MANIFESTS else "  [no manifest for this agent]"))
+      + ("" if not agent or agent in manifests else "  [no manifest for this agent]"))
 print(f"title:    {title or '(empty)'}")
 print(f"command:  {meta.get('command','')}")
 print(f"recorded: {meta.get('status')} ({meta.get('reason','no reason recorded')})")

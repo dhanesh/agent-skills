@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 
 pane_dir, state_path, idle_s, mod_dir = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 sys.path.insert(0, mod_dir)
-from agent_classify import classify_explain, infer_agent  # noqa: E402  (path set above)
+from agent_classify import classify_explain, infer_agent, load_manifests  # noqa: E402  (path set above)
+
+MANIFESTS = load_manifests(os.path.join(os.path.dirname(pane_dir), 'detect'))
 
 now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 now_ts = time.time()
@@ -70,7 +72,7 @@ def status_for(text, title, meta):
     agent = meta.get('agent') or infer_agent(meta.get('command', ''))
     status, reason = classify_explain(text, changed, idle_elapsed, idle_s,
                                       meta.get('status', 'working'),
-                                      agent=agent, title=title)
+                                      agent=agent, title=title, manifests=MANIFESTS)
     meta['reason'] = reason
     # Herdr semantics: 'done' persists until the human views the pane, then it
     # becomes 'idle'. Viewing is "pane focused in an attached client"; the

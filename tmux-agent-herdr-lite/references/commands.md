@@ -16,8 +16,10 @@ Launch a command in a new registered window. Writes a JSON record under
 other command resolves targets through.
 
 - `--agent` — detection manifest to use: `claude`, `codex`, `gemini`,
-  `opencode`, `amp`, `cursor`, `copilot`, `droid`, `cline`. Inferred from the
-  command word when omitted (wrapper tokens like `env`/`npx` are skipped).
+  `opencode` (also `kilo`), `amp`, `cursor`, `copilot`, `droid`, `cline`,
+  `devin`, `kimi`, `kiro`, `grok`, `hermes`, `qodercli`, `antigravity`, `pi`.
+  Inferred from the command word when omitted (wrapper tokens like
+  `env`/`npx` are skipped).
 - `--cwd` — start directory (pair with `agent-worktree` for isolation).
 
 ### `agent-list [--json] [--no-scan]`
@@ -43,6 +45,24 @@ plus key help. Bound to `prefix ?` as a popup.
 Debug classification: prints the agent manifest in use, the pane title, the
 recorded status/reason, a fresh classification of the current screen, and the
 detection-region tail. Port of `herdr agent explain`.
+
+### Detection manifest overrides
+
+Drop `<agent>.json` into `~/.tmux/agent-panes/detect/` to replace that
+agent's built-in rules (the equivalent of Herdr's local
+`agent-detection/<agent>.toml` overrides — local always wins). Each file is a
+JSON list of rules; the highest-priority match wins:
+
+```json
+[{"id": "my_rule", "state": "blocked", "priority": 500,
+  "all":  [["contains", "custom approval text"]],
+  "any":  [["line", "^\\s*❯"]],
+  "none": [["contains", "esc to interrupt"]]}]
+```
+
+Matcher kinds: `contains` (substring, lowercased region), `regex`, `line`
+(regex per line), `title` / `title_regex` (pane title). States: `blocked`,
+`working`, `idle`. Broken files are ignored. Verify with `agent-explain`.
 
 ### `agent-jump blocked|error|working|idle|done`
 Focus the first pane in that state.

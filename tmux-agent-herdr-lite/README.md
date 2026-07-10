@@ -1,6 +1,6 @@
 # tmux-agent-herdr-lite
 
-A tmux-based agent cockpit that combines **Zellij-like human ergonomics** with **Herdr-like agent supervision and coordination** — mouse support, popup dashboards, per-agent status detection (Claude Code, Codex, Gemini, OpenCode, Amp, Cursor, Copilot, Droid, Cline), agent-to-agent read/send/run/wait, transition notifications, git-worktree isolation, and post-restart resume — all on top of durable tmux sessions. Use it to turn any local tmux into a structured workspace for running multiple coding agents in parallel.
+A tmux-based agent cockpit that combines **Zellij-like human ergonomics** with **Herdr-like agent supervision and coordination** — mouse support, popup dashboards, per-agent status detection (Claude Code, Codex, Gemini, OpenCode/Kilo, Amp, Cursor, Copilot, Droid, Cline, Devin, Kimi, Kiro, Grok, Hermes, Qoder, Antigravity, Pi), agent-to-agent read/send/run/wait, transition notifications, git-worktree isolation, and post-restart resume — all on top of durable tmux sessions. Use it to turn any local tmux into a structured workspace for running multiple coding agents in parallel.
 
 > This README is for humans browsing the folder. The agent-facing instructions live in [`SKILL.md`](./SKILL.md) — that's what Claude reads when the skill triggers. The full command reference, coordination recipes, and the Herdr feature-parity map live in [`references/`](./references/).
 

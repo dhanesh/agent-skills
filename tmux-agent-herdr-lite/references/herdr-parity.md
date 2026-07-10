@@ -12,7 +12,8 @@ in July 2026.
 |---|---|
 | Agent status model (`blocked/working/done/idle/unknown`) | Same states plus `error` (crash surfaced separately) |
 | `done` = finished-and-unviewed; viewing demotes to `idle` | Scanner demotes a focused `done` pane to `idle` (viewed-hash pinned) |
-| Per-agent screen detection manifests (claude, codex, gemini, opencode/kilo, amp, cursor, copilot, droid, cline) | `AGENT_MANIFESTS` in `agent_classify.py`, patterns ported from `src/detect/manifests/*.toml` (priority rules, contains/regex/line matchers) |
+| Per-agent screen detection manifests (claude, codex, gemini, opencode/kilo, amp, cursor, copilot, droid, cline, devin, kimi, kiro, grok, hermes, qodercli, antigravity, pi — every screen manifest Herdr ships except hook-only omp/mastracode) | `AGENT_MANIFESTS` in `agent_classify.py`, patterns ported from `src/detect/manifests/*.toml` (priority rules, contains/regex/line matchers) |
+| Local manifest overrides (`agent-detection/<agent>.toml`, local wins) | JSON per-agent overrides in `~/.tmux/agent-panes/detect/` (see `references/commands.md`) |
 | Strict blocked detection: only known approval UI blocks; unknown prompts → idle | Known-agent panes skip generic word heuristics entirely |
 | OSC-title evidence (braille spinner = working, `Action Required` = blocked) | Scanner passes tmux `#{pane_title}` into the classifier |
 | `herdr agent explain` | `agent-explain` (inputs, matched rule, detection tail) |

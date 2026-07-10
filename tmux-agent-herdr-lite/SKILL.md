@@ -16,7 +16,7 @@ metadata:
 Use this skill to turn tmux into a practical coding-agent cockpit that combines:
 
 - **Zellij-like human ergonomics:** mouse support, popup dashboard/help, command menu, pane splits, pane navigation/resizing, zoom, layout cycling, session tree, and vi copy mode.
-- **Herdr-like agent supervision:** consistent agent launch, per-agent screen detection (Claude Code, Codex, Gemini, OpenCode, Amp, Cursor, Copilot, Droid, Cline), jump-to-status navigation, transition notifications, and a compact status bar.
+- **Herdr-like agent supervision:** consistent agent launch, per-agent screen detection (Claude Code, Codex, Gemini, OpenCode/Kilo, Amp, Cursor, Copilot, Droid, Cline, Devin, Kimi, Kiro, Grok, Hermes, Qoder, Antigravity, Pi — user-overridable via JSON manifests), jump-to-status navigation, transition notifications, and a compact status bar.
 - **Herdr-like agent coordination:** any agent or script can list, read, type into, command, and wait on other panes — the shell-script equivalent of Herdr's socket API.
 - **Persistence and isolation:** relaunch dead agents after a tmux restart (with native `--resume` flags where the CLI supports it) and give each agent its own git worktree.
 
@@ -136,7 +136,7 @@ Statuses are routing hints, not truth:
 - `done` — completion sentinel, or a known agent showing its prompt box again after working — until you focus the pane, which demotes it to `idle` (viewed), Herdr-style.
 - `unknown` — metadata or pane lookup is incomplete.
 
-Detection is two-layered, ported from Herdr's manifests: panes launched with a known `--agent` (or an inferable command) are classified **only** by that agent's screen rules plus the pane title — loose word heuristics are skipped, so an agent *discussing* an error or rate limit is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use the generic tail heuristics, where explicit `AGENT_STATUS:` sentinels and real failure signals win over loose words, and active output beats advisory tokens. The classifier lives in `scripts/agent_classify.py` (pure, unit-tested by `assets/test_agent_classify.py`, which `make gate` runs).
+Detection is two-layered, ported from Herdr's manifests: panes launched with a known `--agent` (or an inferable command) are classified **only** by that agent's screen rules plus the pane title — loose word heuristics are skipped, so an agent *discussing* an error or rate limit is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use the generic tail heuristics, where explicit `AGENT_STATUS:` sentinels and real failure signals win over loose words, and active output beats advisory tokens. Per-agent rules can be replaced without editing code by dropping `<agent>.json` files into `~/.tmux/agent-panes/detect/` (Herdr's local manifest overrides; format in `references/commands.md`). The classifier lives in `scripts/agent_classify.py` (pure, unit-tested by `assets/test_agent_classify.py`, which `make gate` runs).
 
 For best accuracy, instruct coding agents to print explicit markers — they outrank every heuristic:
 
