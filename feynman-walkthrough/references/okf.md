@@ -144,7 +144,9 @@ learner keeps a knowledge base (wiki, Google Drive/Docs, Notion), export the exp
 there *from* the bundle on request — the bundle stays the pinned source of truth, since
 only it records which version of the sources the text describes. A rendered artifact
 (see [agent-surface.md](agent-surface.md)) is likewise generated *from* the bundle's
-explainer, not maintained separately.
+explainer, not maintained separately. For a full browsable website over the bundle
+(search, landing page, per-concept pages), the sibling `okf-site-kit` skill generates
+one from any OKF bundle, including these.
 
 ## Placement
 
