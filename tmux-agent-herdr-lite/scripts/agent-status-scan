@@ -110,10 +110,13 @@ for fn in sorted(os.listdir(pane_dir)):
     prev=meta.get('status','unknown')
     pane_id=meta.get('pane_id')
     if not pane_id or pane_id not in TITLES:
-        meta['status']='unknown'
-    else:
-        text=capture(pane_id)
-        meta['status']=status_for(text, TITLES[pane_id].strip(), meta)
+        # Pane is gone: prune the entry rather than parking it as a permanent
+        # 'unknown' on the status bar. Keeps the fleet = live agents only.
+        try: os.remove(path)
+        except OSError: pass
+        continue
+    text=capture(pane_id)
+    meta['status']=status_for(text, TITLES[pane_id].strip(), meta)
     # Herdr suppresses toasts for the active tab: skip focused panes here
     # rather than re-deriving focus inside agent-notify.
     if (meta['status'] != prev and meta['status'] in ('blocked','error','done')

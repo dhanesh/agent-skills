@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""agent-observe: auto-register/deregister an agent running in a tmux pane.
+
+Called by the zsh shell hook (agent-shell-hook.zsh) so that launching a known
+coding agent (claude, codex, gemini, ...) in ANY pane is tracked automatically —
+no special launcher, no commands for the human to learn. The existing
+scan/summary/jump pipeline then treats the pane exactly like an agent-pane
+launch.
+
+Subcommands:
+  agent-observe register <pane_id> <command...>   register IF <command> is a known agent
+  agent-observe finished <pane_id>                remove an auto-registered pane's entry
+  agent-observe agents                            print the '|'-joined known agent binary names
+"""
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+from agent_classify import AGENT_ALIASES, infer_agent  # noqa: E402
+
+ROOT = os.environ.get("AGENT_TMUX_ROOT", os.path.expanduser("~/.tmux/agent-panes"))
+PANE_DIR = os.path.join(ROOT, "panes")
+
+
+def _now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pane_file(pane_id):
+    return os.path.join(PANE_DIR, pane_id.lstrip("%") + ".json")
+
+
+def _tmux(*args):
+    try:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True).stdout.strip()
+    except Exception:
+        return ""
+
+
+def register(pane_id, command):
+    agent = infer_agent(command)
+    if not agent:
+        return 0  # not a recognised agent — ignore (e.g. plain `ls`, `vim`, `node foo`)
+    meta = _tmux("display-message", "-p", "-t", pane_id,
+                 "#{session_name}\t#{window_name}\t#{pane_current_path}")
+    if not meta:
+        return 0  # pane vanished between preexec and here
+    parts = (meta.split("\t") + ["", "", ""])[:3]
+    session, window, cwd = parts
+    os.makedirs(PANE_DIR, exist_ok=True)
+    path = _pane_file(pane_id)
+    now = _now()
+    created = now
+    if os.path.exists(path):
+        try:
+            created = json.load(open(path)).get("created_at", now)
+        except Exception:
+            pass
+    data = {
+        "name": window or agent,
+        "session": session,
+        "window": window,
+        "pane_id": pane_id,
+        "command": command,
+        "agent": agent,
+        "cwd": cwd,
+        "status": "working",
+        "created_at": created,
+        "updated_at": now,
+        "last_hash": "",
+        "last_changed_at": now,
+        "auto": True,  # shell-hook tracked; finished/prune may drop it freely
+    }
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+    return 0
+
+
+def finished(pane_id):
+    path = _pane_file(pane_id)
+    if not os.path.exists(path):
+        return 0
+    try:
+        auto = json.load(open(path)).get("auto", False)
+    except Exception:
+        auto = True  # unreadable -> safe to drop
+    # Only auto-remove shell-hook entries; leave explicit `agent-pane` launches
+    # in place so their resume metadata survives an agent exit.
+    if auto:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return 0
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "agents":
+        print("|".join(sorted(set(AGENT_ALIASES))))
+        return 0
+    if len(argv) < 3:
+        return 0
+    sub, pane = argv[1], argv[2]
+    if sub == "register":
+        return register(pane, " ".join(argv[3:]).strip())
+    if sub == "finished":
+        return finished(pane)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -17,27 +17,28 @@ TMUX_CONF="${HOME}/.tmux.conf"
 # inserted before it — and an existing line found after it is moved up, which
 # repairs configs written by earlier versions of this installer.
 ensure_sourced_before_tpm() {
-  local line="$1"
+  local line="$1" target base base_re
+  target="${line#source-file }"           # path portion of the source-file line
+  base="$(basename "$target")"            # e.g. tmux-agent.conf
+  base_re="${base//./\\.}"                # escape dots for the ERE below
   touch "$TMUX_CONF"
-  if grep -Fxq "$line" "$TMUX_CONF"; then
-    local line_no tpm_no
-    line_no="$(grep -Fxn "$line" "$TMUX_CONF" | head -1 | cut -d: -f1)"
-    tpm_no="$(grep -En "run(-shell)? .*tpm/tpm" "$TMUX_CONF" | head -1 | cut -d: -f1 || true)"
-    if [[ -z "$tpm_no" || "$line_no" -lt "$tpm_no" ]]; then
-      echo "tmux config already sources $(basename "$line")"
-      return
-    fi
-    grep -Fxv "$line" "$TMUX_CONF" > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
-    echo "moving existing source line above the TPM run line in $TMUX_CONF"
+  # Remove ANY existing source-file line for this config, regardless of how the
+  # path was written (~/… vs absolute) or which installer version wrote it. The
+  # old exact-line match missed tilde/absolute variants and stacked duplicates.
+  if grep -Eq "^[[:space:]]*source-file[[:space:]].*${base_re}([[:space:]]|$)" "$TMUX_CONF"; then
+    grep -Ev "^[[:space:]]*source-file[[:space:]].*${base_re}([[:space:]]|$)" "$TMUX_CONF" \
+      > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
   fi
+  # Re-insert the canonical line immediately before TPM's run line (TPM must stay
+  # LAST so it re-applies plugin keybindings), or append when TPM isn't used.
   if grep -Eq "run(-shell)? .*tpm/tpm" "$TMUX_CONF"; then
     awk -v line="$line" '
-      !done && $0 ~ /run(-shell)? .*tpm\/tpm/ { print line; done=1 }
+      !ins && $0 ~ /run(-shell)? .*tpm\/tpm/ { print line; ins=1 }
       { print }' "$TMUX_CONF" > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
-    echo "inserted before TPM run line: $line"
+    echo "sourced $base before the TPM run line"
   else
     printf '%s\n' "$line" >> "$TMUX_CONF"
-    echo "appended: $line"
+    echo "appended source line for $base"
   fi
 }
 
@@ -71,8 +72,30 @@ else
   echo "add: run '~/.tmux/plugins/tpm/tpm' to ~/.tmux.conf, rerun this installer."
 fi
 
+# --- Shell hook: auto-track agents launched in ANY pane (zero-command cockpit) ---
+# Generates a zsh hook and sources it from ~/.zshrc, so running `claude`/`codex`/…
+# in any pane registers that pane automatically (and deregisters on exit). No
+# agent-pane, no commands for the human to learn.
+AGENT_NAMES="$(python3 "$AGENT_BIN/agent-observe" agents 2>/dev/null || true)"
+HOOK="$TMUX_AGENT_DIR/agent-shell-hook.zsh"
+# NB: AGENT_NAMES is a '|'-joined list, so it needs a delimiter other than '|'.
+sed -e "s|@AGENT_BIN@|$AGENT_BIN|g" \
+    -e "s|@AGENT_ROOT@|$TMUX_AGENT_DIR|g" \
+    -e "s#@AGENT_NAMES@#$AGENT_NAMES#g" \
+    "$SKILL_DIR/assets/agent-shell-hook.zsh" > "$HOOK"
+echo "generated $HOOK"
+ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
+touch "$ZSHRC"
+# Drop any prior source line (path may have changed) and re-append the current one.
+if grep -Fq "agent-shell-hook.zsh" "$ZSHRC"; then
+  grep -Fv "agent-shell-hook.zsh" "$ZSHRC" > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
+fi
+printf '\nsource %s  # Tmux Agent Herdr-Lite: auto-track agents in any pane\n' "$HOOK" >> "$ZSHRC"
+echo "sourced agent-shell-hook.zsh from $ZSHRC (new shells pick it up; or run: source $ZSHRC)"
+
 if command -v tmux >/dev/null 2>&1; then
   tmux source-file "$TMUX_CONF" 2>/dev/null || true
 fi
 
-echo "done. Inside tmux: prefix ? = dashboard, prefix m = menu (launch agents, worktrees, resume)."
+echo "done. Just run your agent (claude/codex/…) in any pane — it's tracked automatically."
+echo "Cockpit keys: prefix a, then d = dashboard, m = menu, b/e/w/i/f = jump by state."

@@ -1,7 +1,7 @@
 # Command reference
 
 These commands are the **agent-facing API** — humans reach the same actions
-through tmux keybindings and the `prefix m` menu and never need to type them.
+through tmux keybindings and the `prefix a m` menu and never need to type them.
 They are not copied onto PATH: the generated tmux config references them in
 place, and agents invoke them by path from the skill directory
 (`scripts/agent-pane ...`). State lives under `~/.tmux/agent-panes/`
