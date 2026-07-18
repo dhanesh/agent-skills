@@ -8,7 +8,7 @@ created: 2026-07-18
 sources:
 - type: git
   locator: /home/user/agent-skills
-  fingerprint: eec85b93ac0736c27359fd5ffbccf8f482e2d67b
+  fingerprint: 4a85045d2206d4b67a7c971667d9925e8a28b615
   pinned: 2026-07-18
 resource: /home/user/agent-skills
 ---
