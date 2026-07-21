@@ -5,7 +5,7 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run playbook test list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -17,6 +17,7 @@ gate: clean
 		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
 			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
@@ -27,6 +28,7 @@ gate: clean
 			out=$$(cd "$$d/assets" && python3 "$$(basename "$$t")" 2>&1); st=$$?; \
 			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; [ $$st -eq 0 ] || rc=1; \
 		done; \
+		out=$$(sh $(GATES)/run-eval.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 	done; \
 	exit $$rc
 
@@ -60,6 +62,21 @@ test: clean
 		done; \
 	done; exit $$rc
 
+# Run every skill's outcome eval (docs/eval-standard.md): deterministic
+# harness -> skill tooling -> model-free grader. Hard gate: missing eval fails.
+eval: clean
+	@rc=0; for d in $(SKILLS); do \
+		printf '\n=== %s ===\n' "$$d"; \
+		sh $(GATES)/run-eval.sh "$$d" || rc=1; \
+	done; exit $$rc
+
+# Check the standard frontmatter metadata (license/compatibility/author/version/tags).
+frontmatter:
+	@rc=0; for d in $(SKILLS); do \
+		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; \
+		printf '%s: %s\n' "$$d" "$$(printf '%s\n' "$$out" | tail -1)"; [ $$st -eq 0 ] || rc=1; \
+	done; exit $$rc
+
 # Lint every skill against "The Prompting Playbook" conventions (full output).
 # Promote the two advisories (PP-5/PP-6) to hard failures: make playbook PLAYBOOK_FLAGS=--strict
 playbook:
@@ -79,11 +96,13 @@ gate-skill:
 		sh $(GATES)/dry-run-replay.sh "$(SKILL)" "$$scratch"; \
 		rm -rf "$$scratch"; \
 	fi
+	@sh $(GATES)/frontmatter-standard.sh "$(SKILL)"
 	@for t in "$(SKILL)"/assets/test_*.py; do \
 		[ -f "$$t" ] || continue; \
 		out=$$(cd "$(SKILL)/assets" && python3 "$$(basename "$$t")" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \
 		printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|Ran [0-9]+ tests' | tr '\n' ' ')"; \
 	done
+	@sh $(GATES)/run-eval.sh "$(SKILL)"
 
 # Remove build artifacts that pollute scan-leaks (e.g. __pycache__/*.pyc).
 clean:
