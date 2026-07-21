@@ -15,13 +15,19 @@ For example:
 ```bash
 npx skills add dhanesh/agent-skills --skill agent-ready-rails
 npx skills add dhanesh/agent-skills --skill base-in-reality
+npx skills add dhanesh/agent-skills --skill bug-autopsy
 npx skills add dhanesh/agent-skills --skill context-hygiene-kit
 npx skills add dhanesh/agent-skills --skill crafting-self-prompting-loops
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough
+npx skills add dhanesh/agent-skills --skill knowledge-gardener
 npx skills add dhanesh/agent-skills --skill okf-site-kit
+npx skills add dhanesh/agent-skills --skill repo2skill
+npx skills add dhanesh/agent-skills --skill security-posture-audit
+npx skills add dhanesh/agent-skills --skill spec-first-planning
 npx skills add dhanesh/agent-skills --skill starlight-handbook-kit
 npx skills add dhanesh/agent-skills --skill tmux-agent-herdr-lite
 npx skills add dhanesh/agent-skills --skill mockstar-mock
+npx skills add dhanesh/agent-skills --skill verifier-installer
 npx skills add dhanesh/agent-skills --skill world-model-ledger
 ```
 
@@ -44,6 +50,12 @@ npx skills add dhanesh/agent-skills
 | [`starlight-handbook-kit`](starlight-handbook-kit/) | Scaffold or extend a decision-oriented Astro + Starlight documentation handbook — every topic follows a fixed nine-section skeleton, diagrams and widgets render without JavaScript, and eight CI gates fail the build the moment a page drifts from the contract, making agent-authored content safe. |
 | [`tmux-agent-herdr-lite`](tmux-agent-herdr-lite/) | tmux cockpit with Zellij-like human ergonomics and Herdr-like agent supervision — menus, dashboard, pane navigation, blocked/working/done status detection, and jump-to-status navigation. |
 | [`mockstar-mock`](mockstar-mock/) | Generate a runnable mockstar mock server from a service's specs/docs — OpenAPI, Postman, HAR, curl, GraphQL, and prose docs (md/pdf/docx/url) — normalized into one Endpoint Inventory, full-fidelity (scenarios/handlers/webhooks), Tier 2-enhanced, boot-and-smoke verified, with a provenance + coverage report. |
+| [`repo2skill`](repo2skill/) | The skill-authoring skill: scaffolds a new gate-passing Agent Skill (standard frontmatter, PP-conformant SKILL.md skeleton, README, test stub, outcome-eval stub) and walks the semantic review checklist the mechanical gates can't judge. The source of this repo's vendored gate scripts, now shipped. |
+| [`verifier-installer`](verifier-installer/) | Action-taking sibling of `agent-ready-rails`: detects a repo's stack(s) with a deterministic collector, then installs the missing runnable-verifier loop — format/build/test commands plus a CI workflow that runs them — and proves the loop red→green before handing back. |
+| [`knowledge-gardener`](knowledge-gardener/) | Completes the knowledge trilogy (`feynman-walkthrough` creates, `okf-site-kit` publishes, this maintains): sweeps Open Knowledge Format bundles, reports per-subject FRESH/STALE/UNKNOWN drift against pinned source fingerprints, drives diff-aware refreshes and re-pins, and regenerates any published site. |
+| [`bug-autopsy`](bug-autopsy/) | `feynman-walkthrough`'s sibling for failures: reconstructs a defect end-to-end (evidence-cited timeline, blameless ≥3-deep 5-Whys root cause), writes a lint-checked post-mortem, and persists it into the same OKF knowledge bundle so the failure teaches the next engineer. |
+| [`security-posture-audit`](security-posture-audit/) | Read-only, offline security *hygiene* audit — dependency pinning, committed env/key files, debug/permissive flags, insecure transports, risky CI patterns — severity-graded with file:line evidence and honest not-covered boundaries. Not a CVE scanner or SAST; completes the trust family alongside `scan-leaks` and `base-in-reality`. |
+| [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
 | [`world-model-ledger`](world-model-ledger/) | Install a persistent, SQLite-backed world model for a coding agent — entities (symbols/files/modules/real-world referents), interactions, and constraints, each with two confidence axes (observed vs normative), a validation status, and PROV-style evidence. Code-observed relationships are never treated as ground truth: only oracle evidence (tests/CI/docs/human) raises normative confidence. Four lifecycle hooks retrieve validated/unverified/contradicted items before edits, update records without inventing facts, and consolidate on Stop; detects contradictions, proposes located fixes, and improves normative correctness over time. Ships a 57-test install gate. |
 
 See each skill directory's `SKILL.md` for usage and prerequisites.
