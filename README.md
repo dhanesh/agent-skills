@@ -14,6 +14,7 @@ For example:
 
 ```bash
 npx skills add dhanesh/agent-skills --skill agent-ready-rails
+npx skills add dhanesh/agent-skills --skill ai-migration-operating-model
 npx skills add dhanesh/agent-skills --skill base-in-reality
 npx skills add dhanesh/agent-skills --skill bug-autopsy
 npx skills add dhanesh/agent-skills --skill context-hygiene-kit
@@ -42,6 +43,7 @@ npx skills add dhanesh/agent-skills
 | Skill | Description |
 |-------|-------------|
 | [`agent-ready-rails`](agent-ready-rails/) | Read-only audit scoring how ready a repository is for coding agents — grades six rails (runnable verifiers / the format·build·test feedback loop, green-CI ground truth, a copyable house style, navigable context, scoped trusted tools, and human checkpoints with reversibility) from observed repo evidence and emits a severity-ranked readiness scorecard with a leverage-ordered fix list. Optionally installs the missing rails. Grounded in Spotify's Honk case; audits the engineering *system* agents run inside, not code correctness. |
+| [`ai-migration-operating-model`](ai-migration-operating-model/) | Run a code migration (language port, framework/SDK upgrade, service rewrite) as an operating model — rulebook + queues + reviewers + objective verification — instead of a pile of agent edits. Builds the judge first (golden scenarios + a shipped parity differ), then a lint-clean Migration Control Pack (rulebook, dependency map, gap inventory, portability test plan, parity script, work queue, reviewer prompts, phase gates). Four standalone invocations mirror the model's parts: `economics`, `judge`, `pack`, `qualify` — and "don't migrate yet" is a first-class verdict. Complements `spec-first-planning` and `crafting-self-prompting-loops`. |
 | [`base-in-reality`](base-in-reality/) | Read-only, research-grounded repo audit — extracts falsifiable claims across algorithm/architecture/business-logic layers, routes each to authoritative sources (arxiv, PubMed, Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar + NIST/RFC/OWASP/ISO/regulators), verifies against fetched evidence, and adversarially refutes before emitting a severity-graded cited report. No fabricated citations: ungrounded claims are reported as `UNCONFIRMED`. |
 | [`context-hygiene-kit`](context-hygiene-kit/) | Install a bounded, scored, tiered context cache into a Claude Code project — keeps working memory lean (anti-bloat) and rot-proof across compactions (anti-rot) via a stdlib Python ledger, a deterministic per-turn transcript harvester, and Stop/PreCompact/SessionStart hooks. Replaces lossy local-model session-summarisers with a lossless one; ships with a 16-test install gate. |
 | [`crafting-self-prompting-loops`](crafting-self-prompting-loops/) | Design and build sound self-prompting loops — draft→critique→revise, autonomous task loops, multi-agent orchestration, and human-checkpointed loops. Produces a filled loop spec, a runnable scaffold, and bakes in the mandatory safety properties (hard-stop backstop, trusted/untrusted two-channel boundary). |
