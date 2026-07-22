@@ -1,7 +1,13 @@
 ---
 name: base-in-reality
-description: "Validate a repository's codebase, architecture, and business logic against real-world knowledge from authoritative sources (arxiv, PubMed, Google Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar) plus standards bodies (NIST, IETF/RFC, OWASP, ISO, sector regulators). Use when you want a research-grounded audit that flags algorithms, architectural choices, or business rules that violate established norms, standards, or best practices — each finding tied to a real, fetched citation. Read-only by default; emits a severity-graded cited report. Extracts falsifiable claims across algo/arch/biz layers, routes each to the right source class, verifies against fetched evidence, and adversarially refutes before reporting. Not a linter, SAST, or CVE scanner — it reasons about norms, not syntax."
+description: "Research-grounded, read-only audit that validates a repository's codebase, architecture, and business logic against real-world knowledge from authoritative sources (arxiv, PubMed, Google Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar) plus standards bodies (NIST, IETF/RFC, OWASP, ISO, sector regulators). Use when you want an audit that flags algorithms, architectural choices, or business rules violating established norms, standards, or best practices — e.g. 'is our APR calculation correct per lending norms?', 'does our crypto follow NIST?', 'is this consensus approach sound?' — each finding tied to a real, fetched citation. Extracts falsifiable claims across algo/arch/biz layers, routes each to the right source class, verifies against fetched evidence, and adversarially refutes before reporting; emits a severity-graded cited report with UNCONFIRMED for anything ungrounded. Not a linter, SAST, or CVE scanner — it reasons about norms, not syntax."
 x-spec-version: 1.0
+license: MIT
+compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSearch; bundled helpers run via `uv run` (fetch_sources.py) and python3 stdlib (report_lint.py).
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "audit,research,citations,standards,verification,architecture,business-logic"
 ---
 
 # base-in-reality
@@ -93,7 +99,12 @@ subagent's prompt:
    severity) per `references/verdict-rubric.md`. Each defaults to skeptical. Downgrade to
    `UNCONFIRMED` when ≥2 of 3 refute.
 
-6. **Synthesize.** Fill `assets/report-skeleton.md` and write it to
+6. **Synthesize.** Before filling the report, lint the merged findings array with the
+   bundled contract linter: write the findings to a temp JSON file and run
+   `python3 "<skill-base-dir>/assets/report_lint.py" <findings.json>`. It deterministically
+   enforces the schema enums and the grounding invariant (a `VIOLATION`/`DEVIATION` with no
+   fetched citation is rejected — downgrade it to `UNCONFIRMED` rather than shipping it).
+   Fix every `ERROR:` line, then fill `assets/report-skeleton.md` and write it to
    `docs/base-in-reality/<YYYY-MM-DD>-audit.md`: executive summary, domain map, findings
    (ordered by severity then layer), sources appendix, dropped-claims log. If `--annotate`,
    insert the comment markers at each finding's location.
@@ -108,6 +119,7 @@ subagent's prompt:
 
 - `assets/fetch_sources.py` — keyless scholarly-source query helper (stdlib; `uv run`).
 - `assets/findings.schema.json` — the finding schema verification subagents emit.
+- `assets/report_lint.py` — stdlib linter that gates findings on the schema + grounding invariant (stage 6).
 - `assets/report-skeleton.md` — the report template filled in stage 6.
 - `assets/workflow.mjs` — optional Claude Code Workflow accelerator.
 
