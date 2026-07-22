@@ -15,6 +15,7 @@ Stdlib-only, offline, no repo writes.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -260,6 +261,18 @@ def main():
         plan = GOOD_PACK["PORTABILITY_TEST_PLAN.md"]
         check("test plan fixture wires plan to judge (names parity_check.sh)",
               "parity_check.sh" in plan)
+
+        # ── Invocation surface: the model's four parts are separately callable
+        with open(os.path.join(dst, "SKILL.md"), encoding="utf-8") as f:
+            skill_md = f.read()
+        inv = re.search(r"^## Invocations$(.*?)(?=^## )", skill_md,
+                        re.MULTILINE | re.DOTALL)
+        modes = ("economics", "judge", "pack", "qualify")
+        check("SKILL.md documents the four invocation modes "
+              "(economics/judge/pack/qualify)",
+              inv is not None
+              and all("`%s" % m in inv.group(1) for m in modes),
+              "section %s" % ("found" if inv else "missing"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

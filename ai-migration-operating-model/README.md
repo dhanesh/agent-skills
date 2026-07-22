@@ -22,6 +22,18 @@ loop is.
    fans out implementer/reviewer agents under phase gates. Batch defects are fixed by
    updating the rule and regenerating — never by hand-patching fifty files.
 
+## Four invocations, one per part of the model
+
+Invoke bare for the full workflow, or pass a mode to run one part standalone
+(mirroring the operating model's four parts):
+
+| Invocation | Part | Deliverable |
+|---|---|---|
+| `economics [target]` | Why AI changes migration economics | Brief: measurable pain, what agent leverage changes here, honest cost frame, does the pain clear the bar |
+| `judge [target]` | Verification is the foundation | Golden scenarios + parity runner, proven to catch a seeded break |
+| `pack [target]` | The migration control pack | The eight artifacts, linted to `PACK_RESULT: PASS` |
+| `qualify [target]` | Candidate filter | Row-by-row go / no-go / precursor-work verdict |
+
 ## Shipped tooling (stdlib-only, offline)
 
 | Tool | Job |

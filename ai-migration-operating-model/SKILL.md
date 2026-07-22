@@ -9,9 +9,10 @@ description: >-
   lintable Migration Control Pack (rulebook, dependency map, gap inventory, portability
   test plan, parity script, work queue, reviewer prompts, phase gates) that implementing
   agents execute against; includes a candidate filter that says "don't migrate yet" when
-  behavior can't be captured. Not the bulk executor of the migration itself — it sets up
-  and verifies the machine; complements spec-first-planning and
-  crafting-self-prompting-loops.
+  behavior can't be captured. Callable as one whole workflow or via four standalone
+  modes — economics, judge, pack, qualify — one per part of the model. Not the bulk
+  executor of the migration itself — it sets up and verifies the machine; complements
+  spec-first-planning and crafting-self-prompting-loops.
 license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
@@ -28,6 +29,33 @@ quickly, which is worse than slow. So this skill does not "rewrite the code"; it
 the machine that rewrites the code: the old system as the spec, a rulebook as policy,
 tests and diffs as the judge, and repeated failures as reasons to improve the process.
 
+## Invocations
+
+Invoked bare, run the full workflow below in order. Invoked with a mode argument
+(`<mode> [target]`), run just that part — the operating model's four parts are
+separately callable:
+
+1. **`economics [target]`** — make the migration economics explicit. Deliverable: a
+   short brief naming the measurable current pain, what agent leverage (parallel
+   workers, old code as the spec, compiler/test feedback) changes for *this* target,
+   and the honest cost frame — agentic migrations are serious engineering investment,
+   not free — ending with whether the chronic pain clears the bar now that a migration
+   no longer has to be existential. Grounding: the preamble of
+   `references/candidate-filter.md`.
+2. **`judge [target]`** — build the verification foundation, alone (workflow step 2).
+   Deliverable: golden scenarios, a parity runner wired to `assets/parity_diff.py`,
+   and the transcript proving the judge catches a deliberately broken case.
+3. **`pack [target]`** — produce the Migration Control Pack, alone (workflow steps
+   3–4). Deliverable: the eight artifacts of `references/control-pack.md` in a
+   `migration/` directory, linted to `PACK_RESULT: PASS`.
+4. **`qualify [target]`** — run the candidate filter, alone (workflow step 1).
+   Deliverable: the row-by-row decision-table verdict — go, no-go, or the precursor
+   work that would convert a no into a yes.
+
+Standalone modes still respect order of operations: `pack` presumes a judge exists
+(its gate 1 demands one) — when there isn't one, say so and offer to run `judge`
+first rather than authoring a phase gate the pack can't honor.
+
 ## Doctrine
 
 - **The loop is the strategy, not the agents.** Leverage comes from the process wrapped
@@ -43,17 +71,19 @@ tests and diffs as the judge, and repeated failures as reasons to improve the pr
 
 ## Workflow
 
-1. **Qualify the candidate.** Walk the decision table in
+1. **Qualify the candidate** (mode: `qualify`; fold in the `economics` brief when the
+   business case is contested). Walk the decision table in
    `references/candidate-filter.md`. Every "no" is a finding; when the filter mostly
    fails, the deliverable is a recommendation *against* migrating now, plus the
    precursor work (usually: build golden tests or observability first). Report this
    verdict before writing anything else.
-2. **Build the judge.** Capture golden scenarios from the old system (edge cases
+2. **Build the judge** (mode: `judge`). Capture golden scenarios from the old system (edge cases
    included: failures, retries, timeouts, reversals) and wire a parity check with
    `assets/parity_diff.py` (`--ignore` for timestamp/id noise, `--tolerance` for float
    drift; single-file or golden-corpus directory mode). Prove the judge catches a
    deliberately broken case before trusting any pass.
-3. **Author the Migration Control Pack** in a `migration/` directory next to the target,
+3. **Author the Migration Control Pack** (steps 3–4 = mode: `pack`) in a `migration/`
+   directory next to the target,
    one artifact per section of `references/control-pack.md`: `RULEBOOK.md`,
    `DEPENDENCY_MAP.md`, `GAP_INVENTORY.md`, `PORTABILITY_TEST_PLAN.md`, a
    `parity_check.*` script, `AGENT_WORK_QUEUE.md`, `REVIEWER_PROMPTS.md`,
