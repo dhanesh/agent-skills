@@ -35,6 +35,15 @@ standardize frontmatter metadata; tune long descriptions for trigger accuracy;
 operationalize the prompting-playbook semantic checklist; fix the repo2skill
 link drift in scripts/gates/README.md. Full list in explainer segment 5.
 
+## Did the roadmap from the 2026-07-18 walkthrough actually happen?
+
+Yes — a 2026-07-22 autonomous self-improvement session shipped all six proposed
+skills (repo2skill, verifier-installer, knowledge-gardener, bug-autopsy,
+security-posture-audit, spec-first-planning), landed all seven improvements, and
+generalized world-model-ledger's eval into a hard outcome-eval gate
+(`docs/eval-standard.md`) that every skill now passes. See explainer segment 5
+for the executed list.
+
 ## Why does `okf.py status` report STALE right after creating a bundle in-repo?
 
 Creating the bundle dirties the working tree, and committing it moves HEAD past
