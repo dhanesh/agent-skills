@@ -3,13 +3,19 @@ name: crafting-self-prompting-loops
 description: >-
   Design and build sound self-prompting loops — loops where a model iterates toward a goal across turns
   (draft→critique→revise, autonomous task loops, multi-agent orchestration, human-checkpointed loops).
-  Use this whenever the user wants to make a model "keep improving X until Y", build a self-refinement or
+  Use whenever the user wants to make a model "keep improving X until Y", build a self-refinement or
   reflexion loop, an autonomous agent that works toward a goal with little supervision, a loop that
   orchestrates or fans out to other agents, a recurring self-driven/scheduled task, or any agentic loop —
-  even if they don't say the word "loop". Also use it to audit or fix an existing loop that runs away,
+  even if they don't say the word "loop"; also use it to audit or fix an existing loop that runs away,
   never stops, oscillates, drifts off-goal, or is vulnerable to prompt injection. It produces a filled
   loop spec, a runnable scaffold, and bakes in the mandatory safety properties (a hard stop backstop and
   the trusted/untrusted two-channel boundary) that loops fail without.
+license: MIT
+compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. No dependencies beyond the agent itself.
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
 
 # Crafting Self-Prompting Loops
