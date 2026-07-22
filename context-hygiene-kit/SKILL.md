@@ -1,19 +1,23 @@
 ---
 name: context-hygiene-kit
 description: >-
-  One-time SETUP that installs durable context management into a Claude Code project (or your
-  global ~/.claude config): a bounded, scored, tiered cache that keeps working memory lean
-  (anti-bloat) and rot-proof across compactions (anti-rot). It drops in a stdlib-only Python
-  ledger, a deterministic per-turn transcript harvester, and three lifecycle hooks
-  (Stop / PreCompact / SessionStart) wired into settings.json — and AFTER install those hooks
-  run automatically every turn, so you invoke this skill ONCE to set things up, not repeatedly
-  during work. Use when setting up, installing, configuring, verifying, or uninstalling context
-  hygiene for a project or globally; when the user asks to "set up context management", "stop my
-  context from bloating", "avoid context rot", "make Claude remember decisions across
-  compaction", "persist working memory across sessions", or to replace a lossy local-model
-  session-summariser with a deterministic lossless one. Not an ongoing per-turn skill (the
-  installed hooks handle that); not for ordinary app caching, RAG vector stores, or LLM
-  prompt-caching config.
+  One-time SETUP that installs durable context management into a Claude Code project (or global
+  ~/.claude): a bounded, scored, tiered cache that keeps working memory lean (anti-bloat) and
+  rot-proof across compactions (anti-rot). Use when setting up, installing, configuring,
+  verifying, or uninstalling context hygiene for a project or globally; when the user asks to
+  "set up context management", "stop my context from bloating", "avoid context rot", "make
+  Claude remember decisions across compaction", "persist working memory across sessions", or to
+  replace a lossy local-model session-summariser with a deterministic lossless one. It drops in
+  a stdlib-only Python ledger, a deterministic per-turn transcript harvester, and three
+  lifecycle hooks (Stop / PreCompact / SessionStart) wired into settings.json — after install
+  those hooks run automatically every turn, so you invoke this ONCE. Not an ongoing per-turn
+  skill; not for ordinary app caching, RAG vector stores, or LLM prompt-caching config.
+license: MIT
+compatibility: Requires Claude Code lifecycle hooks (Stop/PreCompact/SessionStart), bash, and python3 (stdlib only, no pip); jq optional for clean settings.json merging.
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "claude-code,hooks,context-management,memory,anti-bloat,anti-rot,compaction"
 ---
 
 # Context Hygiene Kit
@@ -48,6 +52,8 @@ Both modes are idempotent and do the same core work: copy the core files (`conte
 Memory is **always per-project** — even a global install keeps each repo's `.context/` separate (memories never bleed across repos). After either install, **tell the user to restart Claude Code** so the hooks load; for a global install, also remind them to add `.context/` to each repo's `.gitignore` (the project installer does this automatically).
 
 Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `settings.hooks.json` next to the target settings for manual merge).
+
+Installing this kit **alongside the sibling `world-model-ledger` skill**? The settings merges coexist, but two project-scoped installs into the same repo clobber each other's files — read `references/interop.md` first for the safe layouts, install order, and a joint-install verification checklist.
 
 > After setup you do **not** re-invoke this skill — the three hooks run automatically every turn. Re-run the installer only to reconfigure, switch scope, or repair.
 

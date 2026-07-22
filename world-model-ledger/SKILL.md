@@ -1,27 +1,25 @@
 ---
 name: world-model-ledger
 description: >-
-  One-time SETUP that installs a persistent, SQLite-backed WORLD MODEL for a coding agent into
-  a project (or your global ~/.claude): it records entities (symbols, files, modules, and
-  real-world referents like external services/APIs/data stores), the interactions between
-  them, and the constraints that should hold — and for every interaction and constraint tracks
-  TWO confidence axes (observed vs normative), a validation status, and PROV-style evidence
-  pointers (tests, docs, file:line, commits). The load-bearing rule: code-observed
-  relationships are NOT treated as ground truth — only oracle evidence (tests/CI/docs/human)
-  raises normative confidence, so the model can flag what is merely observed-but-unverified.
-  Capture is fully automatic and zero-config — no markers to emit, no env vars to set. Wires
-  four lifecycle hooks: a PreToolUse hook that summarizes relevant validated / unverified /
-  contradicted items for the files or symbols about to be edited; a UNIVERSAL PostToolUse hook
-  that observes what EVERY tool call reveals — files any tool reads/edits become entities, Bash
-  commands become runtime execute/read edges (with a recognised verifier's exit status promoted
-  to oracle evidence), and fetched URLs become external referents; and Stop/SessionStart hooks
-  that consolidate, auto-bootstrap the model on first run, and inject a digest. After install these run automatically — you
-  invoke this skill ONCE to set up. Use when the user wants an agent to remember a codebase
-  across sessions, detect contradictions, propose fixes, and improve its model's correctness
-  over time; when they say "give the agent a world model", "track what's verified vs assumed",
-  "persist codebase knowledge with confidence". Not a linter, LSP server, RAG vector store, or
-  model-driven fact extractor.
+  One-time SETUP: installs a persistent SQLite-backed WORLD MODEL for a coding agent into a
+  project (or global ~/.claude). Use when the user wants an agent to remember a codebase across
+  sessions, detect contradictions, propose fixes, and improve correctness over time — "give the
+  agent a world model", "track what's verified vs assumed", "persist codebase knowledge with
+  confidence". Tracks entities (symbols/files/modules/external referents), interactions, and
+  constraints with TWO confidence axes (observed vs normative), validation status, and
+  PROV-style evidence. Load-bearing rule: code observation is NOT ground truth — only oracle
+  evidence (tests/CI/docs/human) raises normative confidence, flagging
+  observed-but-unverified. Zero-config capture via four hooks (PreToolUse pre-edit summaries;
+  UNIVERSAL PostToolUse observing every tool call; Stop/SessionStart consolidate + inject
+  digest, auto-bootstrap); invoke ONCE; hooks run automatically. Not a linter, LSP server, RAG
+  vector store, or model-driven fact extractor.
+license: MIT
+compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop/SessionStart), bash, and python3 with its stdlib sqlite3 (no pip, no network); jq optional for clean settings.json merging.
 x-spec-version: 1.0
+metadata:
+  author: dhanesh
+  version: "1.0.1"
+  tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions"
 ---
 
 # world-model-ledger
@@ -82,6 +80,10 @@ suite as an install gate** — the guarantees are only real if those pass. Requi
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
 Claude Code** so the hooks load. You do **not** re-invoke this skill to install afterward — the
 hooks run automatically; `--seed`/`--prune` remain available anytime to (re)build the model.
+Installing this skill **alongside the sibling `context-hygiene-kit`**? The settings merges
+coexist, but two project-scoped installs into the same repo clobber each other's files — read
+`references/interop.md` first for the safe layouts, install order, and a joint-install
+verification checklist.
 
 ## How it works — four hooks, three cadences
 
@@ -178,6 +180,7 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `references/capture.md` — markers, the `wm` CLI, and the trust boundary.
 - `references/contradiction-loop.md` — detect → propose → improve, and the constraint kinds.
 - `references/parameters.md` — every install/operate flag and `wm` command, and when to use each.
+- `references/interop.md` — running this skill alongside `context-hygiene-kit` (merge behavior, safe layouts, joint verification).
 
 ## Assets
 
