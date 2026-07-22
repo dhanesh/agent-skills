@@ -13,10 +13,12 @@ green. It runs, for every skill, in a fail-fast loop:
 | Check | Script | Enforces |
 |---|---|---|
 | Structure/frontmatter | `scripts/gates/validate-skill.sh` | `SKILL.md`+`README.md` exist; `name` (kebab-case, ≤64) + `description` (≤1024); **no dangling** `references/`,`assets/`,`scripts/` paths; template↔`PARAMETERS.md` bijection |
+| Metadata standard | `scripts/gates/frontmatter-standard.sh` | frontmatter carries `license`, `compatibility`, and `metadata` (`author`/`version`/`tags`) |
 | Secrets/leaks | `scripts/gates/scan-leaks.sh` | no secrets, keys, or denylisted content |
 | Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`) |
 | Install replay | `scripts/gates/dry-run-replay.sh` | for skills with a `PARAMETERS.md` |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
+| **Outcome eval** | `scripts/gates/run-eval.sh` → `*/eval/run_eval.py` | each skill's end-to-end eval per `docs/eval-standard.md` (deterministic harness → skill tooling → model-free grader, negative fixtures mandatory); **missing eval fails the gate** |
 
 CI (`.github/workflows/skill-gates.yml`) runs `make gate` on every PR and push to `main`, so a
 green PR check means all of the above passed.
@@ -25,8 +27,10 @@ Handy targets:
 
 ```bash
 make gate                       # everything, all skills (what CI runs)
-make gate-skill SKILL=<dir>     # one skill, all checks incl. its unit tests
+make gate-skill SKILL=<dir>     # one skill, all checks incl. its unit tests + eval
 make test                       # just the unit suites
+make eval                       # just the outcome evals (docs/eval-standard.md)
+make frontmatter                # just the metadata-standard check
 make playbook PLAYBOOK_FLAGS=--strict   # promote the two advisory checks to hard failures
 make list-skills
 ```
@@ -35,10 +39,13 @@ make list-skills
 
 ```
 <skill>/
-  SKILL.md         # the agent-facing prompt: frontmatter (name, description) + body
+  SKILL.md         # the agent-facing prompt: frontmatter (name, description, license,
+                   #   compatibility, metadata) + body
   README.md        # human-facing overview (required)
   references/      # progressive-disclosure detail the SKILL.md links to
   assets/          # scripts, templates, test suites the skill ships
+  eval/            # run_eval.py — the skill's outcome eval (required, hard gate;
+                   #   contract in docs/eval-standard.md)
   scripts/         # installer / tooling (e.g. install.sh)
 ```
 
@@ -57,10 +64,14 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
 
 ## Adding or changing a skill
 
-1. Create/edit under `<skill>/` following the anatomy above.
+1. Create/edit under `<skill>/` following the anatomy above (the `repo2skill` skill
+   scaffolds a gate-passing skeleton for you).
 2. If it ships code, add a `assets/test_*.py` stdlib suite (it becomes part of `make gate`).
-3. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
-4. Commit on a branch and open a PR (CI runs `make gate`). Fill in the PR template.
+3. Add/update the skill's `eval/run_eval.py` outcome eval per `docs/eval-standard.md`
+   (required for every skill; negative fixtures mandatory).
+4. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
+5. Commit on a branch and open a PR (CI runs `make gate`). Fill in the PR template,
+   including the semantic-review checklist for any SKILL.md you touched.
 
 ## Sibling skills for auditing this kind of work
 

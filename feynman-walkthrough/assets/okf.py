@@ -14,10 +14,17 @@ spec) pinning a fingerprint of every source the explanation was built from —
 git HEAD for a repo, sha256 for a file/dir — so a later session can detect
 that the source drifted (`status`) and re-pin after refreshing (`pin`).
 
+Self-pinning: when the bundle root lives inside a pinned git repo (e.g.
+`docs/knowledge/` in the very repo it explains), committing or editing the
+bundle's own files moves HEAD / dirties the worktree without the *explained*
+source having changed. Drift detection therefore ignores changes confined to
+the bundle root — only changes outside it make a git source STALE.
+
 Stdlib only — no pip, no network. Examples:
 
     python3 okf.py init "ingest pipeline" --root knowledge --source /path/to/repo
     python3 okf.py status ingest-pipeline --root knowledge
+    python3 okf.py diff ingest-pipeline --root knowledge
     python3 okf.py pin ingest-pipeline --root knowledge
     python3 okf.py list --root knowledge
 """
@@ -198,21 +205,74 @@ def detect_source_type(locator):
     return "external"
 
 
-def fingerprint(locator, source_type):
+def _repo_toplevel(locator):
+    """Real path of the repo's working-tree root, or None outside a repo."""
+    probe = _git(["rev-parse", "--show-toplevel"], cwd=locator)
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return None
+    return os.path.realpath(probe.stdout.strip())
+
+
+def _bundle_rel_in_repo(bundle_root, repo_top):
+    """Bundle root's repo-relative posix path, or None when not inside.
+
+    None disables self-pin filtering: the bundle lives outside the repo (or
+    IS the repo root, where excluding it would hide every change).
+    """
+    if not bundle_root or not repo_top:
+        return None
+    rel = os.path.relpath(os.path.realpath(bundle_root), repo_top)
+    if rel == "." or rel == ".." or rel.startswith(".." + os.sep):
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def _porcelain_paths(porcelain_stdout):
+    """Repo-relative paths from `git status --porcelain` (both rename sides)."""
+    paths = []
+    for line in porcelain_stdout.splitlines():
+        if len(line) < 4:
+            continue
+        for part in line[3:].split(" -> "):
+            part = part.strip().strip('"').rstrip("/")
+            if part:
+                paths.append(part)
+    return paths
+
+
+def _outside_bundle(paths, bundle_rel):
+    """Filter out paths under the bundle root (repo-relative posix paths)."""
+    if bundle_rel is None:
+        return list(paths)
+    prefix = bundle_rel + "/"
+    return [p for p in paths
+            if p.rstrip("/") != bundle_rel and not p.startswith(prefix)]
+
+
+def fingerprint(locator, source_type, bundle_root=None):
     """Current fingerprint of a source, or None when it can't be computed.
 
     git -> HEAD sha (+"+dirty" if the worktree has changes); file -> sha256;
     dir -> sha256 over sorted (relpath, content-sha) pairs, .git excluded;
     external -> None (a URL or topic has no local fingerprint).
+
+    For git sources, `bundle_root` (when it resolves inside the repo) keeps
+    the bundle's own uncommitted files from counting as dirt — writing the
+    explainer into the repo it documents must not taint the pin.
     """
     if source_type == "git":
         head = _git(["rev-parse", "HEAD"], cwd=locator)
         if head.returncode != 0:
             return None
         fp = head.stdout.strip()
-        porcelain = _git(["status", "--porcelain"], cwd=locator)
-        if porcelain.returncode == 0 and porcelain.stdout.strip():
-            fp += "+dirty"
+        porcelain = _git(["status", "--porcelain", "--untracked-files=all"],
+                     cwd=locator)
+        if porcelain.returncode == 0:
+            bundle_rel = _bundle_rel_in_repo(bundle_root, _repo_toplevel(locator))
+            dirty = _outside_bundle(_porcelain_paths(porcelain.stdout),
+                                    bundle_rel)
+            if dirty:
+                fp += "+dirty"
         return fp
     if source_type == "file":
         return _sha256_file(locator)
@@ -227,6 +287,49 @@ def fingerprint(locator, source_type):
                 h.update(_sha256_file(path).encode())
         return h.hexdigest()
     return None  # external
+
+
+def git_drift(locator, pinned_fp, bundle_root=None):
+    """Classify a git source against its pinned fingerprint.
+
+    Returns (state, current_fp, committed, dirty): state is FRESH/STALE/
+    UNKNOWN; committed is the sorted `git diff --name-status` lines between
+    the pinned SHA and HEAD; dirty is the sorted worktree-change paths — both
+    with everything under the bundle root filtered out when the bundle lives
+    inside the repo (self-pin: committing the bundle must not STALE it).
+
+    A fingerprint pinned while the worktree was dirty ("<sha>+dirty")
+    compares by its SHA part — the dirty content it saw was never
+    fingerprintable, so only committed/current drift can be judged.
+    """
+    current = fingerprint(locator, "git", bundle_root)
+    if current is None:
+        return "UNKNOWN", None, [], []
+    if current == pinned_fp:
+        return "FRESH", current, [], []
+    pinned_sha = pinned_fp.split("+", 1)[0]
+    bundle_rel = _bundle_rel_in_repo(bundle_root, _repo_toplevel(locator))
+    diff = _git(["diff", "--name-status", "%s..HEAD" % pinned_sha],
+                cwd=locator)
+    if diff.returncode != 0:
+        # pinned SHA no longer resolvable (rewritten history): drifted.
+        return "STALE", current, [], []
+    committed = []
+    for line in diff.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        if _outside_bundle([f for f in fields[1:] if f], bundle_rel):
+            committed.append(line)
+    committed.sort(key=lambda l: l.split("\t")[1:])
+    porcelain = _git(["status", "--porcelain", "--untracked-files=all"],
+                     cwd=locator)
+    dirty = []
+    if porcelain.returncode == 0:
+        dirty = sorted(set(_outside_bundle(
+            _porcelain_paths(porcelain.stdout), bundle_rel)))
+    state = "STALE" if (committed or dirty) else "FRESH"
+    return state, current, committed, dirty
 
 
 # ── Bundle bookkeeping (reserved files, per the spec) ────────────────────────
@@ -282,14 +385,14 @@ def _subject_index_body(subject):
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
-def _pin_sources(locators, today):
+def _pin_sources(locators, today, bundle_root=None):
     pins = []
     for locator in locators:
         stype = detect_source_type(locator)
         pins.append({
             "type": stype,
             "locator": os.path.abspath(locator) if stype != "external" else locator,
-            "fingerprint": fingerprint(locator, stype),
+            "fingerprint": fingerprint(locator, stype, bundle_root),
             "pinned": today,
         })
     return pins
@@ -306,7 +409,7 @@ def init_okf(root, subject, sources, today=None):
             "OKF subject already exists: %s (use `pin` to refresh it)"
             % subject_dir)
     os.makedirs(subject_dir, exist_ok=True)
-    pins = _pin_sources(sources, today)
+    pins = _pin_sources(sources, today, bundle_root=root)
     meta = {
         "type": "Explainer",
         "title": subject,
@@ -337,9 +440,11 @@ def pin_okf(root, subject_dir, today=None):
     """Re-fingerprint every pinned source; stamp timestamp; log it."""
     today = (today or dt.date.today()).isoformat()
     path = os.path.join(subject_dir, EXPLAINER)
+    _read_pinned_sources(subject_dir)  # raises ValueError on corrupt pins
     meta, body = read_concept(path)
     for source in meta.get("sources", []):
-        source["fingerprint"] = fingerprint(source["locator"], source["type"])
+        source["fingerprint"] = fingerprint(source["locator"], source["type"],
+                                            bundle_root=root)
         source["pinned"] = today
     meta["timestamp"] = "%sT00:00:00Z" % today
     write_concept(path, meta, body)
@@ -350,35 +455,84 @@ def pin_okf(root, subject_dir, today=None):
     return meta
 
 
-def status_okf(subject_dir):
-    """Return (overall, [(source, state), ...]) — states FRESH/STALE/UNKNOWN.
+def _read_pinned_sources(subject_dir):
+    """The explainer's meta + validated `sources` pins.
 
-    Overall is STALE if any source drifted, else UNKNOWN if any source can't
-    be fingerprinted (external URL/topic, or a moved path), else FRESH.
+    Raises ValueError (not a traceback-worthy KeyError later) when the
+    explainer frontmatter is corrupt: missing/unparseable frontmatter, or
+    source pins without the `type`/`locator` keys drift checks depend on.
     """
-    meta, _ = read_concept(os.path.join(subject_dir, EXPLAINER))
-    rows = []
-    for source in meta.get("sources", []):
+    path = os.path.join(subject_dir, EXPLAINER)
+    meta, _ = read_concept(path)
+    if not meta.get("type"):
+        raise ValueError(
+            "corrupt explainer frontmatter (missing/unparseable, no `type`): %s"
+            % path)
+    sources = meta.get("sources") or []
+    if not isinstance(sources, list) or any(
+            not isinstance(s, dict) or not s.get("type") or not s.get("locator")
+            for s in sources):
+        raise ValueError(
+            "corrupt `sources` pins (each needs `type` and `locator`): %s"
+            % path)
+    return meta, sources
+
+
+def diff_okf(subject_dir, bundle_root=None):
+    """Return (overall, entries): per-source drift detail for a subject.
+
+    Each entry is {source, pinned, current, state, committed, dirty}; for git
+    sources `committed` holds `git diff --name-status <pinned>..HEAD` lines
+    and `dirty` the worktree-change paths, both excluding the bundle root
+    when it lives inside the repo (see `git_drift`). Non-git sources carry
+    just their state. Overall is STALE if any source drifted, else UNKNOWN
+    if any can't be fingerprinted, else FRESH.
+    """
+    if bundle_root is None:
+        bundle_root = os.path.dirname(os.path.abspath(subject_dir))
+    _, sources = _read_pinned_sources(subject_dir)
+    entries = []
+    for source in sources:
         pinned = source.get("fingerprint")
+        entry = {"source": source, "pinned": pinned, "current": None,
+                 "state": "UNKNOWN", "committed": [], "dirty": []}
         if source["type"] == "external" or pinned is None:
-            rows.append((source, "UNKNOWN"))
+            entries.append(entry)
             continue
-        current = fingerprint(source["locator"],
-                              detect_source_type(source["locator"]))
-        if current is None:
-            rows.append((source, "UNKNOWN"))
-        elif current == pinned:
-            rows.append((source, "FRESH"))
+        stype = detect_source_type(source["locator"])
+        if stype == "git":
+            state, current, committed, dirty = git_drift(
+                source["locator"], pinned, bundle_root)
+            entry.update(state=state, current=current,
+                         committed=committed, dirty=dirty)
         else:
-            rows.append((source, "STALE"))
-    states = [state for _, state in rows]
+            current = fingerprint(source["locator"], stype)
+            entry["current"] = current
+            if current is None:
+                entry["state"] = "UNKNOWN"
+            else:
+                entry["state"] = "FRESH" if current == pinned else "STALE"
+        entries.append(entry)
+    states = [e["state"] for e in entries]
     if "STALE" in states:
         overall = "STALE"
     elif "UNKNOWN" in states:
         overall = "UNKNOWN"
     else:
         overall = "FRESH"  # includes the no-sources case: nothing to drift
-    return overall, rows
+    return overall, entries
+
+
+def status_okf(subject_dir, bundle_root=None):
+    """Return (overall, [(source, state), ...]) — states FRESH/STALE/UNKNOWN.
+
+    Overall is STALE if any source drifted, else UNKNOWN if any source can't
+    be fingerprinted (external URL/topic, or a moved path), else FRESH.
+    Changes confined to the bundle root itself (default: the subject dir's
+    parent) never count as git drift — see `git_drift`.
+    """
+    overall, entries = diff_okf(subject_dir, bundle_root)
+    return overall, [(e["source"], e["state"]) for e in entries]
 
 
 def list_okfs(root):
@@ -423,6 +577,10 @@ def main(argv=None, out=None):
     p_status.add_argument("subject", nargs="?", default=None,
                           help="slug or subject name (default: all)")
 
+    p_diff = sub.add_parser(
+        "diff", help="pinned vs current fingerprints + changed-file list")
+    p_diff.add_argument("subject", help="slug or subject name")
+
     sub.add_parser("list", help="list subjects in the bundle")
 
     args = parser.parse_args(argv)
@@ -443,11 +601,34 @@ def main(argv=None, out=None):
     if args.command == "pin":
         try:
             subject_dir = _resolve_subject_dir(args.root, args.subject)
-        except FileNotFoundError as exc:
+            meta = pin_okf(args.root, subject_dir)
+        except (FileNotFoundError, ValueError) as exc:
             parser.error(str(exc))
-        meta = pin_okf(args.root, subject_dir)
         out.write("OKF_PINNED: %s (%d source(s))\n"
                   % (subject_dir, len(meta.get("sources", []))))
+        return 0
+
+    bundle_root = os.path.abspath(args.root)
+
+    if args.command == "diff":
+        try:
+            subject_dir = _resolve_subject_dir(args.root, args.subject)
+            overall, entries = diff_okf(subject_dir, bundle_root)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
+        for entry in entries:
+            source = entry["source"]
+            out.write("SOURCE: %s %s -> %s\n"
+                      % (source["type"], source["locator"], entry["state"]))
+            if source["type"] == "git":
+                out.write("  PINNED: %s\n" % entry["pinned"])
+                out.write("  CURRENT: %s\n" % (entry["current"] or "unavailable"))
+                for line in entry["committed"]:
+                    out.write("  %s\n" % line)
+                for path in entry["dirty"]:
+                    out.write("  DIRTY\t%s\n" % path)
+        out.write("OKF_DIFF: %s %s\n"
+                  % (os.path.basename(subject_dir), overall))
         return 0
 
     # status
@@ -461,7 +642,10 @@ def main(argv=None, out=None):
                         for slug, _, _ in list_okfs(args.root)]
     exit_code = 0
     for subject_dir in subject_dirs:
-        overall, rows = status_okf(subject_dir)
+        try:
+            overall, rows = status_okf(subject_dir, bundle_root)
+        except ValueError as exc:
+            parser.error(str(exc))
         for source, state in rows:
             out.write("SOURCE: %s %s -> %s\n"
                       % (source["type"], source["locator"], state))

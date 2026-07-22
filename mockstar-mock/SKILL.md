@@ -1,7 +1,13 @@
 ---
 name: mockstar-mock
-description: "Generate a runnable mockstar mock server for a service from its specs and docs — OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL). Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
+description: "Generate a runnable mockstar mock server for a service from its specs and docs. Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Accepts OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL); normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
 x-spec-version: 1.0
+license: MIT
+compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2) or Docker (ghcr.io/dhanesh/mockstar), plus `uv` and `curl` for the bundled helpers.
+metadata:
+  author: dhanesh
+  version: "1.0.1"
+  tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
 # mockstar-mock

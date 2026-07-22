@@ -1,19 +1,26 @@
 ---
 name: feynman-walkthrough
 description: >-
-  Walk a person through a subject, codebase, whitepaper, or complex system so they genuinely
-  understand it — a guided walkthrough, not a study regimen. Use whenever the user wants to
-  understand or learn something: "explain X", "walk me through this repo/paper", "help me
-  understand how Y works", "onboard me onto Z" — even if they never mention a learning
-  method. Explains with Feynman-grade simplicity (plain language, analogy, concrete example
-  before abstraction) and research-backed structure (big picture first, one segment at a
-  time, checks matched to the goal), gauges understanding only AFTER the walkthrough to see
-  where more coaching helps, and produces a standalone reference explainer the user can
-  revisit later or hand to someone else — persisted as an Open Knowledge Format (OKF)
-  bundle with source fingerprints pinned, so later sessions can review the knowledge and
-  refresh it when the codebase, document, or topic changes. Long-term-retention tooling
-  (spaced retrieval, self-quizzing, review schedules) is available but strictly opt-in.
+  Walk a person through a subject, codebase, whitepaper, or complex system until they
+  genuinely understand it. Use whenever the user wants to understand or learn something:
+  "explain X", "walk me through this repo/paper", "help me understand how Y works",
+  "onboard me onto Z" — even if they never mention a learning method. Explains with
+  Feynman-grade simplicity (plain language, analogy, concrete example before abstraction)
+  and research-backed structure (big picture first, one segment at a time, checks matched
+  to the goal), gauges understanding only AFTER the walkthrough to see where more coaching
+  helps, and produces a standalone, sharable reference explainer — persisted as an Open
+  Knowledge Format (OKF) bundle with source
+  fingerprints pinned, so later sessions can review the knowledge and refresh it
+  diff-aware when the codebase, document, or topic changes. A guided walkthrough, not a
+  study regimen: retention tooling (spaced retrieval, self-quizzing, review schedules)
+  exists but is strictly opt-in.
+license: MIT
+compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
 x-spec-version: 1.0
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
 # feynman-walkthrough
@@ -110,9 +117,11 @@ before, check the knowledge root first (`python3 assets/okf.py status <subject>`
 - **FRESH** → the explainer still matches its sources; review from it, answer questions
   against it, and append new Q&A to its FAQ.
 - **STALE** → the source moved (new commits, revised doc). Say so before relying on the
-  explainer, then refresh it diff-aware: walk what actually changed since the pinned
-  fingerprint, update only the affected segments, re-pin. The learner gets a
-  what-changed walkthrough instead of a full repeat.
+  explainer, then refresh it diff-aware: `python3 assets/okf.py diff <subject>` lists
+  exactly which files changed since the pinned fingerprint; walk what actually changed,
+  update only the affected segments, re-pin. The learner gets a what-changed
+  walkthrough instead of a full repeat. (Committing the bundle itself into the repo it
+  explains never trips STALE — the tool ignores changes confined to the bundle root.)
 - **UNKNOWN** (external URL/topic sources) → ask whether the source changed, or
   re-check it yourself before leaning on the explainer.
 

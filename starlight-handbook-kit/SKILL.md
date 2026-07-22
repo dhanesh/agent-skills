@@ -1,7 +1,13 @@
 ---
 name: starlight-handbook-kit
-description: "Scaffold or extend a decision-oriented Astro + Starlight documentation handbook where every topic follows a fixed nine-section skeleton, diagrams and widgets are static-first and accessible, and a nine-gate CI suite makes agent-authored content safe. Use when standing up a new handbook/knowledge-base site, or when adding a cluster (a group of topics) or a single topic page to an existing site that already follows this pattern."
+description: "Scaffold or extend a decision-oriented Astro + Starlight documentation handbook. Use when standing up a new handbook/knowledge-base site from scratch, or when adding a cluster (a group of topics) or a single topic page to an existing site that already follows this pattern. Every topic follows a fixed nine-section skeleton, diagrams and widgets are static-first and accessible, and a nine-gate CI suite makes agent-authored content safe to ship."
+license: MIT
+compatibility: Requires Node.js 18+ with npm for Astro + Starlight builds; the scaffold's nine CI gates are dependency-free Node scripts. Scaffolding itself needs only a POSIX shell.
 x-spec-version: 1.0
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "astro,starlight,documentation,handbook,scaffold,ci-gates,mdx"
 ---
 
 # starlight-handbook-kit

@@ -291,6 +291,108 @@ class GitSourceTests(unittest.TestCase):
             f.write("uncommitted")
         self.assertEqual(okf.status_okf(subject_dir)[0], "STALE")
 
+    def test_bundle_outside_repo_not_excluded_by_name(self):
+        # A repo dir that merely shares the bundle root's basename must still
+        # count as drift: containment is by resolved path, not by name.
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        os.makedirs(os.path.join(self.repo, os.path.basename(self.root)))
+        self._commit(os.path.join(os.path.basename(self.root), "note.md"),
+                     "inside a dir named like the bundle root", "lookalike")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "STALE")
+
+
+@unittest.skipUnless(GIT, "git not available")
+class SelfPinTests(unittest.TestCase):
+    """Bundle root inside the pinned repo: bundle changes are not drift."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        self._git("init", "-q")
+        self._git("config", "user.email", "test@example.test")
+        self._git("config", "user.name", "Test")
+        self._commit("src.py", "v1", "first")
+        # bundle root lives INSIDE the repo it pins (given as a relative-ish
+        # nested path; containment must resolve real paths)
+        self.root = os.path.join(self.repo, "docs", "knowledge")
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.repo] + list(args),
+                       check=True, capture_output=True)
+
+    def _commit(self, name, content, message):
+        path = os.path.join(self.repo, name)
+        os.makedirs(os.path.dirname(path) or self.repo, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", message)
+
+    def test_pin_ignores_bundle_only_dirt(self):
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        meta, _ = okf.read_concept(os.path.join(subject_dir, okf.EXPLAINER))
+        self.assertNotIn("+dirty", meta["sources"][0]["fingerprint"])
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+
+    def test_committing_the_bundle_stays_fresh(self):
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "add knowledge bundle")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+        # editing bundle files afterwards (FAQ append) is also not drift
+        with open(os.path.join(subject_dir, okf.FAQ), "a",
+                  encoding="utf-8") as f:
+            f.write("\nQ: extra?\n")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "faq update")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+
+    def test_real_source_change_is_still_stale(self):
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "add knowledge bundle")
+        self._commit("src.py", "v2", "source change")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "STALE")
+        okf.pin_okf(self.root, subject_dir, today=TODAY)
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+
+    def test_dirty_source_outside_bundle_is_stale(self):
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        with open(os.path.join(self.repo, "src.py"), "w",
+                  encoding="utf-8") as f:
+            f.write("uncommitted")
+        self.assertEqual(okf.status_okf(subject_dir)[0], "STALE")
+
+    def test_dirty_pin_compares_by_sha_part(self):
+        # Pin taken while a source file was dirty records "<sha>+dirty";
+        # once the worktree is clean again on the same sha, that pin is FRESH.
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        with open(os.path.join(self.repo, "src.py"), "w",
+                  encoding="utf-8") as f:
+            f.write("wip")
+        okf.pin_okf(self.root, subject_dir, today=TODAY)
+        meta, _ = okf.read_concept(os.path.join(subject_dir, okf.EXPLAINER))
+        self.assertTrue(meta["sources"][0]["fingerprint"].endswith("+dirty"))
+        self._git("checkout", "--", "src.py")  # drop the dirt: same sha again
+        self.assertEqual(okf.status_okf(subject_dir)[0], "FRESH")
+
+    def test_git_drift_reports_changed_files_outside_bundle(self):
+        subject_dir = okf.init_okf(self.root, "Repo", [self.repo], today=TODAY)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "add knowledge bundle")
+        pinned = okf.read_concept(
+            os.path.join(subject_dir, okf.EXPLAINER))[0]["sources"][0]
+        self._commit("src.py", "v2", "source change")
+        state, current, committed, dirty = okf.git_drift(
+            self.repo, pinned["fingerprint"], self.root)
+        self.assertEqual(state, "STALE")
+        self.assertEqual(committed, ["M\tsrc.py"])
+        self.assertEqual(dirty, [])
+        self.assertNotEqual(current, pinned["fingerprint"])
+
 
 class CliTests(unittest.TestCase):
     def setUp(self):
@@ -334,6 +436,96 @@ class CliTests(unittest.TestCase):
         code, out = run_cli("--root", self.root, "status")
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
+
+    def test_diff_on_non_git_sources_prints_status(self):
+        src = os.path.join(self.tmp, "doc.md")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("v1")
+        run_cli("--root", self.root, "init", "Mixed",
+                "--source", src, "--source", "https://example.test/spec")
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("v2")
+        code, out = run_cli("--root", self.root, "diff", "mixed")
+        self.assertEqual(code, 0)
+        self.assertIn("SOURCE: file %s -> STALE" % os.path.abspath(src), out)
+        self.assertIn("SOURCE: external https://example.test/spec -> UNKNOWN",
+                      out)
+        self.assertIn("OKF_DIFF: mixed STALE", out)
+        self.assertNotIn("PINNED:", out)  # fingerprint detail is git-only
+
+    def test_status_on_corrupt_explainer_errors_gracefully(self):
+        run_cli("--root", self.root, "init", "Broken")
+        explainer = os.path.join(self.root, "broken", okf.EXPLAINER)
+        with open(explainer, "w", encoding="utf-8") as f:
+            f.write("---\ntype: Explainer\nsources:\n- pinned: 2026-07-11\n"
+                    "---\n\n# Broken\n")
+        for command in (["status", "broken"], ["diff", "broken"],
+                        ["pin", "broken"]):
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli("--root", self.root, *command)
+            self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_corrupt_frontmatter_raises_value_error(self):
+        subject_dir = okf.init_okf(self.root, "Broken", [], today=TODAY)
+        explainer = os.path.join(subject_dir, okf.EXPLAINER)
+        with open(explainer, "w", encoding="utf-8") as f:
+            f.write("---\ntitle: no closing fence\n\n# Broken\n")
+        with self.assertRaises(ValueError):
+            okf.status_okf(subject_dir)
+        with self.assertRaises(ValueError):
+            okf.diff_okf(subject_dir)
+
+
+@unittest.skipUnless(GIT, "git not available")
+class CliDiffGitTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(self.repo)
+        self._git("init", "-q")
+        self._git("config", "user.email", "test@example.test")
+        self._git("config", "user.name", "Test")
+        self._commit("src.py", "v1", "first")
+        self.root = os.path.join(self.repo, "docs", "knowledge")
+
+    def _git(self, *args):
+        subprocess.run(["git", "-C", self.repo] + list(args),
+                       check=True, capture_output=True)
+
+    def _commit(self, name, content, message):
+        with open(os.path.join(self.repo, name), "w", encoding="utf-8") as f:
+            f.write(content)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", message)
+
+    def test_diff_lists_changes_excluding_bundle(self):
+        run_cli("--root", self.root, "init", "Repo", "--source", self.repo)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "add bundle")
+        self._commit("src.py", "v2", "source change")
+        with open(os.path.join(self.repo, "extra.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("dirty")
+        code, out = run_cli("--root", self.root, "diff", "repo")
+        self.assertEqual(code, 0)
+        self.assertIn("SOURCE: git ", out)
+        self.assertIn(" -> STALE", out)
+        self.assertIn("PINNED: ", out)
+        self.assertIn("CURRENT: ", out)
+        self.assertIn("M\tsrc.py", out)
+        self.assertIn("DIRTY\textra.txt", out)
+        self.assertNotIn("knowledge/", out.split("PINNED:", 1)[1])
+        self.assertIn("OKF_DIFF: repo STALE", out)
+
+    def test_diff_fresh_after_bundle_commit(self):
+        run_cli("--root", self.root, "init", "Repo", "--source", self.repo)
+        self._git("add", ".")
+        self._git("commit", "-q", "-m", "add bundle")
+        code, out = run_cli("--root", self.root, "diff", "repo")
+        self.assertEqual(code, 0)
+        self.assertIn("OKF_DIFF: repo FRESH", out)
+        self.assertNotIn("\tM\t", out)
 
 
 if __name__ == "__main__":

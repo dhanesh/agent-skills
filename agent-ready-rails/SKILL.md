@@ -1,21 +1,12 @@
 ---
 name: agent-ready-rails
-description: >-
-  Read-only audit that scores how ready a repository is for coding agents to work in it safely and
-  successfully, then optionally installs the missing rails. Use when someone asks "is our repo ready
-  for agents / Claude Code / a background coding agent?", "why do agents keep failing / making messy
-  PRs in this codebase?", "how do we get agents to actually merge working changes?", or wants to set a
-  codebase up so autonomous/background agents produce verified, reviewable work instead of fast chaos.
-  It grades six rails — runnable verifiers (the format/build/test feedback loop), green-CI ground
-  truth, a copyable house style, navigable context, scoped trusted tools, and human checkpoints with
-  reversibility — from observed repo evidence, and emits a severity-ranked readiness scorecard with a
-  prioritized fix list. For repos running agents unattended against production, an optional second tier
-  grades four more "operate" rails past the merge boundary — runtime observability/audit, blast-radius
-  containment, deploy-path safety with a kill switch, and continuous re-verification. Grounded in
-  Spotify's Honk case and this repo's loop/context skills. Not a
-  linter, SAST, or CI-config generator; it audits the engineering system agents run inside, not the
-  code's correctness (use base-in-reality for that) or a single loop's soundness (use
-  crafting-self-prompting-loops for that).
+description: 'Read-only audit that scores how ready a repository is for coding agents to work in safely and successfully, then optionally installs the missing rails. Use when asked "is our repo ready for agents / Claude Code / a background coding agent?", "why do agents keep failing or making messy PRs here?", or "how do we get agents to actually merge working changes?". Grades six rails — runnable verifiers (the format/build/test loop), green-CI ground truth, copyable house style, navigable context, scoped trusted tools, human checkpoints with reversibility — from observed repo evidence, emitting a severity-ranked scorecard with a prioritized fix list. For agents running unattended against production, an optional second tier grades four operate rails past the merge boundary. Grounded in Spotify''s Honk case. Not a linter, SAST, or CI-config generator: audits the engineering system agents run inside, not code correctness (base-in-reality) or one loop''s soundness (crafting-self-prompting-loops).'
+license: MIT
+compatibility: Any agent harness with shell access to the target repo; the evidence collector needs python3 (stdlib only). Audit mode is read-only.
+metadata:
+  author: dhanesh
+  version: "1.1.0"
+  tags: "agent-readiness,audit,coding-agents,ci,verification,repo-hygiene"
 ---
 
 # agent-ready-rails
@@ -66,7 +57,15 @@ Establish the languages, build system, and where an agent would look for instruc
 
 ### 2. Probe each rail from observed evidence
 
-For each rail in scope, gather the concrete signals named in `references/rubric.md`. Read configs and CI files; check that named commands actually exist. For Tier 2, the evidence lives as much in the *agent harness and deploy/runtime config* (CI/CD workflows, sandbox/container setup, feature-flag and rollout config, bot identity, logging/alerting) as in the repo source — probe there too. **Run nothing destructive** — confirm a verifier or control *exists* and is wired, don't execute migrations, deploys, or a kill switch. Any rail you cannot back with a file/line is scored as absent and tagged `UNVERIFIED`; never credit a rail on a README claim alone.
+Start with the shipped collector, then deepen by reading — the collector supplies evidence, you supply judgment:
+
+```bash
+python3 <skill-dir>/assets/collect_evidence.py <repo-dir>
+```
+
+It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rail (`R-verifiers`, `R-ci`, `R-house-style`, `R-context`, `R-scoped-tools`, `R-checkpoints` — mapping to R1–R6), each entry a `{kind, path, detail}` lead: test/lint/build configs and Make targets, CI workflows (flagging whether each actually runs tests), style docs and EditorConfig, CLAUDE.md/AGENTS.md/README/docs structure, `.claude/settings*.json` permissions and MCP config, CODEOWNERS/PR-template/.gitignore hygiene. It collects and flags only — it never scores; malformed config files surface as `settings-error` entries rather than crashes.
+
+Then, for each rail in scope, verify and extend the collector's leads against the concrete signals named in `references/rubric.md`: read the cited configs and CI files, check that named commands actually exist, and hunt for evidence the collector's fixed patterns cannot see (a bespoke task runner, a wiki style guide). For Tier 2, the evidence lives as much in the *agent harness and deploy/runtime config* (CI/CD workflows, sandbox/container setup, feature-flag and rollout config, bot identity, logging/alerting) as in the repo source — probe there too. **Run nothing destructive** — confirm a verifier or control *exists* and is wired, don't execute migrations, deploys, or a kill switch. Any rail you cannot back with a file/line is scored as absent and tagged `UNVERIFIED`; never credit a rail on a README claim alone.
 
 ### 3. Score against the rubric
 

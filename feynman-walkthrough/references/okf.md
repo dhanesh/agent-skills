@@ -108,6 +108,7 @@ sources:
 ```bash
 python3 okf.py init "ingest pipeline" --root knowledge --source /path/to/repo
 python3 okf.py status ingest-pipeline --root knowledge   # FRESH / STALE / UNKNOWN per source
+python3 okf.py diff ingest-pipeline --root knowledge     # pinned vs current + changed files
 python3 okf.py pin ingest-pipeline --root knowledge      # re-fingerprint after refreshing
 python3 okf.py list --root knowledge
 ```
@@ -115,9 +116,21 @@ python3 okf.py list --root knowledge
 Fingerprints: git sources pin `HEAD` (with a `+dirty` marker for uncommitted changes);
 files and directories pin a sha256; `external` sources (URLs, plain topics) can't be
 fingerprinted locally and report UNKNOWN. `status` exits non-zero when any source is
-STALE, so it works as a scriptable check. `init` writes skeleton concepts — replace
-their placeholder bodies with the real explainer and FAQ. Frontmatter values must stay
-single-line (the stdlib parser reads the subset the tool writes).
+STALE, so it works as a scriptable check. `diff` shows, per git source, the pinned and
+current fingerprints plus the `git diff --name-status <pinned>..HEAD` file list and any
+dirty files (non-git sources just print their status) — the one-command entry into the
+diff-aware refresh flow. `init` writes skeleton concepts — replace their placeholder
+bodies with the real explainer and FAQ. Frontmatter values must stay single-line (the
+stdlib parser reads the subset the tool writes).
+
+**Self-pinning bundles.** When the bundle root sits inside the very repo it pins (the
+recommended `docs/knowledge/` placement), the act of writing or committing the bundle
+moves the repo's state. The tool accounts for this: changes confined to the bundle root
+— uncommitted bundle files at pin time, or commits that only touch the bundle —
+never count as drift, so committing your explainer does not make it STALE. Only
+changes *outside* the bundle root flip a git source to STALE, and `diff` excludes
+bundle-root paths from its file list. A pin taken while the worktree was dirty
+(`<sha>+dirty`) is compared by its SHA part on later checks.
 
 ## Session flows
 
@@ -128,10 +141,11 @@ single-line (the stdlib parser reads the subset the tool writes).
 - **Learner returns to review.** `status` first. FRESH → the explainer is trustworthy;
   walk them through it or answer questions from it directly. STALE → say so before
   relying on it ("the repo has moved since this was written"), then offer a refresh.
-- **Refresh after drift.** Diff-aware, not from scratch: for a git source, read what
-  changed since the pinned SHA (`git diff <pinned>..HEAD --stat` and the relevant
-  hunks); update only the affected segments of the explainer; append new Q&A to the
-  FAQ; `pin` to record the new fingerprint (which also logs the update).
+- **Refresh after drift.** Diff-aware, not from scratch: `okf.py diff <subject>` lists
+  the pinned vs current fingerprints and exactly which files changed since the pinned
+  SHA (bundle-root files excluded when the bundle lives inside the repo); read the
+  relevant hunks, update only the affected segments of the explainer, append new Q&A
+  to the FAQ, then `pin` to record the new fingerprint (which also logs the update).
 - **UNKNOWN sources** (external URL, moved file): can't be auto-checked — ask the
   learner whether the source changed, or re-fetch and compare judgment-wise.
 
