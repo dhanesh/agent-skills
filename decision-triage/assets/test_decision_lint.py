@@ -138,6 +138,16 @@ class TestContractOrder(unittest.TestCase):
         self.assertIn("before", msgs)
         self.assertIn("Criteria", msgs)
 
+    def test_duplicate_decision_heading_cannot_hide_early_verdict(self):
+        lines = FULL.split("\n")
+        insert = lines.index("## Criteria")
+        attack = "\n".join(
+            lines[:insert] + ["## Decision", "Already decided, obviously.", ""] + lines[insert:]
+        )
+        msgs = " ".join(failures(attack))
+        self.assertIn("duplicate", msgs)
+        self.assertIn("before", msgs)
+
     def test_missing_assessment_section_is_rejected(self):
         broken = FULL.replace("## Assessment", "## Notes")
         self.assertTrue(failures(broken))

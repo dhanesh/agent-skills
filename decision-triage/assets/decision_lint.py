@@ -107,8 +107,15 @@ def lint(path):
 
     sections, header = parse_sections(text)
     names = [n for n, _ in sections]
-    bodies = dict(sections)
-    index = {n: i for i, n in enumerate(names)}
+    # First occurrence wins for both maps: the order check must see the
+    # earliest place a verdict appears, or a duplicated heading later in the
+    # file would launder a verdict written ahead of the criteria.
+    bodies = {}
+    for n, b in sections:
+        bodies.setdefault(n, b)
+    index = {}
+    for i, n in enumerate(names):
+        index.setdefault(n, i)
 
     # 1. Title
     title = re.search(r"^#\s+Decision:\s*(.+?)\s*$", text, re.M)
@@ -144,7 +151,15 @@ def lint(path):
     else:
         ok("all required sections present for the %s path" % (path_value or "fast"))
 
-    # 4. CONTRACT ORDER — the anti-sycophancy check.
+    # 4a. Contract headings may appear once — a duplicate is how a verdict
+    # hides ahead of the criteria while a later twin satisfies the order check.
+    dupes = sorted({n for n in names if n in FULL_SECTIONS and names.count(n) > 1})
+    if dupes:
+        bad("duplicate section headings: %s — each contract section may appear once" % ", ".join(dupes))
+    else:
+        ok("contract section headings are unambiguous")
+
+    # 4b. CONTRACT ORDER — the anti-sycophancy check.
     if "Decision" in index and "Criteria" in index and "Assessment" in index:
         if index["Decision"] > index["Criteria"] and index["Decision"] > index["Assessment"]:
             ok("verdict follows the criteria and the assessment")

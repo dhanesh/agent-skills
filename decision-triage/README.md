@@ -81,6 +81,6 @@ make gate-skill SKILL=decision-triage   # from the repo root
 ```
 
 The outcome eval is end-to-end: it lifts both record variants out of the shipped template, fills
-them, and proves they pass the shipped linter — then seeds five defects (verdict-before-criteria
-first among them) and requires each to be rejected, and checks the Brier arithmetic against a
-hand-computed series.
+them, and proves they pass the shipped linter — then seeds six defects (verdict-before-criteria
+first among them, including the duplicate-heading variant that tries to launder it) and requires
+each to be rejected, and checks the Brier arithmetic against a hand-computed series.

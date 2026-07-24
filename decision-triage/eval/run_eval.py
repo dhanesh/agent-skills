@@ -141,6 +141,13 @@ def move_decision_above_criteria(record):
     return "\n".join(lines[:insert] + block + lines[insert:])
 
 
+def duplicate_decision_above_criteria(record):
+    """The laundering variant: verdict up front, heading repeated later."""
+    lines = record.split("\n")
+    insert = lines.index("## Criteria")
+    return "\n".join(lines[:insert] + ["## Decision", "Already decided.", ""] + lines[insert:])
+
+
 def main():
     g = Grader()
     workdir = tempfile.mkdtemp(prefix="decision-triage-eval-")
@@ -174,6 +181,7 @@ def main():
         # --- Negative fixtures: each defect must be rejected ------------------
         negatives = [
             ("rejects-verdict-before-criteria", move_decision_above_criteria(full), "before"),
+            ("rejects-duplicate-decision-heading", duplicate_decision_above_criteria(full), "duplicate"),
             ("rejects-incomplete-score-matrix", full.replace("- C2: O1=3 O2=5", "- C2: O1=3"), "incomplete"),
             ("rejects-prose-confidence", full.replace("70%", "high"), "must be a number"),
             ("rejects-review-date-not-after-decision", full.replace("2026-10-25", "2026-01-01"), "must fall after"),
