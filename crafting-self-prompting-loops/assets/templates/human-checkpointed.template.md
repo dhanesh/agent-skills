@@ -27,8 +27,13 @@ BACKSTOP_WALL_CLOCK:     <hard time limit, incl. approval-wait timeout>
 BACKSTOP_TOKEN_BUDGET:   <hard token cap>
 SAFE_STATE:              stopped   (timeout resolves to STOPPED, never proceed)
 
-STATE_CARRIED:   task_state + last_checkpoint_human_feedback/decision + notes  # LSC-4
-STATE_MECHANISM: structured state + recorded approval/block decisions         # LSC-4
+STATE_CARRIED:    task_state + last_checkpoint_human_feedback/decision + notes # LSC-4
+STATE_MECHANISM:  structured state + recorded approval/block decisions        # LSC-4
+STATE_SCHEMA:     {task: {id, status}, checkpoints: [{action,                 # LSC-4
+                   decision ∈ APPROVED|BLOCKED|PENDING, approver, at}]}
+STATE_VALIDATION: assert schema each round; a checkpoint whose decision is    # LSC-4
+                   not in the vocabulary is treated as PENDING, never as
+                   APPROVED — an unreadable decision must never read as consent
 
 PROGRESS_METRIC:       progress summary + diff/what-changed surfaced to human  # LSC-5
 NO_PROGRESS_DETECTION: <human at the checkpoint catches drift/premature stop>  # LSC-5
@@ -90,7 +95,11 @@ while True:
     result = act(plan.action)
     if not OUTPUT_VALIDATION(result): result = note_invalid(state)     # LSC-6
 
+    # TYPED LOOP BOUNDARY — validate before the next round; the fail-safe
+    # direction matters here: an unreadable decision degrades to PENDING.
     state = update(state, result, human_feedback)           # LSC-4
+    if not STATE_VALIDATION(state, STATE_SCHEMA):           # LSC-4
+        state = repair_or_stop(state, SAFE_STATE)           # repair | re-ask | halt
     if acceptance_bar_met(state) and final_checkpoint_approved(state): # LSC-2
         return result(state)
 
@@ -106,6 +115,7 @@ while True:
 | `STOP_CONDITION` / `STOP_SIGNAL` | Bar met AND final checkpoint approved | LSC-2 |
 | `BACKSTOP_*` / `SAFE_STATE` / `APPROVAL_TIMEOUT` | Hard cap; timeout → stopped, never proceed | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Task state + last human decision/notes | LSC-4 |
+| `STATE_SCHEMA` / `STATE_VALIDATION` | Checkpoint state typed; unreadable decision → PENDING | LSC-4 |
 | `PROGRESS_METRIC` | Progress + diff surfaced at the gate | LSC-5 |
 | `PRE_ACTION_CHECKS` / `OUTPUT_VALIDATION` | Automated validation before the gate (defense in depth) | LSC-6 |
 | `<data>…</data>` wrapping | Human input trusted; model/tool content DATA | LSC-7 |

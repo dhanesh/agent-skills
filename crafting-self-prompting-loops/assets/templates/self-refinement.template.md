@@ -28,8 +28,13 @@ BACKSTOP_TOKEN_BUDGET:   <hard token cap>
 BACKSTOP_WALL_CLOCK:     <hard time limit>
 SAFE_STATE:              stopped  (return BEST-of-N seen, not necessarily last)
 
-STATE_CARRIED:   prior_draft + critique_notes + best_so_far                   # LSC-4
-STATE_MECHANISM: structured object / scratchpad                               # LSC-4
+STATE_CARRIED:    prior_draft + critique_notes + best_so_far                  # LSC-4
+STATE_MECHANISM:  structured object / scratchpad                              # LSC-4
+STATE_SCHEMA:     {draft: str, critique: [{issue, severity, location}],       # LSC-4
+                   best_so_far: {draft, score}}
+STATE_VALIDATION: assert schema each round; a critique entry missing          # LSC-4
+                   issue/severity is DROPPED (repair) — never silently kept,
+                   since an unparseable critique cannot drive the next revision
 
 PROGRESS_METRIC:       rubric score this round vs prior round                  # LSC-5
 NO_PROGRESS_DETECTION: <margin M; if score gain < M or drafts oscillate, stop> # LSC-5
@@ -94,6 +99,12 @@ while True:
     if not OUTPUT_VALIDATION(revised):                      # LSC-6
         revised = draft                                     # reject-and-keep-prior
 
+    # TYPED LOOP BOUNDARY — the carried state is checked BEFORE it becomes the
+    # next round's premise; a malformed critique entry is dropped, not inherited.
+    state = update(state, revised, critique)                # LSC-4
+    if not STATE_VALIDATION(state, STATE_SCHEMA):           # LSC-4
+        state = repair_or_stop(state, SAFE_STATE)           # repair | re-ask | halt
+
     if better(revised, best_so_far): best_so_far = revised  # best-of-N tracking
 
     # EXPLORE vs EXPLOIT — when the evaluator flags a FUNDAMENTAL defect or
@@ -119,6 +130,7 @@ while True:
 | `STOP_CONDITION` / `STOP_SIGNAL` | Threshold met OR no improvement | LSC-2 |
 | `BACKSTOP_*` / `SAFE_STATE` | Hard round/token/time cap; return best-of-N | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Prior draft + critique + best-so-far | LSC-4 |
+| `STATE_SCHEMA` / `STATE_VALIDATION` | Typed critique/draft state, checked each round | LSC-4 |
 | `NO_PROGRESS_DETECTION` / margin `M` | When to stop because it's not improving | LSC-5 |
 | `REDRAFT_TRIGGER` / `MAX_REDRAFTS` (optional) | Explore branch: restart from scratch on a fundamental defect | LSC-10 |
 | `MEMORY_*` (optional) | Cross-run: distill the critique into a reusable rule, read it back next time | LSC-4 |

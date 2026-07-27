@@ -1,6 +1,6 @@
 # crafting-self-prompting-loops
 
-An Agent Skill that helps Claude **design and build sound self-prompting loops** — loops where a model iterates toward a goal across turns (self-refinement, autonomous task loops, multi-agent orchestration, human-checkpointed loops). Given a goal, it picks the right loop family, fills a 10-item spec, emits a runnable scaffold, and bakes in the safety properties loops fail without: a mandatory hard-stop backstop and the trusted/untrusted two-channel boundary.
+An Agent Skill that helps Claude **design and build sound self-prompting loops** — loops where a model iterates toward a goal across turns (self-refinement, autonomous task loops, multi-agent orchestration, human-checkpointed loops). Given a goal, it picks the right loop family, fills a 10-item spec, emits a runnable scaffold, and bakes in the safety properties loops fail without: a mandatory hard-stop backstop, the trusted/untrusted two-channel boundary, and a typed loop boundary that validates carried state before it becomes the next round's premise.
 
 > This README is for humans browsing the folder. The agent-facing instructions live in [`SKILL.md`](./SKILL.md) — that's what Claude reads when the skill triggers.
 

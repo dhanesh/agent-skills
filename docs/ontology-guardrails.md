@@ -66,12 +66,53 @@ bolt onto read-only report-producing skills (`bug-autopsy`, `feynman-walkthrough
 `security-posture-audit`), where a wrong sentence is reviewable prose, not state that
 compounds.
 
-## Candidate follow-ups (not yet done)
+## Follow-ups (shipped)
 
-- `crafting-self-prompting-loops`: add an "ontology/typed-state check at every loop boundary"
-  item to the loop-spec safety properties — validate loop state against a declared schema
-  before it feeds the next iteration.
-- `context-hygiene-kit`: a typed vocabulary for cache entry categories at the ledger's write
-  path (same pattern, smaller surface).
-- `okf-site-kit` / `knowledge-gardener`: validate OKF bundle `type`/metadata fields against
-  the OKF vocabulary at write/refresh time rather than degrading at render time.
+All three candidates were implemented. Two of them changed shape once the code was read —
+recorded here because the corrections are the substance, not bookkeeping.
+
+**1. `crafting-self-prompting-loops` — typed loop boundary (LSC-4).** As scoped. `LSC-6`'s
+`OUTPUT_VALIDATION` checks a single *observation* at its point of use; nothing checked the
+*state that compounds*, and `state = update(state, observation)` fed the next iteration
+unvalidated. Added `STATE_SCHEMA` + `STATE_VALIDATION` slots to LSC-4 across the spec, the
+canonical checklist, and all five family templates, each with a family-appropriate schema and
+violation response (*repair* / *re-ask* / *halt* — never "continue anyway"), plus the check in
+every loop body. New failure mode **6b, Malformed carried state**. Graded by a third eval
+property with two negative fixtures, one of which pins the load-bearing distinction: a schema
+**declared but never enforced** must not count as typed state. Scoped honestly — a genuinely
+unstructured loop writes `N/A — unstructured prior-output state` rather than inventing a
+schema nothing enforces.
+
+**2. `context-hygiene-kit` — corrected premise.** The candidate assumed the vocabulary was
+unenforced. It was already enforced at `Card.__post_init__`. The *real* defect was the
+opposite of missing validation — validation that was too brittle: `Card(**cd)` raised on any
+bad card, so **one** unknown kind or one field from a newer schema made the **entire** ledger
+unloadable. Behind the Stop hook's `… || true` that is a silent, permanent capture failure —
+every durable fact lost, no error surfaced, the exact rot the kit exists to prevent. Both
+modes reproduced as tests, then fixed by quarantining the bad card while the rest of the
+ledger loads (quarantine persisted, counted in `stats`, banner in the digest). Extension added
+on top (`kinds --add`, requiring a salience prior and a lossless flag).
+
+**3. OKF — corrected target *and* corrected premise.** The candidate named `okf-site-kit` /
+`knowledge-gardener`. Neither writes bundles: the first is a **consumer** whose tolerance of a
+missing/unknown `type` is *required* by the spec ("tolerate unknown type values", "degrade,
+don't fail"), the second is read-only. The actual writer for the whole trilogy is
+`feynman-walkthrough/assets/okf.py` (`bug-autopsy` delegates to its `pin`), and
+`write_concept()` wrote anything at all. The candidate also said "validate against the OKF
+vocabulary" — but OKF v0.1 defines `type` as "a short, producer-chosen string (no central
+registry)", so a closed type vocabulary **would itself violate the spec**. The shipped
+validation is therefore *structural, not a vocabulary*: presence and shape of `type` (never
+its value), serialisability, `tags`/`timestamp` shape, and source pins carrying exactly what
+the read side requires. A stricter first draft demanded a non-null `fingerprint` and broke
+external sources, which legitimately have none — caught by the existing test suite and
+corrected.
+
+The through-line: **validate at the write boundary of state that compounds, and let the
+validated thing be as open as its own spec demands.** Two of three follow-ups were wrong about
+*where* the boundary was, and one was wrong about *what* could legitimately be closed.
+
+### Still not done (deliberately)
+
+Read-only report-producing skills (`bug-autopsy`, `feynman-walkthrough`'s walkthrough half,
+`security-posture-audit`, `base-in-reality`) remain unguarded by design — a wrong sentence
+there is reviewable prose, not state that compounds.

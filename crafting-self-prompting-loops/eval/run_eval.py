@@ -4,17 +4,21 @@
 Prompt-only skill: the deliverable contract is its copy-and-adapt loop-spec
 templates. The eval replays the documented PARAMETERS.md examples through the
 repo's own dry-run gate (no residual {{TOKENS}}), then grades the replayed
-loop-spec artifacts for the two mandatory safety properties every family
-template must carry:
+loop-spec artifacts for the safety properties every family template must carry:
 
   1. the hard-stop backstop (LSC-3): harness-level BACKSTOP_* caps outside the
      model's reach, marked "BACKSTOP IS MANDATORY", safe state = stopped;
   2. the trusted/untrusted two-channel boundary (LSC-7): a TRUSTED CONTROL
-     CHANNEL header plus carried content wrapped in <data>...</data>.
+     CHANNEL header plus carried content wrapped in <data>...</data>;
+  3. the typed loop boundary (LSC-4): STATE_SCHEMA declares the shape of the
+     state that COMPOUNDS and STATE_VALIDATION checks it before it becomes the
+     next round's premise — and the check must appear in the loop body, not
+     only in the slot header.
 
 Negative fixtures: a doctored copy whose template needs a param that was
-removed from PARAMETERS.md must FAIL the replay, and loop-spec fixtures with
-either safety section stripped must be flagged by the safety grader.
+removed from PARAMETERS.md must FAIL the replay; loop-spec fixtures with any
+safety section stripped must be flagged; and a schema DECLARED but never
+enforced must not pass as typed state.
 
 Offline, deterministic, stdlib-only; all scratch under tempfile.mkdtemp().
 """
@@ -49,6 +53,13 @@ BOUNDARY_MARKERS = [
     "TRUSTED CONTROL CHANNEL",     # LSC-7 trusted channel header
     "<data>",                      # untrusted carried content wrapped as DATA
 ]
+# LSC-4 typed loop boundary: the state that COMPOUNDS is declared and checked
+# before it becomes the next round's premise (LSC-6 validates one observation at
+# its point of use — not the same check).
+STATE_TYPING_MARKERS = [
+    "STATE_SCHEMA",                # the declared shape of carried state
+    "STATE_VALIDATION",            # the boundary check + violation response
+]
 
 RESIDUAL_RE = re.compile(r"\{\{[A-Z][A-Z0-9_]*\}\}")
 
@@ -70,6 +81,14 @@ def grade_backstop(text):
 def grade_boundary(text):
     """Model-free grader: does it carry the trusted/untrusted two-channel boundary?"""
     missing = [m for m in BOUNDARY_MARKERS if m not in text]
+    return (not missing, missing)
+
+
+def grade_state_typing(text):
+    """Model-free grader: is the carried state declared AND checked at the loop
+    boundary? A schema slot with no enforcement is worse than none — it reads as
+    a guarantee and delivers nothing — so both markers are required."""
+    missing = [m for m in STATE_TYPING_MARKERS if m not in text]
     return (not missing, missing)
 
 
@@ -121,6 +140,19 @@ def main():
               artifacts and not bad_boundary,
               "5/5 templates" if not bad_boundary else f"missing in {bad_boundary}")
 
+        bad_typing = [n for n, t in artifacts.items() if not grade_state_typing(t)[0]]
+        check("every artifact types the loop boundary (LSC-4 STATE_SCHEMA + STATE_VALIDATION)",
+              artifacts and not bad_typing,
+              "5/5 templates" if not bad_typing else f"missing in {bad_typing}")
+
+        # The check must run where state COMPOUNDS, not merely be declared in the
+        # slot header — so the loop body has to reference it too.
+        no_enforcement = [n for n, t in artifacts.items()
+                          if t.count("STATE_VALIDATION") < 2]
+        check("the boundary check appears in the loop body, not just the slot header",
+              artifacts and not no_enforcement,
+              "5/5 templates" if not no_enforcement else f"declared-but-unenforced in {no_enforcement}")
+
         # ── Negative arm 1: required param removed → replay must FAIL ──────────
         # Doctored copy: the base-loop template now needs two substitution
         # params, but PARAMETERS.md documents only one — the other row has been
@@ -153,6 +185,20 @@ def main():
         ok, missing = grade_boundary(no_boundary)
         check("negative: grader flags a loop spec with the trusted/untrusted boundary stripped",
               base and not ok, f"missing markers: {missing}")
+
+        no_typing = "\n".join(
+            ln for ln in base.splitlines()
+            if "STATE_SCHEMA" not in ln and "STATE_VALIDATION" not in ln)
+        ok, missing = grade_state_typing(no_typing)
+        check("negative: grader flags a loop spec with the typed state boundary stripped",
+              base and not ok, f"missing markers: {missing}")
+
+        # A schema DECLARED but never enforced must not pass as typed state.
+        declared_only = "\n".join(
+            ln for ln in base.splitlines() if "STATE_VALIDATION" not in ln)
+        check("negative: a declared-but-unenforced schema is not counted as typed state",
+              base and not grade_state_typing(declared_only)[0]
+              and "STATE_SCHEMA" in declared_only)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
