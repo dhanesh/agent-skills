@@ -73,9 +73,78 @@ def _neutralize_fences(content: str) -> str:
     payload's "</data>" can no longer form a real closing fence."""
     return _DATA_FENCE_RE.sub(lambda m: f"&lt;{m.group(1)}data&gt;", content)
 
-KINDS = ("decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note")
+# ---- Card kind vocabulary (typed write boundary) ---------------------------
+# `kind` is a CLOSED, deliberately-extensible vocabulary, not free text: it drives
+# digest priority, lossless preservation, and the salience prior, so an unrecognised
+# kind is not a harmless label — it silently changes what survives compaction.
+# Validated at the write boundary (Card.__post_init__) with the allowed set named.
+#
+# Projects extend it deliberately via `.context/kinds.json` (next to ledger.json) or
+# `context_ledger.py kinds --add`. An extension MUST declare both knobs the core
+# kinds have — a salience `prior` and whether the kind is `lossless` — because a
+# kind with no prior and no compaction policy is exactly the silent-drift case this
+# vocabulary exists to prevent.
+CORE_KINDS = ("decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note")
+KINDS = CORE_KINDS                      # back-compat alias (CLI/tests import this)
 # Kinds that are LOSSLESS-preserved on compaction (rot-proof). Order = digest priority.
 LOSSLESS_KINDS = ("decision", "constraint", "open_question", "task_state", "file_ref")
+
+EXT_FILENAME = "kinds.json"
+_EXT_KINDS: dict[str, dict] = {}        # name -> {"prior": float, "lossless": bool}
+
+
+def active_kinds() -> tuple[str, ...]:
+    """Core vocabulary + any loaded project extensions."""
+    return CORE_KINDS + tuple(k for k in _EXT_KINDS if k not in CORE_KINDS)
+
+
+def lossless_kinds() -> tuple[str, ...]:
+    """Digest-priority order: core lossless kinds first, then lossless extensions."""
+    return LOSSLESS_KINDS + tuple(
+        k for k, spec in _EXT_KINDS.items()
+        if spec.get("lossless") and k not in LOSSLESS_KINDS)
+
+
+def load_kind_extensions(path: Path) -> dict:
+    """Load `kinds.json` from the ledger's directory. Tolerant by design: a malformed
+    file or entry is dropped, never fatal — a broken extension must not take the
+    curator (or the Stop hook that runs it) down with it."""
+    _EXT_KINDS.clear()
+    if not path or not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    for name, spec in (raw or {}).items():
+        if not isinstance(name, str) or not name or name in CORE_KINDS:
+            continue                     # never let an extension redefine a core kind
+        if not isinstance(spec, dict):
+            continue
+        try:
+            prior = float(spec["prior"])
+        except (KeyError, TypeError, ValueError):
+            continue                     # an extension without a prior is not usable
+        _EXT_KINDS[name] = {"prior": max(0.0, min(1.0, prior)),
+                            "lossless": bool(spec.get("lossless", False))}
+    return dict(_EXT_KINDS)
+
+
+def extend_kind(path: Path, name: str, *, prior: float, lossless: bool) -> dict:
+    """Deliberately add a project kind. Persists to `kinds.json` beside the ledger."""
+    if not name or name in CORE_KINDS:
+        raise ValueError(f"{name!r} is a core kind; pick a new name")
+    ext = {}
+    if path.exists():
+        try:
+            ext = json.loads(path.read_text()) or {}
+        except (OSError, json.JSONDecodeError, ValueError):
+            ext = {}
+    ext[name] = {"prior": max(0.0, min(1.0, float(prior))), "lossless": bool(lossless)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ext, indent=2))
+    load_kind_extensions(path)
+    return ext[name]
 
 _WORD = re.compile(r"[a-z0-9_./:-]+")
 
@@ -102,8 +171,11 @@ class Card:
     id: str = ""
 
     def __post_init__(self):
-        if self.kind not in KINDS:
-            raise ValueError(f"unknown kind {self.kind!r}; valid: {KINDS}")
+        if self.kind not in active_kinds():
+            raise ValueError(
+                f"unknown kind {self.kind!r}; valid: {active_kinds()}. "
+                f"To add a project kind deliberately: "
+                f"`context_ledger.py kinds --add {self.kind} --prior <0..1> [--lossless]`")
         if self.provenance not in (TRUSTED, UNTRUSTED):
             raise ValueError(f"provenance must be {TRUSTED} or {UNTRUSTED}")
         if not self.tokens:
@@ -135,6 +207,9 @@ class ContextLedger:
         self.cards: dict[str, Card] = {}
         self.clock: float = 0.0
         self.weights = {**self.DEFAULT_WEIGHTS, **(weights or {})}
+        # Cards that failed vocabulary/shape validation on load. Held aside (never
+        # dropped, never live) and surfaced in the digest + stats.
+        self.quarantined: list[dict] = []
 
     # ---- ingest: O(1) amortized -------------------------------------------
     def ingest(self, kind: str, content: str, *, provenance: str = TRUSTED,
@@ -162,7 +237,8 @@ class ContextLedger:
         ctoks = _tokenize(card.content)
         union = len(ctoks | anchor_tokens) or 1
         task_sim = len(ctoks & anchor_tokens) / union          # Jaccard, O(len)
-        kind_prior = self.KIND_PRIOR.get(card.kind, 0.4)
+        kind_prior = self.KIND_PRIOR.get(
+            card.kind, _EXT_KINDS.get(card.kind, {}).get("prior", 0.4))
         size_pen = card.tokens / 100.0
         return (w["recency"] * recency
                 + w["frequency"] * frequency
@@ -246,13 +322,22 @@ class ContextLedger:
                 "did not fit and were spilled. Raise the human gate or grow the budget."
             )
             lines.append("")
+        if self.quarantined:
+            # Never silent: a card the vocabulary rejected is reported, not dropped.
+            lines.append(
+                f"> ⚠️ QUARANTINED: {len(self.quarantined)} ledger card(s) failed "
+                "kind/shape validation and were held aside. Run "
+                "`context_ledger.py kinds` to see the vocabulary, or "
+                "`kinds --add <name> --prior <0..1>` to declare a project kind."
+            )
+            lines.append("")
         lines += [
             "> Loaded at session start INSTEAD of raw history. "
             "Items below are preserved verbatim (lossless) to prevent rot.",
             "",
         ]
         # Lossless, high-priority kinds first and verbatim.
-        for kind in LOSSLESS_KINDS:
+        for kind in lossless_kinds():
             cards = sorted(by_kind.get(kind, []), key=lambda c: -c.access_count)
             if not cards:
                 continue
@@ -271,7 +356,7 @@ class ContextLedger:
                     lines.append(f"- {c.content}{pin}")
             lines.append("")
         # Remaining kinds compacted (lossy is acceptable here — low salience).
-        misc = [c for k, cs in by_kind.items() if k not in LOSSLESS_KINDS for c in cs]
+        misc = [c for k, cs in by_kind.items() if k not in lossless_kinds() for c in cs]
         if misc:
             lines.append("## Other context (compactable)")
             for c in sorted(misc, key=lambda c: -c.access_count)[:50]:
@@ -293,21 +378,47 @@ class ContextLedger:
             cards = cards[:cold_cap]
             self.cards = {c.id: c for c in cards}
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
+        payload = {
             "clock": self.clock,
             "weights": self.weights,
             "cards": [asdict(c) for c in self.cards.values()],
-        }, indent=2))
+        }
+        if self.quarantined:
+            # Preserved, not destroyed — a rejected card stays inspectable so the
+            # user can fix the kind (or declare it) rather than lose the content.
+            payload["quarantined"] = self.quarantined
+        path.write_text(json.dumps(payload, indent=2))
 
     @classmethod
     def load(cls, path: Path) -> "ContextLedger":
         if not path.exists():
             return cls()
         data = json.loads(path.read_text())
+        # Project kind extensions live beside the ledger; load them BEFORE building
+        # cards so an extended kind validates instead of being quarantined.
+        load_kind_extensions(path.parent / EXT_FILENAME)
         led = cls(weights=data.get("weights"))
         led.clock = data.get("clock", 0.0)
+        led.quarantined = list(data.get("quarantined", []))
+        fields = {f for f in Card.__dataclass_fields__}
         for cd in data.get("cards", []):
-            c = Card(**cd)
+            # QUARANTINE, don't explode. A single card with an unknown kind or a
+            # field from a newer schema must not make the WHOLE ledger unreadable —
+            # that failure is silent and permanent behind the Stop hook's `|| true`,
+            # which would lose every durable fact this kit exists to protect.
+            if not isinstance(cd, dict):
+                led.quarantined.append({"card": cd, "reason": "not an object"})
+                continue
+            unknown = sorted(set(cd) - fields)
+            try:
+                c = Card(**{k: v for k, v in cd.items() if k in fields})
+            except (ValueError, TypeError) as e:
+                led.quarantined.append({"card": cd, "reason": str(e)})
+                continue
+            if unknown:
+                # Forward-compatible: the card is kept, the dropped keys are recorded.
+                led.quarantined.append(
+                    {"card": {"id": c.id}, "reason": f"dropped unknown field(s): {unknown}"})
             led.cards[c.id] = c
         return led
 
@@ -319,7 +430,9 @@ def _main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pi = sub.add_parser("ingest", help="add a card")
-    pi.add_argument("kind", choices=KINDS)
+    # NOT argparse `choices=`: the active vocabulary depends on --store (project
+    # extensions load from beside the ledger), which isn't known until after parse.
+    pi.add_argument("kind", help=f"card kind (core: {', '.join(CORE_KINDS)})")
     pi.add_argument("content")
     pi.add_argument("--provenance", default=TRUSTED, choices=[TRUSTED, UNTRUSTED])
     pi.add_argument("--pinned", action="store_true")
@@ -332,16 +445,46 @@ def _main(argv: list[str]) -> int:
 
     ps = sub.add_parser("stats", help="print ledger stats")
 
-    for sp in (pi, pc, ps):
+    pk = sub.add_parser("kinds", help="list the card-kind vocabulary, or extend it")
+    pk.add_argument("--add", help="project kind to declare")
+    pk.add_argument("--prior", type=float, help="salience prior in [0,1] (required with --add)")
+    pk.add_argument("--lossless", action="store_true",
+                    help="preserve this kind verbatim on compaction")
+
+    for sp in (pi, pc, ps, pk):
         sp.add_argument("--store", default=".context/ledger.json")
 
     args = p.parse_args(argv)
     store = Path(args.store)
+    ext_path = store.parent / EXT_FILENAME
+
+    if args.cmd == "kinds":
+        if args.add:
+            if args.prior is None:
+                print("kinds --add requires --prior (0..1): a kind with no salience "
+                      "prior cannot be scored", file=sys.stderr)
+                return 2
+            spec = extend_kind(ext_path, args.add, prior=args.prior, lossless=args.lossless)
+            print(f"declared kind {args.add!r} (prior={spec['prior']}, "
+                  f"lossless={spec['lossless']}) -> {ext_path}")
+        else:
+            load_kind_extensions(ext_path)
+            print(json.dumps({
+                "core": list(CORE_KINDS),
+                "extensions": _EXT_KINDS,
+                "lossless": list(lossless_kinds()),
+            }, indent=2))
+        return 0
+
     led = ContextLedger.load(store)
 
     if args.cmd == "ingest":
-        c = led.ingest(args.kind, args.content,
-                       provenance=args.provenance, pinned=args.pinned)
+        try:
+            c = led.ingest(args.kind, args.content,
+                           provenance=args.provenance, pinned=args.pinned)
+        except ValueError as e:
+            print(str(e), file=sys.stderr)     # names the vocabulary; self-correctable
+            return 2
         led.persist(store)
         print(f"ingested {c.id} ({c.kind}, {c.tokens} tok)")
     elif args.cmd == "curate":
@@ -364,6 +507,7 @@ def _main(argv: list[str]) -> int:
             "clock": led.clock,
             "pinned": sum(c.pinned for c in led.cards.values()),
             "tokens": sum(c.tokens for c in led.cards.values()),
+            "quarantined": len(led.quarantined),
         }, indent=2))
     return 0
 

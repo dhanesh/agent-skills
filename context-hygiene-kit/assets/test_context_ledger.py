@@ -226,5 +226,118 @@ class HarvestCapture(unittest.TestCase):
         return Path(fh.name)
 
 
+class KindVocabulary(unittest.TestCase):
+    """The typed write boundary: `kind` is a closed, deliberately-extensible
+    vocabulary, and a violation is quarantined — never fatal, never silent."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        import context_ledger as CL
+        CL._EXT_KINDS.clear()                      # isolate: no leakage across tests
+        self.dir = Path(tempfile.mkdtemp())
+        self.store = self.dir / "ledger.json"
+
+    def _write_raw(self, mutate):
+        """Persist a good 2-card ledger, then mutate the raw JSON on disk."""
+        import json
+        led = ContextLedger()
+        led.ingest("decision", "keep bcrypt for hashing")
+        led.ingest("constraint", "no md5 anywhere")
+        led.persist(self.store)
+        data = json.loads(self.store.read_text())
+        mutate(data)
+        self.store.write_text(json.dumps(data))
+
+    def test_unknown_kind_rejected_at_write_with_vocabulary_named(self):
+        led = ContextLedger()
+        with self.assertRaises(ValueError) as cm:
+            led.ingest("risk", "vendor lock-in")
+        self.assertIn("decision", str(cm.exception))   # the error teaches the vocabulary
+        self.assertEqual(len(led.cards), 0)
+
+    def test_one_bad_card_does_not_destroy_the_whole_ledger(self):
+        # The bug this closes: Card(**cd) raised on ANY bad card, so load() failed
+        # entirely. Behind the Stop hook's `|| true` that is a SILENT, PERMANENT
+        # capture failure — every durable fact lost, forever, with no error surfaced.
+        self._write_raw(lambda d: d["cards"][0].update(kind="risk"))
+        led = ContextLedger.load(self.store)
+        self.assertEqual(len(led.cards), 1, "the good card must survive")
+        self.assertEqual(len(led.quarantined), 1)
+        self.assertIn("risk", led.quarantined[0]["reason"])
+
+    def test_unknown_field_from_a_newer_schema_is_tolerated(self):
+        self._write_raw(lambda d: d["cards"][0].update(source_agent="planner"))
+        led = ContextLedger.load(self.store)
+        self.assertEqual(len(led.cards), 2, "forward-compatible: card kept, key dropped")
+        self.assertTrue(any("source_agent" in q["reason"] for q in led.quarantined))
+
+    def test_quarantined_cards_are_preserved_not_destroyed(self):
+        self._write_raw(lambda d: d["cards"][0].update(kind="risk"))
+        led = ContextLedger.load(self.store)
+        led.persist(self.store)
+        again = ContextLedger.load(self.store)
+        self.assertEqual(len(again.quarantined), 1, "rejected content stays inspectable")
+
+    def test_quarantine_is_surfaced_in_the_digest(self):
+        self._write_raw(lambda d: d["cards"][0].update(kind="risk"))
+        led = ContextLedger.load(self.store)
+        self.assertIn("QUARANTINED", led.to_digest(4000, "hashing"))
+
+    def test_declared_project_kind_validates_and_scores(self):
+        import context_ledger as CL
+        ext = self.dir / CL.EXT_FILENAME
+        CL.extend_kind(ext, "risk", prior=0.95, lossless=True)
+        led = ContextLedger()
+        c = led.ingest("risk", "vendor lock-in on the billing SDK")
+        self.assertEqual(c.kind, "risk")
+        self.assertIn("risk", CL.lossless_kinds())        # honored by the digest
+        self.assertIn("## Risk", led.to_digest(4000, "vendor billing"))
+        # and it survives a round-trip through the store
+        led.persist(self.store)
+        CL._EXT_KINDS.clear()
+        self.assertEqual(len(ContextLedger.load(self.store).cards), 1)
+
+    def test_extension_cannot_redefine_a_core_kind(self):
+        import context_ledger as CL
+        with self.assertRaises(ValueError):
+            CL.extend_kind(self.dir / CL.EXT_FILENAME, "decision", prior=0.1, lossless=False)
+
+    def test_malformed_extension_file_never_breaks_the_curator(self):
+        import context_ledger as CL
+        ext = self.dir / CL.EXT_FILENAME
+        ext.write_text("{not json")
+        self.assertEqual(CL.load_kind_extensions(ext), {})
+        led = ContextLedger()
+        self.assertTrue(led.ingest("decision", "core vocabulary still works"))
+        # an entry missing the mandatory `prior` is dropped, the rest of the file loads
+        ext.write_text('{"risk": {"lossless": true}, "hazard": {"prior": 0.7}}')
+        loaded = CL.load_kind_extensions(ext)
+        self.assertEqual(sorted(loaded), ["hazard"])
+
+    def test_cli_kinds_lists_and_extends(self):
+        import context_ledger as CL
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = CL._main(["kinds", "--store", str(self.store)])
+        self.assertEqual(rc, 0)
+        self.assertIn("decision", buf.getvalue())
+        with redirect_stdout(io.StringIO()):
+            rc = CL._main(["kinds", "--add", "risk", "--prior", "0.9",
+                           "--store", str(self.store)])
+        self.assertEqual(rc, 0)
+        with redirect_stdout(io.StringIO()):
+            rc = CL._main(["ingest", "risk", "vendor lock-in", "--store", str(self.store)])
+        self.assertEqual(rc, 0, "a declared kind must now ingest cleanly")
+
+    def test_cli_rejects_undeclared_kind_and_a_prior_less_add(self):
+        import context_ledger as CL
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                CL._main(["ingest", "risk", "x", "--store", str(self.store)]), 2)
+            self.assertEqual(
+                CL._main(["kinds", "--add", "risk", "--store", str(self.store)]), 2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
