@@ -9,7 +9,9 @@ description: >-
   constraints with TWO confidence axes (observed vs normative), validation status, and
   PROV-style evidence. Load-bearing rule: code observation is NOT ground truth — only oracle
   evidence (tests/CI/docs/human) raises normative confidence, flagging
-  observed-but-unverified. Zero-config capture via four hooks (PreToolUse pre-edit summaries;
+  observed-but-unverified. Every triple is checked against a predicate ontology (RDFS-style
+  domain/range) before insert — hallucinated verbs and impossible pairings are rejected, not
+  stored. Zero-config capture via four hooks (PreToolUse pre-edit summaries;
   UNIVERSAL PostToolUse observing every tool call; Stop/SessionStart consolidate + inject
   digest, auto-bootstrap); invoke ONCE; hooks run automatically. Not a linter, LSP server, RAG
   vector store, or model-driven fact extractor.
@@ -18,8 +20,8 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 x-spec-version: 1.0
 metadata:
   author: dhanesh
-  version: "1.0.1"
-  tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions"
+  version: "1.1.0"
+  tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 
 # world-model-ledger
@@ -74,7 +76,7 @@ scripts/install.sh --seed                 # install AND seed the repo in one go
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 79-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 108-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -160,13 +162,19 @@ normative correctness improves over time. The loop is detailed in
 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.
+5. **Every triple is ontology-checked before it enters the ledger.** Predicates are a closed,
+   deliberately-extensible vocabulary with RDFS-style domain/range per verb — a hallucinated
+   verb or a semantically impossible pairing (a referent that `imports` a file) is rejected
+   with the allowed set named, never silently stored. Markers that violate it are skipped
+   (hooks never break); CLI writes get a structured, self-correctable error. Extend with
+   `wm ontology --add`, never as a side effect of a marker. See `references/ontology.md`.
 
 Prefer these defaults; when a situation genuinely needs an exception, surface it to the user
 rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (79 tests — the two-axis
+Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -178,6 +186,8 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `references/confidence-model.md` — the two-axis epistemics and the derivation formulas.
 - `references/schema.md` — the SQLite data model and query patterns.
 - `references/capture.md` — markers, the `wm` CLI, and the trust boundary.
+- `references/ontology.md` — the predicate vocabulary (domain/range guardrails), rejection
+  behavior, and how to extend it deliberately.
 - `references/contradiction-loop.md` — detect → propose → improve, and the constraint kinds.
 - `references/parameters.md` — every install/operate flag and `wm` command, and when to use each.
 - `references/interop.md` — running this skill alongside `context-hygiene-kit` (merge behavior, safe layouts, joint verification).
@@ -190,5 +200,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 79-test install gate.
+- `assets/test_world_model.py` — the 108-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.

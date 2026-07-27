@@ -13,6 +13,12 @@ model distinguish *"we saw this in the code"* from *"we verified this is correct
 flag what is merely observed-but-unverified, detect contradictions, propose located fixes, and
 raise its own correctness as the session does real work.
 
+The write boundary is **neuro-symbolic**: every triple is validated against a predicate
+**ontology** (a closed, deliberately-extensible vocabulary with RDFS-style domain/range per
+verb) before it enters the ledger, so a hallucinated verb or a semantically impossible pairing
+(a referent that `imports` a file) is rejected with the allowed set named — never silently
+stored. See [`references/ontology.md`](references/ontology.md).
+
 ## Install
 
 ```bash
@@ -28,7 +34,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 79-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 108-test gate.
 
 ## What gets installed
 
@@ -72,7 +78,9 @@ cat .world-model/digest.md          # the current digest
 ## How it's built
 
 Grounded in prior art — Google Knowledge Vault's observed-vs-truth split, the test-oracle
-problem, W3C PROV, AGM/JTMS/ATMS belief revision, SHACL constraint validation, SCIP/Kythe
+problem, W3C PROV, AGM/JTMS/ATMS belief revision, SHACL constraint validation, RDFS
+domain/range typing (the ontology write guardrail — the neuro-symbolic pattern argued for in
+Coyle's "Why Agentic Systems Need Ontologies", AI Engineer 2026), SCIP/Kythe
 symbol models, and standard SQLite FTS5 / recursive-CTE patterns. The full design is in
 [`docs/superpowers/specs/2026-07-01-world-model-ledger-design.md`](../docs/superpowers/specs/2026-07-01-world-model-ledger-design.md),
 and each subsystem is documented under [`references/`](references/).

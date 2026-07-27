@@ -38,7 +38,8 @@ The operate actions above are thin wrappers over the CLI; you can also call it d
 | `build [path]` | Repo-wide language-aware seed (files + structural edges), observation-only, idempotent. |
 | `build --max-files N` | Cap files scanned; the surplus is logged, never silently dropped (default 5000). |
 | `build --prune` | Also soft-invalidate build-origin edges for vanished files (conservative; agent facts protected). |
-| `observe / validate / refute / map / constraint` | Record facts (see `references/capture.md`). |
+| `observe / validate / refute / map / constraint` | Record facts (see `references/capture.md`). Triples are ontology-checked before insert; a violation exits 2 with a structured error naming the allowed verbs (see `references/ontology.md`). |
+| `ontology [--add P --domain K,K --range K,K]` | List the predicate vocabulary, or deliberately extend it (persists to `ontology.json` next to the DB). |
 | `contradictions [--open] [--touching P]` · `resolve <id> --as …` | Review + resolve contradictions. |
 | `precall <path…>` · `query --touching P` | What the pre-call hook surfaces for a file/symbol. |
 | `exec --command "<cmd>" [--exit-code N]` | Observe an execution → runtime edges + verifier oracle. `--from-hook` reads the PostToolUse JSON from stdin (how the hook calls it); `--digest PATH` refreshes the digest. |
