@@ -528,5 +528,108 @@ class CliDiffGitTests(unittest.TestCase):
         self.assertNotIn("\tM\t", out)
 
 
+class ProducerContractTests(unittest.TestCase):
+    """OKF v0.1 splits duties by role: a CONSUMER must tolerate violations and
+    degrade; a PRODUCER must not create them. This module is the producer, so the
+    contract is enforced at the single write choke point — structurally, never as
+    a vocabulary (the spec says `type` is producer-chosen with no registry)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "explainer.md")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write(self, meta):
+        okf.write_concept(self.path, meta, "# Body\n")
+
+    def test_missing_type_is_refused_at_write(self):
+        # okf-site-kit renders this as a generic Concept with a WARN (correct
+        # CONSUMER behaviour). The producer must not emit it in the first place.
+        with self.assertRaises(okf.OkfSpecError) as cm:
+            self._write({"title": "No type here"})
+        self.assertIn("required `type`", str(cm.exception))
+        self.assertFalse(os.path.exists(self.path), "nothing written on refusal")
+
+    def test_any_producer_chosen_type_is_accepted(self):
+        # The spec forbids a central registry, so the VALUE is never constrained.
+        for ctype in ("Explainer", "FAQ", "Dataset", "wildly-bespoke-type"):
+            self._write({"type": ctype, "title": "T"})
+            meta, _ = okf.read_concept(self.path)
+            self.assertEqual(meta["type"], ctype)
+
+    def test_unserialisable_value_is_refused(self):
+        # A newline ends the frontmatter line and a bare '---' closes the block —
+        # either silently truncates the file for EVERY downstream consumer.
+        with self.assertRaises(okf.OkfSpecError):
+            self._write({"type": "Explainer", "title": "line one\nline two"})
+        with self.assertRaises(okf.OkfSpecError):
+            self._write({"type": "Explainer", "description": "---"})
+
+    def test_malformed_tags_are_refused(self):
+        with self.assertRaises(okf.OkfSpecError):
+            self._write({"type": "Explainer", "tags": "not-a-list"})
+        with self.assertRaises(okf.OkfSpecError):
+            # this subset serialises as `[a, b]`, so an embedded comma splits it
+            self._write({"type": "Explainer", "tags": ["a,b"]})
+        self._write({"type": "Explainer", "tags": ["walkthrough", "reference"]})
+
+    def test_source_pins_need_exactly_what_drift_checks_need(self):
+        # Write-side refusal must match the read-side contract in
+        # _read_pinned_sources: `type` + `locator`.
+        with self.assertRaises(okf.OkfSpecError) as cm:
+            self._write({"type": "Explainer",
+                         "sources": [{"type": "file"}]})       # no locator
+        self.assertIn("locator", str(cm.exception))
+        # ...and a null fingerprint stays LEGAL: `external` sources have none.
+        self._write({"type": "Explainer",
+                     "sources": [{"type": "external", "locator": "https://x.test",
+                                  "fingerprint": None, "pinned": "2026-01-01"}]})
+        meta, _ = okf.read_concept(self.path)
+        self.assertIsNone(meta["sources"][0]["fingerprint"])
+
+    def test_bad_timestamp_is_refused(self):
+        with self.assertRaises(okf.OkfSpecError):
+            self._write({"type": "Explainer", "timestamp": "last Tuesday"})
+        self._write({"type": "Explainer", "timestamp": "2026-07-27T00:00:00Z"})
+
+    def test_partially_parsed_concept_is_never_written_back(self):
+        # `pin` round-trips read -> mutate -> write. If a hand-edit left the
+        # frontmatter half-readable, re-writing it would persist the corruption.
+        with self.assertRaises(okf.OkfSpecError) as cm:
+            self._write({"type": "Explainer", "_okf_parse_error": "truncated"})
+        self.assertIn("partially-parsed", str(cm.exception))
+
+    def test_pin_refuses_to_rewrite_a_hand_broken_explainer(self):
+        root = os.path.join(self.dir, "bundle")
+        src = os.path.join(self.dir, "src.txt")
+        with open(src, "w") as f:
+            f.write("hello\n")
+        subject_dir = okf.init_okf(root, "Widget", [src], today=dt.date(2026, 1, 1))
+        exp = os.path.join(subject_dir, okf.EXPLAINER)
+        text = open(exp).read().replace("type: Explainer\n", "")   # hand-break it
+        with open(exp, "w") as f:
+            f.write(text)
+        with self.assertRaises(ValueError):        # corrupt-pin guard or spec error
+            okf.pin_okf(root, subject_dir, today=dt.date(2026, 1, 2))
+
+    def test_validate_false_is_an_explicit_escape_hatch(self):
+        okf.write_concept(self.path, {"title": "fixture"}, "body\n", validate=False)
+        self.assertTrue(os.path.exists(self.path))
+        self.assertEqual(okf.validate_concept_meta({"title": "fixture"}) != [], True)
+
+    def test_everything_this_module_writes_is_valid(self):
+        root = os.path.join(self.dir, "bundle")
+        src = os.path.join(self.dir, "src.txt")
+        with open(src, "w") as f:
+            f.write("hello\n")
+        subject_dir = okf.init_okf(root, "Widget Internals", [src],
+                                   today=dt.date(2026, 1, 1))
+        for name in (okf.EXPLAINER, okf.FAQ):
+            meta, _ = okf.read_concept(os.path.join(subject_dir, name))
+            self.assertEqual(okf.validate_concept_meta(meta, name), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
