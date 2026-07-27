@@ -85,4 +85,19 @@ When [`references/claude-code-primitives.md`](./references/claude-code-primitive
 | Regression assertions | 6/6 | 6/6 |
 | Generation tokens (3 cases) | ≈188k | ≈192k |
 
+### Delta eval — typed loop boundary, LSC-4 (July 2026)
+
+When `STATE_SCHEMA` / `STATE_VALIDATION` were added to LSC-4, the change was A/B'd the same
+way, across **two model tiers**: 3 loop-shaped requests × 2 blinded variants × {Opus 5,
+Haiku 4.5}, fresh-context judges, 3 delta + 2 regression assertions. Both tiers scored
+identically — **13/15 → 15/15, zero regressions**. Full record:
+[`docs/crafting-self-prompting-loops/2026-07-27-typed-state-model-eval.md`](../docs/crafting-self-prompting-loops/2026-07-27-typed-state-model-eval.md).
+
+The honest shape of that win: on the multi-agent and self-refinement requests the arms **tied
+at 5/5** — capable models already produce typed inter-round state unprompted. The entire delta
+sits in the **unattended overnight loop**, where both baselines validated a tool result at its
+point of use but left the state that compounds (`state.json`) unchecked. A prediction that
+*failed*: the Haiku arm was added expecting a wider gap on a smaller model, and did not
+replicate — the value tracks the loop family, not model capability.
+
 The one before-variant failure was exactly the targeted gap: on a "keep working until tests pass" request it built a sound Stop-hook loop but never surfaced native `/goal`; the after-variant presented `/goal` first-class with its two caveats (transcript-only evaluator → the condition must show the check; the turn clause is a soft stop → real caps behind it). Caveats: n=1 per cell, single judge per output — a smoke test, not a benchmark; and the before-variant isn't knowledge-free (the agent environment exposes some primitives), which sharpens rather than weakens the finding — ambient knowledge alone did *not* surface `/goal`.
