@@ -5,7 +5,7 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -84,6 +84,14 @@ playbook:
 		printf '\n=== %s ===\n' "$$d"; \
 		sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) || rc=1; \
 	done; exit $$rc
+
+# Behavioural A/B against a baseline ref: does a change make skills BEHAVE better,
+# or merely still pass the gates? Deliberately NOT part of `make gate` — it needs a
+# baseline commit present in the clone, and SKIPs cleanly when that is unavailable.
+#   make ab-validate                 # against the default baseline in the script
+#   make ab-validate BASE=<git-ref>  # against any other ref
+ab-validate: clean
+	@python3 scripts/ab-validate.py $(BASE)
 
 # Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill:
