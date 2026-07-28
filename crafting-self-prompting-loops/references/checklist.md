@@ -64,13 +64,17 @@ SAFE_STATE: stopped
 
 **In plain words:** Information from one round is carried forward so the next round knows what already happened.
 
-**Why it matters:** Without explicit state-passing each iteration starts blind, so the loop cannot build on prior work or detect repetition.
+**Why it matters:** Without explicit state-passing each iteration starts blind, so the loop cannot build on prior work or detect repetition. And because the state is what *compounds*, it is where a plausible-but-impossible value does the most damage: declare its shape and check it at the boundary, so a malformed state is caught in the round that produced it rather than becoming the next round's premise. (LSC-6 validates a single observation at its point of use; that is not the same check.)
 
 **Slot:**
 ```
 STATE_CARRIED: <what information passes between iterations>
 STATE_MECHANISM: <scratchpad | structured state object | prior output | other>
+STATE_SCHEMA: <declared shape/type of the carried state, or "N/A — unstructured prior-output state">
+STATE_VALIDATION: <how state is checked against STATE_SCHEMA at the boundary, and what happens on violation>
 ```
+
+**On violation, pick one and say so — never "continue anyway":** *repair* (reject the field, keep the last valid value), *re-ask* (feed the validation error back as data so the next round self-corrects), or *halt* (stop into SAFE_STATE). A declared-but-unenforced schema is worse than none — it reads as a guarantee and delivers nothing.
 
 **Across families:** (a) prior draft + critique; (b) task progress + intermediate results; (c) shared message bus / blackboard between agents; (d) state plus human feedback from the last checkpoint.
 

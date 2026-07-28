@@ -34,6 +34,7 @@ import argparse
 import datetime as dt
 import hashlib
 import os
+import re
 import subprocess
 import sys
 
@@ -174,7 +175,115 @@ def read_concept(path):
         return parse_frontmatter(f.read())
 
 
-def write_concept(path, meta, body):
+# ── Producer-side OKF conformance (validated at the WRITE boundary) ──────────
+#
+# OKF v0.1 splits its rules by role: a CONSUMER "MUST tolerate" missing/unknown
+# fields and "degrade, don't fail" (which is why okf-site-kit renders a
+# `type`-less concept as a generic Concept with a WARN). A PRODUCER has the
+# opposite duty — it must not CREATE a bundle that violates the spec. This
+# module is the producer, so the contract is enforced here, at the single write
+# choke point, instead of surfacing later as a renderer warning (or never, if
+# the bundle is never rendered).
+#
+# Deliberately STRUCTURAL, not a vocabulary: the spec says `type` is "a short,
+# producer-chosen string (no central registry)", so its VALUE is never
+# constrained — only its presence and shape. Imposing a closed type vocabulary
+# here would itself violate OKF.
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})?)?$")
+# Exactly what `_read_pinned_sources` requires to run a drift check — so the write
+# side refuses precisely what the read side would later reject. NOT `fingerprint`:
+# that is legitimately null for `external` sources (a URL has no local fingerprint).
+_PIN_KEYS = ("type", "locator")
+
+
+class OkfSpecError(ValueError):
+    """A concept write would have produced a spec-violating or unparseable OKF
+    file. The message lists every problem so the caller can fix them in one pass."""
+
+
+def _unserializable(value):
+    """True if a scalar cannot survive this module's restricted frontmatter
+    round-trip — a newline ends the key/value line, and a bare '---' would close
+    the frontmatter block early, silently truncating every downstream parse."""
+    if value is None or isinstance(value, (int, float, bool)):
+        return False
+    text = str(value)
+    return "\n" in text or "\r" in text or text.strip() == "---"
+
+
+def validate_concept_meta(meta, rel=None):
+    """Return a list of producer-contract problems with `meta` (empty == valid)."""
+    where = " in %s" % rel if rel else ""
+    problems = []
+    if not isinstance(meta, dict):
+        return ["frontmatter must be a mapping%s" % where]
+
+    # Spec: `type` is REQUIRED. The value is producer-chosen and never checked.
+    ctype = meta.get("type")
+    if ctype is None or (isinstance(ctype, str) and not ctype.strip()):
+        problems.append(
+            "missing required `type`%s — OKF v0.1 requires it on every concept "
+            "(any short producer-chosen string, e.g. 'Explainer')" % where)
+    elif not isinstance(ctype, str):
+        problems.append("`type` must be a string%s, got %s"
+                        % (where, type(ctype).__name__))
+
+    # The parser sets this when it could only partially read a file. Writing it
+    # back would persist a half-understood round-trip as if it were canonical.
+    if "_okf_parse_error" in meta:
+        problems.append(
+            "refusing to write back a partially-parsed concept%s: fix the "
+            "frontmatter by hand, then re-run" % where)
+
+    for key, value in meta.items():
+        if not isinstance(key, str) or not key.strip() or _unserializable(key):
+            problems.append("unusable frontmatter key %r%s" % (key, where))
+            continue
+        if key == "tags":
+            if not isinstance(value, list) or any(
+                    not isinstance(t, str) or not t.strip() or "," in t
+                    for t in value):
+                problems.append(
+                    "`tags` must be a list of comma-free strings%s (this "
+                    "frontmatter subset serialises them as `[a, b]`)" % where)
+        elif key == "sources":
+            # Load-bearing: knowledge-gardener reads these pins to detect drift.
+            # A malformed pin silently disables drift detection for the subject.
+            if not isinstance(value, list):
+                problems.append("`sources` must be a list of pins%s" % where)
+            else:
+                for i, pin in enumerate(value):
+                    if not isinstance(pin, dict):
+                        problems.append("source pin %d is not a mapping%s" % (i, where))
+                        continue
+                    missing = [k for k in _PIN_KEYS
+                               if not str(pin.get(k) or "").strip()]
+                    if missing:
+                        problems.append("source pin %d missing %s%s"
+                                        % (i, "/".join(missing), where))
+        elif key == "timestamp":
+            if not isinstance(value, str) or not _ISO_DATE_RE.match(value.strip()):
+                problems.append("`timestamp` must be ISO 8601%s, got %r" % (where, value))
+        elif isinstance(value, list):
+            if any(_unserializable(v) for v in value if not isinstance(v, dict)):
+                problems.append("`%s` has an unserialisable entry%s" % (key, where))
+        elif _unserializable(value):
+            problems.append(
+                "`%s` value cannot round-trip%s (contains a newline or a bare "
+                "'---', which would truncate the frontmatter)" % (key, where))
+    return problems
+
+
+def write_concept(path, meta, body, validate=True):
+    """Write a concept file. Validates the PRODUCER contract first (see
+    `validate_concept_meta`); pass `validate=False` only to write a fixture
+    deliberately, never to silence a real problem."""
+    if validate:
+        problems = validate_concept_meta(meta, os.path.basename(path))
+        if problems:
+            raise OkfSpecError(
+                "refusing to write a spec-violating OKF concept:\n  - "
+                + "\n  - ".join(problems))
     with open(path, "w", encoding="utf-8") as f:
         f.write(format_frontmatter(meta) + "\n" + body)
 

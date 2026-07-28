@@ -20,6 +20,17 @@
     "cards": {
       "type": "array",
       "items": { "$ref": "#/$defs/card" }
+    },
+    "quarantined": {
+      "type": "array",
+      "description": "Cards that failed kind/shape validation on load. Held aside (never live, never destroyed) and surfaced in the digest; fix the kind or declare it via `kinds --add` to restore them.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "card": { "description": "The rejected card as found on disk." },
+          "reason": { "type": "string" }
+        }
+      }
     }
   },
   "$defs": {
@@ -30,8 +41,8 @@
         "id": { "type": "string", "description": "sha1(kind+normalized content)[:16] — stable identity for dedupe/upsert." },
         "kind": {
           "type": "string",
-          "enum": ["decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note"],
-          "description": "decision/constraint/open_question/task_state/file_ref are LOSSLESS-preserved on compaction."
+          "description": "Closed, deliberately-extensible vocabulary validated at the write boundary. Core kinds are listed below; a project may declare additional kinds (each with a salience prior and a lossless flag) in `.context/kinds.json`, so this is not an `enum`. decision/constraint/open_question/task_state/file_ref are LOSSLESS-preserved on compaction.",
+          "examples": ["decision", "constraint", "fact", "file_ref", "task_state", "open_question", "note"]
         },
         "content": { "type": "string" },
         "provenance": {

@@ -32,8 +32,37 @@ make test                       # just the unit suites
 make eval                       # just the outcome evals (docs/eval-standard.md)
 make frontmatter                # just the metadata-standard check
 make playbook PLAYBOOK_FLAGS=--strict   # promote the two advisory checks to hard failures
+make ab-validate [BASE=<ref>]   # behavioural A/B vs a baseline commit (see below)
 make list-skills
 ```
+
+## Proving a change is an *improvement*: `make ab-validate`
+
+`make gate` proves the tree is self-consistent. It cannot prove a change made anything
+**better** — a green gate is equally consistent with a no-op. `scripts/ab-validate.py`
+closes that: it checks a baseline ref into a temp worktree and runs identical fixtures
+through both trees, classifying each dimension as **IMPROVED** (a claimed delta that
+actually moved), **HELD** (behaviour deliberately unchanged — a regression guard),
+**WORSE**, or **UNPROVEN** (a claimed delta whose numbers did *not* move). The last two
+both fail. `UNPROVEN` exists so a held guard can never be counted as a win, and so a
+"fix" that changes no measurement is caught rather than celebrated.
+
+It is **not** part of `make gate` (it needs a baseline commit in the clone, and SKIPs
+cleanly without one). Run it before merging a behavioural change, and **add rows when
+you add a guardrail** — a new rule with no A/B row is a claim nobody measured.
+
+Two honest limits, both worth respecting:
+
+- It measures *code* behaviour. For a **prompt-only** skill it can only check artifacts
+  (does the template carry the slot?), never whether guidance changes what a model
+  builds. That needs model runs, which per `docs/eval-standard.md` stay a **manual,
+  documented protocol** (gate evals are model-free) — recorded under
+  `docs/<skill>/<date>-*.md`. See
+  `docs/crafting-self-prompting-loops/2026-07-27-typed-state-model-eval.md` for the
+  shape: blinded arms, fresh-context judge, delta **and** regression assertions.
+- A fixture only proves what it actually exercises. When a probe shows no delta,
+  suspect the probe before crediting the change — one row in the corpus is labelled
+  `NOT a win` precisely because the baseline already handled that case.
 
 ## Anatomy of a skill
 

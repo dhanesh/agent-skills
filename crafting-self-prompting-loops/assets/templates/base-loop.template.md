@@ -26,8 +26,10 @@ BACKSTOP_WALL_CLOCK:     <hard time limit>
 SAFE_STATE:              stopped
 # ─────────────────────────────────────────────────────────────
 
-STATE_CARRIED:   <what information passes between iterations>              # LSC-4
-STATE_MECHANISM: <scratchpad | structured state object | prior output>    # LSC-4
+STATE_CARRIED:    <what information passes between iterations>             # LSC-4
+STATE_MECHANISM:  <scratchpad | structured state object | prior output>   # LSC-4
+STATE_SCHEMA:     <declared shape of carried state, or "N/A — unstructured"> # LSC-4
+STATE_VALIDATION: <check at the boundary; on violation repair|re-ask|halt> # LSC-4
 
 PROGRESS_METRIC:       <how progress toward GOAL is measured each round>  # LSC-5
 NO_PROGRESS_DETECTION: <how the loop detects it is NOT improving>         # LSC-5
@@ -75,8 +77,13 @@ while True:
     if not OUTPUT_VALIDATION(observation):                  # LSC-6
         observation = reject_keep_prior(state)
 
-    # 6. ASSESS PROGRESS
+    # 6. TYPED LOOP BOUNDARY — the state that compounds is validated BEFORE it
+    #    becomes the next round's premise. Deterministic check, every round.
     state = update(state, observation)                      # LSC-4
+    if not STATE_VALIDATION(state, STATE_SCHEMA):           # LSC-4
+        state = repair_or_stop(state, SAFE_STATE)           # repair | re-ask | halt
+
+    # 7. ASSESS PROGRESS
     if NO_PROGRESS_DETECTION(state):                        # LSC-5 / LSC-10
         escalate_or_stop(state)
 
@@ -92,6 +99,7 @@ while True:
 | `STOP_CONDITION` / `STOP_SIGNAL` | How the model self-terminates | LSC-2 |
 | `BACKSTOP_*` / `SAFE_STATE` | Hard infra cap; default state stopped | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` / `STATE_MECHANISM` | Data passed between rounds | LSC-4 |
+| `STATE_SCHEMA` / `STATE_VALIDATION` | Carried state typed + checked at the boundary | LSC-4 |
 | `PROGRESS_METRIC` / `NO_PROGRESS_DETECTION` | Per-round progress check | LSC-5 |
 | `PRE_ACTION_CHECKS` / `OUTPUT_VALIDATION` | Pre-action + output validation | LSC-6 |
 | `<data>…</data>` wrapping | Carried content marked as DATA | LSC-7 |

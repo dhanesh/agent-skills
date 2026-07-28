@@ -4,6 +4,7 @@
 If any of these fail, the skill's guarantees do not hold — fix before relying on it.
 Run:  python3 test_world_model.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -206,13 +207,129 @@ class TestRetrieval(Base):
     def test_query_partitions(self):
         v = self.wm.add_interaction("a", "calls", "b")
         self.wm.add_evidence("interaction", v, "test", "t::x", weight=0.9)
-        u = self.wm.add_interaction("a", "imports", "c")
+        u = self.wm.add_interaction("a", "uses", "c")
         self.wm.add_evidence("interaction", u, "file_loc", "a.py:1", weight=0.9)
         res = self.wm.query_touching("a")
         facts_validated = [x["fact"] for x in res["validated"]]
         facts_unverified = [x["fact"] for x in res["unverified"]]
         self.assertIn("a calls b", facts_validated)
-        self.assertIn("a imports c", facts_unverified)
+        self.assertIn("a uses c", facts_unverified)
+
+
+class TestOntologyGuardrails(Base):
+    """The neuro-symbolic write boundary: every triple is validated against the
+    predicate vocabulary (RDFS-style domain/range) BEFORE it enters the ledger."""
+
+    def test_unknown_predicate_rejected_with_vocabulary(self):
+        with self.assertRaises(W.OntologyError) as cm:
+            self.wm.add_interaction("a", "frobnicates", "b")
+        # the rejection teaches: it names allowed verbs so the caller can self-correct
+        self.assertIn("imports", str(cm.exception))
+        n = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
+        self.assertEqual(n, 0)   # nothing entered the ledger
+
+    def test_domain_violation_on_known_entity_rejected(self):
+        # a KNOWN referent cannot `imports` — semantically impossible triple
+        self.wm.upsert_entity("referent", "stripe/refunds-api")
+        with self.assertRaises(W.OntologyError):
+            self.wm.add_interaction("stripe/refunds-api", "imports", "auth.py")
+
+    def test_range_violation_on_known_entity_rejected(self):
+        # `calls` cannot target a KNOWN referent
+        self.wm.upsert_entity("referent", "postgres-db")
+        with self.assertRaises(W.OntologyError):
+            self.wm.add_interaction("hash_pw", "calls", "postgres-db")
+
+    def test_range_infers_stub_kind_rdfs_style(self):
+        # unknown object of `depends_on` is stubbed as a referent, not a mis-typed file
+        self.wm.add_interaction("billing/refund.py", "depends_on", "stripe-sdk")
+        k = self.wm.conn.execute(
+            "SELECT kind FROM entity WHERE name='stripe-sdk'").fetchone()["kind"]
+        self.assertEqual(k, "referent")
+        # unknown object of `imports` (marker default hint is symbol) becomes a module
+        self.wm.add_interaction("auth.py", "imports", "hashlib")
+        k = self.wm.conn.execute(
+            "SELECT kind FROM entity WHERE name='hashlib'").fetchone()["kind"]
+        self.assertEqual(k, "module")
+
+    def test_valid_agent_triples_unchanged(self):
+        # the documented examples still work exactly as before
+        iid = self.wm.add_interaction("hash_pw", "uses", "bcrypt")
+        self.assertGreater(iid, 0)
+        iid2 = self.wm.add_interaction("db/config.py", "provides", "load_config")
+        self.assertGreater(iid2, 0)
+
+    def test_constraint_scope_must_use_known_predicate(self):
+        with self.assertRaises(W.OntologyError):
+            self.wm.add_constraint("bogus", "forbids", "msg", scope_predicate="frobnicates")
+        # every scope predicate in the starter pack is in the core vocabulary
+        import json as _json
+        pack = os.path.join(os.path.dirname(os.path.abspath(__file__)), "starter_constraints.json")
+        with open(pack) as fh:
+            for c in _json.load(fh)["constraints"]:
+                self.assertIn(c["scope_predicate"], W.ONTOLOGY_CORE)
+
+    def test_extension_file_admits_new_predicate(self):
+        with self.assertRaises(W.OntologyError):
+            self.wm.add_interaction("orders", "aggregates", "line_items")
+        self.wm.extend_ontology("aggregates", ["symbol"], ["symbol"])
+        iid = self.wm.add_interaction("orders", "aggregates", "line_items")
+        self.assertGreater(iid, 0)
+        # persisted: a fresh handle on the same DB sees the extension
+        wm2 = W.WorldModel(os.path.join(self.tmp, "m.db"))
+        try:
+            self.assertIn("aggregates", wm2.ontology())
+        finally:
+            wm2.close()
+        # ...and the rest of the vocabulary is still enforced
+        with self.assertRaises(W.OntologyError):
+            self.wm.add_interaction("orders", "disaggregates", "line_items")
+
+    def test_malformed_extension_file_never_breaks_the_store(self):
+        with open(self.wm.ontology_path, "w") as fh:
+            fh.write("{not json")
+        self.wm._ontology = None
+        iid = self.wm.add_interaction("a", "calls", "b")   # core vocabulary still works
+        self.assertGreater(iid, 0)
+
+    def test_bad_marker_skipped_not_fatal(self):
+        # a hallucinated marker verb is dropped by the harvester (guard, not crash)
+        import harvest as H
+        rows = [("assistant", "WM-OBSERVE: hash_pw frobnicates bcrypt @ a.py:1")]
+        counts = H.apply_markers(self.wm, rows)
+        self.assertEqual(counts["observe"], 0)
+        n = self.wm.conn.execute("SELECT COUNT(*) c FROM interaction").fetchone()["c"]
+        self.assertEqual(n, 0)
+
+    def test_cli_ontology_list_and_add(self):
+        import io
+        from contextlib import redirect_stdout
+        db = os.path.join(self.tmp, "m.db")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(W.main(["--db", db, "ontology"]), 0)
+        listed = buf.getvalue()
+        self.assertIn("depends_on", listed)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = W.main(["--db", db, "ontology", "--add", "guards",
+                         "--domain", "symbol,file", "--range", "symbol"])
+        self.assertEqual(rc, 0)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(W.main(["--db", db, "observe", "validate_input", "guards", "parse_payload"]), 0)
+
+    def test_cli_rejection_is_structured_not_traceback(self):
+        import io
+        from contextlib import redirect_stdout
+        db = os.path.join(self.tmp, "m.db")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = W.main(["--db", db, "observe", "a", "frobnicates", "b"])
+        self.assertEqual(rc, 2)
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["error"], "ontology_violation")
+        self.assertIn("allowed", out["detail"])
 
 
 class TestGraphTraversal(Base):

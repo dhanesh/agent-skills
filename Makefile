@@ -5,31 +5,42 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
 
-# Full gate across all skills. Fails fast on the first failing skill.
+# Full gate across all skills. Runs every skill (does NOT stop at the first
+# failure) and exits non-zero if any failed.
+#
+# On failure the captured output is PRINTED, not discarded. It used to be
+# swallowed — only a one-line grep'd summary survived — so a failing unit suite
+# showed up as a single line buried mid-log with no traceback, followed by more
+# PASS lines. That made a real CI failure both easy to miss and impossible to
+# diagnose from the log. `_fail` is the fix; keep it that way.
 gate: clean
-	@rc=0; for d in $(SKILLS); do \
+	@rc=0; \
+	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
+	for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \
-		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
-		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
-		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
-		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d validate" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d scan-leaks" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d playbook" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d frontmatter" "$$out"; rc=1; }; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
-			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d dry-run" "$$out"; rc=1; }; \
 			rm -rf "$$scratch"; \
 		fi; \
 		for t in "$$d"/assets/test_*.py; do \
 			[ -f "$$t" ] || continue; \
 			out=$$(cd "$$d/assets" && python3 "$$(basename "$$t")" 2>&1); st=$$?; \
-			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; [ $$st -eq 0 ] || rc=1; \
+			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; \
+			[ $$st -eq 0 ] || { _fail "$$t" "$$out"; rc=1; }; \
 		done; \
-		out=$$(sh $(GATES)/run-eval.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
+		out=$$(sh $(GATES)/run-eval.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d eval" "$$out"; rc=1; }; \
 	done; \
+	if [ $$rc -ne 0 ]; then printf '\nGATE_RESULT: FAIL (search this log for "!!! FAILURE")\n'; else printf '\nGATE_RESULT: PASS\n'; fi; \
 	exit $$rc
 
 validate:
@@ -84,6 +95,14 @@ playbook:
 		printf '\n=== %s ===\n' "$$d"; \
 		sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) || rc=1; \
 	done; exit $$rc
+
+# Behavioural A/B against a baseline ref: does a change make skills BEHAVE better,
+# or merely still pass the gates? Deliberately NOT part of `make gate` — it needs a
+# baseline commit present in the clone, and SKIPs cleanly when that is unavailable.
+#   make ab-validate                 # against the default baseline in the script
+#   make ab-validate BASE=<git-ref>  # against any other ref
+ab-validate: clean
+	@python3 scripts/ab-validate.py $(BASE)
 
 # Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill:

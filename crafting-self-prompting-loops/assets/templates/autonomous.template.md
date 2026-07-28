@@ -25,8 +25,13 @@ BACKSTOP_TOKEN_BUDGET:   <hard token cap>
 BACKSTOP_WALL_CLOCK:     <hard time limit>
 SAFE_STATE:              stopped
 
-STATE_CARRIED:   completed_sub_goals + scratchpad + last_observations + GOAL   # LSC-4
-STATE_MECHANISM: structured episodic state object                             # LSC-4
+STATE_CARRIED:    completed_sub_goals + scratchpad + last_observations + GOAL  # LSC-4
+STATE_MECHANISM:  structured episodic state object                            # LSC-4
+STATE_SCHEMA:     {goal: str, sub_goals: [{id, status ∈ TODO|DOING|DONE}],    # LSC-4
+                   observations: [{source, value}], scratchpad: str}
+STATE_VALIDATION: assert schema every round; an out-of-vocabulary status or   # LSC-4
+                   a sub_goal that vanished between rounds is a drift signal —
+                   repair from the last valid state, or halt if unrepairable
 
 PROGRESS_METRIC:       sub-goal completion check each turn                     # LSC-5
 NO_PROGRESS_DETECTION: <no-progress counter: N turns without advance → stop>   # LSC-5
@@ -79,7 +84,12 @@ while True:
     if not OUTPUT_VALIDATION(observation):                  # LSC-6
         observation = note_invalid(state)
 
+    # TYPED LOOP BOUNDARY — a long autonomous run is where malformed state
+    # compounds the most; validate BEFORE it becomes the next round's premise.
     state = update(state, observation)                      # LSC-4
+    if not STATE_VALIDATION(state, STATE_SCHEMA):           # LSC-4
+        state = repair_or_stop(state, SAFE_STATE)           # repair | re-ask | halt
+
     if NO_PROGRESS_DETECTION(state):                        # LSC-5 / LSC-10
         escalate_or_stop(state)
 
@@ -110,6 +120,7 @@ return best
 | `STOP_CONDITION` / `STOP_SIGNAL` | Done only after re-verifying success | LSC-2 |
 | `BACKSTOP_*` / `SAFE_STATE` | Hard turn/token/time cap; stopped | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Sub-goals + scratchpad + observations + GOAL | LSC-4 |
+| `STATE_SCHEMA` / `STATE_VALIDATION` | Episodic state typed + checked each round | LSC-4 |
 | `NO_PROGRESS_DETECTION` | No-progress counter (N stalled turns) | LSC-5 |
 | `PRE_ACTION_CHECKS` / `OUTPUT_VALIDATION` | Validate tool args + results | LSC-6 |
 | `<data>…</data>` wrapping | Tool/web results treated as DATA | LSC-7 |

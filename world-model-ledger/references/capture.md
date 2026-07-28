@@ -82,6 +82,13 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 `WM-VALIDATED` with a non-oracle kind is ignored — only `test|ci|doc|human` can raise
 normative confidence.
 
+**Predicates are vocabulary, not free text.** Every triple is validated against the ontology
+(RDFS-style domain/range per verb — see `ontology.md`) before insert. A marker with a
+hallucinated verb or a semantically impossible pairing is *skipped* (logged to stderr, hook
+never breaks, nothing enters the ledger); the same triple via `wm observe` gets a structured
+rejection naming the allowed verbs, so you can self-correct. Extend the vocabulary
+deliberately with `wm ontology --add`.
+
 ## (a0) Automatic capture — the universal observer (zero-config)
 
 The primary capture path needs **no markers and no env vars**. A single `PostToolUse` hook
@@ -140,6 +147,7 @@ wm resolve  <id> --as retract|supersede|fixed_code|defer
 wm query    --touching <path|symbol>                  # what the pre-call hook shows
 wm precall  <path...>                                 # markdown pre-call summary
 wm exec     --command "<cmd>" [--exit-code N]         # observe an execution (or --from-hook, from stdin JSON)
+wm ontology [--add <pred> --domain <kinds> --range <kinds>]   # list / deliberately extend the vocabulary
 wm stats | wm consolidate | wm digest | wm export
 ```
 

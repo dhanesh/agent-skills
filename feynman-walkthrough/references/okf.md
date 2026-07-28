@@ -27,6 +27,31 @@ The conformance points, all implemented by `assets/okf.py`:
   populated; the source pins live in a producer-defined `sources:` key, which the spec
   explicitly allows (consumers must preserve unknown keys).
 
+## The producer contract (enforced at the write boundary)
+
+OKF v0.1 splits its rules by **role**. A *consumer* "MUST tolerate" missing or unknown
+fields and "degrade, don't fail" — which is why the sibling `okf-site-kit` renders a
+`type`-less concept as a generic Concept with a `WARN:`. A *producer* has the opposite
+duty: it must not **create** a violating bundle. This skill is the producer, so
+`write_concept()` validates before it writes and raises `OkfSpecError` listing every
+problem at once; nothing is written on refusal. Run it yourself with
+`validate_concept_meta(meta)` (returns a list of problems, empty when valid).
+
+What it checks — deliberately **structural, not a vocabulary**:
+
+| Rule | Why |
+|---|---|
+| `type` present and a non-empty string | the spec's one required concept field |
+| **the `type` *value* is never constrained** | the spec mandates "a short, producer-chosen string (no central registry)" — a closed type vocabulary here would itself violate OKF |
+| no value containing a newline or a bare `---` | either silently truncates the frontmatter for *every* downstream consumer |
+| `tags` a list of comma-free strings | this restricted subset serialises them as `[a, b]`, so an embedded comma splits a tag |
+| `timestamp` ISO 8601 | drift reports and site metadata panels parse it |
+| each `sources` pin has `type` + `locator` | exactly what `_read_pinned_sources` needs for a drift check, so the write side refuses precisely what the read side would reject. A **null `fingerprint` stays legal** — `external` sources have none by design |
+| never write back a partially-parsed concept | `pin` round-trips read→mutate→write; re-writing a half-readable file would persist the corruption |
+
+`write_concept(..., validate=False)` is an explicit escape hatch for deliberately
+authoring a fixture — never for silencing a real problem.
+
 **Keep the format current:** OKF v0.1 is an early spec and will evolve. When you have
 network access and are about to create or migrate a bundle, check the spec at the URL
 above; if it has moved past the version in `okf.py`'s `OKF_SPEC_VERSION`, update the

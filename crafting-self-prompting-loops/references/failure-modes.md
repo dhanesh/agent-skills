@@ -18,6 +18,7 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 | 4 | Runaway / non-termination | Never stops on its own | **LSC-3**, LSC-9 | (b), (c) |
 | 5 | Prompt-injection via carried content | Carried output/tool/web text gets obeyed as instructions | **LSC-7**, LSC-6 | (b), (c) |
 | 6 | Context rot / state bloat | Carried state grows until it confuses the loop | LSC-4, LSC-9 | (a), (b) |
+| 6b | Malformed carried state | Loop proceeds on a subtly impossible state; error surfaces far from its source | **LSC-4**, LSC-6 | (c), (b) |
 | 7 | Cost blowout | Token/iteration spend explodes | **LSC-9**, LSC-3 | (b), (c) |
 | 8 | Multi-agent deadlock / over-fanout | Agents wait on each other or spawn unboundedly | LSC-3, LSC-9, LSC-2 | (c) |
 | 9 | Evaluation degradation / sycophancy | Self-grading inflates perceived quality while real quality stalls or falls | **LSC-5**, LSC-2 | (a), (b), (c) |
@@ -69,8 +70,15 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 
 - **Symptom:** Carried state grows every round (accumulated scratchpad, full transcripts, every tool result). Later iterations get slower, more expensive, and *worse* — the signal gets buried, the model fixates on stale detail or contradicts earlier carried text.
 - **Cause:** `STATE_CARRIED` (LSC-4) accumulates append-only with no compaction. The relevant signal-to-noise ratio of the context degrades; token cost rises in lockstep.
-- **Mitigation:** Carry a *structured, bounded* state object, not a raw growing transcript (**LSC-4** — prefer structured state over append-only scratchpad). Summarize/compact prior rounds into a fixed-size digest; keep only what the next round needs. Cap state size as part of the token budget (**LSC-9**). Cycle/no-progress detection (**LSC-5**) catches the degradation when output quality stalls.
+- **Mitigation:** Carry a *structured, bounded* state object, not a raw growing transcript (**LSC-4** — prefer structured state over append-only scratchpad). Summarize/compact prior rounds into a fixed-size digest; keep only what the next round needs. Cap state size as part of the token budget (**LSC-9**). Cycle/no-progress detection (**LSC-5**) catches the degradation when output quality stalls. Declaring `STATE_SCHEMA` and enforcing it at the boundary (**LSC-4**) is what makes "structured and bounded" checkable rather than aspirational — an unvalidated "structured" state drifts back into a free-text blob one round at a time.
 - **Most prone:** (a) long reflexion chains; (b) long autonomous runs with chatty tools.
+
+### 6b. Malformed carried state
+
+- **Symptom:** The loop proceeds on a state that is subtly impossible — a status string no state machine defines, a total that no longer matches its parts, a field that silently changed type, a sub-goal that vanished between rounds. Downstream rounds reason confidently from it; the error surfaces far from where it entered.
+- **Cause:** The state that *compounds* is never type-checked. `OUTPUT_VALIDATION` (LSC-6) checks a single observation at its point of use, which is not the same check — a valid-looking observation can still merge into an invalid state. A probabilistic generator in a loop will produce a plausible-but-impossible field eventually; without a symbolic check it becomes the next round's premise.
+- **Mitigation:** Declare `STATE_SCHEMA` and enforce `STATE_VALIDATION` at the iteration boundary (**LSC-4**), with the violation response named — *repair* (keep the last valid value), *re-ask* (feed the error back as data), or *halt* into SAFE_STATE (**LSC-3**). Fail safe in the direction that costs least: an unreadable human decision degrades to `PENDING`, never to `APPROVED` (**LSC-8**).
+- **Most prone:** (c) multi-agent loops merging a shared blackboard; (b) long autonomous runs; any loop whose state crosses a process or agent boundary.
 
 ### 7. Cost blowout
 

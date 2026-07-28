@@ -83,6 +83,32 @@ def main():
         for name, task, src, want in fixtures:
             verdict = grade.GRADERS[task](src)
             check(name, verdict["pass"] is want, verdict["reason"][:80])
+
+        # Ontology guardrail: the ledger's write boundary rejects semantically
+        # impossible triples (negative) while valid vocabulary passes (positive).
+        wspec = importlib.util.spec_from_file_location(
+            "wml_world_model", os.path.join(dst, "assets", "world_model.py"))
+        wmod = importlib.util.module_from_spec(wspec)
+        wspec.loader.exec_module(wmod)
+        wm = wmod.WorldModel(os.path.join(tmp, "onto.db"))
+        try:
+            iid = wm.add_interaction("auth/hash.py", "uses", "bcrypt")
+            check("ontology admits a valid in-vocabulary triple", iid > 0)
+            rejected = False
+            try:
+                wm.add_interaction("auth/hash.py", "frobnicates", "bcrypt")
+            except wmod.OntologyError as e:
+                rejected = "allowed" in str(e)
+            check("ontology rejects a hallucinated predicate with the allowed set", rejected)
+            wm.upsert_entity("referent", "stripe/refunds-api")
+            rejected = False
+            try:
+                wm.add_interaction("stripe/refunds-api", "imports", "auth/hash.py")
+            except wmod.OntologyError:
+                rejected = True
+            check("ontology rejects a domain/range-impossible triple", rejected)
+        finally:
+            wm.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

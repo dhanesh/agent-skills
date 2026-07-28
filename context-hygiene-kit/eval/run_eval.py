@@ -22,6 +22,7 @@ digest). No repo writes: everything happens under tempfile.mkdtemp().
 """
 import json
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -209,6 +210,41 @@ def main():
               sel["pins_over_budget"] and "PINS_OVER_BUDGET" in digest
               and len(digest) < 4 * 1000 + 2000,
               f"digest_chars={len(digest)}")
+
+        # ── 7. Typed kind vocabulary at the write boundary ──────────────────
+        # A card kind drives digest priority + lossless preservation, so an
+        # unrecognised kind silently changes what survives compaction.
+        rejected = False
+        try:
+            cl.ContextLedger().ingest("risk", "vendor lock-in")
+        except ValueError as e:
+            rejected = "decision" in str(e)      # the error names the vocabulary
+        check("kind vocabulary rejects an undeclared kind, naming the allowed set",
+              rejected)
+
+        # ── 8. NEGATIVE: one invalid card must not destroy the whole ledger ──
+        # Behind the Stop hook's `|| true`, a hard load() failure is a SILENT,
+        # PERMANENT capture failure — the opposite of what this kit guarantees.
+        with open(lpath) as fh:
+            data = json.load(fh)
+        data["cards"][0]["kind"] = "risk"                  # undeclared kind
+        data["cards"][1]["source_agent"] = "planner"       # field from a newer schema
+        survivors = len(data["cards"]) - 1
+        with open(lpath, "w") as fh:
+            json.dump(data, fh)
+        led_q = cl.ContextLedger.load(pathlib.Path(lpath))
+        check("negative: one invalid card is quarantined, the rest of the ledger survives",
+              len(led_q.cards) == survivors and len(led_q.quarantined) >= 1,
+              f"kept={len(led_q.cards)}/{len(data['cards'])}, "
+              f"quarantined={len(led_q.quarantined)}")
+        check("negative: quarantine is surfaced in the digest, never silent",
+              "QUARANTINED" in led_q.to_digest(4000, ""))
+        rh2 = run(["bash", os.path.join(proj, "hooks", "stop.sh")],
+                  input=json.dumps({"cwd": proj, "transcript_path": transcript}), env=env)
+        check("negative: Stop hook still captures with a quarantined card present",
+              rh2.returncode == 0 and '"continue": true' in rh2.stdout)
+        with open(lpath, "w") as fh:
+            fh.write(good)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

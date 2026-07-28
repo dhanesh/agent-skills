@@ -19,6 +19,7 @@ revisit-across-sessions promise deterministically:
 
 Offline, stdlib-only, deterministic, all writes under tempfile.mkdtemp().
 """
+import json
 import os
 import shutil
 import subprocess
@@ -138,6 +139,49 @@ def main():
               r.returncode != 0 and "Traceback" not in (r.stderr + r.stdout)
               and "corrupt" in (r.stderr + r.stdout),
               (r.stderr or r.stdout).strip()[-80:])
+
+        # ── producer contract: spec violations refused at the WRITE boundary ──
+        # OKF v0.1 makes a CONSUMER tolerate violations and a PRODUCER not create
+        # them. This skill is the producer, so a `type`-less concept must be
+        # refused here rather than surfacing later as a renderer WARN.
+        okf_mod = os.path.join(SKILL, "assets", "okf.py")
+        probe = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import okf, tempfile, os, json\n"
+            "d = tempfile.mkdtemp(); p = os.path.join(d, 'c.md')\n"
+            "res = {}\n"
+            "try:\n"
+            "    okf.write_concept(p, {'title': 'no type'}, 'b')\n"
+            "    res['missing_type_refused'] = False\n"
+            "except okf.OkfSpecError as e:\n"
+            "    res['missing_type_refused'] = 'required `type`' in str(e)\n"
+            "res['nothing_written'] = not os.path.exists(p)\n"
+            "okf.write_concept(p, {'type': 'wildly-bespoke-type'}, 'b')\n"
+            "res['open_type_vocabulary'] = os.path.exists(p)\n"
+            "try:\n"
+            "    okf.write_concept(p, {'type': 'X', 'title': 'a\\nb'}, 'b')\n"
+            "    res['unserialisable_refused'] = False\n"
+            "except okf.OkfSpecError:\n"
+            "    res['unserialisable_refused'] = True\n"
+            "res['external_pin_null_fp_ok'] = okf.validate_concept_meta(\n"
+            "    {'type': 'X', 'sources': [{'type': 'external', 'locator': 'u',\n"
+            "     'fingerprint': None}]}) == []\n"
+            "print(json.dumps(res))\n"
+        ) % os.path.dirname(okf_mod)
+        r = run([sys.executable, "-c", probe], cwd=tmp)
+        try:
+            res = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            res = {}
+        check("negative: producer refuses a concept missing the required `type`",
+              res.get("missing_type_refused") and res.get("nothing_written"),
+              (r.stderr or r.stdout).strip()[-80:])
+        check("`type` stays an OPEN producer-chosen vocabulary (no registry)",
+              res.get("open_type_vocabulary"))
+        check("negative: producer refuses a value that would truncate the frontmatter",
+              res.get("unserialisable_refused"))
+        check("an external source pin with a null fingerprint stays legal",
+              res.get("external_pin_null_fp_ok"))
 
         # ── recall track: documented expanding-interval dates ────────────────
         r = run([sys.executable, SCHEDULE, "--start", "2026-07-11",

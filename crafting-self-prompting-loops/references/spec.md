@@ -55,10 +55,24 @@ Definition: the information carried from one iteration to the next and the mecha
 ```
 STATE_CARRIED: <what information passes between iterations>
 STATE_MECHANISM: <scratchpad | structured state object | prior output | other>
+STATE_SCHEMA: <declared shape/type of the carried state, or "N/A — unstructured prior-output state">
+STATE_VALIDATION: <how state is checked against STATE_SCHEMA at the boundary, and what happens on violation>
 ```
 
 Design rule: explicitly define STATE_CARRIED and STATE_MECHANISM; pass forward the minimum that lets the next round build on the last and detect repetition.
 Decision criteria: carry the smallest state sufficient for progress and loop-detection; prefer a structured summary over the full transcript to bound tokens and limit drift.
+
+**Type the loop boundary — validate carried state before it feeds the next iteration.** LSC-6's OUTPUT_VALIDATION checks a single *observation* at its point of use; it does not check the *state that compounds*. An agent is a probabilistic generator wrapped in a loop, so a plausible-but-impossible state field — a status string no state machine defines, a total that no longer matches its parts, a field that silently changed type — is not a malfunction but the expected tail behaviour, and the loop is exactly where it accumulates instead of being caught. Declare STATE_SCHEMA and enforce it at the boundary with a deterministic checker (JSON Schema, a dataclass/Pydantic model, a hand-written assert — the mechanism matters far less than that it is symbolic and runs every round). This is the neuro-symbolic guardrail applied to loop state: pair the probabilistic generator with a deterministic layer that validates its output *before* that output becomes the next round's premise (Coyle, "Why Agentic Systems Need Ontologies", AI Engineer 2026).
+
+On violation, STATE_VALIDATION must name which of these happens — never "continue anyway":
+
+| Response | What it does | Use when |
+|---|---|---|
+| **repair** | reject the bad field, keep the last valid value, record the rejection | the field is recoverable from prior state |
+| **re-ask** | feed the validation error back as data so the next round self-corrects | the error names the expected shape (that is what makes it correctable) |
+| **halt** | stop into SAFE_STATE (LSC-3) | the state cannot be repaired |
+
+Scope it honestly: a loop whose STATE_MECHANISM is genuinely unstructured (raw prior output, a free-text scratchpad) has no schema to check — write `N/A — unstructured prior-output state` and say so, rather than leaving the slot blank or inventing a schema nothing enforces. A declared-but-unenforced schema is worse than none: it reads as a guarantee and delivers nothing. Validating the boundary is also what makes the typed multi-agent handoffs of LSC-6 (MetaGPT) real rather than aspirational, and it gives OSCILLATION/DRIFT detection (LSC-10) a well-formed state to compare across rounds.
 
 ## LSC-5: Self-evaluation / progress assessment
 

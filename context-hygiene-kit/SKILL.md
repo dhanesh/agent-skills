@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires Claude Code lifecycle hooks (Stop/PreCompact/SessionStart), bash, and python3 (stdlib only, no pip); jq optional for clean settings.json merging.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.2.0"
   tags: "claude-code,hooks,context-management,memory,anti-bloat,anti-rot,compaction"
 ---
 
@@ -40,7 +40,7 @@ scripts/install.sh /path/to/project   # PROJECT scope — just this repo (defaul
 scripts/install.sh --global            # GLOBAL scope — every project, via ~/.claude
 ```
 
-Both modes are idempotent and do the same core work: copy the core files (`context_ledger.py`, `harvest.py`, `optimize_weights.py`, `curate_loop.md`, `test_context_ledger.py`) plus `hooks/`, **additively** merge the three hooks into the right `settings.json` (existing hooks preserved), and **run the 17-test suite as an install gate** — the kit's guarantees are only real if those pass. They differ only in *where*:
+Both modes are idempotent and do the same core work: copy the core files (`context_ledger.py`, `harvest.py`, `optimize_weights.py`, `curate_loop.md`, `test_context_ledger.py`) plus `hooks/`, **additively** merge the three hooks into the right `settings.json` (existing hooks preserved), and **run the 27-test suite as an install gate** — the kit's guarantees are only real if those pass. They differ only in *where*:
 
 | | **Project** (default) | **Global** (`--global`) |
 |---|---|---|
@@ -95,4 +95,4 @@ To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_context_ledger.py` (17 tests — budget invariant, pin spill, rot survival, two-channel fencing, idempotent ingest, harvester capture + injection boundary). If any fail, the guarantees above do not hold — fix before relying on the kit.
+Always confirm the gate passed: `python3 test_context_ledger.py` (27 tests — budget invariant, pin spill, rot survival, two-channel fencing, idempotent ingest, harvester capture + injection boundary). If any fail, the guarantees above do not hold — fix before relying on the kit.

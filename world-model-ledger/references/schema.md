@@ -18,7 +18,10 @@ constants); this is the map.
   semantic) or a `depends_on` interaction (auto-recorded by `wm build` for a package / container
   image / CI action / Terraform module literally declared in the source).
 - **`interaction`** — edges (`subject → predicate → object`), e.g. `calls`, `imports`,
-  `depends_on`, `implements`, `reads`, `writes`, `uses`, `realizes`. Carries
+  `depends_on`, `implements`, `reads`, `writes`, `uses`, `realizes`. The predicate is not
+  free text: every write is validated against the **ontology** — a closed, extensible
+  vocabulary with RDFS-style domain/range per verb (see `ontology.md`) — and a violating
+  triple is rejected before insert. Carries
   `observed_conf`, `normative_conf`, `validation`, `entrenchment`, and `invalidated_at`
   (soft delete). `UNIQUE(subject_id, predicate, object_id)`.
 - **`constraint_`** — what *should* hold (SHACL-inspired). `kind ∈ {functional, cardinality,

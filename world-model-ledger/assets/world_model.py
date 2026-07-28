@@ -53,6 +53,54 @@ ENTRENCHMENT_RANK = {
 
 VALIDATIONS = ("unverified", "validated", "contradicted", "stale")
 
+ENTITY_KINDS = ("symbol", "file", "module", "referent")
+
+
+class OntologyError(ValueError):
+    """A write violated the predicate ontology — unknown verb, or a subject/object
+    whose entity kind falls outside the predicate's domain/range. The message always
+    names the allowed set so a probabilistic caller can self-correct and retry."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ontology — the predicate vocabulary, with RDFS-style domain/range per verb.
+#
+# The neuro-symbolic guardrail: the agent side of the system is probabilistic
+# (markers, `wm observe`), so every triple is validated against this vocabulary
+# BEFORE it enters the ledger — an unknown verb or a semantically impossible
+# pairing (a referent `imports` a file) is rejected with the allowed set, never
+# silently stored. Deterministic emitters (build scanner, exec observer) only
+# use verbs from this table, so validation costs them nothing.
+#
+# `domain`/`range` are ORDERED: the first kind doubles as the stub kind when a
+# triple names an entity the model has never seen (rdfs:domain/range used as
+# type inference — `x depends_on stripe/api` stubs the object as a referent,
+# not a mis-typed file). A known entity's recorded kind is authoritative and is
+# what domain/range are checked against.
+#
+# Projects extend the vocabulary DELIBERATELY via `<db-dir>/ontology.json`
+# ({"verb": {"domain": [...], "range": [...]}}) or `wm ontology --add` —
+# extension is an explicit act, never a side effect of a marker.
+# ─────────────────────────────────────────────────────────────────────────────
+ONTOLOGY_CORE = {
+    # structural (build scanner)
+    "imports":    {"domain": ("file", "module"), "range": ("module", "file")},
+    "includes":   {"domain": ("file",), "range": ("file",)},
+    "references": {"domain": ("file",), "range": ("file",)},
+    "depends_on": {"domain": ("file", "module"), "range": ("referent",)},
+    "provides":   {"domain": ("file", "module"), "range": ("symbol",)},
+    # behavioural (exec observer)
+    "executes":   {"domain": ("referent", "file"), "range": ("file",)},
+    "reads":      {"domain": ("referent", "file", "symbol"), "range": ("file", "referent")},
+    "writes":     {"domain": ("symbol", "file", "referent"), "range": ("file", "referent")},
+    # semantic (agent markers / CLI)
+    "calls":      {"domain": ("symbol", "file", "module"), "range": ("symbol", "file", "module")},
+    "uses":       {"domain": ("symbol", "file", "module"), "range": ("symbol", "module", "referent", "file")},
+    "implements": {"domain": ("symbol", "file", "module"), "range": ("symbol", "referent", "file")},
+    "realizes":   {"domain": ("symbol", "file", "module"), "range": ("referent",)},
+    "owned_by":   {"domain": ("symbol", "file", "module", "referent"), "range": ("referent", "symbol")},
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Execution channel — observe BEHAVIOUR, not just mutation.
 #
@@ -955,6 +1003,9 @@ class WorldModel:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.has_fts = False
+        self.ontology_path = (None if path == ":memory:"
+                              else os.path.join(os.path.dirname(os.path.abspath(path)), "ontology.json"))
+        self._ontology = None
         self._init()
 
     def _init(self):
@@ -969,6 +1020,61 @@ class WorldModel:
     def close(self):
         self.conn.commit()
         self.conn.close()
+
+    # ── ontology (predicate vocabulary + domain/range guardrails) ───────────────
+    def ontology(self) -> dict:
+        """Core vocabulary merged with the project's `ontology.json` extension (if any).
+        Malformed extension entries are dropped, never fatal — a broken extension file
+        must not take the guardrail (or a hook) down with it."""
+        if self._ontology is None:
+            onto = {k: dict(v) for k, v in ONTOLOGY_CORE.items()}
+            if self.ontology_path and os.path.isfile(self.ontology_path):
+                try:
+                    with open(self.ontology_path) as fh:
+                        ext = json.load(fh)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    ext = {}
+                for pred, spec in (ext or {}).items():
+                    if not isinstance(spec, dict):
+                        continue
+                    dom = tuple(k for k in spec.get("domain", ()) if k in ENTITY_KINDS)
+                    rng = tuple(k for k in spec.get("range", ()) if k in ENTITY_KINDS)
+                    if pred and dom and rng:
+                        onto[str(pred)] = {"domain": dom, "range": rng}
+            self._ontology = onto
+        return self._ontology
+
+    def extend_ontology(self, predicate, domain, range_) -> dict:
+        """Deliberately add (or override) a predicate in the project vocabulary.
+        Persists to `ontology.json` next to the DB so the extension survives sessions."""
+        if not self.ontology_path:
+            raise OntologyError("no ontology path for an in-memory model — use a file-backed DB")
+        dom = tuple(k for k in domain if k in ENTITY_KINDS)
+        rng = tuple(k for k in range_ if k in ENTITY_KINDS)
+        if not predicate or not dom or not rng:
+            raise OntologyError(
+                f"ontology extension needs a predicate plus domain/range kinds from {list(ENTITY_KINDS)}")
+        ext = {}
+        if os.path.isfile(self.ontology_path):
+            try:
+                with open(self.ontology_path) as fh:
+                    ext = json.load(fh) or {}
+            except (OSError, json.JSONDecodeError, ValueError):
+                ext = {}
+        ext[predicate] = {"domain": list(dom), "range": list(rng)}
+        with open(self.ontology_path, "w") as fh:
+            json.dump(ext, fh, indent=2)
+        self._ontology = None  # reload on next use
+        return {"predicate": predicate, "domain": list(dom), "range": list(rng)}
+
+    def _predicate_spec(self, predicate) -> dict:
+        spec = self.ontology().get(predicate)
+        if spec is None:
+            raise OntologyError(
+                f"unknown predicate '{predicate}' — allowed: {', '.join(sorted(self.ontology()))}. "
+                f"To extend the vocabulary deliberately: "
+                f"`wm ontology --add {predicate} --domain <kinds> --range <kinds>`.")
+        return spec
 
     # ── entities ──────────────────────────────────────────────────────────────
     def upsert_entity(self, kind, name, symbol_id=None, path=None, lang=None,
@@ -1024,14 +1130,30 @@ class WorldModel:
         r = cur.fetchone()
         if r:
             return r["id"]
-        kind = "file" if ("/" in token or "." in token and default_kind == "file") else default_kind
+        if default_kind in ("symbol", "file"):
+            kind = "file" if ("/" in token or "." in token and default_kind == "file") else default_kind
+        else:
+            kind = default_kind    # explicit referent/module hint beats the path heuristic
         path = token if "/" in token else None
         return self.upsert_entity(kind, token, path=path)
 
     # ── interactions ───────────────────────────────────────────────────────────
     def add_interaction(self, subject, predicate, obj, subj_kind="symbol", obj_kind="symbol") -> int:
-        sid = self._resolve_entity(subject, subj_kind)
-        oid = self._resolve_entity(obj, obj_kind)
+        # Ontology guardrail: validate the triple BEFORE anything enters the ledger.
+        # Unknown entities are stubbed with an ontology-informed kind (domain/range as
+        # type inference); a KNOWN entity's recorded kind must satisfy domain/range.
+        spec = self._predicate_spec(predicate)
+        sid = self._resolve_entity(subject, subj_kind if subj_kind in spec["domain"] else spec["domain"][0])
+        oid = self._resolve_entity(obj, obj_kind if obj_kind in spec["range"] else spec["range"][0])
+        for eid, allowed, role, token in ((sid, spec["domain"], "subject", subject),
+                                          (oid, spec["range"], "object", obj)):
+            kind = self.conn.execute("SELECT kind FROM entity WHERE id=?", (eid,)).fetchone()["kind"]
+            if kind not in allowed:
+                raise OntologyError(
+                    f"'{predicate}' {role} must be one of {list(allowed)}, but '{token}' is a "
+                    f"{kind} — rejected (semantically impossible triple). Pass an explicit "
+                    f"--{'subj' if role == 'subject' else 'obj'}-kind, pick a predicate whose "
+                    f"{'domain' if role == 'subject' else 'range'} fits, or extend the ontology.")
         ts = now()
         cur = self.conn.execute(
             "SELECT id FROM interaction WHERE subject_id=? AND predicate=? AND object_id=?",
@@ -1154,6 +1276,8 @@ class WorldModel:
     # ── constraints ────────────────────────────────────────────────────────────
     def add_constraint(self, name, kind, message_tmpl, scope_predicate=None,
                        params=None, severity="violation") -> int:
+        if scope_predicate:
+            self._predicate_spec(scope_predicate)   # a constraint scoped to an unknown verb can never fire
         ts = now()
         cur = self.conn.execute("SELECT id FROM constraint_ WHERE name=?", (name,))
         r = cur.fetchone()
@@ -2161,6 +2285,18 @@ def cmd_build(wm, a):
           file=sys.stderr)
 
 
+def cmd_ontology(wm, a):
+    """List the predicate vocabulary, or deliberately extend it (`--add`)."""
+    if a.add:
+        dom = [x.strip() for x in (a.domain or "").split(",") if x.strip()]
+        rng = [x.strip() for x in (a.range_ or "").split(",") if x.strip()]
+        print(json.dumps(wm.extend_ontology(a.add, dom, rng)))
+        return 0
+    print(json.dumps({p: {"domain": list(s["domain"]), "range": list(s["range"])}
+                      for p, s in sorted(wm.ontology().items())}, indent=2))
+    return 0
+
+
 def cmd_stats(wm, a):
     print(json.dumps(wm.stats(), indent=2))
 
@@ -2269,6 +2405,12 @@ def build_parser():
                          "(never touches agent-observed/validated facts; never hard-deletes)")
     bd.set_defaults(func=cmd_build)
 
+    on = sub.add_parser("ontology", help="list the predicate vocabulary, or extend it deliberately")
+    on.add_argument("--add", help="predicate to add/override in the project vocabulary")
+    on.add_argument("--domain", help="comma-separated subject kinds (symbol,file,module,referent)")
+    on.add_argument("--range", dest="range_", help="comma-separated object kinds")
+    on.set_defaults(func=cmd_ontology)
+
     sub.add_parser("stats", help="validated/unverified/contradicted counts").set_defaults(func=cmd_stats)
     sub.add_parser("consolidate", help="re-derive + evaluate constraints (Stop hook)").set_defaults(func=cmd_consolidate)
     sub.add_parser("digest", help="markdown digest").set_defaults(func=cmd_digest)
@@ -2282,6 +2424,11 @@ def main(argv=None):
     try:
         rc = args.func(wm, args)
         return rc or 0
+    except OntologyError as e:
+        # Structured rejection, not a traceback — the message names the allowed
+        # vocabulary so a probabilistic caller can self-correct and retry.
+        print(json.dumps({"error": "ontology_violation", "detail": str(e)}))
+        return 2
     finally:
         wm.close()
 

@@ -19,7 +19,7 @@ compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-sche
 x-spec-version: 1.0
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.2.0"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
@@ -100,7 +100,11 @@ Judge your own explaining by two questions, applied continuously:
    — explainer + FAQ concepts whose frontmatter pins each source's fingerprint — via
    [assets/okf.py](assets/okf.py) (spec adherence, examples, and session flows in
    [references/okf.md](references/okf.md)), so later sessions can review it and detect
-   when the source has moved on.
+   when the source has moved on. Writes are validated against the **producer contract**
+   first — a concept missing the spec-required `type`, or carrying a value that would
+   truncate the frontmatter, is refused with every problem listed rather than written
+   and left to degrade in a downstream consumer. The `type` *value* stays open
+   (producer-chosen, per the spec); only its presence and shape are checked.
 7. **Offer the recall track — once.** If long-term retention matters to them, one
    sentence at the end: spaced review of the explainer can be scheduled
    ([assets/spaced_schedule.py](assets/spaced_schedule.py) generates expanding-interval

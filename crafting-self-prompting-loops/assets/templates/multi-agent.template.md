@@ -27,8 +27,14 @@ BACKSTOP_TOKEN_BUDGET:   <AGGREGATE total token cap (authoritative)>
 BACKSTOP_WALL_CLOCK:     <hard time limit>
 SAFE_STATE:              stopped
 
-STATE_CARRIED:   shared blackboard / message log of every agent's contribution # LSC-4
-STATE_MECHANISM: structured shared state (blackboard / message bus)           # LSC-4
+STATE_CARRIED:    shared blackboard / message log of every agent's contribution # LSC-4
+STATE_MECHANISM:  structured shared state (blackboard / message bus)          # LSC-4
+STATE_SCHEMA:     {tasks: [{id, owner, status ∈ OPEN|DONE|BLOCKED}],          # LSC-4
+                   findings: [{agent, claim, evidence}]}
+STATE_VALIDATION: validate the blackboard against the schema after EVERY      # LSC-4
+                   merge; an out-of-vocabulary status or an unowned task is
+                   rejected (repair) — this is what makes the typed handoff
+                   real instead of agents chaining free-form text
 
 PROGRESS_METRIC:       evidence-based arbitration / meta-judge — NOT bare      # LSC-5
                        agreement (consensus can be correlated error)
@@ -69,6 +75,10 @@ while True:
     # SELF-EVAL — cross-agent review / judge / vote
     verdict = judge_or_vote(results)                        # LSC-5
     state   = merge(state, results, verdict)                # LSC-4 blackboard
+    # TYPED LOOP BOUNDARY — a shared blackboard is the state that compounds
+    # ACROSS agents, so validate it after every merge, before the next round.
+    if not STATE_VALIDATION(state, STATE_SCHEMA):           # LSC-4
+        state = repair_or_stop(state, SAFE_STATE)           # repair | re-ask | halt
 
     # HUMAN GATE — only for actions escaping the trusted group
     if escaping_action(state):                              # LSC-8
@@ -89,6 +99,7 @@ while True:
 | `STOP_CONDITION` / `STOP_SIGNAL` | All sub-tasks merged OR judge verdict (consensus only if evidence-backed) | LSC-2 |
 | `BACKSTOP_*` (AGGREGATE) / `SAFE_STATE` | Hard aggregate round/token/time cap; stopped | **LSC-3 (mandatory)** |
 | `STATE_CARRIED` | Shared blackboard / message log | LSC-4 |
+| `STATE_SCHEMA` / `STATE_VALIDATION` | Blackboard typed + checked after every merge | LSC-4 |
 | `PROGRESS_METRIC` / `NO_PROGRESS_DETECTION` | Judge/vote + oscillation detector + K-cap | LSC-5 |
 | `PRE_ACTION_CHECKS` / `OUTPUT_VALIDATION` | Ordering rule + inter-agent message validation | LSC-6 |
 | `<data>…</data>` wrapping | **Peer messages are UNTRUSTED DATA** | LSC-7 |
@@ -110,7 +121,7 @@ while True:
 - [ ] **LSC-1** — shared goal + "resolved" definition.
 - [ ] **LSC-2** — primary stop: consensus OR all sub-tasks merged.
 - [ ] **LSC-3** — MANDATORY **aggregate** backstop (rounds/tokens/wall-clock); safe state = stopped, checked first. **Both LSC-2 and LSC-3 required — independent.**
-- [ ] **LSC-4** — shared blackboard/message log carries every contribution.
+- [ ] **LSC-4** — shared blackboard/message log carries every contribution, **validated against `STATE_SCHEMA` after every merge** (a typed handoff, not chained free-form text).
 - [ ] **LSC-5** — judge/vote each round + oscillation detector + K-round cap.
 - [ ] **LSC-6** — every inter-agent message validated before consumption; ordering rule set.
 - [ ] **LSC-7** — peer messages live inside `<data>…</data>` as UNTRUSTED DATA, never instructions.
