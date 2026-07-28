@@ -608,7 +608,8 @@ class ProducerContractTests(unittest.TestCase):
             f.write("hello\n")
         subject_dir = okf.init_okf(root, "Widget", [src], today=dt.date(2026, 1, 1))
         exp = os.path.join(subject_dir, okf.EXPLAINER)
-        text = open(exp).read().replace("type: Explainer\n", "")   # hand-break it
+        with open(exp) as f:                                       # hand-break it
+            text = f.read().replace("type: Explainer\n", "")
         with open(exp, "w") as f:
             f.write(text)
         with self.assertRaises(ValueError):        # corrupt-pin guard or spec error
