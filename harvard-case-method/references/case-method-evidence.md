@@ -82,6 +82,30 @@ So this skill keeps the post's pattern-extraction questions **verbatim in spirit
 moves them to step 9, the debrief — which is exactly where HBS puts the reveal. Nothing
 of value is discarded; the ordering is repaired.
 
+## Why the hindsight machinery is drill-only
+
+Everything above concerns **retrospective** cases — a company whose ending already
+happened. That is the situation hindsight and survivorship bias govern, and it is what
+`seal`/`reveal` and lint rules D1/D2 exist for.
+
+A **live** business or product decision is a different object. There is no ending to
+leak, to the user or to the agent, because the future has not happened. Hindsight bias
+cannot operate on an outcome that does not yet exist, and survivorship cannot bias a
+case selection of one that the user brought themselves. So for the skill's primary
+mode, the guards below are not merely unnecessary — running them would be theatre.
+
+What survives the move to live decisions, and gets stronger:
+
+- **The commitment record.** In a drill it is fingerprinted so you cannot rewrite your
+  call after the reveal. In a live decision it is fingerprinted so you cannot rewrite it
+  after *reality*, months later — the same guarantee against a much longer gap, and the
+  only way the calibration profile means anything.
+- **Sourced figures (B4).** More important, not less. A drill case's numbers are
+  historical record; a live decision's numbers are assumptions that will be acted on.
+- **The reference class (B5).** The outside view is the survivorship guard that still
+  applies: your own decision is a sample of one until you find the comparable cases,
+  including the ones that went badly.
+
 ## How well-evidenced is any of this? — the uncomfortable part
 
 Two separate questions get conflated when a skill like this is defended. Kept apart, they
@@ -126,7 +150,7 @@ tradition around it:
   difficulty as evidence that few alternatives existed, and become *more* hindsight-biased.
 
 That last finding has a direct operational consequence for
-[facilitation-playbook.md](facilitation-playbook.md): the "disagreement pump" is a
+[coaching-playbook.md](coaching-playbook.md): the "disagreement pump" is a
 consider-the-opposite move, so ask for **one or two strong counter-arguments, not a long
 list**. A learner straining to produce a tenth objection is being pushed toward the
 backfire condition, not away from it.

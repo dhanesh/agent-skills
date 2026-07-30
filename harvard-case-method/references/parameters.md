@@ -1,69 +1,105 @@
-# `casekit.py` — commands, lint rules, and state
+# `casekit.py` — commands, rules, and the scoring maths
 
-`python3 assets/casekit.py [--root DIR] <command> <slug> [...]`
+`python3 assets/casekit.py [--root DIR] <command> [<slug>] [...]`
 
-`--root` defaults to `cases`. Each case is `<root>/<slug>/`.
+`--root` defaults to `decisions`. Each decision is `<root>/<slug>/`.
 
 ## Commands
 
 | Command | Flags | Effect | Refuses when |
 |---|---|---|---|
-| `new <slug>` | `--company` (req), `--decision-date YYYY-MM-DD` (req) | Scaffolds `case.md`, `reveal.md`, `decision.md`, `state.json` at stage `drafting` | slug exists; date is not `YYYY-MM-DD` |
-| `lint <slug>` | — | Runs L0–L5 on `case.md`; one `LINT:` line per rule, then `LINT_RESULT:` | `case.md` missing |
-| `seal <slug>` | `--skip-lint` | Base64-encodes `reveal.md` → `reveal.sealed`, deletes the plaintext, records `reveal_sha256`, stage → `sealed` | lint fails (unless `--skip-lint`); stage is not `drafting`; no `reveal.md` |
-| `commit <slug>` | `--file PATH` | Records `decision_sha256`, stage → `committed` | stage is `drafting`; already committed; decision file missing a required section |
-| `reveal <slug>` | — | Decodes and prints the B-case, stage → `revealed` | stage is `drafting` or `sealed`; blob is corrupt or fails the checksum |
-| `status <slug>` | — | Prints slug, company, decision date, stage, and the next step | no such case |
+| `new <slug>` | `--decision` (req), `--by YYYY-MM-DD` (req), `--drill` | Scaffolds `brief.md` + `decision.md` (+ `reveal.md` in drill), stage `drafting` | slug exists; `--by` malformed |
+| `lint <slug>` | — | Grades `brief.md`: B0–B6, plus D1–D2 in drill mode | `brief.md` missing |
+| `commit <slug>` | `--file PATH` | Validates the DQ chain, fingerprints the record, stores the forecasts | a link missing; scaffold residue; <3 alternatives; no parseable forecast; already committed; drill still `drafting` |
+| `resolve <slug>` | `--n N` (req), `--outcome yes\|no` (req), `--force` | Records how forecast N turned out | not committed; N out of range; already resolved differently without `--force` |
+| `score <slug>` | — | Brier, mean confidence, hit rate, calibration gap, bins | no such decision |
+| `profile` | — | The same across every decision under `--root` | no decisions found |
+| `status <slug>` | — | Mode, stage, forecast counts, next step | no such decision |
+| `seal <slug>` | `--skip-lint` | Drill only: hides `reveal.md`, stage → `sealed` | live decision; lint fails; not `drafting` |
+| `reveal <slug>` | — | Drill only: prints the ending, stage → `revealed` | live decision; no commit yet; corrupt or checksum-mismatched blob |
 
-Exit codes: `0` success, `1` lint failure, `2` a refusal or I/O error (one `ERROR:` line
-on stderr, never a traceback).
+Exit codes: `0` success, `1` lint failure, `2` refusal or I/O error (one `ERROR:` line on
+stderr, never a traceback).
 
-## Lint rules
+## Brief lint rules
 
-All rules read the **narrative body** of `case.md` — every section except `## Sources` and
-`## Facilitator notes`, minus HTML-comment lines.
+All rules read the narrative body of `brief.md` — every section except `## Sources` and
+`## Coach notes`, minus HTML-comment lines.
 
-| Rule | Fails when | Rationale |
+| Rule | Fails when | Why |
 |---|---|---|
-| **L0** `no-scaffold-residue` | `TODO`, `FIXME`, or `<ALL_CAPS>` placeholders remain | An unfilled scaffold trivially satisfies the structural rules |
-| **L1** `no-future-dates` | an ISO date later than the decision date, or a bare year after the decision year | The commonest hindsight leak, and the only one detectable exactly |
-| **L2** `no-hindsight-language` | a phrase from the denylist ("turned out to be right", "went on to", "in hindsight", "what made this work", …), case-insensitively | Outcome language the learner should not be able to read |
-| **L3** `ends-in-a-decision` | no `## The Decision` section, or that section asks no question | An HBS case ends in a decision to be made |
-| **L4** `figures-are-sourced` | a currency amount, percentage, multiplier, or 3+ digit number on a line with no `[^ref]` or `(src: …)` marker | Blocks confident figures recalled from model memory |
-| **L5** `names-comparators` | no `## Comparators` section, or no `-`/`*` bullet in it | The survivorship guard: one company studied alone is a sample of one |
+| **B0** `no-scaffold-residue` | `TODO`/`FIXME`/`<ALL_CAPS>` remain | An unfilled scaffold satisfies the structural rules trivially |
+| **B1** `has-every-section` | any of the six brief sections missing | The brief is the Information link; gaps are silent |
+| **B2** `decision-is-a-dated-question` | `## The Decision` lacks a `?` or an ISO date | A decision has a verb and a date; a topic has neither |
+| **B3** `real-option-set` | fewer than **3** bullets under Options on the Table | Two options is a whether-or-not trap, not a choice |
+| **B4** `figures-are-sourced` | a figure on a line with no `[^ref]` or `(src: …)` | Blocks confident numbers recalled from memory |
+| **B5** `has-a-base-rate` | fewer than **2** bullets under Reference Class | One comparator is an anecdote; a base rate needs more |
+| **B6** `names-what-is-unknown` | Open Uncertainties is empty | A decision with no uncertainty needs no case |
+| **D1** `no-hindsight-language` *(drill)* | a denylisted phrase ("turned out to be right", "in hindsight", …) | The ending must not be readable in the brief |
+| **D2** `no-future-dates` *(drill)* | a date after the decision date | The commonest hindsight leak |
 
-Four-digit years are excluded from L4's figure detector (L1 already governs them), so
-"In 2011 the founders…" needs no citation.
+D1/D2 apply **only in drill mode**. A live decision has no ending to leak — the future
+hasn't happened — so running hindsight rules against it would be theatre.
 
-### When `--skip-lint` is defensible
+Four-digit years are excluded from B4's figure detector, and identifying numerals
+("Section 230", "ISO 27001", "Rule 144A") are skipped: noise is what pushes an author to
+`--skip-lint`, which costs more than the rule saves.
 
-Rarely, and never silently. Legitimate cases: a source genuinely has no citable figure and
-you have written the uncertainty into the case instead; a comparator section is
-intentionally in prose because no comparable company exists and you say so. In both, state
-in the debrief which rules the case failed and why. `--skip-lint` does not record a reason
-in `state.json` — the honesty is yours to supply.
+## Decision-record requirements (checked by `commit`)
+
+Eight sections, in any order: `## Frame`, `## Alternatives Considered`, `## Values`,
+`## Reasoning`, `## Premortem`, `## Decision`, `## Falsifier`, `## Predictions` — the six
+DQ links plus the two evidence-backed disciplines. Also enforced: no scaffold residue, at
+least **3** alternatives, and at least one parseable forecast.
+
+Forecast line format, one per bullet:
+
+```
+- 2026-12-31 | 0.70 | At least 2 of 3 Q3 renewals close on the hybrid
+```
+
+`date | probability | claim`. The probability must be **strictly between 0 and 1** —
+certainty is not a forecast, and the tool rejects `0` and `1` with that message.
+
+## The scoring maths
+
+- **Brier score** = `mean((p − outcome)²)` over resolved forecasts, outcome ∈ {0, 1}.
+  0 is perfect; **0.25 is what saying 0.5 about everything gets you**; above 0.25 your
+  confidence is actively misleading you.
+- **Calibration gap** = `mean(p) − hit rate`. Positive → over-confident, negative →
+  under-confident. Reported as "well calibrated" within ±0.05.
+- **Bins** — forecasts grouped into probability deciles, each showing `n`, mean stated
+  probability, and actual hit rate. This is where over-confidence localises: a bin saying
+  0.90 that lands 0.60 is the actionable finding.
+- `profile` pools every decision under `--root`, live and drill together, and prints a
+  small-n warning below **10** resolved forecasts.
+
+The tool scores forecasts. It does **not** grade the six DQ links — completeness is
+mechanical, quality is a judgement, and a regex producing a number for it would look like
+rigour without being any. `score` prints that reminder every time.
 
 ## `state.json`
 
 ```json
 {
-  "slug": "stripe-2011",
-  "company": "Stripe",
-  "decision_date": "2011-06-30",
+  "slug": "pricing-2026",
+  "decision": "Should we move fee financing to a flat platform fee?",
+  "deadline": "2026-09-30",
+  "mode": "live",
   "stage": "committed",
-  "reveal_sha256": "…",
-  "decision_sha256": "…"
+  "decision_sha256": "…",
+  "predictions": [{"date": "2026-12-31", "p": 0.7, "claim": "…"}],
+  "resolutions": {"1": true}
 }
 ```
 
-Stages advance `drafting → sealed → committed → revealed` and never move backwards. No
-timestamps are recorded: the file is a reproducible audit of *ordering*, which is what the
-method needs, and wall-clock values would make the eval non-deterministic.
+Stages: live runs `drafting → committed`; drill runs `drafting → sealed → committed →
+revealed`. No timestamps are recorded — the file is a reproducible audit of *ordering*,
+and wall-clock values would make the eval non-deterministic.
 
-## What sealing is and is not
+## When `--skip-lint` is defensible
 
-`reveal.sealed` is base64. It stops accidental reading and enforces the workflow's
-ordering; it is **not** encryption and anyone determined to peek can. The meaningful
-guarantee is the recorded ordering — `decision_sha256` is written at stage `committed`,
-before `reveal` will run — which is enough to show a decision was fixed before the outcome
-was seen. Anyone who wants a stronger guarantee should have someone else write the case.
+Rarely, and never silently. Legitimate: a figure genuinely has no citable source and you
+have written the uncertainty into the brief instead. Not legitimate: fewer than three
+options because you have already decided. `--skip-lint` records no reason in `state.json`
+— naming the failed rules in the debrief is yours to do.

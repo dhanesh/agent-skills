@@ -1,122 +1,115 @@
 # harvard-case-method
 
-Run a real Harvard-style business case study with an AI as case writer and discussion
-leader — decision-forcing, outcome withheld, decision committed before the reveal.
+Bring a real business or product decision. Reason through it with case-method
+discipline, get coached while you do it, and leave **decided** — with forecasts that
+score your judgement months later.
 
 ```bash
 npx skills add dhanesh/agent-skills --skill harvard-case-method
 ```
 
-## Why this exists
+## Aid and coach, without the two fighting
 
-There is a popular prompt going around: *"Analyze [company] using the Harvard Business
-School case study method"*, followed by THE SITUATION → THE DECISIONS → THE EXECUTION →
-THE OUTCOME, with questions like *"what did they bet on that turned out to be right"* and
-*"what pattern made this work"*.
+An aid wants to hand you the answer. A coach wants you to do the work. This resolves it
+by splitting the labour along Stanford's **Decision Quality chain** — and quality is the
+chain's **weakest link**, never the average:
 
-It reaches for the right tradition and produces the wrong artifact. An HBS case presents
-only what was knowable at a decision date, **withholds what happened**, makes you commit a
-recommendation in the protagonist's shoes, and reveals the outcome afterwards (the
-"B-case"). The withholding is the pedagogy. A prompt that leads with the ending is a
-retrospective post-mortem of a winner — which trains hindsight bias and survivorship bias,
-the two documented failure modes of learning from success stories. Sources and the full
-comparison are in
-[references/case-method-evidence.md](references/case-method-evidence.md).
+| Link | Owner | Why |
+|---|---|---|
+| **Frame** | You | Only you know which decision you actually face |
+| **Alternatives** | Shared — agent proposes, you accept/reject/add | Where most decisions are quietly lost |
+| **Information** | **Agent** | Research, base rates, sourcing, arithmetic — labour, not judgement |
+| **Values** | You | What you optimise for isn't the agent's call |
+| **Reasoning** | Shared — you argue, agent attacks | The case discussion |
+| **Commitment** | You | You sign it |
 
-Nothing in the original is discarded. Its pattern-extraction questions are good; they are
-moved to the debrief, after the learner has already committed — which is exactly where HBS
-puts the reveal.
+The agent takes the assembly work and withholds the judgement work. Doing your framing
+for you is the failure mode that feels most like helping.
 
-## What it does
+## The loop
 
-1. Picks a company **and a decision moment**, plus a comparator that faced the same
-   situation and did not survive.
-2. Scaffolds a case pinned to a decision date. Everything after that date is contraband.
-3. Writes the A-case from contemporaneous sources: situation, protagonist, what was known
-   (cited), what was genuinely uncertain, comparators, and a decision that ends in a
-   question.
-4. **Lints it** — and refuses to seal a case that leaks the ending.
-5. Seals the B-case, runs the discussion, and makes the learner commit a decision with
-   its disconfirming evidence and a falsifier.
-6. Reveals, scores on **process not outcome**, splits the result across decision quality /
-   execution / luck, and extracts one transferable claim the learner can test.
+1. **Frame** — a decision has a verb and a date. "Our pricing is a mess" is a topic; the
+   agent pushes once for the decision.
+2. **Brief** — the agent assembles `brief.md`: ≥3 real options, sourced evidence, a
+   reference class of ≥2 comparable cases including one that went badly, open
+   uncertainties.
+3. **Lint** — `casekit.py lint` refuses a brief with two options, uncited figures, one
+   comparator, or no stated uncertainty.
+4. **Widen** — you must add an alternative the agent didn't offer. Reversibility,
+   sequencing, and "buy information first" are the ones that get missed.
+5. **Values** — two options that look tied usually differ on a value nobody stated.
+6. **Argue** — you take a position, the agent attacks with the strongest counter. One or
+   two, never a list (piling them on backfires — see the evidence file).
+7. **Premortem** — *"it is 30 September and this failed; write how."* Stated as fact, not
+   possibility. Certainty is the active ingredient.
+8. **Commit** — `casekit.py commit` refuses a record missing any DQ link, carrying fewer
+   than three alternatives, or with no dated probability forecast, then fingerprints it.
+9. **Debrief** — the agent names your **weakest link** and one thing to change. Not
+   whether the decision was right; nobody knows that yet.
+10. **Resolve and score** — as each forecast's date arrives, `resolve` it. `score` gives
+    Brier, hit rate, calibration gap; `profile` pools every decision. **The profile is
+    the real output** — one decision is an anecdote.
 
-## The tooling
+## Why forecasts, and why Brier
 
-`assets/casekit.py` (python3, stdlib only) makes the discipline mechanical rather than
-aspirational:
+Because it is the only part of this with a clean dose-response. A ~one-hour
+probabilistic-reasoning module in the Good Judgment Project improved Brier scores
+**6–11%** over control, persisting for years. Everything else here is scaffolding around
+that mechanism.
 
-```bash
-python3 assets/casekit.py new stripe-2011 --company Stripe --decision-date 2011-06-30
-python3 assets/casekit.py lint stripe-2011      # L0–L5; names every offending line
-python3 assets/casekit.py seal stripe-2011      # refuses while lint fails
-python3 assets/casekit.py commit stripe-2011    # refuses a decision with no falsifier
-python3 assets/casekit.py reveal stripe-2011    # refuses before a decision is committed
-python3 assets/casekit.py status stripe-2011
+```
+  Brier score:     0.1367   (0.25 = coin flip, lower is better)
+  mean confidence: 0.767
+  hit rate:        0.667
+  calibration gap: +0.100  (over-confident)
+  bins:
+    0.6–0.7  n=1    said 0.60  actual 0.00
+    0.8–0.9  n=1    said 0.80  actual 1.00
+    0.9–1.0  n=1    said 0.90  actual 1.00
 ```
 
-Six lint rules, each blocking one way an AI case study goes wrong:
+The tool scores forecasts. It does **not** grade the six DQ links — completeness is
+mechanical, quality is a judgement, and a regex producing a number for it would look like
+rigour without being any. `score` prints that disclaimer every time.
 
-| Rule | Blocks |
-|---|---|
-| L0 | scaffold residue (`TODO`, `<PLACEHOLDER>`) |
-| L1 | dates after the decision date — the commonest hindsight leak |
-| L2 | outcome language ("turned out to be right", "went on to", "in hindsight") |
-| L3 | a case that doesn't end in a decision to be made |
-| L4 | figures with no citation — model-memory financials |
-| L5 | no comparator named — the survivorship guard |
+## Drill mode — historical cases for fast reps
 
-Full flag and rule reference: [references/parameters.md](references/parameters.md).
-Facilitation moves and the post-reveal scoring rubric:
-[references/facilitation-playbook.md](references/facilitation-playbook.md).
+Live decisions resolve in months. `--drill` runs a historical case with a known ending for
+same-session feedback: the brief is written as of a decision date, `seal` hides the ending,
+and `reveal` refuses until a decision is committed. Two extra lint rules fail a brief that
+leaks post-decision dates or hindsight language.
 
-Sealing is base64 — a speed bump, not encryption. The meaningful guarantee is the recorded
-ordering in `state.json`: the decision's checksum is written before `reveal` will run.
-
-## When this works, and when it doesn't
-
-The value is entirely in the commitment being real. Ranked, best to worst:
-
-| Configuration | Verdict |
-|---|---|
-| Someone else writes the case; learner runs it | Works as designed |
-| Author session and run session are **separate**, facilitator never decodes the seal | Works — the facilitating context genuinely lacks the ending |
-| Solo, one session, company whose outcome the learner doesn't know | Partial — honour system, but the exercise is still real |
-| Solo, one session, **famous company** | Don't bother. The learner knows how Netflix 2011 went; the seal is theatre |
-
-The last row is the common case and the skill says so out loud rather than running the
-ceremony anyway.
+This machinery is **drill-only by design**. A live decision has no ending to leak — the
+future hasn't happened — so running hindsight guards against it would be theatre. Drill
+forecasts join the same calibration profile as live ones.
 
 ## Honest limits
 
-- **The case method's own evidence base is weak.** Literature reviews from 1987 to 2018
-  agree the empirical support is sparse and inconclusive; where controlled comparisons
-  exist, the case method performs roughly on par with lecture for declarative knowledge,
-  with higher satisfaction. This skill is faithful to the method — that is a claim about
-  fidelity, not proven learning gains.
-- **The commit-before-reveal mechanic is the better-evidenced part.** Recording a
-  prediction before the outcome demonstrably stops you misremembering *what* you
-  predicted — though not how confident you recall being, which is why the decision file
-  demands the reasoning and a falsifier too, not just the call.
-- **The seal protects a file, not a context window.** An agent that wrote the reveal knows
-  the ending while facilitating. Split authoring and running across sessions.
-- **The lint is a proxy.** It catches leaked dates and stock hindsight phrases. A leak in
-  original prose, with no dates and no denylisted phrase, passes. The rules raise the
-  floor; reading the case is still the ceiling.
-- **Case quality is bounded by source quality**, and a model writing a case from memory
-  cannot reliably partition what it knows by date. Contemporaneous sources are not
-  optional garnish — they are the only thing making the A-case trustworthy.
-- It does not reproduce the cohort, the credential, the recruiting pipeline, or classmates
-  who disagree from experience you don't have.
+- **The case method's own evidence base is weak.** Reviews from 1987 to 2018 agree it's
+  sparse and inconclusive, and controlled comparisons put it roughly on par with lecture.
+  The case *structure* here is scaffolding; the forecasting loop is the part with evidence.
+- **Fewer than ten resolved forecasts is directional, not a verdict.** Small-n Brier scores
+  swing on a single resolution. The tool says so.
+- **Genuine noise reduction needs other people.** One user plus one model cannot produce
+  independent judgements — the model isn't independent of itself. That ceiling is
+  structural, not a backlog item.
+- **The lint is a proxy.** Citation checking is per-line, so one citation covers every
+  figure on its line; a leak written in original prose with no dates passes the drill
+  rules. The rules raise the floor; reading the brief is the ceiling.
+- **Drill mode's seal protects a file, not a context window.** Author and run in separate
+  sessions where you can, and pick endings the learner doesn't already know.
+- It does not reproduce a cohort, a credential, or classmates who disagree from experience
+  you don't have.
 
 ## Development
 
 ```bash
-make gate-skill SKILL=harvard-case-method   # validate + lint + unit suite + outcome eval
-python3 harvard-case-method/assets/test_casekit.py
-python3 harvard-case-method/eval/run_eval.py
+make gate-skill SKILL=harvard-case-method
+python3 harvard-case-method/assets/test_casekit.py     # 56 unit tests
+python3 harvard-case-method/eval/run_eval.py           # 39 outcome checks
 ```
 
-The outcome eval runs two arms of the same synthetic company — one written as the skill
-prescribes, one written the way an AI answers the popular prompt — and requires the second
-to be refused at every stage. License: MIT.
+The outcome eval drives a synthetic product-pricing decision through two arms — reasoned
+as the skill prescribes, and reasoned the way it goes without the skill — and requires the
+second to be refused at both the brief and the record. Brier arithmetic is checked against
+hand-computed values. License: MIT.

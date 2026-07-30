@@ -1,172 +1,159 @@
 ---
 name: harvard-case-method
 description: >-
-  Run a real Harvard-style business case study with an AI as the case writer and
-  discussion leader. Use whenever someone wants to "analyze company X", "do a case
-  study on Y", "teach me strategy through examples", "what can I learn from how Z
-  did it", or wants MBA-style case practice without the MBA. Builds a
-  decision-forcing case — the record as of a specific decision date, outcome
-  withheld — makes the learner commit a decision in the protagonist's shoes, and
-  only then reveals what happened and scores the call. Shipped tooling refuses a
-  case that leaks the ending, cites no sources for its numbers, or names no
-  comparator that failed, because an AI asked to "analyze a company" defaults to
-  retrospective success narration, which is a post-mortem, not a case, and trains
-  hindsight and survivorship bias instead of judgment.
+  Reason through a real business or product decision the way a business-school case
+  is reasoned through, and coach the user's judgement while doing it. Use whenever
+  someone brings a live call to make — pricing, build-vs-buy, market entry, a
+  roadmap bet, a hire, a pivot — or says "help me decide", "think this through with
+  me", "what should we do about X", "run this like a case study". Acts as aid and
+  coach at once: the agent does the assembly labour (research, base rates, sourcing,
+  arithmetic) while the user keeps the judgement work (framing, values, the call),
+  scored against Stanford's Decision Quality chain. Ends with a committed decision,
+  a premortem, and dated probability forecasts that resolve later into a real
+  calibration profile. Also drills historical cases with the ending withheld, for
+  fast reps.
 license: MIT
-compatibility: Requires python3 (stdlib only) for casekit.py — case scaffolding, hindsight lint, and the seal/commit/reveal ordering. Research quality depends on the host agent's web or document access; conversation-only environments can still run the full method with the learner supplying the source material.
+compatibility: Requires python3 (stdlib only) for casekit.py — decision scaffolding, brief lint, Decision Quality completeness checks, and Brier/calibration scoring. Research quality depends on the host agent's web or document access; conversation-only environments run the full method with the user supplying the evidence.
 metadata:
   author: dhanesh
-  version: "1.0.0"
-  tags: "case-study,business-analysis,decision-making,hbs,mba,strategy,teaching,hindsight-bias"
+  version: "2.0.0"
+  tags: "decision-making,decision-quality,case-method,calibration,brier-score,premortem,coaching,product-strategy"
 ---
 
 # harvard-case-method
 
-Teach judgment under uncertainty by putting the learner in a real decision seat.
+Take a real business or product decision, reason through it with case-method
+discipline, and leave the user both **decided** and **better at deciding**.
 
-The instinct — "analyze Stripe using the Harvard case study method" — reaches for the
-right tradition and lands on the wrong artifact. Asked that, a model narrates the whole
-company story with the ending in hand: the decisions that worked, the bets that paid off,
-the pattern that made it succeed. That is a **post-mortem of a winner**. The HBS case
-method is nearly its inverse: a case presents only what was knowable at a decision point,
-**withholds the outcome**, makes you commit a recommendation in the protagonist's shoes,
-and reveals what happened only afterwards ("the B-case"). The withholding *is* the
-pedagogy — remove it and you are practising hindsight, not judgment. The evidence for
-that reading, with sources, is in
-[references/case-method-evidence.md](references/case-method-evidence.md).
+Two things are true at once and they pull against each other. An **aid** wants to hand
+over the best answer fast. A **coach** wants the user to do the work. Resolve it by
+splitting the labour, not by alternating badly between the two.
 
-This skill runs the real shape, and puts the retrospective pattern-extraction where it
-belongs: in the debrief, after the learner has already committed.
+## Who owns which link
 
-## The three failure modes this skill exists to block
+Decision quality is a **chain** — Frame, Alternatives, Information, Values, Reasoning,
+Commitment — and a chain is only as strong as its weakest link, so quality is the
+**minimum**, never the average. Detail in
+[references/decision-quality.md](references/decision-quality.md). Ownership is the
+whole design:
 
-Each is a default an AI case study falls into, and each has a mechanical check in
-[assets/casekit.py](assets/casekit.py) rather than a good intention:
+| Link | Owner | Why |
+|---|---|---|
+| **Frame** | User | Only they know which decision they actually face |
+| **Alternatives** | Shared — you propose, they accept/reject/add | Where most decisions are quietly lost |
+| **Information** | **You** | Research, base rates, sourcing, arithmetic — labour, not judgement |
+| **Values** | User | What they optimise for is not yours to choose |
+| **Reasoning** | Shared — they argue, you attack | This is the case discussion |
+| **Commitment** | User | They sign it |
 
-- **Hindsight leak** — the A-case quietly narrates the future ("their bet on X turned out
-  to be right", a 2014 fact in a 2011 case). `lint` rules L1/L2 fail the case on
-  post-decision-date dates and outcome language.
-- **Invented precision** — confident financials recalled from model memory with no source.
-  Rule L4 fails any unsourced figure, so numbers must carry a citation or come out.
-- **Survivorship** — one famous winner studied alone teaches the traits of survivors as
-  if they were causes of survival. Rule L5 requires a named comparator that faced the same
-  situation, and the debrief requires one that failed.
+Take the assembly labour. Withhold the judgement labour. Doing their framing for them
+is the failure mode that feels most like helping.
 
 ## Workflow
 
-1. **Scope and select.** Establish what the learner will *use* the judgment for (their
-   own business, an interview, a domain they're entering), then pick a company **and a
-   decision moment** — not a company alone. Three tests a candidate must pass, in
-   priority order:
-   - **The learner must not already know the outcome.** This is the binding constraint,
-     and it disqualifies most famous companies — nobody is surprised by how Netflix's
-     2011 split went. Ask them directly what they already know, and pick around it:
-     a company that failed, a mid-sized firm in their own sector, a decision inside a
-     famous company that isn't the famous one.
-   - The record shows **real disagreement at the time**, so the answer isn't obvious.
-   - A **comparator** exists — someone who faced the same situation and did not survive.
-     Pick it now, in the same breath, not later.
-2. **Fix the decision date.** `python3 assets/casekit.py new <slug>
-   --company "<Company>" --decision-date YYYY-MM-DD` scaffolds `case.md`, `reveal.md`,
-   and `decision.md` under `cases/`. Everything after that date is now contraband in
-   the A-case.
-3. **Research and write the A-case.** Fill `case.md`: the situation, the protagonist and
-   what they control, what was known (each figure cited), what was genuinely uncertain,
-   the comparators, and a decision section that ends in a question. Prefer contemporaneous
-   sources — reporting, filings, interviews from around the date — over retrospectives;
-   retrospectives may be *cited* but not narrated. Write `reveal.md` separately: what they
-   decided, what happened, what went wrong, and what was unknowable.
-4. **Verify, then repair.** `casekit.py lint <slug>` grades the A-case against L0–L5 and
-   names every offending line. Fix and re-lint until `LINT_RESULT: PASS`. This loop is
-   not optional politeness — it is the only thing standing between a case and a story.
-5. **Seal.** `casekit.py seal <slug>` hides the B-case and refuses to run while lint
-   fails. Sealing is a speed bump, not encryption; the real guard is the recorded
-   ordering in `state.json`.
-6. **Run the discussion.** Present the A-case, then facilitate rather than answer:
-   surface the competing readings, make the learner argue a position and defend it
-   against the strongest counter. The moves — opening question, cold call, the
-   disagreement pump, handling "just tell me the answer" — are in
-   [references/facilitation-playbook.md](references/facilitation-playbook.md).
-7. **Make them commit.** The learner writes `decision.md`: the call, the reasoning, the
-   disconfirming evidence they weighed, and what would change their mind. `casekit.py
-   commit <slug>` refuses a decision missing any of those four and records its checksum.
-   No commit, no reveal — `casekit.py reveal` enforces it.
-8. **Reveal and score.** `casekit.py reveal <slug>` prints the B-case. Score the learner's
-   call on **process, not outcome**: did they see the real uncertainty, weigh the
-   evidence that was actually available, and name a falsifier? A right call for a lucky
-   reason is not a good decision, and the scoring rubric in the facilitation playbook
-   says so explicitly.
-9. **Debrief — extract the transferable pattern.** Only now is retrospective analysis
-   safe, because the learner's own reasoning is already on record to compare against.
-   Ask what generalizes, then immediately stress it: did the comparator that failed do
-   the same thing? What in this outcome was luck? Close with the one lesson that
-   transfers to the learner's actual context, stated as a testable claim rather than a
-   maxim.
+1. **Frame — one round, theirs.** What decision, by when, who owns it, what is
+   explicitly out of scope. Push back once if they've brought a *topic* ("our pricing")
+   rather than a *decision* ("should we move to a flat platform fee before the Q3
+   renewals?"). A decision has a verb and a date. Then
+   `python3 assets/casekit.py new <slug> --decision "<the question>" --by YYYY-MM-DD`.
+2. **Assemble the brief — yours.** Fill `brief.md`: the situation, at least three
+   options on the table, the evidence with every figure carrying a citation, a
+   **reference class** of at least two comparable cases including one that went badly,
+   and the open uncertainties. Where you cannot source a number, write the uncertainty
+   instead of a confident guess. This is the step where you work hardest and they watch.
+3. **Verify the brief.** `casekit.py lint <slug>` runs B0–B6 and names every offending
+   line. Repair and re-lint until `LINT_RESULT: PASS`. A brief that fails B3 (fewer than
+   three options) or B5 (fewer than two reference cases) is not ready to be decided on,
+   and shipping it anyway is how you launder a foregone conclusion.
+4. **Widen the option set — together.** Present your three options, then ask for a
+   fourth that isn't on your list. Reversibility, sequencing, and "buy information
+   first" are the three that get missed most; the prompts are in
+   [references/coaching-playbook.md](references/coaching-playbook.md). The user must end
+   up considering at least one alternative you did not offer.
+5. **Values, out loud.** What are they optimising for, and what trade-off will they
+   accept? Two options that look close usually differ on a value nobody has stated. Do
+   not supply the answer — surface the conflict and make them rank it.
+6. **Reason, and be argued with.** They state a position; you attack it with the
+   strongest available counter, then let them repair it. Ask for **one or two** strong
+   counters, never a long list — pushing for many backfires (evidence in
+   [references/case-method-evidence.md](references/case-method-evidence.md)).
+7. **Premortem, before the call is fixed.** "It is <resolution date>. This decision
+   failed. Write the story of how." Stated as **fact, not possibility** — the certainty
+   is the active ingredient, and it surfaces roughly 30% more reasons than asking what
+   might go wrong. Their premortem goes in the record whether or not it changes the call.
+8. **Commit.** The user writes `decision.md`: frame, alternatives, values, reasoning,
+   premortem, the decision, a falsifier, and **dated probability forecasts** — claims
+   that will be plainly true or false by a date, each with a probability strictly
+   between 0 and 1. `casekit.py commit <slug>` refuses a record missing any link, with
+   fewer than three alternatives, or with no well-formed forecast, then fingerprints it.
+9. **Debrief the process, not the answer.** Name the **weakest link** in their chain
+   and why — that is the coaching output, and the tool deliberately does not compute it.
+   One concrete thing to do differently next time. Nothing here is a verdict on whether
+   the decision was right; nobody knows that yet.
+10. **Resolve and score, later.** As each forecast's date arrives:
+    `casekit.py resolve <slug> --n 1 --outcome yes|no`. Then `casekit.py score <slug>`
+    for that decision and `casekit.py profile` across all of them — Brier score,
+    hit rate, calibration gap, and per-band bins. **The profile is the trainer's real
+    output**; a single decision is an anecdote. Say plainly that fewer than ten resolved
+    forecasts is directional, not a verdict.
 
-## The context boundary — write and run in separate sessions
+## Drill mode — historical cases for fast reps
 
-The seal protects the *file*. It cannot protect a *context window*: an agent that just
-researched the outcome in order to write `reveal.md` knows it while facilitating, and
-knowing leaks through emphasis, ordering, and which option gets the follow-up question.
-The tooling can enforce ordering on disk; it cannot make you forget.
+Live decisions resolve in months, which is too slow to build calibration on its own.
+`--drill` runs a historical case with a known ending for same-session feedback: the
+brief is written as of a decision date, the ending goes in `reveal.md`, and
+`casekit.py seal` hides it until a decision is committed. Two extra lint rules (D1, D2)
+fail a brief that leaks post-decision dates or hindsight language. The ordering is
+enforced — `reveal` refuses before `commit`.
 
-So when the learner and the case-writer are not the same person, split the work across
-two sessions:
-
-- **Session A (authoring)** — steps 1–5. Research, write, lint, seal. End the session.
-- **Session B (running)** — steps 6–9, started fresh. Read `case.md` and `state.json`
-  only. **Do not open `reveal.sealed` until `casekit.py reveal` prints it.** A
-  facilitator that has not decoded the blob genuinely does not know the ending, and the
-  discussion is honest rather than performed.
-
-When one person is both author and learner, say plainly that the commitment is on the
-honour system — they can decode the blob or simply ask you — and that the exercise is
-worth roughly what their discipline is worth. Prefer, in order: someone else writes the
-case; a fresh session runs it; solo with a genuinely unknown outcome. Solo, one session,
-famous company is the configuration where this skill adds ceremony and little else — say
-so rather than running it.
+Drill cases are a supplement, not the product. Two cautions worth stating once: pick
+cases whose ending the user does **not** already know (which rules out most famous
+companies), and prefer authoring the drill in one session and running it in a fresh one,
+since a context that just researched the ending cannot un-know it. Full guidance in
+[references/coaching-playbook.md](references/coaching-playbook.md).
 
 ## Deliverable
 
-A case directory per study, and a debrief:
+Per decision, under `decisions/<slug>/`:
 
-- `case.md` — the A-case, lint-clean, sourced, honest about what was unknown;
-- `reveal.sealed` — the B-case, unreadable until a decision is on record;
-- `decision.md` — the learner's committed call, with its disconfirming evidence and
-  falsifier;
-- `state.json` — the audit trail: decision date, stage, and the checksums proving the
-  decision was committed before the outcome was seen;
-- the **debrief** — process score, the luck attribution, and one transferable claim the
-  learner can test in their own context.
+- `brief.md` — the case: options, sourced evidence, reference class, uncertainties;
+- `decision.md` — their record: the six DQ links, the premortem, the falsifier, the
+  forecasts;
+- `state.json` — the audit trail: fingerprint of the committed record, the forecasts as
+  committed, and each resolution as it lands;
+- the **debrief** — weakest link named, one thing to change next time;
+- the **calibration profile** — Brier, hit rate, calibration gap across every decision.
 
-Report the lint result and the stage transitions plainly. A case sealed with
-`--skip-lint` is a case with known defects; say which rules it failed.
+Report lint results and refusals plainly. A brief sealed with `--skip-lint`, or a
+decision with only the options you supplied, is a decision with a known weak link —
+name it rather than letting the record imply otherwise.
 
 ## How to behave
 
-- **Withhold the ending, including from yourself.** Once you have researched the outcome
-  you know it; the discipline is not writing it into the A-case, not hinting at it in
-  facilitation, and not steering the learner toward the historical answer. The historical
-  decision is one option among several, and frequently not the best one.
-- **Uncertainty is the content.** "What Is Uncertain" is the section that makes the case
-  hard. If you can't populate it, you have chosen a moment where the answer was obvious —
-  pick a different one.
-- **Cite or cut.** A number you cannot source does not belong in the case. Prefer an
-  honest "the reported range was wide and I could not pin it" to a confident figure from
-  memory.
-- **Facilitate, don't lecture.** By default answer a question with the question behind it.
-  The escape hatch: when the learner is genuinely stuck on a *fact* rather than a
-  judgment, give the fact and move on — withholding data is not the same as withholding
-  the outcome.
-- **Be honest about what this replaces.** It reproduces the analytical loop of the case
-  method and the discipline of committing before knowing. It does not reproduce the
-  cohort, the credential, or a room of classmates who will disagree with you from
-  experience you don't have. Say so once if the learner frames it as an MBA substitute.
+- **Do the labour, withhold the judgement.** Research, arithmetic, base rates, drafting
+  the brief: yours. The frame, the values, the call: theirs. When they ask you to just
+  decide, say what you'd choose *and* what you'd need to believe for the alternative to
+  win — then hand it back.
+- **A decision, not a topic.** If there's no verb and no date, you're doing analysis, not
+  decision-making. Get the frame first.
+- **Cite or cut.** Prefer "the reported range is wide and I couldn't pin it" to a
+  confident figure from memory. An unsourced number in the brief becomes an unexamined
+  assumption in the decision.
+- **Force the outside view before the inside story.** Establish the reference class and
+  its base rate before the narrative gets built, or the story will anchor the estimate.
+- **Probabilities are not decoration.** Push back on 0.5 for everything, on 0.95 for
+  anything genuinely uncertain, and on any claim that can't be settled by a date.
+- **Judge process, never outcome.** A good call can end badly and a bad call can end
+  well. When a forecast resolves against them, ask what was knowable at the time — the
+  answer is often "nothing", and saying so is the lesson.
+- **Be honest about what the numbers support.** Calibration training has real evidence
+  behind it; a handful of resolved forecasts does not make a calibration verdict. Both
+  facts belong in the debrief.
 
 ## Extending this skill
 
-Add domain playbooks under `references/` and link them from step 6 — a regulated-industry
-case needs different facilitation than a consumer-growth one.
-[references/facilitation-playbook.md](references/facilitation-playbook.md) is the shape to
-copy. `casekit.py` flags and lint-rule semantics, including how to justify a
-`--skip-lint` seal, are documented in [references/parameters.md](references/parameters.md).
+Domain playbooks go under `references/` and get linked from step 4 — the alternatives a
+regulated-lending decision misses are not the ones a consumer-growth decision misses.
+[references/coaching-playbook.md](references/coaching-playbook.md) is the shape to copy;
+`casekit.py` flags, lint rules, and the scoring maths are in
+[references/parameters.md](references/parameters.md).

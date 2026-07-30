@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """Gate-runnable outcome eval for harvard-case-method (docs/eval-standard.md).
 
-The skill's end-to-end promise is a *decision-forcing* case: the learner cannot
-see the outcome until a complete decision is on record, and a case that leaks
-the ending, invents figures, or studies a winner alone never gets sealed in the
-first place. This eval builds two synthetic case studies in a tempdir and grades
-that promise through the shipped CLI:
+The skill's end-to-end promise is that a real business decision comes out the
+other side *decided and scoreable*: a brief that survives an evidence lint, a
+decision record complete across the Decision Quality chain, and dated forecasts
+that later resolve into a calibration profile. This eval drives a synthetic
+product decision through the shipped CLI and grades that promise.
 
-  TREATMENT — a case written the way the skill prescribes:
-    lints clean, seals, refuses to reveal before a commit, refuses an
-    incomplete decision, then reveals exactly the sealed B-case.
+  TREATMENT — the decision as the skill prescribes: three real options, sourced
+    figures, a two-case reference class, a complete DQ record with a premortem,
+    a falsifier and forecasts. Must lint clean, commit, resolve, and produce a
+    Brier score that matches an independently computed value.
 
-  CONTROL (negative fixture) — the *same* company written the way an AI
-    answers "analyze X using the Harvard case study method": the whole story
-    told backwards with the ending in hand. It must fail L1/L2/L4/L5 and be
-    refused at `seal`.
+  CONTROL (negative fixture) — the same decision reasoned the way it goes
+    without the skill: two options ("do it / don't"), figures from memory, one
+    comparator, no premortem, no falsifier, confidence as prose. Must be
+    refused at both gates.
 
-Plus a tamper fixture (a swapped seal fails its checksum) and a stage fixture
-(the ordering never runs backwards).
+  MODE fixture — a live decision must NOT be run through the hindsight
+    machinery (seal/reveal are refused), while a drill case must.
+
+  SCORING fixture — Brier and calibration arithmetic checked against
+    hand-computed values, including that confident-and-wrong scores worse.
 
 Offline, stdlib-only, deterministic, all writes under tempfile.mkdtemp().
 """
-import base64
 import json
 import os
 import shutil
@@ -58,243 +61,276 @@ def read(path):
         return fh.read()
 
 
-# ── Harness: the two arms ────────────────────────────────────────────────────
+QUESTION = "Should we move fee financing to a flat platform fee?"
+BY = "2026-09-30"
 
-DECISION_DATE = "2011-06-30"
-
-# A-case as the skill prescribes: knowable on 2011-06-30, sourced, comparator named.
-TREATMENT_CASE = """# Northwind Payments — case as of 2011-06-30
-
-## The Situation
-
-Accepting card payments online requires a merchant account that underwriters take
-weeks to approve.[^1] Developers integrating the incumbent gateways report multi-day
-integration work.[^1]
-
-## The Protagonist
-
-Two founders with no banking relationships, choosing how to reach developers before
-their runway ends.
-
-## What Is Known
-
-The incumbent gateways charge roughly 2.9% plus a fixed fee per transaction.[^2]
-The company has 4 employees and no bank sponsor.[^1]
-
-## What Is Uncertain
-
-Whether developers will route real money through an unknown startup, and whether a
-sponsor bank will take the fraud exposure of instant onboarding.
-
-## Comparators
-
-- A rival launched the same year with an identical instant-onboarding pitch, lost its
-  sponsor bank after a fraud spike, and wound down.[^3]
-- An incumbent processor tried a self-serve tier and abandoned it.[^3]
+GOOD_BRIEF = """# Decision brief
 
 ## The Decision
 
-Underwrite instantly and carry the fraud risk, or resell an incumbent's onboarding
-and stay safe but slow. What should the founders do?
+Should we move fee financing to a flat platform fee? Decide by 2026-09-30.
+
+## Situation
+
+Institutions push back on variable pricing during renewal negotiations.
+
+## Options on the Table
+
+- Flat platform fee per enrolled student
+- Keep the rate spread with volume tiers
+- Hybrid: a flat floor plus a capped spread
+
+## Evidence
+
+Renewal churn ran at 12% last cycle.[^1]
+Average contract value is $48,000.[^1]
+
+## Reference Class
+
+- A peer moved to flat pricing and lost 2 of 9 anchor institutions.[^2]
+- A second peer kept spread pricing and held renewals flat.[^2]
+
+## Open Uncertainties
+
+Whether procurement reads a flat fee as a price rise regardless of total cost.
 
 ## Sources
 
-[^1]: https://example.test/contemporaneous-reporting
-[^2]: https://example.test/published-rate-card
-[^3]: https://example.test/2019/sector-retrospective — a retrospective, cited only.
+[^1]: https://example.test/renewals
+[^2]: https://example.test/peers
 """
 
-TREATMENT_REVEAL = """# Reveal (B-case)
-
-## What They Decided
-
-They underwrote instantly and absorbed the fraud losses.
-
-## What Happened
-
-Fraud losses ran ahead of plan for six quarters before the risk models caught up. A
-sponsor bank nearly withdrew in 2013.
-
-## What Was Unknowable
-
-Whether the sponsor bank would hold. It very nearly did not.
-
-## Sources
-
-[^1]: https://example.test/2019/sector-retrospective
-"""
-
-# The default an AI produces for "analyze X using the HBS case study method":
-# the whole arc, ending known, figures from memory, one winner studied alone.
-CONTROL_CASE = """# Northwind Payments — case as of 2011-06-30
-
-## The Situation
-
-Online payments were broken and nobody had fixed developer onboarding.
-
-## The Protagonist
-
-Two founders who saw what everyone else missed.
-
-## What Is Known
-
-They bet on instant underwriting and it turned out to be right. By 2014 they were
-processing 20 billion in annualized volume and went on to define the category. Today
-the company is worth 95 billion.
-
-## What Is Uncertain
-
-Nothing much — the strategy was sound.
+# Two options, memory figures, one comparator, no stated uncertainty.
+BAD_BRIEF = """# Decision brief
 
 ## The Decision
 
-They decided to underwrite instantly.
+We should probably move to a flat platform fee.
+
+## Situation
+
+Pricing feels messy.
+
+## Options on the Table
+
+- Move to a flat fee
+- Do not move to a flat fee
+
+## Evidence
+
+Churn is around 12% and contracts average $48,000.
+
+## Reference Class
+
+- A peer did this and it worked out.
+
+## Open Uncertainties
 
 ## Sources
 
 [^1]: https://example.test/blog
 """
 
-COMPLETE_DECISION = """# My decision
+GOOD_DECISION = """# Decision record
 
-## Decision
+## Frame
+Pricing structure for the 2027 renewal cycle. Contract length is out of scope.
 
-Underwrite instantly, capped at a low per-merchant exposure.
+## Alternatives Considered
+- Flat platform fee
+- Rate spread with volume tiers
+- Hybrid: flat floor plus capped spread
+- Defer a cycle and instrument procurement objections first
+
+## Values
+Renewal retention over near-term margin.
 
 ## Reasoning
+The hybrid preserves optionality while giving procurement a defensible number.
 
-The onboarding delay is the actual customer pain; reselling leaves it in place.
+## Premortem
+It is 2027-09-30 and this failed. Procurement read the floor as a price rise,
+three anchors renegotiated down, and margin fell with no retention gain.
 
-## Disconfirming evidence
+## Decision
+Ship the hybrid to the three Q3 renewals. Owner: pricing lead.
 
-The comparator died doing exactly this, and its sponsor bank pulled out.
+## Falsifier
+If two of three Q3 renewals cite the floor as their main objection, revert.
 
-## What would change my mind
-
-A sponsor bank refusing the instant-onboarding structure at any exposure cap.
+## Predictions
+- 2026-12-31 | 0.80 | At least 2 of 3 Q3 renewals close on the hybrid
+- 2026-12-31 | 0.60 | Blended take rate holds within 50 basis points
+- 2027-03-31 | 0.90 | No anchor institution churns citing pricing structure
 """
 
-INCOMPLETE_DECISION = """# My decision
+# The shape a decision takes without the skill: a call and a rationale.
+BAD_DECISION = """# Decision record
 
 ## Decision
-
-Underwrite instantly.
+Move to the flat platform fee.
 
 ## Reasoning
+It is simpler and institutions keep asking for predictability. I am confident
+this is right.
 
-It is the bigger opportunity.
+## Alternatives Considered
+- Flat fee
+- Status quo
 """
 
 
 def main():
     tmp = tempfile.mkdtemp(prefix="hcm-eval-")
-    root = os.path.join(tmp, "cases")
+    root = os.path.join(tmp, "decisions")
     try:
-        # ── CONTROL: the retrospective narration must be refused ─────────────
-        r = kit(root, "new", "control", "--company", "Northwind Payments",
-                "--decision-date", DECISION_DATE)
-        check("control case scaffolds", r.returncode == 0, r.stderr.strip()[:80])
-        write(os.path.join(root, "control", "case.md"), CONTROL_CASE)
+        # ── CONTROL: the un-coached decision is refused at both gates ────────
+        r = kit(root, "new", "control", "--decision", QUESTION, "--by", BY)
+        check("control decision scaffolds", r.returncode == 0, r.stderr.strip()[:80])
+        write(os.path.join(root, "control", "brief.md"), BAD_BRIEF)
 
         r = kit(root, "lint", "control")
-        out = r.stdout
-        failed = {line.split()[1] for line in out.splitlines()
-                  if line.startswith("LINT:") and "— FAIL" in line}
-        check("control: hindsight-narrated case fails lint",
-              r.returncode == 1 and "LINT_RESULT: FAIL" in out, out.strip()[-70:])
-        check("control: future date (2014) caught by L1", "L1" in failed, str(sorted(failed)))
-        check("control: outcome language caught by L2", "L2" in failed, str(sorted(failed)))
-        check("control: unsourced figures caught by L4", "L4" in failed, str(sorted(failed)))
-        check("control: missing comparator caught by L5", "L5" in failed, str(sorted(failed)))
+        failed = {l.split()[1] for l in r.stdout.splitlines()
+                  if l.startswith("LINT:") and "— FAIL" in l}
+        check("control: the brief fails lint",
+              r.returncode == 1 and "LINT_RESULT: FAIL" in r.stdout)
+        check("control: two options caught as a whether-or-not trap (B3)",
+              "B3" in failed, str(sorted(failed)))
+        check("control: figures with no citation caught (B4)", "B4" in failed,
+              str(sorted(failed)))
+        check("control: single comparator caught as no base rate (B5)",
+              "B5" in failed, str(sorted(failed)))
+        check("control: empty uncertainties caught (B6)", "B6" in failed,
+              str(sorted(failed)))
+        check("control: a statement rather than a dated question caught (B2)",
+              "B2" in failed, str(sorted(failed)))
 
-        r = kit(root, "seal", "control")
-        check("control: seal is refused while lint fails",
-              r.returncode == 2 and "fails lint" in r.stderr, r.stderr.strip()[:80])
-        check("control: stays at stage drafting",
-              json.loads(read(os.path.join(root, "control", "state.json")))["stage"] == "drafting")
+        write(os.path.join(root, "control", "decision.md"), BAD_DECISION)
+        r = kit(root, "commit", "control")
+        check("control: the decision record is refused", r.returncode == 2)
+        for link in ("Frame", "Values", "Premortem", "Falsifier"):
+            check("control: missing %s named in the refusal" % link,
+                  link in r.stderr, r.stderr.strip()[:110])
+        check("control: too few alternatives named in the refusal",
+              "option set" in r.stderr, r.stderr.strip()[:110])
+        check("control: absence of any forecast named in the refusal",
+              "Predictions" in r.stderr, r.stderr.strip()[:110])
+        check("control: stays uncommitted",
+              json.loads(read(os.path.join(root, "control", "state.json")))["stage"]
+              == "drafting")
 
-        # ── TREATMENT: the prescribed case runs the full ordering ────────────
-        kit(root, "new", "treatment", "--company", "Northwind Payments",
-            "--decision-date", DECISION_DATE)
+        # ── TREATMENT: the coached decision runs the whole loop ──────────────
+        kit(root, "new", "treatment", "--decision", QUESTION, "--by", BY)
         tdir = os.path.join(root, "treatment")
-        write(os.path.join(tdir, "case.md"), TREATMENT_CASE)
-        write(os.path.join(tdir, "reveal.md"), TREATMENT_REVEAL)
+        write(os.path.join(tdir, "brief.md"), GOOD_BRIEF)
+        write(os.path.join(tdir, "decision.md"), GOOD_DECISION)
 
         r = kit(root, "lint", "treatment")
-        check("treatment: prescribed case passes every lint rule",
+        check("treatment: the prescribed brief passes every rule",
               r.returncode == 0 and "LINT_RESULT: PASS" in r.stdout,
               "; ".join(l for l in r.stdout.splitlines() if "FAIL" in l)[:100])
 
-        r = kit(root, "seal", "treatment")
-        check("treatment: seals once lint is clean", r.returncode == 0, r.stderr.strip()[:80])
-        check("treatment: plaintext reveal is removed",
-              not os.path.exists(os.path.join(tdir, "reveal.md")))
-        sealed = read(os.path.join(tdir, "reveal.sealed"))
-        check("treatment: outcome is not readable in the sealed blob",
-              "What Happened" not in sealed and "fraud losses" not in sealed.lower())
-
-        r = kit(root, "reveal", "treatment")
-        check("treatment: reveal is refused before any decision is committed",
-              r.returncode == 2 and "commit a decision before revealing" in r.stderr,
-              r.stderr.strip()[:80])
-        check("treatment: refused reveal leaks nothing to stdout",
-              "What Happened" not in r.stdout and "sponsor bank" not in r.stdout.lower())
-
-        write(os.path.join(tdir, "decision.md"), INCOMPLETE_DECISION)
         r = kit(root, "commit", "treatment")
-        check("treatment: a decision with no falsifier is refused",
-              r.returncode == 2 and "what would change my mind" in r.stderr,
-              r.stderr.strip()[:90])
-
-        write(os.path.join(tdir, "decision.md"), COMPLETE_DECISION)
-        r = kit(root, "commit", "treatment")
-        check("treatment: a complete decision commits", r.returncode == 0, r.stderr.strip()[:80])
+        check("treatment: the complete record commits", r.returncode == 0,
+              r.stderr.strip()[:110])
         state = json.loads(read(os.path.join(tdir, "state.json")))
-        check("treatment: the committed decision is fingerprinted",
-              state["stage"] == "committed" and len(state.get("decision_sha256", "")) == 64)
+        check("treatment: three forecasts are recorded verbatim",
+              [p["p"] for p in state["predictions"]] == [0.80, 0.60, 0.90],
+              str(state.get("predictions"))[:80])
+        check("treatment: the record is fingerprinted",
+              len(state.get("decision_sha256", "")) == 64)
 
         r = kit(root, "commit", "treatment")
-        check("treatment: the decision cannot be swapped after commit",
-              r.returncode == 2 and "already has a committed decision" in r.stderr)
+        check("treatment: a committed record cannot be silently swapped",
+              r.returncode == 2 and "already committed" in r.stderr)
 
-        r = kit(root, "reveal", "treatment")
-        check("treatment: reveal now returns exactly the sealed B-case",
-              r.returncode == 0 and r.stdout.strip() == TREATMENT_REVEAL.strip(),
+        # ── Resolution and scoring against hand-computed values ─────────────
+        for n, outcome in ((1, "yes"), (2, "no"), (3, "yes")):
+            kit(root, "resolve", "treatment", "--n", str(n), "--outcome", outcome)
+        r = kit(root, "resolve", "treatment", "--n", "2", "--outcome", "yes")
+        check("resolution cannot be flipped without --force",
+              r.returncode == 2 and "--force" in r.stderr, r.stderr.strip()[:80])
+
+        # (0.8-1)^2 + (0.6-0)^2 + (0.9-1)^2 = 0.04 + 0.36 + 0.01 = 0.41 / 3
+        expected = round(0.41 / 3, 4)
+        r = kit(root, "score", "treatment")
+        check("score reports the hand-computed Brier value",
+              ("%.4f" % expected) in r.stdout, "expected %.4f" % expected)
+        check("score reports the calibration gap",
+              "calibration gap:" in r.stdout and "hit rate:" in r.stdout)
+        check("score refuses to grade the DQ chain itself",
+              "coach's judgement" in r.stdout)
+
+        r = kit(root, "profile")
+        check("profile pools decisions and flags the small sample",
+              r.returncode == 0 and "ACROSS" in r.stdout
+              and "fewer than 10 resolved forecasts" in r.stdout)
+
+        # ── MODE fixture: hindsight machinery is drill-only ──────────────────
+        r = kit(root, "seal", "treatment")
+        check("live decision: seal is refused (no ending exists to hide)",
+              r.returncode == 2 and "no known ending to hide" in r.stderr,
               r.stderr.strip()[:80])
-        check("treatment: stage advances to revealed",
-              json.loads(read(os.path.join(tdir, "state.json")))["stage"] == "revealed")
+        r = kit(root, "reveal", "treatment")
+        check("live decision: reveal is refused",
+              r.returncode == 2 and "has not happened yet" in r.stderr,
+              r.stderr.strip()[:80])
+        r = kit(root, "lint", "treatment")
+        check("live decision: no hindsight rules are run",
+              "D1" not in r.stdout and "D2" not in r.stdout)
 
-        # ── Tamper fixture: a swapped ending fails its checksum ──────────────
-        kit(root, "new", "tamper", "--company", "Northwind Payments",
-            "--decision-date", DECISION_DATE)
-        xdir = os.path.join(root, "tamper")
-        write(os.path.join(xdir, "case.md"), TREATMENT_CASE)
-        write(os.path.join(xdir, "reveal.md"), TREATMENT_REVEAL)
-        write(os.path.join(xdir, "decision.md"), COMPLETE_DECISION)
-        kit(root, "seal", "tamper")
-        kit(root, "commit", "tamper")
-        write(os.path.join(xdir, "reveal.sealed"),
-              base64.b64encode(b"# Reveal\n\nA flattering ending.\n").decode("ascii") + "\n")
-        r = kit(root, "reveal", "tamper")
-        check("tamper: a swapped seal is rejected by checksum",
-              r.returncode == 2 and "checksum" in r.stderr, r.stderr.strip()[:80])
-        check("tamper: the substituted text is not printed",
-              "flattering" not in r.stdout)
+        kit(root, "new", "drill", "--decision", QUESTION, "--by", BY, "--drill")
+        ddir = os.path.join(root, "drill")
+        write(os.path.join(ddir, "brief.md"), GOOD_BRIEF)
+        write(os.path.join(ddir, "decision.md"), GOOD_DECISION)
+        write(os.path.join(ddir, "reveal.md"), "# Reveal\n\nThey shipped the hybrid.\n")
+        r = kit(root, "lint", "drill")
+        check("drill: hindsight rules ARE run", "D1" in r.stdout and "D2" in r.stdout)
 
-        # ── Ordering fixture: commit cannot precede seal ─────────────────────
-        kit(root, "new", "ordering", "--company", "Northwind Payments",
-            "--decision-date", DECISION_DATE)
-        write(os.path.join(root, "ordering", "decision.md"), COMPLETE_DECISION)
-        r = kit(root, "commit", "ordering")
-        check("ordering: commit is refused before the reveal is sealed",
-              r.returncode == 2 and "seal the reveal" in r.stderr, r.stderr.strip()[:80])
+        write(os.path.join(ddir, "brief.md"),
+              GOOD_BRIEF.replace("## Situation",
+                                 "## Situation\n\nBy 2030 the bet turned out to be right."))
+        r = kit(root, "lint", "drill")
+        leaked = {l.split()[1] for l in r.stdout.splitlines()
+                  if l.startswith("LINT:") and "— FAIL" in l}
+        check("drill: leaked future date caught (D2)", "D2" in leaked, str(sorted(leaked)))
+        check("drill: leaked hindsight language caught (D1)", "D1" in leaked,
+              str(sorted(leaked)))
+        r = kit(root, "seal", "drill")
+        check("drill: seal is refused while the brief leaks",
+              r.returncode == 2 and "fails lint" in r.stderr)
 
-        r = kit(root, "status", "ordering")
-        check("status reports the stage and the next step",
-              r.returncode == 0 and "DRAFTING" in r.stdout and "next:" in r.stdout)
+        write(os.path.join(ddir, "brief.md"), GOOD_BRIEF)
+        check("drill: seals once the brief is clean", kit(root, "seal", "drill").returncode == 0)
+        r = kit(root, "reveal", "drill")
+        check("drill: reveal is refused before a decision is committed",
+              r.returncode == 2 and "commit a decision before revealing" in r.stderr)
+        check("drill: the refused reveal leaks nothing", "hybrid" not in r.stdout)
+        kit(root, "commit", "drill")
+        r = kit(root, "reveal", "drill")
+        check("drill: reveal returns the ending after a commit",
+              r.returncode == 0 and "They shipped the hybrid" in r.stdout)
 
-        r = kit(root, "status", "no-such-case")
-        check("an unknown case fails cleanly, without a traceback",
+        # ── Forecast-hygiene fixture ────────────────────────────────────────
+        kit(root, "new", "certainty", "--decision", QUESTION, "--by", BY)
+        write(os.path.join(root, "certainty", "brief.md"), GOOD_BRIEF)
+        write(os.path.join(root, "certainty", "decision.md"),
+              GOOD_DECISION.replace("| 0.80 |", "| 1.0 |"))
+        r = kit(root, "commit", "certainty")
+        check("a probability of 1.0 is refused as not a forecast",
+              r.returncode == 2 and "certainty is not a forecast" in r.stderr,
+              r.stderr.strip()[:100])
+
+        write(os.path.join(root, "certainty", "decision.md"),
+              GOOD_DECISION.replace(
+                  "- 2026-12-31 | 0.80 | At least 2 of 3 Q3 renewals close on the hybrid",
+                  "- I reckon it goes fine by December"))
+        r = kit(root, "commit", "certainty")
+        check("an unparseable forecast line is reported, not silently dropped",
+              r.returncode == 2 and "expected" in r.stderr, r.stderr.strip()[:100])
+
+        r = kit(root, "status", "no-such-decision")
+        check("an unknown decision fails cleanly, without a traceback",
               r.returncode == 2 and "Traceback" not in r.stderr)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
