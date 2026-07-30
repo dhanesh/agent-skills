@@ -56,12 +56,20 @@ Each is a default an AI case study falls into, and each has a mechanical check i
 
 1. **Scope and select.** Establish what the learner will *use* the judgment for (their
    own business, an interview, a domain they're entering), then pick a company **and a
-   decision moment** — not a company alone. A good moment is one where the record shows
-   real disagreement at the time. Pick the comparator now, in the same breath: someone
-   who faced the same situation and did not survive it.
-2. **Fix the decision date.** `python3 assets/casekit.py new stripe-2011 --company Stripe
-   --decision-date 2011-06-30` scaffolds `case.md`, `reveal.md`, and `decision.md` under
-   `cases/`. Everything after that date is now contraband in the A-case.
+   decision moment** — not a company alone. Three tests a candidate must pass, in
+   priority order:
+   - **The learner must not already know the outcome.** This is the binding constraint,
+     and it disqualifies most famous companies — nobody is surprised by how Netflix's
+     2011 split went. Ask them directly what they already know, and pick around it:
+     a company that failed, a mid-sized firm in their own sector, a decision inside a
+     famous company that isn't the famous one.
+   - The record shows **real disagreement at the time**, so the answer isn't obvious.
+   - A **comparator** exists — someone who faced the same situation and did not survive.
+     Pick it now, in the same breath, not later.
+2. **Fix the decision date.** `python3 assets/casekit.py new <slug>
+   --company "<Company>" --decision-date YYYY-MM-DD` scaffolds `case.md`, `reveal.md`,
+   and `decision.md` under `cases/`. Everything after that date is now contraband in
+   the A-case.
 3. **Research and write the A-case.** Fill `case.md`: the situation, the protagonist and
    what they control, what was known (each figure cited), what was genuinely uncertain,
    the comparators, and a decision section that ends in a question. Prefer contemporaneous
@@ -94,6 +102,29 @@ Each is a default an AI case study falls into, and each has a mechanical check i
    the same thing? What in this outcome was luck? Close with the one lesson that
    transfers to the learner's actual context, stated as a testable claim rather than a
    maxim.
+
+## The context boundary — write and run in separate sessions
+
+The seal protects the *file*. It cannot protect a *context window*: an agent that just
+researched the outcome in order to write `reveal.md` knows it while facilitating, and
+knowing leaks through emphasis, ordering, and which option gets the follow-up question.
+The tooling can enforce ordering on disk; it cannot make you forget.
+
+So when the learner and the case-writer are not the same person, split the work across
+two sessions:
+
+- **Session A (authoring)** — steps 1–5. Research, write, lint, seal. End the session.
+- **Session B (running)** — steps 6–9, started fresh. Read `case.md` and `state.json`
+  only. **Do not open `reveal.sealed` until `casekit.py reveal` prints it.** A
+  facilitator that has not decoded the blob genuinely does not know the ending, and the
+  discussion is honest rather than performed.
+
+When one person is both author and learner, say plainly that the commitment is on the
+honour system — they can decode the blob or simply ask you — and that the exercise is
+worth roughly what their discipline is worth. Prefer, in order: someone else writes the
+case; a fresh session runs it; solo with a genuinely unknown outcome. Solo, one session,
+famous company is the configuration where this skill adds ceremony and little else — say
+so rather than running it.
 
 ## Deliverable
 

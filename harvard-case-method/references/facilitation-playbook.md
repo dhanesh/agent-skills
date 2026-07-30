@@ -19,12 +19,23 @@ reverse-engineered what you want to hear.
 | Move | When | What it sounds like |
 |---|---|---|
 | **Cold call** | The learner is summarising rather than deciding | "Pick one. You can change your mind in five minutes, but pick one now." |
-| **Disagreement pump** | A position is stated too easily | "The strongest argument against you is ___. Answer it." Supply the counter yourself if the learner can't. |
+| **Disagreement pump** | A position is stated too easily | "The strongest argument against you is ___. Answer it." Supply the counter yourself if the learner can't. **Ask for one or two, never a long list** — see the caution below. |
 | **Evidence audit** | A claim leans on a number | "Where in the case is that? What's the citation?" |
 | **Constraint tightening** | The plan does everything | "You have one quarter and one engineer. What survives?" |
 | **Comparator turn** | Confidence is high | "The comparator did roughly this and did not survive. What's different about you?" |
 | **Protagonist reality check** | The advice is abstract | "You have to say this to your board on Monday. Say it in three sentences." |
 | **Uncertainty naming** | Late in the discussion | "What do you not know that you'd most want to know? What would you pay to learn it?" |
+
+### Caution: the disagreement pump can backfire if you over-pump
+
+Asking someone to argue against an outcome's inevitability is the standard hindsight
+remedy, and it **attenuates rather than eliminates** the bias. It also has a documented
+failure mode: pushed to generate *many* alternatives, people experience the effort as
+difficult, read that difficulty as evidence that few alternatives existed, and end up
+**more** hindsight-biased than if you had never asked. Two strong counters beat ten weak
+ones. When the learner starts straining, stop asking and move on — the additional
+objections are not just worthless, they are actively counterproductive. Evidence in
+[case-method-evidence.md](case-method-evidence.md).
 
 ## Two things you must not do
 

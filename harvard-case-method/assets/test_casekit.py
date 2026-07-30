@@ -140,6 +140,32 @@ class TestLint(unittest.TestCase):
                                       "They %s.\n\n## What Is Uncertain" % figure)
             self.assertFalse(self.lint(text)["L4"][0], figure)
 
+    def test_identifying_numerals_are_not_figures(self):
+        # Regression: "Section 230"/"ISO 27001" are references, not measurements.
+        # Flagging them is the noise that pushes an author to --skip-lint.
+        for phrase in ("Section 230 does not apply.", "Certified to ISO 27001.",
+                       "RFC 2119 language is used.", "Rule 144A governed the placement.",
+                       "See Exhibit 10.1 of the filing."):
+            text = CLEAN_CASE.replace("## What Is Uncertain",
+                                      "%s\n\n## What Is Uncertain" % phrase)
+            self.assertTrue(self.lint(text)["L4"][0], phrase)
+
+    def test_comma_grouped_figures_report_the_whole_number(self):
+        text = CLEAN_CASE.replace("## What Is Uncertain",
+                                  "They had about 2,200 employees.\n\n## What Is Uncertain")
+        ok, detail = self.lint(text)["L4"]
+        self.assertFalse(ok)
+        self.assertIn("2,200", detail)   # not the "200" fragment
+
+    def test_currency_figure_reports_its_scale_word(self):
+        text = CLEAN_CASE.replace("## What Is Uncertain",
+                                  "They raised $40 million.\n\n## What Is Uncertain")
+        self.assertIn("$40 million", self.lint(text)["L4"][1])
+
+    def test_small_counts_do_not_need_a_citation(self):
+        self.assertTrue(self.lint(CLEAN_CASE.replace(
+            "## What Is Uncertain", "They had 4 employees.\n\n## What Is Uncertain"))["L4"][0])
+
     def test_missing_comparators_fails(self):
         self.assertFalse(self.lint(CLEAN_CASE.replace("## Comparators", "## Notes"))["L5"][0])
 

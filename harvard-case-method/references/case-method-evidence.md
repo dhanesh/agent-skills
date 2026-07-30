@@ -19,12 +19,24 @@ part that is genuinely a judgment call rather than a fact.
 - Learning happens in **discussion**: individual preparation, then a small discussion
   group, then a faculty-facilitated section discussion driven by classmates' comments and
   experience.
-- The outcome arrives **afterwards**, as the "B-case" / "the rest of the story" / **"the
-  reveal"** — material describing the solution the protagonist chose and its results,
-  distributed at or after the end of class.
+- The outcome arrives **afterwards**, as the **"B-case"** — material describing the
+  solution the protagonist chose and its results, distributed at or after the end of class.
 
 The method is a century old (HBS marked its centenary in 2021) and is the backbone of the
 HBS curriculum, so its shape is well documented rather than a matter of interpretation.
+
+### A terminology precision
+
+This skill uses "**decision-forcing case**" and "**the reveal**". Both are terms of art
+from an adjacent tradition rather than HBS's own house vocabulary: Bruce Gudmundsson, who
+held the Case Method Chair at Marine Corps University 2007–2017, developed decision-forcing
+cases for professional military education, positioned at the intersection of the case
+method, decision games, and Socratic conversation, where "the reveal" names the
+after-the-decision disclosure. That tradition descends directly from HBS — HBS was using
+decision-forcing cases from 1923, and the US Army Infantry School adopted the approach —
+so the structural claim is sound. But HBS's own words are "the case method" and "the B
+case". If precision matters in your context, attribute the *structure* to HBS and the
+*vocabulary* to the military-education lineage.
 
 ## Where the popular prompt diverges
 
@@ -70,6 +82,55 @@ So this skill keeps the post's pattern-extraction questions **verbatim in spirit
 moves them to step 9, the debrief — which is exactly where HBS puts the reveal. Nothing
 of value is discarded; the ordering is repaired.
 
+## How well-evidenced is any of this? — the uncomfortable part
+
+Two separate questions get conflated when a skill like this is defended. Kept apart, they
+give very different answers.
+
+### Does the case method itself improve learning? Weakly evidenced.
+
+The honest state of the literature is that the case method's efficacy evidence is thin
+and has been thin for a long time. Scholars began lamenting the lack of empirical research
+on case-method effectiveness by the **late 1980s**, and successive literature reviews
+**from 1987 through 2018** confirm that the evidence remains sparse and, where it exists,
+largely inconclusive. What controlled comparisons exist suggest the case method is roughly
+**as effective as lecture** for declarative knowledge and situation analysis, with higher
+student satisfaction; some studies find measurable problem-solving gains over a semester,
+and students rate simulation above case study above lecture for interpersonal skills and
+self-awareness. Results depend heavily on which outcome is measured, and too few outcomes
+have been studied for a pattern to emerge.
+
+So: a century of institutional adoption is not the same as an evidence base. This skill
+reproduces the method faithfully; that is a claim about **fidelity**, not about proven
+learning gains. Anyone selling it as "MBA-grade judgment training, proven" is overclaiming
+— including this repo, if it ever does.
+
+### Does committing a decision before the reveal help? This part is better evidenced.
+
+The specific mechanic at the centre of this skill has more direct support than the
+tradition around it:
+
+- **Recording the prediction protects the prediction.** When people make a prediction
+  immediately *before* receiving outcome information, they cannot afterwards distort or
+  misremember what they predicted. That is precisely what `commit` does, and why it
+  fingerprints the decision file rather than trusting recall.
+- **But it protects the record, not the feeling.** The same research finds people still
+  distort *how certain* they recall being, *how good a basis* they had, and how long they
+  deliberated. This is the reason `decision.md` demands reasoning, disconfirming evidence,
+  and a falsifier rather than just the call — the basis has to be on paper too, or the
+  scoring step grades a reconstructed memory.
+- **Hindsight bias resists debiasing.** Merely informing people about the bias fails.
+  "Consider the opposite" — the most recommended remedy, arguing against the inevitability
+  of the outcome — **attenuates but does not eliminate** it, and can **backfire**: asked to
+  generate many alternative outcomes, people find the effort difficult, read that
+  difficulty as evidence that few alternatives existed, and become *more* hindsight-biased.
+
+That last finding has a direct operational consequence for
+[facilitation-playbook.md](facilitation-playbook.md): the "disagreement pump" is a
+consider-the-opposite move, so ask for **one or two strong counter-arguments, not a long
+list**. A learner straining to produce a tenth objection is being pushed toward the
+backfire condition, not away from it.
+
 ## What could not be verified
 
 - **The source post itself.** `youtube.com` returns HTTP 403 to this environment's
@@ -103,6 +164,13 @@ of value is discarded; the ordering is repaired.
 - 5 Benefits of the Case Study Method | HBS Online — <https://online.hbs.edu/blog/post/case-study-method>
 - Case method — Wikipedia (decision-forcing cases, the "reveal"/B-case) — <https://en.wikipedia.org/wiki/Case_method>
 - Harvard Business School's Case Method Is Officially 100 Years Old | Poets&Quants — <https://poetsandquants.com/2021/12/26/harvard-business-schools-case-method-is-officially-100-years-old/>
+- The efficacy of the case method in tertiary business education: a scoping review 2000–2022 — <https://www.sciencedirect.com/science/article/pii/S1472811724000545>
+- Effectiveness of teaching methods in business education: lectures vs case studies vs simulations — <https://www.sciencedirect.com/science/article/abs/pii/S1472811717303294>
+- Roese & Vohs, "Hindsight Bias", *Perspectives on Psychological Science* — <http://houdekpetr.cz/!data/public_html/papers/Roese%20et%20al%202012.pdf>
+- Sanna, Schwarz & Stocker, debiasing hindsight via accessibility experiences (the backfire finding) — <https://www.sciencedirect.com/science/article/abs/pii/S0022103102005280>
+- Fifty Years of Hindsight Bias Research — <https://psycnet.apa.org/fulltext/2025-76722-001.pdf>
+- Bruce Gudmundsson on decision-forcing cases (origin of the terminology) — <https://acquisitiontalk.com/2019/04/bruce-gudmundsson-on-learning-by-decision-forcing-cases/>
+- A Fourth Way in Professional Military Education, War on the Rocks — <https://warontherocks.com/2018/10/a-fourth-way-in-professional-military-education/>
 - Survivorship bias — Wikipedia — <https://en.wikipedia.org/wiki/Survivorship_bias>
 - Survivorship bias — The Decision Lab — <https://thedecisionlab.com/biases/survivorship-bias>
 - Survivorship Bias: The Tale of Forgotten Failures — Farnam Street — <https://fs.blog/survivorship-bias/>

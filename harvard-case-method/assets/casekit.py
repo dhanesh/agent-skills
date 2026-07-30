@@ -60,9 +60,19 @@ CITATION = re.compile(r"\[\^[^\]]+\]|\(src:[^)]+\)")
 ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 FIGURE = re.compile(
-    r"[$₹€£]\s?[\d,]+(?:\.\d+)?"
-    r"|[\d,]+(?:\.\d+)?\s?(?:%|x\b|million|billion|crore|lakh|bn|mn)"
-    r"|\b\d{3,}\b",
+    r"[$₹€£]\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:million|billion|crore|lakh|bn|mn))?"
+    r"|\d[\d,]*(?:\.\d+)?\s?(?:%|x\b|million|billion|crore|lakh|bn|mn)"
+    r"|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b"   # comma-grouped, matched whole
+    r"|\b\d{3,}(?:\.\d+)?\b",
+    re.IGNORECASE,
+)
+
+# A numeral that identifies rather than measures — "Section 230", "RFC 2119",
+# "ISO 27001", "Rule 144A". Flagging these as unsourced figures is noise, and
+# noise is what pushes an author to --skip-lint, which costs more than it saves.
+IDENTIFIER_PREFIX = re.compile(
+    r"(?:section|rule|article|chapter|clause|part|form|schedule|exhibit|figure|"
+    r"table|no\.?|#|version|v\.?|iso|rfc|ieee|ansi|gaap|ias|ifrs)\s*$",
     re.IGNORECASE,
 )
 
@@ -191,9 +201,11 @@ def lint_case(case_text, decision_date):
         if not stripped or stripped.startswith("#") or CITATION.search(line):
             continue
         scrubbed = YEAR.sub(" ", line)
-        m = FIGURE.search(scrubbed)
-        if m:
+        for m in FIGURE.finditer(scrubbed):
+            if IDENTIFIER_PREFIX.search(scrubbed[:m.start()]):
+                continue
             unsourced.append("line %d: %s" % (n, m.group(0).strip()))
+            break
     results.append(("L4 figures-are-sourced", not unsourced, "; ".join(unsourced[:4])))
 
     comparators = section_body(case_text, "comparators")
