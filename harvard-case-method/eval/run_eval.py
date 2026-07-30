@@ -21,7 +21,17 @@ product decision through the shipped CLI and grades that promise.
     machinery (seal/reveal are refused), while a drill case must.
 
   SCORING fixture — Brier and calibration arithmetic checked against
-    hand-computed values, including that confident-and-wrong scores worse.
+    hand-computed values.
+
+  RICE arm — a sourced, single-period sheet validates and ranks by the formula;
+    a sheet with mixed periods, off-scale impact, percentage confidence or
+    unsourced reach is refused AND left unranked, because a score built from a
+    bad input out-ranks every honest row.
+
+  PLAN arm — a reconciled, cross-checked plan passes; a fairytale (drivers from
+    conviction, sizings 25x apart, unstaffed hockey-stick growth, no stated
+    failure condition) fails on every count with the divergence quantified.
+    Negative fixture: a plan formula containing a call is refused, not evaluated.
 
 Offline, stdlib-only, deterministic, all writes under tempfile.mkdtemp().
 """
@@ -35,6 +45,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
 CASEKIT = os.path.join(SKILL, "assets", "casekit.py")
+RIGOR = os.path.join(SKILL, "assets", "rigor.py")
 
 _checks = []
 
@@ -47,6 +58,11 @@ def check(name, ok, detail=""):
 
 def kit(root, *args):
     return subprocess.run([sys.executable, CASEKIT, "--root", root] + list(args),
+                          capture_output=True, text=True, timeout=60, check=False)
+
+
+def rig(*args):
+    return subprocess.run([sys.executable, RIGOR] + list(args),
                           capture_output=True, text=True, timeout=60, check=False)
 
 
@@ -177,6 +193,87 @@ this is right.
 ## Alternatives Considered
 - Flat fee
 - Status quo
+"""
+
+
+GOOD_RICE = """# RICE — Q3 roadmap
+
+## Items
+
+- Bulk fee upload | reach=1200/quarter | impact=2 | confidence=0.8 | effort=3 | src: cohorts [^1]
+- Autopay nudges | reach=9000/quarter | impact=0.5 | confidence=0.5 | effort=2 | src: analytics [^1]
+- Dashboard v2 | reach=340/quarter | impact=3 | confidence=0.8 | effort=5 | src: CRM [^2]
+
+## Sources
+[^1]: https://example.test/a
+[^2]: https://example.test/b
+"""
+
+GOOD_PLAN = """# Plan — FY27
+
+## Drivers
+
+- institutions = 120 | src: signed pipeline [^1]
+- students_per_institution = 850 | src: enrolment data [^1]
+- attach_rate = 0.06 | assumption
+- avg_ticket = 62000 | src: rate card [^2]
+
+## Top Down
+
+- revenue = institutions * students_per_institution * attach_rate * avg_ticket
+
+## Bottom Up
+
+- revenue = 420000000 | src: sales capacity model [^3]
+
+## Trajectory
+
+- FY27-Q1 | 60000000
+- FY27-Q2 | 90000000
+- FY27-Q3 | 120000000
+- FY27-Q4 | 150000000
+
+## What Would Have To Be True
+
+- [least likely] Attach rate holds at 6% as we move down-market
+- Sales can onboard 30 institutions a quarter
+
+## Sources
+[^1]: https://example.test/pipeline
+[^2]: https://example.test/rates
+[^3]: https://example.test/capacity
+"""
+
+# Every driver from conviction, sizings 25x apart, growth nobody staffs.
+FAIRYTALE_PLAN = """# Plan — FY27 expansion
+
+## Drivers
+
+- institutions = 900
+- students_per_institution = 850
+- attach_rate = 0.35
+- avg_ticket = 62000
+
+## Top Down
+
+- revenue = institutions * students_per_institution * attach_rate * avg_ticket
+
+## Bottom Up
+
+- revenue = 640000000 | src: sales capacity [^1]
+
+## Trajectory
+
+- FY27-Q1 | 40000000
+- FY27-Q2 | 110000000
+- FY27-Q3 | 420000000
+
+## What Would Have To Be True
+
+- Every signed institution reaches 35% attach in year one
+
+## Sources
+[^1]: https://example.test/capacity
 """
 
 
@@ -328,6 +425,95 @@ def main():
         r = kit(root, "commit", "certainty")
         check("an unparseable forecast line is reported, not silently dropped",
               r.returncode == 2 and "expected" in r.stderr, r.stderr.strip()[:100])
+
+        # ── RICE: the prioritisation arm ────────────────────────────────────
+        good_rice = os.path.join(tmp, "rice.md")
+        write(good_rice, GOOD_RICE)
+        r = rig("rice", good_rice)
+        check("rice: a sourced, single-period sheet validates and ranks",
+              r.returncode == 0 and "RICE_RESULT: PASS" in r.stdout
+              and "Ranked" in r.stdout,
+              "; ".join(l for l in r.stdout.splitlines() if "FAIL" in l)[:100])
+        # 9000 * 0.5 * 0.5 / 2 = 1125 is the top score
+        check("rice: ranks by the RICE formula, not by input size",
+              r.stdout.split("Ranked")[1].strip().splitlines()[1].strip().startswith("1. Autopay"),
+              r.stdout.split("Ranked")[1].strip().splitlines()[1][:60])
+        check("rice: low-confidence items are flagged for evidence",
+              "Confidence at or below 50%" in r.stdout
+              and "not a discount factor" in r.stdout)
+
+        bad_rice = os.path.join(tmp, "bad-rice.md")
+        write(bad_rice, GOOD_RICE
+              .replace("reach=9000/quarter", "reach=9000/month")
+              .replace("impact=3", "impact=5")
+              .replace("confidence=0.8 | effort=3 | src: cohorts [^1]", "confidence=80 | effort=3"))
+        r = rig("rice", bad_rice)
+        failed = {l.split()[1] for l in r.stdout.splitlines()
+                  if l.startswith("RICE:") and "— FAIL" in l}
+        check("rice: mixed reach periods caught (R2)", "R2" in failed, str(sorted(failed)))
+        check("rice: unsourced reach caught (R3)", "R3" in failed, str(sorted(failed)))
+        check("rice: off-scale impact caught (R4)", "R4" in failed, str(sorted(failed)))
+        check("rice: confidence as a percentage caught (R5)", "R5" in failed,
+              str(sorted(failed)))
+        check("rice: an invalid sheet is NOT ranked",
+              "No ranking printed" in r.stdout and "1." not in r.stdout.split("RICE_RESULT")[1])
+
+        no_period = os.path.join(tmp, "no-period.md")
+        write(no_period, GOOD_RICE.replace("reach=1200/quarter", "reach=1200"))
+        r = rig("rice", no_period)
+        check("rice: reach without a time period is refused",
+              r.returncode == 1 and "needs a period" in r.stdout, r.stdout[:80])
+
+        # ── PLAN: the feasibility arm ───────────────────────────────────────
+        good_plan = os.path.join(tmp, "plan.md")
+        write(good_plan, GOOD_PLAN)
+        r = rig("plan", good_plan)
+        check("plan: a reconciled, cross-checked plan passes",
+              r.returncode == 0 and "PLAN_RESULT: PASS" in r.stdout,
+              "; ".join(l for l in r.stdout.splitlines() if "FAIL" in l)[:120])
+
+        fairytale = os.path.join(tmp, "fairytale.md")
+        write(fairytale, FAIRYTALE_PLAN)
+        r = rig("plan", fairytale)
+        failed = {l.split()[1] for l in r.stdout.splitlines()
+                  if l.startswith("PLAN:") and "— FAIL" in l}
+        check("plan: unsourced, unflagged drivers caught (P2)", "P2" in failed,
+              str(sorted(failed)))
+        check("plan: sizings an order of magnitude apart caught (P6)", "P6" in failed,
+              str(sorted(failed)))
+        check("plan: the divergence is quantified, not just flagged",
+              "× apart" in r.stdout and "fiction" in r.stdout)
+        check("plan: hockey-stick growth caught (P7)", "P7" in failed, str(sorted(failed)))
+        check("plan: too few what-would-have-to-be-true conditions caught (P8)",
+              "P8" in failed, str(sorted(failed)))
+        check("plan: unnamed weakest condition caught (P9)", "P9" in failed,
+              str(sorted(failed)))
+        check("plan: the refusal explains why it matters",
+              "unfalsifiable" in r.stdout)
+
+        r = rig("plan", good_plan, "--tolerance", "1.01")
+        check("plan: tightening --tolerance can fail an otherwise-passing plan",
+              r.returncode == 1)
+
+        broken = os.path.join(tmp, "broken.md")
+        write(broken, GOOD_PLAN.replace("attach_rate * avg_ticket", "attach_rate * churn"))
+        r = rig("plan", broken)
+        check("plan: a top line that does not reconcile is named with the driver",
+              "churn" in r.stdout and "P4" in r.stdout)
+
+        # Negative fixture: a plan formula is arithmetic or it is refused.
+        hostile = os.path.join(tmp, "hostile.md")
+        write(hostile, GOOD_PLAN.replace(
+            "- revenue = institutions * students_per_institution * attach_rate * avg_ticket",
+            "- revenue = __import__('os').getcwd()"))
+        r = rig("plan", hostile)
+        check("plan: a formula containing a call is refused, not evaluated",
+              r.returncode == 1 and "P4" in r.stdout
+              and "Traceback" not in r.stderr, r.stdout[:80])
+
+        r = rig("plan", os.path.join(tmp, "missing.md"))
+        check("a missing file fails cleanly, without a traceback",
+              r.returncode == 2 and "Traceback" not in r.stderr)
 
         r = kit(root, "status", "no-such-decision")
         check("an unknown decision fails cleanly, without a traceback",

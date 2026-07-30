@@ -1,159 +1,174 @@
 ---
 name: harvard-case-method
 description: >-
-  Reason through a real business or product decision the way a business-school case
-  is reasoned through, and coach the user's judgement while doing it. Use whenever
-  someone brings a live call to make — pricing, build-vs-buy, market entry, a
-  roadmap bet, a hire, a pivot — or says "help me decide", "think this through with
-  me", "what should we do about X", "run this like a case study". Acts as aid and
-  coach at once: the agent does the assembly labour (research, base rates, sourcing,
-  arithmetic) while the user keeps the judgement work (framing, values, the call),
-  scored against Stanford's Decision Quality chain. Ends with a committed decision,
-  a premortem, and dated probability forecasts that resolve later into a real
-  calibration profile. Also drills historical cases with the ending withheld, for
-  fast reps.
+  Structured business reasoning for a real product or business problem — decide,
+  prioritise, or pressure-test a plan — with the agent doing the assembly labour and
+  the user keeping the judgement. Use when someone brings a live call to make ("help
+  me decide", "should we build X", "think this through with me"), a RICE or
+  prioritisation question ("I have a product requirement and need a RICE analysis"),
+  or a business plan, forecast or business case to validate ("does this hold up",
+  "is this feasible", "this looks like a hockey stick"). Applies case-method
+  reasoning plus the consulting toolkit that earns its place — MECE, issue trees,
+  driver trees, top-down vs bottom-up cross-checks, and "what would have to be
+  true" — and refuses numbers that cannot support a decision: unsourced reach,
+  mismatched RICE periods, a top line that does not reconcile with its drivers,
+  sizings an order of magnitude apart, or a plan with no stated failure condition.
 license: MIT
-compatibility: Requires python3 (stdlib only) for casekit.py — decision scaffolding, brief lint, Decision Quality completeness checks, and Brier/calibration scoring. Research quality depends on the host agent's web or document access; conversation-only environments run the full method with the user supplying the evidence.
+compatibility: Requires python3 (stdlib only) for casekit.py (decision records, Brier/calibration scoring) and rigor.py (RICE scoring, plan reconciliation). Research quality depends on the host agent's web or document access; conversation-only environments run every mode with the user supplying the evidence.
 metadata:
   author: dhanesh
-  version: "2.0.0"
-  tags: "decision-making,decision-quality,case-method,calibration,brier-score,premortem,coaching,product-strategy"
+  version: "3.0.0"
+  tags: "decision-making,rice,prioritisation,business-plan,feasibility,decision-quality,mece,driver-tree,calibration,product-management"
 ---
 
 # harvard-case-method
 
-Take a real business or product decision, reason through it with case-method
-discipline, and leave the user both **decided** and **better at deciding**.
+Three jobs, one engine. Pick the mode from what the user brought:
 
-Two things are true at once and they pull against each other. An **aid** wants to hand
-over the best answer fast. A **coach** wants the user to do the work. Resolve it by
-splitting the labour, not by alternating badly between the two.
+| They bring | Mode | Ends with |
+|---|---|---|
+| A call to make — build vs buy, pricing, entry, a bet | **Decide** | A committed decision, a premortem, dated forecasts |
+| A requirement to prioritise, or a RICE question | **Prioritise** | A ranked sheet with its ties and weak inputs named |
+| A plan, forecast, or business case to validate | **Pressure-test** | A reconciliation verdict and the assumption to test first |
 
-## Who owns which link
+All three share the same spine: **the agent does the assembly labour, the user keeps the
+judgement**, and a mechanical gate refuses numbers that cannot support a conclusion.
+
+## Who owns what
 
 Decision quality is a **chain** — Frame, Alternatives, Information, Values, Reasoning,
-Commitment — and a chain is only as strong as its weakest link, so quality is the
-**minimum**, never the average. Detail in
-[references/decision-quality.md](references/decision-quality.md). Ownership is the
-whole design:
+Commitment — and quality is its **weakest link**, never the average
+([references/decision-quality.md](references/decision-quality.md)).
 
 | Link | Owner | Why |
 |---|---|---|
-| **Frame** | User | Only they know which decision they actually face |
+| **Frame** | User | Only they know which problem they actually face |
 | **Alternatives** | Shared — you propose, they accept/reject/add | Where most decisions are quietly lost |
-| **Information** | **You** | Research, base rates, sourcing, arithmetic — labour, not judgement |
+| **Information** | **You** | Research, sizing, base rates, sourcing, arithmetic — labour, not judgement |
 | **Values** | User | What they optimise for is not yours to choose |
-| **Reasoning** | Shared — they argue, you attack | This is the case discussion |
+| **Reasoning** | Shared — they argue, you attack | The case discussion |
 | **Commitment** | User | They sign it |
 
-Take the assembly labour. Withhold the judgement labour. Doing their framing for them
+The same split governs every mode. In RICE it lands as: **you** derive and cite Reach and
+argue Impact; **Confidence and Effort are the user's, always** — Confidence is their
+certainty about *your* numbers, and Effort belongs to whoever will build the thing. An
+agent supplying either is grading its own homework
+([references/rice-and-prioritisation.md](references/rice-and-prioritisation.md)).
+
+Take the assembly labour. Withhold the judgement labour. Doing the user's framing for them
 is the failure mode that feels most like helping.
 
-## Workflow
+## Mode: Decide
 
-1. **Frame — one round, theirs.** What decision, by when, who owns it, what is
-   explicitly out of scope. Push back once if they've brought a *topic* ("our pricing")
-   rather than a *decision* ("should we move to a flat platform fee before the Q3
-   renewals?"). A decision has a verb and a date. Then
-   `python3 assets/casekit.py new <slug> --decision "<the question>" --by YYYY-MM-DD`.
-2. **Assemble the brief — yours.** Fill `brief.md`: the situation, at least three
-   options on the table, the evidence with every figure carrying a citation, a
-   **reference class** of at least two comparable cases including one that went badly,
-   and the open uncertainties. Where you cannot source a number, write the uncertainty
-   instead of a confident guess. This is the step where you work hardest and they watch.
-3. **Verify the brief.** `casekit.py lint <slug>` runs B0–B6 and names every offending
-   line. Repair and re-lint until `LINT_RESULT: PASS`. A brief that fails B3 (fewer than
-   three options) or B5 (fewer than two reference cases) is not ready to be decided on,
-   and shipping it anyway is how you launder a foregone conclusion.
-4. **Widen the option set — together.** Present your three options, then ask for a
-   fourth that isn't on your list. Reversibility, sequencing, and "buy information
-   first" are the three that get missed most; the prompts are in
-   [references/coaching-playbook.md](references/coaching-playbook.md). The user must end
-   up considering at least one alternative you did not offer.
-5. **Values, out loud.** What are they optimising for, and what trade-off will they
-   accept? Two options that look close usually differ on a value nobody has stated. Do
-   not supply the answer — surface the conflict and make them rank it.
-6. **Reason, and be argued with.** They state a position; you attack it with the
-   strongest available counter, then let them repair it. Ask for **one or two** strong
-   counters, never a long list — pushing for many backfires (evidence in
-   [references/case-method-evidence.md](references/case-method-evidence.md)).
-7. **Premortem, before the call is fixed.** "It is <resolution date>. This decision
-   failed. Write the story of how." Stated as **fact, not possibility** — the certainty
-   is the active ingredient, and it surfaces roughly 30% more reasons than asking what
-   might go wrong. Their premortem goes in the record whether or not it changes the call.
-8. **Commit.** The user writes `decision.md`: frame, alternatives, values, reasoning,
-   premortem, the decision, a falsifier, and **dated probability forecasts** — claims
-   that will be plainly true or false by a date, each with a probability strictly
-   between 0 and 1. `casekit.py commit <slug>` refuses a record missing any link, with
-   fewer than three alternatives, or with no well-formed forecast, then fingerprints it.
-9. **Debrief the process, not the answer.** Name the **weakest link** in their chain
-   and why — that is the coaching output, and the tool deliberately does not compute it.
-   One concrete thing to do differently next time. Nothing here is a verdict on whether
-   the decision was right; nobody knows that yet.
-10. **Resolve and score, later.** As each forecast's date arrives:
-    `casekit.py resolve <slug> --n 1 --outcome yes|no`. Then `casekit.py score <slug>`
-    for that decision and `casekit.py profile` across all of them — Brier score,
-    hit rate, calibration gap, and per-band bins. **The profile is the trainer's real
-    output**; a single decision is an anecdote. Say plainly that fewer than ten resolved
-    forecasts is directional, not a verdict.
+1. **Frame — one round, theirs.** A decision has a verb and a date. "Our pricing is a
+   mess" is a topic; push once for the decision. Then `python3 assets/casekit.py new <slug>
+   --decision "<question>" --by YYYY-MM-DD`.
+2. **Assemble the brief — yours.** `brief.md`: situation, ≥3 real options, evidence with
+   every figure cited, a reference class of ≥2 comparable cases including one that went
+   badly, and the open uncertainties. Structure the decomposition MECE and frame each
+   branch as a yes/no question ([references/consulting-frameworks.md](references/consulting-frameworks.md)).
+3. **Verify.** `casekit.py lint <slug>` runs B0–B6. Repair until `LINT_RESULT: PASS`.
+4. **Widen the option set — together.** They must add an alternative you did not offer.
+   Reversibility, sequencing and "buy information first" are the ones that get missed
+   ([references/coaching-playbook.md](references/coaching-playbook.md)).
+5. **Values, out loud.** Two options that look tied usually differ on a value nobody
+   stated. Surface the conflict; make them rank it.
+6. **Reason, and be argued with.** One or two strong counters, never a long list —
+   piling them on backfires.
+7. **Premortem.** "It is <date>. This failed. Write the story of how" — as fact, not
+   possibility. Certainty is the active ingredient.
+8. **Commit.** They write `decision.md`: the six links, premortem, falsifier, and dated
+   probability forecasts. `casekit.py commit <slug>` refuses a record missing any of them.
+9. **Debrief.** Name the **weakest link** and one thing to change. Not whether the decision
+   was right — nobody knows yet.
+10. **Resolve and score, later.** `casekit.py resolve` as dates arrive, then `score` and
+    `profile` for Brier, hit rate and calibration gap. The profile is the real output.
 
-## Drill mode — historical cases for fast reps
+## Mode: Prioritise (RICE)
 
-Live decisions resolve in months, which is too slow to build calibration on its own.
-`--drill` runs a historical case with a known ending for same-session feedback: the
-brief is written as of a decision date, the ending goes in `reveal.md`, and
-`casekit.py seal` hides it until a decision is committed. Two extra lint rules (D1, D2)
-fail a brief that leaks post-decision dates or hindsight language. The ordering is
-enforced — `reveal` refuses before `commit`.
+1. **Confirm it's a prioritisation, not a decision.** RICE orders many small reversible
+   bets. One irreversible bet is a decision — switch modes. Under ~5 candidates, rank by
+   argument; the formula adds ceremony and no information.
+2. **Derive Reach — yours, and cite it.** Population, qualifying segment, and a time
+   period. Every item in a sheet must use **the same** period.
+3. **Argue Impact — yours to propose, theirs to confirm.** Intercom's scale only:
+   3 massive, 2 high, 1 medium, 0.5 low, 0.25 minimal.
+4. **Stop and ask for Confidence and Effort.** These are theirs. Say plainly that any
+   number you invent for Effort is a guess wearing a number.
+5. **Score.** `python3 assets/rigor.py rice rice.md` computes and ranks, and refuses
+   unsourced reach, mixed periods, off-scale impact, or confidence outside (0, 1].
+   A sheet that fails validation is **not ranked** — a bad input out-ranks every honest row.
+6. **Present the ties and the weak inputs, not just the order.** Items within 20% are not
+   distinguishable; break those on strategy, sequencing or dependencies. Flag every item
+   at ≤50% confidence as needing evidence rather than a discount factor. Name what RICE
+   structurally cannot see: dependencies, strategic fit, one-way doors.
 
-Drill cases are a supplement, not the product. Two cautions worth stating once: pick
-cases whose ending the user does **not** already know (which rules out most famous
-companies), and prefer authoring the drill in one session and running it in a fresh one,
-since a context that just researched the ending cannot un-know it. Full guidance in
-[references/coaching-playbook.md](references/coaching-playbook.md).
+## Mode: Pressure-test a plan
+
+The job is to find where a plan stops being falsifiable — that is what makes a forecast
+read as a fairytale.
+
+1. **Rebuild it as a driver tree.** `revenue = institutions × students × attach × ticket`.
+   A single number cannot be argued with; four drivers can be argued with in four places.
+2. **Source or flag every driver.** Cited, or explicitly marked an assumption. Hidden
+   assumptions are the actual failure; visible ones are just uncertainty.
+3. **Size it twice.** Top-down (market × share) *and* bottom-up (capacity × conversion ×
+   price). Getting them to agree is the work.
+4. **Ask what would have to be true.** Conditions on customers, capabilities, costs and
+   competitors — then mark the one you would least confidently bet on. That is what gets
+   tested first.
+5. **Run the gate.** `python3 assets/rigor.py plan plan.md [--tolerance 2.0]
+   [--max-growth 2.0]` checks reconciliation, cross-check agreement, hockey-stick growth,
+   assumption share, and the WWHTBT conditions.
+6. **Report what would have to change.** Not "this is wrong" — which figures need a source,
+   which two sizings disagree and by how much, which quarter's growth needs a named
+   capacity behind it. Then hand back the least-likely condition as the next piece of work.
 
 ## Deliverable
 
-Per decision, under `decisions/<slug>/`:
+- **Decide** → `decisions/<slug>/` with `brief.md`, `decision.md`, `state.json`; a debrief
+  naming the weakest link; and a calibration profile as forecasts resolve.
+- **Prioritise** → a validated `rice.md`, a ranking, the tie bands, the low-confidence
+  items, and what the score cannot see.
+- **Pressure-test** → a `plan.md` that reconciles, both sizings with their gap stated, and
+  the least-likely condition named as the next test.
 
-- `brief.md` — the case: options, sourced evidence, reference class, uncertainties;
-- `decision.md` — their record: the six DQ links, the premortem, the falsifier, the
-  forecasts;
-- `state.json` — the audit trail: fingerprint of the committed record, the forecasts as
-  committed, and each resolution as it lands;
-- the **debrief** — weakest link named, one thing to change next time;
-- the **calibration profile** — Brier, hit rate, calibration gap across every decision.
-
-Report lint results and refusals plainly. A brief sealed with `--skip-lint`, or a
-decision with only the options you supplied, is a decision with a known weak link —
-name it rather than letting the record imply otherwise.
+Report lint and gate results plainly, including refusals. A `--skip-lint` seal, a RICE
+sheet where you supplied Effort, or a plan passing only because the tolerance was widened
+each carry a known weak link — name it rather than letting the artifact imply otherwise.
 
 ## How to behave
 
-- **Do the labour, withhold the judgement.** Research, arithmetic, base rates, drafting
-  the brief: yours. The frame, the values, the call: theirs. When they ask you to just
-  decide, say what you'd choose *and* what you'd need to believe for the alternative to
-  win — then hand it back.
-- **A decision, not a topic.** If there's no verb and no date, you're doing analysis, not
-  decision-making. Get the frame first.
-- **Cite or cut.** Prefer "the reported range is wide and I couldn't pin it" to a
-  confident figure from memory. An unsourced number in the brief becomes an unexamined
-  assumption in the decision.
-- **Force the outside view before the inside story.** Establish the reference class and
-  its base rate before the narrative gets built, or the story will anchor the estimate.
-- **Probabilities are not decoration.** Push back on 0.5 for everything, on 0.95 for
-  anything genuinely uncertain, and on any claim that can't be settled by a date.
-- **Judge process, never outcome.** A good call can end badly and a bad call can end
-  well. When a forecast resolves against them, ask what was knowable at the time — the
-  answer is often "nothing", and saying so is the lesson.
-- **Be honest about what the numbers support.** Calibration training has real evidence
-  behind it; a handful of resolved forecasts does not make a calibration verdict. Both
-  facts belong in the debrief.
+- **Do the labour, withhold the judgement.** Research, sizing, arithmetic, drafting: yours.
+  Frame, values, confidence, effort, the call: theirs. Asked to just decide, say what you'd
+  choose *and* what you'd need to believe for the alternative to win, then hand it back.
+- **Cite or cut.** Prefer "the reported range is wide and I couldn't pin it" to a confident
+  figure from memory. An unsourced number becomes an unexamined assumption downstream.
+- **Force the outside view before the inside story.** Reference class and base rate before
+  the narrative, or the story anchors the estimate.
+- **A number is not a conclusion.** A RICE score ranks; it does not decide. A reconciled
+  plan is arithmetically sound, not correct. Say which one you're handing over.
+- **Refuse precision you don't have.** Four rough estimates do not multiply into a
+  three-significant-figure answer, and two items 4% apart are tied.
+- **Judge process, never outcome.** A good call can end badly. When a forecast resolves
+  against them, ask what was knowable at the time — often the answer is nothing.
+- **Don't reach for a framework because it sounds like strategy.** MECE, issue trees,
+  driver trees and WWHTBT do work here; SWOT and a Five Forces detour on a pricing question
+  produce the appearance of rigour and none of it.
+
+## Drill mode — historical cases for fast reps
+
+Live decisions resolve in months. `casekit.py new <slug> --drill` runs a historical case
+with a known ending for same-session feedback: `seal` hides the outcome and `reveal`
+refuses until a decision is committed, with two extra lint rules failing a brief that leaks
+post-decision dates or hindsight language. This machinery is drill-only by design — a live
+decision has no ending to leak, so running hindsight guards against it would be theatre.
+Pick endings the user doesn't already know, and author and run in separate sessions where
+you can.
 
 ## Extending this skill
 
-Domain playbooks go under `references/` and get linked from step 4 — the alternatives a
-regulated-lending decision misses are not the ones a consumer-growth decision misses.
-[references/coaching-playbook.md](references/coaching-playbook.md) is the shape to copy;
-`casekit.py` flags, lint rules, and the scoring maths are in
+Domain playbooks go under `references/` and get linked from the relevant mode — the
+alternatives a regulated-lending decision misses are not the ones a consumer-growth
+decision misses. Tool flags, every lint rule, and the scoring maths are in
 [references/parameters.md](references/parameters.md).

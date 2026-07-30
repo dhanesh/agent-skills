@@ -1,8 +1,16 @@
 # harvard-case-method
 
-Bring a real business or product decision. Reason through it with case-method
-discipline, get coached while you do it, and leave **decided** — with forecasts that
-score your judgement months later.
+Bring a real product or business problem. Get it reasoned through with case-method
+discipline plus the consulting toolkit that earns its place — and leave with a
+conclusion whose numbers hold up.
+
+Three modes, one engine:
+
+| You bring | Mode | You leave with |
+|---|---|---|
+| A call to make | **Decide** | A committed decision, a premortem, dated forecasts |
+| "I need a RICE analysis on this requirement" | **Prioritise** | A ranked sheet with its ties and weak inputs named |
+| A plan, forecast or business case | **Pressure-test** | A reconciliation verdict and the assumption to test first |
 
 ```bash
 npx skills add dhanesh/agent-skills --skill harvard-case-method
@@ -72,6 +80,58 @@ The tool scores forecasts. It does **not** grade the six DQ links — completene
 mechanical, quality is a judgement, and a regex producing a number for it would look like
 rigour without being any. `score` prints that disclaimer every time.
 
+## RICE without the theatre
+
+The ownership split follows from what each input *means*, and it is the whole point:
+
+| Input | Owner | Why |
+|---|---|---|
+| **Reach** | **Agent** | A measurement — a cohort query, a ticket count. Research labour; the agent does it and cites it |
+| **Impact** | Agent proposes, user confirms | Argued from evidence, overruled by whoever owns the goal |
+| **Confidence** | **User, always** | It means "how certain are we about Reach and Impact" — an agent setting it is grading its own homework |
+| **Effort** | **User, always** | Person-months from the people who'll build it. Any number the agent invents is fabrication |
+
+```bash
+python3 assets/rigor.py rice rice.md
+```
+
+Six rules refuse what turns RICE into theatre: reach with no time period, reach with no
+source, **items mixing `/month` and `/quarter`** (a 4× error hiding in plain sight),
+impact off Intercom's 3/2/1/0.5/0.25 scale, and `confidence=80` meaning 80%. A sheet that
+fails is **not ranked** — a score built from an off-scale impact out-ranks every honest row.
+
+The output adds what the number hides: items within **20%** are grouped as not
+distinguishable (break those on sequencing and dependencies, not the score), and anything
+at ≤50% confidence is flagged as needing evidence rather than a discount factor.
+
+## Pressure-testing a plan — where fairytales get caught
+
+```bash
+python3 assets/rigor.py plan plan.md [--tolerance 2.0] [--max-growth 2.0]
+```
+
+```
+PLAN: P2 every-driver-sourced-or-flagged — FAIL (neither cited nor marked an
+      assumption: institutions (line 5); attach_rate (line 7))
+PLAN: P6 sizings-agree — FAIL (top-down 16600500000 vs bottom-up 640000000 —
+      25.9× apart (tolerance 2.0×). Two methods this far apart mean at least
+      one is fiction.)
+PLAN: P7 no-hockey-stick — FAIL (period-over-period growth above 2.0×:
+      FY27-Q1→FY27-Q2 ×2.8; FY27-Q2→FY27-Q3 ×3.8 — state what capacity
+      delivers this, or flatten it)
+PLAN: P9 names-the-weakest-condition — FAIL (mark exactly one condition
+      `[least likely]` — that is the one to test first)
+```
+
+Ten rules: every driver sourced or explicitly flagged an assumption, the top line
+reconciling with its driver tree, top-down cross-checked against bottom-up, growth without
+a named capacity behind it, and Roger Martin's "what would have to be true" with the
+least-likely condition marked. Formulas are evaluated by a restricted AST walker — a plan
+formula is arithmetic or it is refused.
+
+The point isn't that a failing plan is wrong. It's that a plan which can't fail any of
+these is **unfalsifiable**, which is exactly what makes a forecast read as a fairytale.
+
 ## Drill mode — historical cases for fast reps
 
 Live decisions resolve in months. `--drill` runs a historical case with a known ending for
@@ -106,10 +166,12 @@ forecasts join the same calibration profile as live ones.
 ```bash
 make gate-skill SKILL=harvard-case-method
 python3 harvard-case-method/assets/test_casekit.py     # 56 unit tests
-python3 harvard-case-method/eval/run_eval.py           # 39 outcome checks
+python3 harvard-case-method/assets/test_rigor.py       # 40 unit tests
+python3 harvard-case-method/eval/run_eval.py           # 60 outcome checks
 ```
 
 The outcome eval drives a synthetic product-pricing decision through two arms — reasoned
 as the skill prescribes, and reasoned the way it goes without the skill — and requires the
-second to be refused at both the brief and the record. Brier arithmetic is checked against
-hand-computed values. License: MIT.
+second refused at both gates. It then runs a valid and an invalid RICE sheet, and a
+reconciled plan against a fairytale one. Brier arithmetic is checked against hand-computed
+values. License: MIT.
