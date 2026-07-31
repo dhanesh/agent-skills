@@ -315,7 +315,8 @@ def lint_plan(text, tolerance, max_growth):
     silent = ["%s (line %d)" % (n, ln) for n, sourced, assumed, ln in meta
               if not sourced and not assumed]
     results.append(("P2 every-driver-sourced-or-flagged", not silent,
-                    "neither cited nor marked an assumption: %s" % "; ".join(silent[:4])))
+                    "neither cited nor marked an assumption: %s" % "; ".join(silent[:4])
+                    if silent else ""))
 
     assumed = sum(1 for _, sourced, a, _ in meta if a and not sourced)
     share = assumed / len(meta) if meta else 0.0

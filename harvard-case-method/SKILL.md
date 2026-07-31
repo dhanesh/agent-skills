@@ -166,6 +166,15 @@ decision has no ending to leak, so running hindsight guards against it would be 
 Pick endings the user doesn't already know, and author and run in separate sessions where
 you can.
 
+## Worked examples
+
+Three reproducible runs, one per mode, live in [examples/](examples/) —
+`sh examples/run-examples.sh` regenerates them end to end. Each starts from a first
+draft that fails, because that is what first drafts do: the RICE sheet mixes reach
+periods, the board plan's two sizings disagree by 25.9×, and the decision brief poses
+a two-option referendum. Read them when you need to see what a refusal looks like
+before writing a domain playbook of your own.
+
 ## Extending this skill
 
 Domain playbooks go under `references/` and get linked from the relevant mode — the
