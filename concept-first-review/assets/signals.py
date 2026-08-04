@@ -1,0 +1,669 @@
+#!/usr/bin/env python3
+"""Deterministic review signals: the questions a diff cannot answer for itself.
+
+The condensed diff makes a change *legible*. Signals make it *interrogable*. Each
+signal is an observation plus the question a reviewer should put to the author —
+never a verdict. Heuristics route attention; they do not rule.
+
+Two tiers:
+
+  heuristic   works on any repo with no configuration (nested loops, I/O in a
+              loop, swallowed errors, new external dependencies, public API
+              deltas, schema and migration edits, concurrency primitives).
+  baselined   with a `design-rules.json` present, layering and dependency-
+              direction claims become checkable facts instead of guesses:
+              "core/ must not import web/" is either violated or it is not.
+
+Deliberate limits, stated rather than hidden:
+  * nesting is inferred from indentation inside a contiguous run of added rows,
+    so a loop opened outside the diff is not seen;
+  * name-based matching cannot resolve aliases or dynamic dispatch;
+  * a signal is evidence for a question, not a defect.
+"""
+
+import json
+import os
+import re
+import sys
+
+import diffmodel
+from diffmodel import ADD, DEL, SOURCE_KINDS
+
+HIGH = "high"
+MEDIUM = "medium"
+LOW = "low"
+
+_SEV_ORDER = {HIGH: 0, MEDIUM: 1, LOW: 2}
+
+_TEST_PATH_RE = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(spec|test)\.[jt]sx?$")
+_MIGRATION_RE = re.compile(r"(^|/)migrations?/|(^|/)migrate/|\.sql$")
+_SCHEMA_RE = re.compile(r"\.(proto|graphql|gql|avsc|thrift)$|openapi|swagger|schema\.json$")
+_CONFIG_RE = re.compile(r"\.(ya?ml|toml|ini|env|properties)$|(^|/)config/|Dockerfile|(^|/)helm/")
+
+_LOOP_RE = re.compile(r"^(?:for|while)\b|^(?:for|while)\s*\(|\.forEach\s*\(|\bdo\s*\{")
+# I/O evidence, deliberately narrow. A bare `get(`/`load(`/`read(` is far more
+# often a dict lookup or an in-memory accessor than a round trip, and a detector
+# that fires on those teaches reviewers to ignore it.
+_IO_RE = re.compile(
+    r"\b(?:execute|executemany|urlopen|fetch)\s*\("
+    r"|\.(?:query|execute|executemany|fetchone|fetchall|fetch_all|save|commit)\s*\("
+    r"|\b(?:requests|httpx|session|client|http|conn|cursor|db)\.\w+\s*\("
+    r"|\bopen\s*\(|\bsubprocess\.|\bos\.(?:stat|listdir|walk|remove)\s*\("
+    r"|\bfind_one\s*\(|\bfindOne\s*\("
+)
+# Membership testing, deliberately NOT matching a `for x in xs:` loop header —
+# that is iteration, not a scan.
+_LINEAR_SCAN_RE = re.compile(
+    r"^(?:if|elif|while|assert|return)\b.*\b(?:not\s+)?in\s+[A-Za-z_][\w.]*"
+    r"|\.includes\s*\(|\.indexOf\s*\(|\.index\s*\(|\bcontains\s*\("
+)
+_ROUTE_RE = re.compile(
+    r"@(?:app|router|blueprint|bp)\.(?:route|get|post|put|patch|delete)\b"
+    r"|\b(?:app|router|r|mux)\.(?:Get|Post|Put|Patch|Delete|HandleFunc|get|post|put|patch|delete)\s*\("
+    r"|@(?:Get|Post|Put|Delete|Request)Mapping\b"
+)
+_SORT_RE = re.compile(r"\bsort(?:ed)?\s*\(|\.sort\s*\(|sort\.Slice\s*\(|\.OrderBy\s*\(")
+_APPEND_RE = re.compile(r"\.append\s*\(|\.push\s*\(|\bappend\s*\(|\.add\s*\(|\.insert\s*\(|\.Add\s*\(")
+_AWAIT_RE = re.compile(r"\bawait\b")
+_SPAWN_RE = re.compile(r"\bgo\s+\w|\bthreading\.Thread\b|\bThread\s*\(|asyncio\.create_task|\bspawn\s*\(|new\s+Thread|Promise\.all")
+_LOCK_RE = re.compile(r"\b(?:Mutex|RWMutex|Lock|RLock|acquire|synchronized|sync\.)\b")
+_SWALLOW_RE = re.compile(
+    r"except[^:]*:\s*(?:pass|continue)\b|except\s*:|catch\s*\([^)]*\)\s*\{\s*\}"
+    r"|_\s*=\s*err\b|\.unwrap\s*\(\s*\)"
+)
+# An `except:`/`catch {` whose body on the following added row does nothing.
+_SWALLOW_OPENER_RE = re.compile(r"^(?:except\b[^:]*:|\}?\s*catch\s*\([^)]*\)\s*\{|rescue\b.*)$")
+_SWALLOW_BODY_RE = re.compile(r"^(?:pass|continue|\}|//.*|#.*)$")
+_PANIC_RE = re.compile(r"\bpanic\s*\(|os\.Exit\s*\(|sys\.exit\s*\(|process\.exit\s*\(|\.expect\s*\(")
+_RESILIENCE_RE = re.compile(r"\b(?:retry|retries|backoff|timeout|deadline|circuit_?breaker|WithTimeout|max_attempts)\b", re.I)
+_SUBPROCESS_RE = re.compile(r"\bsubprocess\.|os\.system\s*\(|exec\.Command\s*\(|child_process|Runtime\.getRuntime\(\)\.exec|\beval\s*\(")
+_DESERIALIZE_RE = re.compile(r"\bpickle\.loads?\s*\(|yaml\.load\s*\(|Marshal\.load|ObjectInputStream|unserialize\s*\(")
+_NETWORK_RE = re.compile(r"\b(?:requests|httpx|urllib|http\.Client|axios|fetch)\b|\.Get\s*\(\"http|socket\.")
+_PATHJOIN_RE = re.compile(r"os\.path\.join\s*\(|filepath\.Join\s*\(|path\.join\s*\(")
+_AUTHZ_RE = re.compile(r"\b(?:is_admin|has_permission|authorize|authorise|check_?auth|require_?role|can_|acl|rbac)\b", re.I)
+_FLAG_RE = re.compile(r"\b(?:feature_?flag|is_enabled|getenv|os\.environ|process\.env|LookupEnv|ConfigMap)\b", re.I)
+_DDL_RE = re.compile(r"\b(?:CREATE TABLE|ALTER TABLE|DROP TABLE|ADD COLUMN|DROP COLUMN|CREATE INDEX)\b", re.I)
+_GLOBAL_MUT_RE = re.compile(r"^(?:var\s+\w+\s*=|[A-Za-z_]\w*\s*=\s*(?:\[\]|\{\}|dict\(|list\(|make\())")
+_RECURSION_HINT_RE = re.compile(r"^(?:async\s+)?(?:def|func|function|fn)\s+([A-Za-z_]\w*)")
+_REGEX_LITERAL_RE = re.compile(r"(?:re\.(?:compile|match|search|sub)|regexp\.MustCompile|new RegExp)\s*\(\s*[r]?['\"]([^'\"]{4,})['\"]")
+_NESTED_QUANT_RE = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*]")
+
+# Exported / public symbol declarations, per language family.
+_PUBLIC_DECL = {
+    "go": re.compile(r"^(?:func|type|var|const)\s+(?:\([^)]*\)\s*)?([A-Z]\w*)"),
+    "python": re.compile(r"^(?:async\s+)?(?:def|class)\s+([A-Za-z][\w]*)"),
+    "js": re.compile(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var)\s+(\w+)"),
+    "rust": re.compile(r"^pub\s+(?:async\s+)?(?:fn|struct|enum|trait|type)\s+(\w+)"),
+    "jvm": re.compile(r"^\s*public\s+(?:static\s+)?[\w<>\[\], ]+\s+(\w+)\s*\("),
+    "csharp": re.compile(r"^\s*public\s+(?:static\s+)?[\w<>\[\], ]+\s+(\w+)\s*\("),
+}
+
+_PY_STDLIB = getattr(sys, "stdlib_module_names", frozenset())
+_KNOWN_STD_PREFIXES = (
+    "std", "core", "alloc", "java.", "javax.", "kotlin.", "System.",
+)
+
+
+_DOC_EXT = (".md", ".markdown", ".rst", ".txt", ".adoc", ".org")
+
+
+def _is_prose(path):
+    """Documentation is not code; code-shaped detectors must not read it.
+
+    Without this, the word `eval (` in a design note reads as a call to eval.
+    """
+    return (path or "").lower().endswith(_DOC_EXT)
+
+
+def _is_statement_start(src):
+    """False for a continuation row of a multi-line expression.
+
+    A row closing more brackets than it opens is the tail of something that
+    began above the row, so indentation says nothing useful about its nesting.
+    """
+    s = src.strip()
+    if not s:
+        return False
+    opens = sum(s.count(c) for c in "([{")
+    closes = sum(s.count(c) for c in ")]}")
+    return closes <= opens
+
+
+def _signal(sid, severity, path, line, evidence, question):
+    return {
+        "id": sid,
+        "severity": severity,
+        "file": path,
+        "line": line,
+        "evidence": evidence.strip()[:160],
+        "question": question,
+    }
+
+
+# ── Baseline ─────────────────────────────────────────────────────────────────
+
+DEFAULT_BASELINE = {
+    "layers": {},
+    "forbidden_edges": [],
+    "allowed_external": [],
+    # max_loop_depth is the deepest loop nesting a change may introduce without
+    # owing the reviewer an explanation. 1 means "any two-level nest gets asked
+    # about"; raise it for repos where nested iteration is genuinely routine.
+    "budgets": {"max_loop_depth": 1},
+    "invariants": [],
+}
+
+
+def load_baseline(path):
+    """Read a design-rules.json baseline. Missing file -> heuristics only."""
+    if not path or not os.path.exists(path):
+        return dict(DEFAULT_BASELINE)
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    merged = dict(DEFAULT_BASELINE)
+    merged.update({k: v for k, v in data.items() if k in DEFAULT_BASELINE})
+    budgets = dict(DEFAULT_BASELINE["budgets"])
+    budgets.update(data.get("budgets") or {})
+    merged["budgets"] = budgets
+    merged["_configured"] = True
+    return merged
+
+
+def _layer_of(path, layers):
+    best = None
+    best_len = -1
+    for name, prefixes in (layers or {}).items():
+        for prefix in prefixes:
+            if path.startswith(prefix) and len(prefix) > best_len:
+                best, best_len = name, len(prefix)
+    return best
+
+
+# ── Structure helpers ────────────────────────────────────────────────────────
+
+def _loop_depths(entries):
+    """Loop nesting depth per added row, inferred from indentation.
+
+    `entries` is an ordered list of (line_no, source) for one contiguous run of
+    added rows. Only loops opened *within the run* are visible; a loop opened
+    outside the diff is invisible, which is why the derived signal asks a
+    question rather than asserting complexity.
+    """
+    depths = {}
+    stack = []  # (indent, is_loop)
+    for line_no, src in entries:
+        stripped = src.strip()
+        if not stripped:
+            depths[line_no] = len([1 for _, is_loop in stack if is_loop])
+            continue
+        indent = len(src) - len(src.lstrip())
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        depths[line_no] = len([1 for _, is_loop in stack if is_loop])
+        opens_loop = bool(_LOOP_RE.search(stripped)) and _is_statement_start(stripped)
+        stack.append((indent, opens_loop))
+    return depths
+
+
+def _added_runs(rows):
+    """Contiguous runs of added rows, grouped by file path."""
+    runs = []
+    current = []
+    current_path = None
+    for row in rows:
+        if row.kind == ADD:
+            if current and row.no != current[-1][0] + 1:
+                runs.append((current_path, current))
+                current = []
+            current_path = row.path
+            current.append((row.no, row.source))
+        else:
+            if current:
+                runs.append((current_path, current))
+                current = []
+    if current:
+        runs.append((current_path, current))
+    return runs
+
+
+def _module_of(src, lang):
+    s = src.strip()
+    if lang == "python":
+        m = re.match(r"^from\s+([\w.]+)\s+import\b", s) or re.match(r"^import\s+([\w.]+)", s)
+        return m.group(1) if m else None
+    if lang == "go":
+        m = re.search(r'"([^"]+)"', s)
+        return m.group(1) if m else None
+    if lang == "js":
+        m = re.search(r"""from\s+['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]""", s)
+        if m:
+            return m.group(1) or m.group(2)
+        return None
+    if lang == "rust":
+        m = re.match(r"^(?:pub\s+)?use\s+([\w:]+)", s)
+        return m.group(1).split("::")[0] if m else None
+    if lang in ("jvm", "csharp"):
+        m = re.match(r"^(?:import|using)\s+([\w.]+)", s)
+        return m.group(1) if m else None
+    return None
+
+
+def _module_as_path(module, lang):
+    """Best-effort module -> repo-path form, so layer prefixes can match it.
+
+    Dotted namespaces (Python, JVM, C#) become slash paths; already-pathlike
+    module strings (Go, JS) only lose their relative prefix. It is a heuristic,
+    which is why an unmatched module simply yields no layering signal rather
+    than a wrong one.
+    """
+    m = module.lstrip("./")
+    if lang in ("python", "jvm", "csharp"):
+        return m.replace(".", "/")
+    if lang == "rust":
+        return m.replace("::", "/")
+    return m
+
+
+def _is_external(module, lang):
+    if not module:
+        return False
+    if module.startswith((".", "/", "./", "../")):
+        return False
+    if lang == "python":
+        root = module.split(".")[0]
+        return root not in _PY_STDLIB
+    if lang == "go":
+        first = module.split("/")[0]
+        return "." in first  # a dotted first segment means a hosted module path
+    if lang == "js":
+        return not module.startswith((".", "/", "@/", "~"))
+    if module.startswith(_KNOWN_STD_PREFIXES):
+        return False
+    return True
+
+
+# ── Extraction ───────────────────────────────────────────────────────────────
+
+def extract(rows, baseline=None):
+    """Return the full signal list for a parsed diff, most severe first."""
+    baseline = baseline or dict(DEFAULT_BASELINE)
+    declarations = diffmodel.declaration_rows(rows)
+    out = []
+
+    out.extend(_dependency_signals(rows, declarations, baseline))
+    out.extend(_api_signals(rows))
+    out.extend(_algorithm_signals(rows, declarations, baseline))
+    out.extend(_runtime_signals(rows, declarations))
+    out.extend(_contract_signals(rows))
+    out.extend(_blast_radius_signals(rows))
+
+    out.sort(key=lambda s: (_SEV_ORDER.get(s["severity"], 3), s["file"] or "", s["line"]))
+    return out
+
+
+def _dependency_signals(rows, declarations, baseline):
+    out = []
+    layers = baseline.get("layers") or {}
+    forbidden = {(a, b) for a, b in (baseline.get("forbidden_edges") or [])}
+    allowed_external = set(baseline.get("allowed_external") or [])
+    configured = baseline.get("_configured")
+
+    for row in rows:
+        if row.kind != ADD or row.no not in declarations:
+            continue
+        lang = diffmodel.language_of(row.path or "")
+        module = _module_of(row.source, lang)
+        if not module:
+            continue
+
+        if _is_external(module, lang):
+            root = module.split("/")[0].split(".")[0]
+            if configured and allowed_external and root not in allowed_external:
+                out.append(_signal(
+                    "dep.new-external", HIGH, row.path, row.no, row.source,
+                    "`%s` is a new third-party dependency and is not on the allowed list in "
+                    "design-rules.json. Is the capability worth the dependency, and who owns "
+                    "upgrading it?" % module,
+                ))
+            elif not configured:
+                out.append(_signal(
+                    "dep.new-external", MEDIUM, row.path, row.no, row.source,
+                    "`%s` looks like a new third-party dependency. What does it buy that the "
+                    "standard library or an existing dependency does not?" % module,
+                ))
+
+        if layers:
+            src_layer = _layer_of(row.path or "", layers)
+            dst_layer = _layer_of(_module_as_path(module, lang), layers)
+            if src_layer and dst_layer and src_layer != dst_layer:
+                if (src_layer, dst_layer) in forbidden:
+                    out.append(_signal(
+                        "dep.layering", HIGH, row.path, row.no, row.source,
+                        "layer `%s` must not depend on `%s` (design-rules.json forbids that "
+                        "edge). Is this an intended change to the layering, or an accident?"
+                        % (src_layer, dst_layer),
+                    ))
+                else:
+                    out.append(_signal(
+                        "dep.new-edge", LOW, row.path, row.no, row.source,
+                        "new dependency edge `%s` -> `%s`. Does the layering still hold?"
+                        % (src_layer, dst_layer),
+                    ))
+    return out
+
+
+def _api_signals(rows):
+    added = {}
+    removed = {}
+    for row in rows:
+        if row.kind not in (ADD, DEL):
+            continue
+        lang = diffmodel.language_of(row.path or "")
+        pattern = _PUBLIC_DECL.get(lang)
+        if not pattern:
+            continue
+        m = pattern.match(row.source.strip())
+        if not m:
+            continue
+        name = m.group(1)
+        if lang == "python" and name.startswith("_"):
+            continue
+        bucket = added if row.kind == ADD else removed
+        bucket.setdefault((row.path, name), row)
+
+    out = []
+    for row in rows:
+        if row.kind != ADD or not _ROUTE_RE.search(row.source):
+            continue
+        out.append(_signal(
+            "api.route-added", HIGH, row.path, row.no, row.source,
+            "a new externally reachable entry point. Who is allowed to call it, what validates "
+            "its input, and what does it cost to serve?",
+        ))
+
+    for (path, name), row in sorted(added.items()):
+        if (path, name) in removed:
+            out.append(_signal(
+                "api.signature-changed", HIGH, path, row.no, row.source,
+                "public `%s` changed shape. Who calls it, and is every caller updated in this "
+                "change or covered by a compatibility path?" % name,
+            ))
+        else:
+            out.append(_signal(
+                "api.surface-added", MEDIUM, path, row.no, row.source,
+                "`%s` is new public surface. Does it need to be public, and is its contract "
+                "(errors, nil/None, ownership, thread-safety) stated anywhere?" % name,
+            ))
+    for (path, name), row in sorted(removed.items()):
+        if (path, name) in added:
+            continue
+        out.append(_signal(
+            "api.surface-removed", HIGH, path, row.no, row.source,
+            "public `%s` is gone. Is anything outside this change still calling it?" % name,
+        ))
+    return out
+
+
+def _algorithm_signals(rows, declarations, baseline):
+    out = []
+    max_depth = int((baseline.get("budgets") or {}).get("max_loop_depth", 1))
+
+    for path, entries in _added_runs(rows):
+        if _is_prose(path):
+            continue
+        entries = [(n, s) for n, s in entries if n not in declarations]
+        if not entries:
+            continue
+        depths = _loop_depths(entries)
+        func_names = set()
+        for line_no, src in entries:
+            m = _RECURSION_HINT_RE.match(src.strip())
+            if m:
+                func_names.add(m.group(1))
+
+        for line_no, src in entries:
+            s = src.strip()
+            if not s:
+                continue
+            depth = depths.get(line_no, 0)
+            in_loop = depth >= 1
+
+            if _LOOP_RE.search(s) and _is_statement_start(s) and depth >= max_depth:
+                out.append(_signal(
+                    "algo.nested-loop", HIGH, path, line_no, s,
+                    "loop nested %d deep. What bounds each level, and what happens at the "
+                    "largest input this will really see?" % (depth + 1),
+                ))
+            if in_loop and _IO_RE.search(s) and not _LOOP_RE.search(s):
+                out.append(_signal(
+                    "algo.io-in-loop", HIGH, path, line_no, s,
+                    "an I/O or query call inside a loop is the N+1 shape. Can it be batched, "
+                    "or is the iteration count small and bounded?",
+                ))
+            if in_loop and _AWAIT_RE.search(s):
+                out.append(_signal(
+                    "algo.await-in-loop", MEDIUM, path, line_no, s,
+                    "awaiting inside a loop serialises what could be concurrent. Is the "
+                    "ordering required, or is this accidental latency?",
+                ))
+            if in_loop and not _LOOP_RE.search(s) and _LINEAR_SCAN_RE.search(s):
+                out.append(_signal(
+                    "algo.linear-scan-in-loop", MEDIUM, path, line_no, s,
+                    "a linear membership test inside a loop makes this quadratic. Would a set "
+                    "or map index be the honest data structure here?",
+                ))
+            if in_loop and _SORT_RE.search(s):
+                out.append(_signal(
+                    "algo.sort-in-loop", MEDIUM, path, line_no, s,
+                    "sorting inside a loop. Can the sort be hoisted, or is the collection "
+                    "genuinely different each iteration?",
+                ))
+            if in_loop and _APPEND_RE.search(s):
+                out.append(_signal(
+                    "algo.unbounded-growth", LOW, path, line_no, s,
+                    "a collection grows inside a loop. What caps its size — and what is the "
+                    "memory cost at the worst realistic input?",
+                ))
+            for fname in func_names:
+                if re.search(r"\b%s\s*\(" % re.escape(fname), s) and not _RECURSION_HINT_RE.match(s):
+                    out.append(_signal(
+                        "algo.recursion", MEDIUM, path, line_no, s,
+                        "`%s` appears to recurse. What is the termination argument, and how "
+                        "deep can it go on real input?" % fname,
+                    ))
+                    break
+            m = _REGEX_LITERAL_RE.search(s)
+            if m and _NESTED_QUANT_RE.search(m.group(1)):
+                out.append(_signal(
+                    "algo.regex-backtracking", MEDIUM, path, line_no, s,
+                    "nested quantifiers in a regex can backtrack catastrophically. Is this "
+                    "pattern ever applied to input an outsider controls?",
+                ))
+    return out
+
+
+def _runtime_signals(rows, declarations):
+    out = []
+    added = [r for r in rows if r.kind == ADD and r.no not in declarations and not _is_prose(r.path)]
+    next_added = {}
+    for i, row in enumerate(added[:-1]):
+        next_added[row.no] = added[i + 1]
+
+    for row in added:
+        s = row.source.strip()
+        if not s:
+            continue
+        path = row.path
+
+        if _SWALLOW_OPENER_RE.match(s):
+            follower = next_added.get(row.no)
+            if follower and _SWALLOW_BODY_RE.match(follower.source.strip()):
+                out.append(_signal(
+                    "err.swallowed", HIGH, path, row.no, s,
+                    "an error path is discarded. Is this failure genuinely uninteresting, or is "
+                    "a real fault about to become a silent wrong answer?",
+                ))
+
+        if _SPAWN_RE.search(s):
+            out.append(_signal(
+                "conc.spawned", HIGH, path, row.no, s,
+                "new concurrency. What owns this task's lifetime, what happens to its errors, "
+                "and what shared state does it touch?",
+            ))
+        if _LOCK_RE.search(s):
+            out.append(_signal(
+                "conc.lock", MEDIUM, path, row.no, s,
+                "a lock enters the picture. What invariant does it protect, and what is the "
+                "lock ordering relative to the others in this system?",
+            ))
+        if _GLOBAL_MUT_RE.match(s) and row.source[:1] not in (" ", "\t"):
+            out.append(_signal(
+                "state.global-mutable", MEDIUM, path, row.no, s,
+                "module-level mutable state. Who writes it, from which goroutine/thread/request, "
+                "and does its lifetime match the process?",
+            ))
+        if _SWALLOW_RE.search(s):
+            out.append(_signal(
+                "err.swallowed", HIGH, path, row.no, s,
+                "an error path is discarded. Is this failure genuinely uninteresting, or is a "
+                "real fault about to become a silent wrong answer?",
+            ))
+        if _PANIC_RE.search(s):
+            out.append(_signal(
+                "err.abort", MEDIUM, path, row.no, s,
+                "this aborts rather than returns. Is the caller a program entry point, or does "
+                "this take down work that could have been failed gracefully?",
+            ))
+        if _RESILIENCE_RE.search(s):
+            out.append(_signal(
+                "err.resilience", LOW, path, row.no, s,
+                "retry/timeout behaviour changed. What is the resulting worst-case latency, and "
+                "is the operation being retried idempotent?",
+            ))
+        if _SUBPROCESS_RE.search(s):
+            out.append(_signal(
+                "bound.exec", HIGH, path, row.no, s,
+                "the change reaches outside the process. Where does every argument come from, "
+                "and can any of it be influenced by an untrusted caller?",
+            ))
+        if _DESERIALIZE_RE.search(s):
+            out.append(_signal(
+                "bound.deserialize", HIGH, path, row.no, s,
+                "deserialisation of structured input. Is the source trusted, and is a safe "
+                "loader available instead?",
+            ))
+        if _NETWORK_RE.search(s):
+            out.append(_signal(
+                "bound.network", MEDIUM, path, row.no, s,
+                "a new network boundary. What are its timeout, retry, and failure semantics, "
+                "and what does the caller see when it is down?",
+            ))
+        if _PATHJOIN_RE.search(s):
+            out.append(_signal(
+                "bound.path", LOW, path, row.no, s,
+                "a filesystem path is constructed. Can any component come from user input, and "
+                "is traversal outside the intended root possible?",
+            ))
+        if _AUTHZ_RE.search(s):
+            out.append(_signal(
+                "bound.authz", HIGH, path, row.no, s,
+                "an authorisation decision moved. Which callers reach this path, and is the "
+                "check on every one of them?",
+            ))
+    return out
+
+
+def _contract_signals(rows):
+    out = []
+    seen_files = set()
+    for row in rows:
+        path = row.path or ""
+        if not path:
+            continue
+        if row.kind not in (ADD, DEL):
+            continue
+        if path not in seen_files:
+            seen_files.add(path)
+            if _MIGRATION_RE.search(path):
+                out.append(_signal(
+                    "data.migration", HIGH, path, row.no, path,
+                    "a schema migration. Is it reversible, is it safe to run while the old code "
+                    "is still serving, and how long does it lock?",
+                ))
+            elif _SCHEMA_RE.search(path):
+                out.append(_signal(
+                    "data.contract", HIGH, path, row.no, path,
+                    "a wire/schema contract changed. Are old and new producers and consumers "
+                    "compatible during rollout in both directions?",
+                ))
+            elif _CONFIG_RE.search(path):
+                out.append(_signal(
+                    "cfg.changed", LOW, path, row.no, path,
+                    "configuration changed. Does every environment have a value, and what is "
+                    "the behaviour when it is missing?",
+                ))
+        if row.kind == ADD and _DDL_RE.search(row.source):
+            out.append(_signal(
+                "data.ddl", HIGH, path, row.no, row.source,
+                "DDL in the change. What is the migration order relative to the code deploy?",
+            ))
+        if row.kind == ADD and _FLAG_RE.search(row.source):
+            out.append(_signal(
+                "cfg.flag", LOW, path, row.no, row.source,
+                "a flag or environment lookup. What is the default, and who removes this branch "
+                "once it has settled?",
+            ))
+    return out
+
+
+def _blast_radius_signals(rows):
+    files = {}
+    for row in rows:
+        if row.kind in (ADD, DEL) and row.path:
+            files.setdefault(row.path, 0)
+            files[row.path] += 1
+    if not files:
+        return []
+
+    out = []
+    test_files = [p for p in files if _TEST_PATH_RE.search(p)]
+    source_files = [p for p in files if p not in test_files]
+    top_dirs = {p.split("/")[0] for p in files if "/" in p}
+
+    public_changed = any(
+        _PUBLIC_DECL.get(diffmodel.language_of(r.path or ""), None)
+        and _PUBLIC_DECL[diffmodel.language_of(r.path or "")].match(r.source.strip())
+        for r in rows
+        if r.kind == ADD and r.path and not _TEST_PATH_RE.search(r.path)
+    )
+    if not test_files and source_files:
+        if public_changed:
+            out.append(_signal(
+                "radius.untested-surface", HIGH, None, 0,
+                "%d source file(s) changed, 0 test files" % len(source_files),
+                "public surface was declared or redeclared with no test file touched. Is the "
+                "new behaviour covered somewhere, or is it being taken on trust?",
+            ))
+        else:
+            out.append(_signal(
+                "radius.untested-change", MEDIUM, None, 0,
+                "%d source file(s) changed, 0 test files" % len(source_files),
+                "behaviour changed and no test file moved with it. What would have caught a "
+                "mistake in this change?",
+            ))
+    if len(top_dirs) >= 4:
+        out.append(_signal(
+            "radius.spread", MEDIUM, None, 0,
+            "touches %d top-level areas: %s" % (len(top_dirs), ", ".join(sorted(top_dirs)[:8])),
+            "the change spans several areas. Is this one concept that genuinely cuts across "
+            "them, or several changes that would review better apart?",
+        ))
+    return out
+
+
+def summarize(sigs):
+    """Counts by severity, for the report header and the completeness check."""
+    counts = {HIGH: 0, MEDIUM: 0, LOW: 0}
+    for s in sigs:
+        counts[s["severity"]] = counts.get(s["severity"], 0) + 1
+    return {"total": len(sigs), "by_severity": counts}

@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy to your repository root as design-rules.json and edit. Every key is optional. See references/design-baseline.md.",
+  "layers": {
+    "core": ["core/", "internal/model/"],
+    "web": ["web/", "http/", "api/"],
+    "infra": ["infra/", "adapters/", "store/"]
+  },
+  "forbidden_edges": [
+    ["core", "web"],
+    ["core", "infra"]
+  ],
+  "allowed_external": [],
+  "budgets": {
+    "max_loop_depth": 1
+  },
+  "invariants": [
+    "core/ is framework-free and never imports web/ or infra/",
+    "every externally reachable handler passes through the authorisation decorator"
+  ]
+}
