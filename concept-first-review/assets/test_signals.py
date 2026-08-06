@@ -506,6 +506,206 @@ class TestContractAndRadius(unittest.TestCase):
         self.assertIn("radius.spread", ids(extract(text)))
 
 
+class TestFitDRY(unittest.TestCase):
+    def test_a_pasted_block_is_flagged_once(self):
+        block = """
++def handle_a(req):
++    ctx = build_context(req)
++    ctx.tenant = req.tenant
++    validate_tenant(ctx)
++    audit(ctx, "a")
++    return dispatch(ctx)
+"""
+        out = extract(wrap("svc/a.py", block + block))
+        found = [s for s in out if s["id"] == "fit.duplicate-block"]
+        self.assertEqual(len(found), 1, [s["evidence"] for s in found])
+        self.assertIn("already appear at", found[0]["question"])
+
+    def test_negative_short_repeats_are_not_duplication(self):
+        out = extract(wrap("svc/a.py", """
++    a = 1
++    b = 2
++    a = 1
++    b = 2
+"""))
+        self.assertNotIn("fit.duplicate-block", ids(out))
+
+    def test_negative_a_run_of_similar_lines_is_repetition_not_duplication(self):
+        out = extract(wrap("svc/a.py", """
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
++    x = 0
+"""))
+        self.assertNotIn("fit.duplicate-block", ids(out))
+
+    def test_duplication_in_tests_asks_more_quietly(self):
+        block = """
++def test_x():
++    ctx = build_context(req)
++    ctx.tenant = req.tenant
++    validate_tenant(ctx)
++    audit(ctx, "a")
++    assert dispatch(ctx)
+"""
+        out = extract(wrap("tests/test_a.py", block + block))
+        found = [s for s in out if s["id"] == "fit.duplicate-block"]
+        self.assertTrue(found)
+        self.assertEqual(found[0]["severity"], "medium")
+
+
+class TestFitShape(unittest.TestCase):
+    def test_a_wide_signature_is_flagged(self):
+        out = extract(wrap("svc/a.py",
+                           "+def build(a, b, c, d, e, f, g):\n+    return a\n"))
+        self.assertIn("fit.wide-signature", ids(out))
+
+    def test_negative_a_normal_signature_is_not(self):
+        out = extract(wrap("svc/a.py", "+def build(a, b, c):\n+    return a\n"))
+        self.assertNotIn("fit.wide-signature", ids(out))
+
+    def test_negative_a_no_argument_function_is_not_wide(self):
+        out = extract(wrap("svc/a.py", "+def build():\n+    return 1\n"))
+        self.assertNotIn("fit.wide-signature", ids(out))
+
+    def test_parameter_budget_is_configurable(self):
+        body = wrap("svc/a.py", "+def build(a, b, c, d, e, f, g):\n+    return a\n")
+        relaxed = dict(sig.DEFAULT_BASELINE,
+                       budgets=dict(sig.DEFAULT_BASELINE["budgets"], max_params=10))
+        self.assertNotIn("fit.wide-signature", ids(extract(body, relaxed)))
+
+    def test_a_long_function_is_flagged(self):
+        body = "+def build():\n" + "".join("+    step_%d()\n" % i for i in range(70))
+        out = extract(wrap("svc/a.py", body))
+        self.assertIn("fit.long-function", ids(out))
+
+    def test_negative_a_short_function_is_not(self):
+        body = "+def build():\n" + "".join("+    step_%d()\n" % i for i in range(10))
+        self.assertNotIn("fit.long-function", ids(extract(wrap("svc/a.py", body))))
+
+    def test_a_pure_delegate_is_flagged(self):
+        out = extract(wrap("svc/a.py",
+                           "+def fetch_user(uid):\n+    return repo.get_user(uid)\n"))
+        found = [s for s in out if s["id"] == "fit.pass-through"]
+        self.assertTrue(found)
+        self.assertEqual(found[0]["severity"], "low")
+
+    def test_negative_a_function_that_does_something_is_not_a_delegate(self):
+        out = extract(wrap("svc/a.py", """
++def fetch_user(uid):
++    user = repo.get_user(uid)
++    return normalise(user)
+"""))
+        self.assertNotIn("fit.pass-through", ids(out))
+
+
+class TestFitSpeculation(unittest.TestCase):
+    def test_an_uncalled_private_helper_is_flagged(self):
+        out = extract(wrap("svc/a.py", "+def _normalise(x):\n+    return x.strip()\n"))
+        self.assertIn("fit.unreferenced-addition", ids(out))
+
+    def test_negative_a_called_private_helper_is_not(self):
+        out = extract(wrap("svc/a.py", """
++def _normalise(x):
++    return x.strip()
++def handle(x):
++    return _normalise(x)
+"""))
+        self.assertNotIn("fit.unreferenced-addition", ids(out))
+
+    def test_negative_public_surface_may_have_callers_elsewhere(self):
+        out = extract(wrap("svc/a.py", "+def normalise(x):\n+    return x.strip()\n"))
+        self.assertNotIn("fit.unreferenced-addition", ids(out))
+
+    def test_negative_an_exported_rust_function_is_not_speculative(self):
+        out = extract(wrap("src/a.rs", "+pub fn normalise(x: &str) -> String {\n+    x.trim().into()\n+}\n"))
+        self.assertNotIn("fit.unreferenced-addition", ids(out))
+
+    def test_an_interface_with_one_implementation_is_flagged(self):
+        out = extract(wrap("src/store.rs", """
++trait Store {
++    fn get(&self, k: &str) -> Option<String>;
++}
++impl Store for MemStore {
++    fn get(&self, k: &str) -> Option<String> { None }
++}
+"""))
+        self.assertIn("fit.abstraction-for-one", ids(out))
+
+    def test_negative_two_implementations_answer_the_question(self):
+        out = extract(wrap("src/store.rs", """
++trait Store {
++    fn get(&self, k: &str) -> Option<String>;
++}
++impl Store for MemStore {
++    fn get(&self, k: &str) -> Option<String> { None }
++}
++impl Store for DiskStore {
++    fn get(&self, k: &str) -> Option<String> { None }
++}
+"""))
+        self.assertNotIn("fit.abstraction-for-one", ids(out))
+
+    def test_negative_an_interface_with_no_implementation_here_is_not_flagged(self):
+        out = extract(wrap("src/store.rs", "+trait Store {\n+    fn get(&self) -> u8;\n+}\n"))
+        self.assertNotIn("fit.abstraction-for-one", ids(out))
+
+
+class TestFitNoise(unittest.TestCase):
+    def test_a_comment_restating_the_next_line_is_flagged(self):
+        out = extract(wrap("svc/a.py",
+                           "+    # Build the request context\n"
+                           "+    request_context = build_context()\n"))
+        self.assertIn("fit.restating-comment", ids(out))
+
+    def test_negative_a_renamed_copy_is_out_of_reach(self):
+        # Documented limit: matching is exact, so a paste-then-rename escapes.
+        # Recorded as a test so the trade-off is visible rather than assumed.
+        block = ("+def handle_%s(req):\n"
+                 "+    ctx = build_context(req)\n"
+                 "+    ctx.tenant = req.tenant\n"
+                 "+    validate_tenant(ctx)\n"
+                 "+    audit(ctx)\n"
+                 "+    return dispatch(ctx)\n")
+        out = extract(wrap("svc/a.py", block % "a" + block % "b"))
+        self.assertNotIn("fit.duplicate-block", ids(out))
+
+    def test_negative_a_comment_that_adds_a_reason_is_not(self):
+        out = extract(wrap("svc/a.py",
+                           "+    # bounded by the tenant quota, see INC-4412\n+    counter += 1\n"))
+        self.assertNotIn("fit.restating-comment", ids(out))
+
+    def test_negative_a_one_word_comment_is_ignored(self):
+        out = extract(wrap("svc/a.py", "+    # counter\n+    counter += 1\n"))
+        self.assertNotIn("fit.restating-comment", ids(out))
+
+
+class TestFitScope(unittest.TestCase):
+    def test_scattered_one_line_edits_are_flagged(self):
+        text = "".join(wrap("area%d/mod.py" % i, "+x = %d\n" % i) for i in range(10))
+        found = [s for s in extract(text) if s["id"] == "fit.drive-by-edits"]
+        self.assertEqual(len(found), 1)
+        self.assertIn("would review and revert better on their own", found[0]["question"])
+
+    def test_negative_a_focused_change_is_not_flagged(self):
+        text = "".join(
+            wrap("area%d/mod.py" % i, "+a = 1\n+b = 2\n+c = 3\n+d = 4\n") for i in range(10)
+        )
+        self.assertNotIn("fit.drive-by-edits", ids(extract(text)))
+
+    def test_negative_a_small_change_is_never_drive_by(self):
+        text = "".join(wrap("area%d/mod.py" % i, "+x = 1\n") for i in range(4))
+        self.assertNotIn("fit.drive-by-edits", ids(extract(text)))
+
+
 class TestShape(unittest.TestCase):
     def test_every_signal_carries_a_question(self):
         out = extract(wrap("svc/a.py", """

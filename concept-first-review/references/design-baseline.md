@@ -18,7 +18,12 @@ stops being a heuristic question and becomes a checkable fact.
   },
   "forbidden_edges": [["core", "web"], ["core", "infra"]],
   "allowed_external": ["flask", "sqlalchemy", "pydantic"],
-  "budgets": { "max_loop_depth": 1 },
+  "budgets": {
+    "max_loop_depth": 1,
+    "max_params": 5,
+    "max_function_rows": 60,
+    "min_duplicate_rows": 6
+  },
   "invariants": [
     "core/ is framework-free and never imports web/ or infra/",
     "every handler is behind an authorisation decorator"
@@ -32,6 +37,9 @@ stops being a heuristic question and becomes a checkable fact.
 | `forbidden_edges` | `[from, to]` pairs. An added import crossing one becomes `dep.layering` at **high**. Any other cross-layer import becomes `dep.new-edge` at **low**. |
 | `allowed_external` | The third-party roots the project has already accepted. Anything else added becomes `dep.new-external` at **high** instead of medium. Omit the key (or leave it empty) to keep every new dependency at medium. |
 | `budgets.max_loop_depth` | The deepest loop nesting a change may introduce without owing an explanation. Default `1`, so any two-level nest gets asked about. Raise it where nested iteration is genuinely routine. |
+| `budgets.max_params` | Parameters on an added function before `fit.wide-signature` asks whether it is doing one job. Default `5`. |
+| `budgets.max_function_rows` | Rows in an added function body before `fit.long-function` asks what it does. Default `60`. Raise it for languages or domains where long straight-line functions are normal. |
+| `budgets.min_duplicate_rows` | Identical rows repeated before `fit.duplicate-block` calls it copy-paste. Default `6`. Lower it to catch smaller clones, at the cost of firing on coincidence. |
 | `invariants` | Free text for the reviewer, carried into the review's context. Not machine-checked — it is there so a human rule does not stay tribal knowledge. |
 
 Every key is optional. With no file at all, the tool says so at `prepare` time and falls

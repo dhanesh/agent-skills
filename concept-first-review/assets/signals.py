@@ -202,7 +202,17 @@ DEFAULT_BASELINE = {
     # max_loop_depth is the deepest loop nesting a change may introduce without
     # owing the reviewer an explanation. 1 means "any two-level nest gets asked
     # about"; raise it for repos where nested iteration is genuinely routine.
-    "budgets": {"max_loop_depth": 1},
+    "budgets": {
+        "max_loop_depth": 1,
+        # A function past this many parameters is usually carrying more than one
+        # responsibility, or has grown an options bag that wants to be a type.
+        "max_params": 5,
+        # Rows in a single added function body before its size becomes a question.
+        "max_function_rows": 60,
+        # Identical normalised rows repeated in the change before it reads as
+        # copy-paste rather than coincidence.
+        "min_duplicate_rows": 6,
+    },
     "invariants": [],
 }
 
@@ -357,6 +367,7 @@ def extract(rows, baseline=None):
     out.extend(_runtime_signals(rows, declarations))
     out.extend(_contract_signals(rows))
     out.extend(_blast_radius_signals(rows))
+    out.extend(_fit_signals(rows, declarations, baseline))
 
     out.sort(key=lambda s: (_SEV_ORDER.get(s["severity"], 3), s["file"] or "", s["line"]))
     return out
@@ -429,6 +440,7 @@ def _dependency_signals(rows, declarations, baseline):
     return out
 
 
+_WS_RE = re.compile(r"\s+")
 _IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _MAX_DECL_ROWS = 40
 
@@ -782,3 +794,332 @@ def summarize(sigs):
     for s in sigs:
         counts[s["severity"]] = counts.get(s["severity"], 0) + 1
     return {"total": len(sigs), "by_severity": counts}
+
+
+# ── Fit: does the change belong here, and is it the right size? ──────────────
+#
+# Machine-written code fails differently from hand-written code. It is rarely
+# wrong in the small; it is much more often the wrong *size* — an abstraction
+# with one user, a helper nothing calls, a block pasted four times, a comment
+# restating the line beneath it. These detectors look for those shapes.
+#
+# Every one of them is a question about proportion, and proportion is a
+# judgment. They mark where to look; `references/fit-and-scope.md` is where the
+# actual reasoning lives.
+
+_FN_DECL_RE = re.compile(
+    r"^(?:pub(?:\([\w:]+\))?\s+)?(?:export\s+)?(?:default\s+)?(?:public\s+|private\s+|protected\s+)?"
+    r"(?:static\s+)?(?:async\s+)?(?:def|fn|func|function)\s+([A-Za-z_$][\w$]*)"
+)
+_ABSTRACTION_RE = re.compile(
+    r"^(?:pub\s+|export\s+)?(?:abstract\s+)?(?:trait|interface|protocol)\s+([A-Za-z_]\w*)"
+    r"|^(?:export\s+)?abstract\s+class\s+([A-Za-z_]\w*)"
+    r"|^class\s+([A-Za-z_]\w*)\s*\(\s*(?:Protocol|ABC)\s*\)"
+)
+_IMPLEMENTS_RE = re.compile(
+    r"^impl\s+(?:<[^>]*>\s*)?([A-Za-z_]\w*)(?:<[^>]*>)?\s+for\b"
+    r"|\bimplements\s+([A-Za-z_][\w,\s]*)"
+    r"|^class\s+\w+\s*\(\s*([A-Za-z_]\w*)\s*\)"
+)
+_DELEGATE_RE = re.compile(r"^(?:return\s+)?[\w.]*\(?[\w.]+\s*\([^;{}]*\)\s*[;?]?$")
+_COMMENT_RE = re.compile(r"^\s*(?://+|#|--)\s*(.*)$")
+_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+# Function words carry no information either way, so they neither prove nor
+# disprove that a comment is restating the line beneath it.
+_STOPWORDS = frozenset("""
+the and for with from into that this then than but not are was were will its
+our all any each new set get use used using via per out off own same such
+""".split())
+_PRIVATE_HINT = {"python": "_", "js": "_", "jvm": "_", "csharp": "_"}
+# Names a runtime, trait, or framework calls for you. None of them has a caller
+# spelled out in the source, so "nothing calls this" says nothing about them.
+_PROTOCOL_NAMES = frozenset("""
+eq ne cmp partial_cmp hash fmt clone drop default next from into try_from as_ref
+deref index len iter new main run serialize deserialize to_string toString
+__init__ __repr__ __str__ __eq__ __hash__ __enter__ __exit__ __iter__ __next__
+setUp tearDown setup teardown constructor render componentDidMount
+""".split())
+_TEST_ATTR_RE = re.compile(r"^\s*(?:#\[\s*(?:test|tokio::test|bench)|@(?:pytest|Test|test)\b|@Test\b)")
+
+
+def _added_functions(rows):
+    """Every function declared on an added row, with its body extent.
+
+    The body runs from the declaration to the first later added row whose indent
+    returns to the declaration's own — the same indentation model the loop-depth
+    detector uses, and it carries the same limit: a body the diff only partly
+    touches is only partly seen.
+    """
+    out = []
+    added = [r for r in rows if r.kind == ADD and not _is_prose(r.path)]
+    for i, row in enumerate(added):
+        m = _FN_DECL_RE.match(row.source.strip())
+        if not m:
+            continue
+        indent = len(row.source) - len(row.source.lstrip())
+        body = []
+        for nxt in added[i + 1:]:
+            if nxt.path != row.path or nxt.hunk_idx != row.hunk_idx:
+                break
+            if not nxt.source.strip():
+                body.append(nxt)
+                continue
+            if len(nxt.source) - len(nxt.source.lstrip()) <= indent:
+                break
+            body.append(nxt)
+        out.append({"row": row, "name": m.group(1), "indent": indent, "body": body})
+    return out
+
+
+def _param_count(rows, decl_row):
+    """Parameters in a declaration, counting commas at bracket depth one."""
+    tokens = []
+    depth = 0
+    started = False
+    idx = [r.no for r in rows].index(decl_row.no) if decl_row.no <= len(rows) else 0
+    for row in rows[idx:idx + 30]:
+        if row.kind != ADD or (row.no != decl_row.no and row.hunk_idx != decl_row.hunk_idx):
+            break
+        for ch in row.source:
+            if ch == "(":
+                depth += 1
+                started = True
+                continue
+            if ch == ")":
+                depth -= 1
+                if started and depth == 0:
+                    text = "".join(tokens)
+                    if not text.strip():
+                        return 0
+                    return text.count(",") + 1
+                continue
+            if started and depth == 1:
+                tokens.append(ch)
+        if started and depth == 0:
+            break
+    return 0
+
+
+def _fit_signals(rows, declarations, baseline):
+    budgets = baseline.get("budgets") or {}
+    max_params = int(budgets.get("max_params", 5))
+    max_rows = int(budgets.get("max_function_rows", 60))
+    min_dup = int(budgets.get("min_duplicate_rows", 6))
+
+    out = []
+    functions = _added_functions(rows)
+    out.extend(_duplicate_block_signals(rows, declarations, min_dup))
+    out.extend(_shape_signals(rows, functions, max_params, max_rows))
+    out.extend(_speculation_signals(rows, functions))
+    out.extend(_restating_comment_signals(rows))
+    out.extend(_scope_signals(rows))
+    return out
+
+
+def _duplicate_block_signals(rows, declarations, min_dup):
+    """Regions of identical normalised code appearing more than once (DRY).
+
+    Matching is exact once whitespace is collapsed, which keeps precision at the
+    cost of recall: a block pasted and then renamed will not be caught. That is
+    the deliberate trade — a fuzzy clone detector fires on any two functions
+    built the same way, and this family only earns attention by being quiet.
+
+    Overlapping windows are merged into one region per duplicated span. Without
+    that, a 40-row copied file reports 35 times and the finding buries itself.
+    """
+    added = [
+        r for r in rows
+        if r.kind == ADD and r.no not in declarations
+        and not _is_prose(r.path) and r.source.strip()
+    ]
+    norm = [_WS_RE.sub(" ", r.source.strip()) for r in added]
+
+    seen = {}
+    hits = []  # (window_start_index, first_occurrence_row)
+    for i in range(len(added) - min_dup + 1):
+        window = added[i:i + min_dup]
+        if any(window[k + 1].no != window[k].no + 1 for k in range(len(window) - 1)):
+            continue
+        if len(set(norm[i:i + min_dup])) < 3:
+            continue  # a run of near-identical lines is repetition, not duplication
+        key = "\n".join(norm[i:i + min_dup])
+        if key in seen:
+            hits.append((i, seen[key]))
+        else:
+            seen[key] = window[0]
+
+    # Merge consecutive windows into one region.
+    out = []
+    idx = 0
+    while idx < len(hits):
+        start_i, first = hits[idx]
+        end_i = start_i
+        j = idx
+        while j + 1 < len(hits) and hits[j + 1][0] == hits[j][0] + 1:
+            j += 1
+            end_i = hits[j][0]
+        span_rows = (end_i - start_i) + min_dup
+        head = added[start_i]
+        elsewhere = (
+            "%s:%d" % (first.path, first.no) if first.path != head.path
+            else "line %d of the same file" % first.no
+        )
+        out.append(_signal(
+            "fit.duplicate-block", HIGH, head.path, head.no, head.source,
+            "these %d rows already appear at %s. Is this a shared helper waiting to be "
+            "named, or are the two copies genuinely allowed to drift apart?"
+            % (span_rows, elsewhere),
+        ))
+        idx = j + 1
+
+    if len(out) > 12:
+        extra = len(out) - 12
+        out = out[:12]
+        out.append(_signal(
+            "fit.duplicate-block", MEDIUM, None, 0,
+            "%d further duplicated region(s) not listed" % extra,
+            "duplication is pervasive rather than local in this change. Is a whole file or "
+            "directory being kept in sync by hand?",
+        ))
+    return out
+
+
+def _shape_signals(rows, functions, max_params, max_rows):
+    """Size and shape of what was added (SRP, ISP, KISS)."""
+    out = []
+    for fn in functions:
+        row = fn["row"]
+        body = [b for b in fn["body"] if b.source.strip()]
+
+        params = _param_count(rows, row)
+        if params > max_params:
+            out.append(_signal(
+                "fit.wide-signature", MEDIUM, row.path, row.no, row.source,
+                "`%s` takes %d parameters. Is it doing one job, or has an options object "
+                "gone unnamed?" % (fn["name"], params),
+            ))
+
+        if len(body) > max_rows:
+            out.append(_signal(
+                "fit.long-function", MEDIUM, row.path, row.no, row.source,
+                "`%s` adds %d rows in one function. What are the two or three things it "
+                "does, and do they want separate names?" % (fn["name"], len(body)),
+            ))
+
+        exported = bool(re.match(r"^\s*(?:pub\b|export\b|public\b)", row.source)) or (
+            diffmodel.language_of(row.path or "") == "go" and fn["name"][:1].isupper()
+        )
+        if not exported and len(body) == 1 and _DELEGATE_RE.match(body[0].source.strip()):
+            out.append(_signal(
+                "fit.pass-through", LOW, row.path, row.no, row.source,
+                "`%s` only forwards to something else. Does the extra name earn its place, "
+                "or is it indirection for its own sake?" % fn["name"],
+            ))
+    return out
+
+
+def _speculation_signals(rows, functions):
+    """Structure built for a caller that does not exist yet (YAGNI)."""
+    out = []
+    body_text = " ".join(
+        r.source for r in rows if r.kind in (ADD, DEL) and not _is_prose(r.path)
+    )
+
+    by_no = {r.no: r for r in rows}
+    for fn in functions:
+        name = fn["row"] and fn["name"]
+        row = fn["row"]
+        lang = diffmodel.language_of(row.path or "")
+
+        # A method is reached through a receiver this matching cannot follow, and
+        # a trait or test function is called by the language rather than by name.
+        if fn["indent"] > 0:
+            continue
+        if name in _PROTOCOL_NAMES or name.startswith("test") or _NONPROD_RE.search(row.path or ""):
+            continue
+        prev = by_no.get(row.no - 1)
+        if prev is not None and _TEST_ATTR_RE.match(prev.source or ""):
+            continue
+
+        private_prefix = _PRIVATE_HINT.get(lang)
+        is_private = (
+            (private_prefix and name.startswith(private_prefix))
+            or (lang == "rust" and not row.source.strip().startswith("pub"))
+            or (lang == "go" and name[:1].islower())
+        )
+        if not is_private:
+            continue  # public surface may have callers this diff cannot see
+        uses = len(re.findall(r"\b%s\s*\(" % re.escape(name), body_text))
+        if uses <= 1:  # the declaration itself
+            out.append(_signal(
+                "fit.unreferenced-addition", MEDIUM, row.path, row.no, row.source,
+                "`%s` is internal and nothing in this change calls it. Is there a caller "
+                "elsewhere, or was it written for a need that has not arrived?" % name,
+            ))
+
+    for row in rows:
+        if row.kind != ADD or _is_prose(row.path):
+            continue
+        m = _ABSTRACTION_RE.match(row.source.strip())
+        if not m:
+            continue
+        name = next((g for g in m.groups() if g), None)
+        if not name:
+            continue
+        implementors = set()
+        for other in rows:
+            if other.kind != ADD:
+                continue
+            im = _IMPLEMENTS_RE.search(other.source.strip())
+            if im and name in " ".join(g for g in im.groups() if g):
+                implementors.add(other.no)
+        if len(implementors) == 1:
+            out.append(_signal(
+                "fit.abstraction-for-one", MEDIUM, row.path, row.no, row.source,
+                "`%s` is introduced with exactly one implementation. What is the second one, "
+                "and if there isn't one yet, what does the indirection buy today?" % name,
+            ))
+    return out
+
+
+def _restating_comment_signals(rows):
+    """A comment whose words are all already in the line beneath it."""
+    out = []
+    added = [r for r in rows if r.kind == ADD and not _is_prose(r.path)]
+    for i, row in enumerate(added[:-1]):
+        m = _COMMENT_RE.match(row.source)
+        if not m:
+            continue
+        nxt = added[i + 1]
+        if nxt.no != row.no + 1 or _COMMENT_RE.match(nxt.source) or not nxt.source.strip():
+            continue
+        words = {w.lower() for w in _WORD_RE.findall(m.group(1))} - _STOPWORDS
+        if len(words) < 2:
+            continue
+        code = {w.lower() for w in _WORD_RE.findall(nxt.source)}
+        if words <= code:
+            out.append(_signal(
+                "fit.restating-comment", LOW, row.path, row.no, row.source.strip(),
+                "this comment says what the next line already says. Is there a reason for "
+                "the code that could be written here instead?",
+            ))
+    return out
+
+
+def _scope_signals(rows):
+    """Edits that look incidental to whatever the change is actually for."""
+    counts = {}
+    for row in rows:
+        if row.kind in (ADD, DEL) and row.path:
+            counts[row.path] = counts.get(row.path, 0) + 1
+    if len(counts) < 8:
+        return []
+    drive_by = sorted(p for p, n in counts.items() if n <= 2)
+    if len(drive_by) < 3:
+        return []
+    return [_signal(
+        "fit.drive-by-edits", MEDIUM, None, 0,
+        "%d file(s) changed by 2 rows or fewer: %s" % (len(drive_by), ", ".join(drive_by[:6])),
+        "several files are touched barely at all. Are those edits part of this change's "
+        "purpose, or unrelated repairs that would review and revert better on their own?",
+    )]

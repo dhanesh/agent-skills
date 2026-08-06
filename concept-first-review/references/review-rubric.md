@@ -2,8 +2,8 @@
 
 The condensed diff tells you *what* changed. This tells you what to ask about it.
 
-Four dimensions. Each one exists to catch a specific failure, and naming the failure is the
-fastest way to remember why the dimension is there.
+Five dimensions. Each one exists to catch a specific failure, and naming the failure is
+the fastest way to remember why the dimension is there.
 
 Style, formatting, naming conventions, import order, and missing nil checks are **out of
 scope**. The linter has them, the model that wrote the code is good at them, and attention
@@ -66,7 +66,37 @@ change behaviour, it was never a nit — say so.
 [design-baseline.md](design-baseline.md) explains how to make the layering questions
 *checkable* rather than merely askable.
 
-## 4. Blast radius and risk
+## 4. Fit and scope
+
+*Failure: every line is reasonable and the change is the wrong size, or the wrong change.*
+
+This is where machine-written code fails most often, and where a line-by-line read helps
+least. Four questions:
+
+- **Does it look like the code around it?** Error handling, state, naming, test style,
+  dependency choices. A divergence is fine when it was decided; the finding is a divergence
+  nobody chose. This is the one dimension that requires opening files the diff did not
+  touch — a diff cannot show you a convention.
+- **Is anything built for a caller that does not exist?** An interface with one
+  implementation, an option every call site leaves at its default, a layer that only
+  forwards. Ask for the second case *by name*; both possible answers are useful.
+- **Is anything missing the shape it needs?** The same block pasted twice, a conditional
+  that grows a branch per case, validation at one call site and not its siblings. The tell
+  is divergence risk: two copies that must change together eventually will not.
+- **Is this what the change was for?** A `chore` that adds public surface, a refactor that
+  also fixes a bug so neither can be reverted alone, scattered one-line edits. And the
+  harder question: **what part of the request is not in here at all?** An agent that hits a
+  wall often produces a large, confident, adjacent change instead of a small one that says
+  "this part is blocked".
+
+DRY, KISS, YAGNI, SOLID and functional style all live here, and all of them are trades
+rather than rules — duplication is cheaper than the wrong abstraction, and SOLID applied
+before the second case *is* over-engineering. Cite the trade, not the acronym:
+"this is the third copy of the tenant-validation block" is a finding; "DRY violation" is a
+label. The failure shapes, the honest limits of each principle, and what the `fit.*`
+signals can and cannot see are in [fit-and-scope.md](fit-and-scope.md).
+
+## 5. Blast radius and risk
 
 *Failure: the change is fine and the rollout is not.*
 

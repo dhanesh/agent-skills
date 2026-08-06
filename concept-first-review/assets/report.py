@@ -32,6 +32,10 @@ SECTIONS = (
     ("Architecture and boundaries",
      "What moved across a module, process, or trust boundary? Which direction do the new "
      "dependencies point, and does the layering still hold?"),
+    ("Fit and scope",
+     "Does this belong here, and is it the right size? Where does it diverge from how the "
+     "surrounding code already does things, what is built for a caller that does not exist, "
+     "what is done twice, and what is in the change that the change was not for?"),
     ("Blast radius and risk",
      "Who else is affected, what happens on rollout and rollback, and what is the worst "
      "realistic failure?"),

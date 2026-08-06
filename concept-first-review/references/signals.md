@@ -97,6 +97,29 @@ sibling `security-posture-audit` skill.
 | `cfg.changed` | A YAML/TOML/INI/env/Dockerfile/helm path. | `low` |
 | `cfg.flag` | A feature flag or environment lookup. | `low` |
 
+## Fit: size, repetition, and scope
+
+| id | Fires on | Severity |
+|---|---|---|
+| `fit.duplicate-block` | `min_duplicate_rows` (default 6) identical rows appearing twice. | `high` |
+| `fit.abstraction-for-one` | An interface/trait/protocol added with exactly one implementation. | `medium` |
+| `fit.unreferenced-addition` | An internal function nothing in the change calls. | `medium` |
+| `fit.wide-signature` | More parameters than `max_params` (default 5). | `medium` |
+| `fit.long-function` | An added body over `max_function_rows` (default 60). | `medium` |
+| `fit.drive-by-edits` | Three or more files changed by <= 2 rows, in a change touching >= 8. | `medium` |
+| `fit.pass-through` | A new function whose whole body forwards elsewhere. | `low` |
+| `fit.restating-comment` | A comment whose words all appear on the line beneath it. | `low` |
+
+*Limit, and it is the important one:* every detector here reads the diff alone. It can see
+repetition, size, and structure; it cannot see **convention**, so incongruity — code that
+does not match how the surrounding codebase already works — produces no signal at all.
+That judgment needs sibling files open, and it is the one place in this skill where reading
+beyond the change is not optional. See [fit-and-scope.md](fit-and-scope.md).
+
+Duplicate matching is exact after whitespace collapsing, so a block pasted and then renamed
+escapes it. That is deliberate: a fuzzy clone detector fires on any two functions built the
+same way, and this family only earns attention by staying quiet.
+
 ## Blast radius
 
 | id | Fires on | Severity |

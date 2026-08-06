@@ -104,8 +104,15 @@ architecture. Each signal is an observation plus a question rather than a verdic
    python3 assets/review.py signals --into .review --severity medium
    ```
 
-   Work the four dimensions in [references/review-rubric.md](references/review-rubric.md):
-   concepts, algorithm choices, architecture and boundaries, blast radius and risk. The
+   Work the five dimensions in [references/review-rubric.md](references/review-rubric.md):
+   concepts, algorithm choices, architecture and boundaries, fit and scope, blast radius
+   and risk. **Fit and scope** is where machine-written code fails most often — an
+   abstraction with one implementation, a block pasted twice, a `chore` that quietly adds
+   behaviour, or a request only half-answered; the failure shapes and the honest limits of
+   DRY/KISS/YAGNI/SOLID are in
+   [references/fit-and-scope.md](references/fit-and-scope.md). Judging whether the change
+   matches how the surrounding code already works needs sibling files open — a diff cannot
+   show you a convention, and no signal covers it. The
    catalogue and each detector's limits are in
    [references/signals.md](references/signals.md). Read code outside the diff when a clue
    would change your judgment — most rows can be judged from the condensed diff, and the
@@ -166,7 +173,7 @@ sibling `security-posture-audit` skill does that job properly.
 - **`.review/condensed.diff`** — the change reduced to the rows carrying a decision,
   provably derived from the original by dropping, collapsing, and trimming alone.
 - **`.review/signals.json`** — every observation with its question and severity.
-- **`.review/REVIEW.md`** — the review: a plain-language summary, findings across the four
+- **`.review/REVIEW.md`** — the review: a plain-language summary, findings across the five
   dimensions, a disposition for every high-severity signal, and exactly one verdict from
   `ship`, `ship-with-followups`, `needs-changes`, `needs-discussion`.
 - The `grade` result stated plainly — including if you could not get it to pass.

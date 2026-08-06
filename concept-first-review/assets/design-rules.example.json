@@ -1,17 +1,37 @@
 {
   "_comment": "Copy to your repository root as design-rules.json and edit. Every key is optional. See references/design-baseline.md.",
   "layers": {
-    "core": ["core/", "internal/model/"],
-    "web": ["web/", "http/", "api/"],
-    "infra": ["infra/", "adapters/", "store/"]
+    "core": [
+      "core/",
+      "internal/model/"
+    ],
+    "web": [
+      "web/",
+      "http/",
+      "api/"
+    ],
+    "infra": [
+      "infra/",
+      "adapters/",
+      "store/"
+    ]
   },
   "forbidden_edges": [
-    ["core", "web"],
-    ["core", "infra"]
+    [
+      "core",
+      "web"
+    ],
+    [
+      "core",
+      "infra"
+    ]
   ],
   "allowed_external": [],
   "budgets": {
-    "max_loop_depth": 1
+    "max_loop_depth": 1,
+    "max_params": 5,
+    "max_function_rows": 60,
+    "min_duplicate_rows": 6
   },
   "invariants": [
     "core/ is framework-free and never imports web/ or infra/",

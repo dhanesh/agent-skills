@@ -53,6 +53,16 @@ its architecture. Each is an observation plus a **question**, never a verdict:
   authorisation decisions, path construction
 - **blast radius** — behaviour changed with no test touched, a change spread across four or
   more areas
+- **fit** — the shapes machine-written code gets wrong: a block pasted twice, an interface
+  with one implementation, an internal helper nothing calls, an oversized signature, a
+  comment restating the line beneath it, scattered drive-by edits
+
+Incongruity — code that does not match how the surrounding codebase already works — is
+deliberately **not** a signal. Detecting it needs sibling files open, not the diff, so it is
+the reviewer's job and the one place the skill says reading beyond the change is not
+optional. DRY, KISS, YAGNI, SOLID and functional style live in the **Fit and scope** review
+dimension as trades rather than rules: `references/fit-and-scope.md` gives the failure
+shapes and where each principle misleads.
 
 Then you write `REVIEW.md`, and a completeness check grades it. It cannot tell you a finding
 is right; it does refuse a review with an empty section, surviving placeholder text, an
@@ -142,7 +152,7 @@ is why it behaves the same in Claude Code, in Codex, and on a machine with no ne
 
 ## Tests
 
-120 stdlib unit tests across the four modules, plus a 37-check end-to-end eval that asserts
+181 stdlib unit tests across the four modules, plus a 37-check end-to-end eval that asserts
 both directions: that noise collapses while the decisive rows survive, *and* that invented
 text, one-sided relocation treatment, and definition-burying collapses are all rejected;
 that a clean control diff yields no high signals; that the template the skill writes does not
