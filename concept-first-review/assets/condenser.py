@@ -230,6 +230,8 @@ def compile_plan(diff_text, plan, rows=None, declarations=None, moves=None):
     _check_python_blocks(collapses, by_no, errors)
     _check_quote_parity(rows, treat, replace_text, declarations, errors)
 
+    _note_one_sided_hunks(rows, treat, declarations, res.notes)
+
     ignored = sum(1 for n in treat if n in declarations)
     if ignored:
         res.notes.append(
@@ -295,7 +297,9 @@ def _check_symmetry(moves, by_no, treat, replace_text, declarations, errors):
             )
 
 
-_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?(?::=|=)(?!=)")
+# `(?![=>])` keeps a match arm or arrow function (`Expression::Foo => {`,
+# `x => x + 1`) from reading as an assignment to its left-hand name.
+_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=]+)?(?::=|=)(?![=>])")
 
 
 def _check_dependencies(collapses, by_no, treat, declarations, errors):
@@ -396,6 +400,50 @@ def _check_quote_parity(rows, treat, replace_text, declarations, errors):
             "closing delimiters and collapse what is between them."
             % (hunk_idx + 1, marker.strip() or "context", before, after)
         )
+
+
+def _note_one_sided_hunks(rows, treat, declarations, notes):
+    """Warn when a replacement survives as a deletion with nothing replacing it.
+
+    A hunk carrying both `-` and `+` rows is a replacement. Condensing it down to
+    only its removed side leaves the reader watching code disappear and never
+    learning what took its place — the same lie the relocation rule forbids
+    across hunks, which nothing previously caught within one.
+
+    Advisory rather than a rejection: keeping one anchor from each side is a
+    legitimate and common condensation, and only the reviewer can say whether the
+    surviving anchors carry the point.
+    """
+    sides = {}
+    for row in rows:
+        if row.kind not in (ADD, DEL) or row.no in declarations:
+            continue
+        total, kept = sides.setdefault(row.hunk_idx, {"+": [0, 0], "-": [0, 0]})[row.marker], None
+        total[0] += 1
+        if treat.get(row.no, KEEP) in (KEEP, FOLD_START):
+            total[1] += 1
+
+    stranded = []
+    for hunk_idx, marks in sorted(sides.items()):
+        add_total, add_kept = marks["+"]
+        del_total, del_kept = marks["-"]
+        if not add_total or not del_total:
+            continue  # a pure addition or a pure deletion has no other side
+        if add_kept == 0 and del_kept > 0:
+            stranded.append((hunk_idx + 1, "removed", del_kept))
+        elif del_kept == 0 and add_kept > 0:
+            stranded.append((hunk_idx + 1, "added", add_kept))
+
+    for hunk_no, side, kept in stranded[:8]:
+        other = "added" if side == "removed" else "removed"
+        notes.append(
+            "hunk %d replaces code, but only its %s side survives (%d row(s)); every %s row "
+            "is hidden. A reader sees the change as one-directional. Keep an anchor from "
+            "both sides." % (hunk_no, side, kept, other)
+        )
+    if len(stranded) > 8:
+        notes.append("...and %d further hunk(s) condensed to one side only."
+                     % (len(stranded) - 8))
 
 
 def _render(rows, treat, replace_text, fold_rows, declarations):

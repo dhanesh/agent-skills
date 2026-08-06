@@ -250,6 +250,20 @@ class TestDependencyGuard(unittest.TestCase):
         self.assertFalse(res.ok)
         self.assertIn("buries the definition of `CASES`", " ".join(res.errors))
 
+    def test_negative_a_match_arm_is_not_a_definition(self):
+        # `Expression::ListAccess { .. } => {` once read as an assignment to
+        # `Expression`, so any collapse containing a match arm was rejected.
+        text = (
+            "diff --git a/e.rs b/e.rs\n--- a/e.rs\n+++ b/e.rs\n@@ -1,4 +1,8 @@\n"
+            "+            Expression::ListAccess { list, index } => {\n"
+            "+                let items = evaluate(list)?;\n"
+            "+                items.get(index)\n"
+            "+            }\n"
+            "+    let other = Expression::Literal(1);\n"
+        )
+        res = compile_plan(text, plan(collapse("5-8")))
+        self.assertTrue(res.ok, res.errors)
+
     def test_collapsing_only_the_interior_is_accepted(self):
         res = compile_plan(DEP_TEXT, plan(collapse("6-7")))
         self.assertTrue(res.ok, res.errors)
@@ -300,6 +314,55 @@ class TestPythonBlockRules(unittest.TestCase):
         res = compile_plan(text, plan(drop("8")))
         self.assertFalse(res.ok)
         self.assertIn("triple-quote parity", " ".join(res.errors))
+
+
+REPLACEMENT = (
+    "diff --git a/e.rs b/e.rs\n"   # 1
+    "--- a/e.rs\n"                  # 2
+    "+++ b/e.rs\n"                  # 3
+    "@@ -1,6 +1,4 @@\n"             # 4
+    " fn scan(&self) {\n"           # 5
+    "-    let mut all = Vec::new();\n"                # 6
+    "-    for id in 1..=1000 {\n"                     # 7
+    "-        if let Ok(Some(_)) = self.get(id) {\n"  # 8
+    "-            all.push(id);\n"                    # 9
+    "-        }\n"                                    # 10
+    "-    }\n"                                        # 11
+    "+    let all = self.all_node_ids();\n"           # 12
+    "+    let filtered = self.filter(all);\n"         # 13
+)
+
+
+class TestOneSidedReplacement(unittest.TestCase):
+    """A replacement condensed to one side reads as a deletion with no successor.
+
+    Found by redrafting a real review: a denser plan kept `for id in 1..=1000`
+    and hid `all_node_ids()`, so the fix vanished and only the bug remained.
+    """
+
+    def test_hiding_the_added_side_is_flagged(self):
+        res = compile_plan(REPLACEMENT, plan(collapse("12-13")))
+        self.assertTrue(res.ok, res.errors)
+        self.assertFalse(any("only its" in n for n in res.notes),
+                         "a collapse still leaves a placeholder row, so a side survives")
+        res = compile_plan(REPLACEMENT, plan(drop("12-13")))
+        self.assertTrue(res.ok, res.errors)
+        self.assertTrue(any("only its removed side survives" in n for n in res.notes), res.notes)
+
+    def test_hiding_the_removed_side_is_flagged(self):
+        res = compile_plan(REPLACEMENT, plan(drop("6-11")))
+        self.assertTrue(res.ok, res.errors)
+        self.assertTrue(any("only its added side survives" in n for n in res.notes), res.notes)
+
+    def test_negative_keeping_an_anchor_from_both_sides_is_quiet(self):
+        res = compile_plan(REPLACEMENT, plan(drop("6-10"), drop("13")))
+        self.assertTrue(res.ok, res.errors)
+        self.assertFalse(any("only its" in n for n in res.notes), res.notes)
+
+    def test_negative_a_pure_addition_has_no_other_side_to_strand(self):
+        res = compile_plan(SIMPLE, plan(drop("6-11")))
+        self.assertTrue(res.ok, res.errors)
+        self.assertFalse(any("only its" in n for n in res.notes), res.notes)
 
 
 class TestPlanShape(unittest.TestCase):
