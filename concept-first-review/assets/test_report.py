@@ -45,7 +45,14 @@ PARAGRAPH = (
 )
 
 
-def filled(dispositions, paragraph=PARAGRAPH, verdict="needs-changes", sigs=(HIGH_SIG,)):
+CONFIDENCE = (
+    "Verified: read the condensed diff end to end and traced both call sites.\n"
+    "Unverified: did not run the suite; the rollout ordering is taken from the description."
+)
+
+
+def filled(dispositions, paragraph=PARAGRAPH, verdict="needs-changes", sigs=(HIGH_SIG,),
+           confidence=CONFIDENCE):
     """Build a review that is complete except for what the caller varies."""
     out = ["# Concept review", ""]
     for title, _ in reportlib.SECTIONS:
@@ -53,6 +60,8 @@ def filled(dispositions, paragraph=PARAGRAPH, verdict="needs-changes", sigs=(HIG
         out.append("")
         if title == "Verdict":
             out.append(verdict)
+        elif title == "Confidence and basis":
+            out.append(confidence)
         elif title == "The change in one paragraph":
             out.append(paragraph)
         elif title == "Signals":
@@ -165,6 +174,33 @@ class TestGrader(unittest.TestCase):
         )
         checks, ok = reportlib.grade(text, [HIGH_SIG])
         self.assertFalse(ok)
+
+    def test_a_review_that_never_says_what_it_checked_fails(self):
+        text = filled(
+            {"algo.io-in-loop@svc/orders.py:42":
+                "**addressed**: the batched read lands in the same change."},
+            confidence="I looked at it carefully and it seems fine.",
+        )
+        checks, ok = reportlib.grade(text, [HIGH_SIG])
+        self.assertFalse(ok)
+        self.assertIn("confidence-basis", [c[0] for c in checks if not c[1]])
+
+    def test_stating_only_what_was_verified_is_not_enough(self):
+        text = filled(
+            {"algo.io-in-loop@svc/orders.py:42":
+                "**addressed**: the batched read lands in the same change."},
+            confidence="Verified: ran the suite and traced every caller.",
+        )
+        _, ok = reportlib.grade(text, [HIGH_SIG])
+        self.assertFalse(ok, "a review that claims no limits has not stated its basis")
+
+    def test_the_template_names_the_stated_intent(self):
+        text = reportlib.template([], STATS, dict(META, intent="add WAL truncation"))
+        self.assertIn("**The change was asked to:** add WAL truncation", text)
+
+    def test_the_template_says_so_when_no_intent_was_given(self):
+        text = reportlib.template([], STATS, META)
+        self.assertIn("No stated intent was supplied", text)
 
     def test_negative_thin_paragraph(self):
         text = filled(

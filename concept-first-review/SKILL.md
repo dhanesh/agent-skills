@@ -65,10 +65,14 @@ architecture. Each signal is an observation plus a question rather than a verdic
 1. **Open the change.**
 
    ```bash
-   python3 assets/review.py open --rev HEAD~1..HEAD --into .review --rules design-rules.json
+   python3 assets/review.py open --rev HEAD~1..HEAD --into .review \
+       --rules design-rules.json --intent "what the change was asked to do"
    ```
 
-   Use `--diff <file>` or `--diff -` when there is no git range at hand. It reports the row
+   Use `--diff <file>` or `--diff -` when there is no git range at hand. **Pass `--intent`
+   whenever you know what was asked**: silent scope reduction — a competent subset of the
+   request, delivered without mentioning the rest — leaves no trace in a diff, so it is
+   only checkable against a stated intent. It reports the row
    count, how many dependency rows it removed, any relocations it found, and the signal
    counts. Flags: [references/parameters.md](references/parameters.md).
 
@@ -112,7 +116,13 @@ architecture. Each signal is an observation plus a question rather than a verdic
    DRY/KISS/YAGNI/SOLID are in
    [references/fit-and-scope.md](references/fit-and-scope.md). Judging whether the change
    matches how the surrounding code already works needs sibling files open — a diff cannot
-   show you a convention, and no signal covers it. The
+   show you a convention, and no signal covers it.
+
+   When the change came out of a long autonomous run, look for that process's residue too:
+   suppressed warnings, stubs inside a change offered as finished, tests that cannot fail,
+   two names for one operation, citations to files that do not exist. Those are the
+   `agentic.*` signals; where each comes from, and the two patterns no detector can reach,
+   are in [references/agentic-patterns.md](references/agentic-patterns.md). The
    catalogue and each detector's limits are in
    [references/signals.md](references/signals.md). Read code outside the diff when a clue
    would change your judgment — most rows can be judged from the condensed diff, and the
@@ -126,8 +136,15 @@ architecture. Each signal is an observation plus a question rather than a verdic
 7. **Grade it.** `python3 assets/review.py grade --into .review` prints `CHECK:` lines and a
    `REPORT_RESULT:` verdict, exiting non-zero on any gap. It cannot tell you a finding is
    *right*; it does refuse a review with an empty section, surviving placeholder text, an
-   ambiguous verdict, or an unresolved high-severity signal. Repair and re-run until it
-   passes, then hand the review over.
+   ambiguous verdict, an unresolved high-severity signal, or a **Confidence and basis**
+   section that fails to separate `Verified:` from `Unverified:`. Repair and re-run until
+   it passes, then hand the review over.
+
+   That last check is what makes the review something to rely on. Fluent output is not
+   evidence, and a review of machine-written code is itself machine-written: stating where
+   your evidence stops is the only thing that keeps one from laundering the other. A short
+   honest `Unverified:` list is worth more than a long confident review, and where the
+   evidence does not reach far enough to ship, `needs-discussion` is the accurate answer.
 
 ## Reviewing after another agent
 
@@ -173,8 +190,8 @@ sibling `security-posture-audit` skill does that job properly.
 - **`.review/condensed.diff`** — the change reduced to the rows carrying a decision,
   provably derived from the original by dropping, collapsing, and trimming alone.
 - **`.review/signals.json`** — every observation with its question and severity.
-- **`.review/REVIEW.md`** — the review: a plain-language summary, findings across the five
-  dimensions, a disposition for every high-severity signal, and exactly one verdict from
+- **`.review/REVIEW.md`** — the review: an explicit `Verified:`/`Unverified:` basis, a
+  plain-language summary, findings across the five dimensions, a disposition for every high-severity signal, and exactly one verdict from
   `ship`, `ship-with-followups`, `needs-changes`, `needs-discussion`.
 - The `grade` result stated plainly — including if you could not get it to pass.
 - When auditing prior work: the **delta**, saying what the earlier review missed.

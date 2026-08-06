@@ -85,6 +85,11 @@ def filled_review(sigs):
         out.append("")
         if title == "Verdict":
             out.append("needs-changes")
+        elif title == "Confidence and basis":
+            out.append(
+                "Verified: read the condensed diff end to end and traced the relocation.\n"
+                "Unverified: the suite was not run; rollout ordering is taken on trust."
+            )
         elif title == "The change in one paragraph":
             out.append(harness.PARAGRAPH)
         elif title == "Signals":
@@ -113,7 +118,8 @@ def main():
         work = os.path.join(tmp, "work")
 
         # ── Opening the change ──────────────────────────────────────────────
-        rc, out = run("open", "--diff", diff_path, "--into", work, "--rules", rules_path)
+        rc, out = run("open", "--diff", diff_path, "--into", work, "--rules", rules_path,
+                      "--intent", harness.INTENT)
         check("open exits clean", rc == 0, out.strip().splitlines()[-1] if out else "")
 
         indexed = read(os.path.join(work, "indexed.diff"))
@@ -261,6 +267,10 @@ def main():
             "the template names every signal it expects resolved",
             all(reportlib.signal_token(s) in template_text for s in sigs),
         )
+        check(
+            "the template carries the stated intent, so scope is checkable",
+            harness.INTENT in template_text,
+        )
 
         rc, out = run("grade", "--into", work)
         check(
@@ -287,6 +297,20 @@ def main():
         check(
             "one unresolved high signal sinks the review",
             rc != 0 and "high-signals-resolved — FAIL" in out,
+        )
+
+        # A review that never says what it checked is not a final answer.
+        no_basis = filled_review(sigs).replace(
+            "Verified: read the condensed diff end to end and traced the relocation.\n"
+            "Unverified: the suite was not run; rollout ordering is taken on trust.",
+            "I read it closely and it looks right.",
+            1,
+        )
+        write(review_path, no_basis)
+        rc, out = run("grade", "--into", work)
+        check(
+            "a review that never states its evidence is refused",
+            rc != 0 and "confidence-basis — FAIL" in out,
         )
         write(review_path, filled_review(sigs))
 

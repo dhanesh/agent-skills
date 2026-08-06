@@ -166,3 +166,8 @@ def prior_strong_review(sigs):
         where = "%s:%d" % (sig["file"], sig["line"]) if sig["file"] else "(whole change)"
         lines.append("- %s at %s: raised with the author." % (sig["id"], where))
     return "\n".join(lines) + "\n"
+
+
+# What the change was asked to do, in the requester's words. Scope drift is only
+# checkable against something like this — a diff cannot show what is missing.
+INTENT = "batch the per-item reads in order listing and move the identity helpers into core"

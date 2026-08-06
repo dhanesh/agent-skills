@@ -355,8 +355,12 @@ def _is_external(module, lang):
 
 # ── Extraction ───────────────────────────────────────────────────────────────
 
-def extract(rows, baseline=None):
-    """Return the full signal list for a parsed diff, most severe first."""
+def extract(rows, baseline=None, repo_root=None):
+    """Return the full signal list for a parsed diff, most severe first.
+
+    `repo_root` is optional and enables only the checks that cannot be answered
+    from the diff alone — today, whether a cited path actually exists.
+    """
     baseline = baseline or dict(DEFAULT_BASELINE)
     declarations = diffmodel.declaration_rows(rows)
     out = []
@@ -368,6 +372,7 @@ def extract(rows, baseline=None):
     out.extend(_contract_signals(rows))
     out.extend(_blast_radius_signals(rows))
     out.extend(_fit_signals(rows, declarations, baseline))
+    out.extend(_agentic_signals(rows, declarations, baseline, repo_root))
 
     out.sort(key=lambda s: (_SEV_ORDER.get(s["severity"], 3), s["file"] or "", s["line"]))
     return out
@@ -1123,3 +1128,302 @@ def _scope_signals(rows):
         "several files are touched barely at all. Are those edits part of this change's "
         "purpose, or unrelated repairs that would review and revert better on their own?",
     )]
+
+
+# ── Agentic residue: what long-running autonomous work leaves behind ─────────
+#
+# A change produced over many turns by an agent that plans, executes, verifies
+# and repairs has a characteristic sediment. Context is compacted between
+# segments, so the second half of a session does not remember the first. When a
+# check fails the cheapest repair is often to silence it. When the work is
+# blocked the cheapest output is a large adjacent change rather than a small
+# admission. When completion has to be demonstrated, a test that asserts what
+# the code already does demonstrates it.
+#
+# None of these is unique to agents — a person under deadline produces the same
+# shapes. They are worth their own family because they cluster, and because they
+# attack the two things a review is supposed to certify: that the change is
+# correct, and that someone can maintain it next year.
+
+_SUPPRESSION_RE = re.compile(
+    r"#\s*noqa\b|#\s*type:\s*ignore|#\s*pragma:\s*no\s*cover|#\s*pylint:\s*disable"
+    r"|#\s*rubocop:disable|#\s*phpcs:ignore|\bNOSONAR\b"
+    r"|eslint-disable|biome-ignore|oxlint-disable|deno-lint-ignore"
+    r"|@ts-ignore|@ts-expect-error|//\s*nolint|//\s*lint:ignore"
+    r"|#!?\[allow\(|@SuppressWarnings|#\s*fmt:\s*off|//\s*prettier-ignore|@Suppress\b"
+    r"|swiftlint:disable|checkstyle:off"
+)
+# A suppression that explains itself is a decision; a bare one is a reflex. Both
+# are worth a question, but only one of them is worth interrupting for.
+_SUPPRESSION_REASON_RE = re.compile(r":\s*\S+(?:\s+\S+){3,}\s*$")
+# The marker words are conventionally shouted, and lowercasing them costs
+# precision: `xxx` is a placeholder in half the prompt templates ever written,
+# and `hack` is an ordinary English word.
+_MARKER_RE = re.compile(r"\b(?:TODO|FIXME|XXX|HACK)\b")
+_STUB_RE = re.compile(
+    r"NotImplementedError|NotImplementedException|unimplemented!|todo!\("
+    r"|not\s+implemented|notImplemented", re.I,
+)
+_TAUTOLOGY_RE = re.compile(
+    r"assert\s+True\b|assert\s+1\s*==\s*1|assertTrue\s*\(\s*True\s*\)"
+    r"|expect\s*\(\s*true\s*\)\s*\.\s*toBe\s*\(\s*true\s*\)"
+    r"|assert_eq!\s*\(\s*true\s*,\s*true\s*\)"
+    r"|assert\s+([A-Za-z_][\w.]*)\s*==\s*\1\s*$"
+    r"|expect\s*\(\s*([A-Za-z_][\w.]*)\s*\)\s*\.\s*toBe\s*\(\s*\2\s*\)"
+)
+_ASSERT_RE = re.compile(r"\bassert\w*\s*[!(\s]|\bexpect\s*\(|\.should\b|\brequire\.\w+\(")
+_TEST_FN_RE = re.compile(
+    r"^(?:async\s+)?(?:def|fn|func|function)\s+(test\w*|\w*_test)\s*\("
+    r"|^\s*(?:it|test)\s*\(\s*['\"]"
+)
+_SLEEP_RE = re.compile(
+    r"\btime\.sleep\s*\(|\bsleep\s*\(|thread::sleep|Thread\.sleep"
+    r"|setTimeout\s*\(|await\s+delay\s*\(|time\.Sleep\s*\("
+)
+_MOCK_SETUP_RE = re.compile(r"\b(?:mock|Mock|patch|stub|spy|jest\.fn|MagicMock|sinon)\b")
+_CALL_ASSERT_RE = re.compile(
+    r"assert_called|assert_has_calls|toHaveBeenCalled|verify\s*\(|\.calledWith\b"
+)
+_COMMENTED_CODE_RE = re.compile(
+    r"^\s*(?://|#)\s*(?:"
+    r"(?:if|for|while|return|import|from|let|const|var|def|fn|func|class|await|try)\b.*"
+    r"|[\w.\[\]]+\s*=[^=].*"
+    r"|[\w.]+\([^)]*\)\s*[;{]?\s*"
+    r")$"
+)
+_CAMEL_SPLIT_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_ACCESS_VERBS = ("get", "fetch", "load", "read", "retrieve", "find", "lookup", "obtain")
+_PATH_REF_RE = re.compile(r"(?:^|[\s(`'\"])([\w][\w./-]*/[\w./-]+\.[A-Za-z0-9]{1,6})")
+
+
+def _agentic_signals(rows, declarations, baseline, repo_root=None):
+    out = []
+    out.extend(_suppression_signals(rows))
+    out.extend(_unfinished_signals(rows))
+    out.extend(_test_quality_signals(rows))
+    out.extend(_leftover_signals(rows))
+    out.extend(_naming_drift_signals(rows))
+    out.extend(_narration_signals(rows))
+    if repo_root:
+        out.extend(_dangling_reference_signals(rows, repo_root))
+    return out
+
+
+def _suppression_signals(rows):
+    """A check fired and the change turned the check off."""
+    out = []
+    for row in rows:
+        if row.kind != ADD or _is_prose(row.path):
+            continue
+        if not _SUPPRESSION_RE.search(row.source):
+            continue
+        explained = bool(_SUPPRESSION_REASON_RE.search(row.source.rstrip()))
+        if explained:
+            out.append(_signal(
+                "agentic.suppressed-warning", MEDIUM, row.path, row.no, row.source,
+                "a check is silenced here, with a stated reason. Does the reason hold, and "
+                "is the suppression scoped to just this case?",
+            ))
+        else:
+            out.append(_signal(
+                "agentic.suppressed-warning", HIGH, row.path, row.no, row.source,
+                "a tool reported something here and this silences it without saying why. Was "
+                "the finding wrong, or was it right and inconvenient?",
+            ))
+    return out
+
+
+def _unfinished_signals(rows):
+    """Work declared incomplete inside a change presented as complete."""
+    out = []
+    for row in rows:
+        if row.kind != ADD or _is_prose(row.path):
+            continue
+        if _MARKER_RE.search(row.source) or _STUB_RE.search(row.source):
+            out.append(_signal(
+                "agentic.unfinished-work", HIGH, row.path, row.no, row.source,
+                "this marks work that is not done, inside a change offered as done. Which part "
+                "of the original request does it correspond to, and who is expected to finish it?",
+            ))
+    return out
+
+
+def _test_quality_signals(rows):
+    """Tests that demonstrate completion without establishing correctness."""
+    out = []
+    added = [r for r in rows if r.kind == ADD]
+
+    for row in added:
+        if _TAUTOLOGY_RE.search(row.source):
+            out.append(_signal(
+                "agentic.tautological-test", HIGH, row.path, row.no, row.source,
+                "this assertion cannot fail. What behaviour was it meant to pin down, and "
+                "would the test still pass if that behaviour were removed?",
+            ))
+        if _is_test_path(row.path) and _SLEEP_RE.search(row.source):
+            out.append(_signal(
+                "agentic.sleep-in-test", MEDIUM, row.path, row.no, row.source,
+                "a sleep in a test usually means a race nobody has named. What is it waiting "
+                "for, and can that be waited on directly?",
+            ))
+
+    # A test function whose whole body asserts nothing.
+    by_no = {r.no: r for r in added}
+    for row in added:
+        if not _is_test_path(row.path) or not _TEST_FN_RE.match(row.source.strip()):
+            continue
+        indent = len(row.source) - len(row.source.lstrip())
+        body, n = [], row.no + 1
+        while n in by_no:
+            nxt = by_no[n]
+            if nxt.source.strip() and len(nxt.source) - len(nxt.source.lstrip()) <= indent:
+                break
+            body.append(nxt)
+            n += 1
+        if body and not any(_ASSERT_RE.search(b.source) for b in body):
+            out.append(_signal(
+                "agentic.assertionless-test", HIGH, row.path, row.no, row.source.strip(),
+                "this test runs code and checks nothing. What would it catch that simply "
+                "calling the function would not?",
+            ))
+
+    mock_files = {}
+    for row in added:
+        if not _is_test_path(row.path):
+            continue
+        seen = mock_files.setdefault(row.path, {"setup": 0, "calls": 0, "row": row})
+        if _MOCK_SETUP_RE.search(row.source):
+            seen["setup"] += 1
+        if _CALL_ASSERT_RE.search(row.source):
+            seen["calls"] += 1
+    for path, seen in sorted(mock_files.items()):
+        if seen["calls"] >= 3 and seen["setup"] >= 3:
+            out.append(_signal(
+                "agentic.implementation-coupled-test", MEDIUM, path, seen["row"].no,
+                "%d mock setup(s) and %d call assertion(s)" % (seen["setup"], seen["calls"]),
+                "these tests assert how the code works rather than what it does. Will they "
+                "survive a refactor that keeps the behaviour?",
+            ))
+    return out
+
+
+def _is_test_path(path):
+    return bool(_TEST_PATH_RE.search(path or "") or _NONPROD_RE.search(path or ""))
+
+
+def _leftover_signals(rows):
+    """Code that was written, abandoned, and commented out rather than removed."""
+    out = []
+    runs = []
+    current = []
+    for row in rows:
+        if (row.kind == ADD and not _is_prose(row.path)
+                and _COMMENTED_CODE_RE.match(row.source)):
+            if current and row.no == current[-1].no + 1 and row.path == current[-1].path:
+                current.append(row)
+            else:
+                if len(current) >= 2:
+                    runs.append(current)
+                current = [row]
+        else:
+            if len(current) >= 2:
+                runs.append(current)
+            current = []
+    if len(current) >= 2:
+        runs.append(current)
+
+    for run in runs[:8]:
+        out.append(_signal(
+            "agentic.commented-out-code", MEDIUM, run[0].path, run[0].no,
+            run[0].source.strip(),
+            "%d rows of code are added commented out. Is this an approach that was abandoned "
+            "mid-change? Version control already remembers it." % len(run),
+        ))
+    return out
+
+
+def _naming_drift_signals(rows):
+    """One concept given two names inside a single change.
+
+    A long session compacts its own context, so the half that writes `fetchUser`
+    may not remember the half that wrote `getUser`. Two names for one operation
+    is the cheapest observable trace of that seam.
+    """
+    concepts = {}
+    for row in rows:
+        if row.kind != ADD or _is_prose(row.path):
+            continue
+        m = _FN_DECL_RE.match(row.source.strip())
+        if not m:
+            continue
+        name = m.group(1)
+        words = [w.lower() for w in _CAMEL_SPLIT_RE.split(name.replace("_", " ")).__iter__()]
+        words = [w for part in words for w in part.split()]
+        if len(words) < 2:
+            continue
+        verb, rest = words[0], "".join(words[1:])
+        if verb not in _ACCESS_VERBS or not rest:
+            continue
+        concepts.setdefault(rest, {})[verb] = row
+
+    out = []
+    for noun, verbs in sorted(concepts.items()):
+        if len(verbs) < 2:
+            continue
+        first = sorted(verbs.values(), key=lambda r: r.no)[0]
+        names = ", ".join("`%s%s`" % (v, noun) for v in sorted(verbs))
+        out.append(_signal(
+            "agentic.naming-drift", MEDIUM, first.path, first.no, first.source.strip(),
+            "this change introduces %s for what looks like one operation. Are they genuinely "
+            "different, or did one half of the work not know about the other?" % names,
+        ))
+    return out
+
+
+def _narration_signals(rows):
+    """Prose produced alongside the change, measured against the change itself."""
+    prose = sum(1 for r in rows if r.kind == ADD and _is_prose(r.path))
+    code = sum(1 for r in rows if r.kind == ADD and not _is_prose(r.path))
+    if code < 20 or prose < 100 or prose < code:
+        return []
+    return [_signal(
+        "agentic.narration-heavy", LOW, None, 0,
+        "%d rows of prose against %d rows of code" % (prose, code),
+        "the change carries more documentation than code. Does the prose describe what "
+        "shipped, or what was planned? Documentation that outruns the code goes stale first.",
+    )]
+
+
+def _dangling_reference_signals(rows, repo_root):
+    """A path cited in added prose or comments that does not exist in the tree.
+
+    Only runs with `--repo`, because it is the one check here that cannot be done
+    from the diff alone. Fabricated citations are the failure mode that most
+    directly attacks a review's usefulness as a final answer: they read as
+    evidence and are not.
+    """
+    out = []
+    seen = set()
+    changed = {r.path for r in rows if r.path}
+    for row in rows:
+        if row.kind != ADD:
+            continue
+        text = row.source
+        if not _is_prose(row.path):
+            m = _COMMENT_RE.match(text)
+            if not m:
+                continue
+            text = m.group(1)
+        for ref in _PATH_REF_RE.findall(text):
+            ref = ref.rstrip(".,);:")
+            if ref in seen or ref in changed or "://" in ref:
+                continue
+            if os.path.exists(os.path.join(repo_root, ref)):
+                continue
+            seen.add(ref)
+            out.append(_signal(
+                "agentic.dangling-reference", MEDIUM, row.path, row.no, row.source.strip(),
+                "`%s` is cited here and is not in the repository. Was it renamed, is it "
+                "arriving in another change, or was it never there?" % ref,
+            ))
+    return out[:10]

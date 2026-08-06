@@ -706,6 +706,211 @@ class TestFitScope(unittest.TestCase):
         self.assertNotIn("fit.drive-by-edits", ids(extract(text)))
 
 
+class TestAgenticSuppression(unittest.TestCase):
+    def test_every_suppression_dialect_is_caught(self):
+        for stmt, path in (
+            ("+    x = compute()  # noqa: E501\n", "svc/a.py"),
+            ("+    y = other()  # type: ignore\n", "svc/a.py"),
+            ("+// eslint-disable-next-line no-console\n", "svc/a.ts"),
+            ("+  // @ts-expect-error legacy shape\n", "svc/a.ts"),
+            ("+#[allow(dead_code)]\n", "src/a.rs"),
+            ("+@SuppressWarnings(\"unchecked\")\n", "src/A.java"),
+        ):
+            out = extract(wrap(path, stmt))
+            self.assertIn("agentic.suppressed-warning", ids(out), stmt)
+
+    def test_an_explained_suppression_asks_more_quietly(self):
+        bare = extract(wrap("svc/a.ts", "+// biome-ignore lint/style/noVar\n"))
+        said = extract(wrap(
+            "svc/a.ts",
+            "+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ESC is "
+            "the entire point of an ANSI stripper\n"))
+        self.assertEqual([s["severity"] for s in bare
+                          if s["id"] == "agentic.suppressed-warning"], ["high"])
+        self.assertEqual([s["severity"] for s in said
+                          if s["id"] == "agentic.suppressed-warning"], ["medium"])
+
+    def test_negative_ordinary_code_is_not_a_suppression(self):
+        out = extract(wrap("svc/a.py", "+    allow_list = ['a']\n+    ignore_case = True\n"))
+        self.assertNotIn("agentic.suppressed-warning", ids(out))
+
+
+class TestAgenticUnfinished(unittest.TestCase):
+    def test_a_stub_inside_a_finished_change_is_flagged(self):
+        for stmt, path in (
+            ("+    # TODO: handle the retry case\n", "svc/a.py"),
+            ("+    raise NotImplementedError\n", "svc/a.py"),
+            ("+    unimplemented!()\n", "src/a.rs"),
+            ("+    todo!(\"wire this up\")\n", "src/a.rs"),
+        ):
+            self.assertIn("agentic.unfinished-work", ids(extract(wrap(path, stmt))), stmt)
+
+    def test_negative_a_lowercase_placeholder_is_not_a_marker(self):
+        # `/manifold:mN-xxx` in a prompt template is a placeholder, not a TODO.
+        out = extract(wrap("cli/hook.ts",
+                           "+  const hint = 'include the next command: /manifold:mN-xxx';\n"))
+        self.assertNotIn("agentic.unfinished-work", ids(out))
+
+    def test_negative_the_word_hack_in_prose_is_not_a_marker(self):
+        out = extract(wrap("svc/a.py", "+    label = 'growth hack experiment'\n"))
+        self.assertNotIn("agentic.unfinished-work", ids(out))
+
+    def test_negative_a_design_note_is_not_source(self):
+        out = extract(wrap("docs/plan.md", "+- TODO: decide the retention policy\n"))
+        self.assertNotIn("agentic.unfinished-work", ids(out))
+
+
+class TestAgenticTestQuality(unittest.TestCase):
+    def test_a_tautological_assertion_is_flagged(self):
+        for stmt, path in (
+            ("+    assert True\n", "tests/test_a.py"),
+            ("+    assert result == result\n", "tests/test_a.py"),
+            ("+  expect(true).toBe(true);\n", "cli/__tests__/a.test.ts"),
+        ):
+            self.assertIn("agentic.tautological-test", ids(extract(wrap(path, stmt))), stmt)
+
+    def test_negative_a_real_assertion_is_not_tautological(self):
+        out = extract(wrap("tests/test_a.py", "+    assert result == expected\n"))
+        self.assertNotIn("agentic.tautological-test", ids(out))
+
+    def test_a_test_that_asserts_nothing_is_flagged(self):
+        out = extract(wrap("tests/test_a.py", """
++def test_pipeline_runs():
++    pipeline = build()
++    pipeline.run()
+"""))
+        self.assertIn("agentic.assertionless-test", ids(out))
+
+    def test_negative_a_test_with_an_assertion_is_not(self):
+        out = extract(wrap("tests/test_a.py", """
++def test_pipeline_runs():
++    pipeline = build()
++    assert pipeline.run() == 3
+"""))
+        self.assertNotIn("agentic.assertionless-test", ids(out))
+
+    def test_a_sleep_in_a_test_is_flagged(self):
+        out = extract(wrap("tests/test_a.py", "+    time.sleep(0.5)\n"))
+        self.assertIn("agentic.sleep-in-test", ids(out))
+
+    def test_negative_a_sleep_in_production_code_is_not_this_signal(self):
+        out = extract(wrap("svc/poller.py", "+    time.sleep(interval)\n"))
+        self.assertNotIn("agentic.sleep-in-test", ids(out))
+
+    def test_tests_that_assert_on_call_sequences_are_flagged(self):
+        out = extract(wrap("tests/test_a.py", """
++def test_flow():
++    repo = Mock()
++    cache = Mock()
++    clock = Mock()
++    run(repo, cache, clock)
++    repo.load.assert_called_with(1)
++    cache.put.assert_called_with(2)
++    clock.now.assert_called()
+"""))
+        self.assertIn("agentic.implementation-coupled-test", ids(out))
+
+    def test_negative_light_mocking_is_not_flagged(self):
+        out = extract(wrap("tests/test_a.py", """
++def test_flow():
++    repo = Mock()
++    assert run(repo) == 3
+"""))
+        self.assertNotIn("agentic.implementation-coupled-test", ids(out))
+
+
+class TestAgenticLeftovers(unittest.TestCase):
+    def test_commented_out_code_is_flagged(self):
+        out = extract(wrap("svc/a.py", """
++    # result = legacy_path(req)
++    # if result is None:
++    #     return fallback()
++    result = new_path(req)
+"""))
+        self.assertIn("agentic.commented-out-code", ids(out))
+
+    def test_negative_explanatory_comments_are_not_code(self):
+        out = extract(wrap("svc/a.py", """
++    # The retry budget is per tenant, not per request.
++    # See INC-4412 for why this is not global.
++    result = new_path(req)
+"""))
+        self.assertNotIn("agentic.commented-out-code", ids(out))
+
+    def test_negative_a_single_commented_line_is_not_a_run(self):
+        out = extract(wrap("svc/a.py", "+    # x = 1\n+    y = 2\n"))
+        self.assertNotIn("agentic.commented-out-code", ids(out))
+
+
+class TestAgenticNamingDrift(unittest.TestCase):
+    def test_two_verbs_for_one_noun_are_flagged(self):
+        out = extract(wrap("svc/a.py", """
++def get_user_profile(uid):
++    return db.load(uid)
++def fetch_user_profile(uid):
++    return cache.read(uid)
+"""))
+        found = [s for s in out if s["id"] == "agentic.naming-drift"]
+        self.assertTrue(found, ids(out))
+        self.assertIn("`fetchuserprofile`", found[0]["question"])
+
+    def test_camel_case_drift_is_caught_too(self):
+        out = extract(wrap("cli/a.ts", """
++export function loadManifold(id) { return 1; }
++export function readManifold(id) { return 2; }
+"""))
+        self.assertIn("agentic.naming-drift", ids(out))
+
+    def test_negative_one_verb_per_noun_is_quiet(self):
+        out = extract(wrap("svc/a.py", """
++def get_user_profile(uid):
++    return db.load(uid)
++def get_user_settings(uid):
++    return db.load(uid)
+"""))
+        self.assertNotIn("agentic.naming-drift", ids(out))
+
+    def test_negative_unrelated_verbs_are_not_drift(self):
+        out = extract(wrap("svc/a.py", """
++def get_user_profile(uid):
++    return db.load(uid)
++def delete_user_profile(uid):
++    return db.drop(uid)
+"""))
+        self.assertNotIn("agentic.naming-drift", ids(out))
+
+
+class TestAgenticNarration(unittest.TestCase):
+    def test_prose_outweighing_code_is_flagged(self):
+        text = (wrap("docs/plan.md", "".join("+line %d\n" % i for i in range(150)))
+                + wrap("svc/a.py", "".join("+x%d = %d\n" % (i, i) for i in range(30))))
+        self.assertIn("agentic.narration-heavy", ids(extract(text)))
+
+    def test_negative_a_normal_ratio_is_quiet(self):
+        text = (wrap("docs/plan.md", "".join("+line %d\n" % i for i in range(20)))
+                + wrap("svc/a.py", "".join("+x%d = %d\n" % (i, i) for i in range(200))))
+        self.assertNotIn("agentic.narration-heavy", ids(extract(text)))
+
+
+class TestAgenticDanglingReference(unittest.TestCase):
+    def test_a_cited_path_that_does_not_exist_is_flagged(self):
+        tmp = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmp, "svc"))
+        open(os.path.join(tmp, "svc", "real.py"), "w").close()
+        rows = diffmodel.parse_diff(wrap("svc/a.py", """
++    # mirrors the logic in svc/real.py
++    # superseded by svc/ghost.py
+"""))
+        out = sig.extract(rows, None, repo_root=tmp)
+        found = [s for s in out if s["id"] == "agentic.dangling-reference"]
+        self.assertEqual(len(found), 1, [s["evidence"] for s in found])
+        self.assertIn("svc/ghost.py", found[0]["question"])
+
+    def test_negative_without_a_repo_the_check_does_not_run(self):
+        out = extract(wrap("svc/a.py", "+    # superseded by svc/ghost.py\n"))
+        self.assertNotIn("agentic.dangling-reference", ids(out))
+
+
 class TestShape(unittest.TestCase):
     def test_every_signal_carries_a_question(self):
         out = extract(wrap("svc/a.py", """

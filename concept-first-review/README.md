@@ -64,9 +64,27 @@ optional. DRY, KISS, YAGNI, SOLID and functional style live in the **Fit and sco
 dimension as trades rather than rules: `references/fit-and-scope.md` gives the failure
 shapes and where each principle misleads.
 
+- **agentic residue** — what a long autonomous run leaves behind: suppressed warnings,
+  stubs inside a change offered as finished, tests that cannot fail, sleeps masking races,
+  two names for one operation, commented-out abandoned approaches, citations to files that
+  do not exist
+
+`references/agentic-patterns.md` explains where each comes from — context compaction, the
+need to show progress, checks being cheaper to silence than to answer — and names the two
+patterns no detector can reach. **Silent scope reduction** (a competent subset of the
+request, delivered without mentioning the rest) leaves no trace in a diff, which is why
+`open --intent "..."` carries the request into the review. **Confident wrongness** is not a
+shape at all.
+
 Then you write `REVIEW.md`, and a completeness check grades it. It cannot tell you a finding
 is right; it does refuse a review with an empty section, surviving placeholder text, an
-ambiguous verdict, or an unresolved high-severity signal.
+ambiguous verdict, an unresolved high-severity signal, or a **Confidence and basis** section
+that does not separate `Verified:` from `Unverified:`.
+
+That last one is what makes the output something to act on. A review of machine-written code
+is itself machine-written, and fluent output is not evidence — stating where your evidence
+stops is the only thing that stops one laundering the other. A short honest `Unverified:`
+list is worth more than a long confident review.
 
 ## Second opinion on a review that already exists
 
@@ -147,12 +165,12 @@ is why it behaves the same in Claude Code, in Codex, and on a machine with no ne
 | `assets/signals.py` | the signal extractors and the design baseline |
 | `assets/report.py` | review template, grader, loop state, prior-review audit |
 | `assets/review.py` | the CLI |
-| `references/` | condensing rubric, plan language, review rubric, signal catalogue, design baseline, loop integration, second opinion, CLI reference |
+| `references/` | condensing rubric, plan language, review rubric, signal catalogue, fit and scope, agentic patterns, design baseline, loop integration, second opinion, CLI reference |
 | `eval/` | the outcome eval — treatment and control arms, plus plans that must be rejected |
 
 ## Tests
 
-181 stdlib unit tests across the four modules, plus a 37-check end-to-end eval that asserts
+211 stdlib unit tests across the four modules, plus a 39-check end-to-end eval that asserts
 both directions: that noise collapses while the decisive rows survive, *and* that invented
 text, one-sided relocation treatment, and definition-burying collapses are all rejected;
 that a clean control diff yields no high signals; that the template the skill writes does not

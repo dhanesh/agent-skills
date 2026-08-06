@@ -128,6 +128,28 @@ same way, and this family only earns attention by staying quiet.
 | `radius.untested-change` | Source changed and no test file was touched, with no declaration change. | `medium` |
 | `radius.spread` | Four or more top-level areas touched. | `medium` |
 
+## Agentic residue: what a long autonomous run leaves behind
+
+| id | Fires on | Severity |
+|---|---|---|
+| `agentic.suppressed-warning` | `# noqa`, `# type: ignore`, `@ts-expect-error`, `#[allow(..)]`, `eslint-disable`, `@SuppressWarnings`, `# pragma: no cover`. | `high` |
+| `agentic.unfinished-work` | `TODO`/`FIXME`/`HACK`, `NotImplementedError`, `unimplemented!()`, `todo!()`. | `high` |
+| `agentic.tautological-test` | An assertion that cannot fail: `assert True`, `assert x == x`, `expect(true).toBe(true)`. | `high` |
+| `agentic.assertionless-test` | A test function whose whole body asserts nothing. | `high` |
+| `agentic.sleep-in-test` | A sleep added on a test path. | `medium` |
+| `agentic.implementation-coupled-test` | A test file with 3+ mock setups and 3+ call assertions. | `medium` |
+| `agentic.commented-out-code` | Two or more consecutive added rows that are commented-out code. | `medium` |
+| `agentic.naming-drift` | Two access verbs for one noun added in the same change (`getUserProfile` + `fetchUserProfile`). | `medium` |
+| `agentic.dangling-reference` | A path cited in an added comment or document that is not in the repository. Needs `--repo`. | `medium` |
+| `agentic.narration-heavy` | More added prose rows than added code rows, in a change with real code. | `low` |
+
+*Limit:* the two most consequential patterns in this family are not detectable at all.
+**Silent scope reduction** — doing a competent subset of what was asked and never saying so
+— leaves no trace in a diff; state the request with `open --intent "..."` so the review can
+answer against it. **Confident wrongness** is not a shape. Those are why the review carries
+a `Confidence and basis` section that `grade` refuses to accept without both a `Verified:`
+and an `Unverified:` line. Full treatment: [agentic-patterns.md](agentic-patterns.md).
+
 ## Precision, and where it was bought
 
 Three detectors were deliberately narrowed after they proved noisy on real changes, and the

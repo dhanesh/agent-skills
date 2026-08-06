@@ -96,6 +96,12 @@ before the second case *is* over-engineering. Cite the trade, not the acronym:
 label. The failure shapes, the honest limits of each principle, and what the `fit.*`
 signals can and cannot see are in [fit-and-scope.md](fit-and-scope.md).
 
+Where the change came out of a long autonomous run, a second set of shapes applies —
+suppressed warnings, stubs inside a finished change, tests that cannot fail, two names for
+one operation, citations to files that do not exist. Those are the `agentic.*` signals, and
+[agentic-patterns.md](agentic-patterns.md) explains where each one comes from and which two
+are not detectable at all.
+
 ## 5. Blast radius and risk
 
 *Failure: the change is fine and the rollout is not.*

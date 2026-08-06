@@ -20,6 +20,12 @@ VERDICTS = ("ship", "ship-with-followups", "needs-changes", "needs-discussion")
 
 SECTIONS = (
     ("Verdict", "one of: " + ", ".join(VERDICTS)),
+    ("Confidence and basis",
+     "What actually backs this review? Write two lines. `Verified:` names what you "
+     "established by running, tracing, or reading the code that the change touches. "
+     "`Unverified:` names every claim you are taking on trust — the tests you did not run, "
+     "the callers you did not open, the behaviour you inferred. A review is only a final "
+     "answer if it says where its own evidence stops."),
     ("The change in one paragraph",
      "What does this change do, in plain language, to someone who has not read the diff? "
      "If you cannot write this without naming a file, you do not understand the change yet."),
@@ -85,6 +91,16 @@ def template(sigs, stats, meta):
             len(sigs),
         )
     )
+    lines.append("")
+    intent = (meta.get("intent") or "").strip()
+    if intent:
+        lines.append("**The change was asked to:** %s" % intent)
+    else:
+        lines.append(
+            "**No stated intent was supplied** (`open --intent \"...\"`), so scope can only "
+            "be judged against the change itself. Say so in Fit and scope rather than "
+            "implying the scope was checked."
+        )
     lines.append("")
 
     for title, prompt in SECTIONS:
@@ -163,6 +179,18 @@ def grade(text, sigs):
         "verdict",
         len(found) == 1,
         "expected exactly one of %s, found %s" % (", ".join(VERDICTS), found or "none"),
+    )
+
+    confidence = "\n".join(body.get("Confidence and basis", []))
+    has_verified = re.search(r"^\s*[-*]?\s*\**verified\**\s*:", confidence,
+                             re.I | re.M) is not None
+    has_unverified = re.search(r"^\s*[-*]?\s*\**unverified\**\s*:", confidence,
+                               re.I | re.M) is not None
+    add(
+        "confidence-basis",
+        has_verified and has_unverified,
+        "needs a `Verified:` line and an `Unverified:` line"
+        if not (has_verified and has_unverified) else "both stated",
     )
 
     paragraph = "\n".join(body.get("The change in one paragraph", [])).strip()

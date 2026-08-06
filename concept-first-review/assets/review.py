@@ -104,7 +104,8 @@ def cmd_open(args):
     declarations = diffmodel.declaration_rows(rows)
     moves = diffmodel.detect_relocations(rows)
     baseline = signalslib.load_baseline(args.rules)
-    sigs = signalslib.extract(rows, baseline)
+    repo_root = args.repo if args.repo and os.path.isdir(args.repo) else None
+    sigs = signalslib.extract(rows, baseline, repo_root=repo_root)
 
     os.makedirs(args.into, exist_ok=True)
     _write(os.path.join(args.into, SOURCE), text)
@@ -117,6 +118,7 @@ def cmd_open(args):
     )
     meta = {
         "label": label,
+        "intent": args.intent or "",
         "rules": args.rules if args.rules and os.path.exists(args.rules) else None,
         "stats": baseline_plan.stats,
         "relocations": len(moves),
@@ -138,6 +140,8 @@ def cmd_open(args):
     counts = meta["signals"]["by_severity"]
     print("  signals: %d high, %d medium, %d low"
           % (counts.get("high", 0), counts.get("medium", 0), counts.get("low", 0)))
+    if not meta["intent"]:
+        print("  no --intent given — scope can only be judged against the change itself")
     if not meta["rules"]:
         print("  no design-rules.json in play — layering stays heuristic "
               "(see references/design-baseline.md)")
@@ -308,6 +312,9 @@ def build_parser():
     op.add_argument("--repo", default=".", help="repository root for git diff")
     op.add_argument("--into", default=".review", help="work directory to create")
     op.add_argument("--rules", default="design-rules.json", help="design baseline JSON")
+    op.add_argument("--intent", default="",
+                    help="what the change was asked to do, in the requester's words; "
+                         "carried into the review so scope can be checked against it")
     op.set_defaults(func=cmd_open)
 
     st = sub.add_parser("state", help="typed progress for a self-prompting loop")

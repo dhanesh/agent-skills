@@ -17,9 +17,10 @@ Index a diff, detect relocations, extract signals, and lay out the work director
 |---|---|---|
 | `--diff PATH` | — | Read the diff from a file. `-` reads stdin. |
 | `--rev RANGE` | `HEAD~1..HEAD` | Used when `--diff` is absent; passed to `git diff`. Multi-token ranges are fine (`--rev "main...HEAD"`). |
-| `--repo DIR` | `.` | Repository root for `git diff`. |
+| `--repo DIR` | `.` | Repository root for `git diff`, and the tree used by the one check that cannot be answered from the diff: whether a path cited in an added comment or document actually exists. |
 | `--into DIR` | `.review` | Work directory to create. |
 | `--rules PATH` | `design-rules.json` | Design baseline ([design-baseline.md](design-baseline.md)). A missing file is reported on stdout, not an error. |
+| `--intent TEXT` | — | What the change was asked to do, in the requester's words. Carried into `REVIEW.md` so scope can be checked against it — silent scope reduction leaves no trace in a diff, so without this it is unreviewable. |
 
 Writes:
 
@@ -94,9 +95,14 @@ verdict; exits `1` on any gap.
 | `--report PATH` | `<into>/REVIEW.md` |
 
 Checks: every required section present, non-empty, and free of template placeholders; one
-unambiguous verdict; a summary paragraph of at least 25 words; and every **high-severity**
+unambiguous verdict; a summary paragraph of at least 25 words; a **Confidence and basis**
+section carrying both a `Verified:` and an `Unverified:` line; and every **high-severity**
 signal resolved as `**addressed**:` or `**dismissed**:` with at least 20 characters of
 reason.
+
+The confidence check is the one that makes the output something to act on rather than merely
+complete. A review that never says where its evidence stops cannot be acted on without
+re-deriving it, however well it reads.
 
 ## `audit`
 
