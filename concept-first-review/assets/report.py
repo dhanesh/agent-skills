@@ -39,7 +39,21 @@ SECTIONS = (
     ("Open questions for the author", "The questions only the author can settle."),
 )
 
-PLACEHOLDER_RE = re.compile(r"<[^>\n]{3,}>|\bTODO\b|\bFIXME\b|\bXXX\b")
+# Leftover template text is detected by matching what the template actually
+# wrote, not by looking for angle brackets — `Arc<RwLock<T>>` and `Vec<Id>` are
+# code, and a grader that calls them placeholders fails every systems review.
+_UNFILLED_RE = re.compile(r"\bTODO\b|\bFIXME\b|\bXXX\b")
+
+
+def _is_unfilled(title, content):
+    prompt = dict(SECTIONS).get(title, "")
+    if prompt and prompt[:40] in content:
+        return True
+    if "<what you concluded" in content:
+        return True
+    return bool(_UNFILLED_RE.search(content))
+
+
 _DISPOSITION_RE = r"\*\*(addressed|dismissed)\*\*:\s*(.+)$"
 MIN_DISPOSITION_CHARS = 20
 MIN_PARAGRAPH_WORDS = 25
@@ -52,7 +66,7 @@ def signal_token(sig):
 
 
 def template(sigs, stats, meta):
-    """Render the review skeleton. Every `<...>` is meant to be replaced."""
+    """Render the review skeleton. Every bracketed prompt is meant to be replaced."""
     lines = []
     lines.append("# Concept review — %s" % meta.get("label", "working diff"))
     lines.append("")
@@ -129,13 +143,18 @@ def grade(text, sigs):
         if not content:
             add("section:%s" % title, False, "empty")
             continue
-        if title != "Signals" and PLACEHOLDER_RE.search(content):
+        if title != "Signals" and _is_unfilled(title, content):
             add("section:%s" % title, False, "still carries template placeholder text")
             continue
         add("section:%s" % title, True)
 
     verdict = "\n".join(body.get("Verdict", [])).strip().lower()
-    found = [v for v in VERDICTS if re.search(r"\b%s\b" % re.escape(v), verdict)]
+    # Hyphens are word boundaries, so a plain \b would see `ship` inside
+    # `ship-with-followups` and call the only correct answer ambiguous.
+    found = [
+        v for v in VERDICTS
+        if re.search(r"(?<![\w-])%s(?![\w-])" % re.escape(v), verdict)
+    ]
     add(
         "verdict",
         len(found) == 1,

@@ -100,6 +100,23 @@ class TestAlgorithm(unittest.TestCase):
 """))
         self.assertNotIn("bound.exec", ids(out))
 
+    def test_negative_config_files_are_not_read_as_code(self):
+        # A YAML comment listing supported languages once read as a goroutine.
+        out = extract(wrap(".serena/project.yml", """
++#   fsharp              go                  groovy              haskell
++#   language: go
+"""))
+        self.assertNotIn("conc.spawned", ids(out))
+        self.assertIn("cfg.changed", ids(out), "config still gets its path-based signal")
+
+    def test_a_real_goroutine_still_fires(self):
+        out = extract(wrap("svc/server.go", "+\tgo handleConn(c)\n+\tgo func() { drain() }()\n"))
+        self.assertIn("conc.spawned", ids(out))
+
+    def test_negative_the_word_go_in_prose_is_not_concurrency(self):
+        out = extract(wrap("svc/a.py", "+    label = 'go home now'\n"))
+        self.assertNotIn("conc.spawned", ids(out))
+
     def test_await_in_loop(self):
         out = extract(wrap("svc/a.js", """
 +for (const id of ids) {
@@ -231,6 +248,235 @@ class TestSurfaceAndRuntime(unittest.TestCase):
 """))
         self.assertIn("bound.exec", ids(out))
         self.assertIn("bound.deserialize", ids(out))
+
+
+class TestRustIdiom(unittest.TestCase):
+    """Regressions from a real Rust review where three detectors misfired badly."""
+
+    def test_unwrap_aborts_it_does_not_swallow(self):
+        out = extract(wrap("src/graph.rs", "+    let g = Graph::new().unwrap();\n"))
+        self.assertNotIn("err.swallowed", ids(out))
+        self.assertIn("err.abort", ids(out))
+
+    def test_a_discarded_result_still_counts_as_swallowed(self):
+        out = extract(wrap("src/graph.rs", "+    let _ = flush_wal(&mut file);\n"))
+        self.assertIn("err.swallowed", ids(out))
+
+    def test_negative_crate_internal_use_is_not_a_dependency(self):
+        for stmt in ("+use crate::index::RangeKey;\n",
+                     "+use super::wal::WalEntry;\n",
+                     "+use self::inner::Node;\n",
+                     "+use std::collections::HashMap;\n"):
+            out = extract(wrap("src/index/mod.rs", stmt))
+            self.assertNotIn("dep.new-external", ids(out), stmt)
+
+    def test_negative_a_scoped_use_is_not_a_dependency(self):
+        out = extract(wrap("src/index/mod.rs", "+        use RangeKey::*;\n"))
+        self.assertNotIn("dep.new-external", ids(out))
+
+    def test_a_top_level_third_party_use_still_fires(self):
+        out = extract(wrap("src/storage/mod.rs", "+use serde_json::json;\n"))
+        self.assertIn("dep.new-external", ids(out))
+
+    def test_negative_a_sibling_call_is_not_recursion(self):
+        out = extract(wrap("src/perf.rs", """
++fn make_props(i: usize) -> Props {
++    Props::new(i)
++}
++fn run(g: &mut Graph) {
++    g.create_node(make_props(1));
++}
+"""))
+        self.assertNotIn("algo.recursion", ids(out))
+
+    def test_negative_a_trait_method_dispatching_on_another_receiver(self):
+        # `impl Ord for RangeKey { fn cmp(..) { a.cmp(b) } }` is dispatch, not
+        # recursion — and the trait fixes the method name, so it is unavoidable.
+        out = extract(wrap("src/index/mod.rs", """
++fn cmp(&self, other: &Self) -> Ordering {
++    match (self, other) {
++        (Str(a), Str(b)) => a.cmp(b),
++        _ => self.rank().cmp(&other.rank()),
++    }
++}
+"""))
+        self.assertNotIn("algo.recursion", ids(out))
+
+    def test_a_self_dispatched_recursive_call_is_recursion(self):
+        out = extract(wrap("src/tree.rs", """
++fn depth(&self, node: &Node) -> usize {
++    let d = self.depth(node.child());
++    d + 1
++}
+"""))
+        self.assertIn("algo.recursion", ids(out))
+
+    def test_a_genuine_self_call_is_recursion(self):
+        out = extract(wrap("src/walk.rs", """
++fn walk(node: &Node, depth: usize) -> usize {
++    let mut n = 1;
++    n += walk(node.child(), depth + 1);
++    n
++}
+"""))
+        self.assertIn("algo.recursion", ids(out))
+
+
+class TestFormatterSweep(unittest.TestCase):
+    """Regressions from a real lint/format PR that rewrote 110 files.
+
+    A formatter touches every import row and re-wraps long signatures. Without
+    these, such a change reports a hundred new dependencies and thirty reshaped
+    public functions, none of which happened.
+    """
+
+    def test_negative_a_reformatted_import_is_not_a_new_dependency(self):
+        out = extract(wrap("cli/commands/completion.ts", """
+-import { Command } from 'commander';
++import type { Command } from 'commander';
+"""))
+        self.assertNotIn("dep.new-external", ids(out))
+
+    def test_a_genuinely_new_import_still_fires(self):
+        out = extract(wrap("cli/commands/completion.ts", "+import { z } from 'zod';\n"))
+        self.assertIn("dep.new-external", ids(out))
+
+    def test_negative_node_builtins_are_not_third_party(self):
+        for stmt in ("+import { dirname } from 'node:path';\n",
+                     "+import { existsSync } from 'fs';\n",
+                     "+const os = require('node:os');\n"):
+            out = extract(wrap("cli/a.ts", stmt))
+            self.assertNotIn("dep.new-external", ids(out), stmt)
+
+    def test_negative_a_rewrapped_signature_is_not_a_signature_change(self):
+        out = extract(wrap("cli/formatter.ts", """
+-export function printValidationOutput(feature: string, result: Result, options: Opts = {}): void {
++export function printValidationOutput(
++  feature: string,
++  result: Result,
++  options: Opts = {}
++): void {
+"""))
+        self.assertNotIn("api.signature-changed", ids(out))
+
+    def test_negative_an_unwrapped_signature_is_not_a_signature_change(self):
+        # The other direction: the formatter joined a wrapped declaration onto
+        # one line, and dropped the trailing comma while doing it.
+        out = extract(wrap("cli/lib/embedded-assets.ts", """
+-export function lookupAsset(
+-  assets: EmbeddedAssetMap,
+-  pathname: string,
+-): EmbeddedAsset | undefined {
++export function lookupAsset(assets: EmbeddedAssetMap, pathname: string): EmbeddedAsset | undefined {
+"""))
+        self.assertNotIn("api.signature-changed", ids(out))
+
+    def test_negative_a_rewrapped_const_declaration_is_not_a_change(self):
+        out = extract(wrap("cli/lib/structure-schema.ts", """
+-export const TensionTypeSchema = z.enum([
+-  'trade_off',
+-  'resource_tension',
+-  'hidden_dependency'
+-]);
++export const TensionTypeSchema = z.enum(['trade_off', 'resource_tension', 'hidden_dependency']);
+"""))
+        self.assertNotIn("api.signature-changed", ids(out))
+
+    def test_negative_a_rewrapped_builder_chain_is_not_a_change(self):
+        out = extract(wrap("cli/lib/structure-schema.ts", """
+-export const ConstraintIdSchema = z.string().regex(
+-  /^([BTUSO]|OB|D|R|RK|DP)\\d+$/,
+-  'Constraint ID must match a known prefix'
+-);
++export const ConstraintIdSchema = z
++  .string()
++  .regex(
++    /^([BTUSO]|OB|D|R|RK|DP)\\d+$/,
++    'Constraint ID must match a known prefix'
++  );
+"""))
+        self.assertNotIn("api.signature-changed", ids(out))
+
+    def test_negative_a_rewrapped_return_type_union_is_not_a_change(self):
+        # `:` opens a TypeScript return type; treating it as a terminator (as it
+        # is in Python) truncated the declaration and faked a signature change.
+        out = extract(wrap("cli/lib/structure-schema.ts", """
+-export function parseManifoldStructure(json: unknown): {
+-  success: true;
+-  data: ManifoldStructure;
+-} | {
+-  success: false;
+-  error: z.ZodError;
+-} {
++export function parseManifoldStructure(json: unknown):
++  | {
++      success: true;
++      data: ManifoldStructure;
++    }
++  | {
++      success: false;
++      error: z.ZodError;
++    } {
+"""))
+        self.assertNotIn("api.signature-changed", ids(out))
+
+    def test_negative_generated_bundles_are_not_reviewed(self):
+        out = extract(wrap("plugin/lib/parallel/parallel.bundle.js", """
++  } catch (_error) {}
++  subprocess.run([cmd]);
+"""))
+        self.assertNotIn("err.swallowed", ids(out))
+        self.assertNotIn("bound.exec", ids(out))
+
+    def test_negative_vendored_and_dist_paths_are_not_reviewed(self):
+        for path in ("node_modules/x/index.js", "dist/app.js", "vendor/lib.go",
+                     "api/service_pb2.py", "api/service.pb.go"):
+            out = extract(wrap(path, "+  subprocess.run([cmd])\n"))
+            self.assertNotIn("bound.exec", ids(out), path)
+
+    def test_hand_written_source_beside_a_bundle_is_still_reviewed(self):
+        out = extract(wrap("plugin/hooks/prompt-enforcer.ts", "+  } catch (_error) {}\n"))
+        self.assertIn("err.swallowed", ids(out))
+
+    def test_a_changed_enum_member_still_fires(self):
+        out = extract(wrap("cli/lib/structure-schema.ts", """
+-export const TensionTypeSchema = z.enum(['trade_off', 'resource_tension']);
++export const TensionTypeSchema = z.enum(['trade_off', 'resource_tension', 'blocker']);
+"""))
+        self.assertIn("api.signature-changed", ids(out))
+
+    def test_a_real_parameter_change_still_fires(self):
+        out = extract(wrap("cli/formatter.ts", """
+-export function printValidationOutput(feature: string, result: Result): void {
++export function printValidationOutput(
++  feature: string,
++  result: Result,
++  options: Opts = {}
++): void {
+"""))
+        self.assertIn("api.signature-changed", ids(out))
+
+
+class TestSeverityDamping(unittest.TestCase):
+    def test_a_finding_in_an_example_asks_a_quieter_question(self):
+        body = "+    let g = Graph::new().unwrap();\n"
+        prod = [s for s in extract(wrap("src/graph.rs", body)) if s["id"] == "err.abort"]
+        example = [s for s in extract(wrap("examples/perf.rs", body)) if s["id"] == "err.abort"]
+        self.assertEqual(prod[0]["severity"], "medium")
+        self.assertEqual(example[0]["severity"], "low")
+
+    def test_high_severity_in_a_test_drops_to_medium(self):
+        body = "+    subprocess.run([cmd, arg])\n"
+        prod = [s for s in extract(wrap("svc/a.py", body)) if s["id"] == "bound.exec"]
+        test = [s for s in extract(wrap("tests/test_a.py", body)) if s["id"] == "bound.exec"]
+        self.assertEqual(prod[0]["severity"], "high")
+        self.assertEqual(test[0]["severity"], "medium")
+
+    def test_benches_and_fixtures_are_damped_too(self):
+        body = "+    subprocess.run([cmd, arg])\n"
+        for path in ("benches/bench_a.py", "testdata/gen.py", "example/demo.py"):
+            sev = [s for s in extract(wrap(path, body)) if s["id"] == "bound.exec"][0]["severity"]
+            self.assertEqual(sev, "medium", path)
 
 
 class TestContractAndRadius(unittest.TestCase):

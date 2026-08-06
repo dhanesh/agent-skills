@@ -36,6 +36,13 @@ LOW = "low"
 _SEV_ORDER = {HIGH: 0, MEDIUM: 1, LOW: 2}
 
 _TEST_PATH_RE = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(spec|test)\.[jt]sx?$")
+# Tests, examples, benchmarks and fixtures. Code here still gets reviewed, but a
+# choice made in it has a smaller blast radius by construction, so every signal
+# from such a path drops one severity level.
+_NONPROD_RE = re.compile(
+    r"(^|/)(tests?|spec|__tests__|examples?|benches?|benchmarks?|fixtures?|testdata)/"
+    r"|(^|/)test_[^/]*$|_test\.[a-z]+$|_bench\.[a-z]+$|\.(spec|test|bench)\.[jt]sx?$"
+)
 _MIGRATION_RE = re.compile(r"(^|/)migrations?/|(^|/)migrate/|\.sql$")
 _SCHEMA_RE = re.compile(r"\.(proto|graphql|gql|avsc|thrift)$|openapi|swagger|schema\.json$")
 _CONFIG_RE = re.compile(r"\.(ya?ml|toml|ini|env|properties)$|(^|/)config/|Dockerfile|(^|/)helm/")
@@ -65,16 +72,27 @@ _ROUTE_RE = re.compile(
 _SORT_RE = re.compile(r"\bsort(?:ed)?\s*\(|\.sort\s*\(|sort\.Slice\s*\(|\.OrderBy\s*\(")
 _APPEND_RE = re.compile(r"\.append\s*\(|\.push\s*\(|\bappend\s*\(|\.add\s*\(|\.insert\s*\(|\.Add\s*\(")
 _AWAIT_RE = re.compile(r"\bawait\b")
-_SPAWN_RE = re.compile(r"\bgo\s+\w|\bthreading\.Thread\b|\bThread\s*\(|asyncio\.create_task|\bspawn\s*\(|new\s+Thread|Promise\.all")
+_SPAWN_RE = re.compile(
+    r"\bgo\s+(?:func\b|\w[\w.]*\s*\()"          # go func(...) / go handler(...)
+    r"|\bthreading\.Thread\b|\bThread\s*\(|\bnew\s+Thread\b"
+    r"|asyncio\.create_task|\btokio::spawn\b|\bthread::spawn\b|\bspawn\s*\("
+    r"|Promise\.all"
+)
 _LOCK_RE = re.compile(r"\b(?:Mutex|RWMutex|Lock|RLock|acquire|synchronized|sync\.)\b")
+# Swallowing means the failure disappears. `.unwrap()` and `.expect()` do the
+# opposite — they abort loudly — so they belong to err.abort, not here. Getting
+# that wrong turns every idiomatic Rust test into a high-severity finding.
 _SWALLOW_RE = re.compile(
     r"except[^:]*:\s*(?:pass|continue)\b|except\s*:|catch\s*\([^)]*\)\s*\{\s*\}"
-    r"|_\s*=\s*err\b|\.unwrap\s*\(\s*\)"
+    r"|_\s*=\s*\w*err\w*\b|\blet\s+_\s*=|\bif\s+err\s*!=\s*nil\s*\{\s*\}"
 )
 # An `except:`/`catch {` whose body on the following added row does nothing.
 _SWALLOW_OPENER_RE = re.compile(r"^(?:except\b[^:]*:|\}?\s*catch\s*\([^)]*\)\s*\{|rescue\b.*)$")
 _SWALLOW_BODY_RE = re.compile(r"^(?:pass|continue|\}|//.*|#.*)$")
-_PANIC_RE = re.compile(r"\bpanic\s*\(|os\.Exit\s*\(|sys\.exit\s*\(|process\.exit\s*\(|\.expect\s*\(")
+_PANIC_RE = re.compile(
+    r"\bpanic\s*\(|os\.Exit\s*\(|sys\.exit\s*\(|process\.exit\s*\("
+    r"|\.expect\s*\(|\.unwrap\s*\(\s*\)"
+)
 _RESILIENCE_RE = re.compile(r"\b(?:retry|retries|backoff|timeout|deadline|circuit_?breaker|WithTimeout|max_attempts)\b", re.I)
 _SUBPROCESS_RE = re.compile(r"\bsubprocess\.|os\.system\s*\(|exec\.Command\s*\(|child_process|Runtime\.getRuntime\(\)\.exec|\beval\s*\(")
 _DESERIALIZE_RE = re.compile(r"\bpickle\.loads?\s*\(|yaml\.load\s*\(|Marshal\.load|ObjectInputStream|unserialize\s*\(")
@@ -99,20 +117,47 @@ _PUBLIC_DECL = {
 }
 
 _PY_STDLIB = getattr(sys, "stdlib_module_names", frozenset())
+# Node ships these; an import of one is not a dependency decision. The `node:`
+# prefix says so explicitly, but plenty of code still writes the bare name.
+_NODE_BUILTINS = frozenset("""
+assert async_hooks buffer child_process cluster console constants crypto dgram
+diagnostics_channel dns domain events fs http http2 https inspector module net
+os path perf_hooks process punycode querystring readline repl stream string_decoder
+timers tls trace_events tty url util v8 vm wasi worker_threads zlib
+""".split())
 _KNOWN_STD_PREFIXES = (
     "std", "core", "alloc", "java.", "javax.", "kotlin.", "System.",
 )
 
 
-_DOC_EXT = (".md", ".markdown", ".rst", ".txt", ".adoc", ".org")
+# Files whose contents are prose or data, never executable statements. Running
+# code-shaped detectors over them reads English as code: `eval (` in a design note
+# becomes a call to eval, and a YAML comment listing languages becomes a goroutine.
+_NON_CODE_EXT = (
+    ".md", ".markdown", ".rst", ".txt", ".adoc", ".org",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".json", ".lock", ".csv", ".tsv",
+)
+
+
+_GENERATED_RE = re.compile(
+    r"(^|/)(node_modules|vendor|dist|build|third_party)/"
+    r"|\.bundle\.[jt]s$|\.min\.[jt]s$|\.generated\.[\w]+$"
+    r"|_pb2\.py$|\.pb\.go$|\.pb\.cc$|_generated\.[\w]+$|\.lock$"
+)
+
+
+def _is_generated(path):
+    """Machine-produced output. It is a result of the change, not the change."""
+    return bool(_GENERATED_RE.search(path or ""))
 
 
 def _is_prose(path):
-    """Documentation is not code; code-shaped detectors must not read it.
+    """True for a file whose rows are prose or data rather than statements.
 
-    Without this, the word `eval (` in a design note reads as a call to eval.
+    Configuration still gets its own path-based signals (`cfg.changed`,
+    `data.contract`); what it does not get is the statement-level detectors.
     """
-    return (path or "").lower().endswith(_DOC_EXT)
+    return (path or "").lower().endswith(_NON_CODE_EXT) or _is_generated(path)
 
 
 def _is_statement_start(src):
@@ -129,7 +174,15 @@ def _is_statement_start(src):
     return closes <= opens
 
 
+_DAMP = {HIGH: MEDIUM, MEDIUM: LOW, LOW: LOW}
+
+
 def _signal(sid, severity, path, line, evidence, question):
+    # A choice made in a test, example, or benchmark reaches fewer people than the
+    # same choice in production code, so it asks a quieter question. Without this,
+    # a test suite full of idiomatic assertions drowns the real findings.
+    if _NONPROD_RE.search(path or ""):
+        severity = _DAMP[severity]
     return {
         "id": sid,
         "severity": severity,
@@ -242,6 +295,9 @@ def _module_of(src, lang):
     if lang == "rust":
         m = re.match(r"^(?:pub\s+)?use\s+([\w:]+)", s)
         return m.group(1).split("::")[0] if m else None
+    if lang == "c":
+        m = re.search(r'#\s*include\s*[<"]([^>"]+)[>"]', s)
+        return m.group(1) if m else None
     if lang in ("jvm", "csharp"):
         m = re.match(r"^(?:import|using)\s+([\w.]+)", s)
         return m.group(1) if m else None
@@ -276,7 +332,12 @@ def _is_external(module, lang):
         first = module.split("/")[0]
         return "." in first  # a dotted first segment means a hosted module path
     if lang == "js":
-        return not module.startswith((".", "/", "@/", "~"))
+        if module.startswith((".", "/", "@/", "~", "node:", "bun:")):
+            return False
+        return module.split("/")[0] not in _NODE_BUILTINS
+    if lang == "rust":
+        # crate/self/super are this crate; std/core/alloc are the language.
+        return module not in ("std", "core", "alloc", "crate", "self", "super")
     if module.startswith(_KNOWN_STD_PREFIXES):
         return False
     return True
@@ -303,6 +364,15 @@ def extract(rows, baseline=None):
 
 def _dependency_signals(rows, declarations, baseline):
     out = []
+    # Modules the file already imported before this change. A formatter sweep
+    # rewrites every import row, so without this every reformatted import reads
+    # as a brand-new dependency.
+    already = set()
+    for row in rows:
+        if row.kind == DEL and row.no in declarations:
+            mod = _module_of(row.source, diffmodel.language_of(row.path or ""))
+            if mod:
+                already.add((row.file_idx, mod))
     layers = baseline.get("layers") or {}
     forbidden = {(a, b) for a, b in (baseline.get("forbidden_edges") or [])}
     allowed_external = set(baseline.get("allowed_external") or [])
@@ -314,6 +384,13 @@ def _dependency_signals(rows, declarations, baseline):
         lang = diffmodel.language_of(row.path or "")
         module = _module_of(row.source, lang)
         if not module:
+            continue
+        # An indented Rust `use` (e.g. `use RangeKey::*;` inside a match) brings an
+        # item already reachable into local scope. That is a readability choice, not
+        # a dependency decision.
+        if lang == "rust" and row.source[:1].isspace():
+            continue
+        if (row.file_idx, module) in already:
             continue
 
         if _is_external(module, lang):
@@ -352,10 +429,38 @@ def _dependency_signals(rows, declarations, baseline):
     return out
 
 
+_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_MAX_DECL_ROWS = 40
+
+
+def _declaration_tokens(rows, start):
+    """Identifier sequence of a declaration and the rows it was reformatted over.
+
+    Comparing identifiers rather than text is what separates a real signature
+    change from a formatter sweep. Layout, trailing commas, quote style and a
+    leading union pipe all disappear; a renamed function, an added parameter or
+    a changed type shows up immediately.
+
+    The span is the whole contiguous same-marker run starting at the declaration.
+    That run only exists on both sides when the declaration row itself changed,
+    so a body-only edit never reaches this comparison.
+    """
+    first = rows[start]
+    parts = [first.source]
+    i = start + 1
+    while i < len(rows) and i - start < _MAX_DECL_ROWS:
+        nxt = rows[i]
+        if nxt.kind != first.kind or nxt.hunk_idx != first.hunk_idx or nxt.no != rows[i - 1].no + 1:
+            break
+        parts.append(nxt.source)
+        i += 1
+    return tuple(_IDENT_RE.findall(" ".join(parts)))
+
+
 def _api_signals(rows):
     added = {}
     removed = {}
-    for row in rows:
+    for i, row in enumerate(rows):
         if row.kind not in (ADD, DEL):
             continue
         lang = diffmodel.language_of(row.path or "")
@@ -369,7 +474,7 @@ def _api_signals(rows):
         if lang == "python" and name.startswith("_"):
             continue
         bucket = added if row.kind == ADD else removed
-        bucket.setdefault((row.path, name), row)
+        bucket.setdefault((row.path, name), (row, _declaration_tokens(rows, i)))
 
     out = []
     for row in rows:
@@ -381,8 +486,10 @@ def _api_signals(rows):
             "its input, and what does it cost to serve?",
         ))
 
-    for (path, name), row in sorted(added.items()):
+    for (path, name), (row, tokens) in sorted(added.items()):
         if (path, name) in removed:
+            if removed[(path, name)][1] == tokens:
+                continue  # same identifiers, different layout: a formatter moved it
             out.append(_signal(
                 "api.signature-changed", HIGH, path, row.no, row.source,
                 "public `%s` changed shape. Who calls it, and is every caller updated in this "
@@ -394,7 +501,7 @@ def _api_signals(rows):
                 "`%s` is new public surface. Does it need to be public, and is its contract "
                 "(errors, nil/None, ownership, thread-safety) stated anywhere?" % name,
             ))
-    for (path, name), row in sorted(removed.items()):
+    for (path, name), (row, _tokens) in sorted(removed.items()):
         if (path, name) in added:
             continue
         out.append(_signal(
@@ -415,11 +522,10 @@ def _algorithm_signals(rows, declarations, baseline):
         if not entries:
             continue
         depths = _loop_depths(entries)
-        func_names = set()
-        for line_no, src in entries:
-            m = _RECURSION_HINT_RE.match(src.strip())
-            if m:
-                func_names.add(m.group(1))
+        # A function declared in this run and called later in the run is not
+        # recursion unless the call is inside that function's own body. Track the
+        # enclosing declaration by indentation and drop it when the run leaves it.
+        enclosing = None
 
         for line_no, src in entries:
             s = src.strip()
@@ -464,14 +570,23 @@ def _algorithm_signals(rows, declarations, baseline):
                     "a collection grows inside a loop. What caps its size — and what is the "
                     "memory cost at the worst realistic input?",
                 ))
-            for fname in func_names:
-                if re.search(r"\b%s\s*\(" % re.escape(fname), s) and not _RECURSION_HINT_RE.match(s):
-                    out.append(_signal(
-                        "algo.recursion", MEDIUM, path, line_no, s,
-                        "`%s` appears to recurse. What is the termination argument, and how "
-                        "deep can it go on real input?" % fname,
-                    ))
-                    break
+            indent = len(src) - len(src.lstrip())
+            decl = _RECURSION_HINT_RE.match(s)
+            if decl:
+                enclosing = (decl.group(1), indent)
+            elif enclosing and indent <= enclosing[1]:
+                enclosing = None
+            elif enclosing and re.search(
+                # A bare call, or a call on self/this. `a.cmp(b)` inside `fn cmp`
+                # is dispatch on another receiver, not recursion — that pattern is
+                # unavoidable in trait impls where the trait fixes the method name.
+                r"(?:(?<![.\w])|\b(?:self|this)\.)%s\s*\(" % re.escape(enclosing[0]), s
+            ):
+                out.append(_signal(
+                    "algo.recursion", MEDIUM, path, line_no, s,
+                    "`%s` calls itself. What is the termination argument, and how deep can "
+                    "it go on real input?" % enclosing[0],
+                ))
             m = _REGEX_LITERAL_RE.search(s)
             if m and _NESTED_QUANT_RE.search(m.group(1)):
                 out.append(_signal(

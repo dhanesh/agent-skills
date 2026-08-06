@@ -141,16 +141,29 @@ class TestGrader(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("section:Architecture and boundaries", [c[0] for c in checks if not c[1]])
 
-    def test_negative_leftover_placeholder(self):
+    def test_generic_type_syntax_is_not_placeholder_text(self):
+        # `Arc<RwLock<IndexMetadata>>` in an architecture finding once failed the
+        # grader as "leftover placeholder", which sinks every systems review.
         text = filled(
             {"algo.io-in-loop@svc/orders.py:42":
                 "**addressed**: the batched read lands in the same change."},
         ).replace(
             "Something substantive and specific about this change.",
-            "<What idea is new here?>",
+            "State is held in Arc<RwLock<IndexMetadata>> and returned as Vec<Id>.",
+        )
+        checks, ok = reportlib.grade(text, [HIGH_SIG])
+        self.assertTrue(ok, [c for c in checks if not c[1]])
+
+    def test_an_unedited_prompt_still_fails(self):
+        text = filled(
+            {"algo.io-in-loop@svc/orders.py:42":
+                "**addressed**: the batched read lands in the same change."},
+        ).replace(
+            "Something substantive and specific about this change.",
+            "<%s>" % dict(reportlib.SECTIONS)["Concepts"],
             1,
         )
-        _, ok = reportlib.grade(text, [HIGH_SIG])
+        checks, ok = reportlib.grade(text, [HIGH_SIG])
         self.assertFalse(ok)
 
     def test_negative_thin_paragraph(self):
@@ -162,6 +175,18 @@ class TestGrader(unittest.TestCase):
         checks, ok = reportlib.grade(text, [HIGH_SIG])
         self.assertFalse(ok)
         self.assertIn("paragraph-substance", [c[0] for c in checks if not c[1]])
+
+    def test_every_declared_verdict_grades_unambiguously(self):
+        # `ship-with-followups` contains `ship`; a \b match called it ambiguous
+        # and failed every review that chose it.
+        for verdict in reportlib.VERDICTS:
+            text = filled(
+                {"algo.io-in-loop@svc/orders.py:42":
+                    "**addressed**: the batched read lands in the same change."},
+                verdict=verdict,
+            )
+            checks, ok = reportlib.grade(text, [HIGH_SIG])
+            self.assertTrue(ok, "%s: %s" % (verdict, [c for c in checks if not c[1]]))
 
     def test_negative_ambiguous_verdict(self):
         text = filled(
