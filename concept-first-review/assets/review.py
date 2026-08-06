@@ -12,6 +12,8 @@ the judgment; this tool supplies structure, rejection, and grading.
     python3 review.py template --into .review
     python3 review.py grade    --into .review
     python3 review.py audit    --into .review --prior SOMEONE-ELSES-REVIEW.md
+    python3 review.py propose  --repo . --into .baseline
+    python3 review.py adopt    --into .baseline --answers answers.json
 
 Every command is idempotent and safe to re-run, and `state` reports typed
 progress, so the whole sequence can be driven from a self-prompting loop.
@@ -29,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import baseline as baselinelib  # noqa: E402
 import condenser  # noqa: E402
 import diffmodel  # noqa: E402
 import report as reportlib  # noqa: E402
@@ -253,6 +256,59 @@ def cmd_audit(args):
     return 0 if not blind_spots else 1
 
 
+# ── propose / adopt: build a design baseline by asking ───────────────────────
+
+def cmd_propose(args):
+    if not os.path.isdir(args.repo):
+        _die("repository %s not found" % args.repo)
+    evidence = baselinelib.scan(args.repo)
+    if not evidence["files"]:
+        _die("no source files found under %s" % args.repo)
+    proposal = baselinelib.propose(evidence)
+    questions = baselinelib.to_questions(proposal)
+    baselinelib.write_proposal(args.into, proposal, questions)
+
+    if args.json:
+        print(json.dumps({"proposal": proposal, "questions": questions}, indent=2))
+        return 0
+    print(baselinelib.summarize(proposal))
+    print()
+    print("wrote %s and %s" % (os.path.join(args.into, "proposal.json"),
+                               os.path.join(args.into, "questions.json")))
+    print("Put questions.json to the user with the host agent's structured question tool, "
+          "one batch per call, then write their answers and run `adopt`.")
+    return 0
+
+
+def cmd_adopt(args):
+    work = args.into
+    proposal_path = os.path.join(work, "proposal.json")
+    if not os.path.exists(proposal_path):
+        _die("%s not found — run `propose` first" % proposal_path)
+    proposal = _load_json(proposal_path)
+    answers = _load_json(args.answers) if args.answers else {}
+    if not isinstance(answers, dict):
+        _die("answers must be a JSON object; see references/design-baseline.md")
+    rules = baselinelib.apply_answers(proposal, answers)
+    dropped = rules.pop("_dropped", [])
+    _write(args.out, json.dumps(rules, indent=2) + "\n")
+
+    print("wrote %s" % args.out)
+    print("  layers: %s" % (", ".join(sorted(rules["layers"])) or "none"))
+    print("  forbidden edges: %d" % len(rules["forbidden_edges"]))
+    print("  allowed dependencies: %s"
+          % (len(rules["allowed_external"]) or "not frozen (every new one asks at medium)"))
+    print("  budgets: %s" % (", ".join(sorted(rules.get("budgets", {}))) or "not set"))
+    for note in dropped:
+        print("  NOT recorded: %s" % note)
+    if dropped:
+        print("  Re-run `adopt` with those layers included if the rule was meant to stand.")
+    if not rules["layers"] and not rules["forbidden_edges"]:
+        print("  nothing was adopted — the review will stay fully heuristic, which is a "
+              "legitimate answer and better than rules nobody believes")
+    return 0
+
+
 # ── state: the typed loop boundary ───────────────────────────────────────────
 
 def cmd_state(args):
@@ -348,6 +404,18 @@ def build_parser():
     _add_work(gr)
     gr.add_argument("--report")
     gr.set_defaults(func=cmd_grade)
+
+    pr = sub.add_parser("propose", help="derive candidate design rules from a repository")
+    pr.add_argument("--repo", default=".", help="repository root to scan")
+    pr.add_argument("--into", default=".baseline", help="where to write proposal + questions")
+    pr.add_argument("--json", action="store_true")
+    pr.set_defaults(func=cmd_propose)
+
+    ad = sub.add_parser("adopt", help="write design-rules.json from answered questions")
+    ad.add_argument("--into", default=".baseline")
+    ad.add_argument("--answers", help="JSON object of the user's choices")
+    ad.add_argument("--out", default="design-rules.json")
+    ad.set_defaults(func=cmd_adopt)
 
     au = sub.add_parser("audit", help="second-opinion a review another agent wrote")
     _add_work(au)

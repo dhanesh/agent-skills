@@ -56,7 +56,69 @@ python3 assets/review.py prepare --rev HEAD~1..HEAD --out .review --rules design
 `prepare` reads it once and bakes the resulting signals into `signals.json`, so later
 commands need no flags. `assets/design-rules.example.json` is a filled-in starting point.
 
-## Authoring one honestly
+## Let the skill derive it and ask you
+
+Most of a baseline is already written down — in the import graph, in the directory
+layout, in the shapes the code already has. The only part that needs a human is which of
+those observed facts are **rules** and which are accidents.
+
+```bash
+python3 assets/review.py propose --repo . --into .baseline
+```
+
+`propose` walks the tree, resolves every import to either an area of this repo or a
+third-party root, and measures the shapes present. It writes two files:
+
+| File | Contents |
+|---|---|
+| `proposal.json` | The evidence: areas and their file counts, the directory dependency graph, third-party roots ranked by use, and the observed p90 for function length, parameter count, and loop depth. |
+| `questions.json` | Batches shaped for the host agent's structured question tool — at most four questions per batch, two to four options each, short headers. Pass a batch straight through. |
+
+Every proposed rule carries **the number of places that violate it today**, because that is
+the fact that decides the answer. A rule with zero violations is free to adopt. A rule with
+eighteen is a migration, and whoever answers should know which one they are agreeing to.
+
+Put each batch to the user with `AskUserQuestion` (or whatever the host agent calls its
+structured question tool), collect the answers, and write them as JSON:
+
+```json
+{
+  "layers": ["core", "web"],
+  "edges": {"core->web": true, "install->lib/parallel": "lib/parallel->install"},
+  "freeze_dependencies": true,
+  "budgets": "observed",
+  "invariants": ["core/ is framework-free and never imports web/"]
+}
+```
+
+A one-way candidate takes `true`/`false`. A cycle takes the direction to forbid, written
+`"from->to"`, so the answer says which way the dependency should run. `budgets` is
+`"observed"` (match this codebase's 90th percentile), `"strict"` (the defaults), or
+`"skip"`.
+
+```bash
+python3 assets/review.py adopt --into .baseline --answers answers.json --out design-rules.json
+```
+
+Anything unanswered is declined. A baseline is a set of claims somebody has to stand behind,
+and silence is not agreement — adopting nothing is a legitimate outcome and better than
+rules nobody believes.
+
+### What the questions are actually for
+
+The scan can see that `core` never imports `web`. It cannot see whether that is a rule or a
+coincidence, and no amount of scanning distinguishes those — which is exactly why this is a
+conversation rather than a generator. The two questions worth the interruption are:
+
+- **a cycle between two real layers**, because it names a problem that already exists and
+  the answer commits to fixing it in one direction or accepting it;
+- **an edge with zero violations**, because it is free today and will not be free once
+  somebody writes the import.
+
+Obvious rules are deliberately ranked last. "Source must not import tests" is free, true,
+and worth nobody's attention.
+
+## Authoring one by hand
 
 Write down the rules the team **already believes**, not the rules you wish it followed. A
 baseline that flags every existing file on day one gets deleted in a week.

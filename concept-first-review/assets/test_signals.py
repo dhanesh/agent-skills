@@ -341,6 +341,26 @@ class TestFormatterSweep(unittest.TestCase):
         out = extract(wrap("cli/commands/completion.ts", "+import { z } from 'zod';\n"))
         self.assertIn("dep.new-external", ids(out))
 
+    def test_negative_a_crate_importing_itself_is_not_a_dependency(self):
+        # `use graph_d::Graph` in graph_d's own tests reaches inside. Freezing an
+        # allowlist without this flags every self-import in every Rust or Go repo.
+        tmp = tempfile.mkdtemp()
+        repo = os.path.join(tmp, "graph-d")
+        os.makedirs(repo)
+        rows = diffmodel.parse_diff(wrap("tests/e2e.rs", "+use graph_d::Graph;\n"))
+        baseline = dict(sig.DEFAULT_BASELINE, allowed_external=["serde"], _configured=True)
+        out = sig.extract(rows, baseline, repo_root=repo)
+        self.assertNotIn("dep.new-external", ids(out))
+
+    def test_a_real_dependency_is_still_flagged_with_a_repo_root(self):
+        tmp = tempfile.mkdtemp()
+        repo = os.path.join(tmp, "graph-d")
+        os.makedirs(repo)
+        rows = diffmodel.parse_diff(wrap("src/a.rs", "+use serde_json::json;\n"))
+        baseline = dict(sig.DEFAULT_BASELINE, allowed_external=["serde"], _configured=True)
+        out = sig.extract(rows, baseline, repo_root=repo)
+        self.assertIn("dep.new-external", ids(out))
+
     def test_negative_node_builtins_are_not_third_party(self):
         for stmt in ("+import { dirname } from 'node:path';\n",
                      "+import { existsSync } from 'fs';\n",

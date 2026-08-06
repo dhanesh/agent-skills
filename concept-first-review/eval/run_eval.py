@@ -351,6 +351,60 @@ def main():
         check("a thorough prior review audits clean",
               rc == 0 and audit["blind_spots"] == [], str(audit["blind_spots"])[:120])
 
+        # ── Deriving a baseline by asking ───────────────────────────────────
+        repo = os.path.join(tmp, "repo")
+        for rel, body in harness.BASELINE_TREE.items():
+            path = os.path.join(repo, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            write(path, body)
+        bl = os.path.join(tmp, "baseline")
+        rc, out = run("propose", "--repo", repo, "--into", bl)
+        proposal = json.loads(read(os.path.join(bl, "proposal.json")))
+        questions = json.loads(read(os.path.join(bl, "questions.json")))
+        check("propose reads the tree and writes a proposal",
+              rc == 0 and proposal["files_scanned"] == len(harness.BASELINE_TREE),
+              "%d file(s)" % proposal.get("files_scanned", -1))
+        check("the layering the repo actually has is proposed",
+              any(c["from"] == "core" and c["to"] == "web"
+                  for c in proposal["forbidden_edge_candidates"]))
+        check("every candidate reports what adopting it costs today",
+              all("violations_today" in c and c["evidence"]
+                  for c in proposal["forbidden_edge_candidates"]))
+        check("questions fit the host agent's question tool",
+              all(len(b) <= 4 and all(len(q["header"]) <= 12
+                                      and 2 <= len(q["options"]) <= 4
+                                      and q["question"].rstrip().endswith("?")
+                                      for q in b)
+                  for b in questions))
+
+        answers = os.path.join(tmp, "answers.json")
+        write(answers, json.dumps({
+            "layers": ["core", "web"], "edges": {"core->web": True},
+            "freeze_dependencies": True, "budgets": "strict",
+        }))
+        rules_out = os.path.join(tmp, "derived-rules.json")
+        rc, out = run("adopt", "--into", bl, "--answers", answers, "--out", rules_out)
+        derived = json.loads(read(rules_out))
+        check("adopt writes what was chosen",
+              rc == 0 and derived["forbidden_edges"] == [["core", "web"]]
+              and "requests" in derived["allowed_external"])
+
+        # The derived file must be usable by the thing it exists for.
+        derived_work = os.path.join(tmp, "derived-work")
+        breach = os.path.join(tmp, "breach.diff")
+        write(breach, harness.LAYER_BREACH_DIFF)
+        rc, out = run("open", "--diff", breach, "--into", derived_work, "--rules", rules_out)
+        breach_sigs = json.loads(read(os.path.join(derived_work, "signals.json")))
+        check("a derived baseline turns the breach it describes into a high signal",
+              any(s["id"] == "dep.layering" and s["severity"] == "high"
+                  for s in breach_sigs),
+              ", ".join(sorted({s["id"] for s in breach_sigs})))
+
+        rc, out = run("adopt", "--into", bl, "--out", os.path.join(tmp, "silent.json"))
+        silent = json.loads(read(os.path.join(tmp, "silent.json")))
+        check("silence adopts nothing",
+              rc == 0 and not silent["forbidden_edges"] and not silent["allowed_external"])
+
         check(
             "no eval writes escaped the tempdir",
             not os.path.exists(os.path.join(ASSETS, "REVIEW.md"))

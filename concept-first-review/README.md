@@ -121,12 +121,30 @@ high-severity signal is resolved — never from the agent's own account of its p
 
 ## Making the architecture questions checkable
 
-Layering questions stay guesses until the team's rules live somewhere a tool can read. Drop
-a `design-rules.json` at the repo root — named layers, forbidden dependency edges, accepted
-third-party roots, a loop-nesting budget, plain-text invariants — and "a new import crosses
-a layer" becomes a fact instead of a heuristic. Start from
-`assets/design-rules.example.json`; the authoring guide is `references/design-baseline.md`.
-Without it the skill still works, and says plainly that layering is staying heuristic.
+Layering questions stay guesses until the team's rules live somewhere a tool can read. A
+`design-rules.json` — named layers, forbidden dependency edges, accepted third-party roots,
+size budgets, plain-text invariants — turns "a new import crosses a layer" into a fact.
+
+You don't write it by hand. The skill derives it and asks:
+
+```bash
+python3 assets/review.py propose --repo . --into .baseline
+# put .baseline/questions.json to the user with AskUserQuestion, collect answers
+python3 assets/review.py adopt --into .baseline --answers answers.json
+```
+
+`propose` resolves every import to an area of the repo or a third-party root, measures the
+shapes already present, and emits question batches sized for the agent's structured question
+tool. **Every proposed rule reports how many places violate it today** — zero is free to
+adopt, eighteen is a migration, and that number is what decides the answer. A cycle between
+two real layers is ranked first; "source must not import tests" is ranked last, because it
+is free, true, and worth nobody's attention.
+
+The scan can see that `core` never imports `web`. It cannot see whether that is a rule or a
+coincidence, which is exactly what the questions are for. Anything unanswered is declined.
+
+Without a baseline the skill still works, and says plainly that layering is staying
+heuristic.
 
 ## Usage
 
@@ -140,6 +158,8 @@ python3 assets/review.py template --into .review   # writes .review/REVIEW.md
 python3 assets/review.py grade    --into .review   # exits 1 on any gap
 python3 assets/review.py state    --into .review --json
 python3 assets/review.py audit    --into .review --prior their-review.md
+python3 assets/review.py propose  --repo . --into .baseline      # derive design rules
+python3 assets/review.py adopt    --into .baseline --answers answers.json
 ```
 
 `--diff <file>` or `--diff -` works anywhere a git range does not. Full flag reference:
@@ -164,13 +184,14 @@ is why it behaves the same in Claude Code, in Codex, and on a machine with no ne
 | `assets/condenser.py` | the plan compiler and every rule it enforces |
 | `assets/signals.py` | the signal extractors and the design baseline |
 | `assets/report.py` | review template, grader, loop state, prior-review audit |
+| `assets/baseline.py` | derives candidate design rules from a tree and shapes them as questions |
 | `assets/review.py` | the CLI |
 | `references/` | condensing rubric, plan language, review rubric, signal catalogue, fit and scope, agentic patterns, design baseline, loop integration, second opinion, CLI reference |
 | `eval/` | the outcome eval — treatment and control arms, plus plans that must be rejected |
 
 ## Tests
 
-211 stdlib unit tests across the four modules, plus a 39-check end-to-end eval that asserts
+233 stdlib unit tests across the five modules, plus a 46-check end-to-end eval that asserts
 both directions: that noise collapses while the decisive rows survive, *and* that invented
 text, one-sided relocation treatment, and definition-burying collapses are all rejected;
 that a clean control diff yields no high signals; that the template the skill writes does not

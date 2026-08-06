@@ -365,7 +365,7 @@ def extract(rows, baseline=None, repo_root=None):
     declarations = diffmodel.declaration_rows(rows)
     out = []
 
-    out.extend(_dependency_signals(rows, declarations, baseline))
+    out.extend(_dependency_signals(rows, declarations, baseline, repo_root))
     out.extend(_api_signals(rows))
     out.extend(_algorithm_signals(rows, declarations, baseline))
     out.extend(_runtime_signals(rows, declarations))
@@ -378,8 +378,21 @@ def extract(rows, baseline=None, repo_root=None):
     return out
 
 
-def _dependency_signals(rows, declarations, baseline):
+def _self_package_name(repo_root):
+    """What this repository calls itself in its own import paths.
+
+    A crate or module importing itself from its tests and examples — `use
+    graph_d::Graph`, `import myproj/internal/x` — is reaching inside, not taking
+    on a dependency. Without this, freezing an allowlist flags every one of them.
+    """
+    if not repo_root:
+        return None
+    return os.path.basename(os.path.abspath(repo_root)).replace("-", "_")
+
+
+def _dependency_signals(rows, declarations, baseline, repo_root=None):
     out = []
+    self_name = _self_package_name(repo_root)
     # Modules the file already imported before this change. A formatter sweep
     # rewrites every import row, so without this every reformatted import reads
     # as a brand-new dependency.
@@ -407,6 +420,9 @@ def _dependency_signals(rows, declarations, baseline):
         if lang == "rust" and row.source[:1].isspace():
             continue
         if (row.file_idx, module) in already:
+            continue
+        root_segment = module.split("/")[0].split(".")[0].split("::")[0]
+        if self_name and root_segment.replace("-", "_") == self_name:
             continue
 
         if _is_external(module, lang):

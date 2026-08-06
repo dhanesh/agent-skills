@@ -104,6 +104,27 @@ The confidence check is the one that makes the output something to act on rather
 complete. A review that never says where its evidence stops cannot be acted on without
 re-deriving it, however well it reads.
 
+## `propose`
+
+Derive candidate design rules from a repository and shape them as questions. Full flow in
+[design-baseline.md](design-baseline.md).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--repo DIR` | `.` | Repository root to scan. Vendored, generated and build trees are skipped. |
+| `--into DIR` | `.baseline` | Where `proposal.json` and `questions.json` are written. |
+| `--json` | off | Print both to stdout instead of a human summary. |
+
+## `adopt`
+
+Write `design-rules.json` from a proposal plus the user's answers.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--into DIR` | `.baseline` | Directory holding `proposal.json`. |
+| `--answers PATH` | — | JSON object of choices. Omitted or unanswered means declined. |
+| `--out PATH` | `design-rules.json` | Where to write the baseline. |
+
 ## `audit`
 
 Second-opinion a review someone else already wrote. Details in

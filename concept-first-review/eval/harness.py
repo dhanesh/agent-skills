@@ -171,3 +171,32 @@ def prior_strong_review(sigs):
 # What the change was asked to do, in the requester's words. Scope drift is only
 # checkable against something like this — a diff cannot show what is missing.
 INTENT = "batch the per-item reads in order listing and move the identity helpers into core"
+
+
+# ── Baseline derivation ──────────────────────────────────────────────────────
+
+# A tree whose layering is unambiguous: web reaches into core, core never
+# reaches back. The proposer must find that edge and report it as free to adopt.
+BASELINE_TREE = {
+    "core/model.py": "class User:\n    pass\n",
+    "core/rules.py": "from core.model import User\n\n\ndef check(u):\n    return True\n",
+    "core/calc.py": "def add(a, b):\n    return a + b\n",
+    "web/handlers.py": "from core.model import User\nimport requests\n\n\ndef get(u):\n    return u\n",
+    "web/routes.py": "from core.rules import check\n\n\ndef route():\n    return check(1)\n",
+    "web/render.py": "from core.calc import add\n\n\ndef render():\n    return add(1, 2)\n",
+    "tests/test_web.py": "from web.routes import route\n\n\ndef test_route():\n    assert route()\n",
+    "tests/test_core.py": "from core.calc import add\n\n\ndef test_add():\n    assert add(1, 1) == 2\n",
+    "tests/test_more.py": "from core.rules import check\n\n\ndef test_check():\n    assert check(1)\n",
+}
+
+# The change the derived rule exists to catch: core reaching into web.
+LAYER_BREACH_DIFF = (
+    "diff --git a/core/rules.py b/core/rules.py\n"
+    "--- a/core/rules.py\n"
+    "+++ b/core/rules.py\n"
+    "@@ -1,3 +1,5 @@\n"
+    "+from web.render import render\n"
+    " def check(u):\n"
+    "+    render()\n"
+    "     return True\n"
+)

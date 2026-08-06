@@ -200,14 +200,35 @@ sibling `security-posture-audit` skill does that job properly.
 
 Layering questions stay guesses until the team's rules live somewhere a tool can read.
 `design-rules.json` is that file: named layers, forbidden dependency edges, the accepted
-third-party roots, a loop-nesting budget, and free-text invariants. Copy
-[assets/design-rules.example.json](assets/design-rules.example.json) and edit it; the
-authoring guide — including how to derive the rules a repo *actually* follows rather than
-the ones you wish it did — is in
-[references/design-baseline.md](references/design-baseline.md).
+third-party roots, size budgets, and free-text invariants.
 
-Without it the skill still works. Layering signals simply stay heuristic, and `open` says so
-rather than pretending otherwise.
+Do not write it from scratch, and do not guess it on the user's behalf. Derive it and ask:
+
+```bash
+python3 assets/review.py propose --repo . --into .baseline
+```
+
+This walks the tree, resolves every import to an area of the repo or a third-party root,
+measures the shapes already present, and writes `.baseline/questions.json` — batches shaped
+for the host agent's structured question tool (`AskUserQuestion` in Claude Code), at most
+four questions per batch with two to four options each. **Put each batch to the user
+verbatim**, then write their choices to a JSON file and run:
+
+```bash
+python3 assets/review.py adopt --into .baseline --answers answers.json --out design-rules.json
+```
+
+Every proposed rule carries the number of places that violate it today, because that is what
+decides the answer: zero is free to adopt, eighteen is a migration. The scan can see that
+`core` never imports `web`; it cannot see whether that is a rule or a coincidence, and that
+gap is exactly what the questions are for. Anything unanswered is declined — silence is not
+agreement, and adopting nothing beats rules nobody believes. The answer format and the
+authoring guide are in [references/design-baseline.md](references/design-baseline.md);
+[assets/design-rules.example.json](assets/design-rules.example.json) is a hand-written
+starting point if you would rather not scan.
+
+Without a baseline the skill still works. Layering signals simply stay heuristic, and `open`
+says so rather than pretending otherwise.
 
 ## Working without the tooling
 
