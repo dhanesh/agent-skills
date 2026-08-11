@@ -380,6 +380,55 @@ print(json.dumps({"real": len(found) - noise, "noise": noise}))
 """
 
 
+ATLAS_SESSION_PROBE = r"""
+import atlas, sqlite3
+root = tempfile.mkdtemp()
+sid = "ab-session"
+secret = "".join(["hunter2", "hunter2", "hunter2"])
+home = os.path.join(root, "home")
+def w(p, t):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(t)
+recs = [
+  {"type":"user","uuid":"a1","parentUuid":None,"timestamp":"2026-01-01T00:00:00.000Z",
+   "sessionId":sid,"cwd":"/home/dev/x","gitBranch":"main","version":"2.1.0",
+   "message":{"role":"user","content":"hello"}},
+  {"type":"user","uuid":"a2","parentUuid":"a1","timestamp":"2026-01-01T00:01:00.000Z",
+   "sessionId":sid,"cwd":"/home/dev/x","gitBranch":"main","version":"2.1.0",
+   "message":{"role":"user","content":"env: DB_PASSWORD=" + secret}},
+]
+w(os.path.join(home, "projects", "-home-dev-x", sid + ".jsonl"),
+  "\n".join(json.dumps(r, ensure_ascii=False, separators=(",",":")) for r in recs) + "\n")
+w(os.path.join(home, "shell-snapshots", "s.sh"), "export X=" + secret + "\n")
+w(os.path.join(root, ".claude.json"), json.dumps({"oauthAccount":{"e":"a@b.invalid"},
+                                                  "machineID":"m1"}))
+db = os.path.join(root, "atlas.db")
+atlas.main(["sessions", "ingest", "--db", db, "--home", home])
+conn = sqlite3.connect(db)
+dump = "\n".join(conn.iterdump())
+red = conn.execute("select redacted from agent_sessions").fetchone()[0]
+kinds = {r[0] for r in conn.execute("select kind from session_artifacts")}
+conn.close()
+# Relocation: the slug must be recomputed from the TARGET cwd, not replayed.
+out = os.path.join(root, "restored")
+atlas.main(["sessions", "restore", "--db", db, "--home", out, "--cwd", "/Users/dev/x",
+            "--allow-redacted", sid])
+moved = os.path.exists(os.path.join(out, "projects", "-Users-dev-x", sid + ".jsonl"))
+cwds = set()
+if moved:
+    for line in open(os.path.join(out, "projects", "-Users-dev-x", sid + ".jsonl")):
+        if line.strip():
+            cwds.add(json.loads(line).get("cwd"))
+print(json.dumps(sum([
+    secret not in dump,                 # planted credential never stored
+    "oauthAccount" not in dump,         # account identity never read
+    "shell-snapshot" not in kinds,      # snapshots excluded by default
+    red == 1,                           # capture flagged as redacted
+    moved and cwds == {"/Users/dev/x"}, # relocation rewrote paths and slug
+])))
+"""
+
+
 def check_atlas(old, new):
     s = "project-atlas"
     sub = os.path.join("project-atlas", "assets")
@@ -407,6 +456,16 @@ def check_atlas(old, new):
         "%d / %d" % (ro, no_), "%d / %d" % (rn, nn), (rn, nn) == (2, 0),
         "GUARD — a Makefile-only directory and a vendored manifest must never "
         "become rows in the index", kind="guard")
+
+    def session_guards(tree):
+        r = probe(tree, sub, ATLAS_SESSION_PROBE)
+        return 0 if isinstance(r, dict) else int(r)
+
+    so, sn = session_guards(old), session_guards(new)
+    row(s, "session capture guarantees held (of 5)", so, sn, sn == 5,
+        "GUARD — a planted credential, account identity, and a shell snapshot must all "
+        "stay out of a replicated index, the capture must be flagged redacted, and a "
+        "restore must relocate paths to the target machine", kind="guard")
 
 
 def main():

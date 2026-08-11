@@ -77,11 +77,75 @@ languages, then `STATS_RESULT: projects=N git=N missing=N bytes=N`.
 | `--json` | off | Emit the full probe as JSON. |
 | `--require CAP` | none | Fail (exit 1) when a capability is absent. Repeatable, or comma-separated. Known: `fts5`, `wal`, `litestream`, `git`. |
 
+Also reports the agent home, how many transcripts are on disk there, how many sessions have
+been captured, and how many of those were stored **unredacted**.
+
 Reports FTS5 availability, the index's journal mode (`NO-DB` when the index does not exist
 yet), the `litestream` and `git` binaries, python and SQLite versions, and the project /
 missing counts. An unknown capability name is an error, not a silent pass.
 
 Output: `CHECK:` lines, then `DOCTOR_RESULT: PASS` or `DOCTOR_RESULT: FAIL (missing: ...)`.
+
+## `sessions ingest`
+
+Captures agent sessions (chat transcripts + side state) into the index. Full detail,
+including what is deliberately never captured, is in `references/sessions.md`.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--home DIR` | `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Agent home to read. |
+| `--session ID` | all | Capture only this session id. Repeatable. |
+| `--limit N` | all | Capture only the N most recently modified transcripts. |
+| `--no-redact` | off | Store transcripts verbatim. Prints a warning; sets `redacted = 0`. |
+| `--include-shell-snapshots` | off | Also capture `shell-snapshots/` (large; often carries exported env). |
+| `--dry-run` | off | Print `WOULD_CAPTURE:` lines and write nothing. |
+
+Idempotent, and **replacing** rather than appending: re-capturing a session deletes its
+previous events first, so a rewound transcript cannot leave two histories mixed together.
+Uniqueness is `(agent, session_id, host)`, so two machines' captures of the same session id
+coexist as separate rows.
+
+Output: `SESSIONS_RESULT: OK (captured=N events=N total=N redactions=<kind=count,...>)`.
+
+## `sessions list`
+
+`--limit N` (default 20), `--json`. Newest first. A capture stored without redaction is
+flagged `RAW` in the plain-text listing.
+
+## `sessions search QUERY`
+
+`--limit N` (default 20), `--no-fts`, `--json`. Same engine contract as project `search`:
+FTS5 when available, escaped substring otherwise, with `engine=` reported in
+`SEARCH_RESULT:`.
+
+## `sessions show ID`
+
+`ID` may be a full session id or an unambiguous prefix; an exact id always wins over a
+prefix, and an ambiguous prefix is an error listing the candidates.
+
+| Flag | Effect |
+|---|---|
+| `--transcript` | Write the reconstructed JSONL to stdout instead of the summary. |
+| `--json` | Emit the session row, event count, and artifact inventory as JSON. |
+
+## `sessions restore ID`
+
+Writes a captured session back onto this machine.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--home DIR` | `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Agent home to restore into. |
+| `--cwd PATH` | the captured cwd | Working directory on **this** machine. Recomputes the `projects/` slug and rewrites every record's `cwd`. |
+| `--slug NAME` | computed | Override the `projects/` directory name outright. |
+| `--allow-redacted` | off | Required to restore a capture that was redacted. |
+| `--force` | off | Overwrite an existing transcript or task file. |
+| `--dry-run` | off | Report the plan and the verification level; write nothing. |
+
+Refuses (exit 1) on a broken parent chain, on an existing target without `--force`, and on
+a redacted capture without `--allow-redacted`.
+
+Output: `WROTE:` lines, a `RESUME: claude --resume <id>` line, then
+`RESTORE_RESULT: OK (events=N verify=sha256-exact|chain-intact redacted=yes|no cwd=...)`.
 
 ## `litestream-config`
 
@@ -110,6 +174,8 @@ Refuses (exit 1) when the generated text would contain the value of `AWS_ACCESS_
 |---|---|
 | `ATLAS_DB` | Default index path. |
 | `XDG_DATA_HOME` | Base for the default index path. |
+| `CLAUDE_CONFIG_DIR` | Agent home for session capture (default `~/.claude`). |
+| `ATLAS_HOST` | Overrides the hostname recorded on a captured session. |
 | `ATLAS_NOW` | Pins the timestamp written to `first_seen` / `last_scanned` / `missing_since`. Exists so tests and evals are deterministic; leave unset in normal use. |
 | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | Read by **Litestream**, not by `atlas.py`; the generated config references them by name. |
 

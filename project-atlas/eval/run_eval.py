@@ -114,6 +114,66 @@ def build_machine(root: str) -> dict:
     return {"payments": payments, "ingest": ingest, "archive": archive}
 
 
+# ── agent-session fixture ────────────────────────────────────────────────────
+# A synthetic ~/.claude: one transcript with a planted credential, task state, an
+# account-config file that must never be read, and a shell snapshot that must stay
+# out unless asked for.
+
+SESSION_ID = "eval-session-0001"
+SESSION_CWD = "/home/dev/payments"
+SESSION_SLUG = "-home-dev-payments"
+
+
+def synth(*parts):
+    """Runtime-assembled fixture value so the repo's leak scanner sees no literal."""
+    return "".join(parts)
+
+
+PLANTED_SECRET = synth("hunter2", "hunter2", "hunter2")
+PLANTED_EMAIL = "person@example.invalid"
+PLANTED_SHELL_SECRET = synth("shellonly", "value", "123456")
+
+
+def session_record(**kw):
+    base = {"type": "user", "uuid": "e1", "parentUuid": None,
+            "timestamp": "2026-01-01T00:00:00.000Z", "sessionId": SESSION_ID,
+            "cwd": SESSION_CWD, "gitBranch": "main", "version": "2.1.0",
+            "message": {"role": "user", "content": "retry the stripe webhook"}}
+    base.update(kw)
+    return base
+
+
+def build_agent_home(root: str) -> str:
+    home = os.path.join(root, "claude-home")
+    records = [
+        session_record(uuid="e1"),
+        session_record(uuid="e2", parentUuid="e1", type="assistant",
+                       timestamp="2026-01-01T00:01:00.000Z",
+                       message={"role": "assistant",
+                                "content": [{"type": "text",
+                                             "text": "call the retry endpoint"}]}),
+        # A tool result carrying a credential — the realistic leak path.
+        session_record(uuid="e3", parentUuid="e2", type="user",
+                       timestamp="2026-01-01T00:02:00.000Z",
+                       message={"role": "user",
+                                "content": "env output: DB_PASSWORD=" + PLANTED_SECRET}),
+    ]
+    write(os.path.join(home, "projects", SESSION_SLUG, SESSION_ID + ".jsonl"),
+          "\n".join(json.dumps(r, ensure_ascii=False, separators=(",", ":"))
+                    for r in records) + "\n")
+    write(os.path.join(home, "tasks", SESSION_ID, "1.json"),
+          json.dumps({"subject": "wire the retry", "status": "in_progress"}))
+    write(os.path.join(home, "sessions", "99.json"),
+          json.dumps({"pid": 99, "sessionId": SESSION_ID, "cwd": SESSION_CWD}))
+    write(os.path.join(home, "shell-snapshots", "snap.sh"),
+          "export SHELL_ONLY=" + PLANTED_SHELL_SECRET + "\n")
+    # Account identity lives beside the home, and must never be touched.
+    write(os.path.join(root, ".claude.json"),
+          json.dumps({"oauthAccount": {"emailAddress": PLANTED_EMAIL},
+                      "userID": "u-123", "machineID": "m-456"}))
+    return home
+
+
 # ── config grader (model-free) ───────────────────────────────────────────────
 
 def grade_config(text: str) -> list[str]:
@@ -154,8 +214,8 @@ def grade_config(text: str) -> list[str]:
 # The known-bad fixture. The credential-shaped value is assembled at runtime so
 # this file carries no secret-shaped literal for the repo's leak scanner to trip on.
 def bad_config() -> str:
-    fake_id = "AKIA" + "EXAMPLE" * 3
-    fake_value = "NOT-A-REAL-VALUE-" + "EXAMPLE" * 3
+    fake_id = synth("A", "KIA", "EXAMPLE" * 3)
+    fake_value = synth("NOT-A-REAL-", "VALUE-", "EXAMPLE" * 3)
     return "\n".join([
         "dbs:",
         "  - path: /home/dev/.local/share/project-atlas/atlas.db",
@@ -325,6 +385,109 @@ def main() -> int:
                             env={"PATH": os.path.join(tmp, "empty-bin")})
         check("NEGATIVE: doctor fails when a required binary is absent",
               missing_bin.returncode == 1, "exit=%d" % missing_bin.returncode)
+
+        # ── sessions: capture, search, cross-machine restore ─────────────────
+        home = build_agent_home(tmp)
+        cap = atlas("sessions", "ingest", "--db", db, "--home", home)
+        check("session capture runs clean", cap.returncode == 0,
+              (cap.stderr or cap.stdout).strip()[:160])
+
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        srow = conn.execute("SELECT * FROM agent_sessions WHERE session_id = ?",
+                            (SESSION_ID,)).fetchone()
+        events = conn.execute(
+            "SELECT count(*) FROM session_events WHERE session_row = ?",
+            (srow["id"],)).fetchone()[0] if srow else 0
+        arts = conn.execute(
+            "SELECT kind, name FROM session_artifacts WHERE session_row = ?",
+            (srow["id"],)).fetchall() if srow else []
+        dump = "\n".join(conn.iterdump())
+        conn.close()
+
+        check("session envelope metadata captured",
+              srow is not None and srow["cwd"] == SESSION_CWD
+              and srow["git_branch"] == "main" and srow["user_turns"] == 2
+              and srow["assistant_turns"] == 1 and len(srow["transcript_sha256"]) == 64,
+              "cwd=%s turns=%s/%s" % (srow and srow["cwd"], srow and srow["user_turns"],
+                                      srow and srow["assistant_turns"]))
+        check("every transcript event stored", events == 3, "%d event(s)" % events)
+        check("task state captured alongside the chat",
+              ("tasks", "1.json") in {(a["kind"], a["name"]) for a in arts},
+              "%d artifact(s)" % len(arts))
+
+        found = atlas("sessions", "search", "--db", db, "--json", "webhook")
+        hits = json.loads(found.stdout).get("hits", []) if found.returncode == 0 else []
+        check("chats are searchable",
+              any(h["session_id"] == SESSION_ID for h in hits), "%d hit(s)" % len(hits))
+
+        relocated = os.path.join(tmp, "other-machine")
+        restore = atlas("sessions", "restore", "--db", db, "--home", relocated,
+                        "--cwd", "/Users/dev/payments", "--allow-redacted", SESSION_ID)
+        target = os.path.join(relocated, "projects", "-Users-dev-payments",
+                              SESSION_ID + ".jsonl")
+        cwds = set()
+        if os.path.exists(target):
+            with open(target, encoding="utf-8") as fh:
+                cwds = {json.loads(l).get("cwd") for l in fh if l.strip()}
+        check("restore relocates the session onto another machine's layout",
+              restore.returncode == 0 and os.path.exists(target) and cwds == {"/Users/dev/payments"},
+              "slug=-Users-dev-payments cwds=%s" % (cwds or "none"))
+        check("restore replays the task state too",
+              os.path.exists(os.path.join(relocated, "tasks", SESSION_ID, "1.json")))
+        check("restore prints the resume command",
+              "claude --resume %s" % SESSION_ID in restore.stdout)
+
+        raw_db = os.path.join(tmp, "raw", "atlas.db")
+        atlas("sessions", "ingest", "--db", raw_db, "--home", home, "--no-redact")
+        raw_home = os.path.join(tmp, "raw-restore")
+        raw = atlas("sessions", "restore", "--db", raw_db, "--home", raw_home, SESSION_ID)
+        original = open(os.path.join(home, "projects", SESSION_SLUG,
+                                     SESSION_ID + ".jsonl"), "rb").read()
+        restored = b""
+        rt = os.path.join(raw_home, "projects", SESSION_SLUG, SESSION_ID + ".jsonl")
+        if os.path.exists(rt):
+            restored = open(rt, "rb").read()
+        check("an unredacted restore is byte-identical to the original",
+              raw.returncode == 0 and restored == original
+              and "verify=sha256-exact" in raw.stdout,
+              "%d vs %d bytes" % (len(restored), len(original)))
+
+        # ── sessions: the guarantees, as negative fixtures ───────────────────
+        check("NEGATIVE: credentials in a transcript never reach the index",
+              PLANTED_SECRET not in dump and "[REDACTED:" in dump)
+        check("NEGATIVE: account identity never reaches the index",
+              "oauthAccount" not in dump and PLANTED_EMAIL not in dump
+              and "machineID" not in dump)
+        check("NEGATIVE: shell snapshots are excluded by default",
+              "shell-snapshot" not in {a["kind"] for a in arts}
+              and PLANTED_SHELL_SECRET not in dump)
+
+        redacted_restore = atlas("sessions", "restore", "--db", db,
+                                 "--home", os.path.join(tmp, "nope"), SESSION_ID)
+        check("NEGATIVE: a redacted capture will not restore without an explicit flag",
+              redacted_restore.returncode != 0 and "redaction" in redacted_restore.stderr,
+              "exit=%d" % redacted_restore.returncode)
+
+        clobber = atlas("sessions", "restore", "--db", raw_db, "--home", raw_home,
+                        SESSION_ID)
+        check("NEGATIVE: restore refuses to clobber an existing transcript",
+              clobber.returncode != 0 and "--force" in clobber.stderr,
+              "exit=%d" % clobber.returncode)
+
+        broken = sqlite3.connect(raw_db)
+        broken.execute("DELETE FROM session_events WHERE seq = 0")
+        broken.commit()
+        broken.close()
+        chain = atlas("sessions", "restore", "--db", raw_db,
+                      "--home", os.path.join(tmp, "chain"), "--force", SESSION_ID)
+        check("NEGATIVE: a broken parent chain blocks the restore",
+              chain.returncode != 0 and "parent chain" in chain.stderr,
+              "exit=%d" % chain.returncode)
+
+        unknown = atlas("sessions", "restore", "--db", db, "--home", tmp, "no-such-id")
+        check("NEGATIVE: restoring an unknown session exits non-zero",
+              unknown.returncode != 0, "exit=%d" % unknown.returncode)
 
         # ── the good-fixture side of the grader ──────────────────────────────
         doctor = atlas("doctor", "--db", db, "--json")

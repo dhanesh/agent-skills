@@ -365,7 +365,7 @@ class LitestreamConfigTests(TempCase):
         self.assertIn("${LITESTREAM_SECRET_ACCESS_KEY}", text)
 
     def test_generator_refuses_to_emit_a_live_secret(self):
-        secret = "NOT-A-REAL-VALUE-" + "0123456789"  # scan-leaks:ignore — test fixture
+        secret = synth("NOT-A-REAL-", "VALUE-", "0123456789")
         os.environ["AWS_SECRET_ACCESS_KEY"] = secret
         self.addCleanup(os.environ.pop, "AWS_SECRET_ACCESS_KEY", None)
         code, out, err = run("litestream-config", "--db", self.db, "--target", "s3",
@@ -455,6 +455,299 @@ class StatsTests(TempCase):
         self.assertEqual(payload["projects"], 1)
         self.assertEqual(payload["missing"], 0)
         self.assertIn("go", payload["languages"])
+
+
+def synth(*parts):
+    """Runtime-assembled fixture value; see test_sessions.synth for why."""
+    return "".join(parts)
+
+
+def jsonl(records):
+    import json as _json
+    return "\n".join(_json.dumps(r, ensure_ascii=False, separators=(",", ":"))
+                     for r in records) + "\n"
+
+
+def rec(**kw):
+    base = {"type": "user", "uuid": "u1", "parentUuid": None,
+            "timestamp": "2026-01-01T00:00:00.000Z", "sessionId": "sid-alpha",
+            "cwd": "/home/dev/payments", "gitBranch": "main", "version": "2.1.0",
+            "message": {"role": "user", "content": "how do I retry a stripe webhook"}}
+    base.update(kw)
+    return base
+
+
+class SessionCommandTests(TempCase):
+    """The chats side of the index: capture, search, and cross-machine restore."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.tmp, "claude-home")
+        self.sid = "sid-alpha"
+        self.cwd = "/home/dev/payments"
+        self.records = [
+            rec(uuid="u1"),
+            rec(uuid="u2", parentUuid="u1", type="assistant",
+                timestamp="2026-01-01T00:01:00.000Z",
+                message={"role": "assistant",
+                         "content": [{"type": "text", "text": "call the retry endpoint"}]}),
+        ]
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           self.sid + ".jsonl"), jsonl(self.records))
+        write(os.path.join(self.home, "tasks", self.sid, "1.json"),
+              '{"subject": "wire the retry"}')
+
+    def ingest(self, *extra):
+        return run("sessions", "ingest", "--db", self.db, "--home", self.home, *extra)
+
+    def test_capture_records_envelope_metadata(self):
+        code, out, _ = self.ingest()
+        self.assertEqual(code, 0, out)
+        row = self.rows("SELECT * FROM agent_sessions")[0]
+        self.assertEqual(row["session_id"], self.sid)
+        self.assertEqual(row["cwd"], self.cwd)
+        self.assertEqual(row["git_branch"], "main")
+        self.assertEqual(row["cli_version"], "2.1.0")
+        self.assertEqual(row["user_turns"], 1)
+        self.assertEqual(row["assistant_turns"], 1)
+        self.assertEqual(row["redacted"], 1)
+        self.assertEqual(len(row["transcript_sha256"]), 64)
+
+    def test_every_event_is_stored_in_order(self):
+        self.ingest()
+        events = self.rows("SELECT * FROM session_events ORDER BY seq")
+        self.assertEqual([e["uuid"] for e in events], ["u1", "u2"])
+        self.assertEqual([e["seq"] for e in events], [0, 1])
+
+    def test_side_state_is_captured(self):
+        self.ingest()
+        arts = self.rows("SELECT * FROM session_artifacts")
+        self.assertIn(("tasks", "1.json"), {(a["kind"], a["name"]) for a in arts})
+
+    def test_recapture_replaces_rather_than_duplicates(self):
+        self.ingest()
+        self.ingest()
+        self.assertEqual(len(self.rows("SELECT * FROM agent_sessions")), 1)
+        self.assertEqual(len(self.rows("SELECT * FROM session_events")), 2)
+
+    def test_rewound_transcript_does_not_leave_stale_events(self):
+        self.ingest()
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           self.sid + ".jsonl"), jsonl(self.records[:1]))
+        self.ingest()
+        self.assertEqual(len(self.rows("SELECT * FROM session_events")), 1)
+
+    def test_dry_run_writes_nothing(self):
+        code, out, _ = self.ingest("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("WOULD_CAPTURE:", out)
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_chats_are_searchable(self):
+        self.ingest()
+        code, out, _ = run("sessions", "search", "--db", self.db, "stripe")
+        self.assertEqual(code, 0)
+        self.assertIn(self.sid[:8], out)
+        code, out, _ = run("sessions", "search", "--db", self.db, "--no-fts", "webhook")
+        self.assertEqual(code, 0)
+        self.assertIn("engine=like", out)
+
+    def test_list_and_show_report_the_capture(self):
+        self.ingest()
+        code, out, _ = run("sessions", "list", "--db", self.db)
+        self.assertEqual(code, 0)
+        self.assertIn(self.sid[:8], out)
+        code, out, _ = run("sessions", "show", "--db", self.db, "sid-al")
+        self.assertEqual(code, 0)
+        self.assertIn("transcript_sha256", out)
+
+    def test_ambiguous_prefix_is_refused(self):
+        self.ingest()
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           "sid-alpha-two.jsonl"),
+              jsonl([rec(uuid="z1", sessionId="sid-alpha-two")]))
+        self.ingest()
+        code, _, err = run("sessions", "show", "--db", self.db, "sid-a")
+        self.assertEqual(code, 1)
+        self.assertIn("matches 2 sessions", err)
+
+    def test_an_exact_id_wins_over_an_ambiguous_prefix(self):
+        self.ingest()
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           "sid-alpha-two.jsonl"),
+              jsonl([rec(uuid="z1", sessionId="sid-alpha-two")]))
+        self.ingest()
+        code, out, _ = run("sessions", "show", "--db", self.db, self.sid)
+        self.assertEqual(code, 0)
+        self.assertIn(self.sid, out)
+
+    # ── the security guarantees ──────────────────────────────────────────────
+
+    def test_credentials_in_a_transcript_are_redacted_before_storage(self):
+        secret = synth("hunter2", "hunter2", "hunter2")
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           self.sid + ".jsonl"),
+              jsonl([rec(uuid="u1", message={"role": "user",
+                                             "content": "export DB_PASSWORD=" + secret})]))
+        self.ingest()
+        stored = "".join(r["body"] for r in self.rows("SELECT body FROM session_events"))
+        self.assertNotIn(secret, stored)
+        self.assertIn("[REDACTED:", stored)
+        docs = "".join(r["body"] for r in self.rows("SELECT body FROM session_docs"))
+        self.assertNotIn(secret, docs)
+
+    def test_no_redact_is_opt_in_and_warns(self):
+        secret = synth("hunter2", "hunter2", "hunter2")
+        write(os.path.join(self.home, "projects", "-home-dev-payments",
+                           self.sid + ".jsonl"),
+              jsonl([rec(uuid="u1", message={"role": "user",
+                                             "content": "export DB_PASSWORD=" + secret})]))
+        code, _, err = self.ingest("--no-redact")
+        self.assertEqual(code, 0)
+        self.assertIn("WARNING", err)
+        stored = "".join(r["body"] for r in self.rows("SELECT body FROM session_events"))
+        self.assertIn(secret, stored)
+        self.assertEqual(self.rows("SELECT redacted FROM agent_sessions")[0]["redacted"], 0)
+
+    def test_account_config_never_reaches_the_index(self):
+        # ~/.claude.json carries oauthAccount / userID / machineID.
+        write(os.path.join(os.path.dirname(self.home), ".claude.json"),
+              '{"oauthAccount": {"emailAddress": "person@example.invalid"}, '
+              '"userID": "abc123", "machineID": "def456"}')
+        self.ingest()
+        conn = sqlite3.connect(self.db)
+        try:
+            dump = "\n".join(conn.iterdump())
+        finally:
+            conn.close()
+        self.assertNotIn("oauthAccount", dump)
+        self.assertNotIn("person@example.invalid", dump)
+        self.assertNotIn("machineID", dump)
+
+    def test_shell_snapshots_are_excluded_unless_requested(self):
+        write(os.path.join(self.home, "shell-snapshots", "snap.sh"),
+              "export SOME_VALUE=zzzz\n")
+        self.ingest()
+        kinds = {r["kind"] for r in self.rows("SELECT kind FROM session_artifacts")}
+        self.assertNotIn("shell-snapshot", kinds)
+        self.ingest("--include-shell-snapshots")
+        kinds = {r["kind"] for r in self.rows("SELECT kind FROM session_artifacts")}
+        self.assertIn("shell-snapshot", kinds)
+
+    # ── restore ──────────────────────────────────────────────────────────────
+
+    def test_unredacted_restore_is_byte_identical(self):
+        self.ingest("--no-redact")
+        target_home = os.path.join(self.tmp, "restored")
+        code, out, _ = run("sessions", "restore", "--db", self.db,
+                           "--home", target_home, self.sid)
+        self.assertEqual(code, 0, out)
+        self.assertIn("verify=sha256-exact", out)
+        path = os.path.join(target_home, "projects", "-home-dev-payments",
+                            self.sid + ".jsonl")
+        with open(path, "rb") as fh:
+            restored = fh.read()
+        with open(os.path.join(self.home, "projects", "-home-dev-payments",
+                               self.sid + ".jsonl"), "rb") as fh:
+            original = fh.read()
+        self.assertEqual(restored, original)
+
+    def test_restore_relocates_cwd_and_recomputes_the_slug(self):
+        import json as _json
+        self.ingest()
+        target_home = os.path.join(self.tmp, "restored")
+        code, out, _ = run("sessions", "restore", "--db", self.db, "--home", target_home,
+                           "--cwd", "/Users/dev/payments", "--allow-redacted", self.sid)
+        self.assertEqual(code, 0, out)
+        path = os.path.join(target_home, "projects", "-Users-dev-payments",
+                            self.sid + ".jsonl")
+        self.assertTrue(os.path.exists(path))
+        with open(path, encoding="utf-8") as fh:
+            cwds = {_json.loads(l)["cwd"] for l in fh if l.strip()}
+        self.assertEqual(cwds, {"/Users/dev/payments"})
+        self.assertIn("claude --resume", out)
+
+    def test_task_state_is_restored_alongside_the_transcript(self):
+        self.ingest()
+        target_home = os.path.join(self.tmp, "restored")
+        run("sessions", "restore", "--db", self.db, "--home", target_home,
+            "--allow-redacted", self.sid)
+        self.assertTrue(os.path.exists(
+            os.path.join(target_home, "tasks", self.sid, "1.json")))
+
+    def test_redacted_restore_requires_an_explicit_flag(self):
+        self.ingest()
+        target_home = os.path.join(self.tmp, "restored")
+        code, _, err = run("sessions", "restore", "--db", self.db,
+                           "--home", target_home, self.sid)
+        self.assertEqual(code, 1)
+        self.assertIn("redaction", err)
+        self.assertFalse(os.path.exists(os.path.join(target_home, "projects")))
+
+    def test_restore_refuses_to_clobber_without_force(self):
+        self.ingest("--no-redact")
+        target_home = os.path.join(self.tmp, "restored")
+        run("sessions", "restore", "--db", self.db, "--home", target_home, self.sid)
+        code, _, err = run("sessions", "restore", "--db", self.db,
+                           "--home", target_home, self.sid)
+        self.assertEqual(code, 1)
+        self.assertIn("--force", err)
+        code, _, _ = run("sessions", "restore", "--db", self.db, "--home", target_home,
+                         "--force", self.sid)
+        self.assertEqual(code, 0)
+
+    def test_restore_refuses_a_broken_parent_chain(self):
+        self.ingest("--no-redact")
+        conn = sqlite3.connect(self.db)
+        conn.execute("DELETE FROM session_events WHERE seq = 0")
+        conn.commit()
+        conn.close()
+        code, _, err = run("sessions", "restore", "--db", self.db,
+                           "--home", os.path.join(self.tmp, "restored"), self.sid)
+        self.assertEqual(code, 1)
+        self.assertIn("parent chain", err)
+
+    def test_restore_dry_run_writes_nothing(self):
+        self.ingest("--no-redact")
+        target_home = os.path.join(self.tmp, "restored")
+        code, out, _ = run("sessions", "restore", "--db", self.db, "--home", target_home,
+                           "--dry-run", self.sid)
+        self.assertEqual(code, 0)
+        self.assertIn("WOULD_WRITE:", out)
+        self.assertFalse(os.path.exists(os.path.join(target_home, "projects")))
+
+    def test_restoring_an_unknown_session_is_a_readable_error(self):
+        self.ingest()
+        code, _, err = run("sessions", "restore", "--db", self.db, "no-such-session")
+        self.assertEqual(code, 1)
+        self.assertIn("no captured session", err)
+
+    def test_ingest_without_an_agent_home_is_a_readable_error(self):
+        code, _, err = run("sessions", "ingest", "--db", self.db,
+                           "--home", os.path.join(self.tmp, "absent"))
+        self.assertEqual(code, 1)
+        self.assertIn("agent home", err)
+
+    def test_sessions_link_to_indexed_projects(self):
+        os.makedirs(self.tmp + "/tree/payments", exist_ok=True)
+        write(os.path.join(self.tree, "payments", "go.mod"), "module payments\n")
+        run("scan", "--db", self.db, self.tree)
+        write(os.path.join(self.home, "projects", "-x", "sid-beta.jsonl"),
+              jsonl([rec(uuid="b1", sessionId="sid-beta",
+                         cwd=os.path.join(self.tree, "payments"))]))
+        self.ingest()
+        row = [r for r in self.rows("SELECT * FROM agent_sessions")
+               if r["session_id"] == "sid-beta"][0]
+        self.assertIsNotNone(row["project_id"])
+
+    def test_doctor_reports_session_capture_state(self):
+        import json as _json
+        self.ingest()
+        code, out, _ = run("doctor", "--db", self.db, "--json")
+        self.assertEqual(code, 0)
+        report = _json.loads(out)
+        self.assertEqual(report["sessions_captured"], 1)
+        self.assertEqual(report["sessions_unredacted"], 0)
 
 
 class CliTests(TempCase):

@@ -2,29 +2,33 @@
 name: project-atlas
 description: >-
   Index every project on a local machine into one durable SQLite database — path, git remote,
-  branch, HEAD, languages, toolchains, plus full-text search over READMEs and docs — and
-  replicate that database to S3, Cloudflare R2, Backblaze B2, or any S3-compatible bucket with
-  Litestream 0.5.x, restore included. Use when the user says "index all my repos", "catalogue
-  the projects on this machine", "where is that project that...", "find my checkout of X",
-  "back up / sync my project index to S3 or R2", or "make my local projects searchable and
-  survive a reinstall". Ships a stdlib-only scanner, an FTS5-or-LIKE search CLI, a capability
-  doctor, and a config generator whose output is pinned to Litestream's current config
-  grammar. Not a code-search engine over whole source trees, not a background daemon, and not
-  a Cloudflare Durable Object deployment.
+  branch, HEAD, languages, toolchains — and capture agent sessions (chat transcripts plus the
+  task state a resume needs) into the same database, all full-text searchable, then replicate
+  it to S3, Cloudflare R2, Backblaze B2, or any S3-compatible bucket with Litestream 0.5.x.
+  Use when the user says "index all my repos", "catalogue the projects on this machine",
+  "where is that project that...", "back up / sync my project index to S3 or R2", "save my
+  Claude Code chats", "search my past sessions", or "resume this session on my other
+  machine". Restores a captured session onto a different machine, rewriting paths so it can
+  be resumed there. Ships a stdlib-only scanner, session capture with credential redaction on
+  by default, an FTS5-or-LIKE search CLI, a capability doctor, and a Litestream config
+  generator. Not a code-search engine over whole source trees, not a background daemon, not a
+  credential or account sync, and not a Cloudflare Durable Object deployment.
 license: MIT
-compatibility: Requires python3 (stdlib only) and a POSIX-like shell; git optional (enriches metadata); the Litestream binary is needed only to replicate or restore, never to scan or search. Offline except for replication itself.
+compatibility: Requires python3 (stdlib only) and a POSIX-like shell; git optional (enriches metadata); the Litestream binary is needed only to replicate or restore, never to scan, capture or search. Session capture reads Claude Code's agent home ($CLAUDE_CONFIG_DIR or ~/.claude). Offline except for replication itself.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.1.0"
   tags: "sqlite,litestream,fts5,indexing,search,replication,s3,r2,backup,local-projects"
 ---
 
 # project-atlas
 
-Turn a machine full of half-remembered checkouts into one queryable inventory that survives
-the machine. The index is a single SQLite file; search is FTS5 over each project's README,
-docs, and path; durability is Litestream streaming that file to object storage, with a
-restore command generated alongside the config.
+Turn a machine full of half-remembered checkouts — and the conversations that shaped them —
+into one queryable store that survives the machine. The index is a single SQLite file;
+search is FTS5 over project docs and captured chats alike; durability is Litestream
+streaming that file to object storage, with a restore command generated alongside the
+config. Restore it elsewhere and you get both halves back: where the work lives, and the
+session you were in the middle of.
 
 The engineering claims underneath — what Litestream's current config grammar is, why an R2
 endpoint needs its scheme, why the index must be WAL — were verified against the Litestream
@@ -45,10 +49,14 @@ asserting. `references/replication.md` carries the citations.
 - **The replica** — a Litestream `replica:` mapping (0.5.x singular form) pointing at S3,
   R2, B2, a custom S3-compatible endpoint, or a local directory, with an explicit
   `sync-interval` and credentials as `${ENV}` expansions only.
+- **A captured session** — one row per (agent, session id, host): cwd, git branch, CLI
+  version, turn counts, the sha256 of the original transcript, plus every transcript record
+  stored verbatim in order and the session's task state. Credential-shaped strings are
+  redacted before storage; the agent's account config is never read at all.
 - **Output protocol** — every command ends in one machine-readable line:
-  `SCAN_RESULT:`, `SEARCH_RESULT:`, `STATS_RESULT:`, `DOCTOR_RESULT:`. `search`, `stats`,
-  and `doctor` also take `--json`. Exit 0 on success, 1 on a failed check or requirement,
-  2 on a usage error.
+  `SCAN_RESULT:`, `SEARCH_RESULT:`, `STATS_RESULT:`, `DOCTOR_RESULT:`, `SESSIONS_RESULT:`,
+  `RESTORE_RESULT:`. Most commands also take `--json`. Exit 0 on success, 1 on a failed
+  check or requirement, 2 on a usage error.
 
 Every flag is in `references/parameters.md`; the schema and query recipes are in
 `references/schema.md`.
@@ -73,15 +81,30 @@ Every flag is in `references/parameters.md`; the schema and query recipes are in
    available (`stripe AND webhook`, `"exact phrase"`, `pay*`). If `SEARCH_RESULT:` reports
    `engine=like`, the query was a substring match: tell the user, because a multi-term FTS
    query means something different to a LIKE scan. `--json` when another tool consumes it.
-5. **Make it durable.** `atlas.py litestream-config --target r2|s3|b2|custom|file …
+5. **Capture the chats, if the user wants sessions to travel too.**
+   `atlas.py sessions ingest` (add `--limit N` to take only recent ones). Redaction is on
+   by default and the `SESSIONS_RESULT:` line reports what it removed — relay that count,
+   because it is the user's evidence that scrubbing happened. `--no-redact` exists and
+   prints a warning; only reach for it if the user asks for byte-exact transcripts and
+   controls the bucket. Transcripts are large (a single active session ran to 1.8 MB), so
+   say what capturing everything will cost before doing it.
+6. **Make it durable.** `atlas.py litestream-config --target r2|s3|b2|custom|file …
    --out <path>` writes the config and prints the runbook: the `litestream replicate`
    command to run, and the `litestream restore` commands (latest, point-in-time, dry-run)
    for recovery. Bring up replication, then **verify the restore before trusting it** — a
    replica nobody has restored from is a hypothesis. Restore to a scratch path and open it:
    `litestream restore -o /tmp/atlas-check.db "<url>" && python3 assets/atlas.py stats --db /tmp/atlas-check.db`.
-6. **Keep it fresh.** The scanner is not a daemon. Schedule it — a cron entry or a launchd
-   job running `atlas.py scan <roots>` daily is usually right. Litestream is the only
-   long-running piece; `references/replication.md` has the service-unit shape.
+7. **Resume elsewhere, when that is the goal.** On the other machine: restore the index
+   from the replica, `atlas.py sessions search` for the work, then
+   `atlas.py sessions restore <id> --cwd <path-on-this-machine>`. The `--cwd` flag is the
+   one that matters — it recomputes the agent's project directory and rewrites every
+   record's path, which is what makes a Linux capture resumable on a Mac. The command
+   prints the `claude --resume` line to run. `references/sessions.md` has the refusals and
+   what each verification level actually proves.
+8. **Keep it fresh.** Neither the scanner nor the capture is a daemon. Schedule them — a
+   cron entry running `atlas.py scan <roots>` and then `atlas.py sessions ingest --limit 50`
+   daily is usually right. Litestream is the only long-running piece;
+   `references/replication.md` has the service-unit shape.
 
 ## Deliverable
 
@@ -96,13 +119,16 @@ run once. Report the index path, project count, replica target, and the engine (
 Before handing back, run the skill's own checks:
 
 ```sh
-python3 -m unittest discover -s assets -p 'test_*.py'   # 47 unit checks
+python3 -m unittest discover -s assets -p 'test_*.py'   # 96 unit checks
 python3 eval/run_eval.py                                # end-to-end outcome eval
 ```
 
-The eval builds a synthetic machine, indexes it, deletes a project, and grades the result —
-including negative fixtures that must be rejected (a deprecated `replicas:` config, a bare
-R2 endpoint, an inline credential, a `Makefile`-only directory). It ends in
+The eval builds a synthetic machine *and* a synthetic agent home, indexes both, deletes a
+project, captures a session, and relocates it onto a different machine's layout — then
+grades the result, including negative fixtures that must be rejected (a deprecated
+`replicas:` config, a bare R2 endpoint, an inline credential, a `Makefile`-only directory,
+a planted credential that must not reach the database, account identity that must never be
+read, a redacted capture that must refuse to restore, a broken parent chain). It ends in
 `EVAL_RESULT: PASS (n/n checks)`. If you changed anything under `assets/`, a green eval is
 the evidence; a claim without it is a guess.
 
@@ -119,7 +145,14 @@ the evidence; a claim without it is a guess.
   `missing_since` and `last_scanned` are there so staleness is visible rather than assumed
   away.
 - **Secrets stay in the environment.** The generator emits `${…}` expansions and refuses to
-  write a config containing a live credential value from the environment.
+  write a config containing a live credential value from the environment. Session capture
+  redacts credential-shaped strings by default and never reads the agent's account config.
+- **Session formats are undocumented, so nothing here parses them.** Records are stored
+  verbatim and only the envelope is read. A restore is verified, not assumed — but the
+  proof stops at the artifact: that the CLI accepts a restored session and continues it is
+  confirmed by your first real resume, not by the offline eval.
+- **Not a live handoff.** Resume means restore-then-continue after a sync, not two machines
+  writing one conversation at once.
 
 ## References
 
@@ -128,9 +161,14 @@ the evidence; a claim without it is a guess.
   questions the CLI does not answer directly (stale checkouts, duplicate remotes, …).
 - `references/replication.md` — Litestream 0.5.x specifics, per-provider settings, the
   restore drill, scheduling, and the grounded citations behind each constraint.
+- `references/sessions.md` — the agent-session layout, what is deliberately never captured,
+  redaction, and the cross-machine resume procedure with its three refusals.
 
 ## Assets
 
-- `assets/atlas.py` — the scanner, search CLI, doctor, and config generator (stdlib only).
-- `assets/test_atlas.py` — the unit suite.
+- `assets/atlas.py` — the scanner, session commands, search CLI, doctor, and config
+  generator (stdlib only).
+- `assets/sessions.py` — session discovery, redaction, transcript round-tripping, restore
+  path mapping.
+- `assets/test_atlas.py`, `assets/test_sessions.py` — the unit suites.
 - `eval/run_eval.py` — the outcome eval described under **Verify**.

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json as jsonlib
 import os
 import shutil
@@ -41,7 +42,10 @@ import sqlite3
 import subprocess
 import sys
 
-SCHEMA_VERSION = 1
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sessions as _sessions  # noqa: E402  (sibling module, stdlib-only)
+
+SCHEMA_VERSION = 2
 
 # Litestream series whose config grammar this generator targets. Recorded so a
 # future maintainer can tell whether a Litestream upgrade invalidates the output.
@@ -252,11 +256,63 @@ CREATE TABLE IF NOT EXISTS docs (
     project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     body       TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id                INTEGER PRIMARY KEY,
+    session_id        TEXT NOT NULL,
+    agent             TEXT NOT NULL,
+    host              TEXT,
+    cwd               TEXT,
+    slug              TEXT,
+    project_id        INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+    git_branch        TEXT,
+    cli_version       TEXT,
+    title             TEXT,
+    started_at        TEXT,
+    ended_at          TEXT,
+    message_count     INTEGER,
+    user_turns        INTEGER,
+    assistant_turns   INTEGER,
+    redacted          INTEGER NOT NULL DEFAULT 1,
+    redaction_summary TEXT,
+    transcript_sha256 TEXT,
+    transcript_bytes  INTEGER,
+    captured_at       TEXT NOT NULL,
+    captured_from     TEXT,
+    UNIQUE (agent, session_id, host)
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_sid_idx ON agent_sessions(session_id);
+CREATE INDEX IF NOT EXISTS agent_sessions_cwd_idx ON agent_sessions(cwd);
+CREATE TABLE IF NOT EXISTS session_events (
+    session_row INTEGER NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    uuid        TEXT,
+    parent_uuid TEXT,
+    kind        TEXT,
+    ts          TEXT,
+    body        TEXT NOT NULL,
+    PRIMARY KEY (session_row, seq)
+);
+CREATE TABLE IF NOT EXISTS session_artifacts (
+    session_row INTEGER NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    PRIMARY KEY (session_row, kind, name)
+);
+CREATE TABLE IF NOT EXISTS session_docs (
+    session_row INTEGER PRIMARY KEY REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    body        TEXT NOT NULL
+);
 """
 
 FTS_DDL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5("
     "body, content='docs', content_rowid='project_id')"
+)
+
+SESSION_FTS_DDL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5("
+    "body, content='session_docs', content_rowid='session_row')"
 )
 
 
@@ -272,6 +328,7 @@ def init_schema(conn: sqlite3.Connection) -> bool:
     if has_fts:
         try:
             conn.execute(FTS_DDL)
+            conn.execute(SESSION_FTS_DDL)
         except sqlite3.Error:
             has_fts = False
     conn.execute(
@@ -719,7 +776,15 @@ def probe(db_path: str) -> dict:
         "sqlite": sqlite3.sqlite_version,
         "projects": None,
         "missing": None,
+        "agent_home": None,
+        "sessions_on_disk": 0,
+        "sessions_captured": None,
+        "sessions_unredacted": None,
     }
+    home = _sessions.default_agent_home()
+    if os.path.isdir(home):
+        report["agent_home"] = home
+        report["sessions_on_disk"] = len(_sessions.discover(home))
     if exists:
         try:
             conn = sqlite3.connect("file:%s?mode=ro" % db_path, uri=True)
@@ -728,6 +793,13 @@ def probe(db_path: str) -> dict:
             report["missing"] = conn.execute(
                 "SELECT count(*) FROM projects WHERE missing_since IS NOT NULL"
             ).fetchone()[0]
+            try:
+                report["sessions_captured"] = conn.execute(
+                    "SELECT count(*) FROM agent_sessions").fetchone()[0]
+                report["sessions_unredacted"] = conn.execute(
+                    "SELECT count(*) FROM agent_sessions WHERE redacted = 0").fetchone()[0]
+            except sqlite3.Error:
+                pass  # an index written by schema v1 has no session tables yet
             conn.close()
         except sqlite3.Error:
             pass
@@ -764,10 +836,391 @@ def cmd_doctor(args) -> int:
     print("CHECK: git — %s" % (report["git"] or "MISSING (no git metadata will be recorded)"))
     print("CHECK: index — %s (%s project(s), %s missing)"
           % (report["db"], report["projects"], report["missing"]))
+    print("CHECK: agent home — %s (%d transcript(s) on disk)"
+          % (report["agent_home"] or "NONE", report["sessions_on_disk"]))
+    print("CHECK: sessions captured — %s%s" % (
+        report["sessions_captured"],
+        "" if not report["sessions_unredacted"]
+        else " (%d stored UNREDACTED)" % report["sessions_unredacted"]))
     if failures:
         print("DOCTOR_RESULT: FAIL (missing: %s)" % ", ".join(failures))
         return 1
     print("DOCTOR_RESULT: PASS")
+    return 0
+
+
+# ── agent sessions ───────────────────────────────────────────────────────────
+# Chats and the state around them, so a session can be picked up on another
+# machine after the index syncs. The formats these read are undocumented and move
+# with the CLI version, so the rule is: store records verbatim, interpret only the
+# envelope, and prove the round-trip rather than assume it.
+
+def has_session_fts(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_fts'"
+    ).fetchone() is not None
+
+
+def project_for_cwd(conn: sqlite3.Connection, cwd: str):
+    """The indexed project a session was working in, if the scanner has seen it."""
+    if not cwd:
+        return None
+    row = conn.execute("SELECT id FROM projects WHERE path = ?", (cwd,)).fetchone()
+    if row:
+        return row["id"]
+    # A session's cwd may be a subdirectory of the project root.
+    best = None
+    for candidate in conn.execute("SELECT id, path FROM projects"):
+        path = candidate["path"]
+        if cwd.startswith(path.rstrip(os.sep) + os.sep):
+            if best is None or len(path) > best[1]:
+                best = (candidate["id"], len(path))
+    return best[0] if best else None
+
+
+def ingest_session(conn, entry, *, stamp, redact_on, include_shell, agent_home):
+    """Capture one transcript (and its side state) into the index."""
+    records, digest, nbytes = _sessions.read_records(entry["path"])
+    meta = _sessions.summarize(records, entry["session_id"])
+    host = _sessions.hostname()
+
+    bodies = []
+    redaction_counts: dict = {}
+    for rec in records:
+        if rec["obj"] is None:
+            line = rec["line"]
+        else:
+            line = jsonlib.dumps(rec["obj"], ensure_ascii=False, separators=(",", ":"))
+        if redact_on:
+            line, counts = _sessions.redact(line)
+            for key, value in counts.items():
+                redaction_counts[key] = redaction_counts.get(key, 0) + value
+        bodies.append(line)
+
+    doc = _sessions.build_doc(meta)
+    if redact_on:
+        doc, _ = _sessions.redact(doc)
+
+    conn.execute(
+        "INSERT INTO agent_sessions (session_id, agent, host, cwd, slug, project_id,"
+        " git_branch, cli_version, title, started_at, ended_at, message_count,"
+        " user_turns, assistant_turns, redacted, redaction_summary, transcript_sha256,"
+        " transcript_bytes, captured_at, captured_from)"
+        " VALUES (:session_id, :agent, :host, :cwd, :slug, :project_id, :git_branch,"
+        " :cli_version, :title, :started_at, :ended_at, :message_count, :user_turns,"
+        " :assistant_turns, :redacted, :redaction_summary, :sha, :nbytes, :now, :src)"
+        " ON CONFLICT(agent, session_id, host) DO UPDATE SET"
+        " cwd=excluded.cwd, slug=excluded.slug, project_id=excluded.project_id,"
+        " git_branch=excluded.git_branch, cli_version=excluded.cli_version,"
+        " title=excluded.title, started_at=excluded.started_at, ended_at=excluded.ended_at,"
+        " message_count=excluded.message_count, user_turns=excluded.user_turns,"
+        " assistant_turns=excluded.assistant_turns, redacted=excluded.redacted,"
+        " redaction_summary=excluded.redaction_summary,"
+        " transcript_sha256=excluded.transcript_sha256,"
+        " transcript_bytes=excluded.transcript_bytes, captured_at=excluded.captured_at,"
+        " captured_from=excluded.captured_from",
+        {
+            "session_id": entry["session_id"], "agent": _sessions.AGENT_CLAUDE_CODE,
+            "host": host, "cwd": meta["cwd"], "slug": entry["slug"],
+            "project_id": project_for_cwd(conn, meta["cwd"]),
+            "git_branch": meta["git_branch"], "cli_version": meta["cli_version"],
+            "title": meta["title"], "started_at": meta["started_at"],
+            "ended_at": meta["ended_at"], "message_count": meta["message_count"],
+            "user_turns": meta["user_turns"], "assistant_turns": meta["assistant_turns"],
+            "redacted": 1 if redact_on else 0,
+            "redaction_summary": jsonlib.dumps(redaction_counts, sort_keys=True),
+            "sha": digest, "nbytes": nbytes, "now": stamp, "src": entry["path"],
+        },
+    )
+    row_id = conn.execute(
+        "SELECT id FROM agent_sessions WHERE agent = ? AND session_id = ? AND host = ?",
+        (_sessions.AGENT_CLAUDE_CODE, entry["session_id"], host),
+    ).fetchone()[0]
+
+    # Replace wholesale: a transcript is append-only upstream, but a rewind can
+    # rewrite it, and a partial overlay would silently mix two histories.
+    conn.execute("DELETE FROM session_events WHERE session_row = ?", (row_id,))
+    for seq, (rec, body) in enumerate(zip(records, bodies)):
+        obj = rec["obj"] if isinstance(rec["obj"], dict) else {}
+        conn.execute(
+            "INSERT INTO session_events (session_row, seq, uuid, parent_uuid, kind, ts, body)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, seq, obj.get("uuid"), obj.get("parentUuid"), obj.get("type"),
+             obj.get("timestamp"), body),
+        )
+
+    conn.execute("DELETE FROM session_artifacts WHERE session_row = ?", (row_id,))
+    for kind, name, text in _sessions.side_artifacts(
+            agent_home, entry["session_id"], include_shell=include_shell):
+        if redact_on:
+            text, counts = _sessions.redact(text)
+            for key, value in counts.items():
+                redaction_counts[key] = redaction_counts.get(key, 0) + value
+        conn.execute(
+            "INSERT INTO session_artifacts (session_row, kind, name, body)"
+            " VALUES (?, ?, ?, ?)", (row_id, kind, name, text))
+
+    conn.execute(
+        "INSERT INTO session_docs (session_row, body) VALUES (?, ?)"
+        " ON CONFLICT(session_row) DO UPDATE SET body = excluded.body",
+        (row_id, doc))
+    conn.execute(
+        "UPDATE agent_sessions SET redaction_summary = ? WHERE id = ?",
+        (jsonlib.dumps(redaction_counts, sort_keys=True), row_id))
+    return row_id, meta, redaction_counts
+
+
+def cmd_sessions_ingest(args) -> int:
+    home = os.path.abspath(os.path.expanduser(args.home or _sessions.default_agent_home()))
+    if not os.path.isdir(home):
+        raise AtlasError("no agent home at %s (set --home or $CLAUDE_CONFIG_DIR)" % home)
+    entries = _sessions.discover(home)
+    if args.session:
+        entries = [e for e in entries if e["session_id"] in set(args.session)]
+        if not entries:
+            raise AtlasError("no transcript found for session id(s): %s"
+                             % ", ".join(args.session))
+    if args.limit:
+        entries = entries[: args.limit]
+    if not entries:
+        print("SESSIONS_RESULT: OK (0 session(s) found under %s)" % home)
+        return 0
+
+    if args.dry_run:
+        for entry in entries:
+            print("WOULD_CAPTURE: %s (%s)" % (entry["session_id"], entry["slug"]))
+        print("SESSIONS_RESULT: DRY-RUN (%d session(s), redact=%s, shell-snapshots=%s)"
+              % (len(entries), "off" if args.no_redact else "on",
+                 "included" if args.include_shell_snapshots else "excluded"))
+        return 0
+
+    if args.no_redact:
+        # Not a refusal — the user may genuinely need byte-exact transcripts — but
+        # it must never happen quietly, because the destination is a cloud bucket.
+        print("WARNING: --no-redact stores transcripts verbatim; tool output in a "
+              "transcript routinely contains credentials, and this index is "
+              "replicated.", file=sys.stderr)
+
+    conn = connect(args.db)
+    try:
+        has_fts = init_schema(conn)
+        stamp = now_iso()
+        total_events = 0
+        all_redactions: dict = {}
+        for entry in entries:
+            _, meta, counts = ingest_session(
+                conn, entry, stamp=stamp, redact_on=not args.no_redact,
+                include_shell=args.include_shell_snapshots, agent_home=home)
+            total_events += meta["message_count"]
+            for key, value in counts.items():
+                all_redactions[key] = all_redactions.get(key, 0) + value
+        if has_fts and has_session_fts(conn):
+            conn.execute("INSERT INTO session_fts(session_fts) VALUES('rebuild')")
+        conn.commit()
+        total = conn.execute("SELECT count(*) FROM agent_sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+    summary = ", ".join("%s=%d" % kv for kv in sorted(all_redactions.items())) or "none"
+    print("SESSIONS_RESULT: OK (captured=%d events=%d total=%d redactions=%s)"
+          % (len(entries), total_events, total, summary))
+    return 0
+
+
+def cmd_sessions_list(args) -> int:
+    conn = connect(args.db, create=False)
+    try:
+        rows = conn.execute(
+            "SELECT session_id, host, cwd, git_branch, title, started_at, ended_at,"
+            " message_count, redacted FROM agent_sessions"
+            " ORDER BY coalesce(ended_at, captured_at) DESC LIMIT ?",
+            (args.limit,)).fetchall()
+    finally:
+        conn.close()
+    if args.json:
+        print(jsonlib.dumps([dict(r) for r in rows], indent=2, sort_keys=True))
+        return 0
+    for row in rows:
+        print("SESSION: %s  %s  %s  [%d msgs%s]" % (
+            row["session_id"][:8], (row["ended_at"] or "")[:19] or "unknown",
+            row["cwd"] or "?", row["message_count"] or 0,
+            "" if row["redacted"] else " RAW"))
+        if row["title"]:
+            print("         %s" % row["title"][:100])
+    print("SESSIONS_RESULT: %d session(s)" % len(rows))
+    return 0
+
+
+def cmd_sessions_search(args) -> int:
+    conn = connect(args.db, create=False)
+    cols = ("s.session_id, s.host, s.cwd, s.git_branch, s.title, s.ended_at, "
+            "s.message_count, s.redacted")
+    try:
+        rows, engine = [], "like"
+        if not args.no_fts and has_session_fts(conn):
+            try:
+                rows = conn.execute(
+                    "SELECT %s FROM session_fts JOIN agent_sessions s"
+                    " ON s.id = session_fts.rowid WHERE session_fts MATCH ?"
+                    " ORDER BY rank LIMIT ?" % cols, (args.query, args.limit)).fetchall()
+                engine = "fts5"
+            except sqlite3.Error:
+                rows = []
+        if engine != "fts5":
+            like = "%" + args.query.replace("\\", "\\\\").replace(
+                "%", "\\%").replace("_", "\\_") + "%"
+            rows = conn.execute(
+                "SELECT %s FROM session_docs d JOIN agent_sessions s"
+                " ON s.id = d.session_row WHERE d.body LIKE ? ESCAPE '\\'"
+                " ORDER BY s.ended_at DESC LIMIT ?" % cols,
+                (like, args.limit)).fetchall()
+    finally:
+        conn.close()
+    if args.json:
+        print(jsonlib.dumps({"engine": engine, "query": args.query,
+                             "hits": [dict(r) for r in rows]}, indent=2, sort_keys=True))
+        return 0
+    for row in rows:
+        print("HIT: %s  %s  %s" % (row["session_id"][:8], (row["ended_at"] or "")[:19],
+                                   row["cwd"] or "?"))
+        if row["title"]:
+            print("     %s" % row["title"][:100])
+    print("SEARCH_RESULT: %d hit(s) (engine=%s)" % (len(rows), engine))
+    return 0
+
+
+def _resolve_session(conn, session_id: str):
+    """Accept a full session id or an unambiguous prefix."""
+    rows = conn.execute(
+        "SELECT * FROM agent_sessions WHERE session_id = ?", (session_id,)).fetchall()
+    if not rows:
+        rows = conn.execute(
+            "SELECT * FROM agent_sessions WHERE session_id LIKE ?",
+            (session_id + "%",)).fetchall()
+    if not rows:
+        raise AtlasError("no captured session matching %r" % session_id)
+    if len(rows) > 1:
+        raise AtlasError("%r matches %d sessions (%s) — use a longer id"
+                         % (session_id, len(rows),
+                            ", ".join(r["session_id"][:12] for r in rows)))
+    return rows[0]
+
+
+def cmd_sessions_show(args) -> int:
+    conn = connect(args.db, create=False)
+    try:
+        row = _resolve_session(conn, args.session_id)
+        events = conn.execute(
+            "SELECT body FROM session_events WHERE session_row = ? ORDER BY seq",
+            (row["id"],)).fetchall()
+        artifacts = conn.execute(
+            "SELECT kind, name, length(body) AS n FROM session_artifacts"
+            " WHERE session_row = ? ORDER BY kind, name", (row["id"],)).fetchall()
+    finally:
+        conn.close()
+    if args.transcript:
+        sys.stdout.write(_sessions.render_transcript(
+            [e["body"] for e in events], "", ""))
+        return 0
+    payload = dict(row)
+    payload["events"] = len(events)
+    payload["artifacts"] = [dict(a) for a in artifacts]
+    if args.json:
+        print(jsonlib.dumps(payload, indent=2, sort_keys=True, default=str))
+        return 0
+    for key in ("session_id", "agent", "host", "cwd", "slug", "git_branch",
+                "cli_version", "title", "started_at", "ended_at", "message_count",
+                "user_turns", "assistant_turns", "redacted", "redaction_summary",
+                "transcript_sha256", "transcript_bytes", "captured_at"):
+        print("%-18s %s" % (key + ":", payload.get(key)))
+    for art in artifacts:
+        print("artifact:          %s/%s (%d bytes)" % (art["kind"], art["name"], art["n"]))
+    print("SHOW_RESULT: %d event(s), %d artifact(s)" % (len(events), len(artifacts)))
+    return 0
+
+
+def cmd_sessions_restore(args) -> int:
+    conn = connect(args.db, create=False)
+    try:
+        row = _resolve_session(conn, args.session_id)
+        events = [r["body"] for r in conn.execute(
+            "SELECT body FROM session_events WHERE session_row = ? ORDER BY seq",
+            (row["id"],)).fetchall()]
+        artifacts = conn.execute(
+            "SELECT kind, name, body FROM session_artifacts WHERE session_row = ?"
+            " ORDER BY kind, name", (row["id"],)).fetchall()
+    finally:
+        conn.close()
+    if not events:
+        raise AtlasError("session %s has no stored events" % row["session_id"])
+
+    home = os.path.abspath(os.path.expanduser(args.home or _sessions.default_agent_home()))
+    old_cwd = row["cwd"] or ""
+    new_cwd = os.path.abspath(os.path.expanduser(args.cwd)) if args.cwd else old_cwd
+    slug = args.slug or _sessions.slug_for(new_cwd) if new_cwd else row["slug"]
+    text = _sessions.render_transcript(events, old_cwd, new_cwd)
+
+    # Verification. An unredacted, un-relocated restore must reproduce the original
+    # bytes exactly — that is the strongest check available and it is cheap. When
+    # redaction or a cwd rewrite has changed the bytes by design, fall back to the
+    # structural property a resume actually walks: an intact parent chain.
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    exact = bool(row["transcript_sha256"]) and digest == row["transcript_sha256"]
+    parsed = [{"obj": jsonlib.loads(b)} for b in events
+              if b.strip().startswith("{")]
+    intact = _sessions.chain_is_intact(parsed)
+    if not intact:
+        raise AtlasError(
+            "refusing to restore %s: the stored parent chain is broken, so a resume "
+            "would read a truncated history" % row["session_id"])
+    if row["redacted"] and not args.allow_redacted:
+        raise AtlasError(
+            "session %s was captured with redaction, so the transcript is not "
+            "byte-identical to the original (credential-shaped strings were "
+            "replaced). Pass --allow-redacted to restore it anyway."
+            % row["session_id"])
+
+    target_dir = os.path.join(home, "projects", slug)
+    target = os.path.join(target_dir, row["session_id"] + ".jsonl")
+    written = []
+    if args.dry_run:
+        print("WOULD_WRITE: %s (%d bytes)" % (target, len(text.encode("utf-8"))))
+        for art in artifacts:
+            if art["kind"] == "tasks":
+                print("WOULD_WRITE: %s" % os.path.join(
+                    home, "tasks", row["session_id"], art["name"]))
+            else:
+                print("WOULD_SKIP: %s/%s (kept in the index, not replayed to disk)"
+                      % (art["kind"], art["name"]))
+        print("RESTORE_RESULT: DRY-RUN (verify=%s cwd=%s)"
+              % ("sha256-exact" if exact else "chain-intact", new_cwd or "unchanged"))
+        return 0
+
+    if os.path.exists(target) and not args.force:
+        raise AtlasError("%s already exists — pass --force to overwrite" % target)
+    os.makedirs(target_dir, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    written.append(target)
+
+    tasks = [a for a in artifacts if a["kind"] == "tasks"]
+    if tasks:
+        tasks_dir = os.path.join(home, "tasks", row["session_id"])
+        os.makedirs(tasks_dir, exist_ok=True)
+        for art in tasks:
+            path = os.path.join(tasks_dir, art["name"])
+            if os.path.exists(path) and not args.force:
+                continue
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(art["body"])
+            written.append(path)
+
+    for path in written:
+        print("WROTE: %s" % path)
+    print("RESUME: claude --resume %s   # from %s" % (row["session_id"], new_cwd or "?"))
+    print("RESTORE_RESULT: OK (events=%d verify=%s redacted=%s cwd=%s)"
+          % (len(events), "sha256-exact" if exact else "chain-intact",
+             "yes" if row["redacted"] else "no", new_cwd or "unchanged"))
     return 0
 
 
@@ -962,6 +1415,61 @@ def build_parser() -> argparse.ArgumentParser:
                              % "|".join(CAPABILITIES))
     add_db_flag(doctor)
     doctor.set_defaults(func=cmd_doctor)
+
+    sess = sub.add_parser(
+        "sessions", help="capture, search and restore agent sessions (chats + state)")
+    sess_sub = sess.add_subparsers(dest="sessions_command", required=True)
+
+    ing = sess_sub.add_parser("ingest", help="capture sessions into the index")
+    ing.add_argument("--home", default="",
+                     help="agent home (default: $CLAUDE_CONFIG_DIR or ~/.claude)")
+    ing.add_argument("--session", action="append",
+                     help="capture only this session id; repeatable")
+    ing.add_argument("--limit", type=int, default=0,
+                     help="capture only the N most recent sessions")
+    ing.add_argument("--no-redact", action="store_true",
+                     help="store transcripts verbatim (see the warning it prints)")
+    ing.add_argument("--include-shell-snapshots", action="store_true",
+                     help="also capture shell snapshots (large; often carry exported env)")
+    ing.add_argument("--dry-run", action="store_true", help="list, write nothing")
+    add_db_flag(ing)
+    ing.set_defaults(func=cmd_sessions_ingest)
+
+    lst = sess_sub.add_parser("list", help="list captured sessions, newest first")
+    lst.add_argument("--limit", type=int, default=20)
+    lst.add_argument("--json", action="store_true")
+    add_db_flag(lst)
+    lst.set_defaults(func=cmd_sessions_list)
+
+    ssearch = sess_sub.add_parser("search", help="full-text search over captured chats")
+    ssearch.add_argument("query")
+    ssearch.add_argument("--limit", type=int, default=20)
+    ssearch.add_argument("--no-fts", action="store_true")
+    ssearch.add_argument("--json", action="store_true")
+    add_db_flag(ssearch)
+    ssearch.set_defaults(func=cmd_sessions_search)
+
+    show = sess_sub.add_parser("show", help="show one session's metadata or transcript")
+    show.add_argument("session_id", help="full id or an unambiguous prefix")
+    show.add_argument("--transcript", action="store_true",
+                      help="write the reconstructed JSONL to stdout")
+    show.add_argument("--json", action="store_true")
+    add_db_flag(show)
+    show.set_defaults(func=cmd_sessions_show)
+
+    rest = sess_sub.add_parser(
+        "restore", help="write a captured session back onto this machine")
+    rest.add_argument("session_id", help="full id or an unambiguous prefix")
+    rest.add_argument("--home", default="", help="agent home to restore into")
+    rest.add_argument("--cwd", default="",
+                      help="working directory on THIS machine (rewrites paths and slug)")
+    rest.add_argument("--slug", default="", help="override the projects/ directory name")
+    rest.add_argument("--allow-redacted", action="store_true",
+                      help="restore a redacted capture (not byte-identical to the original)")
+    rest.add_argument("--force", action="store_true", help="overwrite existing files")
+    rest.add_argument("--dry-run", action="store_true", help="report the plan, write nothing")
+    add_db_flag(rest)
+    rest.set_defaults(func=cmd_sessions_restore)
 
     cfg = sub.add_parser("litestream-config",
                          help="emit a Litestream %s config and restore runbook" % LITESTREAM_SERIES)

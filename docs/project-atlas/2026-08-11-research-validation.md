@@ -228,3 +228,147 @@ deliberately **not** extracted because the user scoped them out: Cloudflare Dura
 SQLite storage limits, and full-source-tree indexing cost. If either comes back into scope,
 they need their own grounding pass — and the Durable Object one cannot be grounded from this
 environment at all, since `developers.cloudflare.com` is blocked.
+
+---
+
+# Addendum — session capture (same day, second scope pass)
+
+The skill's scope grew to cover storing chats and the rest of a session's state so a
+session can be resumed elsewhere after a sync. That is a different evidence problem from
+the Litestream half: there is no source tree to read and no reachable vendor
+documentation, so this pass is grounded in **direct observation of a real agent home on
+this machine**, and says so.
+
+## Evidence status, stated plainly
+
+`code.claude.com/docs/...` returns 404 through this environment's proxy, and no other
+authoritative description of Claude Code's on-disk session layout was reachable. Under
+`references/verdict-rubric.md` that means **no finding below may be reported as a
+`VIOLATION`** — the grounding bar is a fetched source and there is none. What exists
+instead is primary observation: the files were read, their shapes recorded, and the
+round-trip property was *measured* rather than argued. Observations are labelled
+`OBSERVED`; the inferences drawn from them about future behaviour are `UNCONFIRMED`.
+
+The distinction matters for one reason above all: an undocumented format carries no
+stability promise, so the design must not depend on understanding it.
+
+## What was observed
+
+A live agent home, `/root/.claude`, with one active session:
+
+| Path | Contents |
+|---|---|
+| `projects/<slug>/<session-id>.jsonl` | the transcript — 456 records, 1.8 MB, one JSON object per line |
+| `tasks/<session-id>/<n>.json` | the task list, one file per task |
+| `session-env/<session-id>/` | per-session environment directory |
+| `sessions/<pid>.json` | live descriptor: `pid`, `sessionId`, `cwd`, `startedAt`, `version`, `entrypoint` |
+| `shell-snapshots/*.sh` | a 233 KB serialized shell environment |
+| `~/.claude.json` | `oauthAccount`, `userID`, `machineID`, `projects`, cached feature flags |
+
+Record envelope fields present across the transcript: `type`, `uuid`, `parentUuid`,
+`timestamp`, `sessionId`, `cwd`, `gitBranch`, `version`, `message`, `toolUseResult`,
+`isSidechain`, `userType`, `entrypoint`, `permissionMode`, `requestId`, `effort`.
+Observed `type` values: `user`, `assistant`, `attachment`, `last-prompt`,
+`queue-operation`, `system`.
+
+## Findings
+
+### [high] OBSERVED — transcripts carry tool output, so they carry secrets
+
+- **Claim:** a chat transcript is conversational text and is safe to replicate as-is.
+- **Assessment:** false. 101 of 326 records in the observed transcript carried a
+  `toolUseResult` field — the captured output of commands and file reads. That is the
+  channel through which an `.env` dump, a `printenv`, or a config file lands in the
+  transcript verbatim. Replicating transcripts to object storage without scrubbing turns
+  every such moment into a durable, remote copy of a live credential. This is the single
+  highest-severity property of the whole session feature, and it drove **R20**: redaction
+  on by default, a per-kind count of what was removed, and an explicit warned opt-out.
+- **Evidence:** direct read of
+  `/root/.claude/projects/-home-user-agent-skills/<session-id>.jsonl`; field census over
+  all 326 records at time of inspection.
+- **Recommended fix:** redact by default; treat `--no-redact` as a deliberate act.
+
+### [high] OBSERVED — the account config is identity, not session state
+
+- **Claim:** syncing "the session" means syncing `~/.claude` wholesale.
+- **Assessment:** it must not. `~/.claude.json` was read and its top-level keys include
+  `oauthAccount`, `userID`, and `machineID`. None of that is needed to resume a
+  conversation, and all of it is account identity that would then exist in a bucket.
+  Drove **R21**: the file is on a never-read list, and shell snapshots — a serialized
+  environment, 233 KB in the observed home — are excluded unless explicitly requested.
+- **Evidence:** direct read of `/root/.claude.json` (keys only; values not recorded here).
+- **Recommended fix:** enumerate what is captured; never capture a home directory wholesale.
+
+### [medium] UNCONFIRMED — the on-disk format is undocumented and version-coupled
+
+- **Claim:** the transcript schema can be parsed into a normalized model and rebuilt.
+- **Assessment:** **not grounded, and deliberately not relied upon.** The vendor docs are
+  unreachable, the observed records carry a `version` field (`2.1.227` here), and the
+  record-type set is open — `queue-operation` and `last-prompt` are not things a naive
+  chat model would predict. A tool that parses this into its own schema will silently
+  drop whatever the next CLI version adds. Hence **R17**: store every record verbatim as
+  its own row, interpret only the envelope fields needed to order and locate a session,
+  and record the CLI version alongside.
+- **Evidence:** none fetched. Observation only: `https://code.claude.com/docs/en/claude-code/cli-reference` → HTTP 404.
+- **Recommended fix:** keep the verbatim-storage rule; re-check against real docs if they
+  become reachable.
+
+### [medium] OBSERVED — the project-directory slug is lossy and must not be reused
+
+- **Claim:** the captured `projects/<slug>` directory name can be replayed as-is on the
+  destination machine.
+- **Assessment:** wrong whenever the path differs, which is the normal case for the
+  feature (a Linux `/home/dev/x` becoming a macOS `/Users/dev/x`). The observed mapping is
+  the working directory with `/` replaced by `-`: `/home/user/agent-skills` ↔
+  `-home-user-agent-skills`, confirmed against the live directory. The transform is not
+  injective — a path containing a real `-` collides — so it cannot be inverted to recover
+  a cwd. Drove **R22**: the slug is recomputed from the *target* cwd, and the true cwd is
+  read from inside the records rather than from the directory name.
+- **Evidence:** `/root/.claude/projects/-home-user-agent-skills/` beside a `cwd` field of
+  `/home/user/agent-skills` in every record of that transcript.
+- **Recommended fix:** recompute; never invert.
+
+### [low] OBSERVED — a transcript is a parent-linked chain, not a flat log
+
+- **Claim:** ordering the records by timestamp is sufficient to reconstruct a session.
+- **Assessment:** insufficient in general. 295 of 326 observed records carried a
+  `parentUuid`, and the format has an `isSidechain` flag for subagent branches. A resume
+  walks that chain, so a capture missing a link yields a truncated history that still
+  *looks* complete. Drove **R23**: restore verifies that every non-root `parentUuid`
+  resolves to a `uuid` present in the capture, and refuses otherwise.
+- **Evidence:** field census over the observed transcript.
+- **Recommended fix:** verify the chain at restore time, not at capture time — corruption
+  can happen in storage.
+
+### [—] VERIFIED PROPERTY — the round trip is byte-identical
+
+Not a defect; a measurement, recorded because the design leans on it. Parsing the observed
+456-record, 1.8 MB transcript and re-serializing it with `json.dumps(...,
+ensure_ascii=False, separators=(",", ":"))` reproduced the original file's sha256 exactly.
+That is what makes **R18** enforceable: an unredacted restore is checked against the stored
+hash rather than trusted. The property is contingent on the writer's serialization
+conventions and could break with a CLI change — which is precisely why it is checked at
+restore time and reported (`verify=sha256-exact` vs `verify=chain-intact`) instead of
+assumed.
+
+## Sources appendix (addendum)
+
+No new fetched sources — the relevant vendor documentation was unreachable. Evidence for
+this pass is direct filesystem observation on the machine running the session, recorded
+above. Attempted and unavailable: `https://code.claude.com/docs/en/claude-code/cli-reference`
+(HTTP 404).
+
+## Dropped-claims log (addendum)
+
+Two claims were extracted and deliberately **not** verified, because verifying them needs a
+second machine and a live CLI, which this environment does not have:
+
+1. That `claude --resume <id>` accepts a restored transcript and continues the conversation.
+   The skill's eval proves the *artifact* is reconstructed correctly (byte-identical, chain
+   intact, correct slug, rewritten cwd); it does not prove the CLI accepts it. This is the
+   same manual-protocol boundary `docs/eval-standard.md` draws for model-in-the-loop
+   claims, and the skill's documentation states it rather than implying a guarantee.
+2. That redaction never removes something a resume needed. The redactor targets
+   credential-shaped strings inside message text; a conversation *about* a credential
+   pattern could be altered. Observed rate on the live transcript: 58 replacements across
+   456 records, all in assignment-shaped strings.
