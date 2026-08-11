@@ -22,6 +22,7 @@ npx skills add dhanesh/agent-skills --skill crafting-self-prompting-loops
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
 npx skills add dhanesh/agent-skills --skill okf-site-kit
+npx skills add dhanesh/agent-skills --skill project-atlas
 npx skills add dhanesh/agent-skills --skill repo2skill
 npx skills add dhanesh/agent-skills --skill security-posture-audit
 npx skills add dhanesh/agent-skills --skill spec-first-planning
@@ -52,6 +53,7 @@ npx skills add dhanesh/agent-skills
 | [`starlight-handbook-kit`](starlight-handbook-kit/) | Scaffold or extend a decision-oriented Astro + Starlight documentation handbook — every topic follows a fixed nine-section skeleton, diagrams and widgets render without JavaScript, and eight CI gates fail the build the moment a page drifts from the contract, making agent-authored content safe. |
 | [`tmux-agent-herdr-lite`](tmux-agent-herdr-lite/) | tmux cockpit with Zellij-like human ergonomics and Herdr-like agent supervision — menus, dashboard, pane navigation, blocked/working/done status detection, and jump-to-status navigation. |
 | [`mockstar-mock`](mockstar-mock/) | Generate a runnable mockstar mock server from a service's specs/docs — OpenAPI, Postman, HAR, curl, GraphQL, and prose docs (md/pdf/docx/url) — normalized into one Endpoint Inventory, full-fidelity (scenarios/handlers/webhooks), Tier 2-enhanced, boot-and-smoke verified, with a provenance + coverage report. |
+| [`project-atlas`](project-atlas/) | Index every project directory on a local machine into one durable SQLite database — path, git remote/branch/HEAD, languages, toolchains — with FTS5 full-text search over READMEs, docs and paths (and a LIKE fallback where the SQLite build has no FTS5), then replicate that index to S3, Cloudflare R2, Backblaze B2 or a local disk via Litestream 0.5.x with a generated restore runbook. Vanished projects are tombstoned rather than deleted; generated configs are pinned to Litestream's current config grammar and carry no secrets. |
 | [`repo2skill`](repo2skill/) | The skill-authoring skill: scaffolds a new gate-passing Agent Skill (standard frontmatter, PP-conformant SKILL.md skeleton, README, test stub, outcome-eval stub) and walks the semantic review checklist the mechanical gates can't judge. The source of this repo's vendored gate scripts, now shipped. |
 | [`verifier-installer`](verifier-installer/) | Action-taking sibling of `agent-ready-rails`: detects a repo's stack(s) with a deterministic collector, then installs the missing runnable-verifier loop — format/build/test commands plus a CI workflow that runs them — and proves the loop red→green before handing back. |
 | [`knowledge-gardener`](knowledge-gardener/) | Completes the knowledge trilogy (`feynman-walkthrough` creates, `okf-site-kit` publishes, this maintains): sweeps Open Knowledge Format bundles, reports per-subject FRESH/STALE/UNKNOWN drift against pinned source fingerprints, drives diff-aware refreshes and re-pins, and regenerates any published site. |

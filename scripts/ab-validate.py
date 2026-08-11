@@ -337,6 +337,78 @@ def check_loops(old, new):
         "declared-but-unenforced would not count")
 
 
+# ── project-atlas ───────────────────────────────────────────────────────────
+# Encoded as GUARDS, not deltas, on purpose. When project-atlas is newer than the
+# baseline the old arm simply has no module, so a "0 -> 4" row would score as an
+# IMPROVED that measures nothing but the skill's existence. As guards these rows
+# assert the invariant holds in the candidate tree and keep asserting it once the
+# skill is in the baseline too — which is the regression the corpus should catch:
+# a later edit that quietly drops the https scheme or reintroduces `replicas:`.
+
+ATLAS_CONFIG_PROBE = r"""
+import argparse
+import atlas
+a = argparse.Namespace(db="/tmp/atlas-ab/atlas.db", target="r2", bucket="bkt",
+                       path="project-atlas", account_id="acct", endpoint="",
+                       region="", replica_path="", sync_interval="10s", out="")
+text, url = atlas.render_config(a)
+print(json.dumps(sum([
+    "\n    replica:" in text,          # 0.5.x singular mapping
+    "replicas:" not in text,           # never the deprecated list
+    "endpoint=https://" in url,        # R2 detection keys on the scheme
+    "sync-interval: " in text,         # never inherit the 1s default
+    "${" in text and "AKIA" not in text,   # credentials by reference only
+])))
+"""
+
+ATLAS_DISCOVERY_PROBE = r"""
+import atlas
+root = tempfile.mkdtemp()
+def mk(rel, name, body="x"):
+    d = os.path.join(root, rel)
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, name), "w").write(body)
+mk("alpha", "go.mod")
+mk("beta", "pyproject.toml")
+mk("node_modules/left-pad", "package.json")
+mk("beta/target/dep", "Cargo.toml")
+mk("scratch", "Makefile")
+found = list(atlas.find_projects([root]))
+noise = sum(1 for p in found
+            if "node_modules" in p or "/target/" in p or p.endswith("scratch"))
+print(json.dumps({"real": len(found) - noise, "noise": noise}))
+"""
+
+
+def check_atlas(old, new):
+    s = "project-atlas"
+    sub = os.path.join("project-atlas", "assets")
+
+    def guardrails(tree):
+        r = probe(tree, sub, ATLAS_CONFIG_PROBE)
+        # probe() returns a dict only on failure (module absent in that arm).
+        return 0 if isinstance(r, dict) else int(r)
+
+    def discovery(tree):
+        r = probe(tree, sub, ATLAS_DISCOVERY_PROBE)
+        if not isinstance(r, dict) or "_error" in r:
+            return (0, 0)
+        return (r["real"], r["noise"])
+
+    go, gn = guardrails(old), guardrails(new)
+    row(s, "Litestream config guardrails satisfied (of 5)", go, gn, gn == 5,
+        "GUARD — each one traces to a finding in "
+        "docs/project-atlas/2026-08-11-research-validation.md; 0 in an arm means "
+        "the skill is absent there, not that it regressed",
+        kind="guard")
+
+    (ro, no_), (rn, nn) = discovery(old), discovery(new)
+    row(s, "fixture machine: real projects / vendor-and-scratch noise",
+        "%d / %d" % (ro, no_), "%d / %d" % (rn, nn), (rn, nn) == (2, 0),
+        "GUARD — a Makefile-only directory and a vendored manifest must never "
+        "become rows in the index", kind="guard")
+
+
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else BASE_DEFAULT
     if shutil.which("git") is None:
@@ -363,6 +435,7 @@ def main():
         check_hygiene(old, REPO)
         check_okf(old, REPO)
         check_loops(old, REPO)
+        check_atlas(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
