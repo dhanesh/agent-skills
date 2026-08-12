@@ -1007,6 +1007,54 @@ class TestOptions(TempBundle):
         self.assertEqual([o["value"] for o in detected["options"]], ["dep-2"])
 
 
+class TestBodyRegeneration(TempBundle):
+    """Re-declaring an edge must not leave the prose contradicting the frontmatter."""
+
+    def setUp(self):
+        super().setUp()
+        team(self.root, "payments")
+        team(self.root, "checkout")
+        capability(self.root, "payments", "refund", upstream={"attested": True})
+
+    def _declare(self, days, why=None):
+        argv = ["declare", self.root, "--consumer", "checkout", "--capability",
+                "payments/refund", "--requested-date", "2026-09-01", "--consequence",
+                "Ops runs ~40 manual refunds a week.", "--fallback", "flag off",
+                "--fallback-days", str(days), "--now", "2026-08-12T09:00:00Z"]
+        if why:
+            argv += ["--why", why]
+        return run_cli(*argv)
+
+    def test_a_corrected_estimate_rewrites_the_body_not_just_the_frontmatter(self):
+        self._declare(2)
+        self._declare(3)
+        cat = core.Catalog.load(self.root)
+        dep = cat.by_type("Dependency")[0]
+        self.assertEqual(dep.get("fallback")["execution_days"], 3)
+        self.assertIn("3 day(s)", dep.body)
+        self.assertNotIn("2 day(s)", dep.body)
+
+    def test_human_authored_sections_survive_a_re_declaration(self):
+        self._declare(2)
+        cat = core.Catalog.load(self.root)
+        dep = cat.by_type("Dependency")[0]
+        path = os.path.join(self.root, dep.relpath)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(core.render_doc(dep.meta, dep.body.rstrip("\n")
+                                     + "\n\n# Notes\n\nAgreed with ops on the 3rd.\n"))
+        self._declare(3)
+        cat = core.Catalog.load(self.root)
+        body = cat.by_type("Dependency")[0].body
+        self.assertIn("Agreed with ops on the 3rd.", body)
+        self.assertIn("3 day(s)", body)
+
+    def test_replace_section_appends_when_the_heading_is_absent(self):
+        out = cli.replace_section("# Why\n\nlaunch\n", "# Fallback", "None. Nothing else.\n")
+        self.assertIn("# Fallback", out)
+        self.assertIn("None. Nothing else.", out)
+        self.assertIn("launch", out)
+
+
 class TestNext(TempBundle):
     def setUp(self):
         super().setUp()

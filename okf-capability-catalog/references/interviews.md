@@ -155,11 +155,23 @@ after a staging run is the whole point.
 
 The tooling half of these rules is gate-tested (the CLI refuses a consumer-written
 `promised_date`, a blank consequence, a fallback with no execution time). The conversational
-half — whether an agent actually presses when an engineer answers "it'd be bad" — needs model
-runs, so it lives as a documented manual protocol rather than a gate check:
+half needs model runs, so it lives as a manual protocol:
 `docs/okf-capability-catalog/2026-08-12-interview-elicitation-model-eval.md` in the skills
-repo. If you change the questions above, re-run it, and record an unmoved measurement as
-unproven rather than quietly keeping the new wording.
+repo, with its harness. It has been run once — 12 blinded elicitations, 12 blind judges —
+and the result should change how you weight the questions above:
+
+- **Earned.** Coming back at a hedge (Δ costed fallback) and reading the arithmetic back
+  (Δ PONR read-back) both moved 1/3 → 3/3 on the strong tier. The read-back earned its keep
+  literally: in one run it produced a correction that moved the point of no return earlier.
+- **Unproven.** "Presses on vagueness" and "states depth in words" scored 3/3 in *both*
+  arms, because the CLI's own refusal messages already carry that reasoning. Those two
+  bullets are not what makes the difference — the tooling is. Keep them for the reader, but
+  do not credit the prose for them.
+- **Not rescued by guidance.** On a small model both arms fabricated dates, magnitudes or
+  evidence in every run. Guidance did not fix that; the commit-boundary check is what does.
+
+If you change the questions above, re-run it, and record an unmoved measurement as unproven
+rather than quietly keeping the new wording.
 
 ## Claiming a team → during `annotate`
 

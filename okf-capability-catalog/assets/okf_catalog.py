@@ -936,6 +936,21 @@ def git_commit(repo):
 # declare — the consumer interview's output
 # ─────────────────────────────────────────────────────────────────────────────
 
+def replace_section(body, heading, content):
+    """Replace one `# Heading` section's content, leaving the rest of the body
+    alone. Appends the section when it is absent."""
+    lines = (body or "").split("\n")
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
+    if start is None:
+        return (body.rstrip("\n") + f"\n\n{heading}\n\n{content}").lstrip("\n")
+    end = start + 1
+    while end < len(lines) and not lines[end].startswith("# "):
+        end += 1
+    tail = lines[end:]
+    rebuilt = lines[:start + 1] + ["", content.rstrip("\n"), ""] + tail
+    return "\n".join(rebuilt).rstrip("\n") + "\n"
+
+
 def blankish(text):
     return not text or str(text).strip().lower() in BLANK_ANSWERS
 
@@ -1072,12 +1087,20 @@ def cmd_declare(args):
     if args.depends_on:
         meta["depends_on"] = [d.strip() for d in args.depends_on.split(",") if d.strip()]
 
+    fallback_text = (f"{args.fallback} — {args.fallback_days} day(s) to stand up.\n"
+                     if args.fallback else f"None. {args.no_fallback}\n")
     body = prior.body if prior is not None else ""
     if not body.strip() or "# Detected" in body:
         body = (f"# Why\n\n{args.why or 'Recorded by ' + consumer + ' at planning time.'}\n\n"
-                "# Fallback\n\n"
-                + (f"{args.fallback} — {args.fallback_days} day(s) to stand up.\n"
-                   if args.fallback else f"None. {args.no_fallback}\n"))
+                f"# Fallback\n\n{fallback_text}")
+    else:
+        # Re-declaring an edge (a corrected estimate, say) must not leave the prose
+        # contradicting the frontmatter — a stale body is exactly the drift this
+        # catalog exists to prevent. Regenerate the machine-owned section only;
+        # anything a human wrote elsewhere in the body survives untouched.
+        body = replace_section(body, "# Fallback", fallback_text)
+        if args.why:
+            body = replace_section(body, "# Why", args.why.rstrip() + "\n")
     write_doc(root, rel, meta, body, log,
               f"Dependency {dep_id} proposed by {consumer}.")
 
@@ -1500,6 +1523,16 @@ def cmd_signal(args):
     log = []
     write_doc(cat.root, f"signals/{slug}.md", {k: v for k, v in meta.items() if v != ""}, "",
               log, f"Signal: {cap.get('capability_id')} {args.observation} in {args.environment}.")
+    # A `ci://` string is a claim, not a proof. The mode guard only checks the shape
+    # of the source; what actually establishes that a machine wrote this is the
+    # commit-boundary check on signals/, so say so rather than let the write read
+    # as verification.
+    platform = cat.config.get("platform_team")
+    out("NOTE: this asserts observed traffic, which only CI or monitoring can witness. "
+        "Committed by anyone other than "
+        + (f"'{platform}'" if platform else "the platform team")
+        + ", it fails the commit-boundary check (EN-SIGNAL-AUTHOR). If you are not that "
+          "pipeline, delete it and let the pipeline emit it")
     regenerate_indexes(cat.root)
     append_log(cat.root, log, now)
     out(f"SIGNAL_RESULT: WRITTEN signals/{slug}.md")

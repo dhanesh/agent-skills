@@ -171,6 +171,15 @@ delay costs is worse than an empty box; and **degrade to prose gracefully** wher
 tool exists, still one question at a time. Full per-question instrument mapping:
 [references/interviews.md](references/interviews.md).
 
+Two behaviours are worth more than the rest, because a blind A/B measured them as the ones
+guidance actually adds: **come back at a hedge** ("TBD, a couple of days maybe?" is not an
+estimate — the number you file must be one the respondent stood behind), and **read the
+point of no return back to them with its arithmetic**, which in one run prompted a
+correction that moved the date three days earlier. The same study found small models
+fabricate dates and magnitudes here in every run, whatever the guidance says — so run these
+interviews on a capable model, and treat the commit-boundary check, not the mode guards, as
+what actually holds when you cannot.
+
 ### Mode: `verify` / `signal` — acceptance and liveness
 
 `verify` writes a Verification under the **consumer's** own folder; it refuses the owning

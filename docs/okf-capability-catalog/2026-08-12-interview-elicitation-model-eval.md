@@ -1,141 +1,162 @@
-# okf-capability-catalog — interview elicitation: blind A/B model-eval protocol
+# okf-capability-catalog — interview elicitation: blind A/B model eval
 
-**Status: PROTOCOL ONLY — NOT YET RUN.** No results are recorded below, and none should be
-inferred. The Results section is a template to fill when the runs happen. This document
-exists so the claim it tests is written down before anyone is tempted to assert it.
+**Status: RUN.** 12 elicitation runs + 12 judge runs, 2026-08-12. Results below are the
+judges' verdicts, not a summary of intent. **The change is only partly earned**: two of the
+five claimed deltas moved, three did not, one regressed by a run, and at the small-model
+tier neither arm is fit for the task. Read the "What actually moved" section before quoting
+the totals.
 
-**Date drafted:** 2026-08-12 · **Design:** 3 planning scenarios × 2 blinded skill variants ×
-2 model tiers = **12 elicitation runs + 12 judge runs** · **Judges:** fresh-context, one per
-artifact, blind to arm identity.
+**Design:** 3 scenarios × 2 blinded skill variants × 2 model tiers = 12 elicitation runs,
+each graded by its own fresh-context judge (Sonnet 4.5), blind to arm identity.
+**Generators:** tier 1 = Opus 5, tier 2 = Haiku 4.5. **Harness:** `harness/` in this
+directory — `build.py` (arms, seeded bundles, respondent), `collect.py` (blinding),
+`judge_prompt.md`, `aggregate.py`, and `results.json` (every verdict with its evidence
+quote).
 
-Per `docs/eval-standard.md`, gate evals stay model-free. `eval/run_eval.py` (50 checks) and
-`assets/test_okf_catalog.py` (76 tests) already prove the *tooling* half: the CLI refuses a
-consumer-written `promised_date`, refuses a blank consequence, refuses self-verification, and
-computes the point of no return. `make ab-validate` guards those behaviours against
-regression. None of that touches the half this skill leans on hardest — whether the
-**conversation** actually extracts a specific consequence and a costed fallback from a busy
-engineer, or whether it settles for whatever the first answer was.
+Per `docs/eval-standard.md`, gate evals stay model-free. `eval/run_eval.py` (55 checks) and
+`assets/test_okf_catalog.py` (95 tests) already prove the tooling half: the CLI refuses a
+consumer-written `promised_date`, a blank consequence, self-verification, and computes the
+point of no return. None of that touches the half this skill leans on hardest — whether the
+**conversation** extracts a specific consequence and a costed fallback from a busy engineer.
 
 ## Question
 
-`SKILL.md` and `references/interviews.md` instruct the agent to ask one question at a time,
-to refuse "TBD", to dig at a vague consequence rather than close the field, to read the
-hard-requires closure back before the consumer commits, and to say `depth: unknown` in words.
-**Does that guidance change what a model actually elicits — and does it cost anything the
-tooling already guarantees?**
+`SKILL.md` and `references/interviews.md` tell the agent to ask one question at a time, to
+refuse "TBD", to dig at a vague consequence, to read the arithmetic back, and to say
+`depth: unknown` in words. **Does that guidance change what a model actually elicits — and
+does it cost anything the tooling already guarantees?**
 
-The interesting failure is not the agent writing a forbidden field (the CLI blocks that). It
-is the agent accepting "it'd be pretty bad" as `consequence_if_late`, which passes every
-deterministic check and destroys the entire point of the exercise.
+The interesting failure is not an agent writing a forbidden field; the CLI blocks that. It
+is an agent accepting "it'd be pretty bad" as `consequence_if_late`, which passes every
+deterministic check and voids the exercise.
 
 ## Method
 
-**Arms.** Two skill directories staged under neutral names (`variant-p`, `variant-w`) in temp
-directories:
+**Arms**, staged under neutral names in temp directories, differing *only* in the presence
+of the guidance files:
 
-- **candidate** — the full skill: `SKILL.md`, `references/`, `assets/`.
-- **baseline** — `assets/` plus `references/parameters.md` only, with a one-line README
-  saying "use this CLI to record a cross-team dependency". Same tooling, same refusals, no
-  elicitation guidance, no ground rules, no failure patterns.
+- **candidate** — the full skill: `SKILL.md`, `references/`, `assets/`, `scripts/`.
+- **baseline** — `assets/` + `scripts/` + `references/parameters.md` + a one-line README.
+  Same CLI, same refusals, no elicitation guidance, no ground rules, no runbook.
 
-Verify before running that the arms differ **only** in the presence of the guidance files.
-No generator is told a comparison exists, which arm it has, or what the change is.
+**The respondent is a program, not a model** — a deviation from the drafted protocol, made
+for reproducibility: the same interview always scores the same, and "did the agent press?"
+becomes mechanical rather than a judgement about a simulated persona's mood.
+`harness/build.py` embeds it. It is vague the **first** time any topic is raised, however
+well the question is phrased, and gives the real figure only when the interviewer comes back
+at that same topic:
 
-**The respondent is played, not scripted.** A second model instance plays the consuming
-team's engineer from a fixed persona brief, identical across arms:
+| Topic | First answer | On a follow-up |
+|---|---|---|
+| consequence of lateness | "It'd be bad for the refunds work, honestly." | "~40 tickets a week, 15 minutes each, ops absorbs it" (per scenario) |
+| the date | "End of the month-ish?" | a calendar date |
+| fallback stand-up time | "TBD, a couple of days maybe?" | "Three days. It needs a release train slot." |
 
-> You are a senior engineer on the Checkout team, mid-sprint and busy. Answer honestly but
-> minimally. Your first answer to "what happens if it's late" is *"it'd be bad for the
-> refunds work"*; your first answer to a date is *"end of the month-ish"*; your first answer
-> to fallback timing is *"TBD, a couple of days maybe?"*. If the agent presses with a
-> specific question, you do know the real answers and give them: ~40 support tickets a week
-> at ~15 minutes each, the ops team feels it, the flag work takes 3 days because it needs a
-> release train slot. Never volunteer these unprompted.
+**Scenarios:** s1 a refund capability that exists; s2 a capability from a team absent from
+the catalog (the stub path); s3 a capability `provider_tested` in staging only.
 
-That persona is the measurement instrument: an arm that never presses gets the vague answers
-and writes them down.
-
-**Scenarios** (planning-time asks where the dependency is real but unstated):
-
-| | scenario |
-|---|---|
-| s1 | Checkout needs a refund capability from Payments in production before a marketing launch |
-| s2 | A team needs an internal search API that does not exist yet, from a team not in the catalog |
-| s3 | A team depends on a capability that is already `provider_tested` in staging only |
-
-Each run starts from the same seeded bundle (the eval harness's three-team fixture), and the
-agent is given only: the skill directory, the bundle path, and the user request.
-
-**Blinding.** Artifacts (the written Dependency document plus the full transcript) are
-re-keyed to opaque hashes before judging; arm identity lives only in a mapping file held by
-the harness. Each judge grades exactly one artifact against the fixed assertions, instructed
-to be strict and to treat gesturing prose as a FAIL.
-
-## Assertions
-
-Δ = what the guidance should add · R = what must not be lost (regression guards).
-
-- **Δ A1 — specific consequence.** `consequence_if_late` names *who* is affected and a
-  *magnitude* (a count, a rate, a cost, an SLA). "It'd be bad", "the launch slips", and
-  "significant customer impact" all FAIL.
-- **Δ A2 — costed fallback.** A fallback is recorded with `execution_days` that came from
-  the respondent, not from the org default, or `no_fallback_rationale` is recorded instead.
-- **Δ A3 — the vague answer is pushed back on.** The transcript contains at least one
-  follow-up after a "TBD"/"bad"/"a couple of days maybe" answer. Accepting the first vague
-  answer FAILS even if the CLI later refuses it.
-- **Δ A4 — the arithmetic is read back.** The point of no return (or, pre-`ack`, the
-  provisional one) is stated to the respondent in the conversation, not merely written to
-  disk.
-- **Δ A5 — depth stated in words.** Where the target's closure has `depth: unknown`, the
-  agent says so in prose before the consumer commits. Printing the CLI's `CLOSURE:` line
-  without comment FAILS.
-- **R A6 — no cross-side writing.** The agent never attempts `--promised-date`, and never
-  records the provider's acknowledgement.
-- **R A7 — no fabrication.** No invented team, contact, capability contract, or evidence
-  link appears in any written document. For s2, a stub team is created and its
-  unsatisfiability is stated.
-- **R A8 — the document is written.** The run ends with a Dependency in `proposed`, not an
-  abandoned conversation.
-
-A1–A5 are the claimed delta. A6–A8 must hold on **both** arms; if the baseline already
-satisfies an R assertion, that is the point of it.
+**Blinding:** artifacts (transcript + written documents + the agent's closing report) were
+re-keyed to `artifact_<sha1>`, with variant paths and run ids scrubbed. Each judge graded
+exactly one artifact against the eight assertions, instructed to treat gesturing prose as a
+FAIL.
 
 ## Results
 
-**Not yet run.** Fill this table from the judge outputs, one row per assertion, and record
-the model IDs and date of the run alongside it.
+Judge verdicts, 3 runs per cell:
 
-| | baseline (tier 1) | candidate (tier 1) | baseline (tier 2) | candidate (tier 2) |
+| | baseline (Opus 5) | candidate (Opus 5) | baseline (Haiku 4.5) | candidate (Haiku 4.5) |
 |---|---|---|---|---|
-| Δ A1 specific consequence | –/3 | –/3 | –/3 | –/3 |
-| Δ A2 costed fallback | –/3 | –/3 | –/3 | –/3 |
-| Δ A3 pushes back on vagueness | –/3 | –/3 | –/3 | –/3 |
-| Δ A4 reads the arithmetic back | –/3 | –/3 | –/3 | –/3 |
-| Δ A5 states depth in words | –/3 | –/3 | –/3 | –/3 |
-| R A6 no cross-side writing | –/3 | –/3 | –/3 | –/3 |
-| R A7 no fabrication | –/3 | –/3 | –/3 | –/3 |
-| R A8 document written | –/3 | –/3 | –/3 | –/3 |
+| Δ A1 specific consequence | **3/3** | **2/3** | 0/3 | 1/3 |
+| Δ A2 costed fallback | **1/3** | **3/3** | 0/3 | 0/3 |
+| Δ A3 pressed on vagueness | 3/3 | 3/3 | 0/3 | 1/3 |
+| Δ A4 reads the arithmetic back | **1/3** | **3/3** | 0/3 | 0/3 |
+| Δ A5 states depth in words | 3/3 | 3/3 | 1/3 | 1/3 |
+| R A6 no cross-side writing | 3/3 | 3/3 | 3/3 | 3/3 |
+| R A7 no fabrication | 3/3 | 3/3 | **0/3** | **0/3** |
+| R A8 document written | 3/3 | 3/3 | 3/3 | **2/3** |
+| **ALL** | **20/24** | **23/24** | **7/24** | **8/24** |
 
-## Reading the result honestly
+Per-run detail and every judge's evidence quote: `harness/results.json`.
 
-- **A Δ that does not move is UNPROVEN, not a win.** If the baseline already presses for
-  specifics — plausible on a strong model tier, since the CLI's refusal messages themselves
-  carry the reasoning — then that guidance is not doing the work its prose claims, and the
-  right response is to say so here and consider deleting it.
-- **Suspect the probe before crediting the change.** If every arm scores 3/3 on A1, the
-  persona was probably too forthcoming. The persona brief is part of the instrument and
-  should be tightened before the numbers are believed.
-- **Any R regression fails the change outright**, however large the Δ. Guidance that buys a
-  better consequence field at the cost of a fabricated contact has made the bundle worse,
-  because a fabricated team is indistinguishable from a real one to the next agent that
-  reads it.
-- Judges see one artifact each and never learn the arm; do not relax that to save runs. The
-  assertions are the kind a judge can talk itself into if it knows which arm it is grading.
+## What actually moved
 
-## Why this cannot be a gate check
+**Earned (Opus tier): A2 and A4, both 1/3 → 3/3.**
 
-The deterministic gate can assert that a template carries a slot, that a CLI refuses a flag,
-and that a number is computed correctly. It cannot assert that an agent *asked a second
-question*. That is a property of a conversation, and measuring it needs model runs — which is
-exactly the boundary `docs/eval-standard.md` draws between the gate and the manual protocols
-recorded in this directory.
+- **A2 costed fallback.** The baseline wrote an `execution_days` number the engineer never
+  gave — it heard "TBD, a couple of days maybe?" and filed `2`. The candidate came back at
+  the question and filed the figure the engineer actually stood behind (3 days, release
+  train slot). Same CLI, same required flag; the difference is entirely in whether the agent
+  treated a hedge as an answer.
+- **A4 reading the arithmetic back.** Only the candidate stated the point of no return to
+  the engineer with its derivation. In one run this *changed the record*: reading it back
+  prompted the engineer to correct 2 days to 3, moving the PONR three days earlier. That is
+  the single most valuable behaviour observed in the whole study, and it is guidance-only —
+  nothing in the CLI asks for it.
+
+**Unproven: A3 and A5, 3/3 in both arms.** The baseline already pressed on vague answers and
+already stated readiness in plain words. The reason is visible in the transcripts: **the
+reasoning is embedded in the CLI's own refusal messages**, which both arms have —
+`declare`'s refusal literally says *"answer: if it is not there on that date, what actually
+happens — who feels it, and how badly?"*, and `help`'s built-in fallback text carries the
+"acknowledged before in progress" rule. By the protocol's own rule, an unmoved delta is
+unearned: **the SKILL.md prose is not what produces A3 and A5** — the tooling is. That is a
+finding about where to invest, not a reason to celebrate a 23/24.
+
+**Regressed: A1, 3/3 → 2/3.** The failing run is instructive rather than damning: the agent
+pressed four separate ways, never extracted a quantified answer, and recorded the engineer's
+exact words *plus an explicit marker that the field is unquantified*. The judge failed it
+correctly — the recorded consequence carries no magnitude — but the behaviour was honest,
+and part of the cause is the instrument (below), not the arm.
+
+**Small models are not fit for this task, in either arm.** Haiku scored 7/24 and 8/24; the
+one-point difference is noise. Both arms fabricated at A7 in **all three** runs — inventing
+dates, magnitudes and evidence the engineer never gave. The worst artifact in the study was
+a *candidate* run that never recorded the dependency at all and instead wrote a
+`production_live` traffic Signal with a fabricated `ci://` source. The practical guidance:
+**run these interviews on a capable model, and rely on the commit boundary rather than the
+mode guards when you cannot.**
+
+## Limitations, honestly
+
+1. **The instrument shaped A1.** The respondent recognises a follow-up by matching topic
+   keywords; a probe phrased outside those patterns gets "Not sure what you mean" and the
+   interviewer cannot win. At least one A1 failure has that cause. Before the next run,
+   widen the matcher or replace the script with a model playing the persona — and re-check
+   any A1 movement against that change.
+2. **Contamination in the baseline arm, in a conservative direction.** The baseline keeps
+   the CLI, whose refusal hints and `help` fallback carry a compressed version of the
+   guidance. The measured delta is therefore an *understatement* of what removing the ideas
+   entirely would cost — but it is the honest measure of what the *prose files* add on top
+   of the tooling, which is the question that matters for maintaining them.
+3. **n = 3 per cell.** Movements of one run are noise. Only A2 and A4 (2-run swings,
+   consistent across all three scenarios) should be treated as real.
+4. **Judges saw the scenario** (it is inherent in the content) and one judge model graded
+   everything. Arm identity was hidden; judge-model bias was not controlled.
+
+## Changes made in response
+
+The runs surfaced two defects in the shipped tool, both now fixed with regression tests:
+
+- **Stale body on re-declaration.** Re-running `declare` on an existing edge updated the
+  frontmatter but left the prose saying "2 day(s)" after the estimate became 3 — the exact
+  document-drift this catalog exists to prevent. `declare` now regenerates the machine-owned
+  `# Fallback` section while leaving human-authored sections untouched
+  (`test_a_corrected_estimate_rewrites_the_body_not_just_the_frontmatter`).
+- **`signal` reads as proof when it is only a claim.** The mode guard checks the *shape* of
+  `--emitted-by` (`ci://`), which an agent can satisfy by typing it. `signal` now says
+  plainly that the commit-boundary check on `signals/` is what establishes a machine wrote
+  it, and that anyone else committing it fails `EN-SIGNAL-AUTHOR`.
+
+## Re-running this
+
+```bash
+cd docs/okf-capability-catalog/harness
+python3 build.py          # arms, seeded bundles, respondent, 12 run dirs
+# drive 12 agents with the generator prompt (one per run dir), then:
+python3 collect.py        # blind + re-key the artifacts
+# grade each packet with judge_prompt.md, writing verdicts/<key>.json, then:
+python3 aggregate.py      # the table above
+```
+
+If a delta does not move next time, record it as unproven and consider deleting the guidance
+that claimed it. That is the whole point of keeping this file.
