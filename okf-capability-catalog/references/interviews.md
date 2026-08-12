@@ -5,6 +5,50 @@ can prove what a service exposes. It cannot prove who owns a team, what a delay 
 or what the fallback is. Those need a conversation — and the skill should run one rather
 than leaving blank fields for someone to fill in later, which is the same as never.
 
+## How to ask (agent-native)
+
+Use the host's **structured question tool** when it has one — in Claude Code that is
+`AskUserQuestion`; other runtimes expose an equivalent picker. It is a better instrument
+than prose for this interview specifically: the respondent is mid-sprint, and a chip they
+can click beats an identifier they have to recall.
+
+Rules for using it well:
+
+- **One question per call.** The sequencing *is* the method: whether you follow up on a
+  vague consequence depends on what they just said. Batching the interview into one
+  multi-question call destroys that, and it is the most common way to run this badly.
+- **Never invent the choices.** Run `options` and map its output straight into the tool —
+  `label` → the option label, `description` → the option description, `value` → the CLI
+  argument you will pass. Offering a capability that does not exist, or an environment the
+  org does not have, teaches the respondent that the catalog is fiction.
+
+  ```bash
+  python3 assets/okf_catalog.py options <bundle> --for capabilities --team <consumer> --json
+  python3 assets/okf_catalog.py options <bundle> --for environments --json
+  python3 assets/okf_catalog.py options <bundle> --for dependencies --team <you> --state proposed --json
+  python3 assets/okf_catalog.py options <bundle> --for verification-kinds --json
+  ```
+
+- **Free text stays free text.** Dates, consequences and fallbacks are not multiple choice.
+  Ask them as open questions; the tool's "Other" escape exists for a reason, and a picker
+  with four guesses at what a delay would cost is worse than an empty box.
+- **Show the option's consequence in its description**, not just its name. "a contract test
+  — recorded as evidence, raises readiness for no environment" is the whole lesson, and the
+  respondent reads it at the moment it matters.
+- **Degrade gracefully.** With no such tool, ask in prose — still one question at a time,
+  still with the real choices listed. Never show the respondent YAML to fill in.
+
+| Question | Ask as | Choices from |
+|---|---|---|
+| which capability do you need | picker | `options --for capabilities --team <you>` |
+| which environment | picker | `options --for environments` |
+| which edge are you acknowledging | picker | `options --for dependencies --team <you> --state proposed` |
+| how was it verified | picker | `options --for verification-kinds` |
+| by when do you need it | free text (a date) | — |
+| what happens if it is late | free text, then **follow up** | — |
+| is there a degraded mode | free text, or "none" + why | — |
+| how long to stand it up | free text (days) | — |
+
 ## Shared rules
 
 - **Never ask for what can be derived.** Team name, repo, capability inputs and outputs come
@@ -23,15 +67,21 @@ than leaving blank fields for someone to fill in later, which is the same as nev
 
 Ask in this order:
 
-1. **What are you building, and which team's capability does it need?** Offer a picker over
-   existing capabilities (`review --view directory`). If none matches, say plainly that you
-   will create a proposed capability under that team — and a stub team if the team is absent.
-2. **Which environment does this need to work in?** Defaults to the highest configured.
+1. **What are you building, and which team's capability does it need?** *Picker*, populated
+   from `options --for capabilities --team <you>` — it excludes your own team's capabilities
+   and shows each one's readiness and owner, including whether the owner is a stub. If none
+   matches, say plainly that you will create a proposed capability under that team, and a
+   stub team if the team is absent.
+2. **Which environment does this need to work in?** *Picker*, from
+   `options --for environments`. Defaults to the highest configured.
 3. **By when do you need it?** This is a *request* (`requested_date`), stored separately
    from the provider's promise. Never conflate them.
 4. **If it isn't there on that date, what actually happens? Who feels it, and how badly?**
-   The single most valuable question here. A vague answer is a prompt to dig, not a field to
-   close — half the value of this exercise is that answering it forces two teams to talk.
+   *Free text, and the one question you must be willing to ask twice.* It is the single most
+   valuable answer in the document. "It'd be bad" is not an answer — follow up with a
+   specific: how many people, how often, how long, what does the workaround cost them per
+   week? A vague answer is a prompt to dig, not a field to close, and half the value of this
+   exercise is that answering it properly forces two teams to talk.
 5. **Is there a degraded mode you could ship instead** — flag, manual process, partial
    release?
 6. **How long would it take to stand that fallback up, once you decided to?** This yields
@@ -60,8 +110,12 @@ omitted one is flagged as un-estimated (`CC-DEFAULT-FALLBACK`).
 
 ## Provider interview → `ack`
 
+0. **Which edge are you responding to?** *Picker*, from
+   `options --for dependencies --team <you> --state proposed` — skip this when the edge was
+   named in the request.
 1. **Here is what they say they need, in which environment, by when. Can you commit a
-   date?** Sets `promised_date`.
+   date?** *Free text (a date).* Sets `promised_date`. Read the consumer's stated consequence
+   back to them first; a provider who has seen the cost answers differently.
 2. **Does the capability already exist for this, or is it new work?**
 3. **Today, what state is it in for *that* environment specifically** — not tested anywhere,
    tested by you, or already verified by a consuming team?
@@ -85,7 +139,9 @@ happen now rather than on delivery day.
 Short, but the guards matter more than the questions.
 
 1. **What did you exercise, and in which environment?** (`--scope`, `--environment`)
-2. **How** — a deployment run, a contract test, or by hand? (`--kind`)
+2. **How** — a deployment run, a contract test, or by hand? (`--kind`) *Picker*, from
+   `options --for verification-kinds`; the descriptions carry the guard, so the respondent
+   sees that a contract test raises readiness for nothing at the moment they choose it.
 3. **Where did it actually run?** For `kind: deployment`, `--ran-in` must equal
    `--environment` and `--resolved-from` must be the CI run. Green against staging is
    evidence about staging.

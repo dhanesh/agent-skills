@@ -81,6 +81,14 @@ are optional. Passing `--consequence`, `--fallback` or `--requested-date` is ref
 --expires-days --commit-sha]`. For `kind: deployment`, `--resolved-from` is required and
 `--ran-in` must match `--environment`.
 
+## Orientation
+
+| Mode | Notes |
+|---|---|
+| `help [topic]` | the usage runbook (`references/usage.md`). Topics: `overview`, `sequence`, `events` (aliases `triggers`/`when`), `roles`, `cadence`, `modes`, `troubleshooting`, `adoption`, `all`. Takes **no bundle** — it is the one mode you run before you have one |
+| `next [--team <id>]` | the event-to-command table computed against this bundle's state: what this team should do now, urgent first, as runnable commands |
+| `options --for <kind> [--json]` | choice lists for an agent's structured question tool. Kinds: `capabilities` (`--team <you>` excludes your own, `--environment` narrows the readiness shown), `environments`, `teams`, `dependencies` (`--team`, `--state`), `detected`, `verification-kinds`. `--json` emits `{"kind", "options": [{"value", "label", "description"}]}` — map straight into the picker and pass `value` back as the CLI argument |
+
 ## Reading
 
 | Mode | Notes |

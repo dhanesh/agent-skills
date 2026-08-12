@@ -45,9 +45,9 @@ from catalog_core import (  # noqa: E402
     Catalog, DEFAULT_CONFIG, MANAGED_STATES, OKF_SPEC_VERSION, SCANNER_VERSION,
     TERMINAL_STATES, audit, can_satisfy, closure, closure_coverage, dump_yaml,
     effective_readiness, effective_state, enforce as enforce_changes, hard_requires,
-    impossible_promise, iso, norm_link, own_readiness, parse_date, parse_frontmatter,
-    parse_ts, parse_yaml, point_of_no_return, readiness_rank, render_doc, slugify,
-    validate as validate_bundle,
+    impossible_promise, iso, norm_link, on_track_valid, own_readiness, parse_date,
+    parse_frontmatter, parse_ts, parse_yaml, point_of_no_return, readiness_rank,
+    render_doc, slugify, validate as validate_bundle,
 )
 
 # Provenance stamps the scanner rewrites on every run. They are ignored when
@@ -1690,6 +1690,300 @@ def cmd_enforce(args):
     return 1 if violations else 0
 
 
+USAGE_DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "references", "usage.md")
+HELP_ALIASES = {"events": "events", "triggers": "events", "when": "events",
+                "sequence": "sequence", "order": "sequence", "overview": "overview",
+                "roles": "roles", "who": "roles", "cadence": "cadence",
+                "modes": "modes", "troubleshooting": "troubleshooting",
+                "refused": "troubleshooting", "adoption": "adoption",
+                "rollout": "adoption"}
+
+# Printed only when references/usage.md is unavailable (someone copied assets/ alone).
+HELP_FALLBACK = """okf-capability-catalog — usage
+
+The runbook lives in references/usage.md next to this script and could not be read, so
+here is the short version.
+
+The three habits that carry the system:
+  1. every service repo is scanned on merge          -> annotate
+  2. no work item touching another team starts before
+     its dependency reaches `acknowledged`           -> declare, then ack
+  3. acceptance is recorded by the CONSUMING team
+     from its own CI, never by the provider          -> verify
+
+Order: init -> annotate (providers first) -> declare -> ack -> tested -> verify -> audit.
+Ask the tool what to do now:  okf_catalog.py next <bundle> --team <your-team>
+Every flag:                   references/parameters.md
+"""
+
+
+def _usage_sections():
+    """Parse references/usage.md into {slug: (title, body)}. Single source of truth:
+    the runbook is prose for humans and the `help` output for agents."""
+    if not os.path.isfile(USAGE_DOC):
+        return {}
+    with open(USAGE_DOC, encoding="utf-8") as fh:
+        text = fh.read()
+    sections, title, buf = {}, None, []
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            if title:
+                sections[slugify(title)] = (title, "\n".join(buf).strip())
+            title, buf = line[3:].strip(), []
+        elif title:
+            buf.append(line)
+    if title:
+        sections[slugify(title)] = (title, "\n".join(buf).strip())
+    return sections
+
+
+def cmd_help(args):
+    sections = _usage_sections()
+    if not sections:
+        out(HELP_FALLBACK)
+        out("HELP_RESULT: FALLBACK (references/usage.md not found)")
+        return 0
+    topic = (args.topic or "").strip().lower()
+    if topic in ("all", "full"):
+        for slug, (title, body) in sections.items():
+            out(f"## {title}\n\n{body}\n")
+        out(f"HELP_RESULT: OK (all, {len(sections)} topic(s))")
+        return 0
+    if topic:
+        slug = HELP_ALIASES.get(topic, topic)
+        if slug not in sections:
+            out(f"UNKNOWN TOPIC: {topic}")
+            out("TOPICS: " + ", ".join(sections))
+            out("HELP_RESULT: UNKNOWN_TOPIC")
+            return 2
+        title, body = sections[slug]
+        out(f"## {title}\n\n{body}")
+        out(f"HELP_RESULT: OK ({slug})")
+        return 0
+    # No topic: orientation + the decision table, which is the part people need most.
+    for slug in ("overview", "events"):
+        if slug in sections:
+            title, body = sections[slug]
+            out(f"## {title}\n\n{body}\n")
+    out("TOPICS: " + ", ".join(sections) + ", all")
+    out("MORE: okf_catalog.py help <topic>   |   flags: references/parameters.md")
+    out("INTERACTIVE: `options --for <kind> --json` feeds an agent's question UI with real "
+        "choices instead of invented ones")
+    out(f"HELP_RESULT: OK (default, {len(sections)} topic(s))")
+    return 0
+
+
+def cmd_options(args):
+    """Machine-readable choice lists, so an interviewing agent offers the user real
+    options (existing capabilities, configured environments, its own open edges)
+    rather than asking them to recall an identifier."""
+    cat = load_catalog(args)
+    if cat is None:
+        out("OPTIONS_RESULT: FAIL")
+        return 1
+    today = today_of(args)
+    kind = args.kind
+    options = []
+
+    if kind == "capabilities":
+        for rel, cap in sorted(cat.capabilities.items()):
+            owner = cat.team_of_doc(cap)
+            if args.team and owner == args.team:
+                continue  # you cannot depend on your own team's capability
+            envs = [args.environment] if args.environment else cat.env_names()
+            marks = []
+            for env in envs:
+                ready = effective_readiness(cat, cap, env, today)
+                marks.append(f"{env}: {ready.state}/{ready.verdict}")
+            stub = "" if cat.team_is_claimed(owner) else " [stub team — unacknowledgeable]"
+            options.append({
+                "value": cap.get("capability_id"),
+                "label": cap.get("capability_id"),
+                "description": f"{cap.get('title')} — owned by {owner}{stub}; "
+                               f"{cap.get('lifecycle')}; " + ", ".join(marks),
+            })
+    elif kind == "environments":
+        for env in cat.environments():
+            name = env.get("name")
+            live = " (needs a machine liveness signal)" if env.get("requires_live_signal") else ""
+            options.append({"value": name, "label": name,
+                            "description": f"configured environment{live}"})
+    elif kind == "teams":
+        for team_id, doc in sorted(cat.teams.items()):
+            claimed = doc.get("provenance") == "stub"
+            options.append({
+                "value": team_id, "label": team_id,
+                "description": ("stub — created by another team, cannot acknowledge anything"
+                                if claimed else
+                                f"{doc.get('title')} — claimed"
+                                + (f", lead {(doc.get('contacts') or {}).get('lead')}"
+                                   if (doc.get("contacts") or {}).get("lead") else "")),
+            })
+    elif kind in ("dependencies", "detected"):
+        for dep in cat.by_type("Dependency"):
+            state = effective_state(cat, dep, today)
+            if kind == "detected" and dep.get("state") != "detected":
+                continue
+            if args.state and state.state != args.state:
+                continue
+            consumer = team_id_of(dep.get("consumer_team"))
+            provider = team_id_of(dep.get("provider_team"))
+            if args.team and args.team not in (consumer, provider):
+                continue
+            cap = cat.resolve_capability(dep.get("capability"))
+            cap_id = cap.get("capability_id") if cap is not None else "?"
+            ponr = point_of_no_return(dep, cat.config)
+            options.append({
+                "value": dep.get("dependency_id"),
+                "label": f"{dep.get('dependency_id')} — {cap_id}",
+                "description": f"{consumer} → {provider} in {dep.get('target_environment')}; "
+                               f"{state.state}"
+                               + (f"; promised {dep.get('promised_date')}"
+                                  if dep.get("promised_date") else "")
+                               + (f"; PONR {ponr.isoformat()}" if ponr else ""),
+            })
+    else:  # results — the verify vocabulary, with the guard spelled out
+        options = [
+            {"value": "deployment", "label": "a deployment run",
+             "description": "an end-to-end suite that ran against this environment — the only "
+                            "kind that raises readiness, and only for the environment it ran in"},
+            {"value": "contract", "label": "a contract test",
+             "description": "proves you agree on the shape of the exchange; recorded as "
+                            "evidence and raises readiness for no environment"},
+            {"value": "manual", "label": "exercised by hand",
+             "description": "a named human and an evidence link"},
+        ]
+
+    if args.json:
+        print(json.dumps({"kind": kind, "options": options}, indent=2))
+    else:
+        for opt in options:
+            out(f"OPTION: {opt['value']} — {opt['description']}")
+    out(f"OPTIONS_RESULT: {len(options)} option(s) for {kind}")
+    return 0
+
+
+def cmd_next(args):
+    """What this team should do now, as commands. The event-to-action table in
+    references/usage.md, computed from the actual state of the bundle."""
+    cat = load_catalog(args)
+    if cat is None:
+        out("NEXT_RESULT: FAIL")
+        return 1
+    today = today_of(args)
+    team = args.team
+    bundle = args.bundle
+    actions = []
+
+    def act(why, command, urgency="soon"):
+        actions.append((urgency, why, command))
+
+    for dep in cat.by_type("Dependency"):
+        consumer = team_id_of(dep.get("consumer_team"))
+        provider = team_id_of(dep.get("provider_team"))
+        if team and team not in (consumer, provider):
+            continue
+        dep_id = dep.get("dependency_id")
+        state = effective_state(cat, dep, today)
+        cap = cat.resolve_capability(dep.get("capability"))
+        cap_id = cap.get("capability_id") if cap is not None else "?"
+        env = dep.get("target_environment")
+        ponr = point_of_no_return(dep, cat.config)
+
+        if dep.get("state") == "detected" and (not team or team == consumer):
+            act(f"{dep_id} is an integration in code that nobody manages",
+                f"declare {bundle} --consumer {consumer} --capability {cap_id} "
+                f"--environment <env> --requested-date <date> --consequence \"<who feels it, "
+                f"how badly>\" --fallback \"<degraded mode>\" --fallback-days <n>")
+        elif dep.get("state") == "proposed":
+            ack = dep.get("acknowledgement") or {}
+            if not ack.get("provider"):
+                if cat.team_is_claimed(provider) and (not team or team == provider):
+                    act(f"{consumer} is waiting on your date for {cap_id}",
+                        f"ack {bundle} --dependency {dep_id} --team {provider} "
+                        f"--promised-date <date> --by <handle>", "now")
+                elif not cat.team_is_claimed(provider) and (not team
+                                                            or team in (consumer, provider)):
+                    act(f"{dep_id} names '{provider}', a stub team that cannot acknowledge "
+                        f"anything — this edge is stuck until someone from {provider} claims "
+                        "it, so go and have that conversation",
+                        f"# then {provider} runs: annotate {bundle} --repo . "
+                        f"--branch <integration>   (from a repo they own)", "now")
+            if dep.get("consumer_reconfirmation_required") and (not team or team == consumer):
+                act(f"{dep_id} came back promised {dep.get('promised_date')}, later than you "
+                    f"asked ({dep.get('requested_date')}) — re-confirm or renegotiate",
+                    f"confirm {bundle} --dependency {dep_id} --team {consumer} --by <handle>",
+                    "now")
+        if state.state == "tripped" and not dep.get("decision"):
+            act(f"{dep_id} has tripped ({state.reason}) and may not stay tripped",
+                f"resolve {bundle} --dependency {dep_id} --decision "
+                f"satisfied|fallback_invoked|renegotiated --by <handle> --note \"<decision>\"",
+                "now")
+        elif (ponr and state.state in ("acknowledged", "at_risk")
+              and today <= ponr <= today + _dt.timedelta(days=int(
+                  cat.config.get("ponr_warning_days", 7)))
+              and not on_track_valid(dep, today, cat.config)
+              and (not team or team == provider)):
+            act(f"{dep_id} reaches its point of no return on {ponr.isoformat()} and you have "
+                "not confirmed it is on track",
+                f"on-track {bundle} --dependency {dep_id} --team {provider} --by <handle>"
+                f"   # or: risk {bundle} --dependency {dep_id} --team {provider} "
+                f"--by <handle> --note \"<what changed>\"", "now")
+
+        if (cap is not None and state.state in MANAGED_STATES
+                and (not team or team == consumer)):
+            ready = effective_readiness(cat, cap, env, today)
+            if readiness_rank(ready.state) < readiness_rank("consumer_verified"):
+                act(f"{cap_id} is '{ready.state}' in {env} and nobody on your side has "
+                    "verified it there",
+                    f"verify {bundle} --team {consumer} --capability {cap_id} "
+                    f"--environment {env} --result verified --kind deployment --ran-in {env} "
+                    f"--resolved-from ci://<pipeline>/run/<id> --evidence <url> --by <handle>")
+            if ready.depth != "complete":
+                act(f"{cap_id} in {env} reads depth 'unknown' — you are committed into fog",
+                    f"readiness {bundle} --capability {cap_id} --environment {env}"
+                    "   # then ask the upstream teams to attest")
+
+    for rel, cap in sorted(cat.capabilities.items()):
+        owner = cat.team_of_doc(cap)
+        if team and owner != team:
+            continue
+        upstream = cap.get("upstream") or {}
+        if isinstance(upstream, dict) and upstream.get("attested") is not True:
+            act(f"{cap.get('capability_id')} has not attested its upstreams, so every "
+                "consumer of it reads depth 'unknown'",
+                f"annotate {bundle} --repo . --branch <integration> --attest-upstream yes|no")
+        if cap.get("lifecycle") == "proposed":
+            act(f"{cap.get('capability_id')} is still lifecycle 'proposed' — only a human "
+                "promotes it once the contract is right",
+                f"# review {rel} by hand, then set lifecycle: active")
+
+    if not cat.teams:
+        act("the catalog has no teams yet; teams are self-authoring",
+            f"annotate {bundle} --repo . --branch <integration> "
+            "# from a repo your team owns", "now")
+
+    seen, ordered = set(), []
+    for urgency, why, command in actions:
+        if command in seen:
+            continue
+        seen.add(command)
+        ordered.append((urgency, why, command))
+    ordered.sort(key=lambda a: 0 if a[0] == "now" else 1)
+
+    for urgency, why, command in ordered:
+        out(f"[{urgency}] {why}")
+        out("    " + (command if command.lstrip().startswith("#")
+                      else f"python3 okf_catalog.py {command}"))
+    if not ordered:
+        out("Nothing is waiting on you in this catalog. `review --team <id>` for the full "
+            "picture, `audit` for what is wrong org-wide.")
+    out(f"NEXT_RESULT: {len(ordered)} action(s)"
+        + (f" for {team}" if team else " across all teams"))
+    return 0
+
+
 def cmd_codeowners(args):
     cat = load_catalog(args)
     if cat is None:
@@ -1876,6 +2170,29 @@ def build_parser():
 
     sp = common(sub.add_parser("codeowners", help="regenerate CODEOWNERS from the teams"))
     sp.set_defaults(func=cmd_codeowners)
+
+    sp = common(sub.add_parser("next", help="what this team should do now, as commands"))
+    sp.add_argument("--team", default=None)
+    sp.set_defaults(func=cmd_next)
+
+    sp = common(sub.add_parser("options",
+                               help="choice lists for an agent's question UI (--json)"))
+    sp.add_argument("--for", dest="kind", required=True,
+                    choices=["capabilities", "environments", "teams", "dependencies",
+                             "detected", "verification-kinds"])
+    sp.add_argument("--team", default=None,
+                    help="for capabilities: exclude your own team; for dependencies: yours only")
+    sp.add_argument("--environment", default=None)
+    sp.add_argument("--state", default=None, help="filter dependencies by effective state")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_options)
+
+    # `help` takes no bundle: it is the one mode you run before you have one.
+    sp = sub.add_parser("help", help="the usage runbook (references/usage.md)")
+    sp.add_argument("topic", nargs="?", default=None,
+                    help="overview | sequence | events | roles | cadence | modes | "
+                         "troubleshooting | adoption | all")
+    sp.set_defaults(func=cmd_help)
     return p
 
 

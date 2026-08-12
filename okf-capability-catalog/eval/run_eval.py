@@ -24,6 +24,7 @@ check.
 
 Offline, deterministic, stdlib-only; writes only under tempfile.mkdtemp().
 """
+import json
 import os
 import shutil
 import subprocess
@@ -353,6 +354,41 @@ def contract(tmp, cat):
     return dep_id
 
 
+def guidance(tmp, cat, dep_id):
+    """The runbook, the picker feed, and the computed next actions — the surfaces a
+    user actually navigates by."""
+    code, text = run("help")
+    check("help prints the runbook's orientation and the event-to-command table",
+          code == 0 and "## Overview" in text and "## Events" in text
+          and "TOPICS:" in text and "HELP_RESULT: OK" in text)
+
+    code, text = run("help", "sequence")
+    check("help <topic> prints one section, and needs no bundle to do it",
+          code == 0 and "HELP_RESULT: OK (sequence)" in text and "Phase 0" in text)
+
+    code, text = run("help", "not-a-topic")
+    check("an unknown help topic is refused and lists the real ones",
+          code == 2 and "HELP_RESULT: UNKNOWN_TOPIC" in text and "TOPICS:" in text)
+
+    code, text = run("options", cat, "--for", "capabilities", "--team", "checkout",
+                     "--environment", "production", "--json")
+    payload = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    values = [o["value"] for o in payload["options"]]
+    shapes = all(set(o) == {"value", "label", "description"} for o in payload["options"])
+    described = any("provider_tested" in o["description"] or "unknown" in o["description"]
+                    for o in payload["options"])
+    check("options feeds a question UI with real choices, not invented ones",
+          code == 0 and shapes and described
+          and "payments/initiate-refund" in values
+          and not any(v.startswith("checkout/") for v in values),
+          f"values: {values}")
+
+    code, text = run("next", cat, "--team", "checkout", "--today", "2026-08-06")
+    check("next tells the consumer what to do now, as a runnable command",
+          code == 0 and "verify" in text and "--team checkout" in text
+          and "NEXT_RESULT:" in text)
+
+
 def readiness(tmp, cat, dep_id):
     run("tested", cat, "--team", "payments", "--capability", "payments/initiate-refund",
         "--environment", "production", "--evidence", "https://ci.example/build/8842",
@@ -613,7 +649,6 @@ def commit_boundary(tmp, cat):
                               "committed_at": "2026-09-30T10:00:00Z",
                               "files": [{"path": "teams/checkout/verifications/v.md",
                                          "content": ver_text}]}]}
-    import json
     for name, payload in (("good", good), ("bad", bad), ("backdated", backdated)):
         write(tmp, f"changes-{name}.json", json.dumps(payload))
 
@@ -670,6 +705,7 @@ def main():
         scaffolding(tmp, cat)
         scan(tmp, cat)
         dep_id = contract(tmp, cat)
+        guidance(tmp, cat, dep_id)
         readiness(tmp, cat, dep_id)
         ledger_dep = stub_and_propagation(tmp, cat)
         findings(tmp, cat, dep_id, ledger_dep)

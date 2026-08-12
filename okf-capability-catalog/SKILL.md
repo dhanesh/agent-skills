@@ -88,6 +88,12 @@ team reads a rule as bureaucracy.
 Pick the mode that matches what the user is doing. Full flags:
 [references/parameters.md](references/parameters.md).
 
+0. **Orient.** `help` prints the runbook — the order events must happen in, the
+   event-to-command decision table, who runs what, and what each refusal means
+   ([references/usage.md](references/usage.md), the same text). `help events` alone answers
+   most "which command do I run" questions. When a bundle already exists,
+   `next --team <id>` computes that table against its actual state and hands back runnable
+   commands; prefer it over guessing what the user needs.
 1. **Locate or create the bundle.** If the org has no catalog yet, run `init` once
    (interview first: integration and release branch names, the ordered environment list,
    which environments need a machine liveness signal, the platform team). It scaffolds an
@@ -141,6 +147,30 @@ flag weeks early — treat that as the format working, not as a validation failu
 > A work item that touches another team's system cannot enter *in progress* until a
 > Dependency document exists in state `acknowledged`.
 
+### Asking the questions
+
+Both interviews are conversational, and how you ask changes what you get. Use the host's
+**structured question tool** where one exists (`AskUserQuestion` in Claude Code; the
+equivalent picker elsewhere), and populate it from the catalog rather than from memory:
+
+```bash
+python3 assets/okf_catalog.py options <bundle> --for capabilities --team <consumer> --json
+python3 assets/okf_catalog.py options <bundle> --for environments --json
+python3 assets/okf_catalog.py options <bundle> --for dependencies --team <you> --state proposed --json
+```
+
+`options` returns `{label, description, value}` per choice — map them straight into the
+tool, and pass the chosen `value` back as the CLI argument. The descriptions carry the
+readiness, the owner, and whether a team is a stub, so the respondent sees the consequence
+of a choice while making it.
+
+Three rules that matter more than the tool: **one question per call**, because whether you
+follow up depends on the last answer and batching destroys the sequencing; **dates,
+consequences and fallbacks stay free text**, because a picker with four guesses at what a
+delay costs is worse than an empty box; and **degrade to prose gracefully** where no such
+tool exists, still one question at a time. Full per-question instrument mapping:
+[references/interviews.md](references/interviews.md).
+
 ### Mode: `verify` / `signal` — acceptance and liveness
 
 `verify` writes a Verification under the **consumer's** own folder; it refuses the owning
@@ -178,6 +208,7 @@ Every run produces markdown in the bundle plus a machine-readable report line:
 | `verify` / `signal` / `tested` | Verification / Signal / provider readiness | `VERIFY_RESULT: WRITTEN <path>` |
 | `readiness` | nothing | `READINESS_RESULT: <state> depth=<d> verdict=<v>` |
 | `audit` / `validate` / `enforce` | nothing | `AUDIT_RESULT: n finding(s) (h high)`, `VALIDATE_RESULT`, `ENFORCE_RESULT` |
+| `next` / `options` / `help` | nothing | `NEXT_RESULT: n action(s)`, `OPTIONS_RESULT: n option(s)`, `HELP_RESULT: OK` |
 
 Any refusal prints `REFUSED: <reason>` and a `HINT:`, and exits 2. Hand the user the
 refusal verbatim — it names whose decision the missing thing actually is.

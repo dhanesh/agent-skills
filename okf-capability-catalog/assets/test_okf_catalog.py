@@ -8,6 +8,7 @@ scanner helpers and the idempotent writer. Run:  python3 test_okf_catalog.py
 import contextlib
 import datetime as _dt
 import io
+import json
 import os
 import shutil
 import sys
@@ -904,6 +905,151 @@ class TestCliGuards(TempBundle):
         self.assertEqual(cat.config["branches"]["integration"], "main")
         self.assertEqual(cat.env_names(), ["test", "prod"])
         self.assertTrue(cat.env_config("prod")["requires_live_signal"])
+
+
+# ── help / options / next ────────────────────────────────────────────────────
+
+class TestHelp(unittest.TestCase):
+    def test_default_help_leads_with_orientation_and_the_decision_table(self):
+        code, text = run_cli("help")
+        self.assertEqual(code, 0)
+        self.assertIn("## Overview", text)
+        self.assertIn("## Events", text)
+        self.assertIn("TOPICS:", text)
+        self.assertIn("HELP_RESULT: OK", text)
+
+    def test_topic_and_alias_resolve_to_the_same_section(self):
+        _, by_name = run_cli("help", "events")
+        _, by_alias = run_cli("help", "triggers")
+        self.assertIn("HELP_RESULT: OK (events)", by_name)
+        self.assertEqual(by_name, by_alias)
+
+    def test_every_documented_topic_resolves(self):
+        for topic in ("overview", "sequence", "events", "roles", "cadence", "modes",
+                      "troubleshooting", "adoption"):
+            code, text = run_cli("help", topic)
+            self.assertEqual(code, 0, topic)
+            self.assertIn(f"HELP_RESULT: OK ({topic})", text)
+
+    def test_unknown_topic_lists_the_real_ones_and_exits_nonzero(self):
+        code, text = run_cli("help", "wat")
+        self.assertEqual(code, 2)
+        self.assertIn("TOPICS:", text)
+        self.assertIn("HELP_RESULT: UNKNOWN_TOPIC", text)
+
+    def test_help_degrades_when_the_runbook_is_missing(self):
+        original = cli.USAGE_DOC
+        cli.USAGE_DOC = os.path.join(tempfile.gettempdir(), "no-such-usage.md")
+        try:
+            code, text = run_cli("help")
+        finally:
+            cli.USAGE_DOC = original
+        self.assertEqual(code, 0)
+        self.assertIn("HELP_RESULT: FALLBACK", text)
+        self.assertIn("acknowledged", text)
+
+    def test_help_needs_no_bundle(self):
+        # The one mode you run before you have a catalog.
+        self.assertEqual(run_cli("help", "sequence")[0], 0)
+
+
+class TestOptions(TempBundle):
+    def setUp(self):
+        super().setUp()
+        team(self.root, "payments")
+        team(self.root, "checkout")
+        team(self.root, "ledger", provenance="stub")
+        self.cap = capability(self.root, "payments", "refund", upstream={"attested": True},
+                              readiness=[{"environment": "production",
+                                          "state": "provider_tested"}])
+        capability(self.root, "checkout", "order-detail")
+        capability(self.root, "ledger", "post-entry")
+
+    def _json(self, *argv):
+        _, text = run_cli(*argv, "--json")
+        payload = text[text.index("{"):text.rindex("}") + 1]
+        return json.loads(payload)
+
+    def test_capability_options_exclude_your_own_team(self):
+        data = self._json("options", self.root, "--for", "capabilities", "--team", "checkout")
+        values = [o["value"] for o in data["options"]]
+        self.assertIn("payments/refund", values)
+        self.assertNotIn("checkout/order-detail", values)
+
+    def test_option_descriptions_carry_readiness_and_stub_status(self):
+        data = self._json("options", self.root, "--for", "capabilities",
+                          "--environment", "production")
+        by_value = {o["value"]: o["description"] for o in data["options"]}
+        self.assertIn("provider_tested", by_value["payments/refund"])
+        self.assertIn("stub team", by_value["ledger/post-entry"])
+
+    def test_options_carry_the_three_keys_a_question_ui_needs(self):
+        data = self._json("options", self.root, "--for", "environments")
+        self.assertTrue(data["options"])
+        for opt in data["options"]:
+            self.assertEqual(set(opt), {"value", "label", "description"})
+        self.assertEqual([o["value"] for o in data["options"]], ["staging", "production"])
+
+    def test_verification_kind_options_state_the_guard_in_the_description(self):
+        data = self._json("options", self.root, "--for", "verification-kinds")
+        contract = [o for o in data["options"] if o["value"] == "contract"][0]
+        self.assertIn("no environment", contract["description"])
+
+    def test_dependency_options_filter_by_team_and_state(self):
+        dependency(self.root, "dep-1", "checkout", "payments", self.cap, state="proposed")
+        dependency(self.root, "dep-2", "payments", "ledger",
+                   "teams/ledger/capabilities/post-entry.md", state="detected")
+        data = self._json("options", self.root, "--for", "dependencies",
+                          "--team", "checkout", "--today", "2026-08-14")
+        self.assertEqual([o["value"] for o in data["options"]], ["dep-1"])
+        detected = self._json("options", self.root, "--for", "detected",
+                              "--today", "2026-08-14")
+        self.assertEqual([o["value"] for o in detected["options"]], ["dep-2"])
+
+
+class TestNext(TempBundle):
+    def setUp(self):
+        super().setUp()
+        team(self.root, "payments")
+        team(self.root, "checkout")
+        self.cap = capability(self.root, "payments", "refund", upstream={"attested": True},
+                              readiness=[{"environment": "production",
+                                          "state": "provider_tested"}])
+
+    def test_detected_edge_tells_the_consumer_to_declare(self):
+        dependency(self.root, "dep-1", "checkout", "payments", self.cap, state="detected")
+        code, text = run_cli("next", self.root, "--team", "checkout", "--today", "2026-08-14")
+        self.assertEqual(code, 0)
+        self.assertIn("declare", text)
+        self.assertIn("--consumer checkout", text)
+
+    def test_proposed_edge_tells_the_provider_to_ack_and_is_urgent(self):
+        dependency(self.root, "dep-1", "checkout", "payments", self.cap, state="proposed",
+                   acknowledgement={"consumer": {"by": "bob"}})
+        _, text = run_cli("next", self.root, "--team", "payments", "--today", "2026-08-14")
+        self.assertIn("[now]", text)
+        self.assertIn("ack ", text)
+        self.assertIn("--dependency dep-1", text)
+
+    def test_tripped_edge_tells_the_owner_to_resolve(self):
+        dependency(self.root, "dep-1", "checkout", "payments", self.cap,
+                   promised_date="2026-08-10",
+                   fallback={"description": "flag", "execution_days": 3})
+        _, text = run_cli("next", self.root, "--team", "payments", "--today", "2026-08-20")
+        self.assertIn("resolve", text)
+        self.assertIn("tripped", text)
+
+    def test_a_team_with_nothing_waiting_is_told_so(self):
+        _, text = run_cli("next", self.root, "--team", "checkout", "--today", "2026-08-14")
+        self.assertIn("Nothing is waiting on you", text)
+        self.assertIn("NEXT_RESULT: 0 action(s)", text)
+
+    def test_comment_only_actions_are_not_prefixed_as_commands(self):
+        capability(self.root, "checkout", "order-detail", lifecycle="proposed")
+        _, text = run_cli("next", self.root, "--team", "checkout", "--today", "2026-08-14")
+        for line in text.splitlines():
+            if line.strip().startswith("#"):
+                self.assertNotIn("python3", line)
 
 
 if __name__ == "__main__":
