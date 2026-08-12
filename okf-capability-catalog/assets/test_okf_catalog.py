@@ -467,8 +467,9 @@ class TestStateMachine(TempBundle):
 # ── audit + validate ─────────────────────────────────────────────────────────
 
 class TestAudit(TempBundle):
-    def _eks_case(self):
-        """The canonical incident, reverse-engineered into a fixture."""
+    def _platform_parity_case(self):
+        """Provider-tested only in production, on a platform the staging runs never
+        exercised, with a live commitment standing against it."""
         team(self.root, "payments")
         team(self.root, "checkout")
         rel = capability(self.root, "payments", "refund", upstream={"attested": True},
@@ -486,9 +487,9 @@ class TestAudit(TempBundle):
                    fallback={"description": "flag", "execution_days": 3})
         return core.Catalog.load(self.root)
 
-    def test_eks_case_surfaces_on_two_independent_rules_before_the_date(self):
+    def test_platform_parity_surfaces_on_two_independent_rules_before_the_date(self):
         # Acceptance test 1.
-        cat = self._eks_case()
+        cat = self._platform_parity_case()
         codes = {f.code for f in core.audit(cat, _dt.date(2026, 8, 25))}
         self.assertIn("CC-PROVIDER-ONLY", codes)
         self.assertIn("CC-PLATFORM-DRIFT", codes)
@@ -496,7 +497,7 @@ class TestAudit(TempBundle):
                                      "CC-NOT-VERIFIED"} & codes), 2)
 
     def test_tripped_edge_is_reported_as_an_unresolved_decision(self):
-        cat = self._eks_case()
+        cat = self._platform_parity_case()
         findings = core.audit(cat, _dt.date(2026, 8, 30))
         self.assertEqual(findings[0].code, "CC-TRIPPED")
         self.assertIn("decision", findings[0].message)

@@ -71,9 +71,10 @@ Verification under the consumer's **own** folder from the consumer's **own** rep
 artifact originates where the authority lives, so the commit-boundary check passes
 naturally and a provider cannot produce one without committing to someone else's repo.
 
-`verification.kind` is load-bearing: `contract` may assert nothing on the readiness axis,
-because a contract test proves the shape of the exchange and the original incident's
-contract was fine — the deployment wiring was not.
+`verification.kind` is load-bearing: `contract` may assert nothing on the readiness axis.
+A contract test proves the shape of the exchange, and a payload shape can be perfectly
+agreed while the deployment carrying it does not work — see
+[failure-patterns.md](failure-patterns.md) §1.
 
 ## What inference covers, when nothing is declared
 

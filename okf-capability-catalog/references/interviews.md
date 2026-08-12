@@ -67,9 +67,10 @@ omitted one is flagged as un-estimated (`CC-DEFAULT-FALLBACK`).
    tested by you, or already verified by a consuming team?
 4. **Is the runtime for that environment the same as where you tested it?** `ack` surfaces
    the scanned `runtimes` and refuses to proceed on a platform mismatch until the provider
-   passes `--runtime-checked` and says in `--note` what they actually looked at. This
-   question exists solely because of the ECS/EKS incident: the scanner already knows the
-   platforms differ; the interview makes someone look at it.
+   passes `--runtime-checked` and says in `--note` what they actually looked at. The
+   scanner already knows the platforms differ; the interview is what makes someone look at
+   it. See [failure-patterns.md](failure-patterns.md) §2 for what an unexercised target
+   costs.
 5. **Anything the consumer must do or provide first?** Record in `--note`.
 
 If the provider disputes the consequence or the fallback, record it with `--dispute`; their
@@ -93,6 +94,16 @@ Short, but the guards matter more than the questions.
 Record `result: failed` as readily as `verified`. Then read the printed readiness back,
 including the untouched environments — the line that says production is still `unknown`
 after a staging run is the whole point.
+
+## How this guidance gets measured
+
+The tooling half of these rules is gate-tested (the CLI refuses a consumer-written
+`promised_date`, a blank consequence, a fallback with no execution time). The conversational
+half — whether an agent actually presses when an engineer answers "it'd be bad" — needs model
+runs, so it lives as a documented manual protocol rather than a gate check:
+`docs/okf-capability-catalog/2026-08-12-interview-elicitation-model-eval.md` in the skills
+repo. If you change the questions above, re-run it, and record an unmoved measurement as
+unproven rather than quietly keeping the new wording.
 
 ## Claiming a team → during `annotate`
 

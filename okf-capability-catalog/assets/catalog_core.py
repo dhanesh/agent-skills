@@ -675,7 +675,8 @@ def own_readiness(cat, cap, env, today):
             notes.append(f"expired verification {ver.relpath}")
             continue
         # A contract test proves the shape of the exchange, not the wiring. It
-        # is evidence, never readiness — the incident's contract was fine.
+        # is evidence, never readiness: agreeing on a payload shape says nothing
+        # about whether the deployment it travels through exists.
         if ver.get("kind") == "contract":
             notes.append(f"contract test {ver.relpath} recorded as evidence only")
             continue
@@ -1012,8 +1013,8 @@ def audit(cat, today, ponr_days=None):
             add("CC-TRIPPED", "high", dep.relpath,
                 f"{dep_id} tripped ({state.reason}) with no recorded decision. "
                 f"Named decision-maker: {who or 'unassigned — this is the finding'}. "
-                "Choose satisfied, fallback_invoked, or renegotiated; limbo is what "
-                "caused the incident")
+                "Choose satisfied, fallback_invoked, or renegotiated; an edge left in "
+                "limbo is a decision nobody made")
 
         for other, other_date in impossible_promise(cat, dep):
             add("CC-IMPOSSIBLE-PROMISE", "high", dep.relpath,
@@ -1133,8 +1134,8 @@ def audit(cat, today, ponr_days=None):
                 add("CC-HUMAN-LIVENESS", sev, rel,
                     f"'{state_claimed}' is asserted inside the provider-owned capability "
                     f"file for {env}. consumer_verified lives in the consumer's "
-                    "Verification, production_live in signals/ — humans are exactly who "
-                    "got this wrong last time")
+                    "Verification, production_live in signals/ — a human asserting live "
+                    "traffic is reporting a belief, not an observation")
             asserted = parse_date(entry.get("asserted_at"))
             if asserted and (today - asserted).days > stale_days:
                 add("CC-STALE-ASSERTION", "low", rel,
@@ -1176,8 +1177,9 @@ def audit(cat, today, ponr_days=None):
                 detail = ", ".join(f"{e}={p}" for e, p in sorted(platforms.items()))
                 add("CC-PLATFORM-DRIFT", "high", rel,
                     f"{svc.get('service_id')} runs on different platforms per environment "
-                    f"({detail}) while carrying an open dependency. Tested on one platform "
-                    "is not tested on the other — this is the shape of the original incident")
+                    f"({detail}) while carrying an open dependency. Exercised on one "
+                    "platform is not exercised on the other, and what was never exercised "
+                    "is where parity failures land")
         for link in svc.get("fulfils") or []:
             if norm_link(link) not in cat.docs:
                 add("CC-BROKEN-LINK", "low", rel, f"fulfils points at missing {link}")

@@ -6,11 +6,11 @@ tripped edges first, then by severity. `--json` for machines, `--fail-on-high` f
 
 | Code | Sev | Catches |
 |---|---|---|
-| `CC-TRIPPED` | high | an edge whose point of no return passed with no decision recorded. **Top of the report, always** — it names the decision-maker, because limbo is what caused the incident. |
+| `CC-TRIPPED` | high | an edge whose point of no return passed with no decision recorded. **Top of the report, always** — it names the decision-maker, because an edge left in limbo is a decision nobody made. |
 | `CC-IMPOSSIBLE-PROMISE` | high | a promise the graph says cannot happen: a hard upstream is itself promised later. Pure arithmetic, available at declaration time rather than delivery day. |
 | `CC-FOG` | high | an acknowledged commitment whose hard closure has `depth: unknown`. A commitment made into fog. |
 | `CC-UNMANAGED-UPSTREAM` | high | the edge rests on a capability that is not `consumer_verified` in the target environment and has no edge managing it. The edge looks healthy while resting on nothing. |
-| `CC-PROVIDER-ONLY` | high | the capability is `provider_tested` only in the target environment while a live commitment stands against it. **This line alone catches the original incident.** |
+| `CC-PROVIDER-ONLY` | high | the capability is `provider_tested` only in the target environment while a live commitment stands against it. **This alone catches the provider-validated-but-never-accepted pattern** ([failure-patterns.md](failure-patterns.md) §1). |
 | `CC-PLATFORM-DRIFT` | high | a service whose `runtimes[].platform` differs across environments while carrying an open dependency. Tested on ECS is not tested on EKS. |
 | `CC-PONR-NEAR` | high | the point of no return lands within `ponr_warning_days` with no on-track confirmation — after it, the fallback cannot be stood up in time. |
 | `CC-FEATURE-BRANCH` | high | a dependency points at a capability whose code is only on a feature branch. That is a proposal, not a capability. |

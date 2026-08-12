@@ -55,8 +55,10 @@ one implies unilateral ownership. Schemas: [references/schemas.md](references/sc
 
 ## Ground rules
 
-These are the rules the tool enforces, and the ones to defend in conversation. They exist
-because each has a matching failure.
+These are the rules the tool enforces, and the ones to defend in conversation. Each exists
+because a documented class of failure keeps recurring; the public cases, with sources, are
+in [references/failure-patterns.md](references/failure-patterns.md) — reach for one when a
+team reads a rule as bureaucracy.
 
 - **Readiness is a grid, not a boolean.** Code maturity (`feature`/`integration`/`release`)
   and deployment reality (`unknown`/`provider_tested`/`consumer_verified`/`production_live`)
@@ -144,9 +146,9 @@ flag weeks early — treat that as the format working, not as a validation failu
 `verify` writes a Verification under the **consumer's** own folder; it refuses the owning
 team outright, and refuses to file a run against an environment it did not execute in.
 `kind: contract` is recorded as evidence and raises readiness for nothing — a contract test
-proves you agree on the shape of the exchange, which is exactly what was already true in
-the incident this design comes from. Record `result: failed` as readily as `verified`; a
-failed verification is the most valuable document in the bundle. `signal` accepts only a
+proves you agree on the shape of the exchange, which a broken deployment can also satisfy.
+Record `result: failed` as readily as `verified`; a failed verification is the most valuable
+document in the bundle. `signal` accepts only a
 `ci://` or `monitor://` source.
 
 ### Mode: `review` / `audit` — what is, versus what is wrong
@@ -191,7 +193,7 @@ Before calling a session done:
 3. Re-running `annotate` produces no diff (idempotence), and no human-asserted field moved.
 4. The tool's own suites stay green when you change it:
    `python3 assets/test_okf_catalog.py` (76 tests) and `python3 eval/run_eval.py` (50
-   end-to-end checks, one per acceptance test in the design — the EKS case, PONR
+   end-to-end checks, one per acceptance test in the design — platform parity, PONR
    arithmetic, trip propagation, migration stability, self-certification refusal).
 
 ## Extending

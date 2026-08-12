@@ -44,11 +44,31 @@ ROWS = []
 
 def row(skill, dimension, old, new, ok, note="", kind="delta"):
     """kind='delta' claims the new arm is strictly better; kind='guard' claims only
-    that behaviour is unchanged. Keeping them distinct is what stops a held guard
-    from being counted as an improvement."""
+    that behaviour is unchanged; kind='skip' means the capability does not exist in
+    the baseline at all, so there is nothing to compare. Keeping them distinct is
+    what stops a held guard — or an absent baseline — from being counted as a win."""
     ROWS.append({"skill": skill, "dimension": dimension, "old": old, "new": new,
                  "ok": ok, "note": note, "kind": kind,
                  "moved": str(old) != str(new)})
+
+
+def row_or_skip(skill, dimension, old_probe, new_probe, key, expected, note=""):
+    """Regression guard for a measurement that may not exist in the baseline.
+
+    A skill added after the baseline commit has no old arm — measuring it would
+    print a fabricated 'improvement' against a module that was never there. So the
+    row is recorded as a SKIP: the probe still runs against the candidate and is
+    asserted against `expected`, and it becomes a real HELD/WORSE guard the moment
+    the baseline contains the skill."""
+    new = new_probe.get(key)
+    if "_error" in old_probe:
+        ROWS.append({"skill": skill, "dimension": dimension, "old": "absent",
+                     "new": new, "ok": new == expected, "kind": "skip",
+                     "moved": False,
+                     "note": note or "not in the baseline tree; asserted against the "
+                                     "candidate only"})
+        return
+    row(skill, dimension, old_probe.get(key), new, new == expected, note, kind="guard")
 
 
 def probe(tree, subdir, code):
@@ -337,6 +357,147 @@ def check_loops(old, new):
         "declared-but-unenforced would not count")
 
 
+
+# ── okf-capability-catalog ──────────────────────────────────────────────────
+# Guardrails whose whole value is that they REFUSE things. They are regression
+# guards, not deltas: the day one of these starts honouring a claim it used to
+# reject, the catalog is lying to whoever reads it.
+
+CC_READINESS = r"""
+import catalog_core as C, datetime as D
+root = tempfile.mkdtemp()
+def w(rel, meta):
+    p = os.path.join(root, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(C.render_doc(meta))
+open(os.path.join(root, "catalog.config.yaml"), "w").write(
+    C.dump_yaml({"environments": [{"name": "production"}]}))
+for t in ("prov", "cons", "up"):
+    w("teams/%s/team.md" % t, {"type": "Team", "team_id": t, "provenance": "claimed"})
+w("teams/up/capabilities/upstream.md",
+  {"type": "Capability", "capability_id": "up/upstream",
+   "owning_team": "/teams/up/team.md", "upstream": {"attested": True},
+   "readiness": [{"environment": "production", "state": "provider_tested"}]})
+# The provider types consumer_verified into its OWN file, and the only consumer
+# evidence is a contract test. Neither may raise readiness.
+w("teams/prov/capabilities/cap.md",
+  {"type": "Capability", "capability_id": "prov/cap",
+   "owning_team": "/teams/prov/team.md", "upstream": {"attested": True},
+   "requires": [{"capability": "/teams/up/capabilities/upstream.md",
+                 "criticality": "hard"}],
+   "readiness": [{"environment": "production", "state": "consumer_verified"}]})
+w("teams/cons/verifications/v.md",
+  {"type": "Verification", "capability": "/teams/prov/capabilities/cap.md",
+   "verifying_team": "/teams/cons/team.md", "environment": "production",
+   "result": "verified", "kind": "contract", "verified_by": "bob",
+   "verified_at": "2026-08-10T09:00:00Z"})
+cat = C.Catalog.load(root)
+cap = cat.capability_by_id("prov/cap")
+day = D.date(2026, 8, 14)
+eff = C.effective_readiness(cat, cap, "production", day)
+print(json.dumps({"own": C.own_readiness(cat, cap, "production", day)[0],
+                  "effective": eff.state, "verdict": eff.verdict}))
+"""
+
+CC_STATE = r"""
+import catalog_core as C, datetime as D
+root = tempfile.mkdtemp()
+def w(rel, meta):
+    p = os.path.join(root, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(C.render_doc(meta))
+open(os.path.join(root, "catalog.config.yaml"), "w").write(
+    C.dump_yaml({"environments": [{"name": "production"}]}))
+for t in ("a", "b", "c"):
+    w("teams/%s/team.md" % t, {"type": "Team", "team_id": t, "provenance": "claimed"})
+for t, slug in (("a", "one"), ("b", "two")):
+    w("teams/%s/capabilities/%s.md" % (t, slug),
+      {"type": "Capability", "capability_id": "%s/%s" % (t, slug),
+       "owning_team": "/teams/%s/team.md" % t, "upstream": {"attested": True}})
+def dep(i, cons, prov, cap, promised, **kw):
+    meta = {"type": "Dependency", "dependency_id": i,
+            "consumer_team": "/teams/%s/team.md" % cons,
+            "provider_team": "/teams/%s/team.md" % prov, "capability": cap,
+            "target_environment": "production", "promised_date": promised,
+            "fallback": {"description": "x", "execution_days": 3},
+            "state": "acknowledged"}
+    meta.update(kw)
+    w("dependencies/%s.md" % i, meta)
+dep("dep-up", "b", "a", "/teams/a/capabilities/one.md", "2026-08-20")
+dep("dep-down", "c", "b", "/teams/b/capabilities/two.md", "2026-11-01",
+    depends_on=["dep-up"])
+cat = C.Catalog.load(root)
+day = D.date(2026, 8, 25)
+up, down = cat.dependencies["dep-up"], cat.dependencies["dep-down"]
+state = C.effective_state(cat, down, day)
+print(json.dumps({
+    "ponr": C.point_of_no_return(up, cat.config).isoformat(),
+    "upstream": C.effective_state(cat, up, day).state,
+    "downstream": state.state, "originator": state.originator}))
+"""
+
+CC_ENFORCE = r"""
+import catalog_core as C
+root = tempfile.mkdtemp()
+def w(rel, meta):
+    p = os.path.join(root, rel); os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w").write(C.render_doc(meta))
+open(os.path.join(root, "catalog.config.yaml"), "w").write(C.dump_yaml({}))
+for t in ("prov", "cons"):
+    w("teams/%s/team.md" % t, {"type": "Team", "team_id": t, "provenance": "claimed"})
+w("teams/prov/capabilities/cap.md",
+  {"type": "Capability", "capability_id": "prov/cap",
+   "owning_team": "/teams/prov/team.md"})
+ver = C.render_doc({"type": "Verification",
+                    "capability": "/teams/prov/capabilities/cap.md",
+                    "verifying_team": "/teams/cons/team.md",
+                    "environment": "production", "result": "verified",
+                    "kind": "deployment", "verified_by": "bob",
+                    "verified_at": "2026-08-10T09:00:00Z"})
+cat = C.Catalog.load(root)
+# The providing team commits the consuming team's acceptance for them.
+bad = C.enforce(cat, [{"sha": "x", "author_handle": "alice", "author_team": "prov",
+                       "committed_at": "2026-08-10T10:00:00Z",
+                       "files": [{"path": "teams/cons/verifications/v.md",
+                                  "content": ver}]}])
+good = C.enforce(cat, [{"sha": "y", "author_handle": "bob", "author_team": "cons",
+                        "committed_at": "2026-08-10T10:00:00Z",
+                        "files": [{"path": "teams/cons/verifications/v.md",
+                                   "content": ver}]}])
+print(json.dumps({"provider_authored_caught": len(bad) > 0,
+                  "consumer_authored_clean": len(good) == 0}))
+"""
+
+
+def check_capability_catalog(old, new):
+    s = "okf-capability-catalog"
+    sub = s + "/assets"
+    ro, rn = (probe(t, sub, CC_READINESS) for t in (old, new))
+    row_or_skip(s, "provider file typing consumer_verified is honoured", ro, rn,
+                "own", "provider_tested",
+                "clamped to what a provider-owned document may assert")
+    row_or_skip(s, "effective readiness under a provider_tested hard upstream", ro, rn,
+                "effective", "provider_tested",
+                "min over the hard closure; a contract-kind verification raises nothing")
+    row_or_skip(s, "consumer-facing verdict for that capability", ro, rn,
+                "verdict", "not_ready")
+
+    so, sn = (probe(t, sub, CC_STATE) for t in (old, new))
+    row_or_skip(s, "point of no return (promised 2026-08-20 − 3d)", so, sn,
+                "ponr", "2026-08-17", "computed backwards from the deadline")
+    row_or_skip(s, "upstream edge past its PONR, unconfirmed", so, sn,
+                "upstream", "tripped", "trips with no human action")
+    row_or_skip(s, "downstream edge state after the upstream trips", so, sn,
+                "downstream", "at_risk", "propagated automatically")
+    row_or_skip(s, "originating edge named on the downstream", so, sn,
+                "originator", "dep-up")
+
+    eo, en = (probe(t, sub, CC_ENFORCE) for t in (old, new))
+    row_or_skip(s, "provider-authored verification caught at the commit", eo, en,
+                "provider_authored_caught", True,
+                "the check the mode-level guards cannot make")
+    row_or_skip(s, "honest consumer-authored verification passes", eo, en,
+                "consumer_authored_clean", True, "no false positive on the honest path")
+
+
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else BASE_DEFAULT
     if shutil.which("git") is None:
@@ -363,6 +524,7 @@ def main():
         check_hygiene(old, REPO)
         check_okf(old, REPO)
         check_loops(old, REPO)
+        check_capability_catalog(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
@@ -376,6 +538,8 @@ def main():
             print("=== %s ===" % current)
         if not r["ok"]:
             mark = "WORSE"
+        elif r["kind"] == "skip":
+            mark = "SKIP"
         elif r["kind"] == "guard":
             mark = "HELD"
         else:
@@ -387,11 +551,13 @@ def main():
         print()
 
     worse = [r for r in ROWS if not r["ok"]]
+    skipped = [r for r in ROWS if r["ok"] and r["kind"] == "skip"]
     unproven = [r for r in ROWS if r["ok"] and r["kind"] == "delta" and not r["moved"]]
     improved = [r for r in ROWS if r["ok"] and r["kind"] == "delta" and r["moved"]]
     held = [r for r in ROWS if r["ok"] and r["kind"] == "guard"]
-    print("%d improved · %d guards held · %d unproven · %d worse"
-          % (len(improved), len(held), len(unproven), len(worse)))
+    print("%d improved · %d guards held · %d unproven · %d worse · %d skipped "
+          "(absent in baseline)"
+          % (len(improved), len(held), len(unproven), len(worse), len(skipped)))
     ok = not worse and not unproven
     print("AB_RESULT: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

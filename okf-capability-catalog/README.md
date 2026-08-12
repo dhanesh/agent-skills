@@ -70,8 +70,8 @@ parties.
   author is entitled to claim. A `kind: contract` run raises nothing; a staging run raises
   staging alone.
 - **`review` / `audit`** — what is, versus what is wrong. 24 finding codes, tripped edges
-  first; `CC-PROVIDER-ONLY` and `CC-PLATFORM-DRIFT` each catch the incident this was built
-  from, independently.
+  first; `CC-PROVIDER-ONLY` and `CC-PLATFORM-DRIFT` each catch the
+  provider-validated-but-never-accepted pattern independently.
 - **`validate` / `enforce` / `codeowners`** — OKF conformance plus the three enforcement
   layers (path ownership, diff validation, reconciliation against git history).
 
@@ -83,10 +83,14 @@ parties.
 - `assets/okf_catalog.py` — the CLI: 16 modes, refusals with hints, deterministic clocks.
 - `assets/test_okf_catalog.py` — 76-test stdlib suite.
 - `eval/run_eval.py` — 50 end-to-end checks, one per acceptance test in the design.
-- `references/` — readiness model, schemas, interviews, enforcement, repo declarations,
-  audit findings, CLI reference, OKF spec tracking.
+- `references/` — failure patterns (the public cases each rule comes from), readiness
+  model, schemas, interviews, enforcement, repo declarations, audit findings, CLI
+  reference, OKF spec tracking.
 - `scripts/ci-enforce.sh` — git → changeset → `enforce`, for a required status check.
 
-Verified end to end against a synthetic three-team org carrying the shape of the original
-incident: an ECS/EKS split across environments with a provider-tested capability under a
-live commitment. Both suites green offline, stdlib only.
+Verified end to end against a synthetic three-team org carrying a platform-parity split —
+different container platforms per environment, with a provider-tested-only capability under
+a live commitment. Both suites green offline, stdlib only.
+
+The public failures each rule is derived from (CrowdStrike 2024, Knight Capital 2012, AWS
+Kinesis 2020, GitLab.com 2017), with sources, are in `references/failure-patterns.md`.

@@ -1,9 +1,11 @@
 # Readiness: a grid, an owner per cell, and a depth qualifier
 
-The incident this model is reverse-engineered from: a capability worked on ECS, the team
-assumed the EKS migration was equivalent, but the consumer's Kafka topic configuration was
-wrong. No production data was flowing, so nothing surfaced the gap until go-live. One week
-lost. "Exists" had been treated as one fact. It is not.
+"Exists" gets treated as one fact. It is not: it is a point on two independent axes,
+owned by different parties, and the schema's job is to make it impossible to state one and
+imply the other. The public failures each rule comes from are collected in
+[failure-patterns.md](failure-patterns.md) — a provider's own validation standing in for
+acceptance, deployment reality differing per target, a hidden upstream, a capability nobody
+ever exercised.
 
 ## Axis 1 — code maturity (where the code lives)
 
@@ -54,7 +56,8 @@ and reported by `audit` as `CC-HUMAN-LIVENESS`. It is never honoured.
    `provider_tested`. Someone tried it and it did not work; that outranks optimism.
 
 `kind: contract` raises nothing. A contract test proves you and the provider agree on the
-*shape* of the exchange — which was true throughout the original incident. `kind:
+*shape* of the exchange, and a shape check can pass while the thing it describes is
+unrunnable where it has to run. `kind:
 deployment` may only speak for the environment the run actually executed in, resolved from
 the CI run rather than declared by hand. `kind: manual` needs a named human and evidence.
 
@@ -88,13 +91,13 @@ usually means the capability boundary is drawn wrong.
 
 **A consumer may treat a capability as green only when readiness is `consumer_verified` or
 better AND depth is `complete`.** Everything else renders as `unknown`, distinct from both
-green and red. This is the incident's lesson generalised: partial information presented
-without its own limits is worse than no information, because it manufactures confidence.
+green and red. Partial information presented without its own limits is worse than no
+information, because it manufactures confidence.
 
 `upstream.attested` is what makes absence meaningful. Without it, "this capability declares
 no upstreams" and "nobody has ever looked" are the same bytes on disk — and a downstream
-team reading the first while the truth is the second gets exactly the false confidence that
-caused the incident, one hop further out.
+team reading the first while the truth is the second gets false confidence about
+everything one hop further out.
 
 `scanner_agreement: true` claims only that the scan found nothing *beyond* what was
 declared. It never claims the scan found everything. The scanner is structurally blind to

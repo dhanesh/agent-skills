@@ -460,8 +460,9 @@ def infer_interfaces(repo):
 
 
 def infer_runtimes(repo, env_names):
-    """Per-environment platform from IaC. Per environment, because an ECS/EKS
-    split across environments is exactly what hid the original incident."""
+    """Per-environment platform from IaC. Per environment, because a platform
+    split between environments stays invisible unless it is recorded per
+    environment — and the environment nobody exercised is the risky one."""
     found = {}
     for path in repo_files(repo):
         if not path.endswith((".tf", ".tfvars", ".yaml", ".yml", ".json")):
@@ -755,8 +756,8 @@ def cmd_annotate(args):
     out("NOTE: the scanner never writes consumer_verified or production_live — those are "
         "cross-team and traffic facts that code cannot prove")
     if detected:
-        out(f"NEXT: run `declare` on {len(detected)} unmanaged edge(s) — an integration that "
-            "exists in code with nobody managing it is the class that causes incidents")
+        out(f"NEXT: run `declare` on {len(detected)} unmanaged edge(s) — an integration "
+            "that exists in code with nobody managing it is risk nobody has priced")
     out(f"SCAN_RESULT: OK ({len(cap_paths)} capability/ies, {len(detected)} detected edge(s))")
     return 0
 
@@ -1363,9 +1364,8 @@ def cmd_verify(args):
             return refuse("VERIFY_RESULT",
                           f"the suite ran against '{args.ran_in}' but this claims "
                           f"'{args.environment}'",
-                          "green against staging is evidence about staging — that is the "
-                          "whole lesson of the original failure. File it against the "
-                          "environment it ran in")
+                          "green against staging is evidence about staging and nothing "
+                          "more. File it against the environment it ran in")
     if args.kind == "contract":
         out("NOTE: a contract test proves you and the provider agree on the shape of the "
             "exchange, not that the deployment is wired up. Recorded as supporting "
@@ -1479,9 +1479,9 @@ def cmd_signal(args):
     if not re.match(r"^(ci|monitor|monitoring)://", args.emitted_by or ""):
         return refuse("SIGNAL_RESULT",
                       f"emitted_by '{args.emitted_by}' is not a machine source",
-                      "signals are written by CI or monitoring only (ci:// or monitor://) — "
-                      "production_live is a traffic fact, and humans are exactly who got "
-                      "this wrong last time")
+                      "signals are written by CI or monitoring only (ci:// or monitor://) "
+                      "— production_live is a traffic fact, and a human asserting it is "
+                      "reporting a belief rather than an observation")
     cap = cat.resolve_capability(args.capability)
     if cap is None:
         return refuse("SIGNAL_RESULT", f"capability '{args.capability}' is not in the catalog")

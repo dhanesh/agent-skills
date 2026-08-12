@@ -2,15 +2,15 @@
 """Gate-runnable outcome eval for okf-capability-catalog (docs/eval-standard.md).
 
 Harness: builds a synthetic three-team organisation in a tempdir — a catalog
-bundle plus three service repositories, one of which carries the shape of the
-original incident (a service on EKS in staging and ECS in production, a
-capability the provider has tested and no consumer has). It then drives the
+bundle plus three service repositories, one of which carries a platform-parity
+split (a service on EKS in staging and ECS in production, with a capability the
+provider has tested and no consumer has). It then drives the
 real CLI end to end: init → annotate → declare → ack → confirm → tested →
 verify → signal → resolve.
 
 Grader: model-free checks over the CLI's output protocol and the markdown it
-wrote, one per acceptance test in the skill's spec — the EKS case surfacing on
-two independent rules, point-of-no-return arithmetic, automatic tripping,
+wrote, one per acceptance test in the skill's spec — platform parity surfacing
+on two independent rules, point-of-no-return arithmetic, automatic tripping,
 two-hop trip propagation, derived (never stored) readiness, migration
 stability, and stub-team unsatisfiability.
 
@@ -463,10 +463,11 @@ def stub_and_propagation(tmp, cat):
 
 
 def findings(tmp, cat, dep_id, ledger_dep):
-    # The canonical case, well before the promised date of 2026-09-01.
+    # Well before the promised date of 2026-09-01.
     code, text = run("audit", cat, "--today", "2026-08-14")
     codes = {line.split()[1] for line in text.splitlines() if line.startswith("FINDING:")}
-    check("the EKS case surfaces before the promised date on independent rules",
+    check("a provider-tested-only capability on a split platform surfaces early, "
+          "on independent rules",
           "CC-PROVIDER-ONLY" in codes and "CC-PLATFORM-DRIFT" in codes
           and len(codes & {"CC-PROVIDER-ONLY", "CC-PLATFORM-DRIFT", "CC-NOT-VERIFIED"}) >= 2,
           f"codes: {sorted(codes)}")
