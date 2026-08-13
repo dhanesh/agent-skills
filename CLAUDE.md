@@ -20,6 +20,9 @@ green. It runs, for every skill, in a fail-fast loop:
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
 | **Outcome eval** | `scripts/gates/run-eval.sh` → `*/eval/run_eval.py` | each skill's end-to-end eval per `docs/eval-standard.md` (deterministic harness → skill tooling → model-free grader, negative fixtures mandatory); **missing eval fails the gate** |
 
+Plus one repo-tooling suite that isn't per-skill: `scripts/test_package_skills.py`, the unit
+suite for the release packager (see *Distribution* below). `make gate` runs it first.
+
 CI (`.github/workflows/skill-gates.yml`) runs `make gate` on every PR and push to `main`, so a
 green PR check means all of the above passed.
 
@@ -29,12 +32,33 @@ Handy targets:
 make gate                       # everything, all skills (what CI runs)
 make gate-skill SKILL=<dir>     # one skill, all checks incl. its unit tests + eval
 make test                       # just the unit suites
+make test-tools                 # just the repo tooling suite (release packager)
 make eval                       # just the outcome evals (docs/eval-standard.md)
 make frontmatter                # just the metadata-standard check
 make playbook PLAYBOOK_FLAGS=--strict   # promote the two advisory checks to hard failures
 make ab-validate [BASE=<ref>]   # behavioural A/B vs a baseline commit (see below)
+make package [SKILL=<dir>]      # build the uploadable dist/<skill>.zip archives
 make list-skills
 ```
+
+## Distribution: `make package` and the release
+
+`scripts/package-skills.py` turns each skill folder into `dist/<skill>.zip` whose single
+top-level entry is `<skill>/` — the shape Claude.ai's *Upload skill* flow and
+`~/.claude/skills/` both expect. It also writes `SHA256SUMS`, `manifest.json`, and
+`RELEASE_NOTES.md`. `.github/workflows/release-skills.yml` runs `make gate`, then
+`make package`, then attaches everything to a GitHub Release on every merge to `main`, so
+`releases/latest/download/<skill>.zip` is a stable per-skill URL.
+
+Two properties to preserve when touching the packager:
+
+- **Archives are byte-for-byte reproducible** (sorted entries, pinned timestamps, only the
+  executable bit kept from the file mode). The workflow compares the fresh `SHA256SUMS`
+  against the previous release's and skips publishing when they match — nondeterminism
+  would mint a release of identical zips on every docs-only merge.
+- **An archive is a faithful copy of the skill directory** (minus `__pycache__`/`*.pyc`
+  and friends). Don't start pruning `eval/` or `assets/test_*.py`: several SKILL.md bodies
+  reference them, and `context-hygiene-kit` ships its test suite as its install gate.
 
 ## Proving a change is an *improvement*: `make ab-validate`
 

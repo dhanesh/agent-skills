@@ -3,5 +3,8 @@
 __pycache__/
 *.pyc
 
+# Release archives built by `make package` (published from CI, never committed)
+dist/
+
 # Serena MCP local project state (regenerated per machine)
 .serena/

@@ -1,0 +1,87 @@
+name: release-skills
+
+# Publish one uploadable <skill>.zip per skill folder to a GitHub Release on
+# every merge to main, so each skill has a stable download URL:
+#
+#   https://github.com/dhanesh/agent-skills/releases/latest/download/<skill>.zip
+#
+# Those archives are what Claude.ai's "upload skill" flow accepts (which is how
+# they reach Claude Desktop and remote sessions); they also unzip straight into
+# ~/.claude/skills/.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish even if no skill content changed since the last release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Releases are cumulative and tag-stamped — never run two at once, and never
+# cancel one midway through uploading assets.
+concurrency:
+  group: release-skills
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Never publish an archive that would fail the quality gates.
+      - name: Run skill quality gates
+        run: make gate
+
+      - name: Package every skill
+        run: make package
+
+      # The archives are byte-for-byte reproducible, so an unchanged SHA256SUMS
+      # means no skill content moved — a docs-only merge should not mint a
+      # release full of identical zips.
+      - name: Decide whether anything changed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -eu
+          if [ "$FORCE" = "true" ]; then
+            echo "forced by workflow_dispatch"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p /tmp/previous
+          if gh release download --pattern SHA256SUMS --dir /tmp/previous 2>/dev/null \
+             && cmp -s /tmp/previous/SHA256SUMS dist/SHA256SUMS; then
+            echo "no skill content changed since the latest release — skipping"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        if: steps.decide.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="skills-$(date -u +%Y.%m.%d)-$(git rev-parse --short HEAD)"
+          assets="dist/SHA256SUMS dist/manifest.json"
+          for zip in dist/*.zip; do assets="$assets $zip"; done
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Same commit re-released (a manual re-run): refresh in place.
+            gh release upload "$tag" $assets --clobber
+            gh release edit "$tag" --notes-file dist/RELEASE_NOTES.md --latest
+          else
+            gh release create "$tag" $assets \
+              --title "Agent Skills $tag" \
+              --notes-file dist/RELEASE_NOTES.md \
+              --latest
+          fi
+          echo "Released $tag" >> "$GITHUB_STEP_SUMMARY"

@@ -12,7 +12,12 @@ on every skill it ships.
 | `prompting-playbook.sh <dir> [--strict]` | Lints SKILL.md against [The Prompting Playbook](../../docs/prompting-playbook.md) conventions: structured control surface (PP-1), decomposed single-job workflow (PP-2), explicit output protocol (PP-3), verification baked in (PP-4); advisory overcorrection guard (PP-5) and lean-context/progressive-disclosure (PP-6). `--strict` promotes the advisories to hard failures. | `PLAYBOOK_RESULT:` |
 | `frontmatter-standard.sh <dir>` | Standard frontmatter metadata: `license`, `compatibility`, and `metadata` (`author`/`version`/`tags`) | `FRONTMATTER_RESULT:` |
 | `run-eval.sh <dir>` | The skill's outcome eval (`eval/run_eval.py` per [docs/eval-standard.md](../../docs/eval-standard.md)): deterministic harness → skill tooling → model-free grader, negative fixtures mandatory. **Missing eval fails.** | `EVAL_RESULT:` |
-| `package-skill.sh <dir> <out>` | Produces a distributable archive of the skill | — |
+| `package-skill.sh <dir> [--tar <out.tar.gz>]` | Lists a skill's files (sorted, relative) and optionally tars them | `FILES:` / `PACKAGED:` |
+
+For **release** archives — one uploadable `<skill>.zip` per skill, attached to a GitHub
+Release on every merge to `main` — use [`scripts/package-skills.py`](../package-skills.py)
+(`make package`), not `package-skill.sh`: Claude.ai's upload flow takes a zip, and the
+release path additionally emits `SHA256SUMS`, `manifest.json`, and release notes.
 
 Run all gates across every skill via the repo `Makefile`: `make gate`.
 

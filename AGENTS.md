@@ -9,6 +9,9 @@ TL;DR for any coding agent working here:
   leaks, checks prompt conventions, and runs every skill's unit tests **and outcome eval**
   (`eval/run_eval.py`, contract in `docs/eval-standard.md`). CI runs the same on each PR.
 - Per-skill: `make gate-skill SKILL=<dir>`. Tests only: `make test`.
+- Every merge to `main` publishes one uploadable `<skill>.zip` per skill folder to a GitHub
+  Release (`make package` builds the same archives into `dist/`). Keep them reproducible —
+  `CLAUDE.md` § Distribution explains why.
 - Don't add a root `PARAMETERS.md` (reserved for template bijection — it fails the gate); use
   `references/parameters.md` to document a skill's flags.
 

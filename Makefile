@@ -5,7 +5,9 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
+DIST := dist
+
+.PHONY: gate validate scan-leaks dry-run playbook test test-tools eval frontmatter ab-validate package list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -21,6 +23,10 @@ list-skills:
 gate: clean
 	@rc=0; \
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
+	printf '\n=== repo tooling ===\n'; \
+	out=$$(python3 scripts/test_package_skills.py 2>&1); st=$$?; \
+	printf 'UNIT scripts/test_package_skills.py: %s\n' "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; \
+	[ $$st -eq 0 ] || { _fail "scripts/test_package_skills.py" "$$out"; rc=1; }; \
 	for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \
 		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d validate" "$$out"; rc=1; }; \
@@ -80,6 +86,21 @@ eval: clean
 		printf '\n=== %s ===\n' "$$d"; \
 		sh $(GATES)/run-eval.sh "$$d" || rc=1; \
 	done; exit $$rc
+
+# Run the repo's own tooling tests (the release packager). Not skill suites —
+# `make test` walks skills; this walks scripts/.
+test-tools:
+	@python3 scripts/test_package_skills.py
+
+# Build one uploadable <skill>.zip per skill into dist/, plus SHA256SUMS,
+# manifest.json, and RELEASE_NOTES.md. This is exactly what the release-skills
+# workflow attaches to a GitHub Release on every merge to main; run it locally
+# to inspect an archive before it ships.
+#   make package                    # all skills
+#   make package SKILL=<dir>        # just one
+package: clean
+	@python3 scripts/package-skills.py --out $(DIST) --revision "$$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+		$(if $(SKILL),--skill $(SKILL),)
 
 # Check the standard frontmatter metadata (license/compatibility/author/version/tags).
 frontmatter:

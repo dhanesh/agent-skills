@@ -38,6 +38,25 @@ To install every skill in this repo, omit the `--skill` flag:
 npx skills add dhanesh/agent-skills
 ```
 
+## Download a skill as a `.zip` (Claude.ai, Claude Desktop, remote sessions)
+
+Every merge to `main` publishes a [GitHub Release](../../releases/latest) carrying one
+`.zip` per skill folder, so each skill has a stable download URL:
+
+```
+https://github.com/dhanesh/agent-skills/releases/latest/download/<skill-name>.zip
+```
+
+- **Claude.ai / Claude Desktop / remote sessions** — download the `.zip` and upload it
+  as-is under Settings → Capabilities → Skills → *Upload skill*. Don't unzip it first.
+- **Claude Code, by hand** — `unzip -o <skill>.zip -d ~/.claude/skills/` (or
+  `.claude/skills/` for a single project).
+
+Each release also ships `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`) and a
+`manifest.json` listing every skill's version, description, and archive checksum. The
+archives are byte-for-byte reproducible — build the identical set locally with
+`make package`, which writes them to `dist/`.
+
 ## Skills
 
 | Skill | Description |
