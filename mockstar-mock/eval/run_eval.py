@@ -12,9 +12,15 @@ mockstar CLI, no Docker, no network:
   * the shipped smoke fixture (assets/fixtures/routes.tsv) conforms to the
     METHOD<TAB>/path<TAB>STATUS protocol Stage 5 feeds smoke.sh.
 
+  * webhook signing hints (webhookHints[].signing, mockstar >= 0.3.0) are graded
+    against the wire-format contract mockstar enforces at config-load, so a
+    generated signing block cannot fail the Stage-5 boot.
+
 Negative fixtures (mandatory): an inventory missing required fields, one with
-an invalid method, a provenance-less endpoint entry, and an out-of-enum
-confidence must all be rejected. Tempdir-only writes; deterministic.
+an invalid method, a provenance-less endpoint entry, an out-of-enum confidence,
+and — for signing — an inline secret, a signedPayload that covers no body, a
+signatureTemplate carrying no digest, a `{{ }}` template-engine mix-up, and an
+unknown placeholder must all be rejected. Tempdir-only writes; deterministic.
 """
 import json
 import os
@@ -30,6 +36,114 @@ ASSETS = os.path.join(SKILL, "assets")
 SCHEMA_PATH = os.path.join(SKILL, "references", "inventory.schema.json")
 
 _checks = []
+
+# ── Webhook signing contract (mockstar >= 0.3.0) ────────────────────────────
+# These vocabularies mirror mockstar's exported constants in
+# src/features/webhooks/scheme.ts. They are the wire-format contract, not a
+# preference: a block that breaks one of these is rejected by mockstar's Zod
+# schema at config-load, which is the Stage-5 boot the skill runs to prove the
+# generated project works. Grading them here catches it one stage earlier.
+SIGNED_PAYLOAD_PLACEHOLDERS = ("body", "timestamp", "timestampSeconds")
+SIGNATURE_TEMPLATE_PLACEHOLDERS = ("signature", "algorithm", "timestamp", "timestampSeconds")
+
+# Detection is deliberately wider than substitution: it matches ANY {...} span so a
+# near-miss like "{ body }" or a typo like "{time_stamp}" is flagged rather than
+# silently signed as literal text.
+_PLACEHOLDER_SPAN_RE = re.compile(r"\{[^{}]*\}")
+
+
+def _unknown_placeholders(template, allowed):
+    """Names in `template` that are not in `allowed`, de-duplicated, first-seen order."""
+    seen, out = set(), []
+    for match in _PLACEHOLDER_SPAN_RE.finditer(template):
+        name = match.group(0)[1:-1]
+        # An empty `{}` span is not a placeholder — it is a legitimate empty object
+        # inside a JSON-envelope payload (e.g. '{"meta":{},"b":{body}}').
+        if name == "" or name in allowed or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _has_unbalanced_placeholder(template):
+    """A leftover `{` followed by a letter — an unterminated placeholder.
+
+    A JSON envelope's outer brace is not this shape: stripping the spans from
+    '{"t":{timestamp},"b":{body}}' leaves '{"t":,"b":}', whose `{` precedes '"'.
+    """
+    return bool(re.search(r"\{[A-Za-z]", _PLACEHOLDER_SPAN_RE.sub("", template)))
+
+
+def _validate_signing(sig, sig_schema, where):
+    """Grade one webhookHints[].signing block. Returns a list of error strings."""
+    errors = []
+    if not isinstance(sig, dict):
+        return [f"{where}: signing must be an object"]
+
+    props = sig_schema["properties"]
+    for key in sig:
+        if key not in props:
+            errors.append(f"{where}.signing: unknown field {key!r}")
+
+    provider_enum = props["provider"]["enum"]
+    if "provider" in sig and sig["provider"] not in provider_enum:
+        errors.append(f"{where}.signing: provider {sig['provider']!r} not in {provider_enum}")
+
+    enc_enum = props["digestEncoding"]["enum"]
+    if "digestEncoding" in sig and sig["digestEncoding"] not in enc_enum:
+        errors.append(
+            f"{where}.signing: digestEncoding {sig['digestEncoding']!r} not in {enc_enum}")
+
+    # S3: secret references only. An inline secret is rejected by mockstar at
+    # config-load, and would also leak a credential into a generated artifact.
+    secret_pat = props["secretRef"]["pattern"]
+    if "secretRef" in sig:
+        ref = sig["secretRef"]
+        if not isinstance(ref, str) or not re.match(secret_pat, ref):
+            errors.append(
+                f"{where}.signing: secretRef {ref!r} is not `{{{{ env.NAME }}}}` or `file:/path` "
+                "— inline secrets are rejected")
+
+    checks = (
+        ("signedPayload", SIGNED_PAYLOAD_PLACEHOLDERS, "{body}",
+         "signature covers no request content"),
+        ("signatureTemplate", SIGNATURE_TEMPLATE_PLACEHOLDERS, "{signature}",
+         "signature header carries no digest"),
+    )
+    for field, allowed, required_tok, why in checks:
+        if field not in sig:
+            continue
+        tpl = sig[field]
+        if not isinstance(tpl, str) or not tpl:
+            errors.append(f"{where}.signing: {field} must be a non-empty string")
+            continue
+        # `{{` is the request-template engine's delimiter and `${` is JS template-literal
+        # syntax; neither is signing-placeholder syntax. Both render literally and produce
+        # a signature that authenticates nothing recognisable.
+        wrong_syntax = False
+        if "{{" in tpl:
+            errors.append(f"{where}.signing: {field} uses {{{{ }}}} request-template syntax, "
+                          "not single-brace signing placeholders")
+            wrong_syntax = True
+        if "${" in tpl:
+            errors.append(f"{where}.signing: {field} uses ${{ }} JS template-literal syntax, "
+                          "not single-brace signing placeholders")
+            wrong_syntax = True
+        if wrong_syntax:
+            continue
+        bad = _unknown_placeholders(tpl, allowed)
+        if bad:
+            errors.append(f"{where}.signing: {field} has unknown placeholder(s) "
+                          f"{bad} — allowed: {list(allowed)}")
+        if required_tok not in tpl:
+            errors.append(f"{where}.signing: {field} must contain {required_tok} — "
+                          f"otherwise the {why}")
+        if _has_unbalanced_placeholder(tpl):
+            errors.append(f"{where}.signing: {field} has an unmatched {{ that looks like "
+                          "an unterminated placeholder")
+    return errors
+
 
 
 def check(name, ok, detail=""):
@@ -68,6 +182,8 @@ def validate_inventory(doc, schema):
     resp_required = resp_schema["items"]["required"]
     status_min = resp_schema["items"]["properties"]["status"]["minimum"]
     status_max = resp_schema["items"]["properties"]["status"]["maximum"]
+    signing_schema = (item_schema["properties"]["webhookHints"]["items"]
+                      ["properties"]["signing"])
 
     endpoints = doc.get("endpoints")
     if not isinstance(endpoints, list):
@@ -112,6 +228,15 @@ def validate_inventory(doc, schema):
                     errors.append(f"{rwhere}: status {st} outside {status_min}-{status_max}")
         elif "responses" in ep:
             errors.append(f"{where}: responses must be an array")
+
+        hints = ep.get("webhookHints")
+        if isinstance(hints, list):
+            for j, hint in enumerate(hints):
+                if isinstance(hint, dict) and "signing" in hint:
+                    errors.extend(_validate_signing(
+                        hint["signing"], signing_schema, f"{where}.webhookHints[{j}]"))
+        elif "webhookHints" in ep:
+            errors.append(f"{where}: webhookHints must be an array")
     return errors
 
 
@@ -211,6 +336,121 @@ def main():
             {"endpoints": [endpoint(responses=[{"status": 999, "body": {}}])]}, schema)
         check("out-of-range response status is rejected",
               any("999" in e for e in errs), "; ".join(errs)[:80])
+
+        # ── Webhook signing contract (mockstar >= 0.3.0) ─────────────────
+        def with_signing(sig):
+            return {"endpoints": [endpoint(
+                method="POST", path="/orders",
+                webhookHints=[{"url": "https://partner.example.com/hooks",
+                               "event": "order.created", "signing": sig}])]}
+
+        # The Stripe row of the provider cookbook, emitted verbatim.
+        stripe = {
+            "provider": "stripe",
+            "enabled": True,
+            "secretRef": "{{ env.PARTNER_HOOK_SECRET }}",
+            "signedPayload": "{timestampSeconds}.{body}",
+            "signatureTemplate": "t={timestampSeconds},v1={signature}",
+            "digestEncoding": "hex",
+            "signatureHeader": "stripe-signature",
+            "timestampHeader": None,
+        }
+        errs = validate_inventory(with_signing(stripe), schema)
+        check("provider-fidelity signing hint (stripe cookbook row) validates",
+              errs == [], "; ".join(errs)[:100])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.HOOK_SECRET }}", "enabled": True}), schema)
+        check("minimal signing hint (enabled + secretRef) validates on defaults",
+              errs == [], "; ".join(errs)[:100])
+
+        # Every cookbook row must survive the same grader the generator's output faces.
+        cookbook = {
+            "github": ("{body}", "{algorithm}={signature}", "hex"),
+            "slack": ("v0:{timestampSeconds}:{body}", "v0={signature}", "hex"),
+            "shopify": ("{body}", "{signature}", "base64"),
+            "razorpay": ("{body}", "{signature}", "hex"),
+            "mockstar": ("{timestamp}.{body}", "{algorithm}={signature}", "hex"),
+        }
+        bad_rows = [name for name, (pay, tpl, enc) in cookbook.items()
+                    if validate_inventory(with_signing(
+                        {"provider": name, "enabled": True,
+                         "secretRef": "file:/run/secrets/hook",
+                         "signedPayload": pay, "signatureTemplate": tpl,
+                         "digestEncoding": enc}), schema) != []]
+        check("every provider cookbook row validates against the signing contract",
+              bad_rows == [], f"failing: {bad_rows}")
+
+        # Negative fixtures — each is a shape mockstar rejects at config-load.
+        errs = validate_inventory(with_signing(
+            {"enabled": True, "secretRef": "inline-literal-not-a-ref"}), schema)
+        check("inline secretRef is rejected (no secret ever inlined into a mock)",
+              any("secretRef" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": "{timestamp}"}), schema)
+        check("signedPayload without {body} is rejected (signature covers nothing)",
+              any("{body}" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signatureTemplate": "sha256="}), schema)
+        check("signatureTemplate without {signature} is rejected (header has no digest)",
+              any("{signature}" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": "{{ body }}"}), schema)
+        check("{{ }} request-template syntax in a signing template is rejected",
+              any("request-template" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": "${timestamp}.${body}"}), schema)
+        check("${ } JS template-literal syntax in a signing template is rejected",
+              any("template-literal" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": "{payload}.{body}"}), schema)
+        check("unknown signing placeholder {payload} is rejected",
+              any("payload" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": "{timestamp.{body}"}), schema)
+        check("unterminated placeholder in signedPayload is rejected",
+              any("unmatched" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "provider": "twilio"}), schema)
+        check("provider outside the cookbook enum is rejected",
+              any("provider" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "digestEncoding": "base32"}), schema)
+        check("digestEncoding outside hex/base64 is rejected",
+              any("digestEncoding" in e for e in errs), "; ".join(errs)[:80])
+
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "algorithm": "sha512"}), schema)
+        check("unknown signing field is rejected (schema is closed)",
+              any("algorithm" in e for e in errs), "; ".join(errs)[:80])
+
+        # A JSON-envelope payload is legitimate and must NOT trip the brace heuristics.
+        errs = validate_inventory(with_signing(
+            {"secretRef": "{{ env.H }}", "signedPayload": '{"t":{timestamp},"b":{body}}',
+             "signatureTemplate": "{signature}"}), schema)
+        check("JSON-envelope signedPayload is accepted (brace heuristics not over-eager)",
+              errs == [], "; ".join(errs)[:100])
+
+        # The generator expands a named `provider` from the cookbook table in
+        # mockstar-mapping.md. A provider in the IR enum with no cookbook row is a
+        # hint the generator can accept but cannot translate.
+        mapping_doc = os.path.join(SKILL, "references", "mockstar-mapping.md")
+        with open(mapping_doc, encoding="utf-8") as f:
+            mapping_text = f.read()
+        signing_props = (schema["properties"]["endpoints"]["items"]["properties"]
+                         ["webhookHints"]["items"]["properties"]["signing"]["properties"])
+        undocumented = [name for name in signing_props["provider"]["enum"]
+                        if name != "custom" and f"| `{name}` |" not in mapping_text]
+        check("every IR signing provider has a cookbook row in mockstar-mapping.md",
+              undocumented == [], f"undocumented: {undocumented}")
 
         # ── Stage-5 surface: shipped routes fixture obeys the TSV protocol ─
         with open(os.path.join(ASSETS, "fixtures", "routes.tsv"), encoding="utf-8") as f:

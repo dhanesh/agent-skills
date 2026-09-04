@@ -13,6 +13,7 @@ Quick outline of the translation:
 | `responses[]` entries with `when` | `scenarios[]` entries |
 | `statefulHints` | `response.kind: "dynamic"` + `handler` + TS file |
 | `webhookHints[]` | `webhooks[]` on the triggering entry |
+| `webhookHints[].signing` | `webhooks[].signing` (mockstar >= 0.3.0) |
 
 ---
 
@@ -286,9 +287,119 @@ Complete entry example:
 ```
 
 Notes:
-- HMAC signing and retry logic are **opt-in** — not inferred from `webhookHints`. Add a `secret` field and `retry` config manually when needed.
+- Retry logic is **opt-in** — not inferred from `webhookHints`. Add a `retry` block manually when needed.
 - The `url` from the IR hint is used as-is; validate it points to a reachable endpoint before enabling in production.
 - The generator defaults `method: "POST"` for all inferred webhooks.
+- Signing is emitted only when the IR hint carries a `signing` object — see below.
+
+### Signing (requires mockstar >= 0.3.0)
+
+`webhookHints[].signing` maps to `webhooks[].signing`. The block is a discriminated union on
+`mode`; `hmac` is the only member in 0.x and is injected when absent, so omit `mode` — likewise
+`algorithm`, which is fixed at `sha256`. Emitting either adds noise a future release may move.
+
+```jsonc
+"signing": {
+  "enabled": true,
+  "secretRef": "{{ env.PARTNER_HOOK_SECRET }}",
+  "signedPayload": "{timestamp}.{body}",
+  "signatureTemplate": "{algorithm}={signature}",
+  "digestEncoding": "hex",
+  "signatureHeader": "x-mockstar-signature",
+  "timestampHeader": "x-mockstar-timestamp",
+  "replayWindowMs": 300000
+}
+```
+
+Every field except `secretRef` is optional and shown above at its default, so mockstar's own
+format reduces to `{ "enabled": true, "secretRef": "..." }`.
+
+**Version gate.** `signedPayload`, `signatureTemplate`, `digestEncoding`, and `mode` shipped in
+mockstar **0.3.0**. If Stage 0 detected a runtime below 0.3.0, emit only `enabled`/`secretRef`/
+`signatureHeader`/`timestampHeader`/`replayWindowMs`, and record the downgrade in the coverage
+report's "Runtime & compatibility" section. If the generated config carries a `$schema`, the new
+fields also require repinning it from `v0.2` to `v0.3` — published minor schemas are immutable:
+
+```jsonc
+"$schema": "https://schemas.mockstar.dev/v0.3/mock.json"
+```
+
+#### Placeholders are single-brace
+
+Signing placeholders are `{body}`, **not** the `{{ }}` request-template engine (which has already
+run over `url`, `body`, and `headers` by the time signing happens). The two namespaces are
+disjoint, and mockstar rejects `{{` or `${` inside a signing template at config-load.
+
+| Placeholder | Valid in | Value |
+|---|---|---|
+| `{body}` | `signedPayload` | the rendered request body, exactly as sent |
+| `{timestamp}` | both | signing time in unix **milliseconds** |
+| `{timestampSeconds}` | both | signing time in unix **seconds** |
+| `{signature}` | `signatureTemplate` | the digest, encoded per `digestEncoding` |
+| `{algorithm}` | `signatureTemplate` | literal `sha256` |
+
+Rules mockstar enforces at config-load — a generated block that breaks one fails the boot in
+Stage 5, so check them before emitting:
+
+1. `signedPayload` **must** contain `{body}` — otherwise the HMAC covers no request content.
+2. `signatureTemplate` **must** contain `{signature}` — otherwise the header carries no digest.
+3. No placeholder outside the table above, in either field.
+4. No `{{ … }}` and no `${ … }` in either field.
+5. No unmatched `{` followed by a letter (an unterminated placeholder, e.g. `{timestamp.{body}`).
+
+#### Provider cookbook
+
+When a source doc says the service signs webhooks "like GitHub" / "like Stripe" — or shows a
+receiver snippet whose reconstruction matches one of these — emit the matching row rather than
+the mockstar default. Set `provider` in the IR hint and expand it here.
+
+| `provider` | `signedPayload` | `signatureTemplate` | `digestEncoding` | `signatureHeader` | `timestampHeader` |
+|---|---|---|---|---|---|
+| `mockstar` | `{timestamp}.{body}` | `{algorithm}={signature}` | `hex` | `x-mockstar-signature` | `x-mockstar-timestamp` |
+| `github` | `{body}` | `{algorithm}={signature}` | `hex` | `x-hub-signature-256` | `null` |
+| `slack` | `v0:{timestampSeconds}:{body}` | `v0={signature}` | `hex` | `x-slack-signature` | `x-slack-request-timestamp` |
+| `stripe` | `{timestampSeconds}.{body}` | `t={timestampSeconds},v1={signature}` | `hex` | `stripe-signature` | `null` |
+| `shopify` | `{body}` | `{signature}` | `base64` | `x-shopify-hmac-sha256` | `null` |
+| `razorpay` | `{body}` | `{signature}` | `hex` | `x-razorpay-signature` | `null` |
+
+`timestampHeader: null` suppresses the standalone timestamp header. Use it whenever the scheme
+signs no timestamp (GitHub, Shopify, Razorpay) or carries it inside the signature header itself
+(Stripe) — a stray `x-mockstar-timestamp` there is a duplicate the receiver ignores.
+
+> **Warning:** a timestamp referenced in `signatureTemplate` but absent from `signedPayload` is
+> **not authenticated** — the HMAC does not cover it, so it can be rewritten on the wire and the
+> signature still verifies. Never emit that shape as a replay defence; keep `{timestamp}` (or
+> `{timestampSeconds}`) in `signedPayload` whenever it appears in `signatureTemplate`.
+
+Full example — a Stripe-shaped partner hook:
+
+```jsonc
+"webhooks": [
+  {
+    "id": "order-created-hook",
+    "url": "https://partner.example.com/hooks/orders",
+    "method": "POST",
+    "headers": { "content-type": "application/json" },
+    "body": { "event": "order.created", "orderId": "ord_001" },
+    "signing": {
+      "enabled": true,
+      "secretRef": "{{ env.PARTNER_HOOK_SECRET }}",
+      "signedPayload": "{timestampSeconds}.{body}",
+      "signatureTemplate": "t={timestampSeconds},v1={signature}",
+      "digestEncoding": "hex",
+      "signatureHeader": "stripe-signature",
+      "timestampHeader": null
+    }
+  }
+]
+```
+
+- `secretRef` **must** be `{{ env.NAME }}` or `file:/path`. An inline secret is rejected by
+  mockstar at config-load — never emit one, and never invent a secret value. If no secret name is
+  documented, emit `{{ env.<SERVICE>_WEBHOOK_SECRET }}` and flag it **Review me (speculative)** in
+  the coverage report.
+- A signing block whose scheme is inferred from prose (rather than a documented receiver snippet)
+  is `"confidence": "inferred"` and belongs in the coverage report's speculative list.
 
 ---
 
