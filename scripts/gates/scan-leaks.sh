@@ -30,6 +30,9 @@
 #
 # Opportunistic: if gitleaks is on PATH, it is also run; its findings
 # are folded in. Never required — the shell detectors are the floor.
+# gitleaks findings honour the same per-line "scan-leaks:ignore" annotation
+# as the shell detectors, so a documented false positive is suppressed once,
+# in-file, whichever detector raised it.
 #
 set -eu
 
@@ -386,7 +389,22 @@ if command -v gitleaks > /dev/null 2>&1; then
         /^[[:space:]]*"File":/      { file = jval($0) }
         /^[[:space:]]*"Secret":/    { sec = jval($0); have = 1 }
         END { flush() }
-        ' "$GITLEAKS_TMP" >> "$TMPFILE"
+        ' "$GITLEAKS_TMP" | while IFS="$TAB" read -r gfile glnum gtype gredacted; do
+            [ -n "$gtype" ] || continue
+            # Honour the SAME per-line suppression the shell detectors use. Without
+            # this, gitleaks findings were the one class the documented
+            # "scan-leaks:ignore" annotation could not silence — a documented false
+            # positive had no in-file remedy at all. Fail-closed: if the source line
+            # cannot be re-read (path not resolvable from the current directory), the
+            # finding is KEPT rather than dropped.
+            if [ -n "$gfile" ] && [ -n "$glnum" ] && [ -f "$gfile" ]; then
+                gline="$(sed -n "${glnum}p" "$gfile" 2>/dev/null || true)"
+                case "$gline" in
+                    *"scan-leaks:ignore"*) continue ;;
+                esac
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$gfile" "$glnum" "$gtype" "$gredacted"
+        done >> "$TMPFILE"
     fi
     rm -f "$GITLEAKS_TMP"
 fi
