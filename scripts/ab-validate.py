@@ -312,6 +312,79 @@ def check_okf(old, new):
         "OKF requires CONSUMER tolerance — deliberately unchanged", kind="guard")
 
 
+
+# ── mockstar-mock ───────────────────────────────────────────────────────────
+# mockstar 0.3.0 made the webhook signature wire format configurable. A signing block
+# the skill emits is validated by mockstar's Zod schema at config-load — i.e. the
+# Stage-5 boot — so an invalid one costs a full generate+boot cycle to discover.
+# These fixtures are exactly the shapes mockstar rejects.
+MOCKSTAR_SIGNING = r"""
+import run_eval as R
+schema = json.load(open(os.path.join(os.path.dirname(R.__file__), "..",
+                                     "references", "inventory.schema.json")))
+
+def ep(signing):
+    return {"endpoints": [{
+        "method": "POST", "path": "/orders",
+        "responses": [{"status": 201, "body": {"id": "ord_1"}}],
+        "provenance": {"source": "api.md", "locator": "## Create order"},
+        "confidence": "grounded",
+        "webhookHints": [{"url": "https://x.example/h", "signing": signing}]}]}
+
+BAD = [
+    {"enabled": True, "secretRef": "inline-literal-not-a-ref"},          # inline secret
+    {"secretRef": "{{ env.H }}", "signedPayload": "{timestamp}"},        # signs no body
+    {"secretRef": "{{ env.H }}", "signatureTemplate": "sha256="},        # carries no digest
+    {"secretRef": "{{ env.H }}", "signedPayload": "{{ body }}"},         # {{ }} mix-up
+    {"secretRef": "{{ env.H }}", "signedPayload": "${timestamp}.${body}"},  # ${ } mix-up
+    {"secretRef": "{{ env.H }}", "signedPayload": "{payload}.{body}"},   # unknown placeholder
+    {"secretRef": "{{ env.H }}", "signedPayload": "{timestamp.{body}"},  # unterminated
+    {"secretRef": "{{ env.H }}", "digestEncoding": "base32"},            # out-of-enum
+    {"secretRef": "{{ env.H }}", "provider": "twilio"},                  # unknown provider
+]
+rejected = sum(1 for b in BAD if R.validate_inventory(ep(b), schema) != [])
+
+# Regression guard: the Stripe cookbook row and a JSON-envelope payload are legitimate
+# and must NOT be rejected; a grader that rejects everything is not an improvement.
+GOOD = [
+    {"provider": "stripe", "enabled": True, "secretRef": "{{ env.PARTNER_HOOK_SECRET }}",
+     "signedPayload": "{timestampSeconds}.{body}",
+     "signatureTemplate": "t={timestampSeconds},v1={signature}",
+     "digestEncoding": "hex", "signatureHeader": "stripe-signature",
+     "timestampHeader": None},
+    {"secretRef": "file:/run/secrets/hook",
+     "signedPayload": '{"t":{timestamp},"b":{body}}',
+     "signatureTemplate": "{signature}"},
+]
+accepted = sum(1 for g in GOOD if R.validate_inventory(ep(g), schema) == [])
+
+# Regression guard: the pre-existing endpoint contract still holds.
+no_prov = {"method": "GET", "path": "/x",
+           "responses": [{"status": 200, "body": {}}], "confidence": "grounded"}
+base_ok = R.validate_inventory({"endpoints": [no_prov]}, schema) != []
+print(json.dumps({"rejected": rejected, "accepted": accepted, "base_ok": base_ok}))
+"""
+
+
+def check_mockstar(old, new):
+    s = "mockstar-mock"
+    a, b = (probe(t, s + "/eval", MOCKSTAR_SIGNING) for t in (old, new))
+    row(s, "invalid webhook signing blocks rejected (of 9, higher=better)",
+        a.get("rejected"), b.get("rejected"),
+        b.get("rejected") == 9 and b.get("rejected", 0) > a.get("rejected", 9),
+        "each is a shape mockstar's config-load rejects — caught at IR time, "
+        "not after a generate+boot cycle")
+    row(s, "legitimate signing blocks still accepted (of 2)",
+        a.get("accepted"), b.get("accepted"),
+        b.get("accepted") == 2,
+        "baseline accepts them by having no rule at all; a grader that rejects "
+        "everything would not be a win", kind="guard")
+    row(s, "pre-existing endpoint contract (provenance required)",
+        a.get("base_ok"), b.get("base_ok"),
+        a.get("base_ok") is True and b.get("base_ok") is True,
+        "unchanged by the signing work", kind="guard")
+
+
 # ── crafting-self-prompting-loops (prompt-only; artifact-level) ─────────────
 def check_loops(old, new):
     names = ["autonomous", "base-loop", "human-checkpointed", "multi-agent",
@@ -363,6 +436,7 @@ def main():
         check_hygiene(old, REPO)
         check_okf(old, REPO)
         check_loops(old, REPO)
+        check_mockstar(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

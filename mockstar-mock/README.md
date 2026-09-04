@@ -6,7 +6,8 @@ HAR captures, curl command files, GraphQL SDL/introspection, and prose docs (Mar
 DOCX, or a documentation URL).
 
 It normalizes every input into a single Endpoint Inventory, uses `mockstar import` for OpenAPI
-and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs
+and hand-authors the rest, infers scenarios/dynamic handlers/webhooks — including
+provider-fidelity webhook signing — at full fidelity, runs
 `mockstar enhance` for Tier 2 placeholder rewriting, then boots the server and smoke-tests every
 route. Each mock is tagged with provenance and confidence; a coverage report flags speculative
 inferences and documented-but-unmocked gaps.
@@ -19,8 +20,10 @@ npx skills add dhanesh/agent-skills --skill mockstar-mock
 
 ## Prerequisites
 
-- **Bun** with `bunx mockstar` available — install mockstar globally (`bun add -g mockstar`) or
-  rely on `bunx` to fetch it on first run.
+- **Bun** with `bunx @dhaneshpurohit/mockstar` available — install mockstar globally
+  (`bun add -g @dhaneshpurohit/mockstar`) or rely on `bunx` to fetch it on first run.
+  **Package name matters:** the unscoped `mockstar` on npm is an unrelated project.
+  Requires **>= 0.2.2**; configurable webhook signing schemes require **>= 0.3.0**.
 - **uv** — used to run the Python helper that converts PDF/DOCX inputs and documentation URLs
   to plain text.
 - **curl** — used by the smoke test suite to verify every generated route.

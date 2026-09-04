@@ -1,12 +1,12 @@
 ---
 name: mockstar-mock
-description: "Generate a runnable mockstar mock server for a service from its specs and docs. Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Accepts OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL); normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
+description: "Generate a runnable mockstar mock server for a service from its specs and docs. Use when asked to mock a service, stand up a fake/stub API, create mockstar mocks/fixtures, or scaffold a mock backend from an API spec or documentation. Accepts OpenAPI (json/yaml), Postman collections, HAR captures, curl examples, GraphQL SDL/introspection, and prose docs (Markdown/PDF/DOCX or a documentation URL); normalizes every input into one Endpoint Inventory, uses native `mockstar import` for OpenAPI and hand-authors the rest, infers scenarios/dynamic handlers/webhooks (incl. provider-fidelity signing) at full fidelity, runs `mockstar enhance` for Tier 2 placeholders, then boots the server and smoke-tests every route. Tags each mock with provenance and confidence and emits a coverage report flagging speculative inferences and documented-but-unmocked gaps. Not for the mockstar HTTPS proxy or native GraphQL semantics. Targets the mockstar CLI (`bunx @dhaneshpurohit/mockstar`)."
 x-spec-version: 1.0
 license: MIT
-compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2) or Docker (ghcr.io/dhanesh/mockstar), plus `uv` and `curl` for the bundled helpers.
+compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 for configurable webhook signing schemes) or Docker (ghcr.io/dhanesh/mockstar), plus `uv` and `curl` for the bundled helpers.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.1.0"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -48,7 +48,9 @@ generating.
   `@dhaneshpurohit/mockstar` (latest ≥ 0.2.2). The *unscoped* `mockstar` on npm is an unrelated
   project — never invoke bare `bunx mockstar`. Equivalent Docker image: `ghcr.io/dhanesh/mockstar:latest`
   (`--runtime docker`). The importer's schema-derived bodies and mixed-segment path-param handling
-  require mockstar ≥ 0.2.2; the coverage report records the resolved runtime and version.
+  require mockstar ≥ 0.2.2; **configurable webhook signing schemes require ≥ 0.3.0** (below that,
+  emit only the pre-0.3 signing fields — see Stage 0 step 2). The coverage report records the
+  resolved runtime and version.
 - `uv` available — used to run `assets/extract_text.py` for binary input conversion.
 - `curl` available — used by `assets/smoke.sh` for smoke testing routes.
 - For `--runtime docker`: a reachable Docker daemon and the `ghcr.io/dhanesh/mockstar` image.
@@ -123,6 +125,12 @@ Record the resolved runtime (local or docker) and the image ref when docker is c
 
 Record the version. Note the known caveat: the CLI's printed version may lag the package
 version (treat it as advisory, not definitive).
+
+**Feature gate.** Webhook signing wire-format fields (`signedPayload`, `signatureTemplate`,
+`digestEncoding`, `mode`) exist only on mockstar **≥ 0.3.0**. If the detected version is below
+that — or the version could not be determined — do not emit them; fall back to the pre-0.3
+signing fields and record the downgrade in the coverage report's "Runtime & compatibility"
+section. See `references/mockstar-mapping.md` § Signing.
 
 **3. Validate the live CLI surface.**
 
@@ -242,7 +250,10 @@ mock JSON entries by hand per `references/mockstar-mapping.md` and write them to
 - Map `responses[]` entries with `when` → `scenarios[]` entries.
 - When `--fidelity full` (default):
   - `statefulHints` → `response.kind: "dynamic"` + a minimal TypeScript handler in `handlers/`.
-  - `webhookHints[]` → `webhooks[]` on the triggering entry.
+  - `webhookHints[]` → `webhooks[]` on the triggering entry. When a hint carries `signing`,
+    emit `webhooks[].signing` — expand a named `provider` via the cookbook in
+    `references/mockstar-mapping.md` rather than hand-rolling the wire format, and never emit
+    an inline secret (`secretRef` must be `{{ env.NAME }}` or `file:/path`).
   - For GraphQL: route operations via `scenarios[].when.body` matching on `operationName`
     (NOT via a `match.body.jsonpath` router on the parent entry).
 
@@ -320,8 +331,8 @@ Write `MOCKSTAR-COVERAGE.md` to the output directory root, following the templat
 - **Summary** — inputs list, tenant name, endpoint count (grounded vs. inferred), boot verdict.
 - **Endpoints table** — one row per mock: method, path, mock file, source, locator, confidence.
 - **Grounded vs. inferred** — counts and explanation.
-- **Review me (speculative)** — every inferred scenario, dynamic handler, and webhook with
-  the reason it was inferred and its source.
+- **Review me (speculative)** — every inferred scenario, dynamic handler, webhook, and
+  webhook signing scheme with the reason it was inferred and its source.
 - **Gaps** — endpoints or behaviors present in the source docs but not mocked (e.g. prose
   that names an endpoint without a path, or a schema type with no example).
 - **Dropped** — endpoints cut by `--max-endpoints`, with source.

@@ -71,7 +71,35 @@
               "type": "object",
               "properties": {
                 "url": { "type": "string" },
-                "event": { "type": "string" }
+                "event": { "type": "string" },
+                "signing": {
+                  "type": "object",
+                  "description": "Signature-scheme hint lifted to webhooks[].signing. Requires mockstar >= 0.3.0 and a $schema pinned to v0.3; omit entirely on older runtimes.",
+                  "properties": {
+                    "enabled": { "type": "boolean", "description": "Signing is opt-in; mockstar defaults this to false." },
+                    "provider": {
+                      "type": "string",
+                      "enum": ["mockstar", "github", "slack", "stripe", "shopify", "razorpay", "custom"],
+                      "description": "Named recipe from the provider cookbook in mockstar-mapping.md. Expands to the four wire-format fields; 'custom' means they are given explicitly."
+                    },
+                    "secretRef": {
+                      "type": "string",
+                      "pattern": "^(\\{\\{\\s*env\\.[A-Z_][A-Z0-9_]*\\s*\\}\\}|file:.+)$",
+                      "description": "`{{ env.NAME }}` or `file:/path`. Inline secrets are rejected by mockstar at config-load (S3)."
+                    },
+                    "signedPayload": { "type": "string", "minLength": 1, "description": "Bytes fed to HMAC. Single-brace placeholders: {body} (required), {timestamp}, {timestampSeconds}." },
+                    "signatureTemplate": { "type": "string", "minLength": 1, "description": "Header value around the digest. Single-brace placeholders: {signature} (required), {algorithm}, {timestamp}, {timestampSeconds}." },
+                    "digestEncoding": { "type": "string", "enum": ["hex", "base64"] },
+                    "signatureHeader": { "type": "string", "minLength": 1 },
+                    "timestampHeader": {
+                      "type": ["string", "null"],
+                      "minLength": 1,
+                      "description": "null suppresses the standalone timestamp header (Stripe carries its timestamp inside signatureHeader)."
+                    },
+                    "replayWindowMs": { "type": "integer", "minimum": 1, "description": "Receiver-side replay window advertised in docs. mockstar defaults to 300000." }
+                  },
+                  "additionalProperties": false
+                }
               }
             }
           },

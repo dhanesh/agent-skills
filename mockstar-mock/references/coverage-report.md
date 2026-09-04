@@ -25,6 +25,7 @@
 - Docker image + digest (when docker): <ghcr.io/dhanesh/mockstar:tag @ sha256:…>
 - CLI-surface preflight: <ok | drift noted: …> (including discovered `mockstar import` tenant flag form)
 - Schema / boot validation: <PASS | FAIL> (Stage-5 boot is the authoritative Zod validator)
+- Webhook signing fields: <full (mockstar >= 0.3.0) | downgraded to pre-0.3 fields: …> (`signedPayload`/`signatureTemplate`/`digestEncoding`/`mode` require >= 0.3.0)
 
 ## Endpoints
 
