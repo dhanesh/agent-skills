@@ -5,7 +5,7 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
-.PHONY: gate validate scan-leaks dry-run playbook test eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate validate scan-leaks dry-run playbook test test-integration eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -38,6 +38,19 @@ gate: clean
 			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; \
 			[ $$st -eq 0 ] || { _fail "$$t" "$$out"; rc=1; }; \
 		done; \
+		for t in "$$d"/assets/test_*.sh; do \
+			[ -f "$$t" ] || continue; \
+			if grep -q '^# gate: integration' "$$t"; then \
+				printf 'UNIT %s: SKIP (integration — make test-integration)\n' "$$t"; \
+				continue; \
+			fi; \
+			if ! grep -q '^# gate: offline' "$$t"; then \
+				_fail "$$t marker" "shell suite carries no '# gate:' marker. Add '# gate: offline' (runs here; must be offline and deterministic) or '# gate: integration' (excluded; run by 'make test-integration'). Unmarked suites fail rather than silently skip — a test nobody runs is worse than no test."; rc=1; continue; \
+			fi; \
+			out=$$(sh "$$t" 2>&1); st=$$?; \
+			printf 'UNIT %s: %s assertion(s) passed\n' "$$t" "$$(printf '%s\n' "$$out" | grep -cE '^PASS')"; \
+			[ $$st -eq 0 ] || { _fail "$$t" "$$out"; rc=1; }; \
+		done; \
 		out=$$(sh $(GATES)/run-eval.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d eval" "$$out"; rc=1; }; \
 	done; \
 	if [ $$rc -ne 0 ]; then printf '\nGATE_RESULT: FAIL (search this log for "!!! FAILURE")\n'; else printf '\nGATE_RESULT: PASS\n'; fi; \
@@ -63,6 +76,7 @@ dry-run:
 	done; exit $$rc
 
 # Run every skill's stdlib unit test suite (offline, deterministic — no pip, no network).
+# Covers the Python suites and the shell suites marked `# gate: offline`.
 test: clean
 	@rc=0; for d in $(SKILLS); do \
 		for t in "$$d"/assets/test_*.py; do \
@@ -71,7 +85,30 @@ test: clean
 			out=$$(cd "$$d/assets" && python3 "$$(basename "$$t")" 2>&1); st=$$?; \
 			printf '%s\n' "$$out" | tail -3; [ $$st -eq 0 ] || rc=1; \
 		done; \
+		for t in "$$d"/assets/test_*.sh; do \
+			[ -f "$$t" ] || continue; \
+			grep -q '^# gate: offline' "$$t" || continue; \
+			printf '\n=== %s ===\n' "$$t"; \
+			out=$$(sh "$$t" 2>&1); st=$$?; \
+			printf '%s\n' "$$out" | tail -3; [ $$st -eq 0 ] || rc=1; \
+		done; \
 	done; exit $$rc
+
+# Integration suites: the shell tests marked `# gate: integration`. These need the
+# real mockstar CLI (network via bunx) and optionally a docker daemon, so they are
+# deliberately OUT of `make gate` — CI must stay offline and deterministic. Run them
+# by hand before releasing a change that touches the live CLI surface.
+test-integration: clean
+	@rc=0; found=0; for d in $(SKILLS); do \
+		for t in "$$d"/assets/test_*.sh; do \
+			[ -f "$$t" ] || continue; \
+			grep -q '^# gate: integration' "$$t" || continue; \
+			found=1; printf '\n=== %s ===\n' "$$t"; \
+			sh "$$t" || rc=1; \
+		done; \
+	done; \
+	[ "$$found" -eq 1 ] || printf 'no integration suites found\n'; \
+	exit $$rc
 
 # Run every skill's outcome eval (docs/eval-standard.md): deterministic
 # harness -> skill tooling -> model-free grader. Hard gate: missing eval fails.
@@ -120,6 +157,16 @@ gate-skill:
 		[ -f "$$t" ] || continue; \
 		out=$$(cd "$(SKILL)/assets" && python3 "$$(basename "$$t")" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \
 		printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|Ran [0-9]+ tests' | tr '\n' ' ')"; \
+	done
+	@for t in "$(SKILL)"/assets/test_*.sh; do \
+		[ -f "$$t" ] || continue; \
+		if grep -q '^# gate: integration' "$$t"; then \
+			printf 'UNIT %s: SKIP (integration — make test-integration)\n' "$$t"; \
+			continue; \
+		fi; \
+		grep -q '^# gate: offline' "$$t" || { printf "FAIL %s: no '# gate:' marker (offline|integration)\n" "$$t"; exit 1; }; \
+		out=$$(sh "$$t" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \
+		printf 'UNIT %s: %s assertion(s) passed\n' "$$t" "$$(printf '%s\n' "$$out" | grep -cE '^PASS')"; \
 	done
 	@sh $(GATES)/run-eval.sh "$(SKILL)"
 
