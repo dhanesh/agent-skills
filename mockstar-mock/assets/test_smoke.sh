@@ -2,6 +2,9 @@
 # mockstar-mock/assets/test_smoke.sh — exercises route-checking without booting mockstar.
 # Starts a tiny local HTTP stub, points smoke.sh at it via MOCKSTAR_SMOKE_BASE_URL.
 # Also exercises the docker runtime path when docker is available.
+# gate: integration — excluded from `make gate`; run with `make test-integration`.
+# Needs the real mockstar CLI (network via bunx) and, for the docker branch, a
+# reachable daemon and image. Not offline, so it cannot be a gate check.
 set -eu
 DIR="$(dirname "$0")"
 SMOKE="$DIR/smoke.sh"
@@ -53,7 +56,7 @@ if [ "$DOCKER_AVAILABLE" -eq 1 ]; then
     # Build a mocks dir from the petstore fixture using documented layout (<out>/mocks/<tenant>/)
     DOCKER_MOCKS="$(mktemp -d)"
     trap 'cleanup_docker_tmp' EXIT
-    if ! bunx mockstar import "$FIXTURE" "$DOCKER_MOCKS/mocks" --tenant=default >/dev/null 2>&1; then
+    if ! bunx @dhaneshpurohit/mockstar import "$FIXTURE" "$DOCKER_MOCKS/mocks" --tenant=default >/dev/null 2>&1; then
       echo "SKIP: docker smoke (mockstar import failed)"
     else
       # Write a routes file: GET /pets -> 200

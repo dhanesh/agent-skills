@@ -1,5 +1,7 @@
 #!/bin/sh
 # mockstar-mock/assets/test_coverage_report.sh
+# gate: offline — runs in `make gate`. Must stay offline and deterministic:
+# no network, no bunx/docker, no fixed ports, no wall-clock dependence.
 set -eu
 DOC="$(dirname "$0")/../references/coverage-report.md"
 rc=0

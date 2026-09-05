@@ -1,6 +1,9 @@
 #!/bin/sh
 # mockstar-mock/assets/test_e2e.sh — import -> enhance -> boot -> smoke against real mockstar.
 # Exercises the documented <out>/mocks/<tenant>/ layout (config-root = <out>/mocks).
+# gate: integration — excluded from `make gate`; run with `make test-integration`.
+# Needs the real mockstar CLI (network via bunx) and, for the docker branch, a
+# reachable daemon and image. Not offline, so it cannot be a gate check.
 set -eu
 DIR="$(dirname "$0")"
 FIX="$DIR/fixtures/petstore-mini.yaml"
@@ -12,12 +15,12 @@ OUT2="$(mktemp -d)"
 trap 'rm -rf "$OUT" "$OUT2"' EXIT
 
 # Build documented layout: <out>/mocks/<tenant>/
-if ! bunx mockstar import "$FIX" "$OUT/mocks" --tenant=default >/tmp/e2e-import.log 2>&1; then
+if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT/mocks" --tenant=default >/tmp/e2e-import.log 2>&1; then
   echo "FAIL: mockstar import"; cat /tmp/e2e-import.log; exit 1
 fi
 echo "PASS: import produced mocks at $OUT/mocks/default/"
 
-bunx mockstar enhance "$OUT/mocks/default" >/tmp/e2e-enhance.log 2>&1 || true
+bunx @dhaneshpurohit/mockstar enhance "$OUT/mocks/default" >/tmp/e2e-enhance.log 2>&1 || true
 echo "PASS: enhance ran"
 
 # Write routes TSV at <out>/mocks/routes.tsv (documented location)
@@ -29,7 +32,7 @@ sh "$DIR/smoke.sh" "$OUT/mocks" "$ROUTES"
 
 # F1 regression: non-default tenant import using equals form (--tenant=acme).
 # Proves the equals form is honored; space form is silently ignored by mockstar import.
-if ! bunx mockstar import "$FIX" "$OUT2/mocks" --tenant=acme >/tmp/e2e-import-acme.log 2>&1; then
+if ! bunx @dhaneshpurohit/mockstar import "$FIX" "$OUT2/mocks" --tenant=acme >/tmp/e2e-import-acme.log 2>&1; then
   echo "FAIL: mockstar import --tenant=acme"; cat /tmp/e2e-import-acme.log; exit 1
 fi
 

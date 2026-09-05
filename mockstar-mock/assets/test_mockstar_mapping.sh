@@ -1,5 +1,7 @@
 #!/bin/sh
 # mockstar-mock/assets/test_mockstar_mapping.sh
+# gate: offline — runs in `make gate`. Must stay offline and deterministic:
+# no network, no bunx/docker, no fixed ports, no wall-clock dependence.
 set -eu
 DOC="$(dirname "$0")/../references/mockstar-mapping.md"
 rc=0
