@@ -56,3 +56,12 @@ cd spec-first-planning/assets && python3 test_spec_lint.py && python3 test_spec_
 python3 spec-first-planning/eval/run_eval.py
 make gate-skill SKILL=spec-first-planning   # from the repo root
 ```
+
+## Related
+
+[**Manifold**](https://github.com/dhanesh/manifold) takes the same premise — plan the
+verification, not just the work — and makes it durable. Requirements become typed
+constraints stored in the repo, checked by a CLI (`manifold validate`,
+`manifold verify --verify-evidence`) and by CI, across many sessions rather than one.
+Reach for this skill when you want a spec and a plan now; reach for Manifold when the
+constraints need to outlive the session that wrote them.

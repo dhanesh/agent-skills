@@ -63,6 +63,14 @@ agent-ready-rails/
 └── README.md                this file
 ```
 
+## Related
+
+[**Manifold**](https://github.com/dhanesh/manifold) is one concrete way to raise the
+runnable-verifier rails this audit scores (R1/R2). It stores a feature's constraints in the
+repo as typed, checkable objects, then proves each one is actually satisfied —
+`manifold verify --verify-evidence` fails when a requirement has no evidence behind it, which
+is exactly the "the agent can't stop short of the loop" property the Honk case turns on.
+
 ## Provenance
 
 The rails and their evidence come from Spotify Engineering's *Background Coding Agents* series (*Context Engineering*, Nov 2025; *Feedback Loops*, Dec 2025) and the June 2026 Niklas Gustavsson × Boris Cherny interview ([youtu.be/9DHZLw5653E](https://youtu.be/9DHZLw5653E)), cross-referenced against the research grounding already in this repo's [`crafting-self-prompting-loops`](../crafting-self-prompting-loops/) and [`context-hygiene-kit`](../context-hygiene-kit/) skills. Headline metrics are vendor-reported — a strong practitioner signal, not an independently replicated result. See [`references/grounding.md`](./references/grounding.md) for the per-rail citations and tags.
