@@ -63,3 +63,16 @@ npx skills add dhanesh/agent-skills
 | [`world-model-ledger`](world-model-ledger/) | Install a persistent, SQLite-backed world model for a coding agent — entities (symbols/files/modules/real-world referents), interactions, and constraints, each with two confidence axes (observed vs normative), a validation status, and PROV-style evidence. Code-observed relationships are never treated as ground truth: only oracle evidence (tests/CI/docs/human) raises normative confidence. Four lifecycle hooks retrieve validated/unverified/contradicted items before edits, update records without inventing facts, and consolidate on Stop; detects contradictions, proposes located fixes, and improves normative correctness over time. Every triple is validated against a predicate ontology (RDFS-style domain/range) before it enters the ledger — hallucinated verbs and semantically impossible pairings are rejected, not stored. Ships a 108-test install gate. |
 
 See each skill directory's `SKILL.md` for usage and prerequisites.
+
+## Related projects
+
+[**Manifold**](https://github.com/dhanesh/manifold) — a constraint-first development
+framework that makes a feature's constraints explicit and machine-checkable *before* code
+is written, and keeps them checkable afterwards. Two skills here sit next to it:
+
+- [`spec-first-planning`](spec-first-planning/) does the same job inside one session — a
+  falsifiable spec, then tasks that each name their own verification. Manifold persists
+  that structure across sessions and enforces it with a CLI (`manifold validate`,
+  `manifold verify --verify-evidence`) and CI.
+- [`agent-ready-rails`](agent-ready-rails/) grades whether a repo gives agents a real
+  feedback loop. A Manifold-managed repo is one way to supply the R1/R2 rails it scores.
