@@ -1,8 +1,12 @@
 # Command reference
 
-All commands install to `~/.local/bin` and store state under
-`~/.tmux/agent-panes/` (override root with `AGENT_TMUX_ROOT`, session name
-with `AGENT_TMUX_SESSION`, idle threshold with `AGENT_IDLE_SECONDS`).
+These commands are the **agent-facing API** — humans reach the same actions
+through tmux keybindings and the `prefix a m` menu and never need to type them.
+They are not copied onto PATH: the generated tmux config references them in
+place, and agents invoke them by path from the skill directory
+(`scripts/agent-pane ...`). State lives under `~/.tmux/agent-panes/`
+(override root with `AGENT_TMUX_ROOT`, session name with
+`AGENT_TMUX_SESSION`, idle threshold with `AGENT_IDLE_SECONDS`).
 Targets accept an agent name, a window name, or a tmux pane id (`%3` or `3`).
 
 ## Launch and registry

@@ -10,11 +10,13 @@ A tmux-based agent cockpit that combines **Zellij-like human ergonomics** with *
 npx skills add dhanesh/agent-skills --skill tmux-agent-herdr-lite
 ```
 
-Then run the installer from the skill directory to copy scripts and wire up your tmux config:
+Invoking the skill (e.g. `/tmux-agent-herdr-lite` in Claude Code) runs the installer for you. To run it by hand instead:
 
 ```bash
 bash scripts/install.sh
 ```
+
+Nothing is copied onto your PATH and there are no new commands to learn: the installer generates a tmux config that references the skill's scripts in place, and everything human-facing lives behind tmux keybindings, the `prefix m` menu (launch an agent, jump by status, worktrees, resume), the `prefix ?` dashboard, and the status bar. The `agent-*` scripts are the API your coding agents use to coordinate with each other.
 
 ## What it sets up
 
@@ -25,7 +27,7 @@ bash scripts/install.sh
 - **Agent-to-agent coordination** — `agent-list --json`, `agent-read`, `agent-send` (no Enter), `agent-run` (with Enter), and `agent-wait --status/--match`: the shell equivalent of Herdr's socket API, so one agent can drive and monitor its siblings.
 - **Notifications** — transitions into `blocked`/`error`/`done` fire a tmux toast (optionally a desktop notification) and a sound cue with terminal-bell fallback; suppressed when you're already looking at the pane.
 - **Persistence and isolation** — `agent-resume` relaunches dead agents after a tmux server restart, using native session resume (`claude --resume`, `codex resume`, …) when you pass a session id; `agent-worktree` gives each agent an isolated git worktree; optional tmux-resurrect/tmux-continuum config restores layouts across reboots (wired automatically when TPM is present).
-- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix g/E/W/I/D` bind the states to keys; a compact fleet summary lives in the tmux status bar.
+- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix g/E/W/i/D` bind the states to keys (`idle` also matches finished-but-unviewed `done` panes; capital `I` is left to TPM's plugin installer); a compact fleet summary lives in the tmux status bar.
 
 ## Prerequisites
 

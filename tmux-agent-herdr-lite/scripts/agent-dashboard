@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${AGENT_TMUX_ROOT:-$HOME/.tmux/agent-panes}"
-SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCAN="${AGENT_STATUS_SCAN:-$SCRIPT_DIR/agent-status-scan}"
 STATE="$ROOT/state.json"
 
 if [[ -x "$SCAN" ]]; then
@@ -41,7 +42,7 @@ for p in sorted(panes, key=lambda x:(order.get(x.get('status','unknown'),9), x.g
         print(f"    reason: {reason}")
 print("\nKEYS")
 print("  prefix g    jump blocked        prefix E      jump error (crashed)")
-print("  prefix W/I/D jump working/idle/done")
+print("  prefix W/i/D jump working/idle/done (idle matches done; I = TPM install)")
 print("  prefix m    action menu          prefix ?      this dashboard")
 print("  prefix |/-  split pane           prefix h/j/k/l navigate panes")
 print("  prefix H/J/K/L resize pane       prefix z      zoom pane")

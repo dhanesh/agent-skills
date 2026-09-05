@@ -5,3 +5,6 @@ __pycache__/
 
 # Serena MCP local project state (regenerated per machine)
 .serena/
+
+# world-model-ledger runtime store
+.world-model/

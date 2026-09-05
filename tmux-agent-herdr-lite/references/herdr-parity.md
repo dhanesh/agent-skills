@@ -28,7 +28,7 @@ in July 2026.
 | Session persistence (server survives client detach) | Native tmux; optional tmux-resurrect/continuum layer for server restarts (`assets/tmux-agent-persistence.conf`) |
 | `resume_agents_on_restore` + per-agent resume argv table | `agent-resume` (`claude --resume`, `codex resume`, `cursor-agent --resume`, `copilot --resume=`, `droid --resume`, `opencode --session`, `gemini --resume`) |
 | Worktree CLI (create/open/remove, branch kept on remove, dirty needs `--force`) | `agent-worktree`, same semantics, checkouts under `~/.tmux/agent-panes/worktrees/<repo>/<branch>` |
-| Keyboard: prefix-driven panes/tabs, jump-to-agent, help panel, copy mode, mouse | `assets/tmux-agent.conf` (+ `prefix Tab` last-pane, `prefix ?` dashboard, `prefix m` menu with worktree/resume entries) |
+| Keyboard: prefix-driven panes/tabs, jump-to-agent, help panel, copy mode, mouse | `assets/tmux-agent.conf` (cockpit key-table under `prefix a`: `d` dashboard, `m` menu with worktree/resume entries, `t` tree, `b/e/w/i/f` jump-to-agent) |
 | Remote/SSH reattach | Native tmux (`ssh host tmux attach`) |
 
 ## Approximated (different mechanism, same effect)

@@ -2,24 +2,31 @@
 set -euo pipefail
 
 # Zellij-like discoverable command menu for the tmux agent cockpit.
-# Must be run inside tmux.
+# Everything a human needs lives here (and in the prefix keybindings) — the
+# agent-* scripts are the agent-facing API, never something to memorize.
+# Must be run inside tmux. Scripts are invoked from this script's own
+# directory, so the menu works wherever the skill lives.
 if [[ -z "${TMUX:-}" ]]; then
   echo "agent-menu: run inside tmux" >&2
   exit 1
 fi
 
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 tmux display-menu -T "Agent Cockpit" \
-  "⚠ Jump blocked" b "run-shell '~/.local/bin/agent-jump blocked'" \
-  "✖ Jump error" e "run-shell '~/.local/bin/agent-jump error'" \
-  "● Jump working" w "run-shell '~/.local/bin/agent-jump working'" \
-  "○ Jump idle" i "run-shell '~/.local/bin/agent-jump idle'" \
-  "✓ Jump done" d "run-shell '~/.local/bin/agent-jump done'" \
+  "🤖 New agent pane" a "command-prompt -p 'agent name:','command:' \"run-shell 'cd #{pane_current_path} && $BIN/agent-pane %1 %2'\"" \
   "" \
-  "Refresh status" r "run-shell '~/.local/bin/agent-status-scan'" \
-  "Dashboard" ? "display-popup -E -w 90% -h 80% '~/.local/bin/agent-dashboard; printf \"\\nPress Enter...\"; read'" \
+  "⚠ Jump blocked" b "run-shell '$BIN/agent-jump blocked || true'" \
+  "✖ Jump error" e "run-shell '$BIN/agent-jump error || true'" \
+  "● Jump working" w "run-shell '$BIN/agent-jump working || true'" \
+  "○ Jump idle/done" i "run-shell '$BIN/agent-jump idle || true'" \
+  "✓ Jump done" d "run-shell '$BIN/agent-jump done || true'" \
+  "" \
+  "Refresh status" r "run-shell '$BIN/agent-status-scan'" \
+  "Dashboard" ? "display-popup -E -w 90% -h 80% '$BIN/agent-dashboard; printf \"\\nPress Enter...\"; read'" \
   "Choose tree" s "choose-tree -Zw" \
-  "New worktree window" t "command-prompt -p 'worktree branch' \"run-shell 'cd #{pane_current_path} && (~/.local/bin/agent-worktree create %% --window || ~/.local/bin/agent-worktree open %%)'\"" \
-  "Resume dead agents" u "run-shell '~/.local/bin/agent-resume'" \
+  "New worktree window" t "command-prompt -p 'worktree branch' \"run-shell 'cd #{pane_current_path} && ($BIN/agent-worktree create %% --window || $BIN/agent-worktree open %%)'\"" \
+  "Resume dead agents" u "run-shell '$BIN/agent-resume'" \
   "New window" n "command-prompt -p 'window name' 'new-window -n %%'" \
   "Split horizontal" '|' "split-window -h" \
   "Split vertical" '-' "split-window -v" \

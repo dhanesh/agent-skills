@@ -36,7 +36,7 @@ if [[ -z "$WANT_STATUS" && -z "$MATCH" ]] || [[ -n "$WANT_STATUS" && -n "$MATCH"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCAN="${AGENT_STATUS_SCAN:-$HOME/.local/bin/agent-status-scan}"
+SCAN="${AGENT_STATUS_SCAN:-$SCRIPT_DIR/agent-status-scan}"
 
 # Validate the target up front so a typo fails fast, not at timeout.
 python3 "$SCRIPT_DIR/agent_registry.py" resolve "$TARGET" pane_id >/dev/null
