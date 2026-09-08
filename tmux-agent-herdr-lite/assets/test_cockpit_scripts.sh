@@ -17,6 +17,12 @@ ASSETS="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
+# The scripts under test declare `#!/usr/bin/env bash` and use bash features
+# (BASH_SOURCE, `local`, ${var//x/y}). Invoke them with `bash`, never `sh`: on
+# Linux `sh` is dash, where BASH_SOURCE is unset under `set -u` and the script
+# dies instantly — and because the callers swallow errors with `|| true`, that
+# looked like "the scan ran and did nothing". This harness stays POSIX itself;
+# only the invocations of those bash scripts are bash.
 rc=0
 ok()   { echo "PASS: $1"; }
 bad()  { echo "FAIL: $1"; rc=1; }
@@ -54,7 +60,7 @@ EOF
 # the status bar re-runs this scan every 5 seconds.
 ROOT="$WORK/reg1"
 seed_registry "$ROOT"
-AGENT_TMUX_ROOT="$ROOT" PATH="$WORK/bin-fail:$PATH" sh "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
+AGENT_TMUX_ROOT="$ROOT" PATH="$WORK/bin-fail:$PATH" bash "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
 want "tmux unreachable: pane records survive" "$(ls "$ROOT/panes" | wc -l | tr -d ' ')" "2"
 if [ -f "$ROOT/state.json" ]; then
   bad "tmux unreachable: state.json left untouched"
@@ -67,7 +73,7 @@ fi
 # the very state it consumes — and deletion is not recoverable.
 ROOT="$WORK/reg2"
 seed_registry "$ROOT"
-AGENT_TMUX_ROOT="$ROOT" PATH="$WORK/bin-ok:$PATH" sh "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
+AGENT_TMUX_ROOT="$ROOT" PATH="$WORK/bin-ok:$PATH" bash "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
 want "dead pane: record kept for agent-resume" "$(ls "$ROOT/panes" | wc -l | tr -d ' ')" "2"
 if grep -q '"dead": *true' "$ROOT/panes/alpha.json" 2>/dev/null; then
   ok "dead pane: record marked dead"
@@ -82,7 +88,7 @@ fi
 
 # ── 3. The graveyard is bounded ──────────────────────────────────────────────
 AGENT_TMUX_ROOT="$ROOT" AGENT_GRAVEYARD_TTL_SECONDS=0 PATH="$WORK/bin-ok:$PATH" \
-  sh "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
+  bash "$SCRIPTS/agent-status-scan" >/dev/null 2>&1 || true
 want "graveyard: records past the TTL are reaped" "$(ls "$ROOT/panes" | wc -l | tr -d ' ')" "0"
 
 # ── 4. The installer is idempotent, including on a fresh ~/.tmux.conf ────────
@@ -93,7 +99,7 @@ if [ -f "$SCRIPTS/install.sh" ]; then
   FAKE="$WORK/home"
   mkdir -p "$FAKE"
   for i in 1 2 3; do
-    HOME="$FAKE" sh "$SCRIPTS/install.sh" >/dev/null 2>&1 || true
+    HOME="$FAKE" bash "$SCRIPTS/install.sh" >/dev/null 2>&1 || true
   done
   n="$(grep -c 'tmux-agent.conf' "$FAKE/.tmux.conf" 2>/dev/null || echo 0)"
   want "installer: 3 runs leave exactly one source-file line" "$n" "1"
