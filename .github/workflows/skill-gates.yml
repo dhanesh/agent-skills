@@ -13,10 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
+  matrix-gate:
     # The gates are shell scripts whose behaviour is locale- and awk-dependent,
     # and they are developed on macOS/BSD. Running only ubuntu meant the platform
     # where they are weakest was the one CI never exercised.
+    name: gate (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -30,3 +31,21 @@ jobs:
           python-version: "3.12"
       - name: Run skill quality gates
         run: make gate
+
+  # Branch protection requires a check named exactly `gate`. A matrix job reports
+  # one check PER LEG ("gate (ubuntu-latest)", ...) and never the bare name, so
+  # adding the matrix silently removed the required context and left every PR
+  # blocked with green CI. This aggregator restores it: one check called `gate`
+  # that passes only when every leg passed. Keep it if you add another OS.
+  gate:
+    name: gate
+    needs: matrix-gate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every matrix leg to pass
+        run: |
+          result="${{ needs.matrix-gate.result }}"
+          echo "matrix result: $result"
+          [ "$result" = "success" ] || exit 1
