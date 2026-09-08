@@ -192,8 +192,16 @@ jobs:
 Rules of the road:
 
 - **Never create a second workflow when one exists** — extend the existing one
-  so there is a single ground truth. The detector reports an existing workflow
-  as the `ci` rail precisely so you don't duplicate it.
+  so there is a single ground truth. The detector credits an existing workflow as
+  the `ci` rail **only when that workflow actually runs a verifier command**, so
+  you don't duplicate a real CI job — and doesn't credit one that verifies
+  nothing (a stale-bot, dependabot or labeler workflow). When workflows exist but
+  none of them verifies, the plan says so in `ci_note`: extend one of those rather
+  than adding a competing file.
+
+  Each proposal carries `exists` and `action` (`create` or `extend`). Honour them:
+  `action: extend` means the file is already in the repo and must be added to, not
+  overwritten.
 - Pin major versions of actions; install deps from the lockfile (`npm ci`,
   `pip install -r requirements.txt`) so green is reproducible.
 - If the user prefers another provider (GitLab CI, CircleCI), translate the

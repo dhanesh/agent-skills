@@ -24,27 +24,20 @@ Persistence / isolation
   agent-worktree create <branch> --window  isolated git worktree + window
   agent-worktree open|remove|list
 
-Human-friendly tmux keys
-  prefix ?        dashboard/help popup
-  prefix m        command menu (jump/worktree/resume/split/kill)
-  prefix g        jump blocked agent
-  prefix E        jump error (crashed) agent
-  prefix W/i/D    jump working / idle / done agent (idle matches done too;
-                  prefix I stays TPM's plugin-install key)
-  prefix G        refresh scan
-  prefix S        choose session/window/pane tree
-  prefix | / -    split horizontal / vertical
-  prefix h/j/k/l  move between panes
-  prefix H/J/K/L  resize panes
-  prefix Tab      last pane
-  prefix z        zoom pane
-  prefix Space    cycle layout
-  prefix r        reload tmux config
+Cockpit keys — one prefix, then a key (prefix a puts you in the agent table)
+  prefix a d      dashboard popup
+  prefix a m      command menu (jump/worktree/resume/split/kill)
+  prefix a s      refresh scan
+  prefix a t      choose session/window/pane tree
+  prefix a b      jump to a blocked agent
+  prefix a e      jump to an error (crashed) agent
+  prefix a w      jump to a working agent
+  prefix a i      jump to an idle agent
+  prefix a f      jump to a finished (done) agent
 
-Copy/search
-  prefix [        copy mode
-  /               search in copy mode
-  v/y             vi-style selection/yank if copy-mode-vi is active
+Your own tmux keys are untouched — the cockpit does not rebind pane navigation,
+splits, zoom, copy mode, or the status-bar layout. Whatever you already use for
+those still works.
 
 Notifications (set in the environment tmux server sees)
   AGENT_NOTIFY=tmux|system|off      toast channel (default tmux)

@@ -16,8 +16,10 @@ End-to-end, model-free, offline, deterministic:
             decisions extracted verbatim and idempotently, SessionStart emits the
             digest as additionalContext.
 
-Negative fixtures (mandatory): a corrupt ledger file (hook must stay graceful,
-CLI must fail loudly) and an oversized entry (must be bounded, not bloat the
+Negative fixtures (mandatory): a torn ledger file (capture must RECOVER and
+resume, surfacing the damage — a loud crash here is the bug, not the guard,
+because the Stop hook runs behind `|| true`), concurrent harvests (no lost
+updates, no corruption) and an oversized entry (bounded, not bloating the
 digest). No repo writes: everything happens under tempfile.mkdtemp().
 """
 import json
@@ -89,7 +91,7 @@ def main():
 
         # ── 1. Install into the fixture project via the real installer ──────
         r = run(["bash", os.path.join(kit, "scripts", "install.sh"), proj])
-        check("installer exits green (incl. its 17-test install gate)",
+        check("installer exits green (incl. its install-gate test suite)",
               r.returncode == 0 and "OK" in (r.stdout + r.stderr),
               (r.stdout + r.stderr).strip()[-80:])
 
@@ -180,21 +182,62 @@ def main():
               and "use bcrypt for password hashing" in ctx,
               f"ctx_len={len(ctx)}")
 
-        # ── 5. NEGATIVE: corrupt ledger file ────────────────────────────────
+        # ── 5. NEGATIVE: torn / corrupt ledger file ─────────────────────────
+        # The contract here is RECOVERY, not a loud crash. A crash was the old
+        # behaviour and it was the bug: the Stop hook runs behind `|| true`, so
+        # raising on load meant capture died silently and permanently while
+        # SessionStart kept serving the stale digest. A torn write must cost at
+        # most the in-flight turn.
         lpath = os.path.join(proj, ".context", "ledger.json")
         good = open(lpath).read()
-        with open(lpath, "w") as fh:
-            fh.write("{ this is not json !!!")
+        cards_before = len(json.loads(good)["cards"])
+        with open(lpath, "w") as fh:                       # simulate a kill -9 mid-write
+            fh.write(good[:60])
         rc = run(harvest_cmd, cwd=proj)
         hook_in = json.dumps({"cwd": proj, "transcript_path": transcript})
         rh = run(["bash", os.path.join(proj, "hooks", "stop.sh")],
                  input=hook_in, env=env)
-        check("negative: corrupt ledger — CLI fails loudly, no silent corruption",
-              rc.returncode != 0)
+        after = json.loads(open(lpath).read())
+        quarantine = json.dumps(after.get("quarantined", []))
+        check("negative: torn ledger — capture RESUMES (exit 0, not a permanent brick)",
+              rc.returncode == 0, f"rc={rc.returncode}")
+        check("negative: torn ledger — prior cards recovered from the .bak sidecar",
+              len(after["cards"]) >= cards_before,
+              f"before={cards_before} after={len(after['cards'])}")
+        check("negative: torn ledger — damage is SURFACED, not hidden",
+              "unreadable" in quarantine)
         check("negative: corrupt ledger — Stop hook stays graceful (continue:true, exit 0)",
               rh.returncode == 0 and '"continue": true' in rh.stdout)
         with open(lpath, "w") as fh:
             fh.write(good)
+
+        # ── 5b. NEGATIVE: concurrent sessions must not lose or corrupt writes ─
+        # Two sessions in one project both fire the Stop hook every turn. Without
+        # a lock this dropped a decision in 3/20 runs and corrupted the store in
+        # 1/20 — and a corrupt store then triggered the permanent brick above.
+        import subprocess as _sp
+        lost = corrupt = 0
+        for i in range(6):
+            for tag in ("A", "B"):
+                tp = os.path.join(proj, f"conc-{tag}.jsonl")
+                with open(tp, "w") as fh:
+                    fh.write(json.dumps({"type": "user", "message": {
+                        "content": f"DECISION: concurrent fact {tag}{i} must survive"}}) + "\n")
+            procs = [_sp.Popen([sys.executable, os.path.join(proj, "harvest.py"),
+                                "--transcript", os.path.join(proj, f"conc-{tag}.jsonl")],
+                               cwd=proj, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                     for tag in ("A", "B")]
+            for pr in procs:
+                pr.wait()
+            try:
+                blob = json.dumps(json.loads(open(lpath).read())["cards"])
+            except Exception:
+                corrupt += 1
+                continue
+            if not (f"concurrent fact A{i}" in blob and f"concurrent fact B{i}" in blob):
+                lost += 1
+        check("negative: concurrent harvests lose no writes and corrupt nothing",
+              lost == 0 and corrupt == 0, f"lost={lost} corrupt={corrupt} runs=6")
 
         # ── 6. NEGATIVE: oversized entry stays bounded ──────────────────────
         big = cl.ContextLedger()

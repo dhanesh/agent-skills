@@ -6,8 +6,12 @@ architecture, and business logic** against real-world knowledge — academic lit
 bodies (NIST, IETF/RFC, OWASP, ISO, sector regulators) — and flags anything that violates
 an established norm, standard, algorithm, or best practice.
 
-Every finding is tied to a source the agent actually fetched. Ungrounded claims are
-reported as `UNCONFIRMED`, never as violations — there is no fabricated authority.
+Every finding **must** be tied to a source the agent actually fetched, and the shipped
+linter checks that rather than taking the agent's word for it: `fetch_sources.py` appends
+every retrieved URL/DOI to a session evidence log, and `report_lint.py --evidence <log>`
+fails any citation flagged `fetched` that appears nowhere in it. Ungrounded claims are
+reported as `UNCONFIRMED`, never as violations. Linting without `--evidence` only shape-checks
+citations, and the result line says so.
 
 ## Install
 
@@ -27,6 +31,8 @@ npx skills add dhanesh/agent-skills --skill base-in-reality
 
 `docs/base-in-reality/<YYYY-MM-DD>-audit.md` — executive summary, domain map, findings
 (claim · location · verdict · severity · citations · fix), sources appendix, and a
-dropped-claims log. Read-only unless you pass `--annotate`.
+dropped-claims log. It never edits code: `--annotate` adds comment markers only, and the
+one file it creates on the default path is the report itself, at
+`docs/base-in-reality/<date>-audit.md` — announced before it is written.
 
 See `SKILL.md` for the full procedure, flags, and invariants.

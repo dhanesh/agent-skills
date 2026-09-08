@@ -34,6 +34,7 @@ import argparse
 import datetime as dt
 import hashlib
 import os
+import stat
 import re
 import subprocess
 import sys
@@ -291,10 +292,32 @@ def write_concept(path, meta, body, validate=True):
 # ── Source fingerprints ──────────────────────────────────────────────────────
 
 def _sha256_file(path):
+    """Content hash of one file, or a stable sentinel when it is not hashable.
+
+    Anything that is not a readable REGULAR file gets a sentinel rather than an
+    open(): a source tree routinely contains a socket, a fifo, a dangling
+    symlink or a mode-000 file, and each was a different failure here. An
+    OSError took the whole fingerprint down with a traceback (`okf.py init
+    --source <dir>` on a directory holding a stray socket), and a fifo was
+    worse — open() BLOCKS on it waiting for a writer, hanging the fingerprint
+    indefinitely with no error at all. stat() first, so neither can happen.
+
+    The sentinel keeps the hash deterministic while staying sensitive to the
+    entry appearing, disappearing, or changing kind.
+    """
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError as exc:
+        return "unstattable:%s" % type(exc).__name__
+    if not stat.S_ISREG(st.st_mode):
+        return "nonregular:%o" % stat.S_IFMT(st.st_mode)
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except OSError as exc:
+        return "unreadable:%s" % type(exc).__name__
     return h.hexdigest()
 
 
@@ -670,27 +693,40 @@ def _resolve_subject_dir(root, slug_or_subject):
 def main(argv=None, out=None):
     out = out or sys.stdout
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", default="knowledge",
-                        help="OKF bundle root (default: knowledge)")
+    # `--root` is accepted BEFORE or AFTER the subcommand. A top-level-only
+    # option cannot follow its subcommand, so every documented invocation of the
+    # form `okf.py status <subject> --root <dir>` exited 2 with "unrecognized
+    # arguments" — including all five examples in references/okf.md, the file
+    # SKILL.md sends the agent to for the full flows. Both orders now work, and
+    # argparse's SUPPRESS default lets the later value win without clobbering
+    # the earlier one with a default.
+    ROOT_HELP = "OKF bundle root (default: knowledge)"
+    parser.add_argument("--root", default="knowledge", help=ROOT_HELP)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="create a subject in the bundle")
+    def add_root(p):
+        """Accept --root after the subcommand too; SUPPRESS keeps the pre-command
+        value when this one is absent."""
+        p.add_argument("--root", default=argparse.SUPPRESS, help=ROOT_HELP)
+        return p
+
+    p_init = add_root(sub.add_parser("init", help="create a subject in the bundle"))
     p_init.add_argument("subject", help="human-readable subject name")
     p_init.add_argument("--source", action="append", default=[],
                         help="repo dir, file, or URL/topic (repeatable)")
 
-    p_pin = sub.add_parser("pin", help="re-fingerprint sources after a refresh")
+    p_pin = add_root(sub.add_parser("pin", help="re-fingerprint sources after a refresh"))
     p_pin.add_argument("subject", help="slug or subject name")
 
-    p_status = sub.add_parser("status", help="report drift vs pinned fingerprints")
+    p_status = add_root(sub.add_parser("status", help="report drift vs pinned fingerprints"))
     p_status.add_argument("subject", nargs="?", default=None,
                           help="slug or subject name (default: all)")
 
-    p_diff = sub.add_parser(
-        "diff", help="pinned vs current fingerprints + changed-file list")
+    p_diff = add_root(sub.add_parser(
+        "diff", help="pinned vs current fingerprints + changed-file list"))
     p_diff.add_argument("subject", help="slug or subject name")
 
-    sub.add_parser("list", help="list subjects in the bundle")
+    add_root(sub.add_parser("list", help="list subjects in the bundle"))
 
     args = parser.parse_args(argv)
 

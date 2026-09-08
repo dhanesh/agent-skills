@@ -215,12 +215,38 @@ def detect(root):
             if existing[rail] is None:
                 existing[rail] = cmd
 
-    workflows = [
+    # A workflow only counts as the CI rail if it actually RUNS one of the rail
+    # commands. Crediting the first .yml in sorted order meant a stale-bot,
+    # dependabot or labeler workflow read as "CI installed" — and those are most
+    # common in exactly the neglected repos this skill targets, so the agent
+    # would report the rail done and leave the repo with no verify job at all.
+    workflows = sorted(
         f for f in files
         if f.startswith(".github/workflows/") and f.endswith((".yml", ".yaml"))
-    ]
-    if workflows:
-        existing["ci"] = workflows[0]
+    )
+    rail_cmds = [c for c in existing.values() if c and c != existing.get("ci")]
+    ci_note = None
+    for wf in workflows:
+        blob = _read(root, wf)
+        if not blob:
+            continue
+        low = blob.lower()
+        runs_a_rail = any(
+            cmd.split()[0] in low and cmd.split()[-1].strip("-") in low
+            for cmd in rail_cmds if cmd
+        ) or any(kw in low for kw in (
+            "make verify", "make test", "make check", "npm test", "npm run test",
+            "pytest", "go test", "cargo test", "make build", "make gate",
+        ))
+        if runs_a_rail:
+            existing["ci"] = wf
+            break
+    else:
+        if workflows:
+            # Be explicit: workflows exist, none of them verifies anything. The
+            # right move is to extend one, not to add a competing file.
+            ci_note = ("workflows exist but none runs a verifier command: "
+                       + ", ".join(workflows) + " — extend one rather than adding another")
 
     missing = sorted(rail for rail in RAILS if existing[rail] is None)
 
@@ -234,12 +260,28 @@ def detect(root):
                 if stack in stacks and rail in STACK_PROPOSALS.get(stack, {}):
                     cmd, path = STACK_PROPOSALS[stack][rail]
                     break
-        proposals.append({"rail": rail, "command": cmd, "file_to_create": path})
-    proposals.sort(key=lambda p: (p["rail"], p["command"], p["file_to_create"]))
+        # `exists`/`action` rather than a bare `file_to_create`: the detector
+        # already knows whether the path is in the tree (it detected the make
+        # stack FROM the Makefile), so the machine-readable plan should carry
+        # that fact instead of leaving a prose instruction — "never overwrite a
+        # file the repo already has" — as the only thing between the agent and
+        # a clobbered Makefile. `file_to_create` is kept as a deprecated alias
+        # so an older consumer does not break.
+        exists = path in fileset
+        proposals.append({
+            "rail": rail,
+            "command": cmd,
+            "file": path,
+            "exists": exists,
+            "action": "extend" if exists else "create",
+            "file_to_create": path,
+        })
+    proposals.sort(key=lambda p: (p["rail"], p["command"], p["file"]))
 
     return {
         "stacks": sorted(stacks),
         "existing_verifiers": existing,
+        "ci_note": ci_note,
         "missing": missing,
         "proposals": proposals,
         "lockfiles": sorted(f for f in LOCKFILE_NAMES if f in fileset),

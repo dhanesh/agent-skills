@@ -33,6 +33,19 @@ learning-science research supplies the structure for breaking material down. The
 standards for you, the explainer — never a license to quiz the learner up front, withhold
 answers, or manufacture friction.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'feynman-walkthrough' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## The quality bar
 
 Judge your own explaining by two questions, applied continuously:
@@ -108,7 +121,7 @@ Judge your own explaining by two questions, applied continuously:
 7. **Offer the recall track — once.** If long-term retention matters to them, one
    sentence at the end: spaced review of the explainer can be scheduled
    ([assets/spaced_schedule.py](assets/spaced_schedule.py) generates expanding-interval
-   dates, e.g. `python3 assets/spaced_schedule.py --start 2026-07-11 --reviews 5 "topic"`)
+   dates, e.g. `python3 "$SKILL_DIR/assets/spaced_schedule.py" --start 2026-07-11 --reviews 5 "topic"`)
    and the explainer doubles as the self-quiz source. If they decline or don't respond to
    it, drop it — the walkthrough and the explainer are the deliverable.
 
@@ -116,18 +129,24 @@ Judge your own explaining by two questions, applied continuously:
 
 Understanding kept in a chat log dies with the session; the OKF bundle is what makes it
 durable and maintainable. When a session opens on a subject that may have been explained
-before, check the knowledge root first (`python3 assets/okf.py status <subject>`):
+before, check the knowledge root first (`python3 "$SKILL_DIR/assets/okf.py" status <subject>`):
 
 - **FRESH** → the explainer still matches its sources; review from it, answer questions
   against it, and append new Q&A to its FAQ.
 - **STALE** → the source moved (new commits, revised doc). Say so before relying on the
-  explainer, then refresh it diff-aware: `python3 assets/okf.py diff <subject>` lists
+  explainer, then refresh it diff-aware: `python3 "$SKILL_DIR/assets/okf.py" diff <subject>` lists
   exactly which files changed since the pinned fingerprint; walk what actually changed,
   update only the affected segments, re-pin. The learner gets a what-changed
   walkthrough instead of a full repeat. (Committing the bundle itself into the repo it
   explains never trips STALE — the tool ignores changes confined to the bundle root.)
 - **UNKNOWN** (external URL/topic sources) → ask whether the source changed, or
   re-check it yourself before leaning on the explainer.
+
+For **one** subject the flow above is the whole story. For a whole knowledge root — sweeping
+many bundles, finding every drifted subject, regenerating a published site — hand off to the
+sibling `knowledge-gardener` skill when it is installed; it owns maintenance across bundles
+and its verdicts are pinned to agree with `okf.py`'s by a cross-tool test. The inline flow
+above remains the standalone fallback when it is not.
 
 The full flows — and the standing instruction to track the OKF spec as it evolves — are
 in [references/okf.md](references/okf.md). This is also the honest answer to "will I

@@ -33,15 +33,21 @@ def all_pane_titles():
     # One subprocess answers both "does this pane exist" and "what is its
     # title" for every pane (agents set titles via OSC 0/2 — Herdr reads the
     # same signal: a braille-spinner title means the agent is streaming).
+    #
+    # Returns (titles, ok). The `ok` flag is load-bearing: "tmux could not
+    # answer" must NEVER be read as "every pane is gone". Collapsing the two
+    # let a server restart — exactly when list-panes fails, and exactly when
+    # agent-resume is needed — wipe the whole registry on the next status-bar
+    # tick, five seconds later.
     r = sh(['tmux','list-panes','-a','-F','#{pane_id}\t#{pane_title}'])
     if r.returncode != 0:
-        return {}
+        return {}, False
     titles = {}
     for line in r.stdout.splitlines():
         pane_id, _, title = line.partition('\t')
         if pane_id:
             titles[pane_id] = title
-    return titles
+    return titles, True
 
 def focused_panes():
     # Active pane of each attached client — "viewed" panes. Format expansion
@@ -52,8 +58,19 @@ def focused_panes():
         return set()
     return {p for p in r.stdout.splitlines() if p}
 
-TITLES = all_pane_titles()
+TITLES, TMUX_OK = all_pane_titles()
+if not TMUX_OK:
+    # No server (restart, socket gone, tmux not on PATH). We cannot capture panes
+    # either, so there is nothing truthful to compute — leave every record and the
+    # last state.json untouched and let the next tick do the work.
+    print('agent-status-scan: tmux unreachable; registry left intact', file=sys.stderr)
+    raise SystemExit(0)
 FOCUSED = focused_panes()
+
+# A record whose pane is gone is what agent-resume exists to relaunch, so it is
+# marked dead, not deleted — deletion is unrecoverable. The graveyard is bounded
+# by age so it cannot grow without limit.
+GRAVEYARD_TTL = float(os.environ.get('AGENT_GRAVEYARD_TTL_SECONDS', 7 * 24 * 3600))
 
 def status_for(text, title, meta):
     # Compute activity (hash change) and idle here; the classifier stays pure.
@@ -110,11 +127,27 @@ for fn in sorted(os.listdir(pane_dir)):
     prev=meta.get('status','unknown')
     pane_id=meta.get('pane_id')
     if not pane_id or pane_id not in TITLES:
-        # Pane is gone: prune the entry rather than parking it as a permanent
-        # 'unknown' on the status bar. Keeps the fleet = live agents only.
-        try: os.remove(path)
-        except OSError: pass
+        # Pane is gone. Keep the record so agent-resume can relaunch it, but mark
+        # it dead and drop it from `items` so the status bar still shows only the
+        # live fleet. Only a record that has been dead past the TTL is removed.
+        died = meta.get('died_at_ts')
+        if died is None:
+            meta['dead'] = True
+            meta['died_at'] = now
+            meta['died_at_ts'] = now_ts
+            meta['status'] = 'dead'
+            try:
+                with open(path, 'w') as fh:
+                    json.dump(meta, fh, indent=2)
+            except OSError:
+                pass
+        elif now_ts - died > GRAVEYARD_TTL:
+            try: os.remove(path)
+            except OSError: pass
         continue
+    if meta.pop('dead', None):
+        # tmux reissued this pane id to a live pane — the record is current again.
+        meta.pop('died_at', None); meta.pop('died_at_ts', None)
     text=capture(pane_id)
     meta['status']=status_for(text, TITLES[pane_id].strip(), meta)
     # Herdr suppresses toasts for the active tab: skip focused panes here

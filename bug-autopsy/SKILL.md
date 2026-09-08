@@ -29,6 +29,19 @@ detection → fix — and leaves behind a blameless post-mortem the next enginee
 link by link. The failure is treated as material to learn from, not a fire to fight: if
 the incident is still burning, triage first and come back.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'bug-autopsy' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## Ground rules
 
 - **Evidence or inference, labeled.** Every timeline entry and every "why" cites its
@@ -66,7 +79,7 @@ the incident is still burning, triage first and come back.
    sections: Summary; Impact; Timeline; Root cause (the whys chain); Contributing
    factors; Fix, naming the verifying commit/test/CI run; Prevention, as checkbox items
    each with an owner and a completion check; Links.
-5. **Lint and repair.** Run `python3 assets/postmortem_lint.py <file>` and fix findings
+5. **Lint and repair.** Run `python3 "$SKILL_DIR/assets/postmortem_lint.py" <file>` and fix findings
    until it prints `POSTMORTEM_LINT: PASS`. Structural failures (missing/empty sections,
    untimestamped timeline entries, a shallow whys chain, non-checkbox prevention items)
    are hard; blame-phrasing `WARN` lines are prompts to reframe — resolve them unless

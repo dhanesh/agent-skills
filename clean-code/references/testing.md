@@ -1,7 +1,9 @@
 # L2 — Tests, TDD & Design Discipline
 
-Activate when writing tests, making code testable, wrapping a third-party
-dependency, or deciding what "done" means.
+Activate when **refactoring any existing code** — the refactor-on-green rule
+below is what keeps a cleanup from silently breaking behaviour — and when
+writing tests, making code testable, wrapping a third-party dependency, or
+deciding what "done" means.
 
 > Code rots because we're afraid to clean it. A trustworthy test suite removes
 > the fear — it's what makes all the other clean-code refactoring safe.

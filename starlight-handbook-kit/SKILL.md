@@ -20,6 +20,19 @@ drifts from the contract. The gates are what make it safe to let an agent author
 content — a dropped page, an undated topic, a fenced-mermaid mistake, or a broken
 link all fail loudly instead of shipping.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'starlight-handbook-kit' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## When to use
 
 Use when you want to:
@@ -51,7 +64,7 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
    `.gitignore` and `.github/workflows/`). Copy it recursively:
 
    ```sh
-   cp -R <skill-dir>/assets/templates/scaffold/. <target-repo>/
+   cp -R "$SKILL_DIR/assets/templates/scaffold/." <target-repo>/
    ```
 
 3. **Substitute the five placeholders** in the copied files. They appear only in

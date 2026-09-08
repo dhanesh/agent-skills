@@ -101,9 +101,16 @@ else
 fi
 
 rc=0
-while IFS="$(printf '\t')" read -r METHOD PATHPART EXPECT; do
+probed=0
+declared=0
+# `read` returns non-zero on a final line with no trailing newline, which silently
+# dropped the LAST route while still exiting 0 — a false green from the component
+# whose entire job is verification, on a routes file a model wrote. `|| [ -n ... ]`
+# keeps that line; the probed/declared count below makes any future skip visible.
+while IFS="$(printf '\t')" read -r METHOD PATHPART EXPECT || [ -n "${METHOD:-}" ]; do
   [ -n "${METHOD:-}" ] || continue
   case "$METHOD" in \#*) continue;; esac
+  probed=$((probed + 1))
   # Substitute Hono `:param` segments with a concrete value so param routes match.
   PROBE="$(printf '%s' "$PATHPART" | sed 's#/:[a-zA-Z0-9_]*#/1#g')"
   # Select the tenant via header mode (works identically for local + docker; the
@@ -116,5 +123,14 @@ while IFS="$(printf '\t')" read -r METHOD PATHPART EXPECT; do
   fi
 done < "$ROUTES"
 
-[ "$routes_only" -eq 1 ] || true
+# Every non-comment, non-blank line in the routes file must have been probed.
+# "Smoke-tested every route" is the claim; this is what makes it checkable.
+declared="$(grep -cv -e '^[[:space:]]*$' -e '^[[:space:]]*#' "$ROUTES" || true)"
+if [ "$probed" -ne "$declared" ]; then
+  echo "FAIL: probed $probed of $declared declared route(s) — routes file not fully read"
+  rc=1
+else
+  echo "probed $probed/$declared route(s)"
+fi
+
 exit $rc

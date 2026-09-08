@@ -55,6 +55,33 @@ BULLET_RE = re.compile(r"^\s*[-*+]\s+\S")
 CHECKBOX_RE = re.compile(r"^\s*[-*+]\s+\[(?: |x|X)\]\s+\S")
 TABLE_ROW_RE = re.compile(r"^\s*\|.+\|\s*$")
 TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+# Evidence markers. SKILL.md's deliverable promises an "evidence-cited" write-up
+# where every timeline entry and every why cites `file:line`, a commit sha, a CI
+# run or an issue link — but the linter only ever checked that the sections were
+# present and non-empty, so a post-mortem whose every why read "Because of a
+# thing." scored a clean 11/11. These are what make the claim checkable.
+EVIDENCE_RE = re.compile(
+    r"(?:[\w./+-]+\.[A-Za-z0-9]{1,8}:\d+"      # path/to/file.py:14
+    r"|\b[0-9a-f]{7,40}\b"                       # commit sha
+    r"|https?://\S+"                              # CI run, issue, dashboard
+    r"|#\d+"                                      # issue / PR reference
+    r"|\bPR\s*#?\d+|\bissue\s*#?\d+"
+    r"|\b(?:run|build|job|pipeline)\s*#?\d+)",
+    re.IGNORECASE)
+# A DECLARED BASIS also counts. The requirement is that the author says what
+# backs the statement — not that a commit sha exists for every line. An entry
+# reconstructed rather than recorded may say so, and a systemic conclusion may
+# name itself as one; both are honest, and both beat tempting an author to
+# invent a plausible sha to satisfy a linter. What fails is an assertion with
+# no stated basis at all ("Because of a thing.").
+INFERENCE_RE = re.compile(
+    r"(?:\bevidence\s*[:=]"
+    r"|\bsystemic\s*[:=]"
+    r"|\binferen(?:ce|ces)\b|\binferred\b"
+    r"|\bno artifact\b|\bunrecorded\b"
+    r"|\bper\s+(?:the\s+)?(?:log|logs|transcript|report)\b)",
+    re.IGNORECASE)
+OWNER_RE = re.compile(r"(?:@[\w.-]+|\bowner\s*[:=]|\bowned by\b)", re.IGNORECASE)
 BLAME_RE = re.compile(
     r"human error|should have known|careless|negligen\w*|operator error"
     r"|to blame|at fault|fault of",
@@ -170,6 +197,74 @@ def lint_text(text):
                                str(n) for n in plain)))
         else:
             checks.append((prev_name, True, "%d actionable item(s)" % len(boxes)))
+
+    # Evidence: every timeline entry cites an artifact (or is marked an inference).
+    ev_name = "timeline: every entry cites evidence"
+    if "Timeline" not in found:
+        checks.append((ev_name, False, "no Timeline section to check"))
+    else:
+        body = found["Timeline"]
+        entries = [(n, line) for n, line in body if BULLET_RE.match(line)]
+        if not entries:
+            rows = [(n, line) for n, line in body
+                    if TABLE_ROW_RE.match(line) and not TABLE_SEP_RE.match(line)]
+            entries = rows[1:]
+        if not entries:
+            checks.append((ev_name, False, "no entries to check"))
+        else:
+            bare = [n for n, line in entries
+                    if not (EVIDENCE_RE.search(line) or INFERENCE_RE.search(line))]
+            detail = "%d/%d entries cite evidence" % (
+                len(entries) - len(bare), len(entries))
+            if bare:
+                detail += ("; uncited on line(s) %s (add file:line, a commit sha, "
+                           "a CI/issue link, or mark it `(inference)`)"
+                           % ", ".join(str(n) for n in bare))
+            checks.append((ev_name, not bare, detail))
+
+    # Evidence: each why level is backed, not just asserted.
+    wev_name = "root cause: every why cites evidence"
+    if "Root cause" not in found:
+        checks.append((wev_name, False, "no Root cause section to check"))
+    else:
+        whys = [(n, line) for n, line in found["Root cause"] if WHY_RE.match(line)]
+        if not whys:
+            checks.append((wev_name, False, "no why levels to check"))
+        else:
+            bare = [n for n, line in whys
+                    if not (EVIDENCE_RE.search(line) or INFERENCE_RE.search(line))]
+            detail = "%d/%d why levels cite evidence" % (len(whys) - len(bare), len(whys))
+            if bare:
+                detail += ("; uncited on line(s) %s"
+                           % ", ".join(str(n) for n in bare))
+            checks.append((wev_name, not bare, detail))
+
+    # Fix: names the commit / test / CI run that verifies it (SKILL.md step 5).
+    fix_name = "fix: names a verifying commit, test, or CI run"
+    if "Fix" not in found:
+        checks.append((fix_name, False, "no Fix section to check"))
+    else:
+        joined = " ".join(line for _, line in found["Fix"])
+        ok = bool(EVIDENCE_RE.search(joined))
+        checks.append((fix_name, ok,
+                       "" if ok else "no commit sha, file:line, test id or CI link found"))
+
+    # Prevention: each item carries an owner AND a completion check.
+    own_name = "prevention: every item has an owner"
+    if "Prevention" not in found:
+        checks.append((own_name, False, "no Prevention section to check"))
+    else:
+        boxes = [(n, line) for n, line in found["Prevention"]
+                 if CHECKBOX_RE.match(line)]
+        if not boxes:
+            checks.append((own_name, False, "no checkbox items to check"))
+        else:
+            bare = [n for n, line in boxes if not OWNER_RE.search(line)]
+            detail = "%d/%d items have an owner" % (len(boxes) - len(bare), len(boxes))
+            if bare:
+                detail += ("; missing on line(s) %s (add `@owner` or `owner:`)"
+                           % ", ".join(str(n) for n in bare))
+            checks.append((own_name, not bare, detail))
 
     # Blameless advisory: warn, never fail.
     for lineno, line in vlines:

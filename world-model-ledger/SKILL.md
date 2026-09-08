@@ -3,18 +3,16 @@ name: world-model-ledger
 description: >-
   One-time SETUP: installs a persistent SQLite-backed WORLD MODEL for a coding agent into a
   project (or global ~/.claude). Use when the user wants an agent to remember a codebase across
-  sessions, detect contradictions, propose fixes, and improve correctness over time — "give the
+  sessions, detect contradictions, propose fixes, and improve over time — "give the
   agent a world model", "track what's verified vs assumed", "persist codebase knowledge with
-  confidence". Tracks entities (symbols/files/modules/external referents), interactions, and
+  confidence". Tracks entities (symbols/files/modules/externals), interactions, and
   constraints with TWO confidence axes (observed vs normative), validation status, and
   PROV-style evidence. Load-bearing rule: code observation is NOT ground truth — only oracle
   evidence (tests/CI/docs/human) raises normative confidence, flagging
-  observed-but-unverified. Every triple is checked against a predicate ontology (RDFS-style
-  domain/range) before insert — hallucinated verbs and impossible pairings are rejected, not
-  stored. Zero-config capture via four hooks (PreToolUse pre-edit summaries;
-  UNIVERSAL PostToolUse observing every tool call; Stop/SessionStart consolidate + inject
-  digest, auto-bootstrap); invoke ONCE; hooks run automatically. Not a linter, LSP server, RAG
-  vector store, or model-driven fact extractor.
+  observed-but-unverified. Every triple is checked against a predicate ontology before insert,
+  so hallucinated verbs and impossible pairings are rejected, not stored. Zero-config capture
+  via four lifecycle hooks; invoke ONCE, then they run automatically. Not a linter, LSP server,
+  RAG vector store, or model-driven fact extractor.
 license: MIT
 compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop/SessionStart), bash, and python3 with its stdlib sqlite3 (no pip, no network); jq optional for clean settings.json merging.
 x-spec-version: 1.0
@@ -158,7 +156,10 @@ normative correctness improves over time. The loop is detailed in
    verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions come
    from the agent's own markers/CLI, never from a model summarizing inside a hook.
 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into facts
-   or evidence, so untrusted output cannot forge a marker (a regression test guards this).
+   or evidence, so untrusted output cannot forge a marker. The two tags that raise the
+   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) are additionally accepted from the user's
+   channel only — an agent quoting a poisoned file back into its own reply must not be
+   able to validate a fact. Regression tests guard both the direct and the echo path.
 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.

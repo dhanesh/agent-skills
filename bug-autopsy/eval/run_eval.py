@@ -135,6 +135,45 @@ def main():
               "exit %d" % r.returncode)
 
         # Blameless advisory: warns without failing the run.
+        # NEGATIVE: structurally perfect, entirely evidence-free. This is the
+        # shape the linter used to score 11/11 — every section present, every
+        # timestamp in place, a 3-level why chain in which every why reads
+        # "Because of a thing." The deliverable claims "evidence-cited"; this
+        # fixture is what makes that claim falsifiable.
+        hollow = """# Post-mortem: the thing broke
+
+## Summary
+A thing broke.
+
+## Impact
+Some users were affected.
+
+## Timeline
+- 2026-08-01T10:00Z - it started
+- 2026-08-01T11:00Z - it stopped
+
+## Root cause
+- Why did it break? Because of a thing.
+- Why was there a thing? Because of another thing.
+- Why another thing? Because of a thing.
+
+## Contributing factors
+- It was a Tuesday.
+
+## Fix
+We fixed it.
+
+## Prevention
+- [ ] Do better
+
+## Detection
+We noticed.
+"""
+        r = lint(tmp, "hollow.md", hollow)
+        check("negative: structurally complete but evidence-free write-up is rejected",
+              r.returncode == 1 and "cites evidence - FAIL" in r.stdout,
+              r.stdout.strip().splitlines()[-1][:60])
+
         blamey = GOOD.replace(
             "- Cache TTL of 5 minutes widened the exposure window "
             "(evidence: cache/config.py:12).",

@@ -21,6 +21,19 @@ deterministically (same tree in, same findings out), and the agent adjudicates e
 with the code open — a flagged `debug=True` in a test fixture is INFO; the same line in a
 production entrypoint is HIGH. The tool never guesses context; you never grep by hand.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'security-posture-audit' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## Boundaries — what this is not
 
 State these in the report so it cannot be over-read:
@@ -47,7 +60,7 @@ authorization is unclear, ask before running.
 2. **Run the deterministic sweep.** From the skill directory:
 
    ```bash
-   python3 assets/audit_posture.py <repo> --format json --fail-on never
+   python3 "$SKILL_DIR/assets/audit_posture.py" <repo> --format json --fail-on never
    ```
 
    This emits every draft finding as

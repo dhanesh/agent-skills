@@ -76,7 +76,8 @@ def main():
             "scripts": {"test": "node --test", "build": "node --check index.js"},
         }))
         write(nd, "package-lock.json", "{}")
-        write(nd, ".github/workflows/ci.yml", "on: push\n")
+        write(nd, ".github/workflows/ci.yml",
+              "on: push\njobs:\n  t:\n    steps:\n      - run: npm test\n")
 
         r = run_detector(nd)
         plan = json.loads(r.stdout) if r.returncode == 0 else {}
@@ -92,6 +93,40 @@ def main():
                or ".github/workflows" in p.get("file_to_create", "")]
         check("NEGATIVE node fixture: no duplicate workflow proposed",
               dup == [], str(dup))
+
+        # NEGATIVE: a workflow that verifies nothing must NOT be credited. A
+        # stale-bot / dependabot / labeler workflow is common in exactly the
+        # neglected repos this skill targets, and crediting the first .yml in
+        # sorted order made the agent report CI done and leave the repo with no
+        # verify job at all.
+        sd = os.path.join(tmp, "stalebot")
+        write(sd, "requirements.txt", "requests\n")
+        write(sd, ".github/workflows/stale.yml",
+              "on:\n  schedule:\n    - cron: '0 0 * * *'\n"
+              "jobs:\n  stale:\n    steps:\n      - uses: actions/stale@v9\n")
+        r = run_detector(sd)
+        splan = json.loads(r.stdout) if r.returncode == 0 else {}
+        sev = splan.get("existing_verifiers", {})
+        check("NEGATIVE: a workflow running no verifier is not the ci rail",
+              sev.get("ci") is None and "ci" in splan.get("missing", []),
+              str(sev.get("ci")))
+        check("NEGATIVE: the plan names the non-verifying workflow to extend",
+              "stale.yml" in (splan.get("ci_note") or ""),
+              (splan.get("ci_note") or "")[:60])
+
+        # The plan must carry create-vs-extend, not leave prose as the only
+        # guard against clobbering a file the repo already has.
+        ed = os.path.join(tmp, "existing-makefile")
+        write(ed, "Makefile", "help:\n\t@echo hi\n")
+        write(ed, "requirements.txt", "requests\n")
+        r = run_detector(ed)
+        eplan = json.loads(r.stdout) if r.returncode == 0 else {}
+        props = eplan.get("proposals", [])
+        mk = [p for p in props if p.get("file") == "Makefile"]
+        check("proposals mark an existing target file as `extend`, not `create`",
+              bool(mk) and all(p.get("action") == "extend" and p.get("exists") is True
+                               for p in mk),
+              str([(p.get("file"), p.get("action")) for p in props]))
 
         # ── Fixture 3 (negative): bare repo with nothing ────────────────────
         bare = os.path.join(tmp, "barerepo")

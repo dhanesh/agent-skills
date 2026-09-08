@@ -17,9 +17,22 @@ The thesis, from the best-documented production case (Spotify's Honk agent over 
 
 Default mode is **read-only**: observe, score, report. It only writes files when explicitly asked to install rails (step 5).
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'agent-ready-rails' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## When to use
 
-Reach for this when the question is about the *environment* agents work in, not a specific change: "is our repo agent-ready?", "why do agents keep producing broken or messy PRs here?", "what do we fix so a background agent can merge verified work unattended?". It complements the sibling skills rather than overlapping them — see the relationship table in `references/grounding.md`. Do **not** use it to audit code correctness (that's `base-in-reality`) or to design/repair one agent loop (that's `crafting-self-prompting-loops`); this skill audits the *system* those run inside.
+Reach for this when the question is about the *environment* agents work in, not a specific change: "is our repo agent-ready?", "why do agents keep producing broken or messy PRs here?", "what do we fix so a background agent can merge verified work unattended?". It complements the sibling skills rather than overlapping them — see the relationship table in `references/grounding.md`. Do **not** use it to audit code correctness (that's `base-in-reality`), to judge the quality of the code or its design (that's `clean-code`), or to design/repair one agent loop (that's `crafting-self-prompting-loops`); this skill audits the *system* those run inside.
 
 ## The rails — two tiers
 
@@ -60,7 +73,7 @@ Establish the languages, build system, and where an agent would look for instruc
 Start with the shipped collector, then deepen by reading — the collector supplies evidence, you supply judgment:
 
 ```bash
-python3 <skill-dir>/assets/collect_evidence.py <repo-dir>
+python3 "$SKILL_DIR/assets/collect_evidence.py" <repo-dir>
 ```
 
 It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rail (`R-verifiers`, `R-ci`, `R-house-style`, `R-context`, `R-scoped-tools`, `R-checkpoints` — mapping to R1–R6), each entry a `{kind, path, detail}` lead: test/lint/build configs and Make targets, CI workflows (flagging whether each actually runs tests), style docs and EditorConfig, CLAUDE.md/AGENTS.md/README/docs structure, `.claude/settings*.json` permissions and MCP config, CODEOWNERS/PR-template/.gitignore hygiene. It collects and flags only — it never scores; malformed config files surface as `settings-error` entries rather than crashes.

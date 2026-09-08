@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import json as jsonlib
 import os
+import stat
 import re
 import subprocess
 import sys
@@ -131,10 +132,32 @@ def extract_sources(meta):
 # ── Source fingerprints (identical semantics to okf.py) ──────────────────────
 
 def _sha256_file(path):
+    """Content hash of one file, or a stable sentinel when it is not hashable.
+
+    Anything that is not a readable REGULAR file gets a sentinel rather than an
+    open(): a source tree routinely contains a socket, a fifo, a dangling
+    symlink or a mode-000 file, and each was a different failure here. An
+    OSError took the whole fingerprint down with a traceback (`okf.py init
+    --source <dir>` on a directory holding a stray socket), and a fifo was
+    worse — open() BLOCKS on it waiting for a writer, hanging the fingerprint
+    indefinitely with no error at all. stat() first, so neither can happen.
+
+    The sentinel keeps the hash deterministic while staying sensitive to the
+    entry appearing, disappearing, or changing kind.
+    """
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError as exc:
+        return "unstattable:%s" % type(exc).__name__
+    if not stat.S_ISREG(st.st_mode):
+        return "nonregular:%o" % stat.S_IFMT(st.st_mode)
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except OSError as exc:
+        return "unreadable:%s" % type(exc).__name__
     return h.hexdigest()
 
 
@@ -159,16 +182,70 @@ def detect_source_type(locator):
     return "external"
 
 
-def fingerprint(locator, source_type):
+# ── Self-pin exclusion (must agree with feynman-walkthrough/assets/okf.py) ───
+# A bundle usually lives INSIDE the repo it documents — okf.md calls that the
+# natural layout. Without this, committing the bundle dirties the pin of its own
+# source, so every in-repo subject reported STALE forever, `sweep` exited 1
+# permanently, and the two tools disagreed on identical input despite this
+# skill claiming its verdicts "agree exactly" with okf.py's. Keep the two
+# implementations in step; test_garden.py asserts they agree on a git source.
+
+def _repo_toplevel(locator):
+    probe = _git(["rev-parse", "--show-toplevel"], cwd=locator)
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return None
+    return os.path.realpath(probe.stdout.strip())
+
+
+def _bundle_rel_in_repo(bundle_root, repo_top):
+    """Bundle root's repo-relative posix path, or None when not inside.
+
+    None disables filtering: the bundle is outside the repo, or IS the repo
+    root, where excluding it would hide every change.
+    """
+    if not bundle_root or not repo_top:
+        return None
+    rel = os.path.relpath(os.path.realpath(bundle_root), repo_top)
+    if rel == "." or rel == ".." or rel.startswith(".." + os.sep):
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def _porcelain_paths(porcelain_stdout):
+    """Repo-relative paths from `git status --porcelain` (both rename sides)."""
+    paths = []
+    for line in porcelain_stdout.splitlines():
+        if len(line) < 4:
+            continue
+        for part in line[3:].split(" -> "):
+            part = part.strip().strip('"').rstrip("/")
+            if part:
+                paths.append(part)
+    return paths
+
+
+def _outside_bundle(paths, bundle_rel):
+    """Drop paths under the bundle root (repo-relative posix paths)."""
+    if bundle_rel is None:
+        return list(paths)
+    prefix = bundle_rel + "/"
+    return [p for p in paths
+            if p.rstrip("/") != bundle_rel and not p.startswith(prefix)]
+
+
+def fingerprint(locator, source_type, bundle_root=None):
     """Current fingerprint of a source, or None when it can't be computed."""
     if source_type == "git":
         head = _git(["rev-parse", "HEAD"], cwd=locator)
         if head.returncode != 0:
             return None
         fp = head.stdout.strip()
-        porcelain = _git(["status", "--porcelain"], cwd=locator)
-        if porcelain.returncode == 0 and porcelain.stdout.strip():
-            fp += DIRTY
+        porcelain = _git(["status", "--porcelain", "--untracked-files=all"],
+                         cwd=locator)
+        if porcelain.returncode == 0:
+            bundle_rel = _bundle_rel_in_repo(bundle_root, _repo_toplevel(locator))
+            if _outside_bundle(_porcelain_paths(porcelain.stdout), bundle_rel):
+                fp += DIRTY
         return fp
     if source_type == "file":
         return _sha256_file(locator)
@@ -191,7 +268,7 @@ def _base_sha(fp):
     return fp[:-len(DIRTY)] if fp.endswith(DIRTY) else fp
 
 
-def git_drift(locator, pinned, current):
+def git_drift(locator, pinned, current, bundle_root=None):
     """What moved between the pinned and current fingerprints of a git source.
 
     Returns diffstat (the summary line of `git diff --stat pinned..HEAD`),
@@ -200,6 +277,7 @@ def git_drift(locator, pinned, current):
     """
     detail = {"diffstat": None, "changed_files": [], "note": None}
     base, head = _base_sha(pinned), _base_sha(current)
+    bundle_rel = _bundle_rel_in_repo(bundle_root, _repo_toplevel(locator))
     changed = set()
     if base != head:
         stat = _git(["diff", "--stat", "%s..%s" % (base, head)], cwd=locator)
@@ -213,14 +291,15 @@ def git_drift(locator, pinned, current):
         names = _git(["diff", "--name-only", "%s..%s" % (base, head)],
                      cwd=locator)
         if names.returncode == 0:
-            changed.update(l.strip() for l in names.stdout.split("\n")
-                           if l.strip())
+            changed.update(_outside_bundle(
+                [l.strip() for l in names.stdout.split("\n") if l.strip()],
+                bundle_rel))
     if current.endswith(DIRTY):
-        porcelain = _git(["status", "--porcelain"], cwd=locator)
+        porcelain = _git(["status", "--porcelain", "--untracked-files=all"],
+                         cwd=locator)
         if porcelain.returncode == 0:
-            changed.update(line[3:].strip()
-                           for line in porcelain.stdout.split("\n")
-                           if line.strip())
+            changed.update(_outside_bundle(
+                _porcelain_paths(porcelain.stdout), bundle_rel))
         if base == head and detail["note"] is None:
             detail["note"] = "worktree has uncommitted changes"
     detail["changed_files"] = sorted(changed)
@@ -289,7 +368,7 @@ def find_subjects(bundle_root):
 
 # ── Assessment ───────────────────────────────────────────────────────────────
 
-def assess_source(pin):
+def assess_source(pin, bundle_root=None):
     """One pin -> row dict with state FRESH/STALE/UNKNOWN and drift detail.
 
     Mirrors okf.py's status logic: external or unpinned -> UNKNOWN; a source
@@ -311,16 +390,23 @@ def assess_source(pin):
         return row
     locator = pin["locator"]
     current_type = detect_source_type(locator)
-    current = fingerprint(locator, current_type)
+    current = fingerprint(locator, current_type, bundle_root)
     row["current_fingerprint"] = current
     if current is None:
         return row
     if current == pinned:
         row["state"] = "FRESH"
         return row
-    row["state"] = "STALE"
     if current_type == "git":
-        row.update(git_drift(locator, pinned, current))
+        # STALE is decided by what MOVED outside the bundle, not by raw
+        # fingerprint inequality. Committing the bundle changes HEAD, so
+        # comparing shas alone reported every in-repo bundle as STALE — which
+        # is exactly what okf.py's self-pin fix avoids. Same rule, same answer.
+        drift = git_drift(locator, pinned, current, bundle_root)
+        row.update(drift)
+        row["state"] = "STALE" if drift["changed_files"] else "FRESH"
+        return row
+    row["state"] = "STALE"
     return row
 
 
@@ -345,7 +431,7 @@ def assess_subject(bundle_root, rel_subject):
     states = []
     for pin in pins:
         try:
-            row = assess_source(pin)
+            row = assess_source(pin, bundle_root)
         except Exception as exc:  # never let one bad source kill the sweep
             row = {"type": pin.get("type"), "locator": pin.get("locator"),
                    "pinned_fingerprint": pin.get("fingerprint"),

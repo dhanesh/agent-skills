@@ -99,14 +99,32 @@ def _triple_and_by(rest):
     return (toks[0], toks[1], toks[2]), by_kind, by_ref
 
 
+# Tags that raise NORMATIVE confidence — the oracle axis. These are accepted
+# from the PRINCIPAL's channel only (user text), never from assistant text.
+#
+# The direct tool_result channel was already excluded, but assistant text was
+# not, and an agent quoting a file back into its own reply — showing a snippet,
+# a diff, a config, which agents do constantly — re-emitted any marker line in
+# that file into the trusted channel. One poisoned line in a README or a
+# dependency could therefore mint a `validated` edge at normative_conf 0.8 with
+# a fabricated test reference, while observed_conf stayed 0.0: "certainly
+# correct, never seen". Observation-only tags stay on both channels, because
+# the worst they can do is record something the model already saw.
+ORACLE_TAGS = ("WM-VALIDATED", "WM-REFUTES")
+
+
 def apply_markers(wm: WorldModel, rows) -> dict:
-    counts = {"observe": 0, "validate": 0, "refute": 0, "map": 0, "constraint": 0, "contradict": 0}
-    for _role, text in rows:
+    counts = {"observe": 0, "validate": 0, "refute": 0, "map": 0, "constraint": 0,
+              "contradict": 0, "rejected_echo": 0}
+    for role, text in rows:
         for line in text.splitlines():
             m = _MARK.match(line)
             if not m:
                 continue
             tag, rest = m.group(1), m.group(2).strip()
+            if tag in ORACLE_TAGS and role != "user":
+                counts["rejected_echo"] += 1
+                continue
             try:
                 if tag == "WM-OBSERVE":
                     trip, ev = _triple_and_evidence(rest)
@@ -279,5 +297,21 @@ def main(argv=None):
         wm.close()
 
 
+def _guarded_main(argv=None):
+    """Never let one bad turn end capture for the life of the project.
+
+    Both hooks that call this run behind `|| true`, so an uncaught exception is
+    invisible AND permanent when its cause is persisted (a poisoned constraint
+    template did exactly that). Degrade to a single lossy turn instead: report on
+    stderr, exit 0, and let the next turn try again.
+    """
+    try:
+        return main(argv)
+    except Exception as e:                        # noqa: BLE001 - deliberate backstop
+        print(f"world-model harvest: skipped this turn ({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_guarded_main())

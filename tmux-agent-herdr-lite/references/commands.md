@@ -43,7 +43,7 @@ One-line per-agent summary for the tmux status bar.
 
 ### `agent-dashboard`
 Full table (status, name, agent kind, pane, window, classification reason)
-plus key help. Bound to `prefix ?` as a popup.
+plus key help. Bound to `prefix a d` as a popup.
 
 ### `agent-explain <target>`
 Debug classification: prints the agent manifest in use, the pane title, the
