@@ -30,10 +30,14 @@ domain(s).
 
 ## Invariants (do not violate)
 
-1. **Read-only by default.** Never edit code. The only write path is `--annotate`, which
-   inserts comment markers only — never logic.
-2. **No fabricated citations.** Cite only URLs/DOIs fetched this session. Ungrounded ⇒
-   `UNCONFIRMED`. See `references/verdict-rubric.md`.
+1. **Never edit code.** `--annotate` inserts comment markers only — never logic. The one
+   file this skill creates on the default path is its own report under
+   `docs/base-in-reality/`; name it before writing it, and offer the in-conversation
+   report instead if the user wants their tree untouched.
+2. **No fabricated citations.** Cite only URLs/DOIs fetched this session, and prove it:
+   fetch with `BIR_EVIDENCE_LOG` set, then lint with `--evidence`. `fetched: true` is a
+   claim the agent makes about itself — the evidence log is what makes it checkable.
+   Ungrounded ⇒ `UNCONFIRMED`. See `references/verdict-rubric.md`.
 3. **Adversarial gate.** No `VIOLATION`/`DEVIATION` is reported without surviving a
    refutation pass.
 4. **No silent truncation.** If `--max-claims` caps extraction, list what was dropped in
@@ -64,8 +68,14 @@ subagent's prompt:
   `FETCH="<skill-base-dir>/assets/fetch_sources.py"`.
 - If you don't have the base directory, discover it:
   `FETCH=$(find ~/.claude ~/.config ~/.agents -path '*base-in-reality*/assets/fetch_sources.py' 2>/dev/null | head -1)`
-- Verify it resolves: `uv run "$FETCH" --source openalex --query test --limit 1` should emit JSON.
+- Verify it resolves: `python3 "$FETCH" --source openalex --query test --limit 1` should emit
+  JSON. (`uv run "$FETCH"` is equivalent; the script declares `dependencies = []` and imports
+  only the stdlib, so `python3` works on any host and does not make `uv` a prerequisite.)
 - Hand subagents the literal absolute `$FETCH` value — never a relative `assets/`-prefixed form.
+- **Open the evidence log before any fetching**, and export it so every subagent inherits it:
+  `export BIR_EVIDENCE_LOG="$(mktemp -t bir-evidence-XXXXXX.jsonl)"`. Each retrieval appends the
+  URL/DOI actually returned, and stage 6 reconciles the report against it. Without this, a
+  `fetched: true` flag is only the agent's word for itself and the linter says so.
 
 1. **Scope & domain detection.** Survey languages, dependency manifests, directory layout,
    README/docs, DB schemas/migrations, config. Classify the domain(s) using
@@ -85,7 +95,7 @@ subagent's prompt:
 
 4. **Verify (fan-out, grounded).** Per claim, dispatch a subagent that queries keyless APIs
    first via the bundled source helper at the absolute `$FETCH` path resolved above
-   (`uv run "$FETCH" --source <s> --query "<q>" --limit <n>` — pass the literal absolute path
+   (`python3 "$FETCH" --source <s> --query "<q>" --limit <n>` — pass the literal absolute path
    into the subagent; a skill-relative `assets/`-prefixed path will not resolve from the target repo),
    then WebSearch/WebFetch for standards and paywalled sources. It must hold ≥1 fetched source
    before asserting anything stronger than `UNCONFIRMED`. Output a finding conforming to
@@ -101,11 +111,17 @@ subagent's prompt:
 
 6. **Synthesize.** Before filling the report, lint the merged findings array with the
    bundled contract linter: write the findings to a temp JSON file and run
-   `python3 "<skill-base-dir>/assets/report_lint.py" <findings.json>`. It deterministically
-   enforces the schema enums and the grounding invariant (a `VIOLATION`/`DEVIATION` with no
-   fetched citation is rejected — downgrade it to `UNCONFIRMED` rather than shipping it).
-   Fix every `ERROR:` line, then fill `assets/report-skeleton.md` and write it to
-   `docs/base-in-reality/<YYYY-MM-DD>-audit.md`: executive summary, domain map, findings
+   `python3 "<skill-base-dir>/assets/report_lint.py" <findings.json> --evidence "$BIR_EVIDENCE_LOG"`.
+   It deterministically enforces the schema enums and the grounding invariant (a
+   `VIOLATION`/`DEVIATION` with no fetched citation is rejected — downgrade it to `UNCONFIRMED`
+   rather than shipping it), and with `--evidence` it checks each `fetched: true` citation
+   against the URLs a retrieval actually returned, so a plausible-looking but never-fetched
+   DOI fails instead of rendering as grounded. Run it WITH `--evidence`: the result line
+   states which mode ran, and a report linted without it is only shape-checked.
+   Fix every `ERROR:` line, then fill `assets/report-skeleton.md`. Writing the report to
+   `docs/base-in-reality/<YYYY-MM-DD>-audit.md` is this skill's one expected write outside
+   `--annotate`; say so before creating it, and emit the report in-conversation instead if
+   the user would rather keep their tree untouched. The report contains: executive summary, domain map, findings
    (ordered by severity then layer), sources appendix, dropped-claims log. If `--annotate`,
    insert the comment markers at each finding's location.
 

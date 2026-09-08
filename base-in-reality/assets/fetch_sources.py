@@ -224,6 +224,32 @@ def fetch_source(source, query, limit=5, sleep=1.0, fetcher=fetch):
     return NORMALIZERS[source](raw)
 
 
+def append_evidence(path, source, query, records):
+    """Append one JSONL line per retrieved record to the session evidence log.
+
+    This is what turns "the agent said it fetched this" into something a linter
+    can check. `fetched: true` in a finding is written by the agent about itself;
+    a URL in THIS file was returned by an actual HTTP response. report_lint.py
+    cross-checks one against the other, so a hallucinated DOI can no longer ride
+    through the gate wearing a fetched flag.
+    """
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            for r in records:
+                if not isinstance(r, dict):
+                    continue
+                fh.write(json.dumps({
+                    "url": r.get("url") or "",
+                    "doi": r.get("doi") or "",
+                    "title": r.get("title") or "",
+                    "source": source,
+                    "query": query,
+                }, ensure_ascii=False) + "\n")
+    except OSError as e:
+        # An unwritable log must not lose the fetch the agent just paid for.
+        sys.stderr.write(f"warning: could not write evidence log {path}: {e}\n")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         description="Query a scholarly source (keyless by default; optional API "
@@ -231,6 +257,10 @@ def main(argv=None):
     p.add_argument("--source", required=True, choices=SOURCES)
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--evidence-log", default=os.environ.get("BIR_EVIDENCE_LOG", ""),
+                   help="append retrieved URLs/DOIs here as JSONL so report_lint.py "
+                        "can verify that a 'fetched' citation was really fetched "
+                        "(default: $BIR_EVIDENCE_LOG)")
     args = p.parse_args(argv)
     try:
         records = fetch_source(args.source, args.query, args.limit)
@@ -238,6 +268,8 @@ def main(argv=None):
         json.dump({"error": str(e), "source": args.source}, sys.stderr)
         sys.stderr.write("\n")
         return 2
+    if args.evidence_log:
+        append_evidence(args.evidence_log, args.source, args.query, records)
     json.dump(records, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0

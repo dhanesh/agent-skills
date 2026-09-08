@@ -125,6 +125,59 @@ def main():
                               bad_path], capture_output=True, text=True, timeout=30)
         check("CLI fails the ungrounded report (exit 1, LINT_RESULT: FAIL)",
               bad.returncode == 1 and "LINT_RESULT: FAIL" in bad.stdout)
+
+        # ── NEGATIVE: a fabricated citation flagged `fetched` must not pass ──
+        # `fetched: true` is written by the agent about itself. The evidence log
+        # is the independent record of what an HTTP response actually returned;
+        # without this check the skill's central claim is unenforceable.
+        ev = os.path.join(tmp, "evidence.jsonl")
+        with open(ev, "w") as f:
+            f.write(json.dumps({"url": "https://arxiv.org/abs/2401.00001",
+                                "doi": "10.1000/real.2024", "title": "Real",
+                                "source": "arxiv", "query": "q"}) + "\n")
+        fab_path = os.path.join(tmp, "fabricated.json")
+        with open(fab_path, "w") as f:
+            json.dump([finding(citations=[{
+                "title": "A plausible paper that was never retrieved",
+                "url": "https://arxiv.org/abs/2401.99999",
+                "doi": "10.1234/fabricated.2024.001", "fetched": True,
+                "quote": "..."}])], f)
+        fab = subprocess.run([sys.executable, os.path.join(ASSETS, "report_lint.py"),
+                              fab_path, "--evidence", ev],
+                             capture_output=True, text=True, timeout=30)
+        check("negative: a `fetched` citation absent from the evidence log is rejected",
+              fab.returncode == 1 and "fabricated-citation pattern" in fab.stdout,
+              fab.stdout.strip().splitlines()[-1][:70] if fab.stdout.strip() else "")
+
+        # POSITIVE control: the same report is accepted once the citation really
+        # was fetched — so the check discriminates, rather than failing everything.
+        real_path = os.path.join(tmp, "real.json")
+        with open(real_path, "w") as f:
+            json.dump([finding(citations=[{
+                "title": "Real", "url": "https://arxiv.org/abs/2401.00001",
+                "doi": "10.1000/real.2024", "fetched": True, "quote": "..."}])], f)
+        real = subprocess.run([sys.executable, os.path.join(ASSETS, "report_lint.py"),
+                               real_path, "--evidence", ev],
+                              capture_output=True, text=True, timeout=30)
+        check("a citation present in the evidence log passes (check discriminates)",
+              real.returncode == 0 and "grounding verified" in real.stdout)
+
+        # The result line must never imply a guarantee the run did not make.
+        unv = subprocess.run([sys.executable, os.path.join(ASSETS, "report_lint.py"),
+                              fab_path], capture_output=True, text=True, timeout=30,
+                             env={k: v for k, v in os.environ.items()
+                                  if k != "BIR_EVIDENCE_LOG"})
+        check("without --evidence the result line declares grounding UNVERIFIED",
+              "grounding UNVERIFIED" in unv.stdout)
+
+        # The fetcher must actually write the log the linter reads.
+        log2 = os.path.join(tmp, "written.jsonl")
+        fetch.append_evidence(log2, "arxiv", "q", [
+            {"url": "https://arxiv.org/abs/2402.00002", "doi": "10.1000/x", "title": "T"}])
+        with open(log2) as f:
+            rec = json.loads(f.readline())
+        check("fetch_sources.append_evidence records the retrieved url + doi",
+              rec["url"] == "https://arxiv.org/abs/2402.00002" and rec["doi"] == "10.1000/x")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

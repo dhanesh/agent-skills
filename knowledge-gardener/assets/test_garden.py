@@ -163,6 +163,59 @@ class TestFingerprints(TempDirCase):
         self.assertEqual(garden.fingerprint(doc, "file"),
                          okf.fingerprint(doc, "file"))
 
+    def test_git_fingerprint_agrees_with_sibling_okf_for_in_repo_bundle(self):
+        """The `git` source type is the ONLY one where the two tools could
+        disagree, and it was the one the agreement test never covered — so the
+        gardener called every in-repo bundle STALE while okf.py called it
+        FRESH, in the layout both skills recommend. Cover it here."""
+        okf_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..",
+            "feynman-walkthrough", "assets", "okf.py")
+        if not os.path.isfile(okf_path):
+            self.skipTest("sibling okf.py not installed")
+        import importlib.util
+        import subprocess
+        spec = importlib.util.spec_from_file_location("sibling_okf2", okf_path)
+        okf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(okf)
+
+        repo = self.path("repo")
+        os.makedirs(repo, exist_ok=True)
+
+        def git(*args):
+            return subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                                   *args], cwd=repo, capture_output=True, text=True)
+
+        if git("init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(os.path.join(repo, "app.py"), "print(1)\n")
+        git("add", "-A"); git("commit", "-qm", "init")
+
+        bundle = os.path.join(repo, "docs", "knowledge")
+        os.makedirs(bundle, exist_ok=True)
+        write(os.path.join(bundle, "index.md"), "# Subjects\n")
+
+        # Bundle present but uncommitted: neither tool may call the repo dirty.
+        self.assertEqual(garden.fingerprint(repo, "git", bundle),
+                         okf.fingerprint(repo, "git", bundle))
+        self.assertNotIn(garden.DIRTY, garden.fingerprint(repo, "git", bundle))
+
+        # Bundle committed: the source did not change, so the pin still holds.
+        pinned = garden.fingerprint(repo, "git", bundle)
+        git("add", "-A"); git("commit", "-qm", "add bundle")
+        after = garden.fingerprint(repo, "git", bundle)
+        self.assertEqual(after, okf.fingerprint(repo, "git", bundle))
+        self.assertEqual(garden.git_drift(repo, pinned, after, bundle)["changed_files"], [])
+        self.assertEqual(okf.git_drift(repo, pinned, bundle)[0], "FRESH")
+
+        # A real source change must still register in BOTH tools.
+        write(os.path.join(repo, "app.py"), "print(2)\n")
+        git("add", "-A"); git("commit", "-qm", "change source")
+        current = garden.fingerprint(repo, "git", bundle)
+        self.assertEqual(garden.git_drift(repo, pinned, current, bundle)["changed_files"],
+                         ["app.py"])
+        self.assertEqual(okf.git_drift(repo, pinned, bundle)[0], "STALE")
+
     def test_external_has_no_fingerprint(self):
         self.assertIsNone(garden.fingerprint("https://example.invalid",
                                              "external"))

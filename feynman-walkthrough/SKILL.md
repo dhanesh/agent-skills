@@ -129,6 +129,12 @@ before, check the knowledge root first (`python3 assets/okf.py status <subject>`
 - **UNKNOWN** (external URL/topic sources) → ask whether the source changed, or
   re-check it yourself before leaning on the explainer.
 
+For **one** subject the flow above is the whole story. For a whole knowledge root — sweeping
+many bundles, finding every drifted subject, regenerating a published site — hand off to the
+sibling `knowledge-gardener` skill when it is installed; it owns maintenance across bundles
+and its verdicts are pinned to agree with `okf.py`'s by a cross-tool test. The inline flow
+above remains the standalone fallback when it is not.
+
 The full flows — and the standing instruction to track the OKF spec as it evolves — are
 in [references/okf.md](references/okf.md). This is also the honest answer to "will I
 remember this?": the knowledge bundle guarantees the *reference* stays current and

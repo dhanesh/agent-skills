@@ -177,6 +177,49 @@ def main():
             ok, detail = False, "unparseable json: %s" % exc
         check("json output parseable and agrees with sweep states", ok,
               detail[:100])
+
+        # ── Grade 6: the in-repo bundle layout (the one both skills recommend)
+        # The previous fixtures put repo/ and knowledge/ side by side, so the
+        # bundle was never inside the repo it pins — and the case that was
+        # broken in production was invisible to the eval. okf.md calls the
+        # in-repo bundle the natural layout for a codebase subject.
+        inrepo = os.path.join(tmp, "inrepo")
+        os.makedirs(inrepo)
+        subprocess.run(["git", "init", "-q", inrepo], check=True, capture_output=True)
+        write(os.path.join(inrepo, "app.py"), "print(1)\n")
+        git(inrepo, "add", "-A")
+        git(inrepo, "commit", "-q", "-m", "initial")
+        pinned = rev_head(inrepo)
+
+        nested = os.path.join(inrepo, "docs", "knowledge")
+        write(os.path.join(nested, "index.md"),
+              '---\nokf_version: "0.1"\n---\n\n# Subjects\n\n'
+              "* [App](app/) - reference explainer\n")
+        write(os.path.join(nested, "log.md"),
+              "# Directory Update Log\n\n## 2026-01-01\n"
+              "* **Creation**: Established fixture.\n")
+        write(os.path.join(nested, "app", "explainer.md"),
+              explainer("App",
+                        "sources:\n- type: git\n  locator: %s\n"
+                        "  fingerprint: %s\n  pinned: 2026-01-01\n"
+                        % (inrepo, pinned)))
+        git(inrepo, "add", "-A")
+        git(inrepo, "commit", "-q", "-m", "add the bundle itself")
+
+        code, out, err = run_garden(garden_py, "sweep", nested)
+        check("in-repo bundle: committing the bundle keeps it FRESH (self-pin)",
+              "GARDEN_RESULT: FRESH" in out and code == 0,
+              "exit %d; %s" % (code, out.strip().splitlines()[-1][:60] if out.strip() else ""))
+
+        # NEGATIVE control: a genuine source change must still be STALE, so the
+        # self-pin filter cannot be satisfied by simply never reporting drift.
+        write(os.path.join(inrepo, "app.py"), "print(2)\n")
+        git(inrepo, "add", "-A")
+        git(inrepo, "commit", "-q", "-m", "change the source")
+        code, out, err = run_garden(garden_py, "sweep", nested)
+        check("in-repo bundle: a real source change is still STALE",
+              "GARDEN_RESULT: STALE" in out and "app.py" in out and code != 0,
+              "exit %d" % code)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
