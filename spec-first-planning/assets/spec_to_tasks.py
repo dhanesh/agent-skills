@@ -39,9 +39,16 @@ def derive_plan(text):
     """Derive the task plan structure from spec markdown."""
     spec = spec_lint.parse_spec(text)
     crit_by_req = {}
-    for ctext, refs in spec["criteria"]:
-        for ref in refs:
-            cleaned = re.sub(r"^R%d\s*[:.]\s*" % ref, "", ctext)
+    for ctext, refs, owner in spec["criteria"]:
+        # Ownership drives coverage: a criterion belongs to the requirement in
+        # its leading `R<n>:` prefix, not to every R<n> token that happens to
+        # appear in it. Without this, "R1: run `grep R2 fixtures.txt`" reported
+        # R2 as covered by a check that proves nothing about it — and, because
+        # `refs` was iterated without deduping, appended the same verify step
+        # twice with a foreign `R1:` prefix still attached.
+        targets = [owner] if owner is not None else refs
+        for ref in dict.fromkeys(targets):
+            cleaned = re.sub(r"^(?:\*\*)?R%d(?:\*\*)?\s*[:.]\s*" % ref, "", ctext)
             crit_by_req.setdefault(ref, []).append(cleaned)
 
     tasks = []

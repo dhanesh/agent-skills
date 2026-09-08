@@ -156,7 +156,10 @@ normative correctness improves over time. The loop is detailed in
    verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions come
    from the agent's own markers/CLI, never from a model summarizing inside a hook.
 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into facts
-   or evidence, so untrusted output cannot forge a marker (a regression test guards this).
+   or evidence, so untrusted output cannot forge a marker. The two tags that raise the
+   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) are additionally accepted from the user's
+   channel only — an agent quoting a poisoned file back into its own reply must not be
+   able to validate a fact. Regression tests guard both the direct and the echo path.
 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.

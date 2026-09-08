@@ -99,3 +99,6 @@ coverage table, remaining Open questions, and your suggested execution order.
 - **Complements heavier PRD workflows.** When a full PRD process is in play, use this to
   sharpen its requirements into falsifiable statements and its milestones into verifier-anchored
   tasks — don't duplicate the PRD.
+- **Not a code-quality judge.** "How should I structure this service?" asked about code
+  that already exists is `clean-code`'s question, not this skill's. This one turns a fuzzy
+  request into falsifiable requirements; that one judges the design you end up with.

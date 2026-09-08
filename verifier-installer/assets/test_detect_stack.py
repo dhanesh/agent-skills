@@ -163,12 +163,44 @@ class TestBareRepoAndCI(TempRepoCase):
 
     def test_existing_workflow_detected_and_not_duplicated(self):
         write(self.root, "go.mod", "module x\n")
-        write(self.root, ".github/workflows/ci.yml", "on: push\n")
+        write(self.root, ".github/workflows/ci.yml",
+              "on: push\njobs:\n  t:\n    steps:\n      - run: go test ./...\n")
         plan = self.plan()
         self.assertEqual(plan["existing_verifiers"]["ci"],
                          ".github/workflows/ci.yml")
         self.assertEqual(plan["missing"], [])
         self.assertEqual(plan["proposals"], [])
+
+    def test_workflow_that_verifies_nothing_is_not_the_ci_rail(self):
+        # A stale-bot / dependabot / labeler workflow is extremely common in
+        # exactly the neglected repos this skill targets. Crediting the first
+        # .yml in sorted order made the agent report CI installed and move on,
+        # leaving the repo with an auto-labeler and no verify job.
+        write(self.root, "go.mod", "module x\n")
+        write(self.root, ".github/workflows/stale.yml",
+              "on:\n  schedule:\n    - cron: '0 0 * * *'\n"
+              "jobs:\n  stale:\n    steps:\n      - uses: actions/stale@v9\n")
+        plan = self.plan()
+        self.assertIsNone(plan["existing_verifiers"]["ci"])
+        self.assertIn("ci", plan["missing"])
+        self.assertIn("stale.yml", plan["ci_note"])
+        self.assertIn("extend one", plan["ci_note"])
+
+    def test_proposal_says_extend_when_the_file_already_exists(self):
+        # The plan is what the agent acts on; it must carry the fact that a file
+        # is already there, rather than leaving prose as the only thing between
+        # the agent and a clobbered Makefile.
+        write(self.root, "Makefile", "help:\n\t@echo hi\n")
+        write(self.root, "requirements.txt", "requests\n")
+        plan = self.plan()
+        by_file = {}
+        for pr in plan["proposals"]:
+            by_file.setdefault(pr["file"], set()).add(pr["action"])
+        self.assertIn("Makefile", by_file)
+        self.assertEqual(by_file["Makefile"], {"extend"})
+        for pr in plan["proposals"]:
+            self.assertEqual(pr["exists"], pr["action"] == "extend")
+            self.assertEqual(pr["file"], pr["file_to_create"])   # deprecated alias holds
 
     def test_ci_proposal_targets_verify_workflow(self):
         plan = self.plan()

@@ -166,5 +166,47 @@ class TestCli(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+
+class TestCoverageOwnership(unittest.TestCase):
+    """An `R<n>` token anywhere in a criterion used to count as coverage."""
+
+    SPEC = """# Spec: importer
+
+## Requirements
+- R1: The importer must reject a row with a missing id.
+- R2: The importer must emit a summary count.
+
+## Acceptance criteria
+- R1: run `grep R2 fixtures.txt` and see the row rejected (this also proves R2).
+"""
+
+    def test_incidental_mention_is_not_coverage(self):
+        plan = spec_to_tasks.derive_plan(self.SPEC)
+        self.assertEqual(plan["coverage"]["R2"], [])
+        self.assertIn("R2", plan["uncovered"])
+
+    def test_verify_step_is_not_duplicated(self):
+        plan = spec_to_tasks.derive_plan(self.SPEC)
+        t1 = [t for t in plan["tasks"] if t["id"] == "T1"][0]
+        self.assertEqual(t1["verify"].count("grep R2 fixtures.txt"), 1)
+
+    def test_foreign_prefix_is_stripped_from_the_step(self):
+        plan = spec_to_tasks.derive_plan(self.SPEC)
+        t1 = [t for t in plan["tasks"] if t["id"] == "T1"][0]
+        self.assertFalse(t1["verify"].startswith("R1:"))
+
+    def test_prefixless_criterion_still_covers_its_mentions(self):
+        spec = """# Spec: legacy
+
+## Requirements
+- R1: The thing must happen.
+
+## Acceptance criteria
+- Covers R1 by running the check.
+"""
+        plan = spec_to_tasks.derive_plan(spec)
+        self.assertEqual(plan["coverage"]["R1"], ["T1"])
+        self.assertEqual(plan["uncovered"], [])
+
 if __name__ == "__main__":
     unittest.main()

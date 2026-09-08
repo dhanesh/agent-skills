@@ -116,10 +116,20 @@ def parse_spec(text):
         else:
             malformed.append(bullet)
 
+    # A criterion is OWNED by the requirement in its leading `R<n>:` prefix.
+    # `_RID_REF_RE` matches an R<n> token anywhere — in a filename, a command,
+    # or prose — so a criterion reading "R1: run `grep R2 fixtures.txt`" used to
+    # be counted as covering R2 as well, reporting total coverage for a
+    # requirement with no real check behind it. Mentions are still recorded
+    # (deduped) for the unknown-id diagnostic; ownership is what drives
+    # coverage. A criterion with no prefix falls back to its mentions, so an
+    # older spec that never used the prefix form still works.
     criteria = []
     for bullet in _section_bullets(sections, "Acceptance criteria"):
-        refs = [int(n) for n in _RID_REF_RE.findall(bullet)]
-        criteria.append((bullet, refs))
+        refs = list(dict.fromkeys(int(n) for n in _RID_REF_RE.findall(bullet)))
+        pm = _RID_PREFIX_RE.match(bullet)
+        owner = int(pm.group(1)) if pm else None
+        criteria.append((bullet, refs, owner))
 
     return {
         "title": title,
@@ -206,7 +216,7 @@ def lint(text):
     # 5. Acceptance-criteria coverage.
     known = set(nums)
     covered = set()
-    for ctext, refs in spec["criteria"]:
+    for ctext, refs, _owner in spec["criteria"]:
         if not refs:
             issues.append(
                 "acceptance criterion references no requirement id: '%s'"

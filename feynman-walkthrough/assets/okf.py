@@ -34,6 +34,7 @@ import argparse
 import datetime as dt
 import hashlib
 import os
+import stat
 import re
 import subprocess
 import sys
@@ -291,10 +292,32 @@ def write_concept(path, meta, body, validate=True):
 # ── Source fingerprints ──────────────────────────────────────────────────────
 
 def _sha256_file(path):
+    """Content hash of one file, or a stable sentinel when it is not hashable.
+
+    Anything that is not a readable REGULAR file gets a sentinel rather than an
+    open(): a source tree routinely contains a socket, a fifo, a dangling
+    symlink or a mode-000 file, and each was a different failure here. An
+    OSError took the whole fingerprint down with a traceback (`okf.py init
+    --source <dir>` on a directory holding a stray socket), and a fifo was
+    worse — open() BLOCKS on it waiting for a writer, hanging the fingerprint
+    indefinitely with no error at all. stat() first, so neither can happen.
+
+    The sentinel keeps the hash deterministic while staying sensitive to the
+    entry appearing, disappearing, or changing kind.
+    """
+    try:
+        st = os.stat(path, follow_symlinks=True)
+    except OSError as exc:
+        return "unstattable:%s" % type(exc).__name__
+    if not stat.S_ISREG(st.st_mode):
+        return "nonregular:%o" % stat.S_IFMT(st.st_mode)
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except OSError as exc:
+        return "unreadable:%s" % type(exc).__name__
     return h.hexdigest()
 
 

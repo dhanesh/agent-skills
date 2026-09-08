@@ -99,14 +99,32 @@ def _triple_and_by(rest):
     return (toks[0], toks[1], toks[2]), by_kind, by_ref
 
 
+# Tags that raise NORMATIVE confidence — the oracle axis. These are accepted
+# from the PRINCIPAL's channel only (user text), never from assistant text.
+#
+# The direct tool_result channel was already excluded, but assistant text was
+# not, and an agent quoting a file back into its own reply — showing a snippet,
+# a diff, a config, which agents do constantly — re-emitted any marker line in
+# that file into the trusted channel. One poisoned line in a README or a
+# dependency could therefore mint a `validated` edge at normative_conf 0.8 with
+# a fabricated test reference, while observed_conf stayed 0.0: "certainly
+# correct, never seen". Observation-only tags stay on both channels, because
+# the worst they can do is record something the model already saw.
+ORACLE_TAGS = ("WM-VALIDATED", "WM-REFUTES")
+
+
 def apply_markers(wm: WorldModel, rows) -> dict:
-    counts = {"observe": 0, "validate": 0, "refute": 0, "map": 0, "constraint": 0, "contradict": 0}
-    for _role, text in rows:
+    counts = {"observe": 0, "validate": 0, "refute": 0, "map": 0, "constraint": 0,
+              "contradict": 0, "rejected_echo": 0}
+    for role, text in rows:
         for line in text.splitlines():
             m = _MARK.match(line)
             if not m:
                 continue
             tag, rest = m.group(1), m.group(2).strip()
+            if tag in ORACLE_TAGS and role != "user":
+                counts["rejected_echo"] += 1
+                continue
             try:
                 if tag == "WM-OBSERVE":
                     trip, ev = _triple_and_evidence(rest)

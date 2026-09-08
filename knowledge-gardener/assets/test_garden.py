@@ -163,6 +163,35 @@ class TestFingerprints(TempDirCase):
         self.assertEqual(garden.fingerprint(doc, "file"),
                          okf.fingerprint(doc, "file"))
 
+    def test_fingerprint_survives_nonregular_and_unreadable_entries(self):
+        """A source tree routinely holds a socket, a fifo, or a mode-000 file.
+        An OSError used to take the whole fingerprint down with a traceback, and
+        a fifo was worse: open() blocks on it forever, hanging with no error."""
+        import os as _os
+        import stat as _stat
+        d = self.path("weird")
+        _os.makedirs(d, exist_ok=True)
+        write(_os.path.join(d, "a.txt"), "A")
+        fifo = _os.path.join(d, "pipe")
+        try:
+            _os.mkfifo(fifo)
+        except (AttributeError, OSError):
+            fifo = None
+        locked = _os.path.join(d, "locked.txt")
+        write(locked, "secret")
+        _os.chmod(locked, 0)
+        try:
+            fp = garden.fingerprint(d, "dir")          # must not raise or hang
+            self.assertEqual(fp, garden.fingerprint(d, "dir"))   # deterministic
+            self.assertTrue(fp)
+            if fifo:
+                self.assertTrue(garden._sha256_file(fifo).startswith("nonregular:"))
+            self.assertTrue(garden._sha256_file(locked).startswith("unreadable:"))
+            # A regular file next to them still hashes normally.
+            self.assertEqual(len(garden._sha256_file(_os.path.join(d, "a.txt"))), 64)
+        finally:
+            _os.chmod(locked, 0o644)
+
     def test_git_fingerprint_agrees_with_sibling_okf_for_in_repo_bundle(self):
         """The `git` source type is the ONLY one where the two tools could
         disagree, and it was the one the agreement test never covered — so the

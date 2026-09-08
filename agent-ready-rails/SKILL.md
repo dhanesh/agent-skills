@@ -32,7 +32,7 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## When to use
 
-Reach for this when the question is about the *environment* agents work in, not a specific change: "is our repo agent-ready?", "why do agents keep producing broken or messy PRs here?", "what do we fix so a background agent can merge verified work unattended?". It complements the sibling skills rather than overlapping them — see the relationship table in `references/grounding.md`. Do **not** use it to audit code correctness (that's `base-in-reality`) or to design/repair one agent loop (that's `crafting-self-prompting-loops`); this skill audits the *system* those run inside.
+Reach for this when the question is about the *environment* agents work in, not a specific change: "is our repo agent-ready?", "why do agents keep producing broken or messy PRs here?", "what do we fix so a background agent can merge verified work unattended?". It complements the sibling skills rather than overlapping them — see the relationship table in `references/grounding.md`. Do **not** use it to audit code correctness (that's `base-in-reality`), to judge the quality of the code or its design (that's `clean-code`), or to design/repair one agent loop (that's `crafting-self-prompting-loops`); this skill audits the *system* those run inside.
 
 ## The rails — two tiers
 

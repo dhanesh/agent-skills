@@ -3,18 +3,18 @@ name: clean-code
 description: >-
   Apply Robert C. Martin's (Uncle Bob's) Clean Code, Clean Architecture, and
   Clean Craftsmanship principles when writing, refactoring, reviewing, or
-  designing software. Use this skill whenever the user is writing or editing
-  functions, classes, or modules; asks for a code review or to "check the
-  quality" / "make this cleaner"; mentions naming, function size, SOLID, code
-  smells, refactoring, technical debt, testability, or concurrency; OR is
-  designing system architecture, module boundaries, dependencies, or project
-  structure. Trigger even when the user never says "clean code" — e.g. "review
-  this PR", "refactor this function", "is this well-designed", "how should I
-  structure this service", "this class is doing too much", "how do I make this
-  testable". Covers meaningful names, small single-purpose functions, SOLID,
-  error handling, TDD and simple design, component cohesion/coupling, the
-  Dependency Rule, concurrency, cross-cutting concerns, and craftsmanship —
-  always proportionate to the problem.
+  designing software. Use whenever the user is writing or editing functions,
+  classes, or modules; asks for a code review or to "make this cleaner";
+  mentions naming, function size, SOLID, code smells, refactoring, technical
+  debt, testability, or concurrency; OR is designing system architecture,
+  module boundaries, dependencies, or project structure. Trigger even when the
+  user never says "clean code" — e.g. "review this PR", "refactor this
+  function", "is this well-designed", "how should I structure this service".
+  Covers names, small functions, SOLID, error handling, TDD and simple design,
+  component cohesion/coupling, the Dependency Rule, concurrency, and
+  craftsmanship — always proportionate to the problem. Judges code and design,
+  not requirements (use spec-first-planning) or repo agent-readiness (use
+  agent-ready-rails).
 license: MIT
 compatibility: Prompt-only; no runtime dependencies. Language-agnostic — the principles apply to any codebase the agent can read. python3 (stdlib only) is required to run the outcome eval, not the skill.
 x-spec-version: 1.0
@@ -64,6 +64,24 @@ Pick the mode that fits the task. Most requests are one of these.
   jobs") rather than narrating every rule. Apply the Boy Scout Rule: leave any
   file you touch a little cleaner, but keep cleanups scoped to what you're
   already changing.
+
+  **Refactor on green only — this is the step that makes the rest safe.**
+  Run the project's tests *before* you start and *after* every structural
+  change, and read the failure rather than guessing at it:
+
+  1. Run the suite. Green? Refactor. Red? Fix or report the failure first —
+     never refactor on top of a failing test, because you cannot then tell your
+     change from the pre-existing break.
+  2. Make one structural change. Behaviour must not change.
+  3. Run the suite again. Still green → continue. Newly red → revert or repair
+     that change before making another.
+  4. If there is no test covering what you are about to restructure, say so and
+     either add one first or keep the change to something you can verify by
+     inspection. "There is no test here" is a finding, not a blocker to hide.
+
+  Without this loop the skill is a style checklist that can silently break
+  working code — which is the opposite of its point. Details in
+  `references/testing.md`.
 - **Reviewing** — Produce a structured review (format below). Anchor each
   finding to a principle or smell and a concrete fix. Lead with what matters
   most; don't drown real issues in nitpicks.
