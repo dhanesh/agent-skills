@@ -32,6 +32,19 @@ OKF bundle and emits a complete Astro + Starlight static-site project with searc
 navigation, and OKF-aware presentation. The bundle stays the canonical knowledge; the
 site is a generated view of it, regenerated whenever the bundle changes.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'okf-site-kit' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## Ground rules
 
 - **The bundle is read-only.** The generator never mutates the source bundle. When the
@@ -50,10 +63,10 @@ site is a generated view of it, regenerated whenever the bundle changes.
 1. **Locate and inspect the bundle.** The bundle root is the directory whose `index.md`
    (or concept tree) the user means — for bundles made by the `feynman-walkthrough`
    skill it's the knowledge root (e.g. `docs/knowledge/`). Run
-   `python3 assets/okf_site.py inspect <bundle>` and read the report: concept count and
+   `python3 "$SKILL_DIR/assets/okf_site.py" inspect <bundle>` and read the report: concept count and
    routes, declared `okf_version`, and conformance warnings. Relay warnings that the
    user can act on (concepts missing `type`, files without frontmatter).
-2. **Generate the site.** `python3 assets/okf_site.py generate <bundle> --out <dir>`
+2. **Generate the site.** `python3 "$SKILL_DIR/assets/okf_site.py" generate <bundle> --out <dir>`
    with flags from [references/parameters.md](references/parameters.md): `--title`
    (defaults to the root index's H1), `--tagline`, `--base /<repo>` +
    `--site https://<user>.github.io` + `--deploy-workflow` when the target is GitHub

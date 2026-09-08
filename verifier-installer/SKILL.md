@@ -29,6 +29,19 @@ load-bearing R1/R2 finding); this skill *installs* it. The evidence behind why
 this rail matters most is in that skill's grounding — a verify loop the agent
 cannot skip is the single highest-leverage change for agent success.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'verifier-installer' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## When to use
 
 Reach for this when a repo needs the loop built: no test command, no CI, an
@@ -57,7 +70,7 @@ rather than inventing config from memory.
 
 ## Workflow
 
-1. **Detect the stack.** Run `python3 assets/detect_stack.py <repo>` (offline,
+1. **Detect the stack.** Run `python3 "$SKILL_DIR/assets/detect_stack.py" <repo>` (offline,
    read-only). It emits a deterministic JSON plan: detected `stacks`,
    `existing_verifiers` (format/build/test/ci with the command or workflow
    path found), `missing` rails, concrete `proposals`

@@ -29,6 +29,19 @@ quickly, which is worse than slow. So this skill does not "rewrite the code"; it
 the machine that rewrites the code: the old system as the spec, a rulebook as policy,
 tests and diffs as the judge, and repeated failures as reasons to improve the process.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'ai-migration-operating-model' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## Invocations
 
 Invoked bare, run the full workflow below in order. Invoked with a mode argument
@@ -89,7 +102,7 @@ first rather than authoring a phase gate the pack can't honor.
    `parity_check.*` script, `AGENT_WORK_QUEUE.md`, `REVIEWER_PROMPTS.md`,
    `PHASE_GATES.md`. Mine the gap inventory from what the old system allowed implicitly
    (nullability, units, currencies, timezones) — those are the landmines.
-4. **Lint and repair the pack** with `python3 assets/control_pack_lint.py <pack-dir>`.
+4. **Lint and repair the pack** with `python3 "$SKILL_DIR/assets/control_pack_lint.py" <pack-dir>`.
    Fix every `FAIL:` line (each names the artifact and defect) and rerun until it
    prints `PACK_RESULT: PASS`. Repair by making the pack more explicit — resolving a
    gap with a `decision:`, tightening a rule's modal — not by deleting entries.

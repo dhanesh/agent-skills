@@ -28,6 +28,19 @@ of the knowledge trilogy — `feynman-walkthrough` *creates* bundles (explainers
 source fingerprints pinned), `okf-site-kit` *publishes* them, and the gardener *keeps
 them true*: sweep, report drift, refresh only what moved, re-pin, republish.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'knowledge-gardener' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## Status semantics
 
 [assets/garden.py](assets/garden.py) is self-contained — skills install independently,
@@ -50,7 +63,7 @@ including a direct fingerprint-agreement test against the sibling tool.
 
 ## Workflow
 
-1. **Discover.** Run `python3 assets/garden.py sweep <root> [<root> ...]` over the
+1. **Discover.** Run `python3 "$SKILL_DIR/assets/garden.py" sweep <root> [<root> ...]` over the
    knowledge roots in play — the ones the user names, or the conventional spots
    (`docs/knowledge/` inside repos, a user-level `~/knowledge/`). It finds every bundle
    root (an `index.md` declaring `okf_version`), every subject beneath, and parses each

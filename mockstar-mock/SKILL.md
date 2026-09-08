@@ -92,11 +92,11 @@ dispatching any subagent, resolve this skill's absolute base directory once and 
 absolute paths into every subagent prompt:
 
 - Obtain the skill's base directory from the harness (it is provided when the skill loads).
-- Set `EXTRACT="<skill-base-dir>/assets/extract_text.py"` and
-  `SMOKE="<skill-base-dir>/assets/smoke.sh"`.
+- Set `EXTRACT="$SKILL_DIR/assets/extract_text.py"` and
+  `SMOKE="$SKILL_DIR/assets/smoke.sh"`.
 - If the harness does not expose the base directory, discover it:
   `find ~/.claude ~/.config ~/.agents -path '*mockstar-mock*/assets/extract_text.py' 2>/dev/null | head -1`
-- Verify: `uv run "$EXTRACT" --help` should print usage.
+- Verify: `python3 "$EXTRACT" --help` should print usage and exit 0.
 - Hand subagents the literal absolute `$EXTRACT` and `$SMOKE` values — never a relative
   `assets/`-prefixed form.
 
@@ -455,7 +455,7 @@ The template (`assets/Dockerfile.template`) copies `mocks/` into `/config/mocks`
 
 ## Assets
 
-- `assets/extract_text.py` — converts PDF/DOCX inputs and documentation URLs to plain text (`uv run`).
+- `assets/extract_text.py` — converts local PDF/DOCX/Markdown/text inputs to plain text (a documentation URL is fetched separately, per stage 1).
 - `assets/smoke.sh` — boots mockstar and smoke-tests every route in a TSV file.
 - `assets/fixtures/` — sample inputs used by the test suite (petstore-mini.yaml, routes.tsv).
 

@@ -26,6 +26,19 @@ can fail is an opinion, and a task without a verify step can only ever be "looks
 tooling holds that line deterministically: a linter rejects unfalsifiable specs, and a compiler
 refuses to emit a plan with coverage holes.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'spec-first-planning' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## The contract
 
 - **The spec** — drafted from `references/spec-template.md`. Required sections: Problem, Users,
@@ -52,13 +65,13 @@ The exact grammar, lint rules, JSON schema, and exit codes live in
    Write each acceptance criterion as something runnable: a command plus expected exit
    code/output, or an observation an outside party could make. When you can't write the
    check, the requirement isn't ready — park it in Open questions instead of faking one.
-3. **Lint and repair** with `python3 assets/spec_lint.py <spec.md>`. Fix every `FAIL:` line
+3. **Lint and repair** with `python3 "$SKILL_DIR/assets/spec_lint.py" <spec.md>`. Fix every `FAIL:` line
    (each names the requirement and the defect: missing section, id gap, missing modal,
    vague term with no metric, requirement with no criterion) and rerun until it prints
    `LINT_RESULT: PASS`. Repair by making statements more checkable, not by deleting the
    inconvenient ones — if a requirement truly can't be kept, move it to Non-goals or Open
    questions so the decision stays visible.
-4. **Derive the plan** with `python3 assets/spec_to_tasks.py <spec.md>` (add `--json` for a
+4. **Derive the plan** with `python3 "$SKILL_DIR/assets/spec_to_tasks.py" <spec.md>` (add `--json` for a
    machine-readable handoff). The compiler seeds one task per requirement with its verify
    steps attached. Now review with the user: split tasks that are too big (keep them pointing
    at their requirement id), fill in the Where fields you know, and order tasks by

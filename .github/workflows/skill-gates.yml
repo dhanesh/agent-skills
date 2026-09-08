@@ -5,10 +5,28 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-gates-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    # The gates are shell scripts whose behaviour is locale- and awk-dependent,
+    # and they are developed on macOS/BSD. Running only ubuntu meant the platform
+    # where they are weakest was the one CI never exercised.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Run skill quality gates
         run: make gate

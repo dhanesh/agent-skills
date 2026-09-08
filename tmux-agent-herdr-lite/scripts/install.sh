@@ -26,8 +26,14 @@ ensure_sourced_before_tpm() {
   # path was written (~/… vs absolute) or which installer version wrote it. The
   # old exact-line match missed tilde/absolute variants and stacked duplicates.
   if grep -Eq "^[[:space:]]*source-file[[:space:]].*${base_re}([[:space:]]|$)" "$TMUX_CONF"; then
+    # `|| true`: grep -Ev exits 1 when it filters EVERY line, which is precisely
+    # the state after a first install (the file holds only our line). Without
+    # this the `&&` short-circuited, `mv` never ran, `set -e` did not fire
+    # because it was not the final command of the list — and the config grew by
+    # one duplicate line on every skill invocation, leaving a .tmp in $HOME.
     grep -Ev "^[[:space:]]*source-file[[:space:]].*${base_re}([[:space:]]|$)" "$TMUX_CONF" \
-      > "$TMUX_CONF.tmp" && mv "$TMUX_CONF.tmp" "$TMUX_CONF"
+      > "$TMUX_CONF.tmp" || true
+    mv "$TMUX_CONF.tmp" "$TMUX_CONF"
   fi
   # Re-insert the canonical line immediately before TPM's run line (TPM must stay
   # LAST so it re-applies plugin keybindings), or append when TPM isn't used.

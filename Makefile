@@ -11,7 +11,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate validate scan-leaks dry-run playbook test test-integration eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -28,6 +28,9 @@ gate: clean
 	@test -n "$(SKILLS)" || { echo "GATE_RESULT: FAIL — no skills found (wrong directory, or a sparse checkout?)"; exit 2; }
 	@n=$$(printf '%s\n' $(SKILLS) | wc -l | tr -d ' '); \
 	 [ "$$n" -ge $(MIN_SKILLS) ] || { printf 'GATE_RESULT: FAIL — found %s skill(s), expected at least %s\n' "$$n" "$(MIN_SKILLS)"; exit 2; }
+	@out=$$(sh $(GATES)/test_gates.sh 2>&1); st=$$?; \
+	 printf '\n=== gate self-tests ===\n'; printf '%s\n' "$$out" | grep -c '^PASS:' | sed 's/^/gate self-tests passed: /'; \
+	 [ $$st -eq 0 ] || { printf '%s\n' "$$out"; echo "GATE_RESULT: FAIL (the gate scripts themselves are broken)"; exit 2; }
 	@rc=0; \
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
 	for d in $(SKILLS); do \
@@ -36,6 +39,7 @@ gate: clean
 		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d scan-leaks" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d playbook" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d frontmatter" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/asset-paths.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d asset-paths" "$$out"; rc=1; }; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
 			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d dry-run" "$$out"; rc=1; }; \
@@ -75,6 +79,11 @@ scan-leaks: clean
 		out=$$(sh $(GATES)/scan-leaks.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || rc=1; \
 	done; exit $$rc
 
+# The gates themselves. scan-leaks.sh is the security gate and had no positive
+# test at all: a broken detector regex would have reported PASS forever.
+gate-selftest:
+	@sh $(GATES)/test_gates.sh
+
 dry-run:
 	@rc=0; for d in $(SKILLS); do \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
@@ -86,7 +95,7 @@ dry-run:
 
 # Run every skill's stdlib unit test suite (offline, deterministic — no pip, no network).
 # Covers the Python suites and the shell suites marked `# gate: offline`.
-test: clean
+test: clean gate-selftest
 	@rc=0; for d in $(SKILLS); do \
 		for t in "$$d"/assets/test_*.py; do \
 			[ -f "$$t" ] || continue; \
@@ -163,6 +172,7 @@ gate-skill: clean
 		[ $$st -eq 0 ] || exit $$st; \
 	fi
 	@sh $(GATES)/frontmatter-standard.sh "$(SKILL)"
+	@sh $(GATES)/asset-paths.sh "$(SKILL)"
 	@for t in "$(SKILL)"/assets/test_*.py; do \
 		[ -f "$$t" ] || continue; \
 		out=$$(cd "$(SKILL)/assets" && python3 "$$(basename "$$t")" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \

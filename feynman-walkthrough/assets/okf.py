@@ -670,27 +670,40 @@ def _resolve_subject_dir(root, slug_or_subject):
 def main(argv=None, out=None):
     out = out or sys.stdout
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--root", default="knowledge",
-                        help="OKF bundle root (default: knowledge)")
+    # `--root` is accepted BEFORE or AFTER the subcommand. A top-level-only
+    # option cannot follow its subcommand, so every documented invocation of the
+    # form `okf.py status <subject> --root <dir>` exited 2 with "unrecognized
+    # arguments" — including all five examples in references/okf.md, the file
+    # SKILL.md sends the agent to for the full flows. Both orders now work, and
+    # argparse's SUPPRESS default lets the later value win without clobbering
+    # the earlier one with a default.
+    ROOT_HELP = "OKF bundle root (default: knowledge)"
+    parser.add_argument("--root", default="knowledge", help=ROOT_HELP)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="create a subject in the bundle")
+    def add_root(p):
+        """Accept --root after the subcommand too; SUPPRESS keeps the pre-command
+        value when this one is absent."""
+        p.add_argument("--root", default=argparse.SUPPRESS, help=ROOT_HELP)
+        return p
+
+    p_init = add_root(sub.add_parser("init", help="create a subject in the bundle"))
     p_init.add_argument("subject", help="human-readable subject name")
     p_init.add_argument("--source", action="append", default=[],
                         help="repo dir, file, or URL/topic (repeatable)")
 
-    p_pin = sub.add_parser("pin", help="re-fingerprint sources after a refresh")
+    p_pin = add_root(sub.add_parser("pin", help="re-fingerprint sources after a refresh"))
     p_pin.add_argument("subject", help="slug or subject name")
 
-    p_status = sub.add_parser("status", help="report drift vs pinned fingerprints")
+    p_status = add_root(sub.add_parser("status", help="report drift vs pinned fingerprints"))
     p_status.add_argument("subject", nargs="?", default=None,
                           help="slug or subject name (default: all)")
 
-    p_diff = sub.add_parser(
-        "diff", help="pinned vs current fingerprints + changed-file list")
+    p_diff = add_root(sub.add_parser(
+        "diff", help="pinned vs current fingerprints + changed-file list"))
     p_diff.add_argument("subject", help="slug or subject name")
 
-    sub.add_parser("list", help="list subjects in the bundle")
+    add_root(sub.add_parser("list", help="list subjects in the bundle"))
 
     args = parser.parse_args(argv)
 

@@ -65,7 +65,7 @@ Before dispatching any subagent, resolve the helper's ABSOLUTE path once and pas
 subagent's prompt:
 
 - Use this skill's base directory (your harness provides it when the skill loads) and set
-  `FETCH="<skill-base-dir>/assets/fetch_sources.py"`.
+  `FETCH="$SKILL_DIR/assets/fetch_sources.py"`.
 - If you don't have the base directory, discover it:
   `FETCH=$(find ~/.claude ~/.config ~/.agents -path '*base-in-reality*/assets/fetch_sources.py' 2>/dev/null | head -1)`
 - Verify it resolves: `python3 "$FETCH" --source openalex --query test --limit 1` should emit
@@ -111,7 +111,7 @@ subagent's prompt:
 
 6. **Synthesize.** Before filling the report, lint the merged findings array with the
    bundled contract linter: write the findings to a temp JSON file and run
-   `python3 "<skill-base-dir>/assets/report_lint.py" <findings.json> --evidence "$BIR_EVIDENCE_LOG"`.
+   `python3 "$SKILL_DIR/assets/report_lint.py" <findings.json> --evidence "$BIR_EVIDENCE_LOG"`.
    It deterministically enforces the schema enums and the grounding invariant (a
    `VIOLATION`/`DEVIATION` with no fetched citation is rejected — downgrade it to `UNCONFIRMED`
    rather than shipping it), and with `--evidence` it checks each `fetched: true` citation

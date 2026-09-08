@@ -11,6 +11,19 @@ metadata:
 
 # Tmux Agent Herdr-Lite
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'tmux-agent-herdr-lite' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## On invocation — set up now, don't stand by
 
 When this skill fires (slash command or auto-trigger), immediately do this — it is idempotent, so do it every time rather than asking:
@@ -18,7 +31,7 @@ When this skill fires (slash command or auto-trigger), immediately do this — i
 1. Run the installer from this skill's directory:
 
    ```bash
-   bash scripts/install.sh
+   bash "$SKILL_DIR/scripts/install.sh"
    ```
 
    It generates `~/.tmux/agent-panes/tmux-agent.conf` pointing at this skill's `scripts/` **in place** (nothing is copied onto PATH), wires a `source-file` line into `~/.tmux.conf` (before any TPM `run` line), wires the optional tmux-resurrect/continuum persistence layer when TPM is present, **generates a zsh shell hook and sources it from `~/.zshrc`**, and reloads a running tmux server. No network needed.
@@ -29,12 +42,12 @@ When this skill fires (slash command or auto-trigger), immediately do this — i
 
 ## Zero-command auto-tracking (the core model)
 
-**The human never runs a launcher.** The installed zsh hook (`agent-shell-hook.zsh`, sourced from `~/.zshrc`) watches for a known agent binary (`claude`, `codex`, `gemini`, …) being run at the prompt in any tmux pane. On `preexec` it registers that pane (`bash scripts/agent-observe register`); on `precmd` (the agent exited) it deregisters it. The existing scan/summary/jump pipeline then tracks the pane exactly as if it were launched by `agent-pane`. Dead panes are pruned by `agent-status-scan`, so the fleet is always live-agents-only. `agent-pane` still exists but is **optional** — only for worktree isolation or scripted fan-out where you want to spawn an agent programmatically.
+**The human never runs a launcher.** The installed zsh hook (`agent-shell-hook.zsh`, sourced from `~/.zshrc`) watches for a known agent binary (`claude`, `codex`, `gemini`, …) being run at the prompt in any tmux pane. On `preexec` it registers that pane (`bash "$SKILL_DIR/scripts/agent-observe" register`); on `precmd` (the agent exited) it deregisters it. The existing scan/summary/jump pipeline then tracks the pane exactly as if it were launched by `agent-pane`. Dead panes are pruned by `agent-status-scan`, so the fleet is always live-agents-only. `agent-pane` still exists but is **optional** — only for worktree isolation or scripted fan-out where you want to spawn an agent programmatically.
 
 ## The two surfaces
 
 - **Humans use tmux only.** They just run their agent (`claude`, `codex`, …) in any pane — it is tracked automatically. Everything else lives under one prefix key — `prefix a` opens the cockpit key-table, then a single lowercase key (`m` = menu, `d` = dashboard, jumps, etc.). Never tell the user to run `agent-*` commands; point them at `prefix a` and the menu.
-- **Agents use the scripts.** The `agent-*` commands in `scripts/` are the coordination API (Herdr socket-API equivalents). Invoke them by path from this skill directory (`bash scripts/agent-pane` and siblings). Full reference: `references/commands.md`; recipes: `references/coordination-recipes.md`; what is and isn't ported from Herdr: `references/herdr-parity.md`.
+- **Agents use the scripts.** The `agent-*` commands in `scripts/` are the coordination API (Herdr socket-API equivalents). Invoke them by path from this skill directory (`bash "$SKILL_DIR/scripts/agent-pane"` and siblings). Full reference: `references/commands.md`; recipes: `references/coordination-recipes.md`; what is and isn't ported from Herdr: `references/herdr-parity.md`.
 
 ## Keybindings installed (the human surface)
 

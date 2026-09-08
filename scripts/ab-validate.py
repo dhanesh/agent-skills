@@ -40,6 +40,22 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BASE_DEFAULT = "23dc485"
 
 ROWS = []
+# Probes that crashed. A run with any of these cannot classify anything, because
+# a guard row like `0 >= 0` or `None == None` is True on a missing key — so a
+# double crash used to be reported as a guard holding.
+PROBE_ERRORS = []
+
+
+def _errored(*vals):
+    """True if any probe result is an error dict.
+
+    A crashed probe used to sail through as HELD: `probe()` returns
+    {"_error": ...}, and guard rows written as `0 >= 0` or `None == None` are
+    both True on missing keys. So a broken import in BOTH arms was reported as
+    a regression guard holding — the exact "a guard must never masquerade as a
+    pass" failure this script exists to prevent.
+    """
+    return any(isinstance(v, dict) and "_error" in v for v in vals)
 
 
 def row(skill, dimension, old, new, ok, note="", kind="delta"):
@@ -60,7 +76,9 @@ def probe(tree, subdir, code):
     try:
         return json.loads(r.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return {"_error": (r.stderr or r.stdout).strip()[-300:]}
+        err = {"_error": (r.stderr or r.stdout).strip()[-300:]}
+        PROBE_ERRORS.append((tree, subdir, err["_error"]))
+        return err
 
 
 # ── world-model-ledger ──────────────────────────────────────────────────────
@@ -410,6 +428,204 @@ def check_loops(old, new):
         "declared-but-unenforced would not count")
 
 
+# ── Audit-fix guardrails (added with the 2026-09 whole-repo review) ─────────
+# Each of these rules shipped WITH a measurement, per CLAUDE.md: "a new rule
+# with no A/B row is a claim nobody measured."
+
+def check_audit_guardrails(old, new):
+    import subprocess as sp
+
+    def run(tree, *args):
+        # errors="replace": one fixture deliberately contains an undecodable
+        # byte, and awk echoes it back on stderr. Strict decoding would crash
+        # the harness on the very input the probe exists to measure.
+        r = sp.run(["sh", os.path.join(tree, *args[0].split("/")), *args[1:]],
+                   capture_output=True, timeout=120)
+        dec = lambda b: b.decode("utf-8", "replace")
+        return r.returncode, dec(r.stdout) + dec(r.stderr)
+
+    scratch = tempfile.mkdtemp()
+
+    # 1) validate-skill: an over-long FOLDED description must be caught.
+    fixture = os.path.join(scratch, "longdesc")
+    os.makedirs(os.path.join(fixture, "assets"), exist_ok=True)
+    body = "\n".join("  " + "a" * 80 for _ in range(30))
+    open(os.path.join(fixture, "SKILL.md"), "w").write(
+        "---\nname: longdesc\ndescription: >-\n%s\nlicense: MIT\n"
+        "compatibility: none\nmetadata:\n  author: d\n  version: \"1.0.0\"\n"
+        "  tags: \"t\"\n---\n# x\n" % body)
+    open(os.path.join(fixture, "README.md"), "w").write("# x\n")
+
+    def caught(tree):
+        _, out = run(tree, "scripts/gates/validate-skill.sh", fixture)
+        return 1 if "description: exceeds 1024" in out else 0
+
+    a, b = caught(old), caught(new)
+    row("gates", "over-long folded description caught (1=yes)", a, b, b > a,
+        "11 of 18 skills were unmeasured; one shipped 163 chars over the limit")
+
+    # 2) scan-leaks: a secret hidden below an undecodable byte.
+    leak = os.path.join(scratch, "leakskill")
+    os.makedirs(os.path.join(leak, "assets"), exist_ok=True)
+    open(os.path.join(leak, "SKILL.md"), "w").write(
+        "---\nname: leakskill\ndescription: d\n---\n# x\n")
+    open(os.path.join(leak, "README.md"), "w").write("# x\n")
+    with open(os.path.join(leak, "assets", "n.txt"), "wb") as f:
+        f.write(b"note: \xff byte\nfiller\nAWS_KEY = AKIAIOSFODNN7EXAMPLE\n")
+
+    def leaks_found(tree):
+        rc, out = run(tree, "scripts/gates/scan-leaks.sh", leak)
+        return 0 if "SCAN_RESULT: PASS" in out else 1
+
+    a, b = leaks_found(old), leaks_found(new)
+    row("gates", "undecodable byte no longer hides a secret (1=caught)", a, b, b > a,
+        "the scanner failed open: awk aborted inside a `find | while` pipeline")
+
+    # 3) run-eval: verdict line and exit status must agree.
+    ev = os.path.join(scratch, "evalskill")
+    os.makedirs(os.path.join(ev, "eval"), exist_ok=True)
+    open(os.path.join(ev, "eval", "run_eval.py"), "w").write(
+        'print("CHECK: broken")\nprint("EVAL_RESULT: FAIL")\n')
+
+    def eval_rejected(tree):
+        rc, _ = run(tree, "scripts/gates/run-eval.sh", ev)
+        return 1 if rc != 0 else 0
+
+    a, b = eval_rejected(old), eval_rejected(new)
+    row("gates", "eval printing FAIL but exiting 0 is rejected (1=yes)", a, b, b > a,
+        "the gate trusted the exit code alone")
+
+    # 4) asset-paths: skill-relative helper invocations in shipped SKILL.md files.
+    def relative_invocations(tree):
+        n = 0
+        for d in sorted(os.listdir(tree)):
+            md = os.path.join(tree, d, "SKILL.md")
+            if not os.path.isfile(md):
+                continue
+            rc, _ = run(tree, "scripts/gates/asset-paths.sh", os.path.join(tree, d)) \
+                if os.path.isfile(os.path.join(tree, "scripts/gates/asset-paths.sh")) \
+                else (None, "")
+            if rc is None:
+                # Baseline predates the checker: measure with the NEW one.
+                rc, _ = run(new, "scripts/gates/asset-paths.sh", os.path.join(tree, d))
+            n += 1 if rc != 0 else 0
+        return n
+
+    a, b = relative_invocations(old), relative_invocations(new)
+    row("gates", "skills invoking helpers by a skill-relative path", a, b, b < a,
+        "agents run from the target repo, where `python3 assets/x.py` does not exist")
+
+
+# ── bug-autopsy (evidence, not just structure) ──────────────────────────────
+def check_autopsy(old, new):
+    import subprocess as sp
+    hollow = ("# Post-mortem: x\n\n## Summary\nA thing broke.\n\n## Impact\nSome.\n\n"
+              "## Timeline\n- 2026-08-01T10:00Z - it started\n- 2026-08-01T11:00Z - it stopped\n\n"
+              "## Root cause\n- Why did it break? Because of a thing.\n"
+              "- Why a thing? Because of another thing.\n- Why? Because of a thing.\n\n"
+              "## Contributing factors\n- It was Tuesday.\n\n## Fix\nWe fixed it.\n\n"
+              "## Prevention\n- [ ] Do better\n\n## Detection\nWe noticed.\n\n"
+              "## Links\n- none\n")
+    scratch = tempfile.mkdtemp()
+    path = os.path.join(scratch, "hollow.md")
+    open(path, "w").write(hollow)
+
+    def rejected(tree):
+        lint = os.path.join(tree, "bug-autopsy", "assets", "postmortem_lint.py")
+        if not os.path.isfile(lint):
+            return 0
+        r = sp.run([sys.executable, lint, path], capture_output=True, text=True,
+                   timeout=60)
+        return 1 if r.returncode != 0 else 0
+
+    a, b = rejected(old), rejected(new)
+    row("bug-autopsy", "evidence-free post-mortem rejected (1=yes)", a, b, b > a,
+        "the deliverable claimed `evidence-cited`; the linter checked structure only")
+
+
+# ── base-in-reality (grounding is checkable, not self-declared) ─────────────
+def check_grounding(old, new):
+    import subprocess as sp
+    scratch = tempfile.mkdtemp()
+    ev = os.path.join(scratch, "evidence.jsonl")
+    open(ev, "w").write(json.dumps({"url": "https://arxiv.org/abs/2401.00001",
+                                    "doi": "10.1000/real", "source": "arxiv",
+                                    "query": "q"}) + "\n")
+    fab = os.path.join(scratch, "fabricated.json")
+    json.dump([{"claim": "c", "layer": "algo", "location": "a.py:1",
+                "verdict": "VIOLATION", "severity": "high", "recommended_fix": "f",
+                "citations": [{"title": "never retrieved",
+                               "url": "https://arxiv.org/abs/2401.99999",
+                               "doi": "10.1234/fabricated", "fetched": True}]}],
+              open(fab, "w"))
+
+    def rejected(tree):
+        lint = os.path.join(tree, "base-in-reality", "assets", "report_lint.py")
+        if not os.path.isfile(lint):
+            return 0
+        r = sp.run([sys.executable, lint, fab, "--evidence", ev],
+                   capture_output=True, text=True, timeout=60)
+        blind = ("unrecognized arguments" in r.stderr
+                 or "usage: report_lint.py <findings.json>" in r.stderr)
+        if blind:
+            return 0        # baseline has no evidence mode: it cannot reject this
+        return 1 if r.returncode != 0 else 0
+
+    a, b = rejected(old), rejected(new)
+    row("base-in-reality", "fabricated `fetched` citation rejected (1=yes)", a, b, b > a,
+        "the anti-fabrication claim rested on a boolean the agent wrote about itself")
+
+
+# ── knowledge-gardener (agrees with its sibling on the git source) ──────────
+def check_gardener(old, new):
+    import subprocess as sp
+    scratch = tempfile.mkdtemp()
+    repo = os.path.join(scratch, "repo")
+    os.makedirs(repo)
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    sp.run(["git", "init", "-q", repo], check=True, capture_output=True)
+    open(os.path.join(repo, "app.py"), "w").write("print(1)\n")
+    sp.run(["git", "add", "-A"], cwd=repo, env=env, capture_output=True)
+    sp.run(["git", "commit", "-qm", "i"], cwd=repo, env=env, capture_output=True)
+
+    def stale_on_selfpin(tree):
+        g = os.path.join(tree, "knowledge-gardener", "assets", "garden.py")
+        if not os.path.isfile(g):
+            return 1
+        code = (
+            "import importlib.util, sys, json\n"
+            "spec = importlib.util.spec_from_file_location('g', %r)\n"
+            "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+            "import subprocess\n"
+            "b = %r\n"
+            "import os; os.makedirs(b, exist_ok=True)\n"
+            "open(os.path.join(b,'index.md'),'w').write('# Subjects\\n')\n"
+            "pin = m.fingerprint(%r, 'git', b)\n"
+            "subprocess.run(['git','add','-A'], cwd=%r, capture_output=True)\n"
+            "subprocess.run(['git','commit','-qm','bundle'], cwd=%r, capture_output=True)\n"
+            "cur = m.fingerprint(%r, 'git', b)\n"
+            "try: d = m.git_drift(%r, pin, cur, b)\n"
+            "except TypeError: d = m.git_drift(%r, pin, cur)\n"
+            "print(json.dumps({'stale': 1 if d['changed_files'] else 0}))\n"
+            % (g, os.path.join(repo, "docs", "knowledge"), repo, repo, repo,
+               repo, repo, repo))
+        r = sp.run([sys.executable, "-c", code], capture_output=True, text=True,
+                   timeout=120, env=env)
+        try:
+            return json.loads(r.stdout.strip().splitlines()[-1])["stale"]
+        except Exception:
+            return 1
+
+    a = stale_on_selfpin(old)
+    # fresh repo for the second arm so the commit state matches
+    sp.run(["git", "checkout", "-q", "--", "."], cwd=repo, capture_output=True)
+    b = stale_on_selfpin(new)
+    row("knowledge-gardener", "in-repo bundle wrongly reported STALE (lower=better)",
+        a, b, b <= a and b == 0,
+        "the skill claimed its verdicts `agree exactly` with okf.py's; they did not")
+
+
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else BASE_DEFAULT
     if shutil.which("git") is None:
@@ -437,6 +653,10 @@ def main():
         check_okf(old, REPO)
         check_loops(old, REPO)
         check_mockstar(old, REPO)
+        check_audit_guardrails(old, REPO)
+        check_autopsy(old, REPO)
+        check_grounding(old, REPO)
+        check_gardener(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
@@ -459,6 +679,15 @@ def main():
         if r["note"]:
             print("  %-*s    ^ %s" % (width, "", r["note"]))
         print()
+
+    if PROBE_ERRORS:
+        print("=== probe failures ===")
+        for tree, subdir, err in PROBE_ERRORS:
+            print("  %s/%s: %s" % (os.path.basename(tree.rstrip("/")), subdir,
+                                   err.splitlines()[-1][:120] if err else "(no output)"))
+        print("\n%d probe(s) crashed — no dimension can be classified from a run\n"
+              "that did not measure anything.\nAB_RESULT: FAIL" % len(PROBE_ERRORS))
+        return 1
 
     worse = [r for r in ROWS if not r["ok"]]
     unproven = [r for r in ROWS if r["ok"] and r["kind"] == "delta" and not r["moved"]]

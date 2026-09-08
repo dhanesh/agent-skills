@@ -26,6 +26,19 @@ that is *already green*, guiding the real authoring over it, and finishing with 
 semantic review that mechanical gates cannot perform. Author under gate cover: start
 green, stay green, and let every red check tell you exactly what to fix.
 
+**Locating this skill's helpers (do this first).** The steps below run bundled
+scripts. You execute from the *target repo*, not from this skill's directory, so a
+path written relative to this skill will not resolve. Resolve the base directory once and use it
+everywhere — including in any subagent prompt, which must receive the literal absolute
+path, never a relative form:
+
+```sh
+SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
+# If you don't have it, discover it:
+SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'repo2skill' 2>/dev/null | head -1)
+test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
+```
+
 ## When to use
 
 Reach for this when the job is *making or reviewing a skill*: "create a new skill for
@@ -57,7 +70,7 @@ sections are orthogonal, the deliverable is a real contract, each absolute is ju
    promise or the deliverable can't be stated in one sentence each, the skill isn't
    scoped yet.
 2. **Scaffold the skeleton.** Run
-   `python3 assets/scaffold_skill.py <name> --dir <repo-root>` (flags:
+   `python3 "$SKILL_DIR/assets/scaffold_skill.py" <name> --dir <repo-root>` (flags:
    `--author`, `--version`, `--tags`). It refuses invalid names and existing
    directories, and generates SKILL.md (standard frontmatter + a body shaped to pass
    the structural gates, with `TODO(repo2skill)` markers), README.md, a

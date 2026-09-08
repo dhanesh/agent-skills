@@ -16,18 +16,18 @@ Invoking the skill (e.g. `/tmux-agent-herdr-lite` in Claude Code) runs the insta
 bash scripts/install.sh
 ```
 
-Nothing is copied onto your PATH and there are no new commands to learn: the installer generates a tmux config that references the skill's scripts in place, and everything human-facing lives behind tmux keybindings, the `prefix m` menu (launch an agent, jump by status, worktrees, resume), the `prefix ?` dashboard, and the status bar. The `agent-*` scripts are the API your coding agents use to coordinate with each other.
+Nothing is copied onto your PATH and there are no new commands to learn: the installer generates a tmux config that references the skill's scripts in place, and everything human-facing lives behind one prefix key: `prefix a` enters the cockpit table, then a single key — `m` for the action menu (launch an agent, jump by status, worktrees, resume), `d` for the dashboard, `s` to rescan, `t` for the session tree. The `agent-*` scripts are the API your coding agents use to coordinate with each other.
 
 ## What it sets up
 
-- **Popup menus and dashboard** — `prefix ?` opens a help/dashboard popup; `prefix m` opens an action menu (jump, worktree, resume, splits); keybindings mirror Zellij conventions.
-- **Pane split and navigation** — `prefix |` / `prefix -` splits; `prefix h/j/k/l` to move; `prefix H/J/K/L` to resize; `prefix Tab` last pane; `prefix z` zoom; `prefix Space` cycle layouts.
+- **Popup menus and dashboard** — `prefix a d` opens the dashboard popup; `prefix a m` opens an action menu (jump, worktree, resume, splits); `prefix a s` rescans; `prefix a t` opens the session tree.
+- **Your own tmux stays yours** — the cockpit does not rebind pane navigation, splits, zoom, copy mode, or the status-bar layout. Every action sits under the single `prefix a` table, so nothing you already use is taken.
 - **Agent launch wrappers** — `agent-pane [--agent kind] [--cwd dir] <name> <command>` launches and registers a pane; `agent-workspace` creates or attaches the shared `agents` session.
 - **Per-agent status detection** — `agent-status-scan` classifies each pane as `error`, `blocked`, `working`, `idle`, or `done` using detection manifests ported from [Herdr](https://github.com/ogulcancelik/herdr)'s per-agent screen rules (approval prompts, spinner titles, prompt-box chrome) plus explicit `AGENT_STATUS:` markers. `agent-explain` shows exactly which rule fired. A finished pane stays `done` until you focus it, then demotes to `idle`.
 - **Agent-to-agent coordination** — `agent-list --json`, `agent-read`, `agent-send` (no Enter), `agent-run` (with Enter), and `agent-wait --status/--match`: the shell equivalent of Herdr's socket API, so one agent can drive and monitor its siblings.
 - **Notifications** — transitions into `blocked`/`error`/`done` fire a tmux toast (optionally a desktop notification) and a sound cue with terminal-bell fallback; suppressed when you're already looking at the pane.
 - **Persistence and isolation** — `agent-resume` relaunches dead agents after a tmux server restart, using native session resume (`claude --resume`, `codex resume`, …) when you pass a session id; `agent-worktree` gives each agent an isolated git worktree; optional tmux-resurrect/tmux-continuum config restores layouts across reboots (wired automatically when TPM is present).
-- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix g/E/W/i/D` bind the states to keys (`idle` also matches finished-but-unviewed `done` panes; capital `I` is left to TPM's plugin installer); a compact fleet summary lives in the tmux status bar.
+- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix a b/e/w/i/f` bind the states to keys (`idle` also matches finished-but-unviewed `done` panes).
 
 ## Prerequisites
 

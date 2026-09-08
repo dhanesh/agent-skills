@@ -8,7 +8,10 @@ directory containing a `SKILL.md`. This file tells an agent how to work here saf
 ## The one command that matters: `make gate`
 
 `make gate` is the verify→repair loop for this repo. **Run it before committing** and expect it
-green. It runs, for every skill, in a fail-fast loop:
+green. It runs every check against every skill and reports at the end — it does
+**not** stop at the first failure, so one broken skill still tells you about the
+others. (`make gate-skill SKILL=<dir>` *is* fail-fast: it stops at the first
+failing check for that one skill.) The checks:
 
 | Check | Script | Enforces |
 |---|---|---|
@@ -17,9 +20,11 @@ green. It runs, for every skill, in a fail-fast loop:
 | Secrets/leaks | `scripts/gates/scan-leaks.sh` | no secrets, keys, or denylisted content |
 | Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`) |
 | Install replay | `scripts/gates/dry-run-replay.sh` | for skills with a `PARAMETERS.md` |
+| Asset paths | `scripts/gates/asset-paths.sh` | no skill-relative helper invocation in `SKILL.md` — agents run from the *target repo*, so `python3 assets/x.py` never resolves for them; use `"$SKILL_DIR/assets/x.py"` |
+| Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
 | **Shell suites** | `*/assets/test_*.sh` | each shell suite marked `# gate: offline`. Every `test_*.sh` **must** carry a `# gate:` marker — `offline` (runs here) or `integration` (excluded); an unmarked suite **fails** the gate rather than silently skipping |
-| **Outcome eval** | `scripts/gates/run-eval.sh` → `*/eval/run_eval.py` | each skill's end-to-end eval per `docs/eval-standard.md` (deterministic harness → skill tooling → model-free grader, negative fixtures mandatory); **missing eval fails the gate** |
+| **Outcome eval** | `scripts/gates/run-eval.sh` → `*/eval/run_eval.py` | each skill ships an eval per `docs/eval-standard.md`. The gate mechanically enforces the parts it can: the eval **exists**, its final `EVAL_RESULT:` line and its exit status **agree**, and it finishes inside `EVAL_TIMEOUT` (120s). The rest of the standard — stdlib-only, offline, no repo writes, and **negative fixtures** — is a contract you uphold in review, not something the gate can see. **Missing eval fails the gate.** |
 
 CI (`.github/workflows/skill-gates.yml`) runs `make gate` on every PR and push to `main`, so a
 green PR check means all of the above passed.

@@ -41,6 +41,18 @@ HANDLERS = {".txt": _passthrough, ".md": _passthrough, ".markdown": _passthrough
 
 
 def main(argv):
+    # `--help` must print usage and exit 0. SKILL.md prescribes exactly this as
+    # the preflight that proves the helper resolved — and without this branch
+    # argv[1] was treated as a path, took the unsupported-extension route and
+    # exited 3, so the skill's own check told the agent its helper was broken.
+    if len(argv) == 2 and argv[1] in ("-h", "--help"):
+        sys.stdout.write(
+            "usage: extract_text.py <path>\n\n"
+            "Convert a local document to plain text on stdout.\n"
+            f"Supported extensions: {', '.join(sorted(HANDLERS))}\n"
+            "Exit codes: 0 ok, 2 usage, 3 unsupported extension, 4 missing "
+            "optional dependency.\n")
+        return 0
     if len(argv) != 2:
         sys.stderr.write("usage: extract_text.py <path>\n")
         return 2
