@@ -32,11 +32,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-from context_ledger import ContextLedger, TRUSTED
+from context_ledger import ContextLedger, TRUSTED, ledger_lock
 
 # A marker must START the (stripped) line, then ":" or "-". Keeps precision high.
 _MARKER = re.compile(
@@ -140,17 +141,33 @@ def main(argv: list[str]) -> int:
         return 0
 
     store = Path(args.store)
-    led = ContextLedger.load(store)
-    counts = harvest(led, rows)
 
-    # Flush: curate (renders + persists) so an abrupt close finds fresh state on disk.
-    anchor = args.anchor or Path(".context/anchor.txt").read_text().strip() \
-        if Path(".context/anchor.txt").exists() else args.anchor
-    digest = led.to_digest(args.budget, anchor)
-    dp = Path(args.digest)
-    dp.parent.mkdir(parents=True, exist_ok=True)
-    dp.write_text(digest)
-    led.persist(store)
+    # `--anchor` wins; the file is the fallback. Read it OUTSIDE the lock and never
+    # let an unreadable anchor cost the turn's capture — it only steers ranking.
+    anchor = args.anchor
+    apath = Path(".context/anchor.txt")
+    if not anchor and apath.exists():
+        try:
+            anchor = apath.read_text().strip()
+        except OSError:
+            anchor = args.anchor
+
+    # One writer at a time: two sessions in one project both fire the Stop hook
+    # every turn, and an unguarded read-modify-write drops decisions (3/20 runs)
+    # and can leave an unparseable store (1/20). Load INSIDE the lock so we modify
+    # what is on disk now, not what was there before another session's flush.
+    with ledger_lock(store):
+        led = ContextLedger.load(store)
+        counts = harvest(led, rows)
+
+        # Flush: curate (renders + persists) so an abrupt close finds fresh state.
+        digest = led.to_digest(args.budget, anchor)
+        dp = Path(args.digest)
+        dp.parent.mkdir(parents=True, exist_ok=True)
+        dtmp = dp.with_name(f"{dp.name}.tmp{os.getpid()}")
+        dtmp.write_text(digest)
+        os.replace(dtmp, dp)                      # never inject a half-written digest
+        led.persist(store)
 
     ingested = sum(counts.values())
     print(f"harvested {ingested} card(s): "
@@ -159,5 +176,20 @@ def main(argv: list[str]) -> int:
     return 0
 
 
+def _guarded_main(argv):
+    """Never let one bad turn end capture for the life of the project.
+
+    The Stop hook calls this behind `|| true`, so an uncaught exception is both
+    invisible and — when its cause is on disk — permanent. Degrade to a single
+    lossy turn: report on stderr, exit 0, and let the next turn try again.
+    """
+    try:
+        return main(argv)
+    except Exception as e:                        # noqa: BLE001 - deliberate backstop
+        print(f"context harvest: skipped this turn ({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(_guarded_main(sys.argv[1:]))

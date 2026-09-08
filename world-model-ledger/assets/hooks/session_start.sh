@@ -20,8 +20,12 @@ cwd="$(get cwd)"
 cd "$cwd" || { echo '{"continue": true}'; exit 0; }
 
 # 1. Auto-bootstrap — only in a real project (a .git tree), so we never litter
-#    .world-model/ in scratch dirs. Idempotent: seeds only when the model is empty.
-if [[ ! -f ".world-model/model.db" && -d ".git" ]]; then
+#    .world-model/ in scratch dirs. The guard tests STATE, not file existence:
+#    the installer creates model.db to init the schema, so `! -f model.db` was
+#    already false before the first session and seeding never ran. `bootstrap`
+#    short-circuits on a non-empty entity table, so calling it every time is
+#    idempotent, cheap, and also re-seeds a model left empty by an interrupted run.
+if [[ -d ".git" ]]; then
   mkdir -p .world-model
   grep -qxF '.world-model/' .gitignore 2>/dev/null \
     || printf '\n# world-model-ledger runtime store\n.world-model/\n' >> .gitignore 2>/dev/null || true

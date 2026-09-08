@@ -42,7 +42,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -90,6 +92,93 @@ KINDS = CORE_KINDS                      # back-compat alias (CLI/tests import th
 LOSSLESS_KINDS = ("decision", "constraint", "open_question", "task_state", "file_ref")
 
 EXT_FILENAME = "kinds.json"
+BAK_SUFFIX = ".bak"
+LOCK_SUFFIX = ".lock"
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """Write `payload` so the file on disk is ALWAYS either the old or the new one.
+
+    Durability, concretely: temp file in the same directory -> flush -> fsync ->
+    os.replace (atomic on POSIX and Windows). A kill -9 at any instant leaves one
+    intact file, never a truncated one. The previous good copy is kept alongside
+    as `<name>.bak` so even a damaged filesystem has something to recover from.
+
+    This is the WRITE half of the abrupt-close guarantee; ledger_lock() is the
+    concurrency half. Together they are what make "durable facts survive a crash"
+    a property of the code rather than a claim in the README.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2)
+    if path.exists():
+        try:
+            shutil.copyfile(path, path.with_name(path.name + BAK_SUFFIX))
+        except OSError:
+            pass                                  # a missing backup must never block the write
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+class ledger_lock:
+    """Serialize load->modify->persist across concurrent sessions in one project.
+
+    Two Claude sessions in the same repo both fire the Stop hook every turn. The
+    read-modify-write is not atomic, so without this they interleave: measured
+    3/20 runs silently dropped a decision and 1/20 left an unparseable store.
+
+    flock is advisory and stdlib-only. If the platform or filesystem cannot give
+    us one (Windows, some network mounts), we proceed unlocked rather than fail
+    the hook — a lost update is bad, a blocked session is worse.
+    """
+
+    def __init__(self, path: Path, timeout: float = 10.0) -> None:
+        self.lock_path = path.with_name(path.name + LOCK_SUFFIX)
+        self.timeout = timeout
+        self._fh = None
+
+    def __enter__(self) -> "ledger_lock":
+        try:
+            import fcntl
+        except ImportError:
+            return self
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fh = open(self.lock_path, "a+")
+        except OSError:
+            return self
+        import time
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._fh = fh
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    fh.close()                    # proceed unlocked; never hang the hook
+                    return self
+                time.sleep(0.05)
+
+    def __exit__(self, *exc) -> None:
+        if self._fh is not None:
+            try:
+                import fcntl
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+            self._fh.close()
+            self._fh = None
 _EXT_KINDS: dict[str, dict] = {}        # name -> {"prior": float, "lossless": bool}
 
 
@@ -387,19 +476,51 @@ class ContextLedger:
             # Preserved, not destroyed — a rejected card stays inspectable so the
             # user can fix the kind (or declare it) rather than lose the content.
             payload["quarantined"] = self.quarantined
-        path.write_text(json.dumps(payload, indent=2))
+        atomic_write_json(path, payload)
+
+    @staticmethod
+    def _read_payload(path: Path) -> tuple[dict | None, str | None]:
+        """Parse a store file. Returns (payload, error) and NEVER raises.
+
+        A bare json.loads here was the single point of permanent failure: one
+        torn write (kill -9 mid-persist, pre-atomic-write file, full disk) made
+        every later load raise behind the Stop hook's `|| true`, so capture died
+        silently and forever while SessionStart kept serving the stale digest.
+        """
+        try:
+            data = json.loads(path.read_text())
+        except (ValueError, OSError, UnicodeDecodeError) as e:
+            return None, f"{type(e).__name__}: {e}"
+        if not isinstance(data, dict):
+            return None, f"top level is {type(data).__name__}, expected object"
+        return data, None
 
     @classmethod
     def load(cls, path: Path) -> "ContextLedger":
         if not path.exists():
             return cls()
-        data = json.loads(path.read_text())
+        recovery: list[dict] = []
+        data, err = cls._read_payload(path)
+        if data is None:
+            # Fall back to the sidecar written before the last replace, then to an
+            # empty ledger. Either way capture RESUMES this turn; the banner rides
+            # in `quarantined` so to_digest() surfaces it instead of hiding it.
+            bak = path.with_name(path.name + BAK_SUFFIX)
+            bdata, berr = cls._read_payload(bak) if bak.exists() else (None, "absent")
+            if bdata is not None:
+                recovery.append({"card": {"id": "<store>"},
+                                 "reason": f"store unreadable ({err}); recovered from {bak.name}"})
+                data = bdata
+            else:
+                recovery.append({"card": {"id": "<store>"},
+                                 "reason": f"store unreadable ({err}); backup {berr}; started empty"})
+                data = {}
         # Project kind extensions live beside the ledger; load them BEFORE building
         # cards so an extended kind validates instead of being quarantined.
         load_kind_extensions(path.parent / EXT_FILENAME)
         led = cls(weights=data.get("weights"))
         led.clock = data.get("clock", 0.0)
-        led.quarantined = list(data.get("quarantined", []))
+        led.quarantined = recovery + list(data.get("quarantined", []))
         fields = {f for f in Card.__dataclass_fields__}
         for cd in data.get("cards", []):
             # QUARANTINE, don't explode. A single card with an unknown kind or a

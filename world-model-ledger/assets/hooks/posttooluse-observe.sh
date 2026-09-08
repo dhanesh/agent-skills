@@ -21,14 +21,18 @@ except Exception: print('')" 2>/dev/null)"
 [[ -z "$cwd" || ! -d "$cwd" ]] && { echo '{"continue": true}'; exit 0; }
 cd "$cwd" || { echo '{"continue": true}'; exit 0; }
 
-# Lazy bootstrap: if this is a real project (a .git tree) with no model yet, create and
-# seed it now so capture starts on the very first tool call — no restart required.
-if [[ ! -f ".world-model/model.db" ]]; then
-  [[ -d ".git" ]] || { echo '{"continue": true}'; exit 0; }
+# Lazy bootstrap: in a real project (a .git tree), make sure the model is seeded so
+# capture starts on the very first tool call — no restart required. Guarded on STATE,
+# not on model.db existing: the installer creates the file, and an interrupted
+# bootstrap leaves it empty. `bootstrap` no-ops once the entity table is populated.
+if [[ -d ".git" ]]; then
   mkdir -p .world-model
   grep -qxF '.world-model/' .gitignore 2>/dev/null \
     || printf '\n# world-model-ledger runtime store\n.world-model/\n' >> .gitignore 2>/dev/null || true
   python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" bootstrap . >/dev/null 2>&1 || true
+elif [[ ! -f ".world-model/model.db" ]]; then
+  # Not a project and nothing to observe into — stay out of scratch directories.
+  echo '{"continue": true}'; exit 0
 fi
 
 printf '%s' "$input" | python3 "$KIT_HOME/world_model.py" \

@@ -307,7 +307,7 @@ scan_secrets() {
             }
         }
     }
-    ' "$_file"
+    ' "$_file" || printf '%s\n' "$_file" >> "$SCAN_ERRORS"
 }
 
 # ── Detector 2: Denylist identifiers ──────────────────────────────────────────
@@ -336,6 +336,18 @@ scan_denylist() {
 
 # ── Process all files ──────────────────────────────────────────────────────────
 TMPFILE="$(mktemp)"
+# Any file whose scan aborted lands here. A scanner that cannot read a file must
+# FAIL the gate, never quietly report PASS for it (see the LC_ALL note below).
+SCAN_ERRORS="$(mktemp)"
+
+# Byte-wise matching, deliberately. Under a UTF-8 locale awk aborts at the first
+# invalid byte ("illegal byte sequence") — and because the detectors run inside a
+# `find | while` subshell pipeline, `set -eu` never saw it, the rest of the file
+# went unscanned, and the script still printed PASS. One stray byte on line 1 hid
+# every secret below it. LC_ALL=C removes the abort; $SCAN_ERRORS catches anything
+# else that makes a scan exit non-zero.
+LC_ALL=C
+export LC_ALL
 
 find "$SKILL_DIR" -type f | sort | while IFS= read -r filepath; do
     scan_secrets "$filepath" | while IFS="$TAB" read -r lnum type redacted; do
@@ -422,7 +434,24 @@ fi
 
 rm -f "$TMPFILE"
 
-if [ "$finding_count" -eq 0 ]; then
+# Fail CLOSED on an unreadable file. "The scanner could not read this" is not
+# evidence of "no secrets here", and reporting PASS for it is the worst possible
+# answer from a security gate.
+scan_error_count=0
+if [ -s "$SCAN_ERRORS" ]; then
+    while IFS= read -r badfile; do
+        [ -n "$badfile" ] || continue
+        printf 'SCANNER-ERROR: %s: scan aborted; file NOT scanned\n' "$badfile"
+        scan_error_count=$((scan_error_count + 1))
+    done < "$SCAN_ERRORS"
+fi
+rm -f "$SCAN_ERRORS"
+
+if [ "$scan_error_count" -gt 0 ]; then
+    printf 'SCAN_RESULT: FAIL — %d finding(s) and %d unscannable file(s) in %s\n' \
+        "$finding_count" "$scan_error_count" "$SKILL_DIR"
+    exit 1
+elif [ "$finding_count" -eq 0 ]; then
     printf 'SCAN_RESULT: PASS — no secrets or denylist violations found in %s\n' "$SKILL_DIR"
     exit 0
 else

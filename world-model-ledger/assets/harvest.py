@@ -279,5 +279,21 @@ def main(argv=None):
         wm.close()
 
 
+def _guarded_main(argv=None):
+    """Never let one bad turn end capture for the life of the project.
+
+    Both hooks that call this run behind `|| true`, so an uncaught exception is
+    invisible AND permanent when its cause is persisted (a poisoned constraint
+    template did exactly that). Degrade to a single lossy turn instead: report on
+    stderr, exit 0, and let the next turn try again.
+    """
+    try:
+        return main(argv)
+    except Exception as e:                        # noqa: BLE001 - deliberate backstop
+        print(f"world-model harvest: skipped this turn ({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_guarded_main())

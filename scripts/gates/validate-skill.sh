@@ -191,17 +191,36 @@ else
 fi
 
 # ── Check 4: `description` field ──────────────────────────────────────────────
-# Extract description value (single-line YAML value). NOTE: for a multi-line /
-# YAML block-scalar description, only the first line is captured and counted.
+# Extract the description value, INCLUDING a YAML block scalar (`>-`, `>`, `|`,
+# `|-`, ...). Reading only the first line here was a silent bypass: for a folded
+# scalar that line is the indicator itself, which is non-empty, so the emptiness
+# guard never fired and the length check measured 2 characters. 11 of 18 skills
+# were unmeasured that way and one shipped 163 characters over the platform
+# limit with the gate reporting PASS. Folded blocks join with a space, literal
+# blocks keep their newlines — either way every character is counted.
 desc_value="$(printf '%s\n' "$FRONTMATTER" | awk '
-/^description:/ {
+function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+BEGIN { st = 0; out = ""; sq = sprintf("%c", 39) }
+st == 0 && /^description:/ {
     val = $0
     sub(/^description:[ \t]*/, "", val)
-    gsub(/^["'"'"']|["'"'"']$/, "", val)
-    gsub(/^[ \t]+|[ \t]+$/, "", val)
+    val = trim(val)
+    if (val ~ /^[|>]/) { st = 1; blk = 1; mode = substr(val, 1, 1); next }
+    if (val ~ /^".*"$/) { val = substr(val, 2, length(val) - 2) }
+    else if (val ~ "^" sq ".*" sq "$") { val = substr(val, 2, length(val) - 2) }
     print val
+    st = 2
     exit
 }
+st == 1 {
+    if ($0 ~ /^[ \t]*$/) { if (out != "") out = out "\n"; next }
+    if ($0 !~ /^[ \t]/) { st = 2; exit }          # dedent ends the block
+    line = $0
+    sub(/^[ \t]+/, "", line)
+    if (out == "") out = line
+    else out = out (mode == "|" ? "\n" : " ") line
+}
+END { if (blk && out != "") print out }
 ')"
 
 desc_field_present="$(printf '%s\n' "$FRONTMATTER" | grep -c '^description:' || true)"

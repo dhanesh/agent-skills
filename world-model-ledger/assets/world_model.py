@@ -1281,6 +1281,13 @@ class WorldModel:
                        params=None, severity="violation") -> int:
         if scope_predicate:
             self._predicate_spec(scope_predicate)   # a constraint scoped to an unknown verb can never fire
+        # Reject a template that can never render, at the write boundary — the same
+        # discipline the predicate ontology already applies to verbs. The agent is
+        # told to emit WM-CONSTRAINT markers, so a bad template is an expected
+        # input, and a self-correctable error beats a silently poisoned model.
+        terr = self._template_error(message_tmpl)
+        if terr:
+            raise ValueError(f"invalid message template for constraint {name!r}: {terr}")
         ts = now()
         cur = self.conn.execute("SELECT id FROM constraint_ WHERE name=?", (name,))
         r = cur.fetchone()
@@ -1478,12 +1485,41 @@ class WorldModel:
                 out += self._open_contradiction(c, [("interaction", i["id"])], msg)
         return out
 
+    # Union of every kwarg the four _eval_* sites above pass to _render. Kept
+    # next to them so add_constraint can dry-run a template against exactly what
+    # it will be rendered with. A key valid for another constraint kind renders
+    # as the literal template (degraded, not fatal); a key in NO kind, or a
+    # malformed brace, can never render and is rejected at the write boundary.
+    RENDER_KEYS = ("subject", "object", "predicate", "values", "matched",
+                   "predicate_a", "predicate_b", "companion")
+
     @staticmethod
     def _render(tmpl, **kw):
+        # Catch EVERYTHING. This runs inside consolidate(), which the Stop hook
+        # calls behind `|| true`: an uncaught raise here silently and permanently
+        # ended marker capture, oracle recovery, constraint evaluation and digest
+        # refresh from that turn on. `{subject.nope}` (AttributeError) and an
+        # unbalanced brace (ValueError) were both uncaught; only KeyError was.
+        # A constraint with a bad template must cost its own message, nothing more.
         try:
             return tmpl.format(**kw)
-        except (KeyError, IndexError):
+        except Exception:
             return tmpl
+
+    @classmethod
+    def _template_error(cls, tmpl):
+        """Return a human-readable reason this template can never render, or None."""
+        if not isinstance(tmpl, str):
+            return f"message template must be a string, got {type(tmpl).__name__}"
+        probe = {k: "x" for k in cls.RENDER_KEYS}
+        try:
+            tmpl.format(**probe)
+        except KeyError as e:
+            return (f"unknown placeholder {e} — available: "
+                    + ", ".join("{" + k + "}" for k in cls.RENDER_KEYS))
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
+        return None
 
     def _open_contradiction(self, c, members, message):
         dedup = f"{c['id']}:" + ",".join(sorted(f"{k}#{i}" for k, i in members))

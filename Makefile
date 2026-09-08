@@ -5,6 +5,12 @@ GATES := scripts/gates
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 
+# Floor for the `gate` target. An empty glob made the whole per-skill loop
+# vacuous and still printed GATE_RESULT: PASS, so a sparse checkout or a wrong
+# working-directory produced a green CI check that validated nothing. Raise this
+# as skills are added; it only has to be a floor, not an exact count.
+MIN_SKILLS ?= 15
+
 .PHONY: gate validate scan-leaks dry-run playbook test test-integration eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
@@ -19,6 +25,9 @@ list-skills:
 # PASS lines. That made a real CI failure both easy to miss and impossible to
 # diagnose from the log. `_fail` is the fix; keep it that way.
 gate: clean
+	@test -n "$(SKILLS)" || { echo "GATE_RESULT: FAIL — no skills found (wrong directory, or a sparse checkout?)"; exit 2; }
+	@n=$$(printf '%s\n' $(SKILLS) | wc -l | tr -d ' '); \
+	 [ "$$n" -ge $(MIN_SKILLS) ] || { printf 'GATE_RESULT: FAIL — found %s skill(s), expected at least %s\n' "$$n" "$(MIN_SKILLS)"; exit 2; }
 	@rc=0; \
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
 	for d in $(SKILLS); do \
@@ -142,15 +151,16 @@ ab-validate: clean
 	@python3 scripts/ab-validate.py $(BASE)
 
 # Gate a single skill: make gate-skill SKILL=base-in-reality
-gate-skill:
+gate-skill: clean
 	@test -n "$(SKILL)" || { echo "usage: make gate-skill SKILL=<dir>"; exit 2; }
 	@sh $(GATES)/validate-skill.sh "$(SKILL)"
 	@sh $(GATES)/scan-leaks.sh "$(SKILL)"
 	@sh $(GATES)/prompting-playbook.sh "$(SKILL)" $(PLAYBOOK_FLAGS)
 	@if [ -f "$(SKILL)/PARAMETERS.md" ]; then \
 		scratch=$$(mktemp -d); \
-		sh $(GATES)/dry-run-replay.sh "$(SKILL)" "$$scratch"; \
+		sh $(GATES)/dry-run-replay.sh "$(SKILL)" "$$scratch"; st=$$?; \
 		rm -rf "$$scratch"; \
+		[ $$st -eq 0 ] || exit $$st; \
 	fi
 	@sh $(GATES)/frontmatter-standard.sh "$(SKILL)"
 	@for t in "$(SKILL)"/assets/test_*.py; do \
