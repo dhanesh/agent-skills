@@ -186,6 +186,25 @@ else
   bad "validate-skill fails PARAMETERS.md with no assets/templates/"
 fi
 
+# ── ab-validate: the row lifecycle must survive its own merges ──────────────
+# When a delta lands in the baseline its row measures identically in both arms.
+# If that reported UNPROVEN, `make ab-validate` would fail forever the moment
+# any change merged — the trap in replacing the hardcoded baseline pin with a
+# merge base. The script's --self-test asserts each classification, and that
+# every shipped delta row declares the `since=` that makes the conversion work.
+AB="$GATES/../ab-validate.py"
+if [ -f "$AB" ]; then
+  if out="$(python3 "$AB" --self-test 2>&1)" && \
+     printf '%s\n' "$out" | grep -q '^AB_SELFTEST: PASS'; then
+    ok "ab-validate row lifecycle ($(printf '%s\n' "$out" | grep -c '^PASS:') assertions)"
+  else
+    printf '%s\n' "$out" | grep '^FAIL:' | sed 's/^/  /'
+    bad "ab-validate row lifecycle"
+  fi
+else
+  bad "ab-validate.py not found at $AB"
+fi
+
 # ── A dangling reference in SKILL.md must fail ───────────────────────────────
 d="$(mkskill "dangle")"
 printf '\nSee [detail](references/does-not-exist.md) for more.\n' >> "$d/SKILL.md"

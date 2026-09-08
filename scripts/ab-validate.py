@@ -24,9 +24,27 @@ stdlib only, offline, deterministic. Each arm runs in its own subprocess so two
 versions of the same module name can never collide in one interpreter. Requires git
 and a non-shallow clone containing BASE_REF; SKIPs cleanly when that is unavailable.
 
-The corpus below is the behavioural record of the ontology-guardrail change
-(docs/ontology-guardrails.md). Extend it when you add a guardrail — a new rule with
-no A/B row is a claim nobody measured.
+The corpus below is the cumulative behavioural record of every guardrail this
+repo has added. Extend it when you add one — a new rule with no A/B row is a
+claim nobody measured.
+
+Baseline
+--------
+By default the baseline is the MERGE BASE with `origin/main` (or `main`), so a
+bare `make ab-validate` always measures the branch under review. Override it
+with `make ab-validate BASE=<ref>`.
+
+Row lifecycle
+-------------
+A `delta` row declares `since=<commit that introduced it>`. While that commit is
+outside the baseline the row is a live claim: the numbers must move or it
+reports UNPROVEN. Once it lands in the integration branch the improvement is
+history, so the row is reclassified `HELD*` — a standing regression guard that
+fails if the measurement moves at all. That is what lets one corpus grow across
+campaigns without either re-litigating settled work or quietly dropping it.
+
+Marks: IMPROVED · HELD (guard) · HELD* (landed delta) · UNPROVEN · WORSE.
+UNPROVEN and WORSE both fail.
 """
 import json
 import os
@@ -36,8 +54,51 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Pre-ontology-guardrail baseline. Override with argv[1] / `make ab-validate BASE=…`.
-BASE_DEFAULT = "23dc485"
+
+# The integration branch this work merges into. The default baseline is the
+# MERGE BASE with it, not a fixed commit.
+#
+# A hardcoded pin ("23dc485") measured one historical change forever: a bare
+# `make ab-validate` re-ran the 2026-06 ontology campaign no matter what was
+# under review, so a green AB_RESULT told you nothing about the current branch.
+# merge-base always answers the question this tool exists to answer — "did THIS
+# change make things better?" — and needs no maintenance as work lands.
+INTEGRATION_REFS = ("origin/main", "main")
+
+# When a row's delta was introduced. Once that commit is an ancestor of the
+# baseline the improvement has LANDED, so the row stops being a claim to prove
+# and becomes a standing regression guard (see classify_row).
+#
+# Without this, switching to merge-base would have broken the command outright:
+# every already-merged delta row measures identically in both arms, so all of
+# them would report UNPROVEN and `make ab-validate` would fail forever the
+# moment this change merged.
+SINCE_ONTOLOGY = "077c432"   # world-model-ledger predicate-ontology guardrails
+SINCE_ABVALIDATE = "6b51b41"  # the A/B harness itself, and its first corpus
+SINCE_AUDIT_2026_09 = "7b94236"  # the 2026-09 whole-repo review fixes
+
+
+def _git_out(*args):
+    r = subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def default_base():
+    """Merge base with the integration branch, or "" when it cannot be found."""
+    for ref in INTEGRATION_REFS:
+        if not _git_out("rev-parse", "--verify", "--quiet", ref):
+            continue
+        mb = _git_out("merge-base", "HEAD", ref)
+        if mb:
+            return mb
+    return ""
+
+
+def _is_ancestor(commit, base):
+    if not commit or not base:
+        return False
+    return subprocess.run(["git", "merge-base", "--is-ancestor", commit, base],
+                          cwd=REPO, capture_output=True).returncode == 0
 
 ROWS = []
 # Probes that crashed. A run with any of these cannot classify anything, because
@@ -58,13 +119,40 @@ def _errored(*vals):
     return any(isinstance(v, dict) and "_error" in v for v in vals)
 
 
-def row(skill, dimension, old, new, ok, note="", kind="delta"):
+def row(skill, dimension, old, new, ok, note="", kind="delta", since=None):
     """kind='delta' claims the new arm is strictly better; kind='guard' claims only
     that behaviour is unchanged. Keeping them distinct is what stops a held guard
-    from being counted as an improvement."""
+    from being counted as an improvement.
+
+    `since` is the commit that introduced a delta row. Once it is an ancestor of
+    the baseline the improvement has landed and the row is reclassified as a
+    guard: the claim was already proven, so what matters now is that it has not
+    regressed. A delta row with no `since` is treated as brand new — it must
+    move the numbers or it reports UNPROVEN.
+    """
     ROWS.append({"skill": skill, "dimension": dimension, "old": old, "new": new,
-                 "ok": ok, "note": note, "kind": kind,
+                 "ok": ok, "note": note, "kind": kind, "since": since,
                  "moved": str(old) != str(new)})
+
+
+def classify_row(r, base):
+    """Return (mark, effective_kind) for one row against `base`."""
+    kind = r["kind"]
+    if kind == "delta" and _is_ancestor(r.get("since"), base):
+        kind = "landed"          # proven earlier; now a standing regression guard
+    if kind == "landed":
+        # `ok` was authored as a DELTA comparison ("b < a"), which is False when
+        # both arms measure the same — and measuring the same is precisely what
+        # an intact landed fix looks like once the baseline contains it. So for
+        # a landed row the question is only "did anything move?".
+        if not r["moved"]:
+            return "HELD*", kind
+        return ("IMPROVED" if r["ok"] else "WORSE"), kind
+    if not r["ok"]:
+        return "WORSE", kind
+    if kind == "guard":
+        return "HELD", kind
+    return "IMPROVED" if r["moved"] else "UNPROVEN", kind
 
 
 def probe(tree, subdir, code):
@@ -157,7 +245,8 @@ def check_world_model(old, new):
     row(s, "impossible/hallucinated triples ACCEPTED (lower=better)",
         a.get("bad_accepted"), b.get("bad_accepted"),
         b.get("bad_accepted", 9) < a.get("bad_accepted", 0),
-        "unknown verb, referent-imports-file, calls-a-referent")
+        "unknown verb, referent-imports-file, calls-a-referent",
+        since=SINCE_ONTOLOGY)
     row(s, "legitimate triples accepted (higher=better)",
         a.get("good_accepted"), b.get("good_accepted"),
         b.get("good_accepted") == a.get("good_accepted") == 3,
@@ -165,7 +254,8 @@ def check_world_model(old, new):
     row(s, "constraint scoped to an unwritable verb (lower=better)",
         a.get("dead_constraint"), b.get("dead_constraint"),
         b.get("dead_constraint", 9) < a.get("dead_constraint", 0),
-        "a rule that can never fire is a latent bug, not a belief")
+        "a rule that can never fire is a latent bug, not a belief",
+        since=SINCE_ONTOLOGY)
 
     a, b = (probe(t, s + "/assets", WM_BUILD % REPO) for t in (old, new))
     row(s, "real-repo seed: files / structural edges",
@@ -181,14 +271,16 @@ def check_world_model(old, new):
     row(s, "marker stream (1 hallucinated + 2 valid) -> rows stored",
         a.get("rows"), b.get("rows"),
         b.get("rows", 0) < a.get("rows", 99) and b.get("validated") == 1,
-        "bad marker dropped; the validated fact survives")
+        "bad marker dropped; the validated fact survives",
+        since=SINCE_ONTOLOGY)
 
     a, b = (probe(t, s + "/assets", WM_ECHO) for t in (old, new))
     row(s, "assistant echo of a poisoned marker forges an oracle edge (lower=better)",
         a.get("forged"), b.get("forged"),
         (b.get("forged", 9) or 0) < (a.get("forged") or 0),
         "the direct tool_result channel was excluded, but an agent quoting a file "
-        "back into its own reply re-emitted the marker into the trusted channel")
+        "back into its own reply re-emitted the marker into the trusted channel",
+        since=SINCE_ONTOLOGY)
 
 
 # ── context-hygiene-kit ─────────────────────────────────────────────────────
@@ -240,14 +332,17 @@ def check_hygiene(old, new):
     row(s, "cards surviving 1 bad card in 51 (higher=better)",
         a.get("survived"), b.get("survived"),
         (b.get("survived") or 0) > (a.get("survived") or 0),
-        "old: ANY bad card destroyed the WHOLE ledger")
+        "old: ANY bad card destroyed the WHOLE ledger",
+        since=SINCE_ONTOLOGY)
     row(s, "load crashes on a corrupt card (False=better)",
         a.get("crashed"), b.get("crashed"),
-        a.get("crashed") is True and b.get("crashed") is False)
+        a.get("crashed") is True and b.get("crashed") is False,
+        since=SINCE_ONTOLOGY)
     row(s, "capture resumes next turn (True=better)",
         a.get("resumed"), b.get("resumed"),
         b.get("resumed") is True and not a.get("resumed"),
-        "behind the Stop hook's `|| true` a dead load is PERMANENT and silent")
+        "behind the Stop hook's `|| true` a dead load is PERMANENT and silent",
+        since=SINCE_ONTOLOGY)
 
     a, b = (probe(t, s + "/assets", CH_CLEAN) for t in (old, new))
     row(s, "healthy ledger: cards / hot tokens / kept",
@@ -328,7 +423,8 @@ def check_okf(old, new):
     row(s, "spec-violating concepts WRITTEN to disk (lower=better)",
         a.get("bad_written"), b.get("bad_written"),
         b.get("bad_written", 9) < a.get("bad_written", 0),
-        "no type, unserialisable value, bad tags, bad pin, bad timestamp")
+        "no type, unserialisable value, bad tags, bad pin, bad timestamp",
+        since=SINCE_ONTOLOGY)
     row(s, "legitimate concepts written (higher=better)",
         a.get("good_written"), b.get("good_written"),
         b.get("good_written") == a.get("good_written") == 3,
@@ -337,10 +433,12 @@ def check_okf(old, new):
     a, b = (probe(t, s + "/assets", OKF_PARTIAL) for t in (old, new))
     row(s, "half-parsed concept persisted as canonical (lower=better)",
         a.get("persisted"), b.get("persisted"),
-        a.get("persisted") is True and b.get("persisted") is False)
+        a.get("persisted") is True and b.get("persisted") is False,
+        since=SINCE_ONTOLOGY)
     row(s, "parser-internal marker leaks into the bundle (lower=better)",
         a.get("marker_leaked"), b.get("marker_leaked"),
-        a.get("marker_leaked") is True and b.get("marker_leaked") is False)
+        a.get("marker_leaked") is True and b.get("marker_leaked") is False,
+        since=SINCE_ONTOLOGY)
 
     a, b = (probe(t, s + "/assets", OKF_ROUNDTRIP) for t in (old, new))
     row(s, "init + pin round-trip on a valid bundle",
@@ -417,7 +515,8 @@ def check_mockstar(old, new):
         a.get("rejected"), b.get("rejected"),
         b.get("rejected") == 9 and b.get("rejected", 0) > a.get("rejected", 9),
         "each is a shape mockstar's config-load rejects — caught at IR time, "
-        "not after a generate+boot cycle")
+        "not after a generate+boot cycle",
+        since=SINCE_ONTOLOGY)
     row(s, "legitimate signing blocks still accepted (of 2)",
         a.get("accepted"), b.get("accepted"),
         b.get("accepted") == 2,
@@ -449,9 +548,11 @@ def check_loops(old, new):
     s = "crafting-self-prompting-loops"
     row(s, "templates declaring a state schema (of 5)", do, dn, dn > do,
         "ARTIFACT-LEVEL ONLY — prompt-only skill; behavioural effect needs model "
-        "runs (see docs/crafting-self-prompting-loops/)")
+        "runs (see docs/crafting-self-prompting-loops/)",
+        since=SINCE_ABVALIDATE)
     row(s, "templates ENFORCING it in the loop body (of 5)", eo, en, en > eo,
-        "declared-but-unenforced would not count")
+        "declared-but-unenforced would not count",
+        since=SINCE_ABVALIDATE)
 
 
 # ── Audit-fix guardrails (added with the 2026-09 whole-repo review) ─────────
@@ -488,7 +589,8 @@ def check_audit_guardrails(old, new):
 
     a, b = caught(old), caught(new)
     row("gates", "over-long folded description caught (1=yes)", a, b, b > a,
-        "11 of 18 skills were unmeasured; one shipped 163 chars over the limit")
+        "11 of 18 skills were unmeasured; one shipped 163 chars over the limit",
+        since=SINCE_AUDIT_2026_09)
 
     # 2) scan-leaks: a secret hidden below an undecodable byte.
     leak = os.path.join(scratch, "leakskill")
@@ -505,7 +607,8 @@ def check_audit_guardrails(old, new):
 
     a, b = leaks_found(old), leaks_found(new)
     row("gates", "undecodable byte no longer hides a secret (1=caught)", a, b, b > a,
-        "the scanner failed open: awk aborted inside a `find | while` pipeline")
+        "the scanner failed open: awk aborted inside a `find | while` pipeline",
+        since=SINCE_AUDIT_2026_09)
 
     # 3) run-eval: verdict line and exit status must agree.
     ev = os.path.join(scratch, "evalskill")
@@ -519,7 +622,8 @@ def check_audit_guardrails(old, new):
 
     a, b = eval_rejected(old), eval_rejected(new)
     row("gates", "eval printing FAIL but exiting 0 is rejected (1=yes)", a, b, b > a,
-        "the gate trusted the exit code alone")
+        "the gate trusted the exit code alone",
+        since=SINCE_AUDIT_2026_09)
 
     # 4) asset-paths: skill-relative helper invocations in shipped SKILL.md files.
     def relative_invocations(tree):
@@ -539,7 +643,8 @@ def check_audit_guardrails(old, new):
 
     a, b = relative_invocations(old), relative_invocations(new)
     row("gates", "skills invoking helpers by a skill-relative path", a, b, b < a,
-        "agents run from the target repo, where `python3 assets/x.py` does not exist")
+        "agents run from the target repo, where `python3 assets/x.py` does not exist",
+        since=SINCE_AUDIT_2026_09)
 
 
 # ── bug-autopsy (evidence, not just structure) ──────────────────────────────
@@ -566,7 +671,8 @@ def check_autopsy(old, new):
 
     a, b = rejected(old), rejected(new)
     row("bug-autopsy", "evidence-free post-mortem rejected (1=yes)", a, b, b > a,
-        "the deliverable claimed `evidence-cited`; the linter checked structure only")
+        "the deliverable claimed `evidence-cited`; the linter checked structure only",
+        since=SINCE_AUDIT_2026_09)
 
 
 # ── base-in-reality (grounding is checkable, not self-declared) ─────────────
@@ -599,7 +705,8 @@ def check_grounding(old, new):
 
     a, b = rejected(old), rejected(new)
     row("base-in-reality", "fabricated `fetched` citation rejected (1=yes)", a, b, b > a,
-        "the anti-fabrication claim rested on a boolean the agent wrote about itself")
+        "the anti-fabrication claim rested on a boolean the agent wrote about itself",
+        since=SINCE_AUDIT_2026_09)
 
 
 # ── knowledge-gardener (agrees with its sibling on the git source) ──────────
@@ -649,7 +756,8 @@ def check_gardener(old, new):
     b = stale_on_selfpin(new)
     row("knowledge-gardener", "in-repo bundle wrongly reported STALE (lower=better)",
         a, b, b <= a and b == 0,
-        "the skill claimed its verdicts `agree exactly` with okf.py's; they did not")
+        "the skill claimed its verdicts `agree exactly` with okf.py's; they did not",
+        since=SINCE_AUDIT_2026_09)
 
 
 # ── spec-first-planning / clean-code / starlight-handbook-kit ───────────────
@@ -685,7 +793,8 @@ def check_spec_planning(old, new):
     a, b = phantom(old), phantom(new)
     row("spec-first-planning", "requirement wrongly reported covered (lower=better)",
         a, b, b < a,
-        "an R<n> token anywhere in a criterion counted as coverage")
+        "an R<n> token anywhere in a criterion counted as coverage",
+        since=SINCE_AUDIT_2026_09)
 
     def dupe(tree):
         t = os.path.join(tree, "spec-first-planning", "assets", "spec_to_tasks.py")
@@ -703,7 +812,8 @@ def check_spec_planning(old, new):
     a, b = dupe(old), dupe(new)
     row("spec-first-planning", "duplicated verify steps in one task (lower=better)",
         a, b, b <= a and b <= 1,
-        "refs were iterated without deduping, appending the step once per mention")
+        "refs were iterated without deduping, appending the step once per mention",
+        since=SINCE_AUDIT_2026_09)
 
 
 def check_clean_code(old, new):
@@ -723,10 +833,12 @@ def check_clean_code(old, new):
     s = "clean-code"
     row(s, "primary mode carries a verify loop (1=yes)", va, vb, vb > va,
         "ARTIFACT-LEVEL ONLY — prompt-only skill; behavioural effect needs model runs. "
-        "The word 'test' appeared once in 272 lines, in a quotation")
+        "The word 'test' appeared once in 272 lines, in a quotation",
+        since=SINCE_AUDIT_2026_09)
     row(s, "boundary clause naming the sibling skills (1=yes)", ba, bb, bb > ba,
         "the only skill in the repo with no 'not for X — use Y' clause, on a very "
-        "broad trigger list")
+        "broad trigger list",
+        since=SINCE_AUDIT_2026_09)
 
 
 def check_starlight(old, new):
@@ -771,10 +883,107 @@ def check_starlight(old, new):
         "a gate that exists but is not wired is not a gate", kind="guard")
 
 
+def self_test():
+    """Assert the row lifecycle, so the corpus can survive its own merges.
+
+    The failure this guards: when a delta lands in the baseline its row measures
+    identically in both arms. If that reported UNPROVEN, `make ab-validate`
+    would fail forever the moment any change merged — which is exactly what
+    switching the baseline from a hardcoded pin to a merge base would otherwise
+    have caused. And a genuinely new claim that moves nothing must still fail.
+    """
+    head = _git_out("rev-parse", "HEAD")
+    if not head:
+        print("AB_SELFTEST: SKIP (not a git checkout)")
+        return 0
+
+    def mk(**kw):
+        d = dict(skill="s", dimension="d", old=1, new=1, ok=False, note="",
+                 kind="delta", since=None, moved=False)
+        d.update(kw)
+        return d
+
+    cases = [
+        ("a new claim that moves nothing is UNPROVEN",
+         mk(since=None, ok=True, moved=False), "UNPROVEN"),
+        ("a new claim that moves is IMPROVED",
+         mk(since=None, ok=True, moved=True), "IMPROVED"),
+        ("a new claim that fails its predicate is WORSE",
+         mk(since=None, ok=False, moved=True), "WORSE"),
+        # The landed cases are the point of the whole mechanism: `ok` is a delta
+        # comparison and is False once both arms agree, which is what an intact
+        # landed fix looks like.
+        ("a landed delta still intact is HELD*, not UNPROVEN",
+         mk(since=head, ok=False, moved=False), "HELD*"),
+        ("a landed delta that moved and failed is WORSE",
+         mk(since=head, ok=False, moved=True), "WORSE"),
+        ("a guard row stays HELD",
+         mk(kind="guard", ok=True, moved=False), "HELD"),
+        ("a failing guard is WORSE",
+         mk(kind="guard", ok=False, moved=False), "WORSE"),
+    ]
+    rc = 0
+    for name, r, want in cases:
+        got = classify_row(r, head)[0]
+        if got == want:
+            print("PASS: %s" % name)
+        else:
+            print("FAIL: %s (want %s, got %s)" % (name, want, got))
+            rc = 1
+
+    if default_base():
+        print("PASS: the default baseline resolves without a hardcoded pin")
+    else:
+        print("INFO: no merge base here (detached or no main) — SKIP path exercised")
+
+    # Every delta row in the shipped corpus must declare `since`, or it can
+    # never convert to a guard and will fail the run after it merges.
+    ROWS.clear()
+    missing = _corpus_rows_without_since()
+    if missing:
+        print("FAIL: %d delta row(s) with no `since=`: %s"
+              % (len(missing), ", ".join(missing[:3])))
+        rc = 1
+    else:
+        print("PASS: every delta row in the corpus declares `since=`")
+    print("AB_SELFTEST: %s" % ("PASS" if rc == 0 else "FAIL"))
+    return rc
+
+
+def _corpus_rows_without_since():
+    """Static scan: `row(` calls that are deltas but declare no `since=`."""
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    out, i = [], 0
+    while True:
+        i = src.find("\n    row(", i)
+        if i < 0:
+            return out
+        j, depth = i + 5, 0
+        while j < len(src):
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        call = src[i:j]
+        if 'kind="guard"' not in call and "since=" not in call:
+            head = call.strip().split("\n")[0][:60]
+            out.append(head)
+        i = j
+
+
 def main():
-    base = sys.argv[1] if len(sys.argv) > 1 else BASE_DEFAULT
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
     if shutil.which("git") is None:
         print("AB_RESULT: SKIP (git not available)")
+        return 0
+    base = sys.argv[1] if len(sys.argv) > 1 else default_base()
+    if not base:
+        print("AB_RESULT: SKIP (no merge base with %s — pass a ref explicitly, "
+              "e.g. `make ab-validate BASE=<ref>`)" % " or ".join(INTEGRATION_REFS))
         return 0
     if subprocess.run(["git", "-C", REPO, "rev-parse", "--verify", base + "^{commit}"],
                       capture_output=True).returncode != 0:
@@ -792,7 +1001,12 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         return 0
     try:
-        print(f"baseline: {base}   candidate: working tree\n")
+        short = _git_out("rev-parse", "--short", base) or base
+        subject = _git_out("log", "-1", "--format=%s", base)
+        origin = "merge base with %s" % " / ".join(INTEGRATION_REFS) \
+            if len(sys.argv) <= 1 else "explicit ref"
+        print("baseline: %s (%s)  %s\ncandidate: working tree\n"
+              % (short, origin, subject[:60]))
         check_world_model(old, REPO)
         check_hygiene(old, REPO)
         check_okf(old, REPO)
@@ -816,12 +1030,7 @@ def main():
         if r["skill"] != current:
             current = r["skill"]
             print("=== %s ===" % current)
-        if not r["ok"]:
-            mark = "WORSE"
-        elif r["kind"] == "guard":
-            mark = "HELD"
-        else:
-            mark = "IMPROVED" if r["moved"] else "UNPROVEN"
+        mark, _kind = classify_row(r, base)
         print("  %-*s  old=%-20s new=%-20s %s"
               % (width, r["dimension"], str(r["old"]), str(r["new"]), mark))
         if r["note"]:
@@ -837,12 +1046,15 @@ def main():
               "that did not measure anything.\nAB_RESULT: FAIL" % len(PROBE_ERRORS))
         return 1
 
-    worse = [r for r in ROWS if not r["ok"]]
-    unproven = [r for r in ROWS if r["ok"] and r["kind"] == "delta" and not r["moved"]]
-    improved = [r for r in ROWS if r["ok"] and r["kind"] == "delta" and r["moved"]]
-    held = [r for r in ROWS if r["ok"] and r["kind"] == "guard"]
-    print("%d improved · %d guards held · %d unproven · %d worse"
-          % (len(improved), len(held), len(unproven), len(worse)))
+    marks = [classify_row(r, base)[0] for r in ROWS]
+    worse = marks.count("WORSE")
+    improved = marks.count("IMPROVED")
+    held = marks.count("HELD")
+    landed = marks.count("HELD*")
+    unproven = marks.count("UNPROVEN")
+    print("%d improved · %d guards held · %d landed (HELD*, proven before this "
+          "baseline) · %d unproven · %d worse"
+          % (improved, held, landed, unproven, worse))
     ok = not worse and not unproven
     print("AB_RESULT: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1

@@ -50,13 +50,29 @@ make list-skills
 closes that: it checks a baseline ref into a temp worktree and runs identical fixtures
 through both trees, classifying each dimension as **IMPROVED** (a claimed delta that
 actually moved), **HELD** (behaviour deliberately unchanged — a regression guard),
-**WORSE**, or **UNPROVEN** (a claimed delta whose numbers did *not* move). The last two
+**HELD\*** (a delta proven in an earlier change and still intact), **WORSE**, or
+**UNPROVEN** (a claimed delta whose numbers did *not* move). `WORSE` and `UNPROVEN`
 both fail. `UNPROVEN` exists so a held guard can never be counted as a win, and so a
 "fix" that changes no measurement is caught rather than celebrated.
 
+**The baseline is the merge base with `origin/main`** (or `main`), so a bare
+`make ab-validate` always measures *the branch under review*. Override it with
+`make ab-validate BASE=<ref>`. It used to be a hardcoded commit, which meant the
+command re-measured one historical campaign forever and said nothing about the current
+work.
+
+**Adding a row:** pass `since=<a commit in the change that introduces it>` — use one of
+the `SINCE_*` constants at the top of the script, adding a new one per campaign. While
+that commit is outside the baseline your row is a live claim and must move the numbers.
+Once it merges it becomes `HELD*`: a standing regression guard that fails if the
+measurement moves at all. That is what lets one corpus accumulate across campaigns
+without either re-litigating settled work or silently dropping it — and it is why the
+merge-base default does not break the command the moment a change lands.
+
 It is **not** part of `make gate` (it needs a baseline commit in the clone, and SKIPs
-cleanly without one). Run it before merging a behavioural change, and **add rows when
-you add a guardrail** — a new rule with no A/B row is a claim nobody measured.
+cleanly without one — including when there is no `main` to merge-base against). Run it
+before merging a behavioural change, and **add rows when you add a guardrail** — a new
+rule with no A/B row is a claim nobody measured.
 
 Two honest limits, both worth respecting:
 
