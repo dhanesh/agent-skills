@@ -23,10 +23,16 @@ What it still does NOT cover, said plainly rather than implied away:
 
   * Whether the model writes GOOD tests. That is the limit `CLAUDE.md` records
     for prompt-driven behaviour; it needs the manual, documented model eval.
-  * The pytest PLUGIN path (`-p io_guard`, arming ahead of collection). This
-    eval must run with the stdlib alone, and pytest is not guaranteed present,
-    so the plugin hooks are exercised in `assets/test_io_guard.py` (skipped
-    there when pytest is absent) and the guard's core is exercised here.
+  * The pytest PLUGIN path is covered CONDITIONALLY (check 34). This eval must
+    run with the stdlib alone, so it cannot IMPORT pytest -- which is how the
+    plugin path escaped grading entirely while the guard was unusable under
+    every command the documents print. A subprocess invocation needs no
+    import, so check 34 extracts the documented command string from each
+    document and runs it verbatim wherever pytest is installed, and reports
+    itself NOT GRADED where it is not. What remains ungated: an environment
+    with no pytest grades the plugin path nowhere -- `assets/test_io_guard.py`
+    skips there too -- so a `make gate` on such a machine is green on 34
+    without having proved anything. That is stated rather than hidden.
   * The literal-emission rule (SKILL.md's "one real injection surface") has NO
     EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
     ships in this skill, so there is no code path that could turn a hostile
@@ -97,6 +103,12 @@ def load_json(result):
 # ---------------------------------------------------------------------------
 
 _NEG_RE = re.compile(r"\b(not|never|cannot|no|nothing)\b", re.I)
+
+# A documented command, as opposed to prose mentioning one: zero or more
+# NAME=value assignments, the invocation, and exactly one target.
+_DOC_CMD_RE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+    r'pytest\s+-p\s+io_guard\s+\S+$')
 
 
 def slice_between(text, start_pat, end_pat):
@@ -488,12 +500,22 @@ def main():
         #     filesystem (an actual conftest.py landing under this skill,
         #     which the prose scan alone would never see since it only reads
         #     SKILL.md and triage.md).
-        combined = skill_text + "\n" + triage_text
         has_plugin_desc = (
             "pytest plugin" in skill_text and "`-p`" in skill_text
             and "pytest plugin" in triage_text and "`-p`" in triage_text
         )
-        conftest_ok, conftest_bad = all_mentions_negated(combined, "conftest.py")
+        # PER DOCUMENT, not over the concatenation. Concatenating let the FIRST
+        # mention of `conftest.py` in triage.md inherit a negation from the tail
+        # of SKILL.md, 220 characters away in a different file -- so a positive
+        # "write a conftest.py into the repository root" line at the top of
+        # triage.md left this check green. The prose half is the half aimed at a
+        # doc rewording, so a placement that defeats it defeats the check.
+        conftest_ok, conftest_bad = True, []
+        for _label, _text in (("SKILL.md", skill_text),
+                              ("references/triage.md", triage_text)):
+            _ok, _bad = all_mentions_negated(_text, "conftest.py")
+            conftest_ok = conftest_ok and _ok
+            conftest_bad.extend("%s: %s" % (_label, b) for b in _bad)
         conftest_on_disk = []
         for base, dirs, files in os.walk(SKILL):
             dirs[:] = [d for d in dirs if d not in {".git", "__pycache__"}]
@@ -557,28 +579,41 @@ def main():
             #    case: a guard patching only os.open/read/write sees neither
             #    os.listdir (getdents) nor os.stat (stat), so a tier 1 unit
             #    calling either would pass BOTH layers.
+            #    Each case asserts the GROUP it trips on, not merely that
+            #    something raised. Without that the `subprocess` arm could not
+            #    fail: `subprocess.run` reaches `os.close` on its way, so
+            #    deleting the whole subprocess patch set still produced an
+            #    IOGuardViolation -- from the FILESYSTEM patch -- and the check
+            #    named after the subprocess family was grading the filesystem
+            #    one.
             missed = []
             try:
                 io_guard.arm(1)
-                for label, fn in (("os.listdir", lambda: os.listdir(probe_dir)),
-                                  ("os.stat", lambda: os.stat(probe_dir)),
-                                  ("os.walk", lambda: list(os.walk(probe_dir))),
-                                  ("os.rename", lambda: os.rename(probe_dir,
-                                                                  probe_dir)),
-                                  ("socket", lambda: __import__("socket").socket()),
-                                  ("subprocess", lambda: subprocess.run(
-                                      [sys.executable, "-c", "pass"]))):
+                for label, group, fn in (
+                        ("os.listdir", "filesystem",
+                         lambda: os.listdir(probe_dir)),
+                        ("os.stat", "filesystem", lambda: os.stat(probe_dir)),
+                        ("os.walk", "filesystem",
+                         lambda: list(os.walk(probe_dir))),
+                        ("os.rename", "filesystem",
+                         lambda: os.rename(probe_dir, probe_dir)),
+                        ("socket", "network",
+                         lambda: __import__("socket").socket()),
+                        ("subprocess", "subprocess",
+                         lambda: subprocess.run([sys.executable, "-c", "pass"]))):
                     try:
                         fn()
                         missed.append(label)
-                    except io_guard.IOGuardViolation:
-                        pass
+                    except io_guard.IOGuardViolation as exc:
+                        if exc.group != group:
+                            missed.append("%s (blocked as %s, not %s)"
+                                          % (label, exc.group, group))
                     except BaseException:               # noqa: BLE001
                         missed.append(label + " (wrong exception type)")
             finally:
                 io_guard.disarm()
             check("24 NEGATIVE: the directory/metadata, network and subprocess "
-                  "families all trip at tier 1",
+                  "families each trip at tier 1, in their OWN group",
                   not missed, "missed: %s" % ", ".join(missed))
 
             # 25 the signalling contract: a guard trip must be distinguishable
@@ -609,6 +644,13 @@ def main():
             # 26 tier awareness: a declared group is permitted, an undeclared
             #    one and the uncontrollable ones are not, and disarm restores.
             t2 = {"declared": None, "undeclared": None, "uncontrolled": None}
+            # Names that ARE patched in THIS window: at tier 2 with
+            # `filesystem` allowed the filesystem set is never installed, so
+            # `os.listdir`/`open` would compare equal to themselves whatever
+            # disarm did. `time.time` and `socket.socket` are blocked here.
+            _time_mod = __import__("time")
+            _socket_mod = __import__("socket")
+            before_time, before_socket = _time_mod.time, _socket_mod.socket
             try:
                 io_guard.arm(2, allow=("filesystem",))
                 try:
@@ -626,12 +668,22 @@ def main():
                         t2[key] = "blocked"
             finally:
                 io_guard.disarm()
-            restored = os.path.isdir(probe_dir)          # works again once down
+            # Falsifiable, unlike the `os.path.isdir(probe_dir)` probe this
+            # replaces: `_should_block` gates on `_state["armed"]`, which
+            # `disarm()` clears on its FIRST line, so that probe was True in
+            # every reachable state and a `disarm()` that restored nothing
+            # still passed. Identity against the pre-arm objects, plus an empty
+            # undo log, is the thing that actually changes.
+            restored = (_time_mod.time is before_time
+                        and _socket_mod.socket is before_socket
+                        and not io_guard._undo
+                        and not io_guard.armed())
             check("26 tier 2 permits only the groups the test declares, and "
-                  "disarm restores the primitives",
+                  "disarm puts the original objects back",
                   t2 == {"declared": "permitted", "undeclared": "blocked",
                          "uncontrolled": "blocked"} and restored,
-                  str(t2))
+                  "%s restored=%s undo=%d"
+                  % (t2, restored, len(io_guard._undo)))
 
             # 27 filter <-> guard agreement. C3's real lesson: "what counts as
             #    filesystem I/O" must have ONE answer, or a name can go missing
@@ -649,6 +701,187 @@ def main():
             check("27 every filter marker has a guard-layer intercept or a "
                   "recorded reason", not unaccounted,
                   "unaccounted: %s" % ", ".join(unaccounted))
+
+            # 30 NEGATIVE: `pkgutil.get_data` reads a real file through the
+            #    LOADER (`SourceFileLoader.get_data` -> `_io.open_code`),
+            #    naming neither `open` nor any `os` primitive. It was missed by
+            #    BOTH layers at once -- no `pkgutil` marker in the filter, and
+            #    the `io` re-exports patched but not the `_io` C module the
+            #    frozen importer actually holds -- and returned 14020 real
+            #    bytes at tier 1. The control below is what keeps the fix from
+            #    being "block imports": a real import must still be exempt, or
+            #    the guard declines every candidate.
+            pkg_trip, import_ok = None, None
+            try:
+                io_guard.arm(1)
+                try:
+                    __import__("pkgutil").get_data("json", "__init__.py")
+                    pkg_trip = "no exception -- a real file was read"
+                except io_guard.IOGuardViolation as exc:
+                    pkg_trip = exc
+                except BaseException as exc:            # noqa: BLE001
+                    pkg_trip = "wrong type: %r" % (exc,)
+                try:
+                    __import__("importlib").import_module("wave")
+                    import_ok = True
+                except BaseException as exc:            # noqa: BLE001
+                    import_ok = "import blocked: %r" % (exc,)
+            finally:
+                io_guard.disarm()
+            check("30 NEGATIVE: pkgutil.get_data trips at tier 1 (the _io "
+                  "layer), while a real import stays exempt",
+                  isinstance(pkg_trip, io_guard.IOGuardViolation)
+                  and pkg_trip.group == "filesystem"
+                  and import_ok is True,
+                  "trip=%s import=%s"
+                  % (pkg_trip if isinstance(pkg_trip, str)
+                     else pkg_trip.target, import_ok))
+
+            # 31 NEGATIVE: a violation raised on a worker thread. The thread
+            #    bootstrap catches BaseException, so this used to become a
+            #    warning beside a PASSED run -- the one outcome the guard must
+            #    never have, because the shipped test then fails the moment the
+            #    target repo runs its own suite without the guard.
+            thread_trip, clean_thread = None, None
+            try:
+                io_guard.arm(1)
+                worker = __import__("threading").Thread(
+                    target=lambda: open(victim, "w", encoding="utf-8"))
+                worker.start()
+                try:
+                    worker.join()
+                    thread_trip = "swallowed -- the run would report PASSED"
+                except io_guard.IOGuardViolation as exc:
+                    thread_trip = exc
+                box = {}
+                calm = __import__("threading").Thread(
+                    target=lambda: box.setdefault("n", 2))
+                calm.start()
+                calm.join()
+                clean_thread = box.get("n")
+            finally:
+                io_guard.disarm()
+            check("31 NEGATIVE: an off-main-thread violation reaches the main "
+                  "thread, and a thread doing no I/O still does not trip",
+                  isinstance(thread_trip, io_guard.IOGuardViolation)
+                  and thread_trip.thread is not None
+                  and clean_thread == 2,
+                  "trip=%s clean=%s"
+                  % (thread_trip if isinstance(thread_trip, str)
+                     else thread_trip.target, clean_thread))
+
+            # 32 NEGATIVE: a patched CLASS must stay a class. Replacing
+            #    `socket.socket` with a plain function made `class
+            #    SSLSocket(socket)` in ssl.py raise TypeError, so `import ssl`
+            #    -- and asyncio, http.client, urllib.request, requests --
+            #    failed at BOTH tiers on a correctly-tier-1 unit. That is a
+            #    FOURTH proof outcome the three-outcome contract cannot read.
+            class_shape = []
+            try:
+                io_guard.arm(1)
+                for module_name, attr in (("socket", "socket"), ("io", "FileIO"),
+                                          ("_io", "FileIO"), ("mmap", "mmap"),
+                                          ("subprocess", "Popen")):
+                    patched = getattr(__import__(module_name), attr, None)
+                    if not isinstance(patched, type):
+                        class_shape.append("%s.%s is %r"
+                                           % (module_name, attr, type(patched)))
+            finally:
+                io_guard.disarm()
+            ssl_run = subprocess.run(
+                [sys.executable, "-c",
+                 "import io_guard; io_guard.arm(1); import ssl, urllib.request; "
+                 "print(ssl.PROTOCOL_TLS_CLIENT)"],
+                env=dict(os.environ,
+                         PYTHONPATH=os.path.join(SKILL, "assets")),
+                capture_output=True, text=True, timeout=60)
+            check("32 NEGATIVE: every class-valued patch target stays a class, "
+                  "so `import ssl` still works while armed",
+                  not class_shape and ssl_run.returncode == 0,
+                  "; ".join(class_shape) or ssl_run.stderr.strip()[-160:])
+
+            # 33 NEGATIVE: `os.environ.get(...)`. The MutableMapping methods
+            #    bottom out in `__getitem__` and never call `os.getenv`, so
+            #    patching the functions caught none of them -- while the FILTER
+            #    does see `os.environ.get(...)`. The layers disagreed, in the
+            #    direction where the filter tiers a unit 2 and the guard says
+            #    nothing.
+            env_missed = []
+            try:
+                io_guard.arm(1)
+                alias = os.environ
+                for label, fn in (("subscript", lambda: os.environ["PATH"]),
+                                  ("get", lambda: os.environ.get("PATH")),
+                                  ("aliased get", lambda: alias.get("PATH")),
+                                  ("copy", lambda: os.environ.copy())):
+                    try:
+                        fn()
+                        env_missed.append(label)
+                    except io_guard.IOGuardViolation as exc:
+                        if exc.group != "environment":
+                            env_missed.append("%s (group %s)" % (label, exc.group))
+                    except BaseException:               # noqa: BLE001
+                        env_missed.append(label + " (wrong exception type)")
+            finally:
+                io_guard.disarm()
+            check("33 NEGATIVE: every read form of os.environ trips at tier 1",
+                  not env_missed, "missed: %s" % ", ".join(env_missed))
+
+        # 34 THE DOCUMENTED COMMAND, run verbatim through the real pytest
+        #    console script. This eval is stdlib-only and so cannot import
+        #    pytest -- which is exactly how the plugin path escaped grading
+        #    while the guard was unusable under every command the documents
+        #    print. A SUBPROCESS invocation needs no import here, so the path
+        #    is graded whenever pytest is installed and reported as ungraded
+        #    when it is not. `assets/test_io_guard.py` runs the same commands.
+        pytest_present = subprocess.run(
+            [sys.executable, "-c", "import pytest"],
+            capture_output=True, text=True).returncode == 0
+        doc_fail = []
+        if pytest_present:
+            proof = os.path.join(tmp, "proof")
+            os.makedirs(proof, exist_ok=True)
+            write(proof, "pure.py", "def add(a, b):\n    return a + b\n")
+            write(proof, "test_pure.py",
+                  "import pure\n\n\ndef test_add():\n"
+                  "    print('captured')\n    assert pure.add(2, 3) == 5\n")
+            commands = []
+            for label, text in (("SKILL.md", skill_text),
+                                ("references/triage.md", triage_text),
+                                ("references/stacks.md",
+                                 open(os.path.join(SKILL, "references",
+                                                   "stacks.md"),
+                                      encoding="utf-8").read())):
+                for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                    joined = re.sub(r"\\\n\s*", " ", block)
+                    for line in joined.splitlines():
+                        line = line.strip()
+                        if _DOC_CMD_RE.match(line):
+                            commands.append((label, line))
+            if not commands:
+                doc_fail.append("no documented invocation found to run")
+            for label, command in commands:
+                cmd = command.replace("<path>::<test_name>",
+                                      "test_pure.py::test_add")
+                env = dict(os.environ, SKILL_DIR=SKILL)
+                env.pop("PYTHONPATH", None)
+                env.pop("TEST_SAFETY_NET_TIER", None)
+                env.pop("TEST_SAFETY_NET_ALLOW", None)
+                run = subprocess.run(
+                    ["/bin/sh", "-c", cmd + " -q -p no:cacheprovider"],
+                    cwd=proof, env=env, capture_output=True, text=True,
+                    timeout=120)
+                if run.returncode != 0 or "1 passed" not in run.stdout:
+                    doc_fail.append("%s: %s -> %s"
+                                    % (label, cmd,
+                                       (run.stdout + run.stderr).strip()[-200:]))
+        check("34 the DOCUMENTED `pytest -p io_guard` command, extracted from "
+              "each document and run verbatim, passes cleanly",
+              not doc_fail,
+              "; ".join(doc_fail) if doc_fail else
+              ("%d command(s)" % len(commands) if pytest_present
+               else "NOT GRADED HERE: pytest is not installed in this "
+                    "environment; assets/test_io_guard.py grades it where it is"))
 
         # 28 SKILL.md invokes the guard by $SKILL_DIR path, not a
         #    skill-relative one (agents run from the TARGET repo) and names
