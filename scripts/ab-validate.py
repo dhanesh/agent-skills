@@ -48,6 +48,7 @@ UNPROVEN and WORSE both fail.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,9 @@ SINCE_TEST_SAFETY_NET = "4f88919"  # test-safety-net: the tier >= 3 netting guar
 SINCE_TSN_FIXROUND_4 = "5c69c68"  # test-safety-net: the rank_risk correctness cluster
 # (C1 basename-collision coverage, C2 the os exec/spawn family, I4 attribute
 # over-count, I5 import-time I/O floor, I6 subdirectory churn)
+SINCE_TSN_FIXROUND_5 = "dba1199"  # test-safety-net: the filesystem marker family
+# (C3), the shipped runtime guard (I1), and the document reconciliation
+# (I5 guard-trip outcome, M2 unittest fallback, M3/M4 spec drift)
 
 
 def _git_out(*args):
@@ -1062,6 +1066,171 @@ def check_test_safety_net_ranker(old, new):
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ── test-safety-net, fix round 5: the filesystem family + the shipped guard ──
+_GUARD_PROBE = r"""
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("ESCAPES:5"); print("WROTE:1"); raise SystemExit(0)
+tmp = tempfile.mkdtemp()
+victim = os.path.join(tmp, "escaped.txt")
+probe = os.path.join(tmp, "d")
+os.makedirs(probe, exist_ok=True)
+escapes = []
+def attempt(label, fn):
+    try:
+        fn()
+        escapes.append(label)
+    except io_guard.IOGuardViolation:
+        pass
+    except BaseException:
+        escapes.append(label + "!")
+io_guard.arm(1)
+try:
+    attempt("write", lambda: open(victim, "w").write("x"))
+    attempt("listdir", lambda: os.listdir(probe))
+    attempt("stat", lambda: os.stat(probe))
+    attempt("walk", lambda: list(os.walk(probe)))
+    attempt("glob", lambda: __import__("glob").glob(probe + "/*"))
+finally:
+    io_guard.disarm()
+print("ESCAPES:%d" % len(escapes))
+print("WROTE:%d" % (1 if os.path.exists(victim) else 0))
+"""
+
+
+def _tsn_read(tree, *parts):
+    path = os.path.join(tree, "test-safety-net", *parts)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def check_test_safety_net_guard(old, new):
+    """Round 5: one filter row, two guard rows, three document rows.
+
+    The guard rows run the tree's OWN `io_guard.py` in a subprocess and count
+    what still reaches the disk. A tree without the file scores the worst
+    possible value rather than skipping, because "no guard ships" is precisely
+    the state the row measures — that was finding I1.
+    """
+    scratch = tempfile.mkdtemp()
+
+    # C3 — the filesystem marker family was half-enumerated, so os.listdir /
+    # scandir / walk / stat / rename / glob.glob read "no I/O markers;
+    # directly callable" while os.remove and os.mkdir read Tier 2.
+    c3 = os.path.join(scratch, "c3")
+    os.makedirs(c3, exist_ok=True)
+    with open(os.path.join(c3, "fs.py"), "w") as f:
+        f.write("import glob\nimport os\n\n\n"
+                "def a(p):\n    return os.listdir(p)\n\n\n"
+                "def b(p):\n    return os.scandir(p)\n\n\n"
+                "def c(p):\n    return list(os.walk(p))\n\n\n"
+                "def d(p):\n    return os.stat(p)\n\n\n"
+                "def e(p):\n    return os.rename(p, p)\n\n\n"
+                "def f(p):\n    return glob.glob(p)\n")
+
+    def fs_units_called_tier_1(tree):
+        plan = _tsn_probe(tree, c3)
+        if plan is None:
+            return 6
+        return sum(1 for r in plan["ranked"] + plan["remainder"]
+                   if r["path"] == "fs.py" and r["tier"] == 1)
+
+    def guard_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _GUARD_PROBE, assets],
+                           capture_output=True, text=True, timeout=120)
+        escapes, wrote = 5, 1
+        for line in r.stdout.splitlines():
+            if line.startswith("ESCAPES:"):
+                escapes = int(line.split(":", 1)[1])
+            elif line.startswith("WROTE:"):
+                wrote = int(line.split(":", 1)[1])
+        return escapes, wrote
+
+    def contradicting_docs(tree):
+        """Sentences that reclassify after a guard trip without naming Tier 3."""
+        skill = _tsn_read(tree, "SKILL.md")
+        triage = _tsn_read(tree, "references", "triage.md")
+        if skill is None or triage is None:
+            return 2
+        bad = 0
+        for text in (skill, triage):
+            flat = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*>\s?", "", text))
+            for sentence in re.split(r"(?<=[.;])\s+", flat):
+                if "reclassif" not in sentence.lower():
+                    continue
+                if "Tier 3" not in sentence or re.search(r"Tier 2 or 3", sentence):
+                    bad += 1
+        return bad
+
+    def hedged_unittest_gap(tree):
+        stacks = _tsn_read(tree, "references", "stacks.md")
+        if stacks is None:
+            return 1
+        return 1 if "imported anywhere earlier in the same process" in stacks else 0
+
+    def stale_spec_claims(tree):
+        path = os.path.join(tree, "docs", "superpowers", "specs",
+                            "2026-09-09-test-safety-net-design.md")
+        try:
+            with open(path, encoding="utf-8") as f:
+                spec = f.read()
+        except OSError:
+            return 3
+        stale = 0
+        if "not yet implemented" in spec:
+            stale += 1
+        # each claim counts as stale unless an amendment retracts it
+        if ("This gets a dedicated\ntest and a negative eval fixture." in spec
+                or "gets a dedicated test and a negative eval fixture" in spec) \
+                and "no captured-output emitter ships" not in spec:
+            stale += 1
+        if "plus a cross-tool agreement test" in spec \
+                and "No detector ships, and none" not in spec:
+            stale += 1
+        return stale
+
+    s = "test-safety-net"
+    a, b = fs_units_called_tier_1(old), fs_units_called_tier_1(new)
+    row(s, "filesystem units the filter calls tier 1 'no I/O markers' (lower=better)",
+        a, b, b < a,
+        "C3: os.listdir/scandir/walk/stat/rename and glob.glob are real I/O; "
+        "the table detected os.remove and os.mkdir but not their siblings",
+        since=SINCE_TSN_FIXROUND_5)
+    (ea, wa), (eb, wb) = guard_probe(old), guard_probe(new)
+    row(s, "real I/O escaping an armed tier-1 guard (lower=better)", ea, eb, eb < ea,
+        "I1: the guard was the SOLE enforcement of the frontmatter's "
+        "never-real-I/O promise and did not ship at all",
+        since=SINCE_TSN_FIXROUND_5)
+    row(s, "a file created during an armed tier-1 proof (lower=better)", wa, wb, wb < wa,
+        "I1: the invariant is about side effects, so the file must not exist "
+        "afterwards -- an exception raised after the write would be no guard",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = contradicting_docs(old), contradicting_docs(new)
+    row(s, "reclassify sentences that do not name Tier 3 (lower=better)", a, b, b < a,
+        "I5: triage.md licensed 'drop it at least to Tier 2 or 3', turning the "
+        "one unconditional decline in the design into a retry loop",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = hedged_unittest_gap(old), hedged_unittest_gap(new)
+    row(s, "conditional hedge on the unittest guard gap (lower=better)", a, b, b < a,
+        "M2: the generated test module imports the unit at its own top level, "
+        "which ALWAYS precedes setUpModule -- the gap is unconditional",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = stale_spec_claims(old), stale_spec_claims(new)
+    row(s, "spec claims the tree contradicts (lower=better)", a, b, b < a,
+        "M3/M4: the binding authority asserted a test and a negative fixture "
+        "that were never built, a detector that never shipped, and a status of "
+        "'not yet implemented' on a branch about to merge",
+        since=SINCE_TSN_FIXROUND_5)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1221,6 +1390,7 @@ def main():
         check_starlight(old, REPO)
         check_test_safety_net(old, REPO)
         check_test_safety_net_ranker(old, REPO)
+        check_test_safety_net_guard(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

@@ -450,11 +450,18 @@ def main():
 
         # 17. triage.md names all four tiers and the recorded-promotion
         #     discipline for database/HTTP
+        # ANCHORED TO THE TABLE ROW, not to the bare string. The review's
+        # "Considers" flagged that `r"Tier 4|4 — not reachable"` passed only
+        # because the literal "Tier 4" happened to appear nowhere else in
+        # triage.md -- one incidental rewording and the check stops biting.
+        # Round 5 made exactly that rewording (the import-time floor paragraph
+        # says "not Tier 4"), so the loose form is now unfalsifiable for tier 4
+        # and this anchors all four to the row that has to exist.
         tier_markers = [
-            re.search(r"Tier 1|1 — direct", triage_text),
-            re.search(r"Tier 2|2 — wider boundary", triage_text),
-            re.search(r"Tier 3|3 — needs a seam", triage_text),
-            re.search(r"Tier 4|4 — not reachable", triage_text),
+            re.search(r"(?m)^\|\s*\*\*1 — direct\b", triage_text),
+            re.search(r"(?m)^\|\s*\*\*2 — wider boundary\b", triage_text),
+            re.search(r"(?m)^\|\s*\*\*3 — needs a seam\b", triage_text),
+            re.search(r"(?m)^\|\s*\*\*4 — not reachable\b", triage_text),
         ]
         check(
             "17 references/triage.md names all four tiers and the "
