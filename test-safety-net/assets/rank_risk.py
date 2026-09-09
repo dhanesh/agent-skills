@@ -18,7 +18,11 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
 
   identity
     STACK_NAME                                   str; the report's "stack" key
-    matches(root) -> bool                        is this repo of this stack?
+    evidence(root) -> int                        HOW MUCH of this repo is this
+                                                 stack's: the non-test source
+                                                 files it claims, plus a
+                                                 manifest bonus. Never a
+                                                 boolean -- see `detect_stack`.
 
   files
     iter_source_files(root, include_tests=False) sorted repo-relative paths
@@ -109,18 +113,79 @@ import stack_python                                                 # noqa: E402
 from stack_common import SKIP_DIRS, read_text                       # noqa: E402,F401
 
 # ── Stack registry ───────────────────────────────────────────────────────
-# FIRST MATCH WINS, so a more specific stack must sit ahead of a less specific
-# one. Python is both last and the fallback: a directory this ranker cannot
-# place still gets a well-formed (empty) report rather than an error.
+# HIGHEST EVIDENCE WINS, so registration ORDER carries no meaning at all and a
+# stack can be appended without re-litigating what it sits in front of.
+#
+# The detector this replaced took the FIRST stack whose `matches(root)` was
+# True, which answers "does any evidence exist" when the question a real repo
+# poses is "what is this repo MOSTLY". Polyglot repos are the common case, not
+# the exception: THIS repo holds 51 non-test `.py` files, 17 `.mjs`/`.ts`, and
+# exactly one `package.json` -- which belongs to a Starlight scaffold that
+# `starlight-handbook-kit` installs into somebody else's repo. A generous node
+# `matches()` in front of Python therefore reclassified the ranker's own
+# corpus as node, and a stack picked that way discovers the wrong units,
+# triages them with the wrong tables, and reports it all as a clean result.
 STACKS = [stack_python]
 
+# How close two stacks may be before the answer is "I do not know". Relative,
+# so it scales with the size of the repo rather than firing on every small
+# tree. A tie is REPORTED, never guessed: guessing between two stacks that
+# scored the same is exactly the silent misclassification this detector exists
+# to stop, and the caller can always settle it with `--stack`.
+AMBIGUITY_MARGIN = 0.10
 
-def detect_stack(root: str):
-    """The first registered stack that claims `root`; Python if none does."""
-    for stack in STACKS:
-        if stack.matches(root):
-            return stack
-    return stack_python
+
+class AmbiguousStack(Exception):
+    """Two stacks scored too close to call. Carries the evidence for the report."""
+
+    def __init__(self, scores):
+        self.scores = scores          # [(STACK_NAME, score)], best first
+        detail = ", ".join("%s=%d" % (name, score) for name, score in scores)
+        super().__init__("cannot tell which stack this repo is: " + detail)
+
+
+def stack_evidence(root: str):
+    """[(STACK_NAME, score)] for every registered stack, best first.
+
+    The evidence behind a detection verdict, for reporting it. Ties broken by
+    name so two runs on the same tree agree.
+    """
+    return sorted(((s.STACK_NAME, s.evidence(root)) for s in STACKS),
+                  key=lambda t: (-t[1], t[0]))
+
+
+def stack_by_name(name: str):
+    """The registered stack called `name`, or None."""
+    return next((s for s in STACKS if s.STACK_NAME == name), None)
+
+
+def detect_stack(root: str, name: str = None):
+    """The stack with the most evidence in `root`; Python when there is none.
+
+    `name` overrides detection outright (the CLI's `--stack`), because a
+    detector that weighs evidence can still be wrong about a repo whose owner
+    knows better, and "wrong with no way to say so" is worse than wrong.
+
+    Raises `AmbiguousStack` when the top two scores are within
+    `AMBIGUITY_MARGIN` of each other. Nothing below the ranker guesses on the
+    caller's behalf: `main` prints the scores and asks for `--stack`.
+    """
+    if name is not None:
+        stack = stack_by_name(name)
+        if stack is None:
+            raise ValueError("unknown stack: %s (have: %s)"
+                             % (name, ", ".join(s.STACK_NAME for s in STACKS)))
+        return stack
+    scores = stack_evidence(root)
+    if not scores or scores[0][1] <= 0:
+        # Nothing claims it. Python is the fallback, so an unplaceable
+        # directory still gets a well-formed (empty) report rather than an
+        # error -- the behaviour this had before evidence scoring.
+        return stack_python
+    runner_up = scores[1][1] if len(scores) > 1 else 0
+    if runner_up > 0 and scores[0][1] - runner_up <= scores[0][1] * AMBIGUITY_MARGIN:
+        raise AmbiguousStack(scores)
+    return stack_by_name(scores[0][0])
 
 
 # ── Compatibility surface ────────────────────────────────────────────────
@@ -606,6 +671,9 @@ def main(argv=None) -> int:
                    help="how many units to net in this pass (default: 10)")
     p.add_argument("--since", default="6 months ago",
                    help="churn window, any git --since expression (default: 6 months ago)")
+    p.add_argument("--stack", default=None,
+                   choices=sorted(s.STACK_NAME for s in STACKS),
+                   help="override stack detection (default: detect by evidence)")
     args = p.parse_args(argv)
     if not os.path.isdir(args.repo):
         sys.stderr.write(f"error: not a directory: {args.repo}\n")
@@ -618,7 +686,24 @@ def main(argv=None) -> int:
     if prefix:
         sys.stderr.write(f"note: analysing a subdirectory of a git repo; churn is "
                          f"scoped to {prefix}\n")
-    json.dump(rank(args.repo, args.since, args.top_n), sys.stdout,
+    # WHICH STACK WON, AND ON WHAT EVIDENCE — always, not only when it is
+    # close. The verdict decides which files are read, which units exist and
+    # which marker tables triage them, so a run that picked the wrong one is
+    # wrong everywhere at once while still printing a well-formed report. The
+    # scores are the one thing that makes that visible without re-running.
+    scores = stack_evidence(args.repo)
+    try:
+        stack = detect_stack(args.repo, args.stack)
+    except AmbiguousStack as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        sys.stderr.write("       re-run with --stack {%s} to choose.\n"
+                         % ",".join(name for name, _ in scores))
+        return 2
+    sys.stderr.write("note: stack=%s (evidence: %s%s)\n"
+                     % (stack.STACK_NAME,
+                        ", ".join("%s=%d" % (n, v) for n, v in scores),
+                        "; forced by --stack" if args.stack else ""))
+    json.dump(rank(args.repo, args.since, args.top_n, stack), sys.stdout,
               indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

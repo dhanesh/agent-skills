@@ -33,21 +33,33 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
-from stack_common import SKIP_DIRS, read_text                        # noqa: E402
+from stack_common import (MANIFEST_BONUS, SKIP_DIRS, has_manifest,   # noqa: E402
+                          read_text)
 
 STACK_NAME = "python"
 
+# Files that declare "this directory is a Python project". `setup.py` is a
+# source file too and so is counted twice; that is right -- it is both.
+MANIFESTS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
+             "Pipfile", "environment.yml")
 
-def matches(root: str) -> bool:
-    """True when `root` holds at least one non-test `.py` file.
 
-    Python is also `rank_risk.detect_stack`'s fallback, so this predicate only
-    decides ORDER against more specific stacks -- never whether a repo can be
-    ranked at all.
+def evidence(root: str) -> int:
+    """How much of `root` is Python: non-test `.py` files, plus a manifest bonus.
+
+    ZERO WHEN THERE ARE NO SOURCE FILES AT ALL, manifest or not. A manifest
+    with nothing behind it must not win a repo this stack would then discover
+    no units in -- and a `requirements.txt` beside a pure-TypeScript tree (a
+    docs build, a lint shim) is exactly that. The bonus multiplies a real
+    claim; it never manufactures one.
+
+    Python is also `rank_risk.detect_stack`'s fallback, so a score of 0 here
+    never means "this repo cannot be ranked".
     """
-    for _rel in iter_source_files(root):
-        return True
-    return False
+    n = sum(1 for _rel in iter_source_files(root))
+    if not n:
+        return 0
+    return n + (MANIFEST_BONUS if has_manifest(root, MANIFESTS) else 0)
 
 
 def is_test_path(rel: str) -> bool:

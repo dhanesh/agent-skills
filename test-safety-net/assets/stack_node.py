@@ -43,9 +43,14 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
-from stack_common import SKIP_DIRS, read_text                        # noqa: E402
+from stack_common import (MANIFEST_BONUS, SKIP_DIRS, has_manifest,   # noqa: E402
+                          read_text)
 
 STACK_NAME = "node"
+
+# Files that declare "this directory is a node/TypeScript project".
+MANIFESTS = ("package.json", "tsconfig.json", "jsconfig.json", "deno.json",
+             "deno.jsonc")
 
 # Extensions this stack calls source. `.d.ts` is excluded (see
 # `iter_source_files`), and so is everything a bundler would generate --
@@ -68,24 +73,28 @@ _TEST_FILE_RE = re.compile(r"(?:^|[.\-_])(?:test|spec)s?$")
 
 # ── Identity ─────────────────────────────────────────────────────────────
 
-def matches(root: str) -> bool:
-    """True when `root` looks like a JS/TS repo.
+def evidence(root: str) -> int:
+    """How much of `root` is node: non-test JS/TS files, plus a manifest bonus.
 
-    A manifest is the strong signal; a bare source file is the fallback, for
-    the script directories and scaffolds that carry no `package.json`. Both
-    are deliberately generous, because `rank_risk.detect_stack` takes the
-    FIRST match and a repo that is genuinely node reporting as Python
-    discovers zero units and reads as a clean result.
+    THE PREDICATE THIS REPLACED WAS A BOOLEAN, AND THAT WAS THE BUG. It
+    answered "is there any node evidence here at all", which is True of this
+    very repo -- 17 `.mjs`/`.ts` files against 51 non-test `.py` ones, and a
+    single `package.json` belonging to a scaffold this repo SHIPS. Under first
+    match wins that boolean reclassified the ranker's own corpus as node. The
+    question a polyglot repo actually poses is "what is this repo MOSTLY", and
+    only a score can answer it.
 
-    The cost of that generosity is real and is why registration order matters:
-    a mostly-Python repo holding one `.mjs` helper matches here too.
+    ZERO WHEN THERE ARE NO SOURCE FILES AT ALL, manifest or not: a
+    `package.json` carrying nothing but a `lint` script (in a Python repo, the
+    commonest reason one exists) must not win a repo this stack would then
+    discover no units in. `has_manifest` additionally refuses a manifest that
+    is nested under a template directory or more than `MANIFEST_MAX_DEPTH`
+    below `root`.
     """
-    for name in ("package.json", "tsconfig.json", "jsconfig.json"):
-        if os.path.isfile(os.path.join(root, name)):
-            return True
-    for _rel in iter_source_files(root):
-        return True
-    return False
+    n = sum(1 for _rel in iter_source_files(root))
+    if not n:
+        return 0
+    return n + (MANIFEST_BONUS if has_manifest(root, MANIFESTS) else 0)
 
 
 # ── Files ────────────────────────────────────────────────────────────────

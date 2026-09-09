@@ -10,7 +10,10 @@ a form that must not silently disappear (a unit whose missing test is the bug).
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import shutil
 import sys
@@ -326,7 +329,7 @@ class TestStripper(unittest.TestCase):
 
 class TestInterfaceNames(NodeCase):
     def test_supplies_every_interface_name_except_triage(self):
-        for attr in ("STACK_NAME", "matches", "iter_source_files", "is_test_path",
+        for attr in ("STACK_NAME", "evidence", "iter_source_files", "is_test_path",
                      "is_test_for", "module_of", "name_pattern", "path_pattern",
                      "IDENTIFIER_RE", "preceding_qualifier", "module_bindings",
                      "reached_through_module", "discover_units"):
@@ -337,18 +340,26 @@ class TestInterfaceNames(NodeCase):
         self.assertFalse(hasattr(stack_node, "triage"))
         self.assertNotIn(stack_node, rank_risk.STACKS)
 
-    def test_matches_on_a_manifest_and_on_bare_sources(self):
-        self.assertFalse(stack_node.matches(self.root))
+    def test_evidence_counts_sources_and_adds_a_manifest_bonus(self):
+        self.assertEqual(stack_node.evidence(self.root), 0)
+        write(self.root, "src/a.mjs", "export function a() {}\n")
+        write(self.root, "src/b.ts", "export function b() {}\n")
+        self.assertEqual(stack_node.evidence(self.root), 2)
         write(self.root, "package.json", "{}\n")
-        self.assertTrue(stack_node.matches(self.root))
-        other = tempfile.mkdtemp(prefix="tsn-node-")
-        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
-        write(other, "scripts/build.mjs", "export function build() {}\n")
-        self.assertTrue(stack_node.matches(other))
+        self.assertEqual(stack_node.evidence(self.root),
+                         2 + stack_node.MANIFEST_BONUS)
 
-    def test_matches_ignores_node_modules(self):
+    def test_a_manifest_with_no_source_behind_it_scores_nothing(self):
+        # The commonest reason a Python repo has a `package.json`: a `lint` or
+        # `format` script and nothing else. Scoring it would let a stack win a
+        # repo it then discovers no units in -- a clean-looking empty report.
+        write(self.root, "package.json", '{"scripts": {"lint": "prettier ."}}\n')
+        self.assertEqual(stack_node.evidence(self.root), 0)
+
+    def test_evidence_ignores_node_modules(self):
         write(self.root, "node_modules/x/index.js", "export function y() {}\n")
-        self.assertFalse(stack_node.matches(self.root))
+        write(self.root, "node_modules/x/package.json", "{}\n")
+        self.assertEqual(stack_node.evidence(self.root), 0)
 
     def test_is_test_path(self):
         for rel in ("src/a.test.js", "src/a.spec.ts", "src/a-test.jsx", "src/a_test.ts",
@@ -523,6 +534,141 @@ class TestCoverageThroughTheCore(NodeCase):
         units, _ = stack_node.discover_units(self.root)
         refs = rank_risk.inbound_refs(self.root, units, stack_node)
         self.assertGreaterEqual(refs["src/utils.js::parse"], 1)
+
+
+# ── Stack detection ──────────────────────────────────────────────────────
+
+REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
+# True only when these assets are still sitting in the agent-skills repo they
+# were written in. Installed into somebody else's tree, `REPO_ROOT` is THAT
+# repo, and the classification below is a statement about it that nobody made.
+IN_SOURCE_REPO = os.path.isdir(os.path.join(REPO_ROOT, "scripts", "gates"))
+
+
+class TestStackDetection(unittest.TestCase):
+    """The detector, with BOTH stacks registered.
+
+    Every test here installs the two-stack registry explicitly rather than
+    trusting whatever `STACKS` happens to hold, because the failure these pin
+    is one stack shouting down another and it is unprovable with one stack
+    registered. `test_the_registry_really_holds_both` is the separate
+    assertion that the shipped registry is that list.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="tsn-detect-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self._stacks = rank_risk.STACKS
+        rank_risk.STACKS = [stack_node, rank_risk.stack_python]
+        self.addCleanup(setattr, rank_risk, "STACKS", self._stacks)
+
+    @unittest.skipUnless(IN_SOURCE_REPO, "assets are installed outside their own repo")
+    def test_this_repo_classifies_as_python_not_node(self):
+        # THE test that would have caught the misclassification. This repo
+        # holds 51 non-test `.py` files against 17 `.mjs`/`.ts`, and its only
+        # `package.json` sits inside `starlight-handbook-kit/assets/templates/
+        # scaffold/` -- a scaffold this repo SHIPS, not its own manifest.
+        # First-match-wins with a generous node `matches()` called this repo
+        # node, which discovers the wrong units and triages them with the
+        # wrong marker tables while still printing a well-formed report.
+        self.assertEqual(rank_risk.detect_stack(REPO_ROOT).STACK_NAME, "python")
+        scores = dict(rank_risk.stack_evidence(REPO_ROOT))
+        self.assertGreater(scores["python"], scores["node"])
+        # And no manifest bonus reached either side: the scaffold's
+        # `package.json` is the only manifest in the tree.
+        self.assertLess(scores["node"], stack_node.MANIFEST_BONUS)
+
+    def test_a_manifest_inside_a_template_dir_is_not_evidence(self):
+        write(self.root, "assets/templates/scaffold/package.json", "{}")
+        write(self.root, "src/thing.py", "def go():\n    return 1\n")
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+        # Nothing scored for node at all -- not "scored less". A manifest
+        # describing a scaffold this repo SHIPS says nothing about this repo.
+        self.assertEqual(dict(rank_risk.stack_evidence(self.root))["node"], 0)
+
+    def test_template_dirs_bound_the_manifest_rule_and_nothing_else(self):
+        # Source files under a template directory still COUNT. The asymmetry is
+        # deliberate: this repo's own Python lives in `<skill>/assets/`, so a
+        # file-count rule that skipped template directories would erase the
+        # majority that makes this repo Python in the first place. It is the
+        # MANIFEST -- a claim about what a directory IS -- that a template
+        # directory invalidates.
+        for i in range(4):
+            write(self.root, "assets/templates/scaffold/src/a%d.ts" % i,
+                  "export function a%d() {}\n" % i)
+        self.assertEqual(dict(rank_risk.stack_evidence(self.root))["node"], 4)
+
+    def test_a_manifest_at_the_root_beats_a_file_majority(self):
+        # The direction the bonus exists for: a node package that vendors a
+        # couple of Python scripts is still a node package.
+        write(self.root, "package.json", '{"name": "app"}\n')
+        write(self.root, "src/app.ts", "export function boot() {}\n")
+        for i in range(6):
+            write(self.root, "tools/gen%d.py" % i, "def go():\n    return 1\n")
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "node")
+
+    def test_a_monorepo_package_manifest_still_counts(self):
+        write(self.root, "packages/api/package.json", '{"name": "api"}\n')
+        write(self.root, "packages/api/src/app.ts", "export function boot() {}\n")
+        write(self.root, "tools/gen.py", "def go():\n    return 1\n")
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "node")
+
+    def test_a_manifest_buried_deeper_than_the_depth_limit_does_not(self):
+        write(self.root, "vendored/deep/nested/pkg/package.json", '{"name": "x"}\n')
+        write(self.root, "vendored/deep/nested/pkg/app.ts", "export function b() {}\n")
+        write(self.root, "a.py", "def go():\n    return 1\n")
+        write(self.root, "b.py", "def go2():\n    return 1\n")
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+
+    def test_a_dead_heat_is_reported_not_guessed(self):
+        write(self.root, "a.py", "def a():\n    return 1\n")
+        write(self.root, "b.py", "def b():\n    return 1\n")
+        write(self.root, "a.ts", "export function a() {}\n")
+        write(self.root, "b.ts", "export function b() {}\n")
+        with self.assertRaises(rank_risk.AmbiguousStack) as caught:
+            rank_risk.detect_stack(self.root)
+        self.assertEqual(dict(caught.exception.scores), {"python": 2, "node": 2})
+
+    def test_an_explicit_stack_settles_an_ambiguous_repo(self):
+        write(self.root, "a.py", "def a():\n    return 1\n")
+        write(self.root, "a.ts", "export function a() {}\n")
+        self.assertEqual(rank_risk.detect_stack(self.root, "node").STACK_NAME, "node")
+        self.assertEqual(rank_risk.detect_stack(self.root, "python").STACK_NAME, "python")
+        with self.assertRaises(ValueError):
+            rank_risk.detect_stack(self.root, "cobol")
+
+    def test_a_clear_majority_is_not_ambiguous(self):
+        for i in range(20):
+            write(self.root, "src/m%d.py" % i, "def go():\n    return 1\n")
+        write(self.root, "scripts/build.mjs", "export function build() {}\n")
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+
+    def test_an_empty_directory_still_falls_back_to_python(self):
+        # The pre-existing contract: an unplaceable directory gets a
+        # well-formed empty report, never an error.
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+        self.assertEqual(rank_risk.stack_evidence(self.root),
+                         [("node", 0), ("python", 0)])
+
+    def test_the_cli_reports_the_verdict_and_refuses_to_guess(self):
+        write(self.root, "a.py", "def a():\n    return 1\n")
+        write(self.root, "a.ts", "export function a() {}\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = rank_risk.main([self.root])
+        self.assertEqual(code, 2)
+        self.assertIn("--stack", err.getvalue())
+        self.assertIn("python=1", err.getvalue())
+
+    def test_the_cli_names_the_winner_and_its_evidence(self):
+        write(self.root, "a.py", "def a():\n    return 1\n")
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = rank_risk.main([self.root])
+        self.assertEqual(code, 0)
+        self.assertIn("stack=python", err.getvalue())
+        self.assertIn("node=0", err.getvalue())
+        self.assertEqual(json.loads(out.getvalue())["stack"], "python")
 
 
 if __name__ == "__main__":
