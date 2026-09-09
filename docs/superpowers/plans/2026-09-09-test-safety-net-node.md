@@ -259,7 +259,7 @@ Expected: all green.
 
 ---
 
-### Task 3: Node precise discovery via the repo's own toolchain
+### Task 4: Node precise discovery via the repo's own toolchain
 
 **Files:**
 - Modify: `test-safety-net/assets/stack_node.py`
@@ -297,7 +297,46 @@ Where `node_modules/typescript` exists, both paths must return the same unit ids
 
 ---
 
-### Task 4: Node I/O markers and triage
+### Task 3: Node I/O markers, triage, and stack detection
+
+**Phase 0 — replace first-match-wins stack detection.** Task 2 declined to register
+`stack_node` and was right to. This repo holds 75 `.py` files, 17 `.mjs`/`.ts`, and a
+`package.json` — the last one inside `starlight-handbook-kit/assets/templates/scaffold/`,
+a *template*, not this repo's own manifest. Under first-match-wins with a generous node
+`matches()`, the ranker's own corpus reclassifies as node and the eval crashes. Polyglot
+repos are the common case, not the exception, so the detector has to weigh evidence
+rather than take the first vote.
+
+- [ ] **Step 0a: `matches(root) -> bool` becomes `evidence(root) -> int`**
+
+Each stack scores itself: the count of non-test source files it claims, plus a decisive
+bonus for a manifest **at or near the analysed root** (`package.json`, `go.mod`,
+`Cargo.toml`, `pyproject.toml`). A manifest nested under `assets/`, `templates/`,
+`fixtures/`, `examples/` or `testdata/` is evidence about a *template*, not about this
+repo, and scores nothing.
+
+- [ ] **Step 0b: highest score wins; a tie is reported, not guessed**
+
+On a tie, or when the top two are within a hair of each other, say so and require an
+explicit choice rather than picking. Add a `--stack` CLI flag that overrides detection
+outright.
+
+- [ ] **Step 0c: the test that would have caught this**
+
+```python
+def test_this_repo_classifies_as_python_not_node(self):
+    # 75 .py against 17 .mjs/.ts, and the only package.json is inside a
+    # scaffold TEMPLATE. First-match-wins got this wrong and crashed the eval.
+    self.assertEqual(rank_risk.detect_stack(REPO_ROOT).STACK_NAME, "python")
+
+def test_a_manifest_inside_a_template_dir_is_not_evidence(self):
+    write(self.root, "assets/templates/scaffold/package.json", "{}")
+    write(self.root, "src/thing.py", "def go():\n    return 1\n")
+    self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+```
+
+- [ ] **Step 0d: register `stack_node`** with its `triage`, and re-run the whole gate and
+eval — the crash Task 2 avoided must not reappear.
 
 **Files:**
 - Modify: `test-safety-net/assets/stack_node.py`
