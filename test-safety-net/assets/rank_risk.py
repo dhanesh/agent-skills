@@ -109,10 +109,26 @@ def churn(root: str, since: str = "6 months ago") -> dict:
 
 
 _IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _references_module(module: str, text: str, path_tokens) -> bool:
+    """True if `text`, or `path_tokens` (from the file's own path), plausibly names `module`.
+
+    `module` is a defining file's basename without `.py`. Shared by
+    `inbound_refs` and `already_covered` so the "does this OTHER file talk
+    about that module" predicate cannot drift between the two call sites —
+    they need the same answer to the same question for opposite reasons: one
+    uses it to avoid crediting a unit with reach it does not have, the other
+    to avoid crediting it with coverage it does not have.
+    """
+    if re.search(r"\b%s\b" % re.escape(module), text):
+        return True
+    return module in path_tokens
 
 
 def inbound_refs(root: str, units) -> dict:
-    """Approximate blast radius: whole-identifier references, including intra-module callers.
+    """Approximate blast radius: intra-module use, plus cross-file use from files naming the module.
 
     APPROXIMATE, on purpose, and labelled as such wherever it surfaces. It counts
     identifier occurrences, so a mention in a comment or a docstring counts and a
@@ -120,40 +136,60 @@ def inbound_refs(root: str, units) -> dict:
     better — the report says so and names it as an optional upgrade — but
     requiring one would make the skill undeployable in the repos that need it most.
 
-    RULING (post-launch): this now counts occurrences of a unit's name across
-    ALL files, INCLUDING its own defining file, and excludes only the
-    occurrences on the unit's own definition line (by exact line number, not a
-    flat -1, so a decorated def or a same-line annotation is handled
-    correctly). The earlier version excluded the whole defining file to avoid
-    counting the definition site, but that also discarded every intra-module
-    caller — and a CLI dispatcher, helper or internal API is called mostly
-    from its own module, so those units were silently scoring 0 regardless of
-    how central they are. A genuine self-reference elsewhere in the unit's own
-    body (not on the definition line) now counts as a real intra-module use.
+    RULING (fix round 2): counts an occurrence in a file when either (a) it
+    is the unit's OWN file — every occurrence except those on the definition
+    line itself (by exact line number, not a flat -1, so a decorated def or a
+    same-line annotation is handled correctly); or (b) it is ANOTHER file
+    that plausibly references the unit's MODULE (the defining file's
+    basename, without `.py`) — via `_references_module`, the same predicate
+    `already_covered` uses, so the two rules cannot drift apart.
 
-    Each file's identifiers are tokenised once into a per-file Counter, summed
-    into a global Counter; a unit's count is the global total for its name
-    minus however many of those occurrences fall on the unit's own definition
-    line. This is O(total bytes + units) rather than O(units x total bytes) —
-    the naive per-unit regex scan does not survive on a repo with thousands of
-    units.
+    This replaces the earlier rule of crediting a unit with a bare name match
+    ANYWHERE in the repo, which handed every same-named unit reach it did not
+    have — e.g. 13 unrelated local `write` helpers each inheriting ~470
+    references that belonged to entirely different files. The remaining
+    failure mode is now the opposite one, and deliberate: UNDER-counting. A
+    caller that reaches a unit only through a re-export, without ever naming
+    the unit's own module, stops counting. Understating reach is the
+    direction this skill wants to be wrong in — inventing reach a unit does
+    not have is exactly what produced the false 470s.
     """
-    global_counts: collections.Counter = collections.Counter()
+    per_file_counts = {}
     file_lines = {}
+    file_texts = {}
+    path_tokens = {}
     for rel in iter_py_files(root, include_tests=True):
         text = read_text(root, rel)
-        global_counts.update(_IDENTIFIER_RE.findall(text))
+        per_file_counts[rel] = collections.Counter(_IDENTIFIER_RE.findall(text))
         file_lines[rel] = text.splitlines()
+        file_texts[rel] = text
+        path_tokens[rel] = set(_PATH_TOKEN_RE.findall(rel))
+
+    all_files = sorted(per_file_counts)
+    module_reffiles_cache = {}
 
     counts = {}
     for u in units:
-        lines = file_lines.get(u["path"], [])
+        name = u["name"]
+        own_path = u["path"]
+        module = os.path.splitext(os.path.basename(own_path))[0]
+
+        if module not in module_reffiles_cache:
+            module_reffiles_cache[module] = [
+                rel for rel in all_files
+                if rel != own_path and _references_module(module, file_texts[rel], path_tokens[rel])
+            ]
+        ref_files = module_reffiles_cache[module]
+
+        total = per_file_counts[own_path].get(name, 0)
+        lines = file_lines.get(own_path, [])
         lineno = u["lineno"]
-        def_line_count = 0
         if 1 <= lineno <= len(lines):
-            def_line_count = sum(1 for tok in _IDENTIFIER_RE.findall(lines[lineno - 1])
-                                  if tok == u["name"])
-        counts[u["id"]] = global_counts.get(u["name"], 0) - def_line_count
+            total -= sum(1 for tok in _IDENTIFIER_RE.findall(lines[lineno - 1]) if tok == name)
+        for rel in ref_files:
+            total += per_file_counts[rel].get(name, 0)
+
+        counts[u["id"]] = total
     return counts
 
 
@@ -623,22 +659,20 @@ def _analyze_file(root, rel):
                           local_methods, tier4)
 
 
-_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-
-
 def already_covered(root: str, units) -> dict:
     """Unit id -> the test file naming BOTH it and its module. Keeps the ranking on what is NOT netted.
 
     Same whole-identifier approximation as inbound_refs. A test file counts as
     covering a unit only when it references the unit's NAME *and* its MODULE
-    (the defining file's basename, without `.py`) — the module as a
-    whole-identifier match in the test file's text, or as a token in the test
-    file's own path (so `tests/test_refund.py` counts for `payments/refund.py`
-    even if the import uses an alias). Name-only matching was tried first and
-    rejected: a common name like `apply`, `parse`, `run`, `validate` or `get`
-    collides across modules, so a test covering one module's `apply` marked
-    every OTHER module's `apply` covered too — hiding a genuinely untested
-    unit from `ranked` entirely, which is the opposite of safe.
+    (the defining file's basename, without `.py`), via `_references_module` —
+    the module as a whole-identifier match in the test file's text, or as a
+    token in the test file's own path (so `tests/test_refund.py` counts for
+    `payments/refund.py` even if the import uses an alias). Name-only
+    matching was tried first and rejected: a common name like `apply`,
+    `parse`, `run`, `validate` or `get` collides across modules, so a test
+    covering one module's `apply` marked every OTHER module's `apply`
+    covered too — hiding a genuinely untested unit from `ranked` entirely,
+    which is the opposite of safe.
 
     The remaining failure mode is milder: a unit exercised only through a
     re-export (a test that reaches it via a different module's name and never
@@ -654,12 +688,11 @@ def already_covered(root: str, units) -> dict:
     for u in units:
         name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
         module = os.path.splitext(os.path.basename(u["path"]))[0]
-        module_pattern = re.compile(r"\b%s\b" % re.escape(module))
         for rel in sorted(texts):
             text = texts[rel]
             if not name_pattern.search(text):
                 continue
-            if module_pattern.search(text) or module in path_tokens[rel]:
+            if _references_module(module, text, path_tokens[rel]):
                 covered[u["id"]] = rel
                 break
     return covered

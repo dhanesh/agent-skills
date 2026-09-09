@@ -140,6 +140,27 @@ class TestInboundRefs(TempRepo):
         units = rank_risk.discover_units(self.root)
         self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::apply"], 0)
 
+    def test_cross_file_name_collision_does_not_inflate_an_unrelated_units_refs(self):
+        # FIX round 2 (mirror of already_covered's FIX 1): a call to
+        # alpha.py::helper must not inflate beta.py::helper's refs just
+        # because they share a name -- caller.py never names "beta".
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["beta.py::helper"], 0)
+
+    def test_genuine_cross_file_caller_that_names_the_module_still_counts(self):
+        # The mirror-image control: a file that DOES import from the right
+        # module still counts -- the fix must not zero out real cross-file use.
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
+
     def test_digit_glued_identifier_is_not_a_reference(self):
         # "2x" must not count as a reference to a unit named `x` — the old \bx\b
         # boundary semantics, which the single-pass tokeniser has to preserve.
