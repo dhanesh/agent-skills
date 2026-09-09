@@ -1753,19 +1753,33 @@ def self_test():
     # a live delta that cannot move. That is exactly what happened here: the
     # branch was rebuilt by cherry-pick and a pin kept pointing into the
     # discarded history, turning 11 settled rows into WORSE/UNPROVEN.
-    dangling = []
-    for name, val in sorted(globals().items()):
-        if not name.startswith("SINCE_") or not isinstance(val, str):
-            continue
-        if not (_is_ancestor(val, "origin/main") or _is_ancestor(val, "HEAD")):
-            dangling.append("%s=%s" % (name, val))
-    if dangling:
-        print("FAIL: since-pin(s) not reachable from origin/main or HEAD: %s"
-              % ", ".join(dangling))
-        print("      a rebase or rebuilt branch invalidates a pin without deleting it")
-        rc = 1
+    # A shallow or partial clone cannot answer "is X an ancestor of Y" for any X:
+    # with no history, `merge-base --is-ancestor` is False for everything, so a
+    # fail-closed check reports EVERY pin as orphaned. That is indistinguishable
+    # from the real bug this test exists to catch, and it is a lie in the more
+    # damaging direction -- it cries wolf on a healthy tree, which trains a
+    # reader to ignore the one time it is right. CI now clones with
+    # fetch-depth: 0 so the check actually runs; this guard is what keeps it
+    # honest anywhere else (a fresh shallow clone, a worktree of one).
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                             cwd=REPO, capture_output=True, text=True)
+    if shallow.stdout.strip() == "true":
+        print("SKIP: since-pin reachability -- shallow clone, no history to "
+              "resolve ancestry against (clone with fetch-depth: 0 to enable)")
     else:
-        print("PASS: every SINCE_* pin is reachable from the integration branch")
+        dangling = []
+        for name, val in sorted(globals().items()):
+            if not name.startswith("SINCE_") or not isinstance(val, str):
+                continue
+            if not (_is_ancestor(val, "origin/main") or _is_ancestor(val, "HEAD")):
+                dangling.append("%s=%s" % (name, val))
+        if dangling:
+            print("FAIL: since-pin(s) not reachable from origin/main or HEAD: %s"
+                  % ", ".join(dangling))
+            print("      a rebase or rebuilt branch invalidates a pin without deleting it")
+            rc = 1
+        else:
+            print("PASS: every SINCE_* pin is reachable from the integration branch")
 
     # Every delta row in the shipped corpus must declare `since`, or it can
     # never convert to a guard and will fail the run after it merges.
