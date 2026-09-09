@@ -41,16 +41,22 @@ list this skill cannot act on itself (see Tiers 3/4 below). Do not use this to c
 number, to bless current behaviour as correct, or to refactor code to make it testable — that
 inverts the safety property the skill exists to provide (see Invariant 1).
 
-**Locating this skill's helper (do this first).** The ranker is a bundled script; a path written
-relative to this skill will not resolve from the target repo you're working in. Resolve the base
-directory once and reuse it everywhere:
+**Locating this skill's helpers (do this first).** Two bundled scripts ship with this skill — the
+ranker (`assets/rank_risk.py`, step 2) and the runtime I/O guard (`assets/io_guard.py`, step 4).
+A path written relative to this skill will not resolve from the target repo you're working in.
+Resolve the base directory once and reuse it everywhere:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
 # If you don't have it, discover it:
 SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'test-safety-net' 2>/dev/null | head -1)
 test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard.py"  || echo "SKILL_DIR not resolved"
 ```
+
+Both are stdlib-only python3, offline. Do not author your own guard: the one that ships is what
+Invariant 2 is enforced by, and a hand-rolled substitute that patches the wrong layer is worse
+than none, because it makes the invariant look enforced when it is not.
 
 ## Workflow
 
@@ -114,23 +120,41 @@ test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
    filter — it declines obvious hazards, but Python's dynamic dispatch means it cannot decide
    reachability from source alone; review rounds on the ranker found fifteen-plus constructions it
    called safe that actually reached real I/O. So the invariant is enforced during this red→green
-   proof by a **tier-aware runtime guard**, loaded as a **pytest plugin via `-p`** on the
-   single-test invocation (never a `conftest.py` written into the repo, and never a fixture inside
-   the generated test) — a plugin loads ahead of collection, which is what makes pre-import
-   blocking work, and it touches nothing in the user's tree, keeping Invariant 1 clean with no
-   carve-out. The tier it enforces is passed per invocation by environment variable, which is
-   sufficient because the proof runs one unit at a time — a single run has a single tier:
-   - **Tier 1 candidate:** block *everything* — filesystem, clock, randomness, network,
-     subprocess, DB. The unit claimed to touch nothing, so any touch falsifies the classification:
-     reclassify and discard the test.
-   - **Tier 2 candidate:** block only the groups this test does *not* deliberately fake. The
-     boundary it controls (a temp dir, a frozen clock) is the point, not a violation.
+   proof by the **tier-aware runtime guard this skill ships**, `assets/io_guard.py`, loaded as a
+   **pytest plugin via `-p`** on the single-test invocation (never a `conftest.py` written into the
+   repo, and never a fixture inside the generated test) — a plugin loads ahead of collection, which
+   is what makes pre-import blocking work, and it touches nothing in the user's tree, keeping
+   Invariant 1 clean with no carve-out. **Run every RED and every GREEN through it**, like this:
 
-   The guard patches the **lowest** layer reachable — the `os` primitives (`os.open`, `os.write`,
-   `os.posix_spawn`, `os.spawn*`, `os.fork`), `io.FileIO`, `mmap.mmap`, `socket.socket`,
-   `subprocess.Popen`, and the DB driver connect entry points in use — not just the ergonomic
-   wrappers above them. `os.open` is not the builtin `open`; `os.posix_spawn` never routes through
-   `subprocess.Popen`.
+   ```sh
+   # Tier 1 candidate — the unit claims to touch nothing, so block everything.
+   PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" TEST_SAFETY_NET_TIER=1 \
+     pytest -p io_guard <path>::<test_name>
+
+   # Tier 2 candidate — name EVERY controllable group this test deliberately fakes.
+   PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" \
+     TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem,clock \
+     pytest -p io_guard <path>::<test_name>
+   ```
+
+   The tier is passed per invocation by environment variable, which is sufficient because the proof
+   runs one unit at a time — a single run has a single tier:
+   - **Tier 1 candidate:** blocks *everything* — filesystem, clock, randomness, environment,
+     network, subprocess, DB — and ignores `TEST_SAFETY_NET_ALLOW`. The unit claimed to touch
+     nothing, so any touch falsifies the classification: reclassify the unit to Tier 3 and
+     discard the test.
+   - **Tier 2 candidate:** blocks the uncontrollable groups always, plus every controllable group
+     you did *not* name in `TEST_SAFETY_NET_ALLOW`. The boundary this test controls (a temp dir, a
+     frozen clock) is the point, not a violation — so name it, and name **all** of it. Omitting the
+     variable falls back to permitting all four controllable groups, which is looser than the test
+     actually needs.
+
+   The guard patches the **lowest** layer reachable, which for CPython is the `os` primitives plus
+   the file-object constructors — every name the ranker's marker tables classify on, including the
+   directory-and-metadata family (`os.listdir`, `os.scandir`, `os.walk`, `os.stat`, `os.rename`)
+   that no fd-level patch can see. `os.open` is not the builtin `open`; `pathlib` reaches neither;
+   `os.posix_spawn` never routes through `subprocess.Popen`. The full patch list, the
+   filter↔guard coverage table and the residuals are in `references/triage.md`.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is
@@ -139,8 +163,6 @@ test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
    unit to Tier 3 and discard the test, regardless of whether that run was red or green. Treating
    a guard trip as an ordinary assertion failure defeats the mechanism.
 
-   Full patch list and the residual (a subprocess that itself dials out escapes an in-process
-   guard) are in `references/triage.md`.
 
 5. **Report.** Emit the deliverable below, then stop — the ranked remainder is what the next run
    resumes from.
@@ -203,7 +225,10 @@ No coverage percentage anywhere, in this report or in conversation about it.
 instead, and why — never a silent override (see step 2).
 
 **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurrence
-count, not a call graph, so it cannot tell a call from a comment and can miss a re-export. Where
+count, not a call graph. It cannot tell a call from a comment, it misses a caller that reaches the
+unit only through a re-export, and a **bare** occurrence of the name inside a file that references
+the module still counts even when it means something else (a same-named local, or one imported
+from a different module). Qualified forms are exact: `mod.name` counts, `buf.name` does not. Where
 the user already has a real call-graph tool, it computes that half of the score better. This is an
 **optional** upgrade, never a dependency — nothing here or in the eval requires one.
 

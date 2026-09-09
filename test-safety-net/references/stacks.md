@@ -36,16 +36,33 @@ rather than proceeding on assumptions.
   - pytest: `pytest <path>::<test_name>` for a bare function, or
     `pytest <path>::<TestClass>::<test_name>` for a method.
   - unittest: `python3 -m unittest <module.path>.<ClassName>.<test_name>`.
-- **Runtime guard placement.** Load the guard as a **pytest plugin via `-p`** on the single-test
-  invocation itself (e.g. `pytest -p test_safety_net_guard <path>::<test_name>`), with the tier
-  passed by environment variable — never a `conftest.py` written into the repo. See
-  `references/triage.md` for exactly what it must patch, how it signals a guard trip versus an
+- **Runtime guard placement.** The guard ships as `assets/io_guard.py`. Load it as a **pytest
+  plugin via `-p`** on the single-test invocation itself, with the tier passed by environment
+  variable — never a `conftest.py` written into the repo:
+
+  ```sh
+  PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" TEST_SAFETY_NET_TIER=1 \
+    pytest -p io_guard <path>::<test_name>
+  ```
+
+  See `references/triage.md` for exactly what it patches, how it signals a guard trip versus an
   ordinary assertion failure, and why a plugin (not a written file) is what keeps Invariant 1
-  clean. `unittest` has no equivalent plugin-loading mechanism; when falling back to it, install
-  the guard via `setUpModule` at the top of the generated test module instead, accepting that it
-  runs slightly later than the pytest plugin would (after the module under test is already
-  imported, if that module is imported anywhere earlier in the same process) — flag this
-  explicitly in the report as a weaker guarantee than the pytest path.
+  clean.
+
+- **The `unittest` fallback covers strictly less, and not conditionally.** `unittest` has no
+  plugin-loading mechanism, so the guard has to be armed from `setUpModule` in the generated test
+  module (`io_guard.arm(1)` / `io_guard.arm(2, allow=("filesystem",))`, with
+  `addModuleCleanup(io_guard.disarm)`). The generated test module imports the unit under test at
+  its own top level, and a module's top level **always** runs before `setUpModule`. So on this
+  path the guard **never** covers import-time I/O — not "slightly later", not "if the module was
+  imported earlier in the same process". Unconditionally never.
+
+  That matters because import-time I/O is exactly the case the ranker floors to Tier 3 ("a fixture
+  runs too late to control it — needs a seam"), and the unittest fallback has no backstop for a
+  unit the filter mis-tiered into Tier 1 from a module that reads a file at import. State this in
+  the report whenever the fallback is used, as a weaker guarantee than the pytest path — and
+  prefer pytest whenever the repo will tolerate it, since this is the one gap the fallback cannot
+  close.
 
 ## The `make` case
 

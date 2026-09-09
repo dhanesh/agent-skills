@@ -5,29 +5,34 @@ Deterministic harness -> skill tooling -> model-free grader, stdlib-only, offlin
 Fixture repos are built under `tempfile.mkdtemp()` only; nothing tracked in the
 repo is ever touched.
 
-SCOPE, STATED PLAINLY. This skill's runtime guard (the pytest plugin that
-enforces "never write a test that performs real I/O" during the red->green
-proof) is SPECIFIED in SKILL.md and references/triage.md but NOT BUILT — no
-guard asset ships in this skill yet. This eval therefore grades exactly two
-things and nothing more:
+SCOPE, STATED PLAINLY. This eval grades three things:
 
   1. `assets/rank_risk.py`'s CLI, end to end, on synthetic fixture repos --
      the static triage FILTER that ranks and declines candidates before any
-     test is written.
-  2. The prompt artifacts (SKILL.md, references/triage.md) that describe the
-     workflow, including the runtime guard's *design*.
+     test is written (checks 01-12, 20-21).
+  2. The prompt artifacts (SKILL.md, references/triage.md) that carry the
+     workflow and the guard's contract (checks 13-21, 28-29).
+  3. `assets/io_guard.py`, the runtime guard that is the SOLE enforcement of
+     "never write a test that performs real I/O" -- armed for real, made to
+     face real I/O, and required to raise its own exception type (checks
+     22-27). Those are negative fixtures: they perform genuine filesystem,
+     network and subprocess calls with the guard armed, so a guard that
+     patched the wrong layer, or none, fails them.
 
-It does NOT exercise the runtime guard's behaviour, because there is no guard
-to run. Claiming otherwise here would be exactly the kind of oversold eval
-this repo's own standard forbids.
+What it still does NOT cover, said plainly rather than implied away:
 
-The literal-emission rule (SKILL.md's "one real injection surface") gets the
-SAME treatment, for the SAME reason: no captured-output emitter ships in this
-skill yet, so there is no code path that could turn a hostile captured string
-into executable source, and nothing here to run against one. That surface has
-NO EXECUTABLE COVERAGE in this eval. It is graded as prose only — a check
-that the rule is actually stated in SKILL.md, not a demonstration that the
-(not-yet-built) emitter honours it.
+  * Whether the model writes GOOD tests. That is the limit `CLAUDE.md` records
+    for prompt-driven behaviour; it needs the manual, documented model eval.
+  * The pytest PLUGIN path (`-p io_guard`, arming ahead of collection). This
+    eval must run with the stdlib alone, and pytest is not guaranteed present,
+    so the plugin hooks are exercised in `assets/test_io_guard.py` (skipped
+    there when pytest is absent) and the guard's core is exercised here.
+  * The literal-emission rule (SKILL.md's "one real injection surface") has NO
+    EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
+    ships in this skill, so there is no code path that could turn a hostile
+    captured string into executable source, and nothing to run against one. It
+    is graded as prose only -- a check that the rule is stated, not a
+    demonstration that a (non-existent) emitter honours it.
 """
 from __future__ import annotations
 
@@ -42,6 +47,16 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
 RANKER = os.path.join(SKILL, "assets", "rank_risk.py")
+GUARD = os.path.join(SKILL, "assets", "io_guard.py")
+
+
+def _load(name, path):
+    """Import a shipped asset by path. Stdlib only; nothing is installed."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 _checks = []
 
@@ -488,6 +503,181 @@ def main():
             has_plugin_desc and conftest_ok and not conftest_on_disk,
             detail19,
         )
+
+        # =====================================================================
+        # The runtime guard, exercised. Negative fixtures: the guard is ARMED
+        # and then made to face REAL I/O. A guard that does not ship, or that
+        # patches the ergonomic wrapper instead of the primitive underneath,
+        # fails these.
+        #
+        # Every armed window below is tiny and wrapped in try/finally: this
+        # eval writes fixture files of its own, and its frames are NOT library
+        # frames, so anything it does while armed would (correctly) trip.
+        # =====================================================================
+        guard_present = os.path.isfile(GUARD)
+        check("22 assets/io_guard.py ships (the sole enforcement of "
+              "invariant 2 is a file, not a description)", guard_present)
+        if guard_present:
+            io_guard = _load("io_guard", GUARD)
+            victim = os.path.join(tmp, "guard-must-block-this.txt")
+            probe_dir = os.path.join(tmp, "guard_probe")
+            os.makedirs(probe_dir, exist_ok=True)
+
+            # 23 NEGATIVE: a tier 1 candidate that writes a file must raise the
+            #    guard's OWN type, and the file must not exist afterwards. An
+            #    exception raised after the write would be no guard at all.
+            trip, wrote = None, None
+            try:
+                io_guard.arm(1)
+                try:
+                    with open(victim, "w", encoding="utf-8") as fh:
+                        fh.write("escaped")
+                    trip = "no exception"
+                except io_guard.IOGuardViolation as exc:
+                    trip = exc
+                except BaseException as exc:            # noqa: BLE001
+                    trip = "wrong type: %r" % (exc,)
+            finally:
+                io_guard.disarm()
+            wrote = os.path.exists(victim)
+            check("23 NEGATIVE: armed at tier 1, a real file write raises "
+                  "IOGuardViolation and creates nothing",
+                  isinstance(trip, io_guard.IOGuardViolation) and not wrote,
+                  "trip=%s wrote=%s" % (trip if isinstance(trip, str)
+                                        else trip.target, wrote))
+
+            # 24 NEGATIVE: the directory-and-metadata family. This is the C3
+            #    case: a guard patching only os.open/read/write sees neither
+            #    os.listdir (getdents) nor os.stat (stat), so a tier 1 unit
+            #    calling either would pass BOTH layers.
+            missed = []
+            try:
+                io_guard.arm(1)
+                for label, fn in (("os.listdir", lambda: os.listdir(probe_dir)),
+                                  ("os.stat", lambda: os.stat(probe_dir)),
+                                  ("os.walk", lambda: list(os.walk(probe_dir))),
+                                  ("os.rename", lambda: os.rename(probe_dir,
+                                                                  probe_dir)),
+                                  ("socket", lambda: __import__("socket").socket()),
+                                  ("subprocess", lambda: subprocess.run(
+                                      [sys.executable, "-c", "pass"]))):
+                    try:
+                        fn()
+                        missed.append(label)
+                    except io_guard.IOGuardViolation:
+                        pass
+                    except BaseException:               # noqa: BLE001
+                        missed.append(label + " (wrong exception type)")
+            finally:
+                io_guard.disarm()
+            check("24 NEGATIVE: the directory/metadata, network and subprocess "
+                  "families all trip at tier 1",
+                  not missed, "missed: %s" % ", ".join(missed))
+
+            # 25 the signalling contract: a guard trip must be distinguishable
+            #    from the RED half of red->green, and must survive the
+            #    `except Exception:` that wraps I/O in most legacy code.
+            swallowed = None
+            try:
+                io_guard.arm(1)
+
+                def legacy_unit():
+                    try:
+                        return open(victim, "w", encoding="utf-8")
+                    except Exception:                   # noqa: BLE001
+                        return "fallback"
+                try:
+                    legacy_unit()
+                    swallowed = True
+                except io_guard.IOGuardViolation:
+                    swallowed = False
+            finally:
+                io_guard.disarm()
+            check("25 the violation is not an AssertionError and is not "
+                  "swallowed by `except Exception:`",
+                  not issubclass(io_guard.IOGuardViolation, AssertionError)
+                  and not issubclass(io_guard.IOGuardViolation, Exception)
+                  and swallowed is False)
+
+            # 26 tier awareness: a declared group is permitted, an undeclared
+            #    one and the uncontrollable ones are not, and disarm restores.
+            t2 = {"declared": None, "undeclared": None, "uncontrolled": None}
+            try:
+                io_guard.arm(2, allow=("filesystem",))
+                try:
+                    os.listdir(probe_dir)
+                    t2["declared"] = "permitted"
+                except io_guard.IOGuardViolation:
+                    t2["declared"] = "blocked"
+                for key, fn in (("undeclared", lambda: __import__("time").time()),
+                                ("uncontrolled",
+                                 lambda: __import__("socket").socket())):
+                    try:
+                        fn()
+                        t2[key] = "permitted"
+                    except io_guard.IOGuardViolation:
+                        t2[key] = "blocked"
+            finally:
+                io_guard.disarm()
+            restored = os.path.isdir(probe_dir)          # works again once down
+            check("26 tier 2 permits only the groups the test declares, and "
+                  "disarm restores the primitives",
+                  t2 == {"declared": "permitted", "undeclared": "blocked",
+                         "uncontrolled": "blocked"} and restored,
+                  str(t2))
+
+            # 27 filter <-> guard agreement. C3's real lesson: "what counts as
+            #    filesystem I/O" must have ONE answer, or a name can go missing
+            #    from both layers at once.
+            ranker_mod = _load("rank_risk", RANKER)
+            markers = set()
+            for table in (ranker_mod.CONTROLLABLE, ranker_mod.UNCONTROLLABLE):
+                for group_markers in table.values():
+                    markers.update(group_markers)
+            unaccounted = sorted(
+                m for m in markers
+                if io_guard._marker_intercept(m) is None
+                and m not in io_guard.PARTIALLY_INTERCEPTED
+                and m not in io_guard.NOT_INTERCEPTED)
+            check("27 every filter marker has a guard-layer intercept or a "
+                  "recorded reason", not unaccounted,
+                  "unaccounted: %s" % ", ".join(unaccounted))
+
+        # 28 SKILL.md invokes the guard by $SKILL_DIR path, not a
+        #    skill-relative one (agents run from the TARGET repo) and names
+        #    both environment variables the guard reads.
+        check("28 SKILL.md wires the guard by $SKILL_DIR path and names its "
+              "tier environment variable",
+              "$SKILL_DIR/assets" in skill_text
+              and "io_guard" in skill_text
+              and "TEST_SAFETY_NET_TIER" in skill_text)
+
+        # 29 CROSS-DOCUMENT: SKILL.md and triage.md must agree on what a guard
+        #    trip does. They did not -- the spec and SKILL.md said "Tier 3,
+        #    discard, regardless of red or green" while triage.md licensed
+        #    "drop it at least to Tier 2 or 3, per what tripped", turning the
+        #    one unconditional decline in this design into a retry loop. No
+        #    single-document check could see that, which is why this one reads
+        #    BOTH: every sentence that reclassifies after a trip must name
+        #    Tier 3, and none may offer a lower tier as an alternative.
+        reclass_bad = []
+        for label, text in (("SKILL.md", skill_text),
+                            ("references/triage.md", triage_text)):
+            flat = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*>\s?", "", text))
+            sentences = [s_ for s_ in re.split(r"(?<=[.;])\s+", flat)
+                         if "reclassif" in s_.lower()]
+            if not sentences:
+                reclass_bad.append("%s: says nothing about reclassifying" % label)
+            for sentence in sentences:
+                if "Tier 3" not in sentence:
+                    reclass_bad.append("%s: %r does not name Tier 3"
+                                       % (label, sentence[:70]))
+                if re.search(r"Tier 2 or 3|at least to \*?\*?Tier 2", sentence):
+                    reclass_bad.append("%s: %r offers a tier below 3"
+                                       % (label, sentence[:70]))
+        check("29 CROSS-DOC: SKILL.md and triage.md agree a guard trip means "
+              "Tier 3 and discard, with no lower alternative",
+              not reclass_bad, "; ".join(reclass_bad))
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

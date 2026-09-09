@@ -39,9 +39,14 @@ class GuardCase(unittest.TestCase):
     break every test that ran after it, in this suite and every sibling one."""
 
     def setUp(self):
-        self.addCleanup(io_guard.disarm)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        # Registered LAST so it runs FIRST: cleanups are LIFO, and tearing down
+        # the temp dir while the guard is still armed would trip it on
+        # `shutil.rmtree`. That ordering is not incidental -- it is the same
+        # discipline the workflow needs, where the guard must come down before
+        # anything else touches the disk.
+        self.addCleanup(io_guard.disarm)
         self.path = os.path.join(self.tmp, "fixture.txt")
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("real bytes on a real disk\n")

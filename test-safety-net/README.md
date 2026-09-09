@@ -47,9 +47,14 @@ recorded justification (an in-memory database, or `mockstar-mock` for HTTP), nev
 
 Static triage is a **filter**, not the enforcement — Python's dynamic dispatch means source
 analysis alone can't decide what a unit really touches. The invariant "never write a test that
-performs real I/O" is enforced at runtime instead, by a tier-aware guard that patches the syscall
-layer during the red→green proof, loaded as a pytest plugin ahead of collection rather than
-written into the repo. Full mechanism in [`references/triage.md`](references/triage.md).
+performs real I/O" is enforced at runtime instead, by a tier-aware guard that ships with the skill
+([`assets/io_guard.py`](assets/io_guard.py)) and is loaded as a pytest plugin ahead of collection
+rather than written into the repo. It patches the lowest layer Python exposes — `builtins.open`,
+`io.open`, the `os` primitives including the directory-and-metadata family no fd-level patch can
+see, `socket.socket`, `subprocess.Popen` and the DB entry points already imported — and raises its
+own exception type, so a guard trip (the classification is wrong) is never mistaken for an
+assertion failure (the captured value is wrong). Full mechanism, coverage table and residuals in
+[`references/triage.md`](references/triage.md).
 
 Tiers 3 and 4 are output, not failure — a ranked "here's what blocks testing and the smallest fix"
 list is the handoff to `clean-code`, and is often worth more to a human than the tests themselves.
@@ -90,5 +95,6 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `references/stacks.md` — per-stack facts (find units / where tests go / run one test).
 - `references/parameters.md` — `rank_risk.py`'s CLI flags and JSON output shape.
 - `assets/rank_risk.py` — the ranker: churn, approximate blast radius, testability tier, score.
-- `assets/test_rank_risk.py` — its stdlib test suite.
+- `assets/io_guard.py` — the tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
+- `assets/test_rank_risk.py`, `assets/test_io_guard.py` — their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).

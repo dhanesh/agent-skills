@@ -15,7 +15,7 @@ JSON across repeated runs on an unchanged repo.
 |---|---|---|---|
 | `repo` | positional, required | — | Path to the repository to analyse. Must be a directory. |
 | `--top-n` | flag | `10` | How many units to net into `ranked` in this pass. Everything past this cutoff lands in `remainder`, not discarded — the next run picks up there. |
-| `--since` | flag | `"6 months ago"` | Churn window, any `git --since` expression. With no git history (or no `.git`), churn degrades to `0` for every unit rather than raising. |
+| `--since` | flag | `"6 months ago"` | Churn window, any `git --since` expression. With no git history (or no `.git`), churn degrades to `0` for every unit rather than raising. When `repo` is a *subdirectory* of a git repo, churn is scoped to that subtree and a `note:` line naming the scope is written to **stderr** — the JSON on stdout is unchanged. |
 
 ## Output — top-level keys
 
@@ -28,7 +28,7 @@ JSON across repeated runs on an unchanged repo.
 | `ranked` | array of rows | The top `--top-n` netted units, highest score first, ties broken by `id`. **This is what you show the user at the confirmation gate.** |
 | `remainder` | array of rows | Netted units past the `--top-n` cutoff, same sort order. Where the next run resumes. |
 | `not_netted` | array of rows | Units at Tier 3 or Tier 4 — sorted by `(tier, id)`. These never get a test written; they are the seam/refactor list for `clean-code`. |
-| `covered` | array of strings | Unit `id`s some existing test file already appears to exercise (name-and-module match). These never entered `ranked`/`remainder`/`not_netted` in the first place — this key is a flat index across ALL discovered units, not a fourth partition; a unit can appear here and also in `not_netted` if it happens to be both. |
+| `covered` | array of strings | Unit `id`s some existing test file already appears to exercise: the test names the unit AND plausibly names its module. Where two source files share a basename (`app/utils.py`, `lib/utils.py`), a bare `utils` is not enough — the evidence must name the file's *path* (`app.utils` or `app/utils`), so an untested unit is never credited to its namesake's test. The cost is the opposite direction: a repo-root file colliding with a packaged one has no qualifier to offer and reads as uncovered. These never entered `ranked`/`remainder`/`not_netted` in the first place — this key is a flat index across ALL discovered units, not a fourth partition; a unit can appear here and also in `not_netted` if it happens to be both. |
 
 ## Output — a ranked/remainder/not_netted row
 
@@ -40,7 +40,7 @@ JSON across repeated runs on an unchanged repo.
 | `lineno` | Line the `def`/`class` starts on. |
 | `kind` | `"function"` or `"class"`. |
 | `churn` | Commits touching this unit's file within the `--since` window. Exact, from git log. |
-| `inbound_refs` | Approximate blast radius: identifier occurrences of this unit's name, credited to its own file (excluding the definition line) plus other files that plausibly reference its module. **Static approximation, not a call graph** — it cannot tell a call from a comment, and a re-export can hide real reach. Show it alongside `churn` in the report so a human can see which signal drove the placement (see "Reading a row's score" below). |
+| `inbound_refs` | Approximate blast radius: identifier occurrences of this unit's name, credited to its own file (excluding the definition line) plus other files that plausibly reference its module. **Static approximation, not a call graph** — it cannot tell a call from a comment, and a re-export can hide real reach. Qualified forms are exact (`mod.name` counts, `buf.name` does not); a **bare** occurrence in a file that references the module still counts even when it means something else — a same-named local, or one imported from a different module. Show it alongside `churn` in the report so a human can see which signal drove the placement (see "Reading a row's score" below). |
 | `inbound_approx` | Always `true` in this version — labels `inbound_refs` as approximate wherever it surfaces. |
 | `tier` | `1`–`4`, per `references/triage.md`. |
 | `tier_reason` | Human-readable reason for the tier. For a Tier 2 row this names only ONE controllable group (alphabetically first) — see the multi-group note in `references/triage.md` before treating it as the complete list of what to fake. |

@@ -30,7 +30,14 @@ often (a good filter means fewer discarded attempts), not to replace it.
 | **1 — direct** | deps passable, output returnable, no I/O reachable | Unit test. |
 | **2 — wider boundary** | unit does I/O, but its module / handler / CLI can be driven with the boundary controlled | Pin at that boundary and **name it** in the report. Not a unit test — a narrow characterization test. As a change-detector, equally good. |
 | **3 — needs a seam** | no honest boundary without adding code | Report the smallest **additive** seam (sprout/wrap) and hand to `clean-code`. Never performed by this skill. |
-| **4 — not reachable** | global state, work in constructors/at import time, deep branch soup | Prioritized refactor list with the reason. |
+| **4 — not reachable** | global state, deep branch soup, or *uncontrollable* I/O at import time | Prioritized refactor list with the reason. |
+
+A module that performs **controllable** I/O at import time (reading a config file, stamping a
+timestamp) floors every unit in that file at **Tier 3**, not Tier 4: a fixture runs too late to
+control a boundary crossed during `import`, so it needs a seam — making the module-level load
+lazy — but it *is* reachable once that seam exists. Pure path algebra over `__file__`
+(`os.path.join`/`dirname`/`abspath`) performs no I/O and does not floor anything; `os.path.exists`,
+`os.listdir` and `os.stat` do.
 
 Tiers 3 and 4 are **output, not failure**. A risk-ranked "here is what blocks testing, and the
 smallest change that unblocks it" list is the missing input to `clean-code`, and is often worth
@@ -81,30 +88,41 @@ The guard is what actually enforces "never real I/O." It runs during the red→g
 (workflow step 4) and is **tier-aware**:
 
 - **Tier 1 candidate** (claims to touch nothing): block *everything* during the proof run —
-  filesystem, clock, randomness, network, subprocess, and DB drivers. The unit claimed to touch
-  nothing, so ANY touch falsifies that classification. If anything is blocked and raises,
-  reclassify the unit (drop it at least to Tier 2 or 3, per what tripped) and discard the test —
-  do not keep a test that only passed because the guard let something through.
-- **Tier 2 candidate** (I/O at a boundary the test controls): block only the **uncontrolled**
-  groups — the ones not named among what this test deliberately fakes. The controllable groups
-  (a temp dir standing in for the filesystem, a frozen clock) are the point of the test, not a
-  violation to block.
+  filesystem, clock, randomness, environment, network, subprocess, and DB drivers. The unit
+  claimed to touch nothing, so ANY touch falsifies that classification. If anything is blocked and
+  raises, **reclassify to Tier 3 and discard the test** — unconditionally, and regardless of
+  whether that run was red or green. Not "drop it a tier and retry": a guard trip is not a signal
+  to go looking for a boundary, it is the classification being wrong, and turning it into a
+  Tier 2 retry converts the one hard decline in this design into a loop.
+- **Tier 2 candidate** (I/O at a boundary the test controls): block the **uncontrolled** groups
+  always, plus every controllable group not named among what this test deliberately fakes. The
+  controllable groups it does fake (a temp dir standing in for the filesystem, a frozen clock) are
+  the point of the test, not a violation to block. A trip here means the same thing it means at
+  Tier 1: reclassify to Tier 3 and discard the test.
 
 **Patch the lowest layer, not the ergonomic wrapper.** Monkeypatching `builtins.open` or
-`requests.get` alone is not enough — real code reaches I/O underneath those names. Patch:
+`requests.get` alone is not enough — real code reaches I/O underneath those names. `io_guard.py`
+patches, per group:
 
-- the `os` primitives: `os.open`, `os.write`, `os.posix_spawn`, `os.spawnv`/`os.spawnl`/
-  `os.spawnvp`, `os.fork` (and, where reachable, `os.exec*` — noting the residual below)
-- `io.FileIO`
-- `mmap.mmap`
-- `socket.socket`
-- `subprocess.Popen`
-- the DB driver connect entry points in use (e.g. `sqlite3.connect`, `psycopg2.connect`)
+| group | what the guard replaces |
+|---|---|
+| filesystem | `builtins.open`, `io.open`, `io.open_code`, `io.FileIO`, `codecs.open`, `mmap.mmap`, and the `os` primitives: the fd-level data family (`open`/`read`/`write`/`close`/`fdopen`/`pread`/`pwrite`/`readv`/`writev`/`sendfile`/`fsync`/`truncate`), the directory-and-metadata family (`listdir`/`scandir`/`walk`/`fwalk`/`stat`/`lstat`/`fstat`/`statvfs`/`access`/`readlink`/`pathconf`), and the mutation family (`remove`/`unlink`/`rename`/`renames`/`replace`/`mkdir`/`makedirs`/`rmdir`/`removedirs`/`link`/`symlink`/`mkfifo`/`mknod`/`chdir`/`chmod`/`chown`/`chflags`/`utime`/`*xattr`) |
+| clock | `time.time`, `time.time_ns`, `time.sleep`, `time.localtime`, `time.gmtime`, `time.ctime`, and guarded subclasses of `datetime.datetime` / `datetime.date` (their `now`/`utcnow`/`today`/`fromtimestamp` are C classmethods and cannot be patched in place) |
+| randomness | the module-level `random` methods, `uuid.uuid1/3/4/5`, the `secrets` token functions, `os.urandom` |
+| environment | `os.getenv`, `os.getenvb`, `os.putenv`, `os.unsetenv` |
+| network | `socket.socket`, `socket.create_connection`, `socket.create_server`, `socket.socketpair`, `socket.getaddrinfo`, `socket.gethostbyname*` |
+| subprocess | `subprocess.Popen` and its `run`/`call`/`check_*` wrappers, `os.system`, `os.popen`, `os.startfile`, and the whole `exec*`/`spawn*`/`fork*` family derived from `dir(os)` at runtime |
+| database | `sqlite3.connect`, and `psycopg2`/`psycopg`/`pymysql`/`MySQLdb`/`pymongo`/`sqlalchemy` entry points — patched only once the target repo has imported them, never imported by the guard |
 
-`os.open` is not the builtin `open` — a guard scoped only to the builtin never sees it.
-`os.posix_spawn` never routes through `subprocess.Popen` — a guard scoped only to `subprocess`
-never sees it either. Patch the primitives underneath, not just the names a human would reach
-for first.
+Why that list and not a shorter one, measured on CPython rather than assumed: `open(p)` reaches
+`builtins.open` and **not** `os.open` or `io.FileIO`; `pathlib.Path.read_text` reaches `io.open`
+and **not** `builtins.open`; `os.path.exists` is an `os.stat`; `os.walk` and `glob.glob` are
+`os.scandir`; `subprocess.run` forks in C and is visible only at `subprocess.Popen`. A guard
+scoped to `os.open`/`read`/`write` — the "syscall layer" as it is usually described — sees none
+of the directory or metadata reads at all, so a Tier 1 unit calling `os.listdir` would pass both
+the filter and the guard. That is the two-layer hole this split exists to prevent, which is why
+the guard's coverage tables and `rank_risk.py`'s marker tables are cross-checked by a test rather
+than kept in step by hand.
 
 **Install the guard before the module under test is imported.** It must load ahead of collection,
 not as a fixture inside the generated test file. A module that performs I/O at import time runs
@@ -127,26 +145,63 @@ filesystem could otherwise pass "RED" only because the guard's exception looked 
 deliberately-wrong assertion, then pass "GREEN" the same way once corrected — two runs that both
 "succeeded" while never proving the classification safe.
 
-**How the guard is loaded.** It loads as a **pytest plugin, via `-p`** (e.g.
-`pytest -p test_safety_net_guard <path>::<test_name>`), not as a `conftest.py` written into the
-target repo. A plugin loads before collection — which is what makes pre-import blocking work —
+**How the guard is loaded.** It **ships with this skill** as `assets/io_guard.py` — do not author
+your own. It loads as a **pytest plugin, via `-p`**, not as a `conftest.py` written into the
+target repo:
+
+```sh
+PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" TEST_SAFETY_NET_TIER=1 \
+  pytest -p io_guard <path>::<test_name>
+
+PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" \
+  TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem,clock \
+  pytest -p io_guard <path>::<test_name>
+```
+ A plugin loads before collection — which is what makes pre-import blocking work —
 and, because it is passed on the command line rather than written to disk, it touches nothing in
 the user's tree: it cannot collide with a `conftest.py` the repo already has, and it cannot
 outlive the proof run. That keeps Invariant 1 ("never modifies source") true with **no
 carve-out** — a written `conftest.py` would have been exactly that carve-out.
 
-**How the guard knows its tier.** The tier is passed **per invocation, by environment variable**,
-read once at plugin import. This is sufficient — not a limitation — precisely *because* the proof
-runs one unit at a time (workflow step 4): a single proof run has a single tier, so the plugin
-never needs to dispatch per test the way a guard shared across a whole suite run would.
+**How the guard knows its tier.** The tier is passed **per invocation, by environment variable**
+(`TEST_SAFETY_NET_TIER`, values `1` or `2`), read once at plugin import. This is sufficient — not
+a limitation — precisely *because* the proof runs one unit at a time (workflow step 4): a single
+proof run has a single tier, so the plugin never needs to dispatch per test the way a guard shared
+across a whole suite run would. An absent or unparseable value falls back to tier 1, the strictest
+setting: a misconfigured invocation must over-block, never under-block.
 
-**State the residual honestly.** A test that spawns a subprocess which itself dials out to the
-network escapes an in-process guard — the guard patches this process's syscall layer, not a
-child process's. Process-replacing calls (`os.exec*`) are declined **statically** by the filter
-for the same reason: they replace the entire process image, taking every in-process monkeypatch
-with them, so no runtime guard can survive one. That is not redundant with the guard — it is the
-one case the guard structurally cannot reach, which is why the filter must decline it rather than
-rely on the guard to catch it.
+`TEST_SAFETY_NET_ALLOW` carries the second half of the Tier 2 rule — the comma-separated
+controllable groups (`filesystem`, `clock`, `randomness`, `environment`) this particular test
+deliberately fakes. Name **every** group the test controls, not just the one `tier_reason`
+happened to print. Omitting the variable permits all four, which is the loosest reading of
+Tier 2; `TEST_SAFETY_NET_ALLOW=none` fakes nothing. At Tier 1 it is ignored outright.
+
+**How arming is scoped.** The guard is armed for the whole proof run — it has to be, or
+import-time I/O runs before it exists — but it only *fires* on I/O initiated from the target
+repo's own code: the test module and the unit under test. pytest's collection, assertion
+rewriting, output capture and failure reporting run on stacks that never leave the interpreter's
+library directories and are exempt, so a guarded run reports an ordinary assertion failure
+ordinarily. Where the two directions trade off the guard over-fires: a false trip costs one
+declined candidate, a missed one ships a test that performs real I/O.
+
+**State the residuals honestly.** Four of them:
+
+1. A test that spawns a subprocess which itself dials out to the network escapes an in-process
+   guard — the guard patches this process's primitives, not a child process's.
+2. A C extension that reaches the syscall directly (`numpy.fromfile`, `ctypes.CDLL(...)`) bypasses
+   every Python name and is not intercepted by anything.
+3. A reference bound *before* the guard armed keeps the original. Arming ahead of collection is
+   what makes this rare rather than routine.
+4. `os.environ["HOME"]` as a bare **subscript** is not intercepted — only `os.getenv`/`putenv`/
+   `unsetenv` are. This is the same residual the filter has, since its markers match a *call*, so
+   the two layers agree on what neither can see.
+
+**Process-replacing calls are declined statically, and that is not redundancy.** The guard does
+patch `os.exec*`, so a Python-level `os.execv` raises before the image is replaced. But an
+`exec` reached any other way — a pre-bound reference, a C extension — takes every in-process
+monkeypatch with it and leaves nothing behind to report the trip. The filter's static decline is
+the line that holds in that case, which is why the `exec*`/`spawn*` family must be enumerated
+completely in the marker table and not delegated to the guard.
 
 ## Promoting a unit
 
