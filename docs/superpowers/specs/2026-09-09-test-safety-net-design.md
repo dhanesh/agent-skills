@@ -94,8 +94,17 @@ Every discovered unit lands in exactly one tier:
 |---|---|
 | filesystem | temp dir |
 | clock / randomness | the language's own freeze/seed hooks |
-| database | in-memory or throwaway file |
-| HTTP | hand off to **`mockstar-mock`** — already in this collection, exists for exactly this |
+| database | in-memory or throwaway file — **but see below: declined by default** |
+| HTTP | **`mockstar-mock`** — already in this collection — **but see below: declined by default** |
+
+**Amended during implementation: database and HTTP are declined by default, not routine Tier 2.**
+This table was written aspirationally; the shipped classifier buckets database, HTTP and subprocess
+as *uncontrollable*, so they land in Tier 3 and no test is written. That is the correct default —
+controlling a database or an HTTP boundary means standing up a fake, which is a far larger
+intervention than pointing a write at a temp dir, and defaulting to "decline" is what keeps the
+never-performs-real-I/O invariant cheap to hold. A human may still promote such a unit to Tier 2
+and control the boundary, but only through the recorded-promotion discipline — never silently.
+Filesystem, clock, randomness and environment remain routine Tier 2 controls.
 
 **Tiers 3 and 4 are output, not failure.** A risk-ranked "here is what blocks testing, and the
 smallest change that unblocks it" list is the missing input to `clean-code`, and often worth more
