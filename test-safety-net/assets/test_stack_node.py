@@ -1190,6 +1190,93 @@ class TestManifestCaseTable(unittest.TestCase):
         self.assertIn("no stack claims", err.getvalue())
 
 
+class TestNodeGuardMatchesTheFilter(unittest.TestCase):
+    """`io_guard.js` and the marker tables must have ONE answer, and it is checkable.
+
+    The split this skill runs on is FILTER then ENFORCEMENT: `stack_node.py`
+    ranks and declines statically, `io_guard.js` blocks at run time. That split
+    only means something while the two layers agree about what counts as, say,
+    filesystem I/O. A marker the filter declines on but the guard cannot
+    intercept is a two-layer hole -- the Python pair shipped one for two review
+    rounds, where `pkgutil.get_data` was invisible to the filter (the read
+    lives in a module the analysed unit merely imports) AND exempted by the
+    guard's import rule.
+
+    So the guard publishes what it intercepts, and this asserts the three maps
+    PARTITION the marker tables exactly: every marker in exactly one map, and
+    no map naming a marker the filter has never heard of.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.guard = os.path.join(_HERE, "io_guard.js")
+        cls.node = shutil.which("node")
+        cls.maps = None
+        if not cls.node or not os.path.isfile(cls.guard):
+            return
+        # `disarm()` first: requiring the guard ARMS it (that is the contract
+        # `--require` needs), and an armed process printing JSON would be
+        # deciding provenance on its own stdout write.
+        script = ("const g = require(process.argv[1]); g.disarm();"
+                  "console.log(JSON.stringify({"
+                  "intercepts: Object.keys(g.FILTER_MARKER_INTERCEPTS),"
+                  "partial: Object.keys(g.PARTIALLY_INTERCEPTED),"
+                  "missing: Object.keys(g.NOT_INTERCEPTED),"
+                  "groups: g.GROUPS}));")
+        run = subprocess.run([cls.node, "-e", script, "--", cls.guard],
+                             capture_output=True, text=True, timeout=30)
+        if run.returncode == 0:
+            cls.maps = json.loads(run.stdout)
+
+    def setUp(self):
+        if self.maps is None:
+            sys.stderr.write(
+                "\nSKIP: no usable `node` for %s -- io_guard.js's intercept "
+                "tables are NOT compared against the marker tables on this "
+                "machine. Install node 18+ to run it.\n" % self.guard)
+            self.skipTest("node is not available")
+
+    def markers(self):
+        found = set()
+        for table in (stack_node.CONTROLLABLE, stack_node.UNCONTROLLABLE):
+            for names in table.values():
+                found.update(names)
+        return found
+
+    def test_the_three_maps_partition_the_marker_tables(self):
+        intercepts = set(self.maps["intercepts"])
+        partial = set(self.maps["partial"])
+        missing = set(self.maps["missing"])
+        markers = self.markers()
+        self.assertEqual(intercepts & partial, set())
+        self.assertEqual(intercepts & missing, set())
+        self.assertEqual(partial & missing, set())
+        covered = intercepts | partial | missing
+        self.assertEqual(
+            markers - covered, set(),
+            "marker(s) the FILTER declines on that the guard's tables never "
+            "mention -- a marker with no intercept is a silent two-layer hole")
+        self.assertEqual(
+            covered - markers, set(),
+            "the guard claims to intercept marker(s) the filter has never "
+            "heard of; one of the two layers has drifted")
+
+    def test_the_guard_uses_the_filters_groups_verbatim(self):
+        self.assertEqual(sorted(self.maps["groups"]),
+                         sorted(list(stack_node.CONTROLLABLE)
+                                + list(stack_node.UNCONTROLLABLE)))
+
+    def test_the_documented_command_is_reachable_from_the_target_repo(self):
+        # An agent runs from the TARGET repo, so a skill-relative path never
+        # resolves. `asset-paths.sh` enforces this for SKILL.md; the guard's
+        # own header prints the command too, and it has to obey the same rule.
+        with open(self.guard, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn('node --require "$SKILL_DIR/assets/io_guard.js"', text)
+        self.assertIn("TEST_SAFETY_NET_TIER=1", text)
+        self.assertIn("TEST_SAFETY_NET_ALLOW=", text)
+
+
 class TestManifestContent(unittest.TestCase):
     """`declaring` vs `tooling`: what a manifest SAYS, not that it exists.
 
