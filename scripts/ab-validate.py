@@ -2028,10 +2028,17 @@ try:
 except Exception:
     pass
 
+# A manifest only scales a claim when it DECLARES the stack -- an entry point,
+# runtime dependencies, a real build. `{"name": "app"}` declares nothing, and
+# the fixtures below mean "a real node package", so they say so.
+PKG_DECLARING = '{"name": "app", "main": "src/index.js", "dependencies": {"ky": "^1"}}\n'
+PKG_TOOLING = ('{"name": "app", "private": true, "scripts": {"prepare": "husky"},'
+               ' "devDependencies": {"husky": "^9", "prettier": "^3"}}\n')
+
 # 3. the direction the manifest scaling still has to carry: a fresh node
 #    project beside a few Python helper scripts is a node project.
 res["fresh_node"] = stack_of(tree({
-    "package.json": '{"name": "app"}\n',
+    "package.json": PKG_DECLARING,
     "src/a.js": "export function a() {}\n",
     "src/b.js": "export function b() {}\n",
     "tools/gen.py": "def go():\n    return 1\n",
@@ -2040,12 +2047,38 @@ res["fresh_node"] = stack_of(tree({
 
 # 4. and a declared node package that vendors six Python scripts.
 res["declared_node"] = stack_of(tree(dict(
-    [("package.json", '{"name": "app"}\n'), ("src/app.ts", "export function boot() {}\n")]
+    [("package.json", PKG_DECLARING), ("src/app.ts", "export function boot() {}\n")]
     + [("tools/gen%d.py" % i, "def go():\n    return 1\n" % ()) for i in range(6)])))
+
+# 4b. THE SHAPE FILE COUNTS CANNOT SEPARATE. Eight `.py`, three `.js` and a
+#     `package.json` that carries husky and nothing else scored node 16 to
+#     python 8 -- identical counts to a fresh node project, opposite verdict.
+#     Only the manifest's CONTENT tells them apart.
+res["husky_python"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(8)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(3)]
+    + [("package.json", PKG_TOOLING)])))
+
+# 4c. the same rule run on the OTHER side: a `pyproject.toml` holding only
+#     `[tool.ruff]` is exactly as much a claim about the repo as a husky
+#     `package.json`, so 40 declared JS files beat 30 linted Python ones.
+res["ruff_only_pyproject"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(30)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(40)]
+    + [("pyproject.toml", "[tool.ruff]\nline-length = 100\n"),
+       ("package.json", PKG_DECLARING)])))
+
+# 4d. and the bound in the other direction, which content classification had to
+#     replace: a Python backend with no manifest of its own must not lose to a
+#     ten-file declared frontend.
+res["backend_beats_frontend"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(40)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(10)]
+    + [("web/package.json", PKG_DECLARING)])))
 
 # 5. a toolchain that is present and BROKEN must not cost the run its units.
 broken = tree({
-    "package.json": '{"name": "app"}\n',
+    "package.json": PKG_DECLARING,
     "src/util.js": "export function parse(s) { return s; }\n",
     "node_modules/typescript/lib/typescript.js": 'throw new Error("boom");\n'})
 if stack_node is not None:
@@ -2153,6 +2186,38 @@ def check_test_safety_net_node_precise(old, new):
         "the same edge one size up: a `package.json` beside a real source tree "
         "is a claim about what the repo IS, and a scattering of another "
         "language's scripts must not overturn it",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "a small Python repo whose `package.json` is only husky "
+           "(python=right)",
+        oldp["husky_python"], newp["husky_python"],
+        newp["husky_python"] == "python",
+        "the shape FILE COUNTS CANNOT SEPARATE, and the one Task 4 left open: "
+        "8 `.py`, 3 `.js` and a git-hooks `package.json` are the same counts as "
+        "a fresh node project with the opposite right answer, so no "
+        "`(files + floor) * multiplier` pair fixes both. A manifest now scales "
+        "a claim only when it DECLARES the stack -- an entry point, runtime "
+        "dependencies, a module system, a real build -- and husky declares "
+        "none of those",
+        kind="guard")
+    row(s, "a Python backend with no manifest beside a 10-file declared JS "
+           "frontend (python=right)",
+        oldp["backend_beats_frontend"], newp["backend_beats_frontend"],
+        newp["backend_beats_frontend"] == "python",
+        "the table's UPPER bound on `MANIFEST_FLOOR`/`MANIFEST_MULTIPLIER`, "
+        "which had to be replaced: while a tooling `package.json` still scaled "
+        "node's claim, the 40-`.py` row above was what stopped the constants "
+        "being raised. It cannot be broken by any pair any more, so this shape "
+        "holds the ceiling instead -- raise the floor past 6 and ten frontend "
+        "files outvote forty backend ones",
+        kind="guard")
+    row(s, "40 declared `.js` against 30 `.py` whose only manifest is a ruff "
+           "config (node=right)",
+        oldp["ruff_only_pyproject"], newp["ruff_only_pyproject"],
+        newp["ruff_only_pyproject"] == "node",
+        "the classification runs on BOTH sides or it is not weighing evidence, "
+        "it is picking a winner: a `pyproject.toml` holding only `[tool.ruff]` "
+        "is exactly as much a claim about what a repo IS as a husky "
+        "`package.json`, which is to say none",
         since=SINCE_TSN_NODE_TRIAGE)
     row(s, "units still discovered when a PRESENT toolchain is broken "
            "(higher=better)",

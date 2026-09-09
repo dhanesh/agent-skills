@@ -97,7 +97,99 @@ def evidence(root: str) -> int:
     scores zero when no source files stand behind the manifest.
     """
     return evidence_score(sum(1 for _rel in iter_source_files(root)),
-                          root, MANIFESTS)
+                          root, MANIFESTS, classify_manifest)
+
+
+# Keys whose presence means "this package declares how it is ENTERED or what it
+# needs at RUNTIME" -- a claim about what the directory IS. `type: "module"` is
+# in the list because it changes how every `.js` file in the tree executes,
+# which nobody writes for a formatter.
+_PKG_DECLARING_KEYS = ("main", "module", "exports", "bin", "browser",
+                       "workspaces", "dependencies", "peerDependencies")
+
+# Scripts that RUN or BUILD the package, as opposed to editing it. `prepare` is
+# deliberately absent: it is husky's install hook and nothing else in most
+# repos that have one.
+_PKG_DECLARING_SCRIPTS = ("build", "start", "dev", "serve")
+
+# Commands that are tooling even when they are spelled `build`. A Python repo
+# whose `package.json` fronts a formatter with `"build": "prettier --write ."`
+# is still a Python repo; a repo that compiles itself is not. First token of
+# the command only -- `tsc && node scripts/bundle.js` declares on `tsc`.
+_TOOLING_COMMANDS = frozenset({
+    "prettier", "eslint", "husky", "lint-staged", "stylelint", "commitlint",
+    "editorconfig-checker", "echo", "true", ":", "exit", "npm-run-all",
+})
+
+# Manifests whose ONLY reason to exist is to say "there is source here".
+# Unlike `package.json`, nobody keeps a `tsconfig.json` in a Python repo to
+# format Markdown with.
+_SELF_DECLARING_MANIFESTS = frozenset({"tsconfig.json", "jsconfig.json",
+                                       "deno.json", "deno.jsonc"})
+
+
+def _first_token(command: str) -> str:
+    """The executable a script runs, past `npx`, `env` and `VAR=1` prefixes."""
+    for token in str(command).split():
+        if "=" in token.split("/")[0]:
+            continue                      # FOO=1 prefix
+        if token in ("npx", "env", "cross-env", "sudo"):
+            continue
+        if token.startswith("-"):
+            continue
+        return os.path.basename(token)
+    return ""
+
+
+def classify_manifest(name: str, text: str) -> str:
+    """`declaring` when this manifest says the repo IS node; `tooling` otherwise.
+
+    THE QUESTION IS NOT "IS THERE A `package.json`" -- `has_manifest` answers
+    that, and in a Python repo it answers yes for `husky` and `prettier`. It is
+    "does this file declare how the repo RUNS": an entry point (`main`,
+    `exports`, `bin`), runtime dependencies, a module system for the whole
+    tree, or a build/start script that runs something other than a formatter.
+
+    Everything else -- `{}`, a bare name and version, devDependencies plus a
+    `prepare` hook -- is `tooling`, and scales nothing. That direction is the
+    conservative one for THIS stack: the failure it prevents (three JavaScript
+    files outvoting eight Python ones) is a wrong repo ranked end to end, while
+    the failure it risks (a node package that declares nothing at all losing to
+    a larger scattering of another language) still leaves `--stack` and the
+    stderr evidence line, and is a shape almost nothing real has.
+
+    Unparseable JSON falls back to a scan of the same key names rather than to
+    either verdict: a manifest with a trailing comma is not JSON and is still
+    somebody's package.
+    """
+    if name in _SELF_DECLARING_MANIFESTS:
+        return "declaring"
+    if name != "package.json":
+        return "tooling"          # not a name this stack knows: never declares
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        # Text fallback: the key list, not a guess. `"main":` in the raw bytes
+        # is a declaration even when the file around it will not parse.
+        low = text.lower()
+        if any('"%s"' % key in low for key in _PKG_DECLARING_KEYS):
+            return "declaring"
+        return "declaring" if '"type"' in low and '"module"' in low else "tooling"
+    for key in _PKG_DECLARING_KEYS:
+        value = data.get(key)
+        if value:                 # an empty dict/string declares nothing
+            return "declaring"
+    if data.get("type") == "module":
+        return "declaring"
+    scripts = data.get("scripts")
+    if isinstance(scripts, dict):
+        for script in _PKG_DECLARING_SCRIPTS:
+            command = scripts.get(script)
+            if command and _first_token(command) not in _TOOLING_COMMANDS:
+                return "declaring"
+    return "tooling"
 
 
 # ── Files ────────────────────────────────────────────────────────────────

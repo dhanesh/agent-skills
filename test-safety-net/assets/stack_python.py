@@ -56,7 +56,57 @@ def evidence(root: str) -> int:
     never means "this repo cannot be ranked".
     """
     return evidence_score(sum(1 for _rel in iter_source_files(root)),
-                          root, MANIFESTS)
+                          root, MANIFESTS, classify_manifest)
+
+
+# Sections that declare a Python DISTRIBUTION rather than a tool's settings.
+# `[tool.ruff]`/`[tool.black]` in a `pyproject.toml`, and `[flake8]` in a
+# `setup.cfg`, are the Python mirror of a husky `package.json`: extremely
+# common in repos whose code is another language entirely.
+_DECLARING_SECTIONS = ("[project]", "[tool.poetry]", "[build-system]",
+                       "[tool.setuptools]", "[tool.hatch", "[tool.flit",
+                       "[metadata]", "[options]")
+
+# Requirements that are Python TOOLING. A `requirements.txt` naming only these
+# says "this repo is linted with Python", not "this repo is Python".
+_TOOLING_REQUIREMENTS = frozenset({
+    "black", "ruff", "flake8", "isort", "mypy", "pylint", "pre-commit",
+    "precommit", "tox", "autopep8", "yapf", "bandit", "pyupgrade",
+    "pydocstyle", "codespell",
+})
+
+# Manifests that exist only to declare a distribution or an environment. There
+# is no tooling-only form of a `setup.py`.
+_SELF_DECLARING_MANIFESTS = frozenset({"setup.py", "Pipfile", "environment.yml"})
+
+
+def classify_manifest(name: str, text: str) -> str:
+    """`declaring` when this manifest says the repo IS Python; `tooling` otherwise.
+
+    The same rule as `stack_node.classify_manifest`, run on the other side, and
+    it has to be: a detector that demoted node's tooling manifests while
+    letting Python's count would not be weighing evidence, it would be picking
+    a winner. A `pyproject.toml` holding `[tool.ruff]` and nothing else is
+    exactly as much a claim about what this repo IS as a `package.json` holding
+    `husky` -- which is to say none.
+    """
+    if name in _SELF_DECLARING_MANIFESTS:
+        return "declaring"
+    if name in ("pyproject.toml", "setup.cfg"):
+        low = text.lower()
+        return ("declaring"
+                if any(section in low for section in _DECLARING_SECTIONS)
+                else "tooling")
+    if name == "requirements.txt":
+        for line in text.splitlines():
+            line = line.split("#")[0].strip()
+            if not line or line.startswith("-"):
+                continue          # `-r other.txt`, `--index-url ...`
+            package = re.split(r"[\[<>=!~;\s]", line, 1)[0].strip().lower()
+            if package and package not in _TOOLING_REQUIREMENTS:
+                return "declaring"
+        return "tooling"
+    return "tooling"              # not a name this stack knows: never declares
 
 
 def is_test_path(rel: str) -> bool:

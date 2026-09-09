@@ -24,7 +24,11 @@ version does not cover it and stop rather than proceeding on assumptions.
 
 `assets/rank_risk.py` **does** cover node/TypeScript repositories for the first half of the
 workflow. It detects them (each stack scores the repo — the non-test source files it claims, doubled
-(plus a floor) when a manifest at or near the root declares that stack — and the highest score
+(plus a floor) when a manifest at or near the root **declares** that stack, which means it says
+how the repo runs: an entry point, runtime dependencies, a module system, a real build. A
+`package.json` carrying only `husky` and `prettier`, or a `pyproject.toml` carrying only
+`[tool.ruff]`, is tooling and scales nothing — otherwise eight Python files lose to three
+JavaScript ones. The highest score
 wins; `--stack` overrides, and a tie is
 reported rather than guessed), discovers top-level `export`ed functions and classes, and triages
 them against node's own I/O marker tables into the same four tiers Python uses.

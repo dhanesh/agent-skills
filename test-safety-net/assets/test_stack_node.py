@@ -373,7 +373,7 @@ class TestInterfaceNames(NodeCase):
                      "reached_through_module", "discover_units", "triage"):
             self.assertTrue(hasattr(stack_node, attr), attr)
         self.assertEqual(stack_node.STACK_NAME, "node")
-        # All fourteen, so registration cannot raise `AttributeError` inside
+        # All fifteen, so registration cannot raise `AttributeError` inside
         # `rank()` for a repo this stack wins. Compared by NAME, not identity:
         # this file loads the stacks by path while `rank_risk` imports them by
         # name, so the registry holds a different module object for the same
@@ -388,7 +388,8 @@ class TestInterfaceNames(NodeCase):
                          "is_test_path", "is_test_for", "module_of",
                          "name_pattern", "path_pattern", "IDENTIFIER_RE",
                          "preceding_qualifier", "module_bindings",
-                         "reached_through_module", "discover_units", "triage"):
+                         "reached_through_module", "discover_units", "triage",
+                         "classify_manifest"):
                 self.assertTrue(hasattr(stack, attr),
                                 "%s lacks %s" % (stack.STACK_NAME, attr))
 
@@ -401,10 +402,12 @@ class TestInterfaceNames(NodeCase):
         self.assertEqual(stack_node.evidence(self.root), 2)
 
     def test_a_manifest_with_no_source_behind_it_scores_nothing(self):
-        # The commonest reason a Python repo has a `package.json`: a `lint` or
-        # `format` script and nothing else. Scoring it would let a stack win a
+        # Scoring a manifest with nothing behind it would let a stack win a
         # repo it then discovers no units in -- a clean-looking empty report.
-        write(self.root, "package.json", '{"scripts": {"lint": "prettier ."}}\n')
+        # The body is the FULLY DECLARING one on purpose: a tooling-only
+        # manifest now scores nothing for a second, independent reason, and a
+        # fixture that trips both rules stops testing either.
+        write(self.root, "package.json", MANIFEST_BODIES["package.json/declaring"])
         self.assertEqual(stack_node.evidence(self.root), 0)
 
     def test_evidence_ignores_node_modules(self):
@@ -638,7 +641,8 @@ class TestStackDetection(unittest.TestCase):
                          sum(1 for _ in rank_risk.stack_python.iter_source_files(REPO_ROOT)))
 
     def test_a_manifest_inside_a_template_dir_is_not_evidence(self):
-        write(self.root, "assets/templates/scaffold/package.json", "{}")
+        write(self.root, "assets/templates/scaffold/package.json",
+              MANIFEST_BODIES["package.json/declaring"])
         write(self.root, "src/thing.py", "def go():\n    return 1\n")
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
         # Nothing scored for node at all -- not "scored less". A manifest
@@ -660,20 +664,22 @@ class TestStackDetection(unittest.TestCase):
     def test_a_manifest_at_the_root_beats_a_file_majority(self):
         # The direction the bonus exists for: a node package that vendors a
         # couple of Python scripts is still a node package.
-        write(self.root, "package.json", '{"name": "app"}\n')
+        write(self.root, "package.json", MANIFEST_BODIES["package.json/declaring"])
         write(self.root, "src/app.ts", "export function boot() {}\n")
         for i in range(6):
             write(self.root, "tools/gen%d.py" % i, "def go():\n    return 1\n")
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "node")
 
     def test_a_monorepo_package_manifest_still_counts(self):
-        write(self.root, "packages/api/package.json", '{"name": "api"}\n')
+        write(self.root, "packages/api/package.json",
+              MANIFEST_BODIES["package.json/declaring"])
         write(self.root, "packages/api/src/app.ts", "export function boot() {}\n")
         write(self.root, "tools/gen.py", "def go():\n    return 1\n")
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "node")
 
     def test_a_manifest_buried_deeper_than_the_depth_limit_does_not(self):
-        write(self.root, "vendored/deep/nested/pkg/package.json", '{"name": "x"}\n')
+        write(self.root, "vendored/deep/nested/pkg/package.json",
+              MANIFEST_BODIES["package.json/declaring"])
         write(self.root, "vendored/deep/nested/pkg/app.ts", "export function b() {}\n")
         write(self.root, "a.py", "def go():\n    return 1\n")
         write(self.root, "b.py", "def go2():\n    return 1\n")
@@ -1006,31 +1012,79 @@ class TestPreciseAgainstTheRealToolchain(NodeCase):
 
 # ── The manifest weight ───────────────────────────────────
 
+# What each fixture manifest CONTAINS, because content is what decides.
+#
+# The table used to write `{}` for every `.json` manifest and `[project]` for
+# everything else, which was fine while a manifest's mere EXISTENCE scaled a
+# stack's claim. It no longer does: a `package.json` that declares an entry
+# point, runtime dependencies or a build is a claim about what the repo IS; one
+# carrying git hooks and a formatter is a claim about how it is EDITED. Writing
+# `{}` for both would have made every row below a test of the walk rather than
+# of the rule.
+MANIFEST_BODIES = {
+    "package.json/declaring":
+        '{"name": "app", "main": "src/index.js",\n'
+        ' "dependencies": {"express": "^4.19.0"}}\n',
+    "package.json/tooling":
+        '{"name": "app", "private": true,\n'
+        ' "devDependencies": {"husky": "^9.0.0", "prettier": "^3.0.0"},\n'
+        ' "scripts": {"prepare": "husky"}}\n',
+    "pyproject.toml/declaring": '[project]\nname = "srv"\nversion = "1.0.0"\n',
+    "pyproject.toml/tooling": "[tool.ruff]\nline-length = 100\n",
+}
+
 CASE_TABLE = [
     # (label, .py files, node files, node extension, manifests, expected)
+    # where each manifest is `(relative path, "declaring" | "tooling")`.
     #
-    # EIGHT REAL REPO SHAPES, AND THE VERDICT EACH MUST REACH. This table is
+    # TWELVE REAL REPO SHAPES, AND THE VERDICT EACH MUST REACH. This table is
     # the specification of what a manifest is WORTH; `MANIFEST_FLOOR` and
     # `MANIFEST_MULTIPLIER` were chosen to satisfy it, in that order. Fitting
     # the constants to any one row is how the bug this replaced happened: an
     # additive `MANIFEST_BONUS = 100` is exactly right for row 4 and ranks
     # five files while ignoring forty in row 1.
+    #
+    # Rows 9-11 are the CONTENT rows. Before them, file counts alone had to
+    # separate "a node project" from "a Python project with node tooling", and
+    # they cannot: row 9 (8 `.py`, 3 `.js`, a husky `package.json`) scored node
+    # 16 to python 8 and read as node. Nothing about the counts distinguishes
+    # it from row 4 -- only the manifest does.
     ("a Python repo with JS tooling (prettier/husky)",
-     40, 5, ".js", ("package.json",), "python"),
+     40, 5, ".js", (("package.json", "tooling"),), "python"),
     ("a Python repo whose only manifest belongs to a shipped template",
-     75, 17, ".ts", ("kit/assets/templates/scaffold/package.json",), "python"),
+     75, 17, ".ts",
+     (("kit/assets/templates/scaffold/package.json", "declaring"),), "python"),
     ("a JS repo with a handful of Python scripts",
-     3, 200, ".js", ("package.json",), "node"),
+     3, 200, ".js", (("package.json", "declaring"),), "node"),
     ("a fresh node project beside some Python tooling",
-     3, 2, ".js", ("package.json",), "node"),
+     3, 2, ".js", (("package.json", "declaring"),), "node"),
     ("a Python service with a JS frontend, both declared",
-     300, 20, ".js", ("pyproject.toml", "package.json"), "python"),
+     300, 20, ".js",
+     (("pyproject.toml", "declaring"), ("package.json", "declaring")), "python"),
     ("a TypeScript repo with Python tooling scripts",
-     4, 150, ".ts", ("package.json",), "node"),
+     4, 150, ".ts", (("package.json", "declaring"),), "node"),
     ("a 50/50 polyglot tree with no manifest at all",
      10, 10, ".js", (), "ambiguous"),
     ("an empty repo",
      0, 0, ".js", (), "neither"),
+    ("a small Python repo whose package.json is only git hooks",
+     8, 3, ".js", (("package.json", "tooling"),), "python"),
+    ("a JS repo whose pyproject.toml is only a linter's config",
+     30, 40, ".js",
+     (("pyproject.toml", "tooling"), ("package.json", "declaring")), "node"),
+    ("a real JS repo whose package.json happens to be tooling-shaped",
+     3, 200, ".js", (("package.json", "tooling"),), "node"),
+    # ROW 12 IS THE TABLE'S UPPER BOUND ON THE CONSTANTS, and it exists because
+    # content classification took row 1's away. While a tooling `package.json`
+    # scaled node's claim, row 1 (40 `.py` against 5 `.js`) is what stopped
+    # `MANIFEST_FLOOR`/`MANIFEST_MULTIPLIER` from being raised; now that it
+    # scales nothing, row 1 is satisfied at every pair in `0..8 x 2..6` and the
+    # table pins the constants from below only. A Python backend with no
+    # manifest of its own and a declared JavaScript frontend is the shape that
+    # replaces it: raise the floor past 6 and ten frontend files outvote forty
+    # backend ones.
+    ("a Python backend with no manifest and a declared JS frontend",
+     40, 10, ".js", (("web/package.json", "declaring"),), "python"),
 ]
 
 
@@ -1057,8 +1111,8 @@ class TestManifestCaseTable(unittest.TestCase):
             write(root, "srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
         for i in range(node):
             write(root, "web/mod%d%s" % (i, ext), "export function go%d() {}\n" % i)
-        for rel in manifests:
-            write(root, rel, "{}\n" if rel.endswith(".json") else "[project]\n")
+        for rel, kind in manifests:
+            write(root, rel, MANIFEST_BODIES["%s/%s" % (os.path.basename(rel), kind)])
 
     def _verdict(self, root):
         """python | node | ambiguous | neither -- the four answers a run can give."""
@@ -1085,7 +1139,7 @@ class TestManifestCaseTable(unittest.TestCase):
         # row inside a loop is easy to delete by accident. 40 .py + 5 .js + a
         # root `package.json` reported `stack=node (node=105, python=40)` and
         # `units: 5`: a Python repo whose skill looked at the JavaScript.
-        self._build(self.root, 40, 5, ".js", ("package.json",))
+        self._build(self.root, 40, 5, ".js", (("package.json", "tooling"),))
         scores = dict(rank_risk.stack_evidence(self.root))
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
         self.assertGreater(scores["python"], scores["node"])
@@ -1096,17 +1150,30 @@ class TestManifestCaseTable(unittest.TestCase):
         write(self.root, "src/a.mjs", "export function a() {}\n")
         write(self.root, "src/b.ts", "export function b() {}\n")
         self.assertEqual(stack_node.evidence(self.root), 2)
-        write(self.root, "package.json", "{}\n")
+        write(self.root, "package.json", MANIFEST_BODIES["package.json/declaring"])
         self.assertEqual(
             stack_node.evidence(self.root),
             (2 + stack_common.MANIFEST_FLOOR) * stack_common.MANIFEST_MULTIPLIER)
+
+    def test_a_tooling_only_manifest_scales_nothing(self):
+        # The other half of the rule, and the one the reproduction needed: the
+        # same two files under a `package.json` that carries husky and prettier
+        # score exactly what the files are worth. `has_manifest` still finds it
+        # -- the walk is unchanged -- so a regression here would be the
+        # CLASSIFIER giving up, not the walk.
+        write(self.root, "src/a.mjs", "export function a() {}\n")
+        write(self.root, "src/b.ts", "export function b() {}\n")
+        write(self.root, "package.json", MANIFEST_BODIES["package.json/tooling"])
+        self.assertTrue(stack_common.has_manifest(self.root, stack_node.MANIFESTS))
+        self.assertEqual(stack_node.evidence(self.root), 2)
 
     def test_the_multiplier_cancels_when_both_stacks_declare_themselves(self):
         # Row 5 of the table, stated as the property that makes it work: when
         # both stacks carry a manifest the multiplier is on both sides, so the
         # file counts decide -- which is what a polyglot repo that declares
         # both halves honestly wants.
-        self._build(self.root, 30, 6, ".ts", ("pyproject.toml", "package.json"))
+        self._build(self.root, 30, 6, ".ts",
+                    (("pyproject.toml", "declaring"), ("package.json", "declaring")))
         scores = dict(rank_risk.stack_evidence(self.root))
         self.assertEqual(scores["python"] / scores["node"], 35 / 11)
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
@@ -1121,6 +1188,156 @@ class TestManifestCaseTable(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out.getvalue())["units_discovered"], 0)
         self.assertIn("no stack claims", err.getvalue())
+
+
+class TestManifestContent(unittest.TestCase):
+    """`declaring` vs `tooling`: what a manifest SAYS, not that it exists.
+
+    Existence was doing work content should do. `has_manifest` answers "is
+    there a claim here at all", and every root `package.json` says yes --
+    including the one a Python repo keeps for `husky` and `prettier`, which is
+    the commonest reason a Python repo has one. The classifier is the second
+    question: does this file declare how the repo RUNS (an entry point, runtime
+    dependencies, a build) or only how it is EDITED (a formatter, a git hook)?
+
+    Derived rather than tuned: no constant moves when a row is added here, and
+    the same rule runs on both sides -- a `pyproject.toml` carrying only
+    `[tool.ruff]` scales Python's claim exactly as little as a husky
+    `package.json` scales node's.
+    """
+
+    stack_python = rank_risk.stack_python
+
+    def assertDeclaring(self, stack, name, text):
+        self.assertEqual(stack.classify_manifest(name, text), "declaring",
+                         "%s: %r" % (name, text))
+
+    def assertTooling(self, stack, name, text):
+        self.assertEqual(stack.classify_manifest(name, text), "tooling",
+                         "%s: %r" % (name, text))
+
+    # ── node ────────────────────────────────────────────────────────────
+    def test_a_package_json_that_declares_how_the_code_is_entered(self):
+        for text in ('{"main": "index.js"}',
+                     '{"exports": {".": "./index.js"}}',
+                     '{"bin": {"app": "cli.js"}}',
+                     '{"module": "dist/index.mjs"}',
+                     '{"browser": "dist/web.js"}',
+                     '{"type": "module"}',
+                     '{"workspaces": ["packages/*"]}',
+                     '{"dependencies": {"express": "^4"}}',
+                     '{"peerDependencies": {"react": "^18"}}',
+                     '{"scripts": {"build": "tsc -p ."}}',
+                     '{"scripts": {"start": "node server.js"}}',
+                     '{"scripts": {"dev": "vite"}}'):
+            self.assertDeclaring(stack_node, "package.json", text)
+
+    def test_a_package_json_that_only_says_how_the_repo_is_edited(self):
+        for text in ('{}',
+                     '{"name": "app", "version": "1.0.0"}',
+                     '{"private": true, "devDependencies": {"husky": "^9"}}',
+                     '{"devDependencies": {"prettier": "^3", "eslint": "^9"}}',
+                     '{"scripts": {"prepare": "husky"}}',
+                     '{"scripts": {"lint": "eslint ."}, '
+                     '"devDependencies": {"eslint": "^9"}}',
+                     '{"scripts": {"build": "prettier --write ."}}',
+                     '{"dependencies": {}, "devDependencies": {"husky": "^9"}}'):
+            self.assertTooling(stack_node, "package.json", text)
+
+    def test_a_build_script_is_read_by_WHAT_IT_RUNS(self):
+        # `scripts.build` is the one declaring signal whose VALUE matters: a
+        # Python repo that fronts `prettier` with a `build` script is still a
+        # Python repo, and a node repo that compiles itself is not.
+        self.assertDeclaring(stack_node, "package.json",
+                             '{"scripts": {"build": "tsc && node scripts/bundle.js"}}')
+        self.assertTooling(stack_node, "package.json",
+                           '{"scripts": {"build": "echo nothing to build"}}')
+
+    def test_an_unparseable_package_json_is_read_as_text(self):
+        # JSON with a trailing comma is not JSON, and a manifest this stack
+        # cannot parse must not silently become "no claim". The key scan is the
+        # fallback, and it is the same key list.
+        self.assertDeclaring(stack_node, "package.json",
+                             '{\n  "main": "index.js",\n}\n')
+        self.assertTooling(stack_node, "package.json", "not json at all")
+
+    def test_a_tsconfig_declares_by_existing(self):
+        # Unlike `package.json`, whose commonest reason to exist in a Python
+        # repo is tooling, a `tsconfig.json`/`deno.json` exists only to say
+        # "there is TypeScript/Deno source here to compile or run".
+        for name in ("tsconfig.json", "jsconfig.json", "deno.json", "deno.jsonc"):
+            self.assertDeclaring(stack_node, name, "{}")
+
+    # ── python ──────────────────────────────────────────────────────────
+    def test_a_pyproject_that_declares_a_distribution(self):
+        for text in ('[project]\nname = "srv"\n',
+                     '[tool.poetry]\nname = "srv"\n',
+                     '[build-system]\nrequires = ["setuptools"]\n'):
+            self.assertDeclaring(self.stack_python, "pyproject.toml", text)
+
+    def test_a_pyproject_that_is_only_a_linters_config(self):
+        for text in ("[tool.ruff]\nline-length = 100\n",
+                     "[tool.black]\nline-length = 88\n",
+                     "[tool.ruff.lint]\nselect = [\"E\"]\n",
+                     ""):
+            self.assertTooling(self.stack_python, "pyproject.toml", text)
+
+    def test_a_setup_cfg_that_is_only_a_flake8_config(self):
+        # The Python mirror of the husky `package.json`, and just as common.
+        self.assertTooling(self.stack_python, "setup.cfg",
+                           "[flake8]\nmax-line-length = 100\n")
+        self.assertDeclaring(self.stack_python, "setup.cfg",
+                             "[metadata]\nname = srv\n")
+
+    def test_a_requirements_file_naming_only_linters_declares_nothing(self):
+        self.assertTooling(self.stack_python, "requirements.txt",
+                           "black==24.1.0\nruff\n# pinned\n")
+        self.assertTooling(self.stack_python, "requirements.txt", "\n# empty\n")
+        self.assertDeclaring(self.stack_python, "requirements.txt",
+                             "flask==3.0.0\nruff\n")
+
+    def test_the_manifests_that_exist_only_to_declare(self):
+        for name, text in (("setup.py", "from setuptools import setup\nsetup()\n"),
+                           ("Pipfile", "[packages]\n"),
+                           ("environment.yml", "name: srv\n")):
+            self.assertDeclaring(self.stack_python, name, text)
+
+    # ── both, through the score ─────────────────────────────────────────
+    def test_an_unknown_manifest_name_never_silently_declares(self):
+        # A stack that grows a MANIFESTS entry and forgets the classifier would
+        # otherwise get the old existence behaviour back for that one name.
+        for stack in (stack_node, self.stack_python):
+            self.assertTooling(stack, "not-a-manifest.toml", "whatever")
+
+    def test_every_shipped_manifest_name_is_classifiable(self):
+        # The other direction of the same rule: every name a stack calls a
+        # manifest must have an answer here, or it can never scale a claim.
+        for stack, sample in ((stack_node, '{"main": "i.js"}'),
+                              (self.stack_python, "[project]\nname = \"s\"\n")):
+            for name in stack.MANIFESTS:
+                with self.subTest(stack=stack.STACK_NAME, name=name):
+                    self.assertIn(stack.classify_manifest(name, sample),
+                                  ("declaring", "tooling"))
+
+    def test_the_reproduction_task_4_left_open(self):
+        # 8 `.py`, 3 `.js`, a husky `package.json`: node 16 to python 8, and
+        # the skill ranked three files while ignoring eight. No
+        # `(files + floor) * multiplier` shape fixes this -- the counts are
+        # identical to a fresh node project's -- so the manifest's content has
+        # to decide, and it does.
+        root = tempfile.mkdtemp(prefix="tsn-repro8-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for i in range(8):
+            write(root, "srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+        for i in range(3):
+            write(root, "web/m%d.js" % i, "export function go%d() {}\n" % i)
+        write(root, "package.json", MANIFEST_BODIES["package.json/tooling"])
+        stacks = rank_risk.STACKS
+        rank_risk.STACKS = [stack_node, rank_risk.stack_python]
+        self.addCleanup(setattr, rank_risk, "STACKS", stacks)
+        scores = dict(rank_risk.stack_evidence(root))
+        self.assertEqual(scores, {"python": 8, "node": 3})
+        self.assertEqual(rank_risk.detect_stack(root).STACK_NAME, "python")
 
 
 class TestAmbiguityMargin(unittest.TestCase):
