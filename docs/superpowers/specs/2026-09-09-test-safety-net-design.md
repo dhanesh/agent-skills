@@ -170,6 +170,24 @@ on the receiving side.
    the marker table as uncontrollable, and that is not redundancy with the guard, it is the one
    case the guard cannot reach.
 
+   **How the guard signals, and how it is loaded.** A review found the guard was specified in
+   *what* but not in *how*, leaving three questions that decide whether it can be built correctly:
+
+   - **It raises its own exception type**, not a generic error. The proof run has three outcomes,
+     not two: an `AssertionError` means the expectation is wrong (the RED half of red→green); the
+     guard's exception means the classification is wrong. If the guard's exception appears at ANY
+     point — during the deliberately-wrong RED run or the corrected GREEN run — the unit is
+     reclassified Tier 3 and the test is discarded, regardless of red or green. Conflating a
+     guard trip with an ordinary assertion failure would defeat the whole mechanism.
+   - **It loads as a pytest plugin (`-p`), not as a `conftest.py`.** A plugin loads before
+     collection, which is what makes pre-import blocking work, and it avoids writing into the
+     target repo entirely — so it cannot collide with a `conftest.py` the repo already has, and
+     it cannot outlive the proof run. Nothing about the guard is ever committed to the user's
+     tree; that keeps invariant 1 ("never modifies source") true without a carve-out.
+   - **The tier is passed per invocation**, by environment variable read at plugin import. The
+     proof runs one unit at a time, so a single run has a single tier and the plugin needs no
+     per-test dispatch.
+
    Residual, stated plainly: a test that spawns a subprocess which itself dials out escapes an
    in-process guard. That is a smaller residual than trusting static analysis alone, and naming
    it is the point.
