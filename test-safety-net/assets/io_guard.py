@@ -455,12 +455,47 @@ _IMPORT_PROTOCOL_FRAMES = frozenset((
 
 
 def _import_in_progress(frame):
-    """True when an import is what the machinery frame `frame` is running for."""
+    """True when an import is what the machinery frame `frame` is running for.
+
+    SCOPE is the whole of this predicate, and getting it wrong is not a
+    near-miss. The outward scan STOPS at the first frame that is neither a
+    `<frozen ...>` frame nor a library frame -- that is, at the first frame
+    that could be code under test. The question being asked is "is THIS
+    machinery frame running for an import?", and only the frames between the
+    machinery and its caller can answer it.
+
+    Scanning to the TOP of the stack instead asks "is an import happening
+    anywhere below me?", which every module body answers yes to:
+    `_call_with_frames_removed` sits on the stack for the whole of
+    `exec_module`. A module body calling `pkgutil.get_data(...)` -- or
+    `SourceFileLoader(...).get_data("/etc/hosts")`, which reads an arbitrary
+    file having nothing to do with any module -- was therefore exempted at
+    tier 1, with the run reporting `1 passed`. The filter cannot see it either
+    (the read lives in a module the analysed unit merely imports), so that was
+    a both-layers miss, the shape the filter/guard split exists to prevent.
+
+    Both directions are load-bearing, and narrowing too far is the opposite
+    failure: a genuine import must stay True, or the guard declines every
+    candidate that imports anything. It does. For `import x`,
+    `from x import y` and `importlib.import_module(x)` alike the protocol
+    frames (`_find_and_load` and friends) sit INSIDE the frozen machinery,
+    below any user frame, so the scan reaches one before it can stop --
+    including for a lazy import inside a function body, and for an import
+    triggered from another module's body, whose own protocol frames are
+    nearer than the enclosing `<module>` frame.
+
+    An unattributable `<string>`/`<stdin>` frame stops the scan rather than
+    being scanned through: `_initiated_by_code_under_test` reads those as code
+    under test, and this predicate must not be the looser of the two.
+    """
     while frame is not None:
         filename = frame.f_code.co_filename
         if "importlib" in filename and \
                 frame.f_code.co_name in _IMPORT_PROTOCOL_FRAMES:
             return True
+        if not filename.startswith("<frozen ") and \
+                not _is_library_frame(filename):
+            return False              # the caller, not the import machinery
         frame = frame.f_back
     return False
 
@@ -479,14 +514,19 @@ def _initiated_by_code_under_test(depth=2):
       is on the stack outward from it. Reading a module's own source in order
       to import it is the machinery's I/O, not the importer's -- otherwise a
       generated test module's top-level `import pytest` would trip the guard.
-      A module that performs I/O in its own body is unaffected: its `<module>`
-      frame is reached first, and it is not a library frame. The `_find_and_load`
-      condition is what closes the `pkgutil.get_data` hole: that call reaches
-      `SourceFileLoader.get_data` -> `_io.open_code` on an importlib frame with
-      NO import in progress, so it used to read a real file at tier 1 while
-      looking like machinery. Measured, not assumed: an import always carries
-      `_find_and_load`/`_load_unlocked` outward of `get_data`; `pkgutil.get_data`
-      carries `pkgutil.get_data` instead;
+      A module that performs I/O in its own body is unaffected, but ONLY
+      because `_import_in_progress` stops its scan at that module's frame:
+      while the scan ran to the top of the stack, the `_call_with_frames_removed`
+      frame that is live for the whole of `exec_module` exempted every module
+      body, so `pkgutil.get_data` and `SourceFileLoader.get_data` read real
+      files at tier 1 from a module body and the run said `1 passed`. The
+      `_find_and_load` condition closes the DIRECT-call form of that hole --
+      `pkgutil.get_data` from a test body reaches `SourceFileLoader.get_data`
+      -> `_io.open_code` on an importlib frame with no import in progress --
+      and the scan boundary closes the during-an-import form. Measured, not
+      assumed: an import always carries `_find_and_load`/`_load_unlocked`
+      outward of `get_data` with no user frame in between; `pkgutil.get_data`
+      carries `pkgutil.get_data` and then its caller instead;
     * a `<frozen ...>` frame for any other frozen stdlib module (`runpy`, which
       is how `python -m pytest` starts) is a library frame and is transparent;
     * a stdlib diagnostic frame (`linecache`, `traceback`, `inspect`) also

@@ -497,12 +497,27 @@ class TestTheImportMachineryHole(GuardCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ok", result.stdout)
 
-    def test_a_module_that_does_io_in_its_own_body_still_trips_on_import(self):
-        # The other control: narrowing the exemption must not widen it either.
+    # The bodies a module can use to do its OWN I/O while an import is in
+    # progress. `os.stat` never reaches a loader frame, so it never consults
+    # `_import_in_progress` at all -- which is why the control drawn only at
+    # that shape passed while the exemption was scoped to the whole stack and
+    # the two loader shapes below read real files at tier 1. A control has to
+    # be drawn where the code can be wrong.
+    _OWN_BODY_IO = (
+        ("os.stat", "import os\n_SIZE = os.stat(__file__).st_size\n"),
+        ("pkgutil.get_data",
+         "import pkgutil\n_D = pkgutil.get_data('json', '__init__.py')\n"),
+        ("SourceFileLoader.get_data",
+         "import importlib.machinery\n"
+         "_D = importlib.machinery.SourceFileLoader('x', '/etc/hosts')"
+         ".get_data('/etc/hosts')\n"),
+    )
+
+    def _import_a_module_whose_body_does(self, body):
         src = os.path.join(self.tmp, "importio.py")
         with open(src, "w", encoding="utf-8") as fh:
-            fh.write("import os\n_SIZE = os.stat(__file__).st_size\n")
-        result = subprocess.run(
+            fh.write(body)
+        return subprocess.run(
             [sys.executable, "-c",
              "import io_guard\n"
              "io_guard.arm(1)\n"
@@ -514,7 +529,66 @@ class TestTheImportMachineryHole(GuardCase):
             env=dict(os.environ,
                      PYTHONPATH=os.pathsep.join([HERE, self.tmp])),
             capture_output=True, text=True)
+
+    def test_a_module_that_does_io_in_its_own_body_still_trips_on_import(self):
+        # The other control: narrowing the exemption must not widen it either.
+        for label, body in self._OWN_BODY_IO:
+            with self.subTest(body=label):
+                result = self._import_a_module_whose_body_does(body)
+                self.assertIn("BLOCKED", result.stdout,
+                              result.stdout + result.stderr)
+
+    def test_a_lazy_import_from_a_function_body_cannot_launder_a_read(self):
+        # The same hole reached at RUN time rather than collection time: the
+        # unit imports the reading module when it is first called, so the
+        # `_call_with_frames_removed` frame is on the stack under the test's
+        # own frame. Scope, not timing, is what decides this.
+        with open(os.path.join(self.tmp, "importio.py"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("import pkgutil\n"
+                     "_D = pkgutil.get_data('json', '__init__.py')\n")
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import io_guard\n"
+             "def unit():\n"
+             "    import importio\n"
+             "    return len(importio._D)\n"
+             "io_guard.arm(1)\n"
+             "try:\n"
+             "    print('LEAK', unit())\n"
+             "except io_guard.IOGuardViolation as exc:\n"
+             "    print('BLOCKED', exc.target)\n"],
+            env=dict(os.environ,
+                     PYTHONPATH=os.pathsep.join([HERE, self.tmp])),
+            capture_output=True, text=True)
         self.assertIn("BLOCKED", result.stdout, result.stdout + result.stderr)
+
+    def test_an_import_heavy_module_still_imports_cleanly_while_armed(self):
+        # The control for the control. Narrowing `_import_in_progress`'s SCOPE
+        # is the change that could re-break N1, so this arms the guard and then
+        # imports first-time stdlib modules by every route -- a plain import, a
+        # from-import, a package, `importlib.import_module`, and a lazy import
+        # inside a function -- all of which read real source off disk through
+        # the very loader frames the narrowing now stops at.
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import io_guard, importlib\n"
+             "io_guard.arm(1)\n"
+             "import wave\n"
+             "import xml.sax.saxutils\n"
+             "from statistics import mean\n"
+             "importlib.import_module('xml.dom.minidom')\n"
+             "importlib.import_module('email.headerregistry')\n"
+             "def lazy():\n"
+             "    import difflib\n"
+             "    return difflib.SequenceMatcher\n"
+             "assert lazy() is not None\n"
+             "assert mean([1, 3]) == 2\n"
+             "print('ok', wave.__name__)\n"],
+            env=dict(os.environ, PYTHONPATH=HERE),
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ok", result.stdout)
 
 
 class TestEnvironmentReads(GuardCase):
@@ -717,6 +791,76 @@ class TestPytestPluginIntegration(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("IOGuardViolation", result.stdout)
                 self.assertIn("builtins.open", result.stdout)
+
+    def test_import_time_io_through_a_loader_frame_trips_too(self):
+        # NEGATIVE, end to end: the both-layers miss. The filter tiers
+        # `cfg_unit.py::default_size` 1 ("no I/O markers"), because the read
+        # lives in a module it merely imports; the guard reported `1 passed`
+        # while the process read 14020 real bytes, because an import was on the
+        # stack for the whole of `exec_module` and the exemption was scoped to
+        # the whole stack rather than to the call it judges.
+        self._write("resources.py",
+                    "import pkgutil\n\n\n"
+                    "BLOB = pkgutil.get_data('json', '__init__.py')\n")
+        self._write("cfg_unit.py",
+                    "import resources\n\n\ndef default_size():\n"
+                    "    return len(resources.BLOB)\n")
+        self._write("test_cfg.py",
+                    "import cfg_unit\n\n\ndef test_default_size():\n"
+                    "    assert cfg_unit.default_size() > 1000\n")
+        for label, result in self._run("test_cfg.py"):
+            with self.subTest(invocation=label):
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertNotIn("1 passed", result.stdout)
+
+    def test_an_arbitrary_file_read_through_a_loader_frame_trips_too(self):
+        # NEGATIVE, end to end, and the reason the shape above is not merely a
+        # packaging nicety: the same route reads a file that has nothing to do
+        # with any module, from a LAZY import inside the unit's own function.
+        self._write("hostsmod.py",
+                    "import importlib.machinery\n\n\n"
+                    "DATA = importlib.machinery.SourceFileLoader(\n"
+                    "    'x', '/etc/hosts').get_data('/etc/hosts')\n")
+        self._write("peek.py",
+                    "def peek():\n"
+                    "    import hostsmod\n"
+                    "    return hostsmod.DATA[:8]\n")
+        self._write("test_peek.py",
+                    "import peek\n\n\ndef test_peek():\n"
+                    "    assert len(peek.peek()) == 8\n")
+        for label, result in self._run("test_peek.py"):
+            with self.subTest(invocation=label):
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertNotIn("1 passed", result.stdout)
+
+    def test_an_import_heavy_unit_still_passes_under_the_guard(self):
+        # The control end to end: narrowing the exemption's scope must not
+        # start declining candidates whose only sin is importing things. Both
+        # the test module and the unit import first-time stdlib modules, by
+        # every route, at collection time AND lazily at call time.
+        self._write("importer.py",
+                    "import xml.sax.saxutils\n"
+                    "from statistics import mean\n\n\n"
+                    "def lazily():\n"
+                    "    import difflib\n"
+                    "    import importlib\n"
+                    "    importlib.import_module('email.headerregistry')\n"
+                    "    return difflib.SequenceMatcher(None, 'a', 'a').ratio()\n")
+        self._write("test_importer.py",
+                    "import wave\n"
+                    "import importer\n\n\ndef test_lazily():\n"
+                    "    assert importer.lazily() == 1.0\n"
+                    "    assert importer.mean([1, 3]) == 2\n"
+                    "    assert wave.__name__ == 'wave'\n")
+        for label, result in self._run("test_importer.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("1 passed", result.stdout)
 
     def test_a_tier_2_run_permits_the_group_it_declares(self):
         self._write("sneaky.py",
