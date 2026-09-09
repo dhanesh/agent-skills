@@ -151,8 +151,13 @@ def inbound_refs(root: str, units) -> dict:
 # OUT a marker string (this table itself, included) from reading as
 # behaviour: a string literal contains no `ast.Call`, so it never resolves.
 CONTROLLABLE = {
+    # Raw file-descriptor access sits UNDERNEATH the builtin `open` — `os.open`
+    # is not `open`, and a runtime guard patching the builtin never sees it —
+    # but it is still CONTROLLABLE: a test can point an fd at a temp dir the
+    # same way it points `open` at one.
     "filesystem": ("open", "pathlib", "os.path", "os.remove", "os.mkdir",
-                   "shutil", "tempfile"),
+                   "shutil", "tempfile", "os.open", "os.write", "os.read",
+                   "os.close", "os.fdopen", "io.FileIO", "mmap.mmap"),
     "clock": ("datetime", "time.time", "time.sleep", "date.today"),
     "randomness": ("random", "uuid.uuid4", "secrets"),
     "environment": ("os.environ", "os.getenv"),
@@ -162,7 +167,15 @@ UNCONTROLLABLE = {
                 "boto3", "urlopen"),
     "database": ("psycopg2", "sqlite3.connect", "pymongo", "MongoClient",
                  "create_engine"),
-    "subprocess": ("subprocess", "os.system", "os.popen"),
+    # spawn/exec/fork bypass `subprocess.Popen` entirely, so a guard patching
+    # `subprocess` never sees them — and `os.exec*` REPLACES THE PROCESS IMAGE,
+    # taking every in-process monkeypatch with it, so no runtime guard can
+    # survive one at all. These are the calls the filter must decline
+    # statically because the guard structurally cannot reach them. Declined
+    # (tier 3, not 2): no seam makes spawning a process safe to pin.
+    "subprocess": ("subprocess", "os.system", "os.popen", "os.posix_spawn",
+                   "os.spawnv", "os.spawnl", "os.spawnvp", "os.execv",
+                   "os.execve", "os.execvp", "os.execl", "os.fork"),
 }
 
 

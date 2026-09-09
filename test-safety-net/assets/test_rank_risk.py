@@ -452,6 +452,57 @@ class TestTriage(TempRepo):
         self.assertNotIn("fetch", reason)
         self.assertNotIn("network", reason)
 
+    def test_raw_file_descriptor_io_is_tier_2_filesystem(self):
+        # `os.open` is NOT the builtin `open`: it sits underneath it, so a
+        # runtime guard patching the builtin never sees this. Still
+        # CONTROLLABLE though -- a test can point an fd at a temp dir.
+        tier, reason = self._tier(
+            "rawwrite.py",
+            "import os\n\n\ndef rawwrite(p, data):\n"
+            "    fd = os.open(p, os.O_WRONLY | os.O_CREAT)\n"
+            "    os.write(fd, data)\n    os.close(fd)\n",
+            "rawwrite")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_posix_spawn_is_tier_3_subprocess(self):
+        # `os.posix_spawn` never routes through `subprocess.Popen`, so a
+        # guard patching `subprocess` does not see it. No seam makes
+        # spawning a real process safe to pin: decline it.
+        tier, reason = self._tier(
+            "spawn.py",
+            "import os\n\n\ndef spawn(p, argv):\n"
+            "    return os.posix_spawn(p, argv, {})\n",
+            "spawn")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_execv_is_tier_3_because_no_runtime_guard_can_survive_it(self):
+        # THE case that must be caught STATICALLY rather than left to the
+        # runtime guard: `os.execv` replaces the entire process image, so
+        # every in-process monkeypatch the guard installed is gone the
+        # instant it runs. There is no "the guard will catch it" backstop
+        # here -- the guard cannot survive the call it would be catching.
+        tier, reason = self._tier(
+            "replace.py",
+            "import os\n\n\ndef replace(p, argv):\n"
+            "    os.execv(p, argv)\n",
+            "replace")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_os_path_join_is_not_swept_into_subprocess_by_the_new_os_markers(self):
+        # The control: the new `os.*` spawn/exec entries are exact-or-prefix
+        # matches on a resolved dotted name, not a blanket "starts with os.".
+        # Ordinary `os.path` use must stay Tier 2 filesystem.
+        tier, reason = self._tier(
+            "joiner.py",
+            "import os\n\n\ndef joiner(a, b):\n    return os.path.join(a, b)\n",
+            "joiner")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+        self.assertNotIn("subprocess", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
