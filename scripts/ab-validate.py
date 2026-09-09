@@ -98,6 +98,11 @@ SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
 SINCE_TSN_NODE = "0a02273"   # test-safety-net: the node stack's heuristic
 # discovery, and the two interface corrections that had to precede it
 # (`name_pattern`, and the file context the import grammar resolves against).
+SINCE_TSN_NODE_PRECISE = "75d8de9"  # test-safety-net: the manifest bonus made
+# multiplicative (an additive 100 ranked five JS files in a forty-file Python
+# repo), and node's optional precise discovery path with the `discovery` key
+# that reports which reader ran. One constant for the campaign: both commits
+# land at the same merge.
 SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # detection (first match wins reclassified this repo's own corpus as node),
 # then node's I/O marker tables, triage, and registration. One constant for
@@ -1968,6 +1973,197 @@ def check_test_safety_net_node_triage(old, new):
         since=SINCE_TSN_NODE_TRIAGE)
 
 
+
+# ── test-safety-net: the manifest weight, and the precise discovery path ────
+
+_NODE_PRECISE_PROBE = r"""
+res = {"tooling_stack": "ERROR", "tooling_units": -1, "fresh_node": "ERROR",
+       "declared_node": "ERROR", "discovery_key": 0, "survives_a_bad_toolchain": 0,
+       "precise_extra": -1}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+try:
+    import stack_node
+except Exception:
+    # No node stack at all. That is what the baseline looks like, and it is a
+    # measurement rather than a crash: every row below still answers, so the
+    # probe must not bail the way one that imports it at the top would.
+    stack_node = None
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+def stack_of(root):
+    try:
+        return rank_risk.detect_stack(root).STACK_NAME
+    except AttributeError:
+        return "python"          # before the stack seam, the ranker WAS python
+    except Exception as exc:
+        return "ambiguous" if type(exc).__name__ == "AmbiguousStack" else "ERROR"
+
+
+# 1/2. THE REPRODUCTION: a Python repo with a `prettier` package.json. An
+#      additive bonus scored node 105 against python 40 and the skill ranked
+#      five files while ignoring forty.
+tooling = tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(40)]
+    + [("web/s%d.js" % i, "export function go%d() {}\n" % i) for i in range(5)]
+    + [("package.json", '{"devDependencies": {"prettier": "^3"}}\n')]))
+res["tooling_stack"] = stack_of(tooling)
+try:
+    plan = rank_risk.rank(tooling, "10 years ago", 10)
+    res["tooling_units"] = plan["units_discovered"]
+    res["discovery_key"] = 1 if "discovery" in plan else 0
+except Exception:
+    pass
+
+# 3. the direction the manifest scaling still has to carry: a fresh node
+#    project beside a few Python helper scripts is a node project.
+res["fresh_node"] = stack_of(tree({
+    "package.json": '{"name": "app"}\n',
+    "src/a.js": "export function a() {}\n",
+    "src/b.js": "export function b() {}\n",
+    "tools/gen.py": "def go():\n    return 1\n",
+    "tools/fmt.py": "def go():\n    return 1\n",
+    "tools/lint.py": "def go():\n    return 1\n"}))
+
+# 4. and a declared node package that vendors six Python scripts.
+res["declared_node"] = stack_of(tree(dict(
+    [("package.json", '{"name": "app"}\n'), ("src/app.ts", "export function boot() {}\n")]
+    + [("tools/gen%d.py" % i, "def go():\n    return 1\n" % ()) for i in range(6)])))
+
+# 5. a toolchain that is present and BROKEN must not cost the run its units.
+broken = tree({
+    "package.json": '{"name": "app"}\n',
+    "src/util.js": "export function parse(s) { return s; }\n",
+    "node_modules/typescript/lib/typescript.js": 'throw new Error("boom");\n'})
+if stack_node is not None:
+    try:
+        import io as _io
+        import contextlib as _cl
+        err = _io.StringIO()
+        with _cl.redirect_stderr(err):
+            units, _mode = stack_node.discover_units(broken)
+        res["survives_a_bad_toolchain"] = 1 if [u["id"] for u in units] == \
+            ["src/util.js::parse"] else 0
+    except Exception:
+        res["survives_a_bad_toolchain"] = 0
+
+# 6. what precision BUYS, where a real typescript exists to buy it with.
+lib = os.environ.get("TSN_TYPESCRIPT_LIB", "")
+if lib and os.path.isfile(lib) and stack_node is not None:
+    forms = tree({
+        "src/codec.js": "export const { encode, decode } = makeCodec();\n",
+        "src/cjs.js": "function fn(x) { return x; }\nmodule.exports = fn;\n",
+        "src/quoted.js": ('function parse(s) { return s; }\n'
+                          'module.exports = { "parse": parse };\n')})
+    try:
+        heur = {u["id"] for u in stack_node.discover_units(forms)[0]}
+        prec = stack_node._units_precise(forms, ts_lib=lib)
+        res["precise_extra"] = -1 if prec is None else len({u["id"] for u in prec} - heur)
+    except Exception:
+        res["precise_extra"] = -1
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_precise(old, new):
+    """Does a Python repo with a `package.json` stay Python, and does the report
+    say which reader found its units?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_PRECISE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_PRECISE_PROBE)
+    if _errored(oldp, newp):
+        return
+    # THESE TWO ARE GUARDS, NOT CLAIMS, AND THE REASON IS WORTH STATING. The
+    # swamping bug was introduced and fixed on the SAME branch, so it never
+    # reached the baseline: at the merge base there is no node stack to lose
+    # this repo to, and the shape below has always answered "python". Writing
+    # them as deltas would report UNPROVEN, which is the harness working -- a
+    # fix that moves no measurement against the baseline is not an improvement
+    # against the baseline. What they are worth is standing: from here on, any
+    # change that lets a tooling `package.json` outvote a file majority fails
+    # this row instead of shipping.
+    row(s, "stack for 40 `.py` + 5 `.js` + a `prettier` package.json "
+           "(python=right)",
+        oldp["tooling_stack"], newp["tooling_stack"],
+        newp["tooling_stack"] == "python" == oldp["tooling_stack"],
+        "the mainline shape, not a corner: an intra-branch `MANIFEST_BONUS = "
+        "100` ADDED to the file count scored node 105 against python 40, and a "
+        "root `package.json` for formatting or git hooks is ordinary in a "
+        "Python repo. A manifest now SCALES a claim -- `(files + 5) * 2` -- so "
+        "it cannot manufacture a majority it does not have",
+        kind="guard")
+    row(s, "units that repo's plan actually looks at (higher=better)",
+        oldp["tooling_units"], newp["tooling_units"],
+        newp["tooling_units"] >= oldp["tooling_units"] > 0,
+        "the consequence the label hides: under the additive bonus the run "
+        "ranked the five JavaScript files and never saw the forty Python "
+        "ones. A well-formed report about the wrong half of a repo is exactly "
+        "the failure this skill exists to close",
+        kind="guard")
+    row(s, "the report names WHICH reader produced its units (higher=better)",
+        oldp["discovery_key"], newp["discovery_key"],
+        newp["discovery_key"] > oldp["discovery_key"],
+        "decision D1's ninth key. A stack whose toolchain path is optional can "
+        "degrade for reasons that have nothing to do with the code, and two "
+        "runs that disagree about how many units exist are not comparable "
+        "unless the report says which reader produced each",
+        since=SINCE_TSN_NODE_PRECISE)
+    # These two DO move against the baseline, and they move because node was
+    # registered at all -- so they carry that campaign's constant rather than
+    # this one's. What they measure here is the other edge of the same
+    # constants: correcting the swamping bug by simply shrinking a manifest's
+    # weight would hand every small declared node package to whichever language
+    # vendored more helper scripts, and these fail if that happens.
+    row(s, "a fresh node project beside three Python scripts (node=right)",
+        oldp["fresh_node"], newp["fresh_node"], newp["fresh_node"] == "node",
+        "the direction opposite the swamping bug, and the reason the manifest "
+        "scaling carries a FLOOR: two source files plus a real `package.json` "
+        "is a node project even beside three Python helper scripts, and a "
+        "multiplier on a claim of 2 cannot say so without one",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "a declared node package vendoring six Python scripts (node=right)",
+        oldp["declared_node"], newp["declared_node"],
+        newp["declared_node"] == "node",
+        "the same edge one size up: a `package.json` beside a real source tree "
+        "is a claim about what the repo IS, and a scattering of another "
+        "language's scripts must not overturn it",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "units still discovered when a PRESENT toolchain is broken "
+           "(higher=better)",
+        oldp["survives_a_bad_toolchain"], newp["survives_a_bad_toolchain"],
+        newp["survives_a_bad_toolchain"] > oldp["survives_a_bad_toolchain"],
+        "the precise path's whole contract: it is an upgrade, never a "
+        "dependency. A `node_modules/typescript` that throws on require must "
+        "cost the run nothing at all -- the heuristic still returns every unit "
+        "and the run still reports which reader found them",
+        since=SINCE_TSN_NODE_PRECISE)
+    if newp.get("precise_extra", -1) >= 0:
+        row(s, "export forms the precise path finds that the heuristic cannot "
+               "(higher=better)",
+            max(oldp.get("precise_extra", -1), 0), newp["precise_extra"],
+            newp["precise_extra"] > max(oldp.get("precise_extra", -1), 0),
+            "destructured exports, a whole-module `module.exports = fn`, and a "
+            "quoted key -- three of the four forms Task 2 recorded as "
+            "deliberate misses of a reader with no parse tree. Row emitted "
+            "only where a real `typescript` is resolvable "
+            "(TSN_TYPESCRIPT_LIB)",
+            since=SINCE_TSN_NODE_PRECISE)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -2146,6 +2342,7 @@ def main():
         check_test_safety_net_round7(old, REPO)
         check_test_safety_net_node(old, REPO)
         check_test_safety_net_node_triage(old, REPO)
+        check_test_safety_net_node_precise(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
