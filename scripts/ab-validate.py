@@ -86,6 +86,11 @@ SINCE_TSN_FIXROUND_4 = "5c69c68"  # test-safety-net: the rank_risk correctness c
 SINCE_TSN_FIXROUND_5 = "dba1199"  # test-safety-net: the filesystem marker family
 # (C3), the shipped runtime guard (I1), and the document reconciliation
 # (I5 guard-trip outcome, M2 unittest fallback, M3/M4 spec drift)
+SINCE_TSN_FIXROUND_6 = "903fc56"  # test-safety-net: the guard under its OWN
+# documented command (N1), pkgutil.get_data through the _io layer (N2), a
+# worker-thread violation reaching the run (N3), class-valued patch targets
+# staying classes (N5), os.environ reads (M-a), and same-directory coverage
+# evidence under a basename collision (N4)
 
 
 def _git_out(*args):
@@ -1231,6 +1236,281 @@ def check_test_safety_net_guard(old, new):
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ── test-safety-net, fix round 6: the guard under its own documented command ──
+#
+# Every probe below scores a tree with no `io_guard.py`/`rank_risk.py` at the
+# WORST possible value rather than skipping it: at the merge base this skill
+# does not exist, and "no guard ships" is a real state each row measures. The
+# round's numbers against the PRE-ROUND tip (14bfbeb), where the skill does
+# exist, are recorded in the round-6 report -- that is the arm that shows the
+# fixes moved something, and it is why the disclosure matters.
+
+_ENTRY_POINT_PROBE = r"""
+import io_guard, tempfile
+io_guard.arm(1)
+try:
+    tempfile.mkdtemp()          # the ENTRY SCRIPT's own I/O, via the stdlib
+    print("BLOCKED:0")
+except BaseException:
+    print("BLOCKED:1")
+"""
+
+_ROUND6_PROBE = r"""
+import os, sys, tempfile, threading
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("PKGUTIL:1"); print("SSL:3"); print("THREAD:1"); print("ENV:4")
+    raise SystemExit(0)
+
+tmp = tempfile.mkdtemp()
+
+# N2 -- pkgutil.get_data reads a real file through the loader, not through any
+# `io` name and not through `os`.
+io_guard.arm(1)
+try:
+    try:
+        __import__("pkgutil").get_data("json", "__init__.py")
+        pkgutil_escape = 1
+    except io_guard.IOGuardViolation:
+        pkgutil_escape = 0
+    except BaseException:
+        pkgutil_escape = 1
+finally:
+    io_guard.disarm()
+print("PKGUTIL:%d" % pkgutil_escape)
+
+# N5 -- `socket.socket` is a class; wrapping it as a function breaks `import
+# ssl`, and with it every HTTP client in the stdlib. Fresh interpreter per
+# module so an already-imported one cannot mask the failure.
+ssl_broken = 0
+for mod in ("ssl", "urllib.request", "http.client"):
+    r = __import__("subprocess").run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r)\n"
+         "import io_guard; io_guard.arm(1)\n"
+         "import %s\n" % (sys.argv[1], mod)],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        ssl_broken += 1
+print("SSL:%d" % ssl_broken)
+
+# N3 -- a violation on a worker thread: swallowed by the thread bootstrap, so
+# the run reports green and a test performing real I/O ships.
+io_guard.arm(1)
+thread_escape = 1
+try:
+    box = {}
+    t = threading.Thread(target=lambda: box.setdefault("n", len(open(
+        os.path.join(tmp, "seed.txt"), "w").name)))
+    t.start()
+    try:
+        t.join()
+    except io_guard.IOGuardViolation:
+        thread_escape = 0
+    if thread_escape:
+        try:
+            if hasattr(io_guard, "pending_thread_violations") \
+                    and io_guard.pending_thread_violations():
+                thread_escape = 0
+        except BaseException:
+            pass
+finally:
+    try:
+        io_guard.disarm()
+    except BaseException:
+        thread_escape = 0
+print("THREAD:%d" % thread_escape)
+
+# M-a -- os.environ reads. `.get`/`.copy` are MutableMapping methods that
+# bottom out in __getitem__ and never call os.getenv.
+io_guard.arm(1)
+env_escapes = 0
+try:
+    alias = os.environ
+    for fn in (lambda: os.environ["PATH"], lambda: os.environ.get("PATH"),
+               lambda: alias.get("PATH"), lambda: os.environ.copy()):
+        try:
+            fn()
+            env_escapes += 1
+        except io_guard.IOGuardViolation:
+            pass
+        except BaseException:
+            env_escapes += 1
+finally:
+    io_guard.disarm()
+print("ENV:%d" % env_escapes)
+"""
+
+
+def check_test_safety_net_round6(old, new):
+    """Six rows: the guard under its own documented command, and five holes."""
+    scratch = tempfile.mkdtemp()
+
+    def round6_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _ROUND6_PROBE, assets],
+                           capture_output=True, text=True, timeout=180)
+        out = {"PKGUTIL": 1, "SSL": 3, "THREAD": 1, "ENV": 4}
+        for line in r.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key in out and value.strip().isdigit():
+                out[key] = int(value)
+        return out
+
+    def entry_point_blocked(tree):
+        """I/O the ENTRY-POINT SCRIPT itself makes, wrongly blocked (1 = yes).
+
+        Pytest-free on purpose. The defect is that a console script's frame
+        (`<prefix>/bin/pytest`) is under none of the interpreter's library
+        roots and sits at the base of every stack, so the guard read pytest's
+        own capture and environment handling as the unit's. A file named
+        `harness` with no `.py` extension reproduces exactly that shape, and
+        needs nothing installed -- so this row is measured in every
+        environment, while the row below runs the real documented command only
+        where pytest exists.
+        """
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        if not os.path.isfile(os.path.join(assets, "io_guard.py")):
+            return 1
+        harness_dir = tempfile.mkdtemp(dir=scratch)
+        harness = os.path.join(harness_dir, "harness")
+        with open(harness, "w", encoding="utf-8") as f:
+            f.write(_ENTRY_POINT_PROBE)
+        r = subprocess.run([sys.executable, harness],
+                           env=dict(os.environ, PYTHONPATH=assets),
+                           capture_output=True, text=True, timeout=120)
+        for line in r.stdout.splitlines():
+            if line.startswith("BLOCKED:"):
+                return int(line.split(":", 1)[1])
+        return 1
+
+    _DOC_CMD = re.compile(
+        r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+        r'pytest\s+-p\s+io_guard\s+\S+$')
+
+    def documented_commands_failing(tree):
+        """How many of the tree's OWN documented invocations do not pass."""
+        skill_dir = os.path.join(tree, "test-safety-net")
+        commands = []
+        for rel in ("SKILL.md", "references/triage.md", "references/stacks.md"):
+            text = _tsn_read(tree, *rel.split("/"))
+            if not text:
+                continue
+            for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                joined = re.sub(r"\\\n\s*", " ", block)
+                for line in joined.splitlines():
+                    if _DOC_CMD.match(line.strip()):
+                        commands.append(line.strip())
+        if not commands:
+            return 5                      # no guard, no documented command
+        proof = tempfile.mkdtemp(dir=scratch)
+        with open(os.path.join(proof, "pure.py"), "w") as f:
+            f.write("def add(a, b):\n    return a + b\n")
+        with open(os.path.join(proof, "test_pure.py"), "w") as f:
+            f.write("import pure\n\n\ndef test_add():\n"
+                    "    assert pure.add(2, 3) == 5\n")
+        failing = 0
+        for command in commands:
+            cmd = command.replace("<path>::<test_name>", "test_pure.py::test_add")
+            env = dict(os.environ, SKILL_DIR=skill_dir)
+            env.pop("PYTHONPATH", None)
+            env.pop("TEST_SAFETY_NET_TIER", None)
+            env.pop("TEST_SAFETY_NET_ALLOW", None)
+            r = subprocess.run(["/bin/sh", "-c",
+                                cmd + " -q -p no:cacheprovider"],
+                               cwd=proof, env=env, capture_output=True,
+                               text=True, timeout=180)
+            if r.returncode != 0 or "1 passed" not in r.stdout:
+                failing += 1
+        return failing
+
+    # N4 fixture: two colliding `harvest.py`, one of them tested from beside it.
+    n4 = os.path.join(scratch, "n4")
+    for pkg in ("one", "two"):
+        d = os.path.join(n4, pkg, "assets")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "harvest.py"), "w") as f:
+            f.write("def collect():\n    return 1\n\n\n"
+                    "def gather():\n    return 2\n")
+    with open(os.path.join(n4, "one", "assets", "test_one.py"), "w") as f:
+        f.write("import harvest\n\n\ndef test_c():\n"
+                "    assert harvest.collect() == 1\n\n\n"
+                "def test_g():\n    assert harvest.gather() == 2\n")
+
+    def colliding_units_credited(tree):
+        """Genuinely-tested colliding units credited, or -1 on ANY over-credit.
+
+        Folding the invariant into the score rather than into a separate guard
+        row: `two/assets/harvest.py` has no test at all, so crediting it hides
+        an untested unit -- the direction round 4 closed and this row must
+        never reopen. -1 is therefore worse than crediting nothing.
+        """
+        plan = _tsn_probe(tree, n4)
+        if plan is None:
+            return -1
+        covered = set(plan.get("covered", []))
+        if any(i.startswith("two/assets/harvest.py::") for i in covered):
+            return -1
+        return sum(1 for i in covered if i.startswith("one/assets/harvest.py::"))
+
+    s = "test-safety-net"
+    a, b = entry_point_blocked(old), entry_point_blocked(new)
+    row(s, "the entry-point script's own I/O wrongly blocked (lower=better)",
+        a, b, b < a,
+        "N1: a console script lives in <prefix>/bin, under none of the four "
+        "sysconfig roots, so its frame -- at the base of every stack -- read as "
+        "'code under test' and pytest's own capture and env handling tripped "
+        "the guard",
+        since=SINCE_TSN_FIXROUND_6)
+
+    if shutil.which("pytest"):
+        a, b = documented_commands_failing(old), documented_commands_failing(new)
+        row(s, "documented `pytest -p io_guard` invocations that do not pass "
+               "(lower=better)", a, b, b < a,
+            "N1: the suite ran `python -m pytest` while every document prints "
+            "`pytest`; at tier 1 the documented command died inside pytest's "
+            "capture teardown with no test result, at tier 2 it ERRORed every "
+            "test on os.putenv. Row emitted only where pytest is installed",
+            since=SINCE_TSN_FIXROUND_6)
+
+    oldp, newp = round6_probe(old), round6_probe(new)
+    row(s, "pkgutil.get_data escaping an armed tier-1 guard (lower=better)",
+        oldp["PKGUTIL"], newp["PKGUTIL"], newp["PKGUTIL"] < oldp["PKGUTIL"],
+        "N2: `SourceFileLoader.get_data` -> `_io.open_code` is a Python name "
+        "the `io` re-exports do not cover, on a frozen-importlib frame the "
+        "provenance walk exempted unconditionally -- missed by BOTH layers",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "stdlib modules that fail to import while armed (lower=better)",
+        oldp["SSL"], newp["SSL"], newp["SSL"] < oldp["SSL"],
+        "N5: `socket.socket` is a CLASS; as a function it broke "
+        "`class SSLSocket(socket)`, so `import ssl` -- and asyncio, "
+        "http.client, urllib.request, requests -- raised TypeError at BOTH "
+        "tiers: a fourth proof outcome the contract cannot express",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "worker-thread I/O that leaves the proof green (lower=better)",
+        oldp["THREAD"], newp["THREAD"], newp["THREAD"] < oldp["THREAD"],
+        "N3: `Thread._bootstrap_inner` catches BaseException, so the trip "
+        "became a warning beside `1 passed` and a test performing real I/O "
+        "shipped with a green proof",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "os.environ read forms escaping an armed tier-1 guard (lower=better)",
+        oldp["ENV"], newp["ENV"], newp["ENV"] < oldp["ENV"],
+        "M-a: `.get`/`.copy`/`.pop` are MutableMapping methods bottoming out "
+        "in __getitem__ and never calling os.getenv -- and the FILTER does see "
+        "`os.environ.get(...)`, so the two layers disagreed rather than agreed",
+        since=SINCE_TSN_FIXROUND_6)
+    a, b = colliding_units_credited(old), colliding_units_credited(new)
+    row(s, "tested units credited under a basename collision, -1 on any "
+           "over-credit (higher=better)", a, b, b > a,
+        "N4: path-qualified evidence is unrepresentable for a test sitting "
+        "beside its module, so 105 of this repo's 320 units could not be "
+        "credited at all and four tested ones went back into `ranked`",
+        since=SINCE_TSN_FIXROUND_6)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1391,6 +1671,7 @@ def main():
         check_test_safety_net(old, REPO)
         check_test_safety_net_ranker(old, REPO)
         check_test_safety_net_guard(old, REPO)
+        check_test_safety_net_round6(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
