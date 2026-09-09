@@ -967,6 +967,27 @@ def self_test():
     else:
         print("INFO: no merge base here (detached or no main) — SKIP path exercised")
 
+    # Every SINCE_* pin must still be REACHABLE from the integration branch or
+    # HEAD. A rebase or a rebuilt branch gives every commit a new SHA, and the
+    # abandoned object often still exists — so the pin resolves, `_is_ancestor`
+    # quietly returns False, and every row that depends on it misclassifies as
+    # a live delta that cannot move. That is exactly what happened here: the
+    # branch was rebuilt by cherry-pick and a pin kept pointing into the
+    # discarded history, turning 11 settled rows into WORSE/UNPROVEN.
+    dangling = []
+    for name, val in sorted(globals().items()):
+        if not name.startswith("SINCE_") or not isinstance(val, str):
+            continue
+        if not (_is_ancestor(val, "origin/main") or _is_ancestor(val, "HEAD")):
+            dangling.append("%s=%s" % (name, val))
+    if dangling:
+        print("FAIL: since-pin(s) not reachable from origin/main or HEAD: %s"
+              % ", ".join(dangling))
+        print("      a rebase or rebuilt branch invalidates a pin without deleting it")
+        rc = 1
+    else:
+        print("PASS: every SINCE_* pin is reachable from the integration branch")
+
     # Every delta row in the shipped corpus must declare `since`, or it can
     # never convert to a guard and will fail the run after it merges.
     ROWS.clear()
