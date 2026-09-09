@@ -327,13 +327,20 @@ def reached_through_module(module: str, name: str, text: str, *,
                for alias in aliases)
 
 
-def discover_units(root: str):
+def discover_units(root: str, precise: bool = True):
     """Interface entry point: `(units, discovery_path)`.
 
     The label is always "precise" for Python -- `ast` is stdlib, so discovery
     can never silently degrade to a heuristic the way a stack that shells out
     to an absent toolchain can. Callers compare runs by it (multistack design,
     D1), so it is reported rather than assumed.
+
+    `precise` is ACCEPTED AND IGNORED, and the asymmetry is the point. The flag
+    exists because node's precise path runs the ANALYSED REPO'S OWN compiler;
+    Python's reads the tree with stdlib `ast` and executes nothing, so there is
+    nothing here for a user to decline. Accepting it keeps ONE signature across
+    stacks -- `--no-precise` on a Python repo has to be a no-op, not a
+    TypeError.
     """
     return _discover_units(root), "precise"
 

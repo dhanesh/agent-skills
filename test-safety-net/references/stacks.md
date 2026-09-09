@@ -48,6 +48,21 @@ downloaded** — `npx tsc` on a miss would fetch an unpinned compiler, so the pr
 `require`s one already on disk or declines. Two node runs are comparable only when the key
 agrees.
 
+**The precise path RUNS THE ANALYSED REPO'S OWN CODE.** `require`ing
+`<repo>/node_modules/typescript/lib/typescript.js` executes that file, in a node process, during
+what is otherwise a read-only analysis of a tree nobody has vetted yet. Nothing is downloaded and
+no package runner is involved, but a repo that ships a hostile — or merely broken — `typescript`
+gets to run it. Pass **`--no-precise`** to decline the path outright; the run then reports
+`discovery: "heuristic"` and finds fewer units, which is the trade. Python's precise path is
+stdlib `ast` and executes nothing, so the flag is a no-op there.
+
+**A degraded precise run declines rather than under-reporting.** A toolchain that loads but
+cannot parse — an aliased or shimmed compiler, a version whose AST this walker does not share —
+used to produce `discovery: "precise"` with **zero units**, which reads as "this repo has nothing
+worth testing" while wearing the label you are told to trust more. Any unreadable file, or no
+units at all over a non-empty source tree, now hands the run back to the heuristic reader with a
+`note:` on stderr naming the reason.
+
 **Which path to expect.** `heuristic`, in most repos you meet. `precise` needs a real
 `node_modules/typescript` already installed in the tree being analysed — not one hoisted into a
 parent workspace this run cannot see, not a Yarn PnP zip, and not one this run could install. So

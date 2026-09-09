@@ -18,7 +18,8 @@ compatibility: >-
   CLI. Writes and proves tests on two stacks — python (pytest, falling back to unittest) and
   node/TypeScript (node 18+, `node --test`); go and rust are covered by neither and are declined
   (references/stacks.md). No pip, no npm, no network: node's optional precise discovery drives a
-  `typescript` the repo already ships and never downloads one.
+  `typescript` the repo already ships and never downloads one — that runs the analysed repo's own
+  compiler in-process, and `--no-precise` declines it.
 metadata:
   author: dhanesh
   version: "1.1.0"
@@ -94,7 +95,10 @@ than none, because it makes the invariant look enforced when it is not.
    (`precise` = a real parser, `heuristic` = a text reader); a node repo reads `heuristic` unless
    it ships its own `typescript`, and two runs are only comparable when it agrees. **Carry that
    value into your report's header**, as the template below does: a run that silently degraded is a
-   run whose numbers cannot be compared to the last one's.
+   run whose numbers cannot be compared to the last one's. Node's precise path reaches that repo's
+   own `typescript` by `require`ing it, so it EXECUTES code from the tree you are analysing; pass
+   `--no-precise` on any repo you were handed rather than wrote, and expect `heuristic` and fewer
+   units in exchange (`references/parameters.md`).
 
    Every unit lands in exactly one of the four testability tiers described in full in
    `references/triage.md` — read it before writing anything. In short: Tier 1 (direct) gets a

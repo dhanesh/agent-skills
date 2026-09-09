@@ -861,6 +861,110 @@ class TestPreciseDiscovery(NodeCase):
                     ["src/util.ts::parse"]):
             self.assertIsNone(stack_node._units_from_payload(bad, files), bad)
 
+    def test_a_shimmed_toolchain_that_reads_nothing_declines_rather_than_reporting_zero(self):
+        """F2: the silent zero, wearing the better label.
+
+        A `node_modules/typescript` whose entry point LOADS but whose API does
+        not behave -- an aliased, shimmed or incompatible compiler -- made the
+        walker count every file into `unreadable` and emit an empty `units`
+        list. An empty list is not `None`, so nothing declined: the run
+        reported `discovery: "precise"` with zero units and exit 0, while the
+        heuristic would have found five. Zero units reads as "this repo has
+        nothing worth testing", which is the failure mode this whole stack was
+        built to refuse.
+        """
+        for i in range(5):
+            write(self.root, "src/m%d.ts" % i,
+                  "export function f%d(s: string) { return s; }\n" % i)
+        # An entry point that loads and exports the right NAMES, but whose
+        # `createSourceFile` throws -- the walker's per-file `catch` counts it.
+        self.stub_typescript(
+            "module.exports = {\n"
+            "  createSourceFile: function () { throw new Error('shimmed'); },\n"
+            "  ScriptTarget: { Latest: 99 },\n"
+            "  SyntaxKind: {},\n"
+            "};\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            units, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual(len(units), 5)
+        self.assertIn("unreadable", err.getvalue())
+
+    def test_one_unreadable_file_out_of_many_still_declines_the_whole_run(self):
+        """`unreadable` is all-or-nothing, exactly as a malformed row is.
+
+        A run that walked nine files and choked on the tenth reports nine units
+        and calls itself precise -- fewer than the heuristic would find, under
+        the label the report tells an agent to trust MORE. The consumer used to
+        read `payload["units"]` and never read `payload["unreadable"]` at all,
+        so a number the walker computed on every run was thrown away.
+        """
+        self.assertIsNone(
+            stack_node._decline_reason({"units": [{"x": 1}], "unreadable": 0}, ["a.ts"]))
+        self.assertIn("1 file", stack_node._decline_reason(
+            {"units": [{"x": 1}], "unreadable": 1}, ["a.ts", "b.ts"]))
+
+    def test_an_empty_unit_list_over_a_non_empty_file_set_declines(self):
+        # The second half of the same rule, for a toolchain that reports no
+        # failures and no units: a tree with source files in it has something
+        # in it, and a reader that finds nothing has not read it.
+        self.assertIn("no units", stack_node._decline_reason(
+            {"units": [], "unreadable": 0}, ["a.ts"]))
+        # …but a tree with no files never gets here, and an empty tree is not
+        # a degraded run.
+        self.assertIsNone(stack_node._decline_reason({"units": [], "unreadable": 0}, []))
+
+    def test_no_precise_refuses_to_run_the_analysed_repos_compiler(self):
+        """F6: running a target repo's own code is a decision a user may refuse.
+
+        The precise path `require`s `<analysed repo>/node_modules/typescript/lib/
+        typescript.js` in a node process. That is the repo's own code, executing,
+        during what SKILL.md pitches as a read-only analysis of a tree nobody
+        trusts yet. The flag is the important half of the disclosure: an agent
+        handed a repo it did not write needs a way to say no.
+        """
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        marker = os.path.join(self.root, "PWNED")
+        self.stub_typescript(
+            "require('fs').writeFileSync(%r, 'the analysed repo ran');\n"
+            "throw new Error('and then failed');\n" % marker)
+        with contextlib.redirect_stderr(io.StringIO()):
+            units, mode = stack_node.discover_units(self.root, precise=False)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+        self.assertFalse(os.path.exists(marker),
+                         "--no-precise still executed the analysed repo's compiler")
+        # …and the negative arm: with the default, it DOES run, which is the
+        # behaviour the flag exists to let a user decline.
+        with contextlib.redirect_stderr(io.StringIO()):
+            stack_node.discover_units(self.root)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_the_cli_flag_reaches_the_stack(self):
+        # The flag is worth nothing if it stops at argparse.
+        write(self.root, "package.json", '{"name": "demo"}\n')
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        marker = os.path.join(self.root, "PWNED")
+        self.stub_typescript(
+            "require('fs').writeFileSync(%r, 'ran');\n"
+            "throw new Error('nope');\n" % marker)
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = rank_risk.main([self.root, "--since", "10 years ago", "--no-precise"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["discovery"], "heuristic")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_python_accepts_the_same_flag_and_is_unaffected(self):
+        # The interface is one signature for every stack. Python's `ast` is
+        # stdlib and executes nothing, so the flag is a no-op there -- but it
+        # has to be ACCEPTED, or `--no-precise` would crash a Python repo.
+        import stack_python
+        write(self.root, "m.py", "def f():\n    return 1\n")
+        self.assertEqual(stack_python.discover_units(self.root, precise=False)[1],
+                         "precise")
+
     def test_the_toolchain_is_never_downloaded(self):
         # `npx tsc` on a miss DOWNLOADS. The precise path resolves a file that
         # already exists and requires it directly; nothing here may shell out

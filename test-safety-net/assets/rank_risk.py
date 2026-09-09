@@ -66,9 +66,14 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
                                                  same-named file in the repo.
 
   analysis
-    discover_units(root) -> (units, path)        the units, plus WHICH
-                                                 discovery path ran
-                                                 ("precise" | "heuristic")
+    discover_units(root, precise=True)           the units, plus WHICH
+        -> (units, path)                         discovery path ran
+                                                 ("precise" | "heuristic").
+                                                 `precise=False` declines any
+                                                 path that would EXECUTE the
+                                                 analysed repo's own toolchain
+                                                 (node's does; Python's `ast`
+                                                 does not, and ignores it)
     triage(root, unit) -> (tier, reason)         the FILTER -- never the
                                                  enforcement; the runtime
                                                  guard enforces the no-I/O
@@ -202,13 +207,13 @@ UNCONTROLLABLE = stack_python.UNCONTROLLABLE
 triage = stack_python.triage
 
 
-def discover_units(root: str, stack=None):
+def discover_units(root: str, stack=None, precise: bool = True):
     """The discovered units alone, dropping the discovery-path label.
 
     The stack interface returns `(units, discovery_path)`; this preserves the
     single-value contract callers had before the label existed.
     """
-    return (stack or detect_stack(root)).discover_units(root)[0]
+    return (stack or detect_stack(root)).discover_units(root, precise=precise)[0]
 
 def _git_prefix(root: str) -> str:
     """`root`'s path INSIDE its git repo, slash-terminated ("pkg/sub/"), or "".
@@ -588,7 +593,7 @@ def _normalise(value, hi):
 
 
 def rank(root: str, since: str = "6 months ago", top_n: int = 10,
-         stack=None) -> dict:
+         stack=None, precise: bool = True) -> dict:
     """The plan: what to net, what cannot be netted, and what is already covered.
 
     `ranked`, `remainder` and `not_netted` partition the discovered units by
@@ -609,7 +614,10 @@ def rank(root: str, since: str = "6 months ago", top_n: int = 10,
     # says which reader produced each. Python is always "precise" (`ast` is
     # stdlib and cannot go missing); node is "precise" only where the repo
     # ships its own `typescript`.
-    units, discovery = stack.discover_units(root)
+    # `precise=False` is the caller declining any discovery path that would
+    # EXECUTE code from the analysed repo. Only node has one; see
+    # `stack_node.discover_units`.
+    units, discovery = stack.discover_units(root, precise=precise)
     churn_by_path = churn(root, since)
     refs = inbound_refs(root, units, stack)
     covered = already_covered(root, units, stack)
@@ -680,6 +688,15 @@ def main(argv=None) -> int:
     p.add_argument("--stack", default=None,
                    choices=sorted(s.STACK_NAME for s in STACKS),
                    help="override stack detection (default: detect by evidence)")
+    # The precise path on node RUNS THE ANALYSED REPO'S OWN COMPILER
+    # (`node_modules/typescript/lib/typescript.js`, `require`d in a node
+    # process). Everything else this tool does to a target tree reads it. That
+    # is a real decision on a repo nobody has vetted, so it gets a way to say
+    # no -- and the `discovery` key then honestly reports "heuristic".
+    p.add_argument("--no-precise", dest="precise", action="store_false",
+                   help="never execute the analysed repo's own toolchain; use the "
+                        "heuristic reader only (node's precise path requires that "
+                        "repo's typescript in-process)")
     args = p.parse_args(argv)
     if not os.path.isdir(args.repo):
         sys.stderr.write(f"error: not a directory: {args.repo}\n")
@@ -721,7 +738,8 @@ def main(argv=None) -> int:
                          % (stack.STACK_NAME,
                             ", ".join("%s=%d" % (n, v) for n, v in scores),
                             "; forced by --stack" if args.stack else ""))
-    json.dump(rank(args.repo, args.since, args.top_n, stack), sys.stdout,
+    json.dump(rank(args.repo, args.since, args.top_n, stack, precise=args.precise),
+              sys.stdout,
               indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

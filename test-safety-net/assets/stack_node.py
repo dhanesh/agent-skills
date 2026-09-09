@@ -802,7 +802,7 @@ _STMT_KEYWORDS = ("export", "import", "const", "let", "var", "function",
                   "class", "module", "exports", "return", "async")
 
 
-def discover_units(root: str):
+def discover_units(root: str, precise: bool = True):
     """Interface entry point: `(units, discovery_path)`.
 
     Two paths, and the label says which one ran (multistack design, D1),
@@ -815,8 +815,18 @@ def discover_units(root: str):
     reader that needs nothing installed. A precise path that could fail a run
     would be worse than no precise path at all -- it would make the skill's
     answer depend on whether somebody had run `npm ci` today.
+
+    `precise=False` (`--no-precise` on the CLI) declines the toolchain path
+    without trying it, and the label then honestly says `"heuristic"`. THE
+    REASON IT EXISTS: the precise path `require`s
+    `<analysed repo>/node_modules/typescript/lib/typescript.js` in a node
+    process, which is the ANALYSED REPO'S OWN CODE, executing. Everything else
+    this skill does to a target tree reads it. An agent handed a repo nobody
+    has vetted is entitled to say no to that, and to be told it is happening --
+    `references/parameters.md` and `references/stacks.md` say so where a user
+    reaches them.
     """
-    units = _units_precise(root)
+    units = _units_precise(root) if precise else None
     if units is None:
         return _units_heuristic(root), "heuristic"
     return units, "precise"
@@ -1110,6 +1120,45 @@ def _units_from_payload(raw, files):
     return sorted(out, key=lambda u: u["id"])
 
 
+def _decline_reason(payload, files):
+    """Why this precise run is not usable, or None if it is.
+
+    The walker has always COUNTED the files it could not parse (`unreadable`,
+    the `catch` in `_PRECISE_JS`) and always written the number on stdout. The
+    consumer used to read `payload["units"]` and never read it -- so a broken
+    toolchain produced an empty `units` list, which is not `None`, nothing
+    declined, and the run reported `discovery: "precise"` with ZERO units while
+    the heuristic would have found five. Zero units reads as "nothing here is
+    worth testing": the silent zero, wearing the label the report tells an
+    agent to trust more.
+
+    `_units_from_payload` already refuses to half-trust a payload ROW by row.
+    This is the same rule at the level of the RUN, which is where its own
+    docstring always claimed it applied: the precise path may not report fewer
+    units than the heuristic while still calling itself precise.
+
+    Two conditions, both all-or-nothing:
+
+      * ANY unreadable file. Nine of ten files parsed is a degraded run, and a
+        degraded run relabelled `precise` is worse than an honest heuristic
+        one.
+      * NO units at all over a NON-EMPTY file set. A toolchain can report no
+        failures and still return nothing -- an API shimmed to a no-op, a
+        version whose `SyntaxKind` numbering this walker does not share. An
+        empty tree is a different thing and is not a degraded run, so the file
+        set is part of the test.
+    """
+    unreadable = payload.get("unreadable")
+    if isinstance(unreadable, int) and not isinstance(unreadable, bool) and unreadable > 0:
+        return "%d file%s of %d unreadable" % (
+            unreadable, "" if unreadable == 1 else "s", len(files))
+    units = payload.get("units")
+    if files and isinstance(units, list) and not units:
+        return "no units over %d source file%s" % (
+            len(files), "" if len(files) == 1 else "s")
+    return None
+
+
 def _units_precise(root: str, ts_lib=None, timeout: int = PRECISE_TIMEOUT,
                    node_exe: str = "node"):
     """The units the repo's own typescript sees, or None to fall back.
@@ -1148,6 +1197,12 @@ def _units_precise(root: str, ts_lib=None, timeout: int = PRECISE_TIMEOUT,
         return None
     try:
         payload = json.loads(proc.stdout)
+        if not isinstance(payload, dict):
+            raise TypeError("payload is not an object")
+        reason = _decline_reason(payload, files)
+        if reason is not None:
+            _precise_declined(reason)
+            return None
         units = _units_from_payload(payload["units"], files)
     except (ValueError, TypeError, KeyError, IndexError):
         _precise_declined("unparseable output")
