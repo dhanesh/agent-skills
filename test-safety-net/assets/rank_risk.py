@@ -172,11 +172,20 @@ def _markers(text):
 
 
 def _module_level_source(tree, lines):
-    """Source of statements OUTSIDE any def/class — what runs on import."""
+    """Source of statements OUTSIDE any def/class — what runs on import.
+
+    Only statements containing a Call or an Attribute can perform I/O at
+    import time. A module-level data literal that merely NAMES an I/O
+    marker — a driver allowlist, a settings table, this module's own
+    marker constants — is data, not behaviour, and must not condemn every
+    unit in the file to Tier 4.
+    """
     out = []
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
                              ast.Import, ast.ImportFrom)):
+            continue
+        if not any(isinstance(n, (ast.Call, ast.Attribute)) for n in ast.walk(node)):
             continue
         seg = lines[node.lineno - 1: getattr(node, "end_lineno", node.lineno)]
         out.extend(seg)

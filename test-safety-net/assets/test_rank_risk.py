@@ -178,6 +178,17 @@ class TestTriage(TempRepo):
         self.assertEqual(tier, 4)
         self.assertIn("import time", reason)
 
+    def test_module_level_data_naming_a_marker_is_not_import_time_io(self):
+        # A module-level allowlist that MENTIONS a driver is data, not behaviour.
+        # Reading it as I/O condemned every unit in the file to tier 4 and
+        # silently dropped them from the net.
+        tier, reason = self._tier(
+            "g.py",
+            'DRIVERS = {"database": ("psycopg2.", "sqlite3.connect")}\n\n\n'
+            "def pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
