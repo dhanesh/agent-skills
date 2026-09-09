@@ -517,6 +517,28 @@ Carry across the Python guard's hard-won rules, each of which cost a review roun
 - Modify: `test-safety-net/SKILL.md`, `test-safety-net/references/stacks.md`, `test-safety-net/README.md`
 
 - [ ] **Step 1:** Fill the node row in `stacks.md` with the four facts, and replace the three "see the follow-up plan" promises with what is now true. State the hybrid-discovery limit and which path a reader should expect.
+- [ ] **Step 1b: the async-violation reporting rule — REQUIRED, controller-reproduced**
+
+`node --test` misattributes a violation that lands after its test resolved. Verbatim:
+
+```
+ok 1     - fast_test_slow_violation          <- the test that violated
+not ok 2 - second_test_keeps_process_alive   <- an innocent test
+exit 1
+```
+
+An agent reading per-test results keeps the test performing real I/O and discards the
+innocent one — exactly inverted. So SKILL.md must state, in the node proof loop:
+
+- **The exit status is the only trustworthy signal on this stack.** A zero exit means the
+  batch is clean; a nonzero exit means something in it violated.
+- On a nonzero exit whose failure is an `IOGuardViolation`, **discard the whole batch and
+  re-prove one test at a time**. Per-test attribution cannot be trusted for async
+  violations, and a batch is cheap to re-run.
+- Never keep a test reported `ok` from a run that exited nonzero.
+
+Add a shell assertion pinning this exact fixture shape, so the rule cannot rot into prose.
+
 - [ ] **Step 2:** In SKILL.md, add the node guard invocation beside the Python one, **as a complete copyable block** including whatever preload path is needed, referencing `"$SKILL_DIR/assets/io_guard.js"`. Update `compatibility` to name python and node.
 - [ ] **Step 3:** Update the frontmatter `description` so it fires for node repos.
 - [ ] **Step 4:** Run `make gate-skill SKILL=test-safety-net`; `asset-paths.sh` will fail a skill-relative path.
@@ -524,7 +546,7 @@ Carry across the Python guard's hard-won rules, each of which cost a review roun
 
 ---
 
-### Task 7: Eval checks and A/B rows
+### Task 7: Eval checks and A/B rows (dispatched together with Task 6 — the eval proves the very commands Task 6 writes)
 
 **Files:**
 - Modify: `test-safety-net/eval/run_eval.py`, `scripts/ab-validate.py`
