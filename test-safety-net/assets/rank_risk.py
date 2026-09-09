@@ -140,93 +140,217 @@ def inbound_refs(root: str, units) -> dict:
 # I/O markers, grouped by whether the boundary can be CONTROLLED in a test.
 # Controllable -> tier 2 (pin at a wider boundary, with the boundary named).
 # Uncontrollable without a seam -> tier 3 (report the seam; write nothing).
+#
+# Markers are DOTTED-PATH PREFIXES matched against a call's RESOLVED target
+# (see `_resolve` / `_import_alias_map`), not raw substrings of the source
+# text. That is what makes `import socket as s; s.create_connection(...)`
+# visible as network I/O (a substring scan cannot see through the alias, and
+# an alias-derived substring like "s." is not safe — it is also a substring
+# of "os."), and what stops a module-level data literal that merely SPELLS
+# OUT a marker string (this table itself, included) from reading as
+# behaviour: a string literal contains no `ast.Call`, so it never resolves.
 CONTROLLABLE = {
-    "filesystem": ("open(", "pathlib.", "os.path.", "os.remove", "os.mkdir",
-                   "shutil.", "tempfile."),
-    "clock": ("datetime.now", "datetime.utcnow", "time.time", "time.sleep",
-              "date.today"),
-    "randomness": ("random.", "uuid.uuid4", "secrets."),
+    "filesystem": ("open", "pathlib", "os.path", "os.remove", "os.mkdir",
+                   "shutil", "tempfile"),
+    "clock": ("datetime", "time.time", "time.sleep", "date.today"),
+    "randomness": ("random", "uuid.uuid4", "secrets"),
     "environment": ("os.environ", "os.getenv"),
 }
 UNCONTROLLABLE = {
-    "network": ("requests.", "urllib.request", "httpx.", "socket.", "aiohttp.",
-                "boto3.", "urlopen("),
-    "database": ("psycopg2.", "sqlite3.connect", "pymongo.", "MongoClient",
-                 "create_engine", "cursor()"),
-    "subprocess": ("subprocess.", "os.system", "os.popen"),
+    "network": ("requests", "urllib.request", "httpx", "socket", "aiohttp",
+                "boto3", "urlopen"),
+    "database": ("psycopg2", "sqlite3.connect", "pymongo", "MongoClient",
+                 "create_engine"),
+    "subprocess": ("subprocess", "os.system", "os.popen"),
 }
 
 
-def _markers(text):
-    """(group, marker) for every I/O marker present in `text`. Deterministic order."""
+def _import_alias_map(tree):
+    """Local name -> canonical dotted path, from every import in the module.
+
+        import socket                    -> {"socket": "socket"}
+        import socket as s               -> {"s": "socket"}
+        import os.path                   -> {"os": "os"}          (binds the root)
+        from os import system            -> {"system": "os.system"}
+        from os import system as run_cmd -> {"run_cmd": "os.system"}
+        from requests import get         -> {"get": "requests.get"}
+
+    Walks the whole tree, not just the module body, so a function-local
+    import is resolved the same way as a module-level one.
+    """
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+                else:
+                    root = alias.name.split(".")[0]
+                    aliases[root] = root
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _resolve(node, alias_map):
+    """Resolve a Name/Attribute AST node to a dotted canonical path, or None.
+
+    `ast.Name(id=n)` resolves through the alias map (falling back to `n`
+    itself for an unaliased or local name); `ast.Attribute(value=v, attr=a)`
+    resolves recursively to `resolve(v) + "." + a`. Anything else (a call
+    result, a subscript, ...) is unresolvable and returns None rather than
+    guessing.
+    """
+    if isinstance(node, ast.Name):
+        return alias_map.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = _resolve(node.value, alias_map)
+        return None if base is None else f"{base}.{node.attr}"
+    return None
+
+
+def _call_targets(node_or_nodes, alias_map):
+    """Resolved dotted call targets for every `ast.Call` reachable from the
+    given node (or list of nodes).
+
+    Only a Call's func matters here — a bare data literal that merely NAMES
+    a marker string contains no Call node, so it contributes nothing.
+    """
+    nodes = node_or_nodes if isinstance(node_or_nodes, list) else [node_or_nodes]
+    targets = []
+    for root in nodes:
+        if root is None:
+            continue
+        for n in ast.walk(root):
+            if isinstance(n, ast.Call):
+                resolved = _resolve(n.func, alias_map)
+                if resolved is not None:
+                    targets.append(resolved)
+    return targets
+
+
+def _markers(names):
+    """(group, marker, controllable) for every I/O marker matched by any
+    resolved call target in `names`. Deterministic order: UNCONTROLLABLE
+    groups before CONTROLLABLE groups, each iterated in sorted-group /
+    fixed-marker-tuple order — so two runs on the same input agree.
+
+    A name matches a marker when it equals the marker exactly or starts with
+    `marker + "."` (the marker is always a dotted-path prefix).
+    """
+    def _hit(marker):
+        return any(n == marker or n.startswith(marker + ".") for n in names)
+
     hits = []
     for group in sorted(UNCONTROLLABLE):
         for m in UNCONTROLLABLE[group]:
-            if m in text:
+            if _hit(m):
                 hits.append((group, m, False))
     for group in sorted(CONTROLLABLE):
         for m in CONTROLLABLE[group]:
-            if m in text:
+            if _hit(m):
                 hits.append((group, m, True))
     return hits
 
 
-def _module_level_source(tree, lines):
-    """Source of statements OUTSIDE any def/class — what runs on import.
-
-    Only statements containing a Call or an Attribute can perform I/O at
-    import time. A module-level data literal that merely NAMES an I/O
-    marker — a driver allowlist, a settings table, this module's own
-    marker constants — is data, not behaviour, and must not condemn every
-    unit in the file to Tier 4.
+def _module_level_targets(tree, alias_map):
+    """Resolved call targets for whatever runs at IMPORT time: statements
+    outside any def/class, plus the parts of a def/class that Python
+    evaluates at DEFINITION time rather than call time — decorator
+    arguments, argument defaults, and class-body statements (but not method
+    bodies, which run only when called, not when the class is defined).
     """
-    out = []
+    targets = []
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                             ast.Import, ast.ImportFrom)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
             continue
-        if not any(isinstance(n, (ast.Call, ast.Attribute)) for n in ast.walk(node)):
-            continue
-        seg = lines[node.lineno - 1: getattr(node, "end_lineno", node.lineno)]
-        out.extend(seg)
-    return "\n".join(out)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            targets.extend(_call_targets(node.decorator_list, alias_map))
+            targets.extend(_call_targets(node.args.defaults, alias_map))
+            targets.extend(_call_targets(
+                [d for d in node.args.kw_defaults if d is not None], alias_map))
+        elif isinstance(node, ast.ClassDef):
+            targets.extend(_call_targets(node.decorator_list, alias_map))
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue                # a method body runs only when called
+                targets.extend(_call_targets(stmt, alias_map))
+        else:
+            targets.extend(_call_targets(node, alias_map))
+    return targets
+
+
+def _transitive_hits(node, alias_map, local_funcs, visited):
+    """Hits for `node`'s own body, plus (recursively) hits from same-module
+    module-level functions it calls — so a thin wrapper over a Tier-3 helper
+    reads as Tier 3, not Tier 1. Only same-module, name-resolved calls are
+    followed; cross-module analysis is out of scope.
+
+    `visited` guards mutual/self recursion. Each hit is
+    `(group, marker, controllable, via)` — `via` names the same-module
+    function the hit was reached through, or None when the marker sits
+    directly in `node`'s own body.
+    """
+    targets = _call_targets(node, alias_map)
+    hits = [(g, m, c, None) for g, m, c in _markers(targets)]
+    for name in sorted(set(targets)):
+        if name in local_funcs and name not in visited:
+            visited.add(name)
+            for g, m, c, _via in _transitive_hits(local_funcs[name], alias_map,
+                                                    local_funcs, visited):
+                hits.append((g, m, c, name))
+    return hits
 
 
 def triage(root: str, unit) -> tuple:
     """Classify how testable a unit is. Returns (tier, reason).
 
-    The ranker is deliberately CONSERVATIVE: it reads text, not semantics, so a
-    call that is actually behind an injected parameter still reads as I/O. The
-    SKILL.md permits promoting a unit after inspection — but only by recording
-    the promotion, never silently.
+    Resolves calls through this module's import-alias map — so a renamed
+    import (`import socket as s`) is still visible as network I/O — and
+    follows same-module function calls transitively, so a thin wrapper over
+    a Tier-3 helper is Tier 3 too. Still a static, CONSERVATIVE
+    approximation, not execution: it cannot see cross-module indirection,
+    dynamic dispatch (`getattr`, `**kwargs`), or I/O reached only through a
+    variable that happens to hold a function. The SKILL.md permits promoting
+    a unit after inspection — but only by recording the promotion, never
+    silently.
     """
     text = read_text(root, unit["path"])
     try:
         tree = ast.parse(text)
     except SyntaxError:
         return 4, "file does not parse; nothing in it can be pinned"
-    lines = text.splitlines()
+
+    alias_map = _import_alias_map(tree)
 
     # Tier 4 first: if importing the module does I/O, no unit in it is reachable.
-    mod_hits = _markers(_module_level_source(tree, lines))
+    mod_hits = _markers(_module_level_targets(tree, alias_map))
     uncontrollable_mod = [h for h in mod_hits if not h[2]]
     if uncontrollable_mod:
         group, marker, _ = uncontrollable_mod[0]
         return 4, f"module does {group} I/O at import time ({marker}); not reachable"
 
-    # The unit's own span.
+    # The unit's own node.
     node = next((n for n in tree.body
                  if getattr(n, "name", None) == unit["name"]), None)
     if node is None:
         return 4, "unit not found on re-parse"
-    span = "\n".join(lines[node.lineno - 1: getattr(node, "end_lineno", node.lineno)])
 
-    hits = _markers(span)
+    local_funcs = {n.name: n for n in tree.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    hits = _transitive_hits(node, alias_map, local_funcs, {unit["name"]})
+
     if not hits:
         return 1, "no I/O markers; directly callable"
     uncontrollable = [h for h in hits if not h[2]]
     if uncontrollable:
-        group, marker, _ = uncontrollable[0]
+        group, marker, _, via = uncontrollable[0]
+        if via:
+            return 3, f"{group} I/O via {via} ({marker}); needs a seam"
         return 3, f"{group} I/O inside the unit ({marker}); needs a seam"
-    group, marker, _ = hits[0]
+    group, marker, _, via = hits[0]
+    if via:
+        return 2, (f"{group} I/O via {via} ({marker}); "
+                    f"pin at a wider boundary with {group} controlled")
     return 2, f"{group} I/O ({marker}); pin at a wider boundary with {group} controlled"

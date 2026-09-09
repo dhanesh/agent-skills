@@ -189,6 +189,60 @@ class TestTriage(TempRepo):
             "pure")
         self.assertEqual(tier, 1)
 
+    def test_renamed_module_import_is_still_seen_as_network_io(self):
+        # `import socket as s` must not hide behind an alias. Substring
+        # matching on a derived marker like "s." would also match "os." —
+        # this only works because resolution goes through the alias map.
+        tier, reason = self._tier(
+            "alias.py",
+            "import socket as s\n\n\ndef dial(host):\n"
+            "    return s.create_connection((host, 80))\n",
+            "dial")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_renamed_from_import_is_still_seen_as_subprocess_io(self):
+        tier, reason = self._tier(
+            "fromalias.py",
+            "from os import system as run_cmd\n\n\ndef go(cmd):\n"
+            "    return run_cmd(cmd)\n",
+            "go")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_wrapper_over_a_same_module_tier_3_helper_is_tier_3(self):
+        # A thin wrapper that just forwards to a helper doing real I/O must
+        # not read clean — the helper's tier is inherited, and the reason
+        # must name the helper so a human can see why.
+        tier, reason = self._tier(
+            "indirect.py",
+            "import requests\n\n\ndef _fetch_raw(u):\n    return requests.get(u)\n\n\n"
+            "def get_data(u):\n    return _fetch_raw(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("_fetch_raw", reason)
+
+    def test_argument_default_calling_uncontrollable_io_taints_the_module(self):
+        # Python evaluates argument defaults at DEFINITION time — import
+        # time — even though the default lives inside a `def` header.
+        tier, reason = self._tier(
+            "default.py",
+            "import requests\n\n\ndef risky(x=requests.get('http://x').json()):\n"
+            "    return x\n\n\ndef pure_helper(y):\n    return y\n",
+            "pure_helper")
+        self.assertEqual(tier, 4)
+
+    def test_class_body_call_at_definition_time_taints_the_module(self):
+        # A class-body statement (not inside a method) runs when the class
+        # is defined — at import time — even though it lives inside `class`.
+        tier, reason = self._tier(
+            "classbody.py",
+            "import psycopg2\n\n\nclass Setup:\n    CONN = psycopg2.connect('dsn')\n\n\n"
+            "def pure_helper2(z):\n    return z\n",
+            "pure_helper2")
+        self.assertEqual(tier, 4)
+
 
 if __name__ == "__main__":
     unittest.main()
