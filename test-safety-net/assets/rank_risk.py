@@ -420,6 +420,13 @@ CONTROLLABLE = {
     "filesystem": ("open", "io.open", "io.open_code", "codecs.open",
                    "pathlib", "os.path", "glob", "fileinput",
                    "shutil", "tempfile", "io.FileIO", "mmap.mmap",
+                   # `pkgutil.get_data` reads a real file through the LOADER
+                   # (`SourceFileLoader.get_data` -> `_io.open_code`), naming
+                   # neither `open` nor any `os` primitive. Round 6 found it
+                   # missing from this table AND unpatched by the guard -- the
+                   # same both-layers miss as C2 and C3 -- so the two go in
+                   # together: `io_guard.py` now patches `_io` as well.
+                   "pkgutil",
                    # fd-level data movement
                    "os.open", "os.write", "os.read", "os.close", "os.fdopen",
                    "os.pread", "os.pwrite", "os.preadv", "os.pwritev",

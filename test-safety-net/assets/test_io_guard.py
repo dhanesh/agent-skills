@@ -9,13 +9,16 @@ are controls that keep the negatives from passing for the wrong reason.
 import importlib.util
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SKILL_DIR = os.path.dirname(HERE)
 
 _spec = importlib.util.spec_from_file_location("io_guard",
                                                os.path.join(HERE, "io_guard.py"))
@@ -383,6 +386,220 @@ class TestFilterGuardAgreement(unittest.TestCase):
                 self.assertIsNot(getattr(os, name), original)
 
 
+class TestClassValuedPatches(GuardCase):
+    """A patched CLASS must stay a class. NEGATIVE fixtures for the `import
+    ssl` breakage: `socket.socket` was replaced by a plain function, so
+    `class SSLSocket(socket)` in `ssl.py` got a function as its base and
+    `import ssl` -- and with it `asyncio`, `http.client`, `urllib.request`,
+    `requests` -- raised `TypeError` at BOTH tiers. That was a fourth proof
+    outcome the three-outcome contract has no rule for."""
+
+    CLASS_VALUED = (
+        ("socket", "socket"), ("io", "FileIO"), ("_io", "FileIO"),
+        ("mmap", "mmap"), ("subprocess", "Popen"),
+    )
+
+    def test_every_class_valued_patch_target_is_still_a_class_when_armed(self):
+        originals = {}
+        for module_name, attr in self.CLASS_VALUED:
+            module = __import__(module_name)
+            originals[(module_name, attr)] = getattr(module, attr)
+            self.assertIsInstance(originals[(module_name, attr)], type,
+                                  "%s.%s is not a class -- update this list"
+                                  % (module_name, attr))
+        io_guard.arm(1)
+        for (module_name, attr), original in originals.items():
+            with self.subTest(target="%s.%s" % (module_name, attr)):
+                patched = getattr(__import__(module_name), attr)
+                self.assertIsNot(patched, original, "not patched at all")
+                self.assertIsInstance(patched, type)
+                self.assertTrue(issubclass(patched, original))
+
+    def test_import_ssl_works_at_both_tiers_while_armed(self):
+        # Run out of process: `ssl` is almost certainly already imported in
+        # this one, and the failure only happens on a FIRST import while armed.
+        for tier in ("1", "2"):
+            with self.subTest(tier=tier):
+                result = subprocess.run(
+                    [sys.executable, "-c",
+                     "import io_guard\n"
+                     "io_guard.arm(%s)\n"
+                     "import ssl, urllib.request, http.client\n"
+                     "import socket\n"
+                     "assert isinstance(socket.socket, type)\n"
+                     "assert not isinstance(object(), socket.socket)\n"
+                     "print('ok', ssl.PROTOCOL_TLS_CLIENT)\n" % tier],
+                    env=dict(os.environ, PYTHONPATH=HERE),
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("ok", result.stdout)
+
+    def test_constructing_a_patched_class_still_trips(self):
+        # The control for the subclass fix: keeping the name a type must not
+        # cost the block.
+        import socket
+        io_guard.arm(1)
+        self.assertTrips("network", socket.socket)
+        self.assertTrips("filesystem", lambda: io_guard.__dict__ and
+                         __import__("io").FileIO(self.path))
+
+
+class TestTheImportMachineryHole(GuardCase):
+    """`pkgutil.get_data` read real files at tier 1 through TWO holes at once:
+    `_io.open_code` was unpatched, and any `<frozen importlib...>` frame
+    exempted the call unconditionally. Both are closed here, and the control
+    below keeps the fix from simply re-breaking imports."""
+
+    def test_pkgutil_get_data_is_blocked_at_tier_1(self):
+        import pkgutil
+        io_guard.arm(1)
+        exc = self.assertTrips("filesystem",
+                               lambda: pkgutil.get_data("json", "__init__.py"))
+        self.assertEqual(exc.target, "_io.open_code")
+
+    def test_the_underscore_io_names_are_patched_not_only_their_io_aliases(self):
+        import _io
+        io_guard.arm(1)
+        for name in ("open", "open_code", "FileIO"):
+            with self.subTest(name=name):
+                self.assertTrips("filesystem",
+                                 lambda n=name: getattr(_io, n)(self.path))
+
+    def test_a_real_import_is_still_exempt_including_a_first_time_one(self):
+        # The control. The exemption exists so a generated test module's
+        # top-level `import x` does not read as a classification failure; if
+        # narrowing it broke that, the guard would decline every candidate.
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import io_guard, importlib\n"
+             "io_guard.arm(1)\n"
+             "import wave\n"
+             "importlib.import_module('xml.dom.minidom')\n"
+             "print('ok')\n"],
+            env=dict(os.environ, PYTHONPATH=HERE),
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ok", result.stdout)
+
+    def test_a_module_that_does_io_in_its_own_body_still_trips_on_import(self):
+        # The other control: narrowing the exemption must not widen it either.
+        src = os.path.join(self.tmp, "importio.py")
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write("import os\n_SIZE = os.stat(__file__).st_size\n")
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import io_guard\n"
+             "io_guard.arm(1)\n"
+             "try:\n"
+             "    import importio\n"
+             "    print('LEAK')\n"
+             "except io_guard.IOGuardViolation as exc:\n"
+             "    print('BLOCKED', exc.target)\n"],
+            env=dict(os.environ,
+                     PYTHONPATH=os.pathsep.join([HERE, self.tmp])),
+            capture_output=True, text=True)
+        self.assertIn("BLOCKED", result.stdout, result.stdout + result.stderr)
+
+
+class TestEnvironmentReads(GuardCase):
+    """`os.environ.get(...)` reached the real environment at tier 1: the
+    MutableMapping methods bottom out in `__getitem__`, which never calls
+    `os.getenv`. The filter DID see `os.environ.get(...)`, so the recorded
+    "the two layers agree on this blind spot" was false in both directions."""
+
+    def test_every_read_form_of_os_environ_trips(self):
+        io_guard.arm(1)
+        alias = os.environ
+        for label, fn in (("subscript", lambda: os.environ["PATH"]),
+                          ("get", lambda: os.environ.get("PATH")),
+                          ("aliased get", lambda: alias.get("PATH")),
+                          ("items", lambda: list(os.environ.items())),
+                          ("copy", lambda: os.environ.copy()),
+                          ("iteration", lambda: list(os.environ))):
+            with self.subTest(form=label):
+                self.assertTrips("environment", fn)
+
+    def test_the_filter_and_the_guard_now_agree_on_os_environ(self):
+        # The claim this replaces said the two layers agreed because NEITHER
+        # could see the subscript. The filter's marker table sees `os.environ`;
+        # so, now, does the guard.
+        self.assertIn("os.environ", rank_risk.CONTROLLABLE["environment"])
+        self.assertIsNotNone(io_guard._marker_intercept("os.environ")
+                             or io_guard.PARTIALLY_INTERCEPTED.get("os.environ"))
+
+    def test_a_tier_2_run_that_declares_environment_still_permits_reads(self):
+        io_guard.arm(2, allow=("environment",))
+        os.environ.get("PATH")
+        self.assertIsInstance(os.environ.copy(), dict)
+
+    def test_disarm_restores_the_real_mapping(self):
+        real = os.environ
+        io_guard.arm(1)
+        self.assertIsNot(os.environ, real)
+        io_guard.disarm()
+        self.assertIs(os.environ, real)
+
+
+class TestOffMainThreadViolations(GuardCase):
+    """A violation raised on a worker thread is swallowed by
+    `Thread._bootstrap_inner`, which catches BaseException. Before this, the
+    proof run reported `1 passed` and the skill shipped a test that performs
+    real I/O -- the one outcome the guard must never have."""
+
+    def test_a_join_re_raises_the_workers_violation_on_the_main_thread(self):
+        io_guard.arm(1)
+        t = threading.Thread(target=lambda: open(self.path).read())
+        t.start()
+        with self.assertRaises(io_guard.IOGuardViolation) as ctx:
+            t.join()
+        self.assertEqual(ctx.exception.group, "filesystem")
+        self.assertIsNotNone(ctx.exception.thread)
+        self.assertIn("not the main thread", str(ctx.exception))
+
+    def test_a_dropped_future_is_caught_even_though_nothing_reads_it(self):
+        # `concurrent.futures` stores the exception ON THE FUTURE and never
+        # calls `threading.excepthook`, so an excepthook-based fix would miss
+        # this entirely. Recording at the RAISE is what sees it. (The executor
+        # joins its workers on shutdown, so the surfacing point here is the
+        # patched `join` -- which is the mechanism working, not a bypass.)
+        import concurrent.futures
+        io_guard.arm(1)
+        with self.assertRaises(io_guard.IOGuardViolation):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(lambda: open(self.path).read())
+
+    def test_disarm_is_the_backstop_and_still_restores_everything(self):
+        real_hook = threading.excepthook
+        threading.excepthook = lambda args: None    # keep the suite output clean
+        self.addCleanup(setattr, threading, "excepthook", real_hook)
+        io_guard.arm(1)
+        t = threading.Thread(target=lambda: open(self.path).read())
+        t.start()
+        t._started.wait()
+        while t.is_alive():
+            pass
+        with self.assertRaises(io_guard.IOGuardViolation):
+            io_guard.disarm()
+        self.assertFalse(io_guard.armed())
+        self.assertEqual(io_guard.pending_thread_violations(), ())
+        open(self.path).close()          # the patch set really did come down
+
+    def test_a_clean_threaded_unit_does_not_trip(self):
+        # The control: threads are not the offence, unguarded I/O is.
+        io_guard.arm(1)
+        box = {}
+        t = threading.Thread(target=lambda: box.setdefault("n", 1 + 1))
+        t.start()
+        t.join()
+        self.assertEqual(box["n"], 2)
+
+
+_INVOCATIONS = [("python -m pytest", [sys.executable, "-m", "pytest"])]
+if shutil.which("pytest"):
+    _INVOCATIONS.append(("pytest console script", [shutil.which("pytest")]))
+
+
 @unittest.skipUnless(_HAS_PYTEST, "pytest is not installed in this environment")
 class TestPytestPluginIntegration(unittest.TestCase):
     """End-to-end through real pytest: the `-p` loading contract itself.
@@ -390,6 +607,14 @@ class TestPytestPluginIntegration(unittest.TestCase):
     Skipped rather than faked when pytest is absent, because faking it would
     prove nothing about the hook that matters -- arming ahead of collection is
     the whole reason the spec chose `-p` over a `conftest.py`.
+
+    EVERY case runs under BOTH invocations. This class used to run only
+    `python -m pytest`, while every document in the skill prints `pytest` --
+    and the two differ in a way that mattered: the console script's own frame
+    is not under any library root, so the guard read pytest's own I/O as the
+    unit's and the documented command could not complete at either tier. A
+    suite that exercises a different command than the docs prescribe proves
+    nothing about the docs, so the loop is the fix, not a convenience.
     """
 
     def setUp(self):
@@ -402,16 +627,20 @@ class TestPytestPluginIntegration(unittest.TestCase):
         p.write_text(text, encoding="utf-8")
 
     def _run(self, target, tier="1", allow=None):
+        """(label, CompletedProcess) for each invocation form."""
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([HERE, self.repo])
         env["TEST_SAFETY_NET_TIER"] = tier
         env.pop("TEST_SAFETY_NET_ALLOW", None)
         if allow is not None:
             env["TEST_SAFETY_NET_ALLOW"] = allow
-        return subprocess.run(
-            [sys.executable, "-m", "pytest", "-p", "io_guard", "-q",
-             "--no-header", "-p", "no:cacheprovider", target],
-            cwd=self.repo, env=env, capture_output=True, text=True)
+        out = []
+        for label, argv in _INVOCATIONS:
+            out.append((label, subprocess.run(
+                argv + ["-p", "io_guard", "-q", "--no-header",
+                        "-p", "no:cacheprovider", target],
+                cwd=self.repo, env=env, capture_output=True, text=True)))
+        return out
 
     def test_an_honest_tier_1_test_still_passes_with_the_guard_loaded(self):
         # The control, and the one that would catch a guard that broke
@@ -422,9 +651,11 @@ class TestPytestPluginIntegration(unittest.TestCase):
                     "import pure\n\n\ndef test_add():\n"
                     "    print('captured output')\n"
                     "    assert pure.add(2, 3) == 5\n")
-        result = self._run("test_pure.py")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("1 passed", result.stdout)
+        for label, result in self._run("test_pure.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertIn("1 passed", result.stdout)
 
     def test_a_deliberately_wrong_expectation_still_reads_as_an_assertion(self):
         # The RED half of red->green must stay distinguishable: an
@@ -433,10 +664,11 @@ class TestPytestPluginIntegration(unittest.TestCase):
         self._write("test_pure.py",
                     "import pure\n\n\ndef test_add():\n"
                     "    assert pure.add(2, 3) == 99\n")
-        result = self._run("test_pure.py")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("AssertionError", result.stdout)
-        self.assertNotIn("IOGuardViolation", result.stdout)
+        for label, result in self._run("test_pure.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("AssertionError", result.stdout)
+                self.assertNotIn("IOGuardViolation", result.stdout)
 
     def test_a_tier_1_unit_that_lists_a_directory_trips_the_guard(self):
         # NEGATIVE, end to end: exactly the C3 case. Before the marker fix the
@@ -448,10 +680,11 @@ class TestPytestPluginIntegration(unittest.TestCase):
         self._write("test_sneaky.py",
                     "import sneaky\n\n\ndef test_count():\n"
                     "    assert sneaky.count('.') >= 0\n")
-        result = self._run("test_sneaky.py")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("IOGuardViolation", result.stdout)
-        self.assertIn("os.listdir", result.stdout)
+        for label, result in self._run("test_sneaky.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertIn("os.listdir", result.stdout)
 
     def test_import_time_io_trips_during_collection_which_is_why_p_not_conftest(self):
         # The property that decides the loading mechanism. A guard installed
@@ -464,10 +697,11 @@ class TestPytestPluginIntegration(unittest.TestCase):
         self._write("test_cfgmod.py",
                     "import cfgmod\n\n\ndef test_size():\n"
                     "    assert cfgmod.size() > 0\n")
-        result = self._run("test_cfgmod.py")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("IOGuardViolation", result.stdout)
-        self.assertIn("builtins.open", result.stdout)
+        for label, result in self._run("test_cfgmod.py"):
+            with self.subTest(invocation=label):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertIn("builtins.open", result.stdout)
 
     def test_a_tier_2_run_permits_the_group_it_declares(self):
         self._write("sneaky.py",
@@ -476,20 +710,212 @@ class TestPytestPluginIntegration(unittest.TestCase):
         self._write("test_sneaky.py",
                     "import sneaky\n\n\ndef test_count():\n"
                     "    assert sneaky.count('.') >= 0\n")
-        result = self._run("test_sneaky.py", tier="2", allow="filesystem")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for label, result in self._run("test_sneaky.py", tier="2",
+                                       allow="filesystem"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+
+    def test_a_worker_thread_violation_fails_the_test_instead_of_passing(self):
+        # NEGATIVE, end to end. `Thread._bootstrap_inner` catches
+        # BaseException and routes it to `threading.excepthook`, so before the
+        # fix this run reported "1 passed" and the skill shipped a test whose
+        # captured value existed only because the guard was armed -- it fails
+        # the moment the target repo runs its own suite without the guard.
+        self._write("loader.py",
+                    "import threading\n\n\n"
+                    "def _hosts(box):\n"
+                    "    box['n'] = len(open('/etc/hosts').read())\n\n\n"
+                    "HANDLERS = {'hosts': _hosts}\n\n\n"
+                    "def load(kind='hosts'):\n"
+                    "    box = {'n': -1}\n"
+                    "    t = threading.Thread(target=HANDLERS[kind], args=(box,))\n"
+                    "    t.start()\n    t.join()\n    return box['n']\n")
+        self._write("test_loader.py",
+                    "import loader\n\n\ndef test_load():\n"
+                    "    assert loader.load() == -1\n")
+        for label, result in self._run("test_loader.py"):
+            with self.subTest(invocation=label):
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertNotIn("1 passed,", result.stdout)
+
+    def test_a_thread_that_is_never_joined_still_fails_the_run(self):
+        # The shape `Thread.join` cannot catch: the unit drops the thread. The
+        # teardown hook is the backstop, so the run ERRORs rather than passing.
+        self._write("fire.py",
+                    "import threading\n\n\n"
+                    "def fire():\n"
+                    "    t = threading.Thread(\n"
+                    "        target=lambda: open('/etc/hosts').read())\n"
+                    "    t.start()\n    t.join(timeout=5)\n    return 'sent'\n")
+        self._write("test_fire.py",
+                    "import fire\n\n\ndef test_fire():\n"
+                    "    assert fire.fire() == 'sent'\n")
+        for label, result in self._run("test_fire.py"):
+            with self.subTest(invocation=label):
+                self.assertNotEqual(result.returncode, 0,
+                                    result.stdout + result.stderr)
+                self.assertIn("IOGuardViolation", result.stdout)
 
     def test_the_header_states_the_tier_and_what_is_blocked(self):
         self._write("test_nothing.py", "def test_ok():\n    assert True\n")
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join([HERE, self.repo])
         env["TEST_SAFETY_NET_TIER"] = "1"
+        for label, argv in _INVOCATIONS:
+            with self.subTest(invocation=label):
+                result = subprocess.run(
+                    argv + ["-p", "io_guard", "-p", "no:cacheprovider",
+                            "test_nothing.py"],
+                    cwd=self.repo, env=env, capture_output=True, text=True)
+                self.assertIn("io_guard: tier=1", result.stdout)
+                self.assertIn("filesystem", result.stdout)
+
+
+
+# --------------------------------------------------------------------------
+# The documented invocation, run verbatim.
+# --------------------------------------------------------------------------
+_SH_BLOCK_RE = re.compile(r"```sh\n(.*?)```", re.S)
+_DOCUMENTED_SOURCES = (
+    ("SKILL.md", os.path.join(SKILL_DIR, "SKILL.md")),
+    ("references/triage.md", os.path.join(SKILL_DIR, "references", "triage.md")),
+    ("references/stacks.md", os.path.join(SKILL_DIR, "references", "stacks.md")),
+)
+
+
+# A command, as opposed to prose that happens to mention one: zero or more
+# NAME=value assignments followed by the invocation and exactly one target.
+# Filtering by SHAPE rather than by "contains pytest" keeps a sentence about
+# the command out of the runner -- and the two count assertions below keep
+# the filter from quietly emptying the test.
+_CMD_SHAPE_RE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+    r'pytest\s+-p\s+io_guard\s+\S+$')
+
+
+def _shell_commands(text):
+    """Every shell command in `text` that loads the guard, joined at its
+    backslash continuations exactly as a shell would join them.
+
+    Extraction rather than a hardcoded string on purpose: the point of the
+    test below is that whatever the documents currently SAY is what gets run,
+    so a future reword cannot drift away from a passing test."""
+    commands = []
+    for block in _SH_BLOCK_RE.findall(text):
+        joined = re.sub(r"\\\n\s*", " ", block)
+        for line in joined.splitlines():
+            line = line.strip()
+            if _CMD_SHAPE_RE.match(line):
+                commands.append(line)
+    return commands
+
+
+def _docstring_commands(text):
+    """The same, for the guard's own module docstring, which is indented
+    prose rather than a fenced block."""
+    joined = re.sub(r"\\\\?\n\s*", " ", text)
+    return [ln.strip() for ln in joined.splitlines()
+            if _CMD_SHAPE_RE.match(ln.strip())]
+
+
+@unittest.skipUnless(_HAS_PYTEST, "pytest is not installed in this environment")
+@unittest.skipUnless(shutil.which("pytest"),
+                     "the `pytest` console script is not on PATH")
+class TestTheDocumentedInvocation(unittest.TestCase):
+    """Run the command string the documents print, verbatim, and require a pass.
+
+    This class exists because of a specific failure: every document tells the
+    agent to run `pytest -p io_guard ...` while the integration suite ran
+    `python -m pytest -p io_guard ...`. Those are NOT the same command -- the
+    console script's own frame (`<prefix>/bin/pytest`) sits at the base of
+    every stack, and it is not under any library root, so the guard read
+    pytest's own capture and environment handling as "code under test" and
+    killed the run. 122 green tests said nothing about it, because none of them
+    ran what the documentation ships.
+
+    So: extract the command from the document, substitute only the angle-
+    bracket placeholders, and hand the rest to `/bin/sh` unchanged.
+    """
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        pathlib.Path(self.repo, "pure.py").write_text(
+            "def add(a, b):\n    return a + b\n", encoding="utf-8")
+        pathlib.Path(self.repo, "test_pure.py").write_text(
+            "import pure\n\n\ndef test_add():\n"
+            "    print('captured output')\n"
+            "    assert pure.add(2, 3) == 5\n", encoding="utf-8")
+
+    def _run_documented(self, command):
+        cmd = command.replace("<path>::<test_name>", "test_pure.py::test_add")
+        cmd = cmd.replace("path/to/test_file.py::test_name",
+                          "test_pure.py::test_add")
+        env = dict(os.environ)
+        env["SKILL_DIR"] = SKILL_DIR
+        env.pop("PYTHONPATH", None)
+        env.pop("TEST_SAFETY_NET_TIER", None)
+        env.pop("TEST_SAFETY_NET_ALLOW", None)
+        return cmd, subprocess.run(["/bin/sh", "-c", cmd + " -q -p no:cacheprovider"],
+                                   cwd=self.repo, env=env,
+                                   capture_output=True, text=True)
+
+    def _assert_clean_pass(self, label, command):
+        cmd, result = self._run_documented(command)
+        detail = "%s\n$ %s\n%s\n%s" % (label, cmd, result.stdout, result.stderr)
+        self.assertEqual(result.returncode, 0, detail)
+        self.assertIn("1 passed", result.stdout, detail)
+        self.assertNotIn("IOGuardViolation", result.stdout, detail)
+        self.assertNotIn("Traceback", result.stderr, detail)
+
+    def test_every_documented_command_in_every_document_runs_clean(self):
+        found = 0
+        for label, path in _DOCUMENTED_SOURCES:
+            with open(path, encoding="utf-8") as fh:
+                commands = _shell_commands(fh.read())
+            self.assertTrue(commands, "%s documents no guard invocation" % label)
+            for command in commands:
+                found += 1
+                with self.subTest(document=label, command=command):
+                    self._assert_clean_pass(label, command)
+        self.assertGreaterEqual(found, 5, "expected the five documented "
+                                          "invocations; found %d" % found)
+
+    def test_the_guards_own_docstring_invocation_runs_clean(self):
+        commands = _docstring_commands(io_guard.__doc__ or "")
+        self.assertEqual(len(commands), 2,
+                         "expected the two invocations io_guard's docstring "
+                         "prints; found %r" % (commands,))
+        for command in commands:
+            with self.subTest(command=command):
+                self._assert_clean_pass("io_guard.__doc__", command)
+
+    def test_every_documented_invocation_carries_the_pythonpath_it_needs(self):
+        # `pytest -p io_guard` on its own dies with `ImportError: Error
+        # importing plugin "io_guard"` -- the console script does not put the
+        # working directory, let alone the skill's assets/, on sys.path. So the
+        # PYTHONPATH assignment is not decoration and must never be separable
+        # from the pytest line by a reader copying one line out of a block.
+        for label, path in _DOCUMENTED_SOURCES:
+            with open(path, encoding="utf-8") as fh:
+                for command in _shell_commands(fh.read()):
+                    with self.subTest(document=label, command=command):
+                        self.assertIn("PYTHONPATH=", command)
+                        self.assertIn("$SKILL_DIR/assets", command)
+
+    def test_the_bare_pytest_line_fails_loudly_rather_than_silently(self):
+        # The control for the check above: prove the omission really is fatal,
+        # so the requirement is a measured fact and not a superstition.
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-p", "io_guard",
-             "-p", "no:cacheprovider", "test_nothing.py"],
+            ["/bin/sh", "-c", "pytest -p io_guard -q test_pure.py::test_add"],
             cwd=self.repo, env=env, capture_output=True, text=True)
-        self.assertIn("io_guard: tier=1", result.stdout)
-        self.assertIn("filesystem", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("io_guard", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":                                      # pragma: no cover
