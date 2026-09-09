@@ -623,22 +623,43 @@ def _analyze_file(root, rel):
                           local_methods, tier4)
 
 
-def already_covered(root: str, units) -> dict:
-    """Unit id -> the test file naming it. Keeps the ranking on what is NOT netted.
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
-    Same whole-identifier approximation as inbound_refs, and the same honesty:
-    a test that merely imports a name counts as covering it. Over-counting here
-    is the safe direction — it drops a unit down the list rather than writing a
-    duplicate test for something already pinned.
+
+def already_covered(root: str, units) -> dict:
+    """Unit id -> the test file naming BOTH it and its module. Keeps the ranking on what is NOT netted.
+
+    Same whole-identifier approximation as inbound_refs. A test file counts as
+    covering a unit only when it references the unit's NAME *and* its MODULE
+    (the defining file's basename, without `.py`) — the module as a
+    whole-identifier match in the test file's text, or as a token in the test
+    file's own path (so `tests/test_refund.py` counts for `payments/refund.py`
+    even if the import uses an alias). Name-only matching was tried first and
+    rejected: a common name like `apply`, `parse`, `run`, `validate` or `get`
+    collides across modules, so a test covering one module's `apply` marked
+    every OTHER module's `apply` covered too — hiding a genuinely untested
+    unit from `ranked` entirely, which is the opposite of safe.
+
+    The remaining failure mode is milder: a unit exercised only through a
+    re-export (a test that reaches it via a different module's name and never
+    mentions its own module) reads as uncovered and may get a duplicate test
+    written for it. That direction is still safe — the worst case is a
+    redundant test, not a hidden gap.
     """
     test_files = [rel for rel in iter_py_files(root, include_tests=True)
                   if _is_test_path(rel)]
     texts = {rel: read_text(root, rel) for rel in test_files}
+    path_tokens = {rel: set(_PATH_TOKEN_RE.findall(rel)) for rel in test_files}
     covered = {}
     for u in units:
-        pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
+        name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
+        module = os.path.splitext(os.path.basename(u["path"]))[0]
+        module_pattern = re.compile(r"\b%s\b" % re.escape(module))
         for rel in sorted(texts):
-            if pattern.search(texts[rel]):
+            text = texts[rel]
+            if not name_pattern.search(text):
+                continue
+            if module_pattern.search(text) or module in path_tokens[rel]:
                 covered[u["id"]] = rel
                 break
     return covered
@@ -717,7 +738,17 @@ def _normalise(value, hi):
 
 
 def rank(root: str, since: str = "6 months ago", top_n: int = 10) -> dict:
-    """The plan: what to net, what cannot be netted, and what is already covered."""
+    """The plan: what to net, what cannot be netted, and what is already covered.
+
+    `ranked`, `remainder` and `not_netted` partition the discovered units by
+    triage tier and coverage — every unit appears in exactly one of those
+    three. `covered` is NOT a fourth bucket in that partition: it is a flat
+    INDEX, across ALL discovered units regardless of tier, of ids that
+    `already_covered` matched to a test file. A unit that is both tier >= 3
+    (so it lands in `not_netted`) and already covered by a test still appears
+    in `covered` too — nothing is dropped, but a consumer should not assume
+    the four keys partition cleanly.
+    """
     units = discover_units(root)
     churn_by_path = churn(root, since)
     refs = inbound_refs(root, units)
@@ -746,6 +777,18 @@ def rank(root: str, since: str = "6 months ago", top_n: int = 10) -> dict:
         # product favours units that are BOTH reached and moving, which is where
         # an agent is most likely to do damage. +1 keeps a zero on one axis from
         # annihilating a strong signal on the other.
+        #
+        # A consequence of the +1 floor, left in deliberately: a max-churn,
+        # zero-refs unit can still score up to 1.0 and outrank a moderate-churn
+        # unit with decent refs. That is intended, not a bug the +1 should be
+        # tuned away — zero STATIC references very often means "entry point
+        # the approximate reference counter cannot see" (a CLI dispatcher, a
+        # `main`, a plugin hook invoked by name/registry) rather than "nothing
+        # depends on it," while churn is the more reliable signal of the two.
+        # Ranking the repo's hottest file highly under that ambiguity is the
+        # right default. Each ranked row still carries its raw `churn` and
+        # `inbound_refs`, so a human reviewing the list can see which signal
+        # actually drove a given placement.
         r["score"] = round((_normalise(r["churn"], max_churn) + 1)
                            * (_normalise(r["inbound_refs"], max_refs) + 1) - 1, 6)
 

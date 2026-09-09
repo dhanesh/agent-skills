@@ -1,5 +1,7 @@
 """Unit suite for rank_risk.py. Stdlib only, offline, deterministic."""
+import contextlib
 import importlib.util
+import io
 import os
 import pathlib
 import subprocess
@@ -533,6 +535,31 @@ class TestAlreadyCovered(TempRepo):
         self.assertEqual(cov.get("core.py::covered"), "tests/test_core.py")
         self.assertNotIn("core.py::bare", cov)
 
+    def test_name_only_match_does_not_cover_a_same_named_unit_in_another_module(self):
+        # FIX 1: a test for discounts/coupon.py::apply must not mark
+        # payments/refund.py::apply covered just because the NAME matches --
+        # that hid a genuinely untested unit from `ranked` entirely.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "discounts/coupon.py", "def apply(code):\n    return code\n")
+        write(self.root, "tests/test_coupon.py",
+              "from discounts.coupon import apply\n\n\ndef test_apply():\n    apply('X')\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("discounts/coupon.py::apply"), "tests/test_coupon.py")
+        self.assertNotIn("payments/refund.py::apply", cov)
+
+    def test_module_named_only_in_the_test_files_path_still_counts_as_covered(self):
+        # The test's source never spells "refund" -- it imports the name as
+        # re-exported through the package -- but the test file's own path
+        # encodes the module, which satisfies the module requirement too.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "payments/__init__.py", "from .refund import apply\n")
+        write(self.root, "tests/test_refund.py",
+              "from payments import apply\n\n\ndef test_apply():\n    apply(1)\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("payments/refund.py::apply"), "tests/test_refund.py")
+
 
 class TestRank(TempRepo):
     def _repo(self):
@@ -574,6 +601,56 @@ class TestRank(TempRepo):
         self.assertTrue(plan["ranked"])
         for row in plan["ranked"]:
             self.assertIs(row["inbound_approx"], True)
+
+    def test_name_collision_does_not_hide_an_untested_unit_from_ranked(self):
+        # FIX 1 regression at the rank() level: a covered discounts/coupon.py::apply
+        # must not blank out an untested payments/refund.py::apply that merely
+        # shares the name -- the exact collision the review reproduced, where
+        # `ranked` came back EMPTY.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "discounts/coupon.py", "def apply(code):\n    return code\n")
+        write(self.root, "tests/test_coupon.py",
+              "from discounts.coupon import apply\n\n\ndef test_apply():\n    apply('X')\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ranked_ids = [r["id"] for r in plan["ranked"]]
+        self.assertIn("payments/refund.py::apply", ranked_ids)
+
+
+class TestMain(TempRepo):
+    def _run(self, argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = rank_risk.main(argv)
+        return code, stdout.getvalue()
+
+    def test_success_on_a_valid_repo_exits_0_and_prints_json_with_the_eight_expected_keys(self):
+        import json
+        write(self.root, "core.py", "def solo():\n    pass\n")
+        code, out = self._run([self.root, "--since", "10 years ago"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(set(payload.keys()),
+                         {"root", "stack", "window", "units_discovered",
+                          "ranked", "remainder", "not_netted", "covered"})
+
+    def test_nonexistent_path_exits_2(self):
+        code, _ = self._run([os.path.join(self.root, "does-not-exist")])
+        self.assertEqual(code, 2)
+
+    def test_path_that_is_a_file_not_a_directory_exits_2(self):
+        f = write(self.root, "notadir.py", "x = 1\n")
+        code, _ = self._run([f])
+        self.assertEqual(code, 2)
+
+    def test_directory_with_no_python_files_exits_0_with_empty_ranked(self):
+        import json
+        empty_dir = os.path.join(self.root, "empty")
+        os.makedirs(empty_dir, exist_ok=True)
+        code, out = self._run([empty_dir])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["units_discovered"], 0)
+        self.assertEqual(payload["ranked"], [])
 
 
 if __name__ == "__main__":
