@@ -1,8 +1,10 @@
 # test-safety-net — design
 
-**Status:** implemented on `feat/test-safety-net-spec`; amended eight times during
-implementation (each amendment is marked inline and dated). Where this document and the shipped
-code disagree, that is a defect in one of them — say which, do not leave it.
+**Status:** implemented on `feat/test-safety-net-spec`; amended repeatedly during implementation
+(each amendment is marked inline and dated — grep `^**Amended`). The count is deliberately not
+stated: it said "eight" against a document carrying a different number of blocks, which is the
+smallest possible instance of the defect this branch keeps finding. Where this document and the
+shipped code disagree, that is a defect in one of them — say which, do not leave it.
 **Date:** 2026-09-09
 
 ## The gap
@@ -119,7 +121,11 @@ applied last and upward only, so a unit that dials out keeps its own, more speci
 Pure path algebra over `__file__` (`os.path.join`/`dirname`/`basename`/`abspath`/`normpath`/
 `split`/`splitext`/`relpath`) is exempt from the floor: it performs no I/O, and
 `HERE = os.path.dirname(os.path.abspath(__file__))` is the commonest module-level statement there
-is — flooring on it moved 138 of this repo's own 305 units out of the net. Inertness is judged per
+is. Re-measured 2026-09-09 (fix round 6), because the original figure ("138 of this repo's own 305
+units") did not reproduce at any tree: re-running `triage` over this repo with
+`IMPORT_TIME_INERT = ()` moves **80 of 320** units out of the net (239 nettable with the exemption,
+159 without). The method is given alongside the number because the number moves as the repo does,
+and an unreproducible measurement is worse than none. Inertness is judged per
 CALL, not per marker, so `os.path.exists` (a real stat) still floors while `os.path.join` does
 not, and the exemption applies ONLY to the import-time scan: inside a function body `os.path.join`
 still marks a unit Tier 2.
@@ -163,6 +169,8 @@ on the receiving side.
    - **Tier 1 candidate** (claimed to do no I/O): block *everything* — filesystem, clock and
      randomness as well as network, subprocess and DB. The unit claimed to touch nothing, so any
      touch falsifies the classification. Reclassify and discard the test.
+     *(Superseded — this six-group list omits `environment`; see fix round 5's correction 2
+     below. Marked here so a reader who stops at this line is not left with the wrong list.)*
    - **Tier 2 candidate** (I/O at a controlled boundary): block only the uncontrolled groups. The
      controllable ones are deliberately faked by the test — a temp dir and a frozen clock are the
      point, not a violation.
@@ -174,6 +182,9 @@ on the receiving side.
    `ctypes` C call bypass Python-level file objects entirely. So the guard patches the lowest
    available layer — the `os` primitives (`open`, `write`, `posix_spawn`, `spawn*`, `fork`),
    `io.FileIO`, `mmap.mmap` and `socket.socket` — not only the ergonomic wrappers above them.
+   *(Superseded — this list is INSUFFICIENT; see fix round 5's correction 1 below, and fix round
+   6's addition of the `_io` C module. Marked here because this exact list was copied into
+   `rank_risk.py`'s docstring and went stale there twice.)*
 
    **The guard is installed BEFORE the module under test is imported.** Otherwise a module doing
    I/O at import time runs its side effects during `import unit_module`, before any fixture body
@@ -258,6 +269,43 @@ on the receiving side.
    intercepted by nothing. And `os.environ["HOME"]` as a bare subscript is invisible to the guard,
    which patches `os.getenv`/`putenv`/`unsetenv` — the same residual the filter has, since its
    markers match a call, so the two layers agree on what neither can see.
+   *(The `os.environ` half is superseded and was false in both directions; see fix round 6 below.
+   The C-extension half stands, and was measured rather than assumed.)*
+
+   **Amended 2026-09-09 (fix round 6) — the guard did not work under its own documented command,
+   and four more holes.** A scoped re-review ran the command each of these documents prints. It
+   does not merely differ from `python -m pytest`; it did not work at all, and the shipped suite
+   could not see that because it ran the other form. Six corrections:
+
+   1. **The console-script entry point is a library root.** `<prefix>/bin/pytest` is under none of
+      the interpreter's library directories, and its frame sits at the base of every stack in a
+      console-script run — so the guard read pytest's OWN capture and environment handling as the
+      unit's. Tier 1 died inside pytest's capture teardown with no test result; Tier 2 ERRORed
+      every test on `PYTEST_CURRENT_TEST`. The exemption is scoped to a NON-`.py` `argv[0]`, so
+      target-repo code run as `python3 module.py` can never be exempted by it. The suite now runs
+      the command string extracted from each document, verbatim, at both tiers.
+   2. **The patch set includes the `_io` C module.** `pkgutil.get_data` reaches
+      `SourceFileLoader.get_data` → `_io.open_code`, which is a Python name and is where the
+      frozen importer goes. Patching only the `io` re-exports left it returning real file bytes at
+      Tier 1. `pkgutil` is now a filter marker too, so the two layers close together.
+   3. **The import-machinery exemption is conditional.** An `<frozen importlib...>` frame exempts
+      a call only when an import is actually in progress (`_find_and_load` and friends on the
+      stack outward). Unconditional, it was the second half of the `pkgutil` hole.
+   4. **A patched class stays a class.** `socket.socket`, `io.FileIO`, `_io.FileIO`, `mmap.mmap`,
+      `subprocess.Popen` and `pymongo.MongoClient` are replaced by guarded SUBCLASSES. As plain
+      functions they broke `class SSLSocket(socket)` in `ssl.py`, so `import ssl` — and asyncio,
+      `http.client`, `urllib.request`, `requests` — raised `TypeError` at both tiers: a FOURTH
+      proof outcome the three-outcome contract cannot express.
+   5. **An off-main-thread violation is surfaced.** The thread bootstrap catches `BaseException`,
+      so a worker-thread trip became a warning beside a PASSED run — a test performing real I/O,
+      shipped with a green proof. Trips are recorded at the raise (which also sees a
+      `concurrent.futures` future nobody reads) and re-raised on the main thread at
+      `Thread.join`, at pytest teardown, or at `disarm()`.
+   6. **`os.environ` reads are intercepted.** The mapping is rebound to a guarded subclass. The
+      superseded claim was wrong twice: the subscript IS interceptable, and the filter's
+      `os.environ` marker DOES see `os.environ.get(...)`, so the layers did not agree — the filter
+      tiered such a unit 2 while the guard said nothing. What remains uncovered is stated in
+      `references/triage.md`: `len(...)`, `in`, and `os.environb`.
 3. **Never ships an unproven test.** A test that did not go red is discarded and listed under
    *could not prove*.
 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the report.
@@ -277,10 +325,27 @@ Stdlib + git only. No MCP, no network, no third-party packages. Emits determinis
   — it cannot distinguish a call from a comment.
 - **Testability tier** — per the triage above.
 - **Already-covered detection** — a symbol some existing test already exercises never enters the
-  ranking.
-- **Score** — normalised churn × normalised inbound refs; ties broken by path sort. Determinism is
-  non-negotiable: the eval asserts byte-identical output across runs, as `detect_stack.py`
-  already does.
+  ranking. Amended 2026-09-09 (fix round 6): "already exercises" is a two-sided approximation and
+  the two sides are not symmetric. Over-crediting HIDES an untested unit and is never acceptable;
+  under-crediting costs a redundant test. Round 4 closed an over-credit (a bare basename crediting
+  a colliding sibling's unit) by demanding path-qualified evidence — which the dominant Python
+  idiom, a test file beside the module doing `import x`, can never produce, so under a collision
+  correct evidence became UNREPRESENTABLE: 105 of this repo's 320 units, credited 0. Round 6 adds
+  one further route and only one: the test file is in the same directory as the defining file AND
+  reaches the unit through an import of that module (`import x` + `x.name`, `import x as y` +
+  `y.name`, `from x import name`). That predicate is stronger than the bare-name match used
+  elsewhere, because the weaker form credited two `::main` units to files whose only `main` was
+  `unittest.main()`. Repo-wide effect: 122 → 126 credited, none lost.
+- **Score** — `(normalised churn + 1) × (normalised inbound refs + 1) − 1`; ties broken by unit
+  `id` (`path::name`). Corrected 2026-09-09 (fix round 6) from "normalised churn × normalised
+  inbound refs; ties broken by path sort", which was wrong in both halves. The `+1` floor is
+  load-bearing and deliberate: it keeps a zero on one axis from annihilating a strong signal on
+  the other, with the stated consequence that a max-churn, zero-refs unit can outrank a
+  moderate-churn unit with decent refs — zero STATIC references usually means "an entry point the
+  approximate counter cannot see", not "nothing depends on it". `rank_risk.py`'s own comment at
+  the computation carries that reasoning; this bullet is the summary, not the authority.
+  Determinism is non-negotiable: the eval asserts byte-identical output across runs, as
+  `detect_stack.py` already does.
 
 A real call-graph tool would compute the blast-radius half better. The report names that as an
 **optional** upgrade the user may already have. It is never a dependency, and nothing in the
@@ -411,9 +476,13 @@ structure checked, evidence claimed.
 Per `docs/eval-standard.md`: deterministic harness → skill tooling → model-free grader, negative
 fixtures mandatory, offline, stdlib-only, bounded.
 
-**The eval grades the deterministic half.** Five tiny fixture repos (one per stack), each a real
-git repo with churn history, several units, and one already-covered unit, run through
-`rank_risk.py`:
+**The eval grades the deterministic half.** Corrected 2026-09-09 (fix round 6): there is no
+per-stack fixture set and there never was one — this version of the skill supports Python only, so
+"five tiny fixture repos, one per stack" described a shape that could not exist. What ships is
+**four Python fixture repos** under one `mkdtemp` (`main`, a real git repo with churn history,
+several units and an already-covered unit; `nogit`, with no history; `nopy`, with no Python; and
+`samebase`, for the colliding-basename rule), plus a fifth non-git directory used to run the
+documented `pytest -p io_guard` command verbatim (check 34). Run through `rank_risk.py`:
 
 - ranking is byte-identical across repeated runs
 - an already-covered unit is excluded
