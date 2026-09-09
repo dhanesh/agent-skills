@@ -174,9 +174,15 @@ class TestInboundRefs(TempRepo):
         self.assertEqual(refs["a/util.py::run"], 0)
         self.assertEqual(refs["b/util.py::run"], 0)
 
-    def test_init_py_basename_collision_across_packages_does_not_cross_inflate(self):
-        # Every package has an __init__.py, so this basename collision is the
-        # likeliest real-world trigger for the round-3 bug.
+    def test_dunder_init_modules_never_match_each_other_by_path_token(self):
+        # Pins a STRUCTURAL property, not the round-3 exclusion: _PATH_TOKEN_RE
+        # is [A-Za-z0-9]+, so pkg1/__init__.py yields tokens {pkg1, init, py}
+        # while the module string is `__init__` -- they can never be equal.
+        # Two __init__.py files therefore could not cross-inflate even before
+        # the exclusion existed, which is why this test cannot catch its
+        # regression. It is here to pin the tokeniser: widen _PATH_TOKEN_RE to
+        # include `_` and this pair starts matching by path, and the
+        # same-basename exclusion becomes the only thing holding them at 0.
         write(self.root, "pkg1/__init__.py", "def boot():\n    pass\n")
         write(self.root, "pkg2/__init__.py", "def boot():\n    pass\n")
         units = rank_risk.discover_units(self.root)

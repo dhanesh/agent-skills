@@ -161,14 +161,30 @@ def inbound_refs(root: str, units) -> dict:
     trivially satisfies the path half of `_references_module` against module
     "X" — against ITSELF — regardless of whether it ever mentions some OTHER
     X.py in a different directory. Two files can share a basename from
-    different directories (`a/util.py` and `b/util.py`; every `__init__.py`
-    shares the basename `__init__`, so this was likely in any real package
-    layout), and each such file's own path was wrongly earning it membership
+    different directories (`a/util.py` and `b/util.py`), and each such file's own path
+    was wrongly earning it membership
     in the OTHER's reference list. Excluding same-basename files outright
     (rather than only the current unit's own_path) fixes that at its root,
     incidentally also always excludes own_path (whose basename equals module
     by construction), and keeps the cache shared purely by module string —
     still O(distinct modules), no per-unit variant needed.
+
+    COST of that exclusion — a second, narrower UNDER-count stacked on the
+    re-export one above, and accepted for the same reason. When `b/util.py`
+    genuinely does import from `a/util.py`, its references to `a/util.py`'s
+    units are not counted: `b/util.py` is dropped from the module's
+    reference-file list by basename, before its text is ever read. Per-package
+    `models.py` / `utils.py` / `config.py` make this common rather than a
+    corner case, so a unit in one of them can read as less-reached than it is.
+    The trade is deliberate and one-directional: real reach lost, self-earned
+    reach eliminated — understating, never inventing, as everywhere else here.
+
+    `__init__.py` is NOT an instance of the collision, despite being the first
+    example a reader reaches for. `_PATH_TOKEN_RE` matches `[A-Za-z0-9]+`, so
+    `pkg/__init__.py` yields the path tokens {pkg, init, py}; the module string
+    is `__init__`, which equals none of them. Two packages' `__init__.py`
+    files could never earn membership in each other's reference lists by path,
+    with or without this exclusion.
     """
     per_file_counts = {}
     file_lines = {}
