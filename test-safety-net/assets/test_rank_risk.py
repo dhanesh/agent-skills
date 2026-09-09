@@ -161,6 +161,42 @@ class TestInboundRefs(TempRepo):
         refs = rank_risk.inbound_refs(self.root, units)
         self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
 
+    def test_same_basename_different_directories_do_not_cross_inflate(self):
+        # FIX round 3: a/util.py and b/util.py share the basename "util" but
+        # are unrelated modules -- neither calls the other's `run`. The
+        # module-reffiles cache is keyed by basename and shared across both,
+        # so this catches the own_path exclusion being applied at the wrong
+        # time (population vs. lookup).
+        write(self.root, "a/util.py", "def run():\n    pass\n")
+        write(self.root, "b/util.py", "def run():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["a/util.py::run"], 0)
+        self.assertEqual(refs["b/util.py::run"], 0)
+
+    def test_init_py_basename_collision_across_packages_does_not_cross_inflate(self):
+        # Every package has an __init__.py, so this basename collision is the
+        # likeliest real-world trigger for the round-3 bug.
+        write(self.root, "pkg1/__init__.py", "def boot():\n    pass\n")
+        write(self.root, "pkg2/__init__.py", "def boot():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["pkg1/__init__.py::boot"], 0)
+        self.assertEqual(refs["pkg2/__init__.py::boot"], 0)
+
+    def test_genuine_cross_file_caller_still_counts_after_round_3_fix(self):
+        # Control paired with the two negative tests above: excluding
+        # same-basename files from a module's reference list must not
+        # swallow a genuine cross-file caller when the basenames actually
+        # differ -- the round-2 behaviour stays intact.
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
+        self.assertEqual(refs["beta.py::helper"], 0)
+
     def test_digit_glued_identifier_is_not_a_reference(self):
         # "2x" must not count as a reference to a unit named `x` — the old \bx\b
         # boundary semantics, which the single-pass tokeniser has to preserve.

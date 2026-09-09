@@ -153,6 +153,22 @@ def inbound_refs(root: str, units) -> dict:
     the unit's own module, stops counting. Understating reach is the
     direction this skill wants to be wrong in — inventing reach a unit does
     not have is exactly what produced the false 470s.
+
+    RULING (fix round 3): the per-module reference-file list is memoised by
+    module BASENAME (see below) because many units share a basename — but a
+    file whose OWN basename equals `module` is now excluded from that list
+    entirely, not merely the current unit's own_path. Any file named X.py
+    trivially satisfies the path half of `_references_module` against module
+    "X" — against ITSELF — regardless of whether it ever mentions some OTHER
+    X.py in a different directory. Two files can share a basename from
+    different directories (`a/util.py` and `b/util.py`; every `__init__.py`
+    shares the basename `__init__`, so this was likely in any real package
+    layout), and each such file's own path was wrongly earning it membership
+    in the OTHER's reference list. Excluding same-basename files outright
+    (rather than only the current unit's own_path) fixes that at its root,
+    incidentally also always excludes own_path (whose basename equals module
+    by construction), and keeps the cache shared purely by module string —
+    still O(distinct modules), no per-unit variant needed.
     """
     per_file_counts = {}
     file_lines = {}
@@ -175,9 +191,25 @@ def inbound_refs(root: str, units) -> dict:
         module = os.path.splitext(os.path.basename(own_path))[0]
 
         if module not in module_reffiles_cache:
+            # Cached purely by module string, and shared by every unit whose
+            # basename matches -- including across unrelated directories
+            # (every __init__.py shares "__init__"). A file whose OWN
+            # basename equals `module` is excluded from the candidate list
+            # entirely, not just the current unit's own_path: any file named
+            # X.py trivially satisfies the path half of _references_module
+            # against module "X" -- against ITSELF -- regardless of whether
+            # it ever mentions some OTHER X.py in a different directory. So
+            # `a/util.py` and `b/util.py` must never "reference" each other's
+            # module just by both being named util.py; only a file whose own
+            # basename DIFFERS gets to earn membership via a genuine
+            # name/path match. This also always excludes the current unit's
+            # own_path, since own_path's basename equals module by
+            # construction -- no separate per-unit lookup-time filter is
+            # needed, and the cache stays keyed, and shared, purely by module.
             module_reffiles_cache[module] = [
                 rel for rel in all_files
-                if rel != own_path and _references_module(module, file_texts[rel], path_tokens[rel])
+                if os.path.splitext(os.path.basename(rel))[0] != module
+                and _references_module(module, file_texts[rel], path_tokens[rel])
             ]
         ref_files = module_reffiles_cache[module]
 
