@@ -36,14 +36,16 @@ rather than proceeding on assumptions.
   - pytest: `pytest <path>::<test_name>` for a bare function, or
     `pytest <path>::<TestClass>::<test_name>` for a method.
   - unittest: `python3 -m unittest <module.path>.<ClassName>.<test_name>`.
-- **Runtime guard placement.** A `conftest.py` at the same level as (or above) the generated test
-  file, loaded by pytest ahead of collection — see `references/triage.md` for exactly what it
-  must patch and why it cannot live inside a fixture. `unittest` has no equivalent
-  collection-time hook; when falling back to it, install the guard via `setUpModule` at the top
-  of the generated test module instead, accepting that it runs slightly later than pytest's
-  `conftest.py` would (after the module under test is already imported, if that module is
-  imported anywhere earlier in the same process) — flag this explicitly in the report as a weaker
-  guarantee than the pytest path.
+- **Runtime guard placement.** Load the guard as a **pytest plugin via `-p`** on the single-test
+  invocation itself (e.g. `pytest -p test_safety_net_guard <path>::<test_name>`), with the tier
+  passed by environment variable — never a `conftest.py` written into the repo. See
+  `references/triage.md` for exactly what it must patch, how it signals a guard trip versus an
+  ordinary assertion failure, and why a plugin (not a written file) is what keeps Invariant 1
+  clean. `unittest` has no equivalent plugin-loading mechanism; when falling back to it, install
+  the guard via `setUpModule` at the top of the generated test module instead, accepting that it
+  runs slightly later than the pytest plugin would (after the module under test is already
+  imported, if that module is imported anywhere earlier in the same process) — flag this
+  explicitly in the report as a weaker guarantee than the pytest path.
 
 ## The `make` case
 

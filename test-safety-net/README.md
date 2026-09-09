@@ -37,15 +37,19 @@ every unit rather than assuming it's callable:
 | Tier | Situation | What happens |
 |---|---|---|
 | 1 — direct | deps passable, output returnable, no I/O reachable | a real unit test |
-| 2 — wider boundary | I/O at a boundary that can be controlled (temp dir, frozen clock, mocked HTTP) | pinned at that boundary, named in the report |
+| 2 — wider boundary | I/O at a boundary that can be controlled (temp dir, frozen clock, seeded randomness) | pinned at that boundary, named in the report |
 | 3 — needs a seam | no honest boundary without adding code | reported to `clean-code`, never acted on here |
 | 4 — not reachable | global state, import-time work, deep branch soup | a prioritized refactor reason |
+
+Only filesystem, clock, randomness, and environment variables are controlled automatically —
+database and HTTP are declined to Tier 3 by default and are only ever pinned at Tier 2 with a
+recorded justification (an in-memory database, or `mockstar-mock` for HTTP), never silently.
 
 Static triage is a **filter**, not the enforcement — Python's dynamic dispatch means source
 analysis alone can't decide what a unit really touches. The invariant "never write a test that
 performs real I/O" is enforced at runtime instead, by a tier-aware guard that patches the syscall
-layer during the red→green proof, installed before the module under test is even imported. Full
-mechanism in [`references/triage.md`](references/triage.md).
+layer during the red→green proof, loaded as a pytest plugin ahead of collection rather than
+written into the repo. Full mechanism in [`references/triage.md`](references/triage.md).
 
 Tiers 3 and 4 are output, not failure — a ranked "here's what blocks testing and the smallest fix"
 list is the handoff to `clean-code`, and is often worth more to a human than the tests themselves.

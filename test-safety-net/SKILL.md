@@ -114,9 +114,12 @@ test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
    filter — it declines obvious hazards, but Python's dynamic dispatch means it cannot decide
    reachability from source alone; review rounds on the ranker found fifteen-plus constructions it
    called safe that actually reached real I/O. So the invariant is enforced during this red→green
-   proof by a **tier-aware runtime guard**, installed in a `conftest.py` loaded ahead of test
-   collection — never a fixture inside the generated test, or import-time I/O in the module under
-   test runs before any fixture body executes:
+   proof by a **tier-aware runtime guard**, loaded as a **pytest plugin via `-p`** on the
+   single-test invocation (never a `conftest.py` written into the repo, and never a fixture inside
+   the generated test) — a plugin loads ahead of collection, which is what makes pre-import
+   blocking work, and it touches nothing in the user's tree, keeping Invariant 1 clean with no
+   carve-out. The tier it enforces is passed per invocation by environment variable, which is
+   sufficient because the proof runs one unit at a time — a single run has a single tier:
    - **Tier 1 candidate:** block *everything* — filesystem, clock, randomness, network,
      subprocess, DB. The unit claimed to touch nothing, so any touch falsifies the classification:
      reclassify and discard the test.
@@ -127,8 +130,17 @@ test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
    `os.posix_spawn`, `os.spawn*`, `os.fork`), `io.FileIO`, `mmap.mmap`, `socket.socket`,
    `subprocess.Popen`, and the DB driver connect entry points in use — not just the ergonomic
    wrappers above them. `os.open` is not the builtin `open`; `os.posix_spawn` never routes through
-   `subprocess.Popen`. Full patch list, the tier-aware logic, and the residual (a subprocess that
-   itself dials out escapes an in-process guard) are in `references/triage.md`.
+   `subprocess.Popen`.
+
+   **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
+   three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is
+   wrong); the guard's exception means the *classification* is wrong. If the guard's exception
+   appears at any point — during the deliberately-wrong run or the corrected one — reclassify the
+   unit to Tier 3 and discard the test, regardless of whether that run was red or green. Treating
+   a guard trip as an ordinary assertion failure defeats the mechanism.
+
+   Full patch list and the residual (a subprocess that itself dials out escapes an in-process
+   guard) are in `references/triage.md`.
 
 5. **Report.** Emit the deliverable below, then stop — the ranked remainder is what the next run
    resumes from.
@@ -161,11 +173,11 @@ code generation from program output, and it is the one real injection surface in
 ```
 ## Test safety net: <repo>  (stack: python · 3 added, 1 unproven, 1 needs a seam)
 
-| unit                    | tier                | kind             | test file             | proved    |
+| unit                    | tier                 | kind             | test file              | proved    |
 |-------------------------|----------------------|------------------|------------------------|-----------|
-| billing/refund.py:apply | 1 direct             | characterization | tests/test_refund.py  | RED→GREEN |
-| api/handler.py:post     | 2 (fs, clock)        | characterization | tests/test_api.py     | RED→GREEN |
-| auth/hash.py:verify     | 1 direct             | specification    | tests/test_hash.py    | RED→GREEN |
+| billing/refund.py:apply | 1 direct             | characterization | tests/test_refund.py   | RED→GREEN |
+| api/handler.py:post     | 2 (fs, clock)        | characterization | tests/test_api.py      | RED→GREEN |
+| auth/hash.py:verify     | 1 direct             | specification    | tests/test_hash.py     | RED→GREEN |
 
 The tier column for a Tier 2 row names EVERY controllable group actually faked (not just
 `tier_reason`'s alphabetically-first one) — "2 (fs, clock)" means both the filesystem and the

@@ -106,11 +106,39 @@ The guard is what actually enforces "never real I/O." It runs during the red→g
 never sees it either. Patch the primitives underneath, not just the names a human would reach
 for first.
 
-**Install the guard before the module under test is imported.** Use a `conftest.py` loaded ahead
-of collection (or the stack's equivalent — see `references/stacks.md`), not a fixture inside the
-generated test file. A module that performs I/O at import time runs those side effects during
-`import unit_module`, before any fixture body executes — once per proof run, for every module,
-regardless of tier. A guard installed only inside a test function's fixture never sees that.
+**Install the guard before the module under test is imported.** It must load ahead of collection,
+not as a fixture inside the generated test file. A module that performs I/O at import time runs
+those side effects during `import unit_module`, before any fixture body executes — once per proof
+run, for every module, regardless of tier. A guard installed only inside a test function's
+fixture never sees that.
+
+**How the guard signals.** The proof run has **three** outcomes, not two:
+
+- an `AssertionError` — the expectation is wrong; this is the RED half of red→green, or the
+  correction went wrong and it's still wrong;
+- **the guard's own exception type** — the *classification* is wrong, not the assertion; and
+- neither raised — GREEN.
+
+If the guard's exception appears at **any** point during the proof — the deliberately-wrong RED
+run or the corrected GREEN run — the unit is reclassified Tier 3 and the test is discarded,
+**regardless of whether that run was red or green**. Conflating a guard trip with an ordinary
+assertion failure defeats the whole mechanism: a Tier 1 candidate that happens to touch the
+filesystem could otherwise pass "RED" only because the guard's exception looked like the
+deliberately-wrong assertion, then pass "GREEN" the same way once corrected — two runs that both
+"succeeded" while never proving the classification safe.
+
+**How the guard is loaded.** It loads as a **pytest plugin, via `-p`** (e.g.
+`pytest -p test_safety_net_guard <path>::<test_name>`), not as a `conftest.py` written into the
+target repo. A plugin loads before collection — which is what makes pre-import blocking work —
+and, because it is passed on the command line rather than written to disk, it touches nothing in
+the user's tree: it cannot collide with a `conftest.py` the repo already has, and it cannot
+outlive the proof run. That keeps Invariant 1 ("never modifies source") true with **no
+carve-out** — a written `conftest.py` would have been exactly that carve-out.
+
+**How the guard knows its tier.** The tier is passed **per invocation, by environment variable**,
+read once at plugin import. This is sufficient — not a limitation — precisely *because* the proof
+runs one unit at a time (workflow step 4): a single proof run has a single tier, so the plugin
+never needs to dispatch per test the way a guard shared across a whole suite run would.
 
 **State the residual honestly.** A test that spawns a subprocess which itself dials out to the
 network escapes an in-process guard — the guard patches this process's syscall layer, not a
