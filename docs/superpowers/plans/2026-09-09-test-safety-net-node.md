@@ -146,11 +146,24 @@ analysis   discover_units(root) -> (units, mode), triage(root, unit) -> (tier, r
 
 Run the suite unmodified (158, OK), the eval (34/34), `make gate`, and:
 
+**The bar, stated correctly.** Do NOT capture a baseline before your work and compare
+after: the ranker's corpus is the repo it lives in, so adding public names adds units by
+construction (Task 1: 321→326, Task 1b: 326→332). That is not a behaviour change and the
+naive `cmp` cannot pass.
+
+Compare the OLD ranker against the NEW ranker over the SAME tree:
+
 ```bash
-python3 test-safety-net/assets/rank_risk.py . > /tmp/after.json && cmp /tmp/base.json /tmp/after.json && echo IDENTICAL
+mkdir -p /tmp/oldrank && for f in rank_risk stack_python stack_common; do
+  git show <base>:test-safety-net/assets/$f.py > /tmp/oldrank/$f.py; done
+for tree in . test-safety-net scripts agent-ready-rails; do
+  python3 /tmp/oldrank/rank_risk.py "$tree" > /tmp/o.json
+  python3 test-safety-net/assets/rank_risk.py "$tree" > /tmp/n.json
+  cmp /tmp/o.json /tmp/n.json && echo "$tree IDENTICAL"
+done
 ```
 
-`IDENTICAL` is the bar, exactly as in Task 1.
+Every tree `IDENTICAL` is the bar.
 
 - [ ] **Step 7: Commit**
 
@@ -178,6 +191,33 @@ module.exports = { name, ... }    module.exports.name = ...
 exports.name = ...
 ```
 
+**Phase 0 — three interface corrections first, each zero behaviour change for Python,
+each committed separately before any node code.** Task 1b's report found these; they are
+silent-zero bugs for node exactly like the grammar gap Task 1b closed.
+
+- [ ] **Step 0a: `name_pattern(name)` joins the interface (fourteenth name)**
+
+`already_covered` and `_references_module` still build `re.compile(r"\b%s\b" % ...)` in
+the core. `\b` does not treat `$` as an identifier character — verified:
+`re.search(r"\b\$fetch\b", "$fetch(1)")` is `False`. So every `$`-named JS export can
+never be matched in a test file and reads as an uncovered gap forever. Move pattern
+construction to the stack. Python's stays `\b%s\b` byte-for-byte; node will use
+`(?<![A-Za-z0-9_$])name(?![A-Za-z0-9_$])`.
+
+- [ ] **Step 0b: give the grammar names their file context**
+
+`module_bindings(module, text)` and `reached_through_module(module, name, text)` receive a
+bare token and never learn which file `text` came from or which file defines the unit, so
+node cannot resolve `"../utils"` and is reduced to matching a specifier's last segment.
+Extend both to take the defining and referencing paths. Python ignores the new arguments,
+so its behaviour is unchanged — prove that with the identical-output check.
+
+- [ ] **Step 0c: prove Phase 0 changed nothing, then commit**
+
+Old-vs-new ranker over the same four trees, all `IDENTICAL`; suite unmodified at 158.
+
+---
+
 - [ ] **Step 1: Write the failing test**
 
 ```python
@@ -200,6 +240,14 @@ Expected: FAIL — module does not exist.
 Strip comments and string literals **before** matching, or a `//` in a URL and an exported name inside a template literal both produce phantom units. A single pass that tracks whether it is inside `'`, `"`, `` ` ``, `//` or `/* */` is enough; do not attempt full tokenisation.
 
 - [ ] **Step 4: Cover the rest of the export forms, plus negatives**
+
+**Required negative, from Task 1b's concern 4.** The Python branch's fix round 6 ruled
+that "the colliding sibling is by definition in a different directory" — true only while
+`is_test_for` means same-directory. Node's `__tests__/` siblings and `src/`↔`test/`
+mirroring break that assumption, and the guard against it (`rivals`, via `path_pattern`)
+is node's weakest predicate. Write a fixture with the same basename in two packages, a
+`__tests__/` test for one of them, and assert the OTHER is reported uncovered. If it
+cross-credits, `is_test_for` is too wide — narrow it; never widen `rivals` to compensate.
 
 One test per form above. Negatives that must find **nothing**: a non-exported `function helper()`, a name inside a comment, a name inside a string, a `.test.js`/`.spec.ts` file, anything under `node_modules/`, and a nested function inside an exported one (not independently addressable, exactly as Python excludes nested defs).
 
