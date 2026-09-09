@@ -128,6 +128,18 @@ on the receiving side.
    Tier 3, and no test is kept. That makes this invariant a property the tooling enforces rather
    than one the prose asserts.
 
+   **The guard is tier-aware.** Amended again after a review found the first version had a hole:
+   it blocked only the UNCONTROLLABLE groups (socket, subprocess, DB drivers), so a unit the
+   filter called Tier 1 — "no I/O at all" — that actually reached `open(path, "w")` was not
+   backstopped, and its generated test would have written a real file. So:
+
+   - **Tier 1 candidate** (claimed to do no I/O): block *everything* — filesystem, clock and
+     randomness as well as network, subprocess and DB. The unit claimed to touch nothing, so any
+     touch falsifies the classification. Reclassify and discard the test.
+   - **Tier 2 candidate** (I/O at a controlled boundary): block only the uncontrolled groups. The
+     controllable ones are deliberately faked by the test — a temp dir and a frozen clock are the
+     point, not a violation.
+
    Residual, stated plainly: a test that spawns a subprocess which itself dials out escapes an
    in-process guard. That is a smaller residual than trusting static analysis alone, and naming
    it is the point.
