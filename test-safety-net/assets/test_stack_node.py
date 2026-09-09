@@ -566,6 +566,71 @@ class TestCoverageThroughTheCore(NodeCase):
         self.assertIn("src/utils.js::parse", covered)
         self.assertNotIn("lib/utils.js::parse", covered)
 
+    def test_a_tsconfig_alias_credits_no_file_it_cannot_resolve(self):
+        """F4, and C1 from the Python branch verbatim: a unit with NO test, covered.
+
+        `src/__tests__/utils.test.ts` importing `"@app/utils"` lines three
+        predicates up wrongly at once. `_dir_key` strips both `src` and `lib`
+        (both in `SRC_ROOTS`) and strips `__tests__`, so the test is positioned
+        for BOTH files. `_specifier_matches` could not resolve a non-relative
+        specifier and compared last segments, so `@app/utils` matched module
+        `utils` -- again both. And `rivals`, the guard that is supposed to
+        bound exactly this, never fires, because a test importing `"@app/utils"`
+        never emits the string `src/utils`.
+
+        Result: `lib/utils.ts::parse` had no test anywhere in the repo, was
+        reported `covered`, and dropped out of `ranked` entirely -- the outcome
+        `already_covered`'s own docstring calls "the opposite of safe". The
+        rule this stack inherits is that the coverage predicate may UNDER-credit
+        and never over-credit, so an alias it cannot resolve now credits
+        nothing at all.
+
+        R12's two existing fixtures do not cover this: both use RELATIVE
+        specifiers, which the resolver handles exactly. The alias case is the
+        dominant real-world TypeScript layout.
+        """
+        write(self.root, "src/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "lib/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "tsconfig.json",
+              '{"compilerOptions": {"baseUrl": ".", "paths": {"@app/*": ["src/*"]}}}\n')
+        write(self.root, "src/__tests__/utils.test.ts",
+              'import { parse } from "@app/utils";\n'
+              'test("parses", () => { parse("x"); });\n')
+        units, covered = self.covered()
+        self.assertEqual([u["id"] for u in units],
+                         ["lib/utils.ts::parse", "src/utils.ts::parse"])
+        # The unit with no test anywhere must NOT be credited…
+        self.assertNotIn("lib/utils.ts::parse", covered)
+        # …and must be back in the plan rather than silently dropped.
+        plan = rank_risk.rank(self.root, since="10 years ago", stack=stack_node)
+        self.assertIn("lib/utils.ts::parse", [r["id"] for r in plan["ranked"]])
+
+    def test_a_baseurl_specifier_that_names_the_path_still_credits_it(self):
+        # The decidable half of the same rule, kept as its own fixture so the
+        # fix cannot quietly become "non-relative specifiers credit nothing".
+        # `"src/utils"` is non-relative and UNAMBIGUOUS: it names the defining
+        # file's path, not merely its last segment, so it credits `src` and
+        # refuses `lib`.
+        write(self.root, "src/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "lib/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "src/__tests__/utils.test.ts",
+              'import { parse } from "src/utils";\n'
+              'test("parses", () => { parse("x"); });\n')
+        _, covered = self.covered()
+        self.assertIn("src/utils.ts::parse", covered)
+        self.assertNotIn("lib/utils.ts::parse", covered)
+
+    def test_a_bare_single_segment_specifier_credits_nothing_under_ambiguity(self):
+        # `import { parse } from "utils"` under a `baseUrl` cannot say WHICH
+        # `utils`. Undecidable is under-credit, not a coin flip.
+        write(self.root, "src/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "lib/utils.ts", "export function parse(s: string) { return s; }\n")
+        write(self.root, "src/__tests__/utils.test.ts",
+              'import { parse } from "utils";\n'
+              'test("parses", () => { parse("x"); });\n')
+        _, covered = self.covered()
+        self.assertEqual(covered, {})
+
     def test_an_uncolliding_module_is_credited_by_the_looser_rule(self):
         write(self.root, "src/ledger.js", "export function post(e) { return e; }\n")
         write(self.root, "src/ledger.test.js",
@@ -1135,6 +1200,25 @@ MANIFEST_BODIES = {
         ' "scripts": {"prepare": "husky"}}\n',
     "pyproject.toml/declaring": '[project]\nname = "srv"\nversion = "1.0.0"\n',
     "pyproject.toml/tooling": "[tool.ruff]\nline-length = 100\n",
+    # Django's near-universal split-requirements layout. The CONTENT rule is
+    # `requirements.txt`'s, unchanged -- what was missing was the NAME.
+    "base.txt/declaring": "Django>=4.2\npsycopg[binary]>=3.1\n",
+    "base.txt/tooling": "ruff==0.5.0\nblack==24.4.2\n",
+    "requirements-dev.txt/declaring": "Django>=4.2\npytest>=8\n",
+    "requirements-dev.txt/tooling": "ruff==0.5.0\n",
+    # Django's entry point. Self-declaring the way `setup.py` is: there is no
+    # tooling-only form of it, so the table has one body and both keys use it.
+    "manage.py/declaring": (
+        "#!/usr/bin/env python\n"
+        "import os, sys\n"
+        "def main():\n"
+        "    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'srv.settings')\n"
+        "    from django.core.management import execute_from_command_line\n"
+        "    execute_from_command_line(sys.argv)\n"),
+    # A test-runner config, and therefore TOOLING on the same rule that makes a
+    # husky `package.json` tooling. It is in `MANIFESTS` so that decision is
+    # visible and asserted rather than an unrecognised filename.
+    "tox.ini/tooling": "[tox]\nenvlist = py311\n[testenv]\ndeps = pytest\n",
 }
 
 CASE_TABLE = [
@@ -1189,6 +1273,37 @@ CASE_TABLE = [
     # backend ones.
     ("a Python backend with no manifest and a declared JS frontend",
      40, 10, ".js", (("web/package.json", "declaring"),), "python"),
+    # ROWS 13-16 ARE THE REGION THE TABLE HAD NO ROW IN: "Python majority,
+    # UNDECLARED; node minority, DECLARED". Rows 1-12 pin the constants along
+    # the axis their author chose, and row 12 is `40 > 30` -- it says nothing
+    # about 30/20 or 12/6, which is where every reproduction of F3 sits. They
+    # were added from the OUTSIDE: pick the repo shape first, then see what the
+    # code says.
+    #
+    # Row 13 is the reproduction verbatim. `requirements/base.txt` is standard
+    # Django and matched NONE of `MANIFESTS`, which keyed on exact filenames at
+    # the root, so Python earned no manifest credit while the `package.json`
+    # every Django repo has for its frontend assets earned node's. The verdict
+    # was `node=50, python=30`, and thirty Python modules got no plan at all.
+    ("a conventional Django repo: split requirements, JS assets, a real package.json",
+     30, 20, ".js",
+     (("requirements/base.txt", "declaring"), ("package.json", "declaring")),
+     "python"),
+    ("Python Lambda handlers beside a declared TypeScript CDK app",
+     12, 6, ".ts",
+     (("requirements/base.txt", "declaring"), ("package.json", "declaring")),
+     "python"),
+    ("…and a split-requirements file naming only linters still declares nothing",
+     30, 20, ".js",
+     (("requirements/base.txt", "tooling"), ("package.json", "declaring")),
+     "node"),
+    ("a Django repo declared only by manage.py",
+     30, 20, ".js",
+     (("manage.py", "declaring"), ("package.json", "declaring")), "python"),
+    # tox.ini is TOOLING, on the same rule that demotes a husky `package.json`.
+    # A repo tested with tox is not thereby a Python repo.
+    ("a JS repo that runs its few Python scripts under tox",
+     8, 40, ".js", (("tox.ini", "tooling"), ("package.json", "declaring")), "node"),
 ]
 
 
@@ -1217,6 +1332,11 @@ class TestManifestCaseTable(unittest.TestCase):
             write(root, "web/mod%d%s" % (i, ext), "export function go%d() {}\n" % i)
         for rel, kind in manifests:
             write(root, rel, MANIFEST_BODIES["%s/%s" % (os.path.basename(rel), kind)])
+        # `manage.py` is a `.py` SOURCE file as well as a manifest -- exactly
+        # as `setup.py` is, and counted twice for the same reason. The row's
+        # `py` count is the number of modules under `srv/`, so nothing here
+        # needs adjusting; this comment exists so the double count is not read
+        # as an accident.
 
     def _verdict(self, root):
         """python | node | ambiguous | neither -- the four answers a run can give."""

@@ -64,6 +64,10 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
                                                  specifier's last segment
                                                  instead credits every
                                                  same-named file in the repo.
+                                                 A specifier the stack cannot
+                                                 resolve credits NOTHING: the
+                                                 predicate may under-credit,
+                                                 never over-credit.
 
   analysis
     discover_units(root, precise=True)           the units, plus WHICH

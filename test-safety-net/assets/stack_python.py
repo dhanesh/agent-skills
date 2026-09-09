@@ -39,9 +39,31 @@ from stack_common import (SKIP_DIRS, evidence_score, has_manifest,   # noqa: E40
 STACK_NAME = "python"
 
 # Files that declare "this directory is a Python project". `setup.py` is a
-# source file too and so is counted twice; that is right -- it is both.
-MANIFESTS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
-             "Pipfile", "environment.yml")
+# source file too and so is counted twice; that is right -- it is both, and so
+# is `manage.py`.
+#
+# ENTRIES MAY BE GLOBS (see `stack_common.iter_manifests`), and the ones that
+# are exist because this list was exact filenames at the root and Django's
+# near-universal layout is a `requirements/` DIRECTORY -- `base.txt`,
+# `dev.txt`, `prod.txt` -- which matched nothing. A conventional Django repo
+# earned no manifest credit while the `package.json` it keeps for its frontend
+# assets earned node's, so 30 Python modules beside 20 JS files scored
+# `node=50, python=30` and the plan ranked the JavaScript. Case-table rows
+# 13-16 are that region.
+#
+# WHAT IS DELIBERATELY NOT HERE: lock files. `poetry.lock`, `Pipfile.lock` and
+# `uv.lock` were the obvious cheap addition and they are the `has_manifest`
+# mistake wearing a content rule's clothes -- a lock file records that a
+# package manager RAN, not that the repo is this language, and one generated
+# from a lint-only `pyproject.toml` is indistinguishable from one generated
+# from a real dependency set. The same argument rules out `package-lock.json`
+# and `yarn.lock` on the node side, which is the point: a detector that
+# credited one stack's lock files and not the other's would not be weighing
+# evidence, it would be picking a winner.
+MANIFESTS = ("pyproject.toml", "setup.py", "setup.cfg", "manage.py",
+             "requirements.txt", "requirements-*.txt", "constraints.txt",
+             "requirements/*.txt", "requirements/*.in",
+             "Pipfile", "environment.yml", "environment.yaml", "tox.ini")
 
 
 def evidence(root: str) -> int:
@@ -76,12 +98,25 @@ _TOOLING_REQUIREMENTS = frozenset({
 })
 
 # Manifests that exist only to declare a distribution or an environment. There
-# is no tooling-only form of a `setup.py`.
-_SELF_DECLARING_MANIFESTS = frozenset({"setup.py", "Pipfile", "environment.yml"})
+# is no tooling-only form of a `setup.py`, and none of a Django `manage.py`:
+# it names a settings module and boots a framework, which is this stack's
+# analogue of node's `main`/`bin` entry-point keys.
+_SELF_DECLARING_MANIFESTS = frozenset({"setup.py", "Pipfile", "environment.yml",
+                                       "environment.yaml", "manage.py"})
+
+# Manifest keys read with `requirements.txt`'s CONTENT rule. The rule did not
+# change; only the set of names it answers for did.
+_REQUIREMENTS_KEYS = frozenset({"requirements.txt", "requirements-*.txt",
+                                "constraints.txt", "requirements/*.txt",
+                                "requirements/*.in"})
 
 
 def classify_manifest(name: str, text: str) -> str:
     """`declaring` when this manifest says the repo IS Python; `tooling` otherwise.
+
+    `name` is the MANIFESTS entry that matched, which for a glob is the spec
+    (`"requirements/*.txt"`) rather than the file's own basename. `base.txt`
+    says nothing about its format; the spec says everything.
 
     The same rule as `stack_node.classify_manifest`, run on the other side, and
     it has to be: a detector that demoted node's tooling manifests while
@@ -97,7 +132,7 @@ def classify_manifest(name: str, text: str) -> str:
         return ("declaring"
                 if any(section in low for section in _DECLARING_SECTIONS)
                 else "tooling")
-    if name == "requirements.txt":
+    if name in _REQUIREMENTS_KEYS:
         for line in text.splitlines():
             line = line.split("#")[0].strip()
             if not line or line.startswith("-"):
@@ -106,6 +141,11 @@ def classify_manifest(name: str, text: str) -> str:
             if package and package not in _TOOLING_REQUIREMENTS:
                 return "declaring"
         return "tooling"
+    # `tox.ini` is a TEST-RUNNER config, and tooling on exactly the rule that
+    # makes a husky `package.json` tooling: a repo tested with tox is not
+    # thereby a Python repo. It is listed in `MANIFESTS` so that decision is
+    # asserted by a case-table row rather than left as an unrecognised name
+    # nobody notices is missing.
     return "tooling"              # not a name this stack knows: never declares
 
 

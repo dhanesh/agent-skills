@@ -674,14 +674,36 @@ def _specifier_matches(spec: str, module: str, src_rel: str, ref_rel: str) -> bo
     `"../utils"` is indistinguishable from any other `utils` in the repo, and
     a test for one package's `utils` credits every other package's.
 
-    A NON-RELATIVE specifier (`@scope/pkg`, `#internal/x`, a `tsconfig`
-    path alias, a bare package) cannot be resolved without reading the
-    project's own resolution config, which this function is not given. It
-    falls back to comparing the specifier's last segment to the module name.
-    Note which way that fails: an alias like `@app/utils` matches any `utils`
-    in the repo (over-credit, bounded by the caller's `rivals` check), while
-    a cross-package import like `@app/a` does NOT match `a/src/utils.ts`
-    (under-credit). The under-credit case is the common one.
+    A NON-RELATIVE specifier (`@scope/pkg`, `#internal/x`, a `tsconfig` path
+    alias, a bare package) cannot be resolved without reading the project's own
+    resolution config, which this function is not given. IT USED TO FALL BACK
+    TO COMPARING THE SPECIFIER'S LAST SEGMENT to the module name, and that was
+    an over-credit in the one predicate that may not have one.
+
+    The reproduction: `src/utils.ts` and `lib/utils.ts` both exporting `parse`,
+    a `tsconfig` mapping `@app/*` to `src/*`, and one test at
+    `src/__tests__/utils.test.ts` importing `"@app/utils"`. `@app/utils`'s last
+    segment is `utils`, which matches BOTH modules; `is_test_for` is true for
+    both, because `_dir_key` strips `src`, `lib` and `__tests__` alike; and
+    `rivals` -- the guard written to bound exactly this -- never fires, because
+    a test importing `"@app/utils"` never emits the string `src/utils`. So
+    `lib/utils.ts::parse`, which has NO test anywhere in the repo, was reported
+    `covered` and dropped out of `ranked` entirely. That is C1 from the Python
+    branch verbatim, and the rule it settled stands: THE COVERAGE PREDICATE MAY
+    UNDER-CREDIT, NEVER OVER-CREDIT. If a case cannot be made to decide, the
+    unit is untested.
+
+    So a non-relative specifier now credits a file only when it NAMES THAT
+    FILE'S PATH rather than merely its last segment: `"src/utils"` (a `baseUrl`
+    import) decides between `src/utils.ts` and `lib/utils.ts` and is honoured;
+    `"@app/utils"` and a bare `"utils"` decide nothing and are refused. The
+    cost is under-credit on an aliased import -- a redundant test at worst,
+    which is the direction every other predicate in this file is wrong in too.
+
+    This function is only ever reached under basename AMBIGUITY (it is called
+    from `reached_through_module`, which `already_covered` consults only in its
+    `ambiguous` branch), so the tightening cannot cost an unambiguous repo any
+    coverage it had.
     """
     src = _strip_ext(src_rel.replace(os.sep, "/"))
     if spec.startswith("."):
@@ -689,8 +711,13 @@ def _specifier_matches(spec: str, module: str, src_rel: str, ref_rel: str) -> bo
         target = os.path.normpath(os.path.join(base, spec)).replace(os.sep, "/")
         target = _strip_ext(target)
         return target == src or target + "/index" == src
-    tail = _strip_ext(spec.rstrip("/").split("/")[-1])
-    return tail == module
+    target = _strip_ext(spec.rstrip("/"))
+    if "/" not in target:
+        return False              # a bare `"utils"` names a module, not a file
+    for candidate in (target, target + "/index"):
+        if src == candidate or src.endswith("/" + candidate):
+            return True
+    return False
 
 
 def _clause_bindings(clause: str):

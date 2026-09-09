@@ -16,6 +16,7 @@ rather than once per stack.
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build",
@@ -84,14 +85,34 @@ MANIFEST_MAX_DEPTH = 2
 
 
 def iter_manifests(root: str, names):
-    """Yield `(relative path, filename)` for each of `names` at or near `root`.
+    """Yield `(relative path, matched key)` for each of `names` at or near `root`.
 
     Walks at most `MANIFEST_MAX_DEPTH` levels below `root` and prunes
     `SKIP_DIRS`, dotted directories and `TEMPLATE_DIRS`, so a vendored
     `node_modules/*/package.json` and a shipped scaffold's manifest are never
     yielded at all.
+
+    AN ENTRY IN `names` IS A FILENAME OR A GLOB, and the second kind is why
+    this yields the KEY THAT MATCHED rather than the basename. Exact names
+    yield themselves, so nothing changed for them. A glob containing `/` is
+    matched against the manifest's repo-relative PATH
+    (`requirements/*.txt` -> `requirements/base.txt`); one without is matched
+    against the basename (`requirements-*.txt`). Either way the caller's
+    `classify` receives the SPEC, not the file's own name -- `base.txt` says
+    nothing about its format, `requirements/*.txt` says everything.
+
+    The reason the glob forms exist at all: `MANIFESTS` used to be exact
+    filenames at the root, and Django's near-universal split-requirements
+    layout (`requirements/base.txt`, `requirements/dev.txt`) matched none of
+    them. A conventional Django repo therefore earned NO manifest credit while
+    the `package.json` it has for its frontend assets earned node's, and a
+    30-module Python service with 20 JS files was detected as node and ranked
+    the JavaScript.
     """
-    wanted = frozenset(names)
+    exact, globs = set(), []
+    for spec in names:
+        (globs.append(spec) if ("*" in spec or "?" in spec or "[" in spec)
+         else exact.add(spec))
     for base, dirs, files in os.walk(root):
         rel = os.path.relpath(base, root).replace(os.sep, "/")
         depth = 0 if rel == "." else rel.count("/") + 1
@@ -103,8 +124,14 @@ def iter_manifests(root: str, names):
                              and d not in TEMPLATE_DIRS
                              and not d.startswith("."))
         for name in sorted(files):
-            if name in wanted:
-                yield ("%s/%s" % (rel, name) if rel != "." else name), name
+            path = ("%s/%s" % (rel, name) if rel != "." else name)
+            if name in exact:
+                yield path, name
+                continue
+            for spec in globs:
+                if fnmatch.fnmatchcase(path if "/" in spec else name, spec):
+                    yield path, spec
+                    break
 
 
 def has_manifest(root: str, names) -> bool:
