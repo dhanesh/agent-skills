@@ -238,6 +238,51 @@ def _path_pattern(rel: str):
     return re.compile(r"(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])" % body)
 
 
+def _module_bindings(module: str, text: str) -> tuple:
+    """(aliases, names) the file binds for `module` by an actual import.
+
+    `aliases` are the names the module object itself is bound to
+    (`import harvest` -> "harvest"; `import harvest as H` -> "H"); `names` are
+    the members pulled out of it (`from harvest import apply_markers`).
+
+    This is `already_covered`'s SAME-DIRECTORY evidence, and it is deliberately
+    stronger than the bare whole-identifier match used elsewhere in this file.
+    A test file beside `harvest.py` that says `import harvest` and also
+    contains the token `main` — because it ends with `unittest.main()`, or
+    calls a DIFFERENT module's `main` through an alias — must not credit
+    `harvest.py::main`, which has no test at all. Requiring the unit's name to
+    be reached THROUGH the module's own binding is what makes the recovered
+    evidence exact instead of merely more generous. Measured on this repo: the
+    weaker form credited 6 units, 2 of them (`::main` twice) false; this form
+    credits exactly the 4 genuine ones.
+    """
+    aliases, names = set(), set()
+    esc = re.escape(module)
+    for m in re.finditer(r"^[ \t]*import[ \t]+%s(?:[ \t]+as[ \t]+(\w+))?[ \t]*(?:#.*)?$"
+                         % esc, text, re.M):
+        aliases.add(m.group(1) or module)
+    for m in re.finditer(r"^[ \t]*from[ \t]+\.?%s[ \t]+import[ \t]+(\(?[^()]*\)?)"
+                         % esc, text, re.M):
+        for piece in m.group(1).replace("(", " ").replace(")", " ").split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            parts = piece.split()
+            names.add(parts[-1] if len(parts) > 2 and parts[-2] == "as"
+                      else parts[0])
+    return tuple(sorted(aliases)), tuple(sorted(names))
+
+
+def _reached_through_module(module: str, name: str, text: str) -> bool:
+    """True when `text` reaches `name` through an import of `module`."""
+    aliases, names = _module_bindings(module, text)
+    if name in names:
+        return True
+    return any(re.search(r"(?<![A-Za-z0-9_.])%s[ \t]*\.[ \t]*%s\b"
+                         % (re.escape(alias), re.escape(name)), text)
+               for alias in aliases)
+
+
 def inbound_refs(root: str, units) -> dict:
     """Approximate blast radius: intra-module use, plus cross-file use from files naming the module.
 
@@ -989,34 +1034,73 @@ def already_covered(root: str, units) -> dict:
     discovered from — so a repo whose basenames are all distinct (the common
     case) takes the looser rule throughout.
 
+    FIX (round 6): path-qualified evidence alone was not merely strict, it was
+    UNREPRESENTABLE for the dominant Python test idiom. A test file sitting
+    beside the module it imports — `assets/test_ledger.py` doing
+    `sys.path.insert(0, dirname(__file__)); import harvest` — can never emit
+    the string `context-hygiene-kit.assets.harvest`, so under a collision
+    CORRECT evidence had no way to be seen. Measured on this repo: 105 of 320
+    units live in a colliding-basename file and the round-4 rule credited
+    exactly ZERO of them, which put four genuinely-tested units back into
+    `ranked` — one of them at the top, sending the user to write a test for a
+    function that already has four call sites in a real suite. That is not the
+    conservative direction; it is a broken predicate, and a fabricated gap
+    costs the user's attention just as a hidden one costs their safety.
+
+    So a SECOND kind of evidence is admitted, and only this one: the test file
+    is in the SAME DIRECTORY as the defining file, and reaches the unit THROUGH
+    an import of that module — `import harvest` then `harvest.<name>`,
+    `import harvest as H` then `H.<name>`, or `from harvest import <name>`
+    (`_reached_through_module`). Note what that is not: it is not the bare
+    whole-identifier match used elsewhere here. The weaker form would credit
+    `harvest.py::main` to a file whose only `main` is `unittest.main()` — 2 of
+    6 recovered units were exactly that — so the same-directory route uses the
+    stronger predicate and recovers 4 units, all genuine.
+
+    The cross-directory over-credit round 4 closed stays closed, because the
+    colliding sibling is by definition in a different directory. And the one
+    way this could still over-credit — a same-directory test that actually
+    exercises the SIBLING, path-qualified — is excluded explicitly: if the text
+    path-qualifies any rival file of the same basename, the same-directory
+    route is refused for this unit.
+
     The remaining failure mode is milder: a unit exercised only through a
     re-export (a test that reaches it via a different module's name and never
     mentions its own module) reads as uncovered and may get a duplicate test
-    written for it. Under a shared basename that widens — a repo-root
-    `utils.py` colliding with `pkg/utils.py` has no qualifier of its own, so it
-    reads as uncovered outright. That direction is still safe — the worst case
-    is a redundant test, not a hidden gap.
+    written for it. That direction is still safe — the worst case is a
+    redundant test, not a hidden gap.
     """
     test_files = [rel for rel in iter_py_files(root, include_tests=True)
                   if _is_test_path(rel)]
     texts = {rel: read_text(root, rel) for rel in test_files}
     path_tokens = {rel: set(_PATH_TOKEN_RE.findall(rel)) for rel in test_files}
-    basenames = collections.Counter(
-        os.path.splitext(os.path.basename(rel))[0] for rel in iter_py_files(root))
+    by_basename = collections.defaultdict(list)
+    for rel in iter_py_files(root):
+        by_basename[os.path.splitext(os.path.basename(rel))[0]].append(rel)
     covered = {}
     for u in units:
         name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
         module = os.path.splitext(os.path.basename(u["path"]))[0]
-        ambiguous = basenames[module] > 1
+        siblings = by_basename.get(module, ())
+        ambiguous = len(siblings) > 1
         qualified = _path_pattern(u["path"]) if ambiguous else None
-        if ambiguous and qualified is None:
-            continue                      # no evidence could name this file alone
+        rivals = ()
+        if ambiguous:
+            rivals = tuple(p for p in (_path_pattern(r) for r in siblings
+                                       if r != u["path"]) if p is not None)
+        home = os.path.dirname(u["path"])
         for rel in sorted(texts):
             text = texts[rel]
             if not name_pattern.search(text):
                 continue
-            if qualified is not None:
-                if not qualified.search(text):
+            if ambiguous:
+                if qualified is not None and qualified.search(text):
+                    pass                          # path-qualified: unambiguous
+                elif (os.path.dirname(rel) == home
+                        and _reached_through_module(module, u["name"], text)
+                        and not any(r.search(text) for r in rivals)):
+                    pass                          # beside the module it imports
+                else:
                     continue
             elif not _references_module(module, text, path_tokens[rel]):
                 continue

@@ -1051,6 +1051,118 @@ class TestAlreadyCovered(TempRepo):
         cov = rank_risk.already_covered(self.root, units)
         self.assertEqual(cov.get("payments/refund.py::apply"), "tests/test_refund.py")
 
+    def test_a_test_beside_its_module_is_credited_under_a_basename_collision(self):
+        # FIX round 6 (N4). The round-4 rule demanded PATH-qualified evidence
+        # under a collision -- but the dominant Python idiom, a test file
+        # beside the module doing `import harvest`, can never emit the string
+        # `pkg/assets/harvest`. So correct evidence was UNREPRESENTABLE, not
+        # merely discounted: measured on this repo, 105 of 320 units live in a
+        # colliding-basename file and the rule credited exactly 0 of them,
+        # putting four genuinely-tested units back into `ranked`.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 1\n")
+        write(self.root, "two/assets/test_two.py",
+              "import harvest as H\n\n\ndef test_c():\n"
+              "    assert H.collect() == 2\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
+        self.assertEqual(cov.get("two/assets/harvest.py::collect"),
+                         "two/assets/test_two.py")
+
+    def test_the_same_directory_route_does_not_reopen_the_cross_directory_hole(self):
+        # NEGATIVE, and the reason the route is scoped to one directory: the
+        # C1 reproduction must stay closed. `two/assets/harvest.py::collect`
+        # has no test at all and must still be ranked.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertIn("one/assets/harvest.py::collect", cov)
+        self.assertNotIn("two/assets/harvest.py::collect", cov)
+
+    def test_a_neighbour_that_path_qualifies_the_rival_credits_only_the_rival(self):
+        # NEGATIVE. A test file can sit beside one `harvest.py` while actually
+        # exercising the OTHER one by its package path. The same-directory
+        # route must stand down when the text names a rival that way, or the
+        # collision reopens from inside the directory.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_cross.py",
+              '"""Pinned against two/assets/harvest.py, which this directory'
+              ' shadows."""\n'
+              "import sys\n"
+              "sys.path.insert(0, '../../two/assets')\n"
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 2\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+        self.assertEqual(cov.get("two/assets/harvest.py::collect"),
+                         "one/assets/test_cross.py")
+
+    def test_a_bare_name_beside_the_module_is_not_evidence(self):
+        # NEGATIVE, and the reason the same-directory route uses a STRONGER
+        # predicate than the rest of this function: `unittest.main()` in a file
+        # that also imports `harvest` would otherwise credit
+        # `harvest.py::main`, which has no test. Measured on this repo the
+        # weaker form did exactly that, twice.
+        write(self.root, "one/assets/harvest.py",
+              "def main(argv):\n    return 0\n\n\ndef collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def main(argv):\n    return 0\n")
+        write(self.root, "one/assets/test_one.py",
+              "import unittest\nimport harvest\n\n\n"
+              "class T(unittest.TestCase):\n"
+              "    def test_c(self):\n"
+              "        assert harvest.collect() == 1\n\n\n"
+              "if __name__ == '__main__':\n    unittest.main()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertIn("one/assets/harvest.py::collect", cov)
+        self.assertNotIn("one/assets/harvest.py::main", cov)
+
+    def test_a_from_import_beside_the_module_is_evidence(self):
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "from harvest import (\n    collect,\n)\n\n\n"
+              "def test_c():\n    assert collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
+
+    def test_a_repo_root_collision_is_creditable_from_beside_it(self):
+        # Round 4 recorded "a repo-root `utils.py` colliding with
+        # `pkg/utils.py` has no qualifier of its own, so it reads as uncovered
+        # outright". It has a directory (the root) like anything else, so the
+        # same-directory route restores it.
+        write(self.root, "utils.py", "def helper():\n    return 1\n")
+        write(self.root, "pkg/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "test_utils.py",
+              "import utils\n\n\ndef test_h():\n"
+              "    assert utils.helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("utils.py::helper"), "test_utils.py")
+        self.assertNotIn("pkg/utils.py::helper", cov)
+
 
 class TestRank(TempRepo):
     def _repo(self):
