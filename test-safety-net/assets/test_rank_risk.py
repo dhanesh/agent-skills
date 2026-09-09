@@ -504,5 +504,16 @@ class TestTriage(TempRepo):
         self.assertNotIn("subprocess", reason)
 
 
+class TestAlreadyCovered(TempRepo):
+    def test_unit_named_in_a_test_file_is_reported_covered(self):
+        write(self.root, "core.py", "def covered():\n    pass\n\n\ndef bare():\n    pass\n")
+        write(self.root, "tests/test_core.py",
+              "from core import covered\n\n\ndef test_covered():\n    covered()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("core.py::covered"), "tests/test_core.py")
+        self.assertNotIn("core.py::bare", cov)
+
+
 if __name__ == "__main__":
     unittest.main()

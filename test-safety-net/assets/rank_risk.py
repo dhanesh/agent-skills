@@ -604,6 +604,27 @@ def _analyze_file(root, rel):
                           local_methods, tier4)
 
 
+def already_covered(root: str, units) -> dict:
+    """Unit id -> the test file naming it. Keeps the ranking on what is NOT netted.
+
+    Same whole-identifier approximation as inbound_refs, and the same honesty:
+    a test that merely imports a name counts as covering it. Over-counting here
+    is the safe direction — it drops a unit down the list rather than writing a
+    duplicate test for something already pinned.
+    """
+    test_files = [rel for rel in iter_py_files(root, include_tests=True)
+                  if _is_test_path(rel)]
+    texts = {rel: read_text(root, rel) for rel in test_files}
+    covered = {}
+    for u in units:
+        pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
+        for rel in sorted(texts):
+            if pattern.search(texts[rel]):
+                covered[u["id"]] = rel
+                break
+    return covered
+
+
 def triage(root: str, unit) -> tuple:
     """Classify how testable a unit is. Returns (tier, reason).
 
