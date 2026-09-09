@@ -841,8 +841,15 @@ function pendingViolations() {
 // the signal, and this is what makes it true.
 process.on("exit", function () {
   if (!state.violations.length) return;
+  // Only when the run would otherwise be GREEN. A violation that already
+  // reached the test result has been reported by the runner, in the place a
+  // reader looks first, and printing it a second time here buries the stack
+  // that names the unit's own line under a duplicate. The backstop exists for
+  // the trips that reached nothing: a `catch {}`, or a raise on a later turn of
+  // the event loop.
+  if (process.exitCode) return;
   const first = state.violations[0];
-  if (!process.exitCode) process.exitCode = 1;
+  process.exitCode = 1;
   // The NAME is printed, not just the message: a caller (and this skill's own
   // suite) recognises a trip by `IOGuardViolation`, and a record surfaced here
   // was never thrown past the unit, so nothing else prints it. The stack is
