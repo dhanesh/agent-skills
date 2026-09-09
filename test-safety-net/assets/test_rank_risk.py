@@ -886,7 +886,20 @@ class TestTriage(TempRepo):
         # Deliberate exclusions, each with a reason. Empty today: every name
         # the derivation finds really does touch the filesystem.
         allowed_unmarked = {}
-        table = set(rank_risk.CONTROLLABLE["filesystem"])
+        # Compare against EVERY marker group, not just `filesystem`. The
+        # question this test asks is "is this primitive marked at all?", and a
+        # path-taking primitive can legitimately be marked somewhere else:
+        # `os.execve` belongs in UNCONTROLLABLE["subprocess"], because replacing
+        # the process image is not a controllable seam, whatever it does with
+        # the path. Comparing against `filesystem` alone made the test
+        # PLATFORM-DEPENDENT and it failed CI on Linux while passing on macOS —
+        # `os.execve` is in `os.supports_fd` on Linux (fd-as-path execve) and
+        # not on macOS, so only Linux's derivation reached the name at all. The
+        # table was right both times; the expectation was too narrow.
+        table = set()
+        for group in (rank_risk.CONTROLLABLE, rank_risk.UNCONTROLLABLE):
+            for names in group.values():
+                table.update(names)
         missing = derived - table - set(allowed_unmarked)
         self.assertEqual(missing, set(),
                          "path-taking os primitives absent from the marker "
