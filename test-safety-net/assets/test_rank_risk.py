@@ -1,0 +1,1358 @@
+"""Unit suite for rank_risk.py. Stdlib only, offline, deterministic."""
+import contextlib
+import importlib.util
+import io
+import os
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_spec = importlib.util.spec_from_file_location("rank_risk", os.path.join(HERE, "rank_risk.py"))
+rank_risk = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rank_risk)
+
+
+def write(root, rel, text):
+    p = pathlib.Path(root) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
+class TempRepo(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="tsn-")
+
+
+class TestDiscoverUnits(TempRepo):
+    def test_finds_module_level_functions_and_classes(self):
+        write(self.root, "billing/refund.py",
+              "def apply(amount):\n    return amount\n\n\nclass Ledger:\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual([u["id"] for u in units],
+                         ["billing/refund.py::Ledger", "billing/refund.py::apply"])
+        self.assertEqual(units[1]["kind"], "function")
+        self.assertEqual(units[0]["kind"], "class")
+        self.assertEqual(units[1]["lineno"], 1)
+
+    def test_skips_private_names_nested_defs_test_files_and_vendor(self):
+        write(self.root, "app.py",
+              "def _helper():\n    pass\n\n\ndef outer():\n    def inner():\n        pass\n    return inner\n")
+        write(self.root, "tests/test_app.py", "def test_outer():\n    pass\n")
+        write(self.root, "node_modules/pkg/mod.py", "def vendored():\n    pass\n")
+        write(self.root, ".venv/lib/mod.py", "def alsovendored():\n    pass\n")
+        ids = [u["id"] for u in rank_risk.discover_units(self.root)]
+        self.assertEqual(ids, ["app.py::outer"])
+
+    def test_unparseable_file_is_skipped_not_fatal(self):
+        write(self.root, "broken.py", "def (((\n")
+        write(self.root, "ok.py", "def fine():\n    pass\n")
+        ids = [u["id"] for u in rank_risk.discover_units(self.root)]
+        self.assertEqual(ids, ["ok.py::fine"])
+
+
+def git(root, *args):
+    return subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=root, capture_output=True, text=True)
+
+
+class TestChurn(TempRepo):
+    def test_counts_commits_per_file(self):
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "hot.py", "def a():\n    pass\n")
+        write(self.root, "cold.py", "def b():\n    pass\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        for i in range(3):
+            write(self.root, "hot.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        c = rank_risk.churn(self.root)
+        self.assertEqual(c["hot.py"], 4)
+        self.assertEqual(c["cold.py"], 1)
+
+    def test_analysing_a_subdirectory_still_reports_that_subtree_s_churn(self):
+        # FIX round 4 (I6): `churn` keyed by paths relative to the GIT REPO
+        # ROOT while `discover_units` keys by paths relative to the ANALYSED
+        # ROOT, so pointing the ranker at `<repo>/pkg/sub` joined nothing and
+        # every score collapsed to 0.0 -- silently, for a file with 5 commits.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        for i in range(5):
+            write(self.root, "pkg/sub/mod.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        sub = os.path.join(self.root, "pkg", "sub")
+        self.assertEqual(rank_risk.churn(sub).get("mod.py"), 5)
+
+    def test_a_subdirectory_run_scores_above_zero(self):
+        # The consequence, at the rank() level: churn is the primary risk
+        # signal, so the whole ranking was reading 0.0 with no warning.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        for i in range(5):
+            write(self.root, "pkg/sub/mod.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        plan = rank_risk.rank(os.path.join(self.root, "pkg", "sub"),
+                              since="10 years ago", top_n=10)
+        row = [r for r in plan["ranked"] if r["id"] == "mod.py::a"][0]
+        self.assertEqual(row["churn"], 5)
+        self.assertGreater(row["score"], 0.0)
+
+    def test_churn_outside_the_analysed_subtree_is_not_attributed_to_it(self):
+        # The mirror: stripping the prefix must not turn a sibling directory's
+        # history into this subtree's churn.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "pkg/sub/mod.py", "def a():\n    return 1\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        for i in range(3):
+            write(self.root, "other/mod.py", f"def b():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"o{i}")
+        c = rank_risk.churn(os.path.join(self.root, "pkg", "sub"))
+        self.assertEqual(c, {"mod.py": 1})
+
+    def test_git_prefix_reports_the_analysed_subtree(self):
+        # The note `main()` prints on stderr when the analysed root is not the
+        # git repo root, so a 0-churn ranking is never silent about its scope.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "pkg/sub/mod.py", "def a():\n    return 1\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        self.assertEqual(rank_risk._git_prefix(self.root), "")
+        self.assertEqual(rank_risk._git_prefix(os.path.join(self.root, "pkg", "sub")),
+                         "pkg/sub/")
+
+    def test_no_git_history_degrades_to_empty_not_a_crash(self):
+        # A tarball checkout, or a brand-new directory, must not take the ranker
+        # down — churn is one signal of two, and the other still works.
+        write(self.root, "a.py", "def a():\n    pass\n")
+        self.assertEqual(rank_risk.churn(self.root), {})
+
+    def test_counts_a_filename_containing_a_quote(self):
+        # git C-quotes filenames with a quote, backslash, or non-ASCII byte in
+        # its default `--name-only` output (e.g. `"quo\"te.py"`); without `-z`
+        # that quoted key never matches the plain path iter_py_files produces,
+        # and the file's churn silently reads as 0.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        rel = 'quo"te.py'
+        try:
+            write(self.root, rel, "def a():\n    pass\n")
+        except OSError:
+            self.skipTest("filesystem rejects quote in filename")
+        git(self.root, "add", "-A")
+        r = git(self.root, "commit", "-qm", "1")
+        if r.returncode != 0:
+            self.skipTest("git rejects quote in filename")
+        c = rank_risk.churn(self.root)
+        self.assertEqual(c.get(rel), 1)
+
+
+class TestInboundRefs(TempRepo):
+    def test_counts_references_outside_the_defining_file(self):
+        write(self.root, "core.py", "def widely_used():\n    pass\n\n\ndef lonely():\n    pass\n")
+        write(self.root, "a.py", "from core import widely_used\nwidely_used()\n")
+        write(self.root, "b.py", "import core\ncore.widely_used()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["core.py::widely_used"], 3)   # import + 2 call sites
+        self.assertEqual(refs["core.py::lonely"], 0)
+
+    def test_does_not_count_the_definition_itself(self):
+        # Semantics changed by ruling: intra-module references now count, so the
+        # self-reference inside `solo`'s own body ("return solo") is a real
+        # intra-module use and counts as 1. Only the definition LINE itself
+        # ("def solo():") is excluded, not the whole defining file.
+        write(self.root, "core.py", "def solo():\n    return solo\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::solo"], 1)
+
+    def test_intra_file_calls_are_counted(self):
+        write(self.root, "core.py",
+              "def helper():\n    pass\n\n\ndef a():\n    helper()\n\n\ndef b():\n    helper()\n\n\ndef c():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["core.py::helper"], 3)
+
+    def test_ranked_order_within_a_file_reflects_intra_file_call_counts(self):
+        write(self.root, "core.py",
+              "def busy():\n    pass\n\n\ndef quiet():\n    pass\n\n\n"
+              "def a():\n    busy()\n    busy()\n    busy()\n\n\ndef b():\n    quiet()\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("core.py::busy"), ids.index("core.py::quiet"))
+
+    def test_matches_whole_identifiers_only(self):
+        # `apply` must not be found inside `apply_discount` or `reapply`.
+        write(self.root, "core.py", "def apply():\n    pass\n")
+        write(self.root, "other.py", "def apply_discount():\n    pass\n\n\ndef reapply():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::apply"], 0)
+
+    def test_cross_file_name_collision_does_not_inflate_an_unrelated_units_refs(self):
+        # FIX round 2 (mirror of already_covered's FIX 1): a call to
+        # alpha.py::helper must not inflate beta.py::helper's refs just
+        # because they share a name -- caller.py never names "beta".
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["beta.py::helper"], 0)
+
+    def test_genuine_cross_file_caller_that_names_the_module_still_counts(self):
+        # The mirror-image control: a file that DOES import from the right
+        # module still counts -- the fix must not zero out real cross-file use.
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
+
+    def test_same_basename_different_directories_do_not_cross_inflate(self):
+        # FIX round 3: a/util.py and b/util.py share the basename "util" but
+        # are unrelated modules -- neither calls the other's `run`. The
+        # module-reffiles cache is keyed by basename and shared across both,
+        # so this catches the own_path exclusion being applied at the wrong
+        # time (population vs. lookup).
+        write(self.root, "a/util.py", "def run():\n    pass\n")
+        write(self.root, "b/util.py", "def run():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["a/util.py::run"], 0)
+        self.assertEqual(refs["b/util.py::run"], 0)
+
+    def test_dunder_init_modules_never_match_each_other_by_path_token(self):
+        # Pins a STRUCTURAL property, not the round-3 exclusion: _PATH_TOKEN_RE
+        # is [A-Za-z0-9]+, so pkg1/__init__.py yields tokens {pkg1, init, py}
+        # while the module string is `__init__` -- they can never be equal.
+        # Two __init__.py files therefore could not cross-inflate even before
+        # the exclusion existed, which is why this test cannot catch its
+        # regression. It is here to pin the tokeniser: widen _PATH_TOKEN_RE to
+        # include `_` and this pair starts matching by path, and the
+        # same-basename exclusion becomes the only thing holding them at 0.
+        write(self.root, "pkg1/__init__.py", "def boot():\n    pass\n")
+        write(self.root, "pkg2/__init__.py", "def boot():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["pkg1/__init__.py::boot"], 0)
+        self.assertEqual(refs["pkg2/__init__.py::boot"], 0)
+
+    def test_genuine_cross_file_caller_still_counts_after_round_3_fix(self):
+        # Control paired with the two negative tests above: excluding
+        # same-basename files from a module's reference list must not
+        # swallow a genuine cross-file caller when the basenames actually
+        # differ -- the round-2 behaviour stays intact.
+        write(self.root, "alpha.py", "def helper():\n    pass\n")
+        write(self.root, "beta.py", "def helper():\n    pass\n")
+        write(self.root, "caller.py", "from alpha import helper\nhelper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
+        self.assertEqual(refs["beta.py::helper"], 0)
+
+    def test_attribute_call_on_a_foreign_receiver_is_not_a_reference(self):
+        # FIX round 4 (I4): `user.py` imports `sink`, so it joins sink's
+        # reference-file list -- and its three `buf.write(...)` calls on an
+        # io.StringIO were counted as references to `sink.py::write`, which has
+        # ZERO callers. The zero-caller unit outranked the one with a real
+        # caller. `X.name` where X is not the unit's own module must not count.
+        write(self.root, "sink.py",
+              "def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+        write(self.root, "user.py",
+              "import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+              "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+              "    return sink.other()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 0)
+        self.assertEqual(refs["sink.py::other"], 1)   # `sink.other()` names the module
+
+    def test_module_qualified_and_bare_forms_still_count(self):
+        # The control for the test above: the three forms that DO name the unit
+        # must survive -- `from mod import name`, a bare `name(...)` call, and
+        # `mod.name(...)`. Killing attribute counting outright would zero the
+        # commonest real caller shape there is.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "a.py", "from sink import write\nwrite('x')\n")
+        write(self.root, "b.py", "import sink\nsink.write('y')\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 3)   # import + bare call + mod.name
+
+    def test_unresolvable_receiver_attribute_is_not_a_reference(self):
+        # `make_buffer().write(...)` -- the receiver is a call result, not a
+        # name, so nothing says it is the unit's module. Not counted.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "user.py",
+              "import sink\n\n\ndef emit(mk):\n    return mk().write('a')\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["sink.py::write"], 0)
+
+    def test_attribute_over_count_no_longer_outranks_a_real_caller(self):
+        # The ranking consequence, pinned at the rank() level: before the fix
+        # the zero-caller `write` scored above the genuinely-called `other`.
+        write(self.root, "sink.py",
+              "def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+        write(self.root, "user.py",
+              "import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+              "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+              "    return sink.other()\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("sink.py::other"), ids.index("sink.py::write"))
+
+    def test_documented_residual_a_bare_same_named_local_still_over_counts(self):
+        # Pins the RESIDUAL the docstring now claims, so the claim is
+        # falsifiable rather than asserted. `user.py` names `sink` but its
+        # bare `write(...)` calls are `other`'s, not sink's -- and they still
+        # count for `sink.py::write`. Resolving that needs per-file name
+        # binding, the boundary this approximation stops at. If a later change
+        # narrows it, this test fails and the docstring gets updated WITH it.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "other.py", "def write(x):\n    return x\n")
+        write(self.root, "user.py",
+              "import sink\nfrom other import write\n\n\ndef emit():\n"
+              "    write('a')\n    write('b')\n    return sink\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 3)   # over-counted, documented
+
+    def test_digit_glued_identifier_is_not_a_reference(self):
+        # "2x" must not count as a reference to a unit named `x` — the old \bx\b
+        # boundary semantics, which the single-pass tokeniser has to preserve.
+        write(self.root, "core.py", "def x():\n    pass\n")
+        write(self.root, "notes.py", "# scale by 2x and 3x for the 4k display\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::x"], 0)
+
+
+class TestTriage(TempRepo):
+    def _tier(self, rel, src, name):
+        write(self.root, rel, src)
+        unit = [u for u in rank_risk.discover_units(self.root) if u["name"] == name][0]
+        return rank_risk.triage(self.root, unit)
+
+    def test_pure_function_is_tier_1(self):
+        tier, reason = self._tier("a.py", "def add(x, y):\n    return x + y\n", "add")
+        self.assertEqual(tier, 1)
+        self.assertIn("no I/O", reason)
+
+    def test_filesystem_use_is_tier_2_with_a_named_boundary(self):
+        tier, reason = self._tier(
+            "b.py", "def load(path):\n    with open(path) as f:\n        return f.read()\n", "load")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_clock_use_is_tier_2(self):
+        tier, reason = self._tier(
+            "c.py", "import datetime\n\n\ndef stamp():\n    return datetime.datetime.now()\n", "stamp")
+        self.assertEqual(tier, 2)
+        self.assertIn("clock", reason)
+
+    def test_network_call_is_tier_3(self):
+        tier, reason = self._tier(
+            "d.py", "import requests\n\n\ndef fetch(u):\n    return requests.get(u).json()\n", "fetch")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_network_in_a_constructor_is_tier_3(self):
+        # THE headline negative: a class that dials out when you instantiate it
+        # cannot be pinned without a seam, and must never get a test written.
+        tier, reason = self._tier(
+            "e.py",
+            "import socket\n\n\nclass Client:\n    def __init__(self, host):\n"
+            "        self.sock = socket.create_connection((host, 80))\n",
+            "Client")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_module_level_io_makes_every_unit_in_the_file_tier_4(self):
+        # Importing the module does I/O, so nothing in it can be reached at all.
+        tier, reason = self._tier(
+            "f.py",
+            "import requests\n\nCONFIG = requests.get('http://x/cfg').json()\n\n\n"
+            "def pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 4)
+        self.assertIn("import time", reason)
+
+    def test_import_time_file_read_floors_every_unit_in_the_file(self):
+        # FIX round 4 (I5): `_CFG = json.load(open("/etc/app/config.json"))`
+        # runs at IMPORT. The unit read as Tier 1 "directly callable", which is
+        # wrong twice over: the harness takes an IOError on `import cfg` before
+        # any test body runs, and a fixture cannot control a boundary that was
+        # crossed before the fixture existed. Floored to Tier 3 -- the tier the
+        # runtime guard would itself reclassify it to when it trips at import.
+        tier, reason = self._tier(
+            "cfg.py",
+            'import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def get_timeout():\n    return _CFG['timeout'] * 2\n",
+            "get_timeout")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+        self.assertIn("filesystem", reason)
+
+    def test_import_time_io_also_floors_a_unit_that_would_be_tier_2(self):
+        # It is a FLOOR, not a tier-1 special case: a unit doing its own
+        # controllable I/O still cannot be pinned while importing its module
+        # does uncontrolled I/O first.
+        tier, reason = self._tier(
+            "cfg2.py",
+            'import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def load(path):\n    with open(path) as f:\n        return f.read()\n",
+            "load")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_the_floor_never_masks_a_units_own_more_severe_reason(self):
+        # It is a floor applied UPWARD only. A unit that dials out keeps its own
+        # Tier 3 reason -- "network", the specific and more severe fact -- rather
+        # than being relabelled with the module's import-time filesystem read.
+        tier, reason = self._tier(
+            "both.py",
+            'import json\nimport requests\n'
+            '_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def fetch(u):\n    return requests.get(u)\n",
+            "fetch")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_import_time_env_read_floors_the_tier(self):
+        # `os.environ.get(...)` at module level reads process state at import;
+        # a fixture setting the variable afterwards is too late. (The bare
+        # subscript form `os.environ["HOME"]` stays invisible here: markers
+        # match a CALL's resolved target throughout this tool, deliberately, so
+        # that a data literal spelling a marker is not read as behaviour. That
+        # is a pre-existing boundary of `_markers`, not of the floor.)
+        tier, reason = self._tier(
+            "envcfg.py",
+            'import os\nHOME = os.environ.get("HOME", "/")\n\n\n'
+            "def where():\n    return HOME\n",
+            "where")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_import_time_path_algebra_does_not_floor_the_tier(self):
+        # THE control. `HERE = os.path.dirname(os.path.abspath(__file__))` is
+        # the single commonest module-level statement in this repo -- and it
+        # performs no I/O at all: it is string manipulation over `__file__`.
+        # Flooring on it would have moved 138 of this repo's own 305 units out
+        # of the net, the same over-flagging `_is_main_guard` was added to stop.
+        tier, reason = self._tier(
+            "paths.py",
+            "import os\nHERE = os.path.dirname(os.path.abspath(__file__))\n\n\n"
+            "def rel(name):\n    return name\n",
+            "rel")
+        self.assertEqual(tier, 1)
+
+    def test_import_time_path_probe_does_floor_the_tier(self):
+        # The other side of that control: `os.path.exists` is not path algebra,
+        # it stats the filesystem. Inertness is per CALL, not per marker.
+        tier, reason = self._tier(
+            "probe.py",
+            'import os\nFOUND = os.path.exists("/etc/app/config.json")\n\n\n'
+            "def ok():\n    return FOUND\n",
+            "ok")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_import_time_io_inside_the_main_guard_does_not_floor_the_tier(self):
+        # The main-guard exclusion must apply to the new floor too -- that body
+        # does not run on import.
+        tier, reason = self._tier(
+            "cli.py",
+            "def go(p):\n    return p\n\n\n"
+            "if __name__ == '__main__':\n    print(open('/etc/hosts').read())\n",
+            "go")
+        self.assertEqual(tier, 1)
+
+    def test_file_that_stops_parsing_after_discovery_is_tier_4_not_a_crash(self):
+        # I12: the reviewer read `_analyze_file`'s SyntaxError branch and
+        # `triage`'s `tree is None` guard as unreachable, because
+        # `discover_units` already skips a file that does not parse. Both are
+        # REACHABLE, by two paths, so both stay:
+        #   * `triage(root, unit)` is public and takes a unit dict from any
+        #     caller -- it does not re-derive it from `discover_units`;
+        #   * even inside `rank()` the file is read TWICE, once at discovery
+        #     and once here, so a save mid-run (an editor writing a half-typed
+        #     file into a repo being ranked) lands between them. This test
+        #     reproduces exactly that race.
+        # Without the branch that race is an uncaught SyntaxError out of the
+        # CLI; with it the unit declines to Tier 4, which is the safe
+        # direction: never net what cannot be parsed.
+        write(self.root, "race.py", "def a():\n    return 1\n")
+        unit = [u for u in rank_risk.discover_units(self.root)
+                if u["id"] == "race.py::a"][0]
+        write(self.root, "race.py", "def (((\n")     # saved mid-run
+        tier, reason = rank_risk.triage(self.root, unit)
+        self.assertEqual(tier, 4)
+        self.assertIn("does not parse", reason)
+
+    def test_module_level_data_naming_a_marker_is_not_import_time_io(self):
+        # A module-level allowlist that MENTIONS a driver is data, not behaviour.
+        # Reading it as I/O condemned every unit in the file to tier 4 and
+        # silently dropped them from the net.
+        tier, reason = self._tier(
+            "g.py",
+            'DRIVERS = {"database": ("psycopg2.", "sqlite3.connect")}\n\n\n'
+            "def pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 1)
+
+    def test_renamed_module_import_is_still_seen_as_network_io(self):
+        # `import socket as s` must not hide behind an alias. Substring
+        # matching on a derived marker like "s." would also match "os." —
+        # this only works because resolution goes through the alias map.
+        tier, reason = self._tier(
+            "alias.py",
+            "import socket as s\n\n\ndef dial(host):\n"
+            "    return s.create_connection((host, 80))\n",
+            "dial")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_renamed_from_import_is_still_seen_as_subprocess_io(self):
+        tier, reason = self._tier(
+            "fromalias.py",
+            "from os import system as run_cmd\n\n\ndef go(cmd):\n"
+            "    return run_cmd(cmd)\n",
+            "go")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_wrapper_over_a_same_module_tier_3_helper_is_tier_3(self):
+        # A thin wrapper that just forwards to a helper doing real I/O must
+        # not read clean — the helper's tier is inherited, and the reason
+        # must name the helper so a human can see why.
+        tier, reason = self._tier(
+            "indirect.py",
+            "import requests\n\n\ndef _fetch_raw(u):\n    return requests.get(u)\n\n\n"
+            "def get_data(u):\n    return _fetch_raw(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("_fetch_raw", reason)
+
+    def test_argument_default_calling_uncontrollable_io_taints_the_module(self):
+        # Python evaluates argument defaults at DEFINITION time — import
+        # time — even though the default lives inside a `def` header.
+        tier, reason = self._tier(
+            "default.py",
+            "import requests\n\n\ndef risky(x=requests.get('http://x').json()):\n"
+            "    return x\n\n\ndef pure_helper(y):\n    return y\n",
+            "pure_helper")
+        self.assertEqual(tier, 4)
+
+    def test_class_body_call_at_definition_time_taints_the_module(self):
+        # A class-body statement (not inside a method) runs when the class
+        # is defined — at import time — even though it lives inside `class`.
+        tier, reason = self._tier(
+            "classbody.py",
+            "import psycopg2\n\n\nclass Setup:\n    CONN = psycopg2.connect('dsn')\n\n\n"
+            "def pure_helper2(z):\n    return z\n",
+            "pure_helper2")
+        self.assertEqual(tier, 4)
+
+    def test_function_local_import_does_not_shadow_the_module_level_alias(self):
+        # The alias map is scoped to MODULE-level imports only. An unrelated
+        # function's local `import ... as requests` must not rewrite what
+        # `requests` means for the rest of the file — the round-1 fix
+        # introduced this regression by walking the whole tree.
+        tier, reason = self._tier(
+            "shadow.py",
+            "import requests\n\n\n"
+            "def unrelated():\n    import collections.abc as requests\n"
+            "    return requests.Mapping\n\n\n"
+            "def net_call(u):\n    return requests.get(u)\n",
+            "net_call")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_class_base_expression_call_at_definition_time_taints_the_module(self):
+        # `class C(make_base()):` evaluates `make_base()` at class-CREATION
+        # time — import time — even though the call lives in the base-class
+        # list, not the class body or a decorator.
+        tier, reason = self._tier(
+            "basecls.py",
+            "import requests\n\n\ndef make_base():\n"
+            "    return requests.get('http://x').json()\n\n\n"
+            "class C(make_base()):\n    pass\n\n\ndef pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 4)
+
+    def test_method_call_through_a_fresh_instance_is_tier_3_named_by_method(self):
+        # `Client().fetch(u)` — the receiver is a fresh instantiation, not a
+        # resolvable name, but the METHOD name alone must still be enough to
+        # find a same-module `fetch` that does real network I/O.
+        tier, reason = self._tier(
+            "method.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef get_data(u):\n"
+            "    return Client().fetch(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_module_level_call_to_a_same_module_helper_taints_the_module(self):
+        # `_STARTED = _boot()` at module level must inherit whatever `_boot`
+        # itself reaches — the module-taint check chases the same-module
+        # call graph transitively, not just the direct call target.
+        tier, reason = self._tier(
+            "boot.py",
+            "import subprocess\n\n\ndef _boot():\n    return subprocess.run(['true'])\n\n\n"
+            "_STARTED = _boot()\n\n\ndef pure_helper3(x):\n    return x\n",
+            "pure_helper3")
+        self.assertEqual(tier, 4)
+
+    def test_main_guard_does_not_taint_the_module(self):
+        # `if __name__ == "__main__": main()` is THE standard idiom written
+        # specifically so its body does not run at import time. Making the
+        # module-taint check transitive (chasing `_boot()` above) must not
+        # also start chasing into `main()` through this guard — that false
+        # positive was observed to taint 128 of this repo's own 296 units
+        # before `_is_main_guard` excluded it.
+        tier, reason = self._tier(
+            "script.py",
+            "import subprocess\n\n\ndef main():\n    return subprocess.run(['true'])\n\n\n"
+            "def pure_helper4(x):\n    return x\n\n\n"
+            "if __name__ == '__main__':\n    main()\n",
+            "pure_helper4")
+        self.assertEqual(tier, 1)
+
+    def test_function_local_import_is_still_visible_within_its_own_function(self):
+        # Scoping the alias map to module level (previous test) must not
+        # also blind a function to its OWN local import — this repo's own
+        # scripts/ab-validate.py::check_audit_guardrails does exactly this
+        # (`import subprocess as sp` then `sp.run(...)`, both inside the
+        # same function) and was observed to silently drop to tier 2 before
+        # `_local_alias_map` restored per-function visibility.
+        tier, reason = self._tier(
+            "localimport.py",
+            "def run_it(cmd):\n    import subprocess as sp\n"
+            "    return sp.run(cmd)\n",
+            "run_it")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_nested_def_local_import_does_not_hide_the_outer_functions_io(self):
+        # A NESTED def's own local import must not leak OUTWARD and
+        # overwrite the ENCLOSING function's correct, module-level alias —
+        # one boundary deeper than the shadow.py bug this fixes.
+        tier, reason = self._tier(
+            "nested.py",
+            "import requests as X\n\n\n"
+            "def outer(u):\n    def inner():\n        import os as X\n"
+            "        return X.getcwd()\n    return X.get(u)\n",
+            "outer")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_sibling_method_local_import_does_not_hide_another_methods_io(self):
+        # One METHOD's local import must not leak SIDEWAYS into a sibling
+        # method when the whole class is scanned as one unit.
+        tier, reason = self._tier(
+            "sibling.py",
+            "import requests as X\n\n\nclass Client:\n"
+            "    def helper(self):\n        import os as X\n"
+            "        return X.getcwd()\n\n"
+            "    def fetch(self, u):\n        return X.get(u)\n",
+            "Client")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_bare_attribute_call_on_an_unresolvable_receiver_is_not_chased(self):
+        # `cfg.get('key')` on a plain dict must NOT resolve to a
+        # module-level `get()` just because the names coincide — chasing a
+        # bare `.attr` regardless of receiver was found to silently shrink
+        # the net project-wide (`.get`/`.run`/`.read`/... are everywhere).
+        tier, reason = self._tier(
+            "c2.py",
+            "import subprocess\n\n\ndef get():\n    return subprocess.run(['true'])\n\n\n"
+            "def lookup(cfg):\n    return cfg.get('key')\n",
+            "lookup")
+        self.assertEqual(tier, 1)
+
+    def test_fresh_instance_method_chase_still_works_after_narrowing(self):
+        # The control: narrowing the method chase (previous test) must not
+        # have disabled it outright. `Client().fetch(u)` is still the one
+        # receiver shape that IS trusted, and must still resolve.
+        tier, reason = self._tier(
+            "method2.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef get_data(u):\n"
+            "    return Client().fetch(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_parameter_held_instance_method_is_chased_when_unambiguous(self):
+        # `w` is a plain function PARAMETER — neither `self` nor an inline
+        # `Client()` — so the two narrow receiver shapes miss it. But `fetch`
+        # is defined by exactly one module-level class, so the resolution is
+        # forced and the real `requests.get` behind it must stay visible.
+        # This is the shape of this repo's own world_model.py CLI dispatchers
+        # (`def cmd_x(wm, a): wm.build(...)`), twelve of which regressed to a
+        # false Tier 1 when the chase was narrowed to those two shapes.
+        tier, reason = self._tier(
+            "param.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef use(w, u):\n"
+            "    return w.fetch(u)\n",
+            "use")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_module_level_singleton_method_call_is_chased(self):
+        # `_c = Client()` at module level, then `_c.fetch(u)` from a function:
+        # the receiver is an ordinary module global, not a constructor call in
+        # the expression itself, so it needs the unambiguous-method rule too.
+        tier, reason = self._tier(
+            "singleton.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\n_c = Client()\n\n\n"
+            "def grab(u):\n    return _c.fetch(u)\n",
+            "grab")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_class_name_dispatch_is_chased(self):
+        # `Client.fetch(u)` — static/classmethod dispatch by bare class name
+        # from an outside function. The receiver IS a module-level ClassDef,
+        # so this resolves exactly, with no ambiguity to weigh.
+        tier, reason = self._tier(
+            "static.py",
+            "import requests\n\n\nclass Client:\n    @staticmethod\n"
+            "    def fetch(u):\n        return requests.get(u)\n\n\n"
+            "def grab(u):\n    return Client.fetch(u)\n",
+            "grab")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_bare_attribute_still_does_not_chase_a_module_level_function(self):
+        # THE control that must not regress. Widening the chase to class
+        # methods must not re-open it to module-level FUNCTIONS: `cfg.get`
+        # on a plain dict still must not resolve to a module-level `get()`
+        # that shells out. No class in this file defines `get`, so there is
+        # nothing to chase and the unit stays directly callable.
+        tier, reason = self._tier(
+            "c3.py",
+            "import subprocess\n\n\ndef get():\n    return subprocess.run(['true'])\n\n\n"
+            "def lookup(cfg):\n    return cfg.get('key')\n",
+            "lookup")
+        self.assertEqual(tier, 1)
+
+    def test_ambiguous_method_name_across_two_classes_is_not_chased(self):
+        # Two module-level classes both define `fetch`, one of them doing
+        # network I/O. Picking which one `w` holds needs the receiver's TYPE
+        # — points-to analysis, deliberately out of scope — and fanning out
+        # to both is the over-flagging that shrinks the net project-wide.
+        # So the name is dropped: assert only that the caller was NOT chased
+        # (no `Class.fetch` credited in the reason), not any particular tier,
+        # since the tier follows only from whatever the unit does itself.
+        tier, reason = self._tier(
+            "ambig.py",
+            "import requests\n\n\nclass A:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\nclass B:\n    def fetch(self, u):\n"
+            "        return u\n\n\ndef use(w, u):\n    return w.fetch(u)\n",
+            "use")
+        self.assertNotIn("fetch", reason)
+        self.assertNotIn("network", reason)
+
+    def test_raw_file_descriptor_io_is_tier_2_filesystem(self):
+        # `os.open` is NOT the builtin `open`: it sits underneath it, so a
+        # runtime guard patching the builtin never sees this. Still
+        # CONTROLLABLE though -- a test can point an fd at a temp dir.
+        tier, reason = self._tier(
+            "rawwrite.py",
+            "import os\n\n\ndef rawwrite(p, data):\n"
+            "    fd = os.open(p, os.O_WRONLY | os.O_CREAT)\n"
+            "    os.write(fd, data)\n    os.close(fd)\n",
+            "rawwrite")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_posix_spawn_is_tier_3_subprocess(self):
+        # `os.posix_spawn` never routes through `subprocess.Popen`, so a
+        # guard patching `subprocess` does not see it. No seam makes
+        # spawning a real process safe to pin: decline it.
+        tier, reason = self._tier(
+            "spawn.py",
+            "import os\n\n\ndef spawn(p, argv):\n"
+            "    return os.posix_spawn(p, argv, {})\n",
+            "spawn")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_execv_is_tier_3_because_no_runtime_guard_can_survive_it(self):
+        # THE case that must be caught STATICALLY rather than left to the
+        # runtime guard: `os.execv` replaces the entire process image, so
+        # every in-process monkeypatch the guard installed is gone the
+        # instant it runs. There is no "the guard will catch it" backstop
+        # here -- the guard cannot survive the call it would be catching.
+        tier, reason = self._tier(
+            "replace.py",
+            "import os\n\n\ndef replace(p, argv):\n"
+            "    os.execv(p, argv)\n",
+            "replace")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_every_os_exec_spawn_fork_name_is_in_the_marker_table(self):
+        # FIX round 4 (C2): the table listed 11 of the family and missed the
+        # rest, so `os.execlp` / `os.posix_spawnp` / `os.spawnlp` read as Tier 1
+        # "no I/O markers; directly callable" while the near-identical
+        # `os.execv` read as Tier 3. DERIVED from `dir(os)` at runtime rather
+        # than restated as a literal list, so the table cannot silently rot
+        # when a Python release adds a sibling -- and so it stays honest on a
+        # platform whose `os` exposes a different subset.
+        #
+        # These are the calls the runtime guard structurally CANNOT backstop:
+        # `os.exec*` replaces the process image, taking every in-process
+        # monkeypatch with it. The static filter is the only line of defence.
+        derived = {"os." + n for n in dir(os)
+                   if n.startswith(("exec", "spawn", "fork", "posix_spawn"))
+                   and callable(getattr(os, n, None))}
+        # Deliberate exclusions, each with a reason. Empty today: every name
+        # the derivation finds really does start or replace a process.
+        allowed_unmarked = {}
+        table = set(rank_risk.UNCONTROLLABLE["subprocess"])
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "os process-family names absent from the marker table: "
+                         "%s" % sorted(missing))
+
+    def test_a_missed_exec_family_member_is_tier_3_like_its_siblings(self):
+        # The behavioural half of the test above, on three of the names that
+        # were absent: they must classify the same as `os.execv` already did.
+        for src_name, call in (("execlp", "os.execlp('sh', 'sh', '-c', c)"),
+                               ("posix_spawnp", "os.posix_spawnp('sh', ['sh'], {})"),
+                               ("spawnlp", "os.spawnlp(os.P_WAIT, 'sh', 'sh')"),
+                               ("forkpty", "os.forkpty()")):
+            with self.subTest(name=src_name):
+                tier, reason = self._tier(
+                    "%s_mod.py" % src_name,
+                    "import os\n\n\ndef go(c):\n    return %s\n" % call,
+                    "go")
+                self.assertEqual(tier, 3)
+                self.assertIn("subprocess", reason)
+
+    def test_os_path_join_is_not_swept_into_subprocess_by_the_new_os_markers(self):
+        # The control: the new `os.*` spawn/exec entries are exact-or-prefix
+        # matches on a resolved dotted name, not a blanket "starts with os.".
+        # Ordinary `os.path` use must stay Tier 2 filesystem.
+        tier, reason = self._tier(
+            "joiner.py",
+            "import os\n\n\ndef joiner(a, b):\n    return os.path.join(a, b)\n",
+            "joiner")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+        self.assertNotIn("subprocess", reason)
+
+    def test_every_path_taking_os_primitive_is_in_the_marker_table(self):
+        # FIX round 5 (C3): the filesystem family had the SAME enumeration hole
+        # C2 found in the exec/spawn family -- `os.remove` and `os.mkdir` were
+        # listed while `os.rename`, `os.listdir`, `os.scandir`, `os.walk` and
+        # `os.stat` were not, so equally-real I/O split across Tier 2 and
+        # Tier 1 "no I/O markers; directly callable".
+        #
+        # DERIVED from CPython itself, not restated as a literal list: the
+        # `os.supports_*` sets ARE the interpreter's own record of which `os`
+        # functions take a path (or a path-like fd), so this expectation
+        # follows the platform and the Python release instead of a human's
+        # memory of them.
+        derived = set()
+        for attr in ("supports_dir_fd", "supports_effective_ids",
+                     "supports_fd", "supports_follow_symlinks"):
+            for fn in getattr(os, attr, ()):
+                name = getattr(fn, "__name__", None)
+                if name:
+                    derived.add("os." + name)
+        # ...plus the fd (`f`-prefixed) and no-follow (`l`-prefixed) variants
+        # of each, which CPython exposes as separate callables and which the
+        # `supports_*` sets therefore do not list.
+        for variant in list(derived):
+            base = variant[len("os."):]
+            for prefix in ("f", "l"):
+                if callable(getattr(os, prefix + base, None)):
+                    derived.add("os." + prefix + base)
+        # Deliberate exclusions, each with a reason. Empty today: every name
+        # the derivation finds really does touch the filesystem.
+        allowed_unmarked = {}
+        # Compare against EVERY marker group, not just `filesystem`. The
+        # question this test asks is "is this primitive marked at all?", and a
+        # path-taking primitive can legitimately be marked somewhere else:
+        # `os.execve` belongs in UNCONTROLLABLE["subprocess"], because replacing
+        # the process image is not a controllable seam, whatever it does with
+        # the path. Comparing against `filesystem` alone made the test
+        # PLATFORM-DEPENDENT and it failed CI on Linux while passing on macOS —
+        # `os.execve` is in `os.supports_fd` on Linux (fd-as-path execve) and
+        # not on macOS, so only Linux's derivation reached the name at all. The
+        # table was right both times; the expectation was too narrow.
+        table = set()
+        for group in (rank_risk.CONTROLLABLE, rank_risk.UNCONTROLLABLE):
+            for names in group.values():
+                table.update(names)
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "path-taking os primitives absent from the marker "
+                         "table: %s" % sorted(missing))
+
+    def test_every_pure_python_os_filesystem_wrapper_is_in_the_marker_table(self):
+        # The second derivation, covering what the first structurally cannot:
+        # `os.walk`, `os.makedirs`, `os.removedirs`, `os.renames` and `os.fwalk`
+        # are written in Python inside `os.py` and take no `dir_fd`/`fd`
+        # argument, so no `os.supports_*` set mentions them. Derive them from
+        # `os.py`'s own module membership instead, and allow-list the members
+        # that genuinely perform no filesystem I/O.
+        derived = {"os." + n for n in dir(os)
+                   if not n.startswith("_")
+                   and callable(getattr(os, n, None))
+                   and getattr(getattr(os, n), "__module__", None) == "os"}
+        allowed_unmarked = {
+            "os.PathLike": "an ABC, not a call",
+            "os.stat_result": "a result type, not a syscall",
+            "os.statvfs_result": "a result type, not a syscall",
+            "os.terminal_size": "a result type, not a syscall",
+            "os.fsencode": "pure str/bytes conversion",
+            "os.fsdecode": "pure str/bytes conversion",
+            "os.get_exec_path": "reads os.environ; covered by the environment group",
+            # 3.14 additions. `process_cpu_count` reports scheduler affinity --
+            # a syscall, but no path, no environment and no subprocess, so none
+            # of the tracked groups own it. (`os.reload_environ`, the other
+            # 3.14 addition, is NOT allow-listed: it re-reads the process
+            # environment, which is exactly the environment group's business,
+            # so it is marked there and patched in io_guard.)
+            "os.process_cpu_count": "scheduler affinity; no tracked I/O group",
+        }
+        # NOTE: this test is SUPPOSED to fail when a Python release adds an
+        # `os` callable. That failure is the mechanism -- it forces someone to
+        # classify the new name into a marker group or allow-list it with a
+        # reason, instead of it silently landing in Tier 1 "no I/O markers".
+        # Found exactly that way: running this suite on Python 3.14 in an
+        # Ubuntu container surfaced `process_cpu_count` and `reload_environ`,
+        # which CI's 3.12 does not have yet. Do NOT "fix" a future failure by
+        # widening the derivation.
+        table = (set(rank_risk.CONTROLLABLE["filesystem"])
+                 | set(rank_risk.CONTROLLABLE["environment"])
+                 | set(rank_risk.UNCONTROLLABLE["subprocess"]))
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "pure-python os wrappers absent from the marker "
+                         "table: %s" % sorted(missing))
+
+    def test_the_filesystem_family_tiers_consistently_not_half_at_tier_1(self):
+        # The behavioural half, on the six spellings the review reproduced at
+        # Tier 1 "no I/O markers; directly callable" while `os.remove`,
+        # `os.mkdir` and `open` in the same file read Tier 2.
+        for name, call in (("listdir", "os.listdir(p)"),
+                           ("scandir", "os.scandir(p)"),
+                           ("walk", "list(os.walk(p))"),
+                           ("stat", "os.stat(p)"),
+                           ("rename", "os.rename(p, p)"),
+                           ("globbed", "glob.glob(p)")):
+            with self.subTest(name=name):
+                tier, reason = self._tier(
+                    "fs_%s.py" % name,
+                    "import glob\nimport os\n\n\ndef go(p):\n    return %s\n" % call,
+                    "go")
+                self.assertEqual(tier, 2)
+                self.assertIn("filesystem", reason)
+
+    def test_import_time_path_algebra_still_inert_after_the_family_widened(self):
+        # Round 4's IMPORT_TIME_INERT judgement call must survive round 5's
+        # widening: `os.path.join`/`dirname`/`abspath` at module level are
+        # string algebra over `__file__` and must NOT floor the tier, while a
+        # real probe (`os.path.exists`) and the newly-added `os.listdir` must.
+        tier, reason = self._tier(
+            "algebra.py",
+            "import os\n\nHERE = os.path.dirname(os.path.abspath(__file__))\n"
+            "\n\ndef pure(x):\n    return x + 1\n",
+            "pure")
+        self.assertEqual(tier, 1, reason)
+        for name, stmt in (("exists", "FOUND = os.path.exists('/etc/hosts')"),
+                           ("listdir", "ENTRIES = os.listdir('/tmp')"),
+                           ("stat", "ST = os.stat('/etc/hosts')")):
+            with self.subTest(name=name):
+                tier, reason = self._tier(
+                    "probe_%s.py" % name,
+                    "import os\n\n%s\n\n\ndef pure_%s(x):\n    return x + 1\n"
+                    % (stmt, name),
+                    "pure_%s" % name)
+                self.assertEqual(tier, 3, reason)
+                self.assertIn("import time", reason)
+
+
+class TestAlreadyCovered(TempRepo):
+    def test_unit_named_in_a_test_file_is_reported_covered(self):
+        write(self.root, "core.py", "def covered():\n    pass\n\n\ndef bare():\n    pass\n")
+        write(self.root, "tests/test_core.py",
+              "from core import covered\n\n\ndef test_covered():\n    covered()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("core.py::covered"), "tests/test_core.py")
+        self.assertNotIn("core.py::bare", cov)
+
+    def test_name_only_match_does_not_cover_a_same_named_unit_in_another_module(self):
+        # FIX 1: a test for discounts/coupon.py::apply must not mark
+        # payments/refund.py::apply covered just because the NAME matches --
+        # that hid a genuinely untested unit from `ranked` entirely.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "discounts/coupon.py", "def apply(code):\n    return code\n")
+        write(self.root, "tests/test_coupon.py",
+              "from discounts.coupon import apply\n\n\ndef test_apply():\n    apply('X')\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("discounts/coupon.py::apply"), "tests/test_coupon.py")
+        self.assertNotIn("payments/refund.py::apply", cov)
+
+    def test_shared_basename_needs_path_qualified_evidence_not_a_bare_basename(self):
+        # FIX round 4 (C1): `app/utils.py` and `lib/utils.py` share the basename
+        # "utils". A test naming `app.utils` matches the bare basename "utils"
+        # equally well for BOTH files, so crediting on it marked lib's entirely
+        # untested `helper` covered and emptied `ranked`. Ambiguous evidence must
+        # credit nobody; only evidence naming the unit's OWN path counts.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_helper():\n    assert helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/utils.py::helper"), "tests/test_app.py")
+        self.assertNotIn("lib/utils.py::helper", cov)
+
+    def test_unique_basename_still_credits_on_a_bare_module_match(self):
+        # The control for the test above: when the basename is unique in the
+        # repo a bare-basename match is NOT ambiguous, so the pre-existing
+        # (looser, path-token-friendly) rule must stand -- the C1 fix must not
+        # quietly stop crediting every ordinary test in the repo.
+        write(self.root, "app/solo.py", "def helper():\n    return 1\n")
+        write(self.root, "tests/test_app.py",
+              "import solo\n\n\ndef test_helper():\n    assert solo.helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/solo.py::helper"), "tests/test_app.py")
+
+    def test_package_qualified_evidence_credits_only_the_module_it_names(self):
+        # Both colliding modules have a test; each test names its own package.
+        # Each must be credited to its own file and to neither the other's.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_a():\n    helper()\n")
+        write(self.root, "tests/test_lib.py",
+              "from lib.utils import helper\n\n\ndef test_l():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/utils.py::helper"), "tests/test_app.py")
+        self.assertEqual(cov.get("lib/utils.py::helper"), "tests/test_lib.py")
+
+    def test_a_longer_module_path_is_not_credited_by_a_suffix_of_another(self):
+        # `myapp.utils` contains the substring "app.utils". A plain substring
+        # test would hand `app/utils.py` coverage it does not have -- the
+        # OVER-crediting direction this file must never take.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "myapp/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_myapp.py",
+              "from myapp.utils import helper\n\n\ndef test_h():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("myapp/utils.py::helper"), "tests/test_myapp.py")
+        self.assertNotIn("app/utils.py::helper", cov)
+
+    def test_module_named_only_in_the_test_files_path_still_counts_as_covered(self):
+        # The test's source never spells "refund" -- it imports the name as
+        # re-exported through the package -- but the test file's own path
+        # encodes the module, which satisfies the module requirement too.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "payments/__init__.py", "from .refund import apply\n")
+        write(self.root, "tests/test_refund.py",
+              "from payments import apply\n\n\ndef test_apply():\n    apply(1)\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("payments/refund.py::apply"), "tests/test_refund.py")
+
+    def test_a_test_beside_its_module_is_credited_under_a_basename_collision(self):
+        # FIX round 6 (N4). The round-4 rule demanded PATH-qualified evidence
+        # under a collision -- but the dominant Python idiom, a test file
+        # beside the module doing `import harvest`, can never emit the string
+        # `pkg/assets/harvest`. So correct evidence was UNREPRESENTABLE, not
+        # merely discounted: measured on this repo, 105 of 321 units live in a
+        # colliding-basename file and the rule credited exactly 0 of them,
+        # putting four genuinely-tested units back into `ranked`.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 1\n")
+        write(self.root, "two/assets/test_two.py",
+              "import harvest as H\n\n\ndef test_c():\n"
+              "    assert H.collect() == 2\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
+        self.assertEqual(cov.get("two/assets/harvest.py::collect"),
+                         "two/assets/test_two.py")
+
+    def test_the_same_directory_route_does_not_reopen_the_cross_directory_hole(self):
+        # NEGATIVE, and the reason the route is scoped to one directory: the
+        # C1 reproduction must stay closed. `two/assets/harvest.py::collect`
+        # has no test at all and must still be ranked.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertIn("one/assets/harvest.py::collect", cov)
+        self.assertNotIn("two/assets/harvest.py::collect", cov)
+
+    def test_a_neighbour_that_path_qualifies_the_rival_credits_only_the_rival(self):
+        # NEGATIVE. A test file can sit beside one `harvest.py` while actually
+        # exercising the OTHER one by its package path. The same-directory
+        # route must stand down when the text names a rival that way, or the
+        # collision reopens from inside the directory.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_cross.py",
+              '"""Pinned against two/assets/harvest.py, which this directory'
+              ' shadows."""\n'
+              "import sys\n"
+              "sys.path.insert(0, '../../two/assets')\n"
+              "import harvest\n\n\ndef test_c():\n"
+              "    assert harvest.collect() == 2\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+        self.assertEqual(cov.get("two/assets/harvest.py::collect"),
+                         "one/assets/test_cross.py")
+
+    def test_a_bare_name_beside_the_module_is_not_evidence(self):
+        # NEGATIVE, and the reason the same-directory route uses a STRONGER
+        # predicate than the rest of this function: `unittest.main()` in a file
+        # that also imports `harvest` would otherwise credit
+        # `harvest.py::main`, which has no test. Measured on this repo the
+        # weaker form did exactly that, twice.
+        write(self.root, "one/assets/harvest.py",
+              "def main(argv):\n    return 0\n\n\ndef collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def main(argv):\n    return 0\n")
+        write(self.root, "one/assets/test_one.py",
+              "import unittest\nimport harvest\n\n\n"
+              "class T(unittest.TestCase):\n"
+              "    def test_c(self):\n"
+              "        assert harvest.collect() == 1\n\n\n"
+              "if __name__ == '__main__':\n    unittest.main()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertIn("one/assets/harvest.py::collect", cov)
+        self.assertNotIn("one/assets/harvest.py::main", cov)
+
+    def test_a_mock_patch_string_beside_the_module_is_not_evidence(self):
+        # NEGATIVE (fix round 7). `mock.patch("harvest.collect")` names the
+        # module binding textually while proving the OPPOSITE of coverage: the
+        # unit is replaced by a stub for the duration of the test. Crediting it
+        # hid a unit with no test at all behind a basename collision, which is
+        # the over-credit direction this file calls never acceptable.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n\n\ndef tally():\n    return 2\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n\n\ndef tally():\n    return 3\n")
+        write(self.root, "one/assets/test_one.py",
+              "import unittest\nfrom unittest import mock\nimport harvest\n\n\n"
+              "class T(unittest.TestCase):\n"
+              "    def test_stub(self):\n"
+              "        with mock.patch('harvest.collect', return_value='s'):\n"
+              "            self.assertTrue(True)\n\n"
+              "    def test_tally(self):\n"
+              "        self.assertEqual(harvest.tally(), 2)\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::tally"),
+                         "one/assets/test_one.py")
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+
+    def test_a_commented_mention_beside_the_module_is_not_evidence(self):
+        # NEGATIVE (fix round 7), the other half: a bare `harvest.collect` in
+        # prose is a mention, not a use.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\n"
+              "# TODO: harvest.collect still has no test\n"
+              "def test_nothing():\n    assert True\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+
+    def test_a_stubbed_unit_that_is_also_really_called_stays_credited(self):
+        # The control for the two above: requiring a CALL SITE must not cost a
+        # genuine test that also patches the same name somewhere.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "from unittest import mock\nimport harvest\n\n\n"
+              "def test_c():\n"
+              "    with mock.patch('harvest.collect', return_value=9):\n"
+              "        pass\n"
+              "    assert harvest.collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
+
+    def test_a_from_import_beside_the_module_is_evidence(self):
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "from harvest import (\n    collect,\n)\n\n\n"
+              "def test_c():\n    assert collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
+
+    def test_a_repo_root_collision_is_creditable_from_beside_it(self):
+        # Round 4 recorded "a repo-root `utils.py` colliding with
+        # `pkg/utils.py` has no qualifier of its own, so it reads as uncovered
+        # outright". It has a directory (the root) like anything else, so the
+        # same-directory route restores it.
+        write(self.root, "utils.py", "def helper():\n    return 1\n")
+        write(self.root, "pkg/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "test_utils.py",
+              "import utils\n\n\ndef test_h():\n"
+              "    assert utils.helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("utils.py::helper"), "test_utils.py")
+        self.assertNotIn("pkg/utils.py::helper", cov)
+
+
+class TestRank(TempRepo):
+    def _repo(self):
+        write(self.root, "hot.py", "def risky(a, b):\n    return a + b\n")
+        write(self.root, "cold.py", "def quiet(a):\n    return a\n")
+        write(self.root, "net.py",
+              "import requests\n\n\ndef fetch(u):\n    return requests.get(u)\n")
+        write(self.root, "caller.py",
+              "from hot import risky\nrisky(1, 2)\nrisky(3, 4)\n")
+
+    def test_tier_3_units_are_not_netted_never_ranked(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ranked_ids = [r["id"] for r in plan["ranked"]]
+        self.assertNotIn("net.py::fetch", ranked_ids)
+        self.assertIn("net.py::fetch", [r["id"] for r in plan["not_netted"]])
+
+    def test_more_referenced_unit_outranks_a_quiet_one(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("hot.py::risky"), ids.index("cold.py::quiet"))
+
+    def test_top_n_bounds_the_ranked_list(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=1)
+        self.assertEqual(len(plan["ranked"]), 1)
+
+    def test_output_is_byte_identical_across_runs(self):
+        import json
+        self._repo()
+        a = json.dumps(rank_risk.rank(self.root, since="10 years ago", top_n=10), sort_keys=True)
+        b = json.dumps(rank_risk.rank(self.root, since="10 years ago", top_n=10), sort_keys=True)
+        self.assertEqual(a, b)
+
+    def test_every_ranked_row_flags_the_reference_count_as_approximate(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        self.assertTrue(plan["ranked"])
+        for row in plan["ranked"]:
+            self.assertIs(row["inbound_approx"], True)
+
+    def test_name_collision_does_not_hide_an_untested_unit_from_ranked(self):
+        # FIX 1 regression at the rank() level: a covered discounts/coupon.py::apply
+        # must not blank out an untested payments/refund.py::apply that merely
+        # shares the name -- the exact collision the review reproduced, where
+        # `ranked` came back EMPTY.
+        write(self.root, "payments/refund.py", "def apply(amount):\n    return amount\n")
+        write(self.root, "discounts/coupon.py", "def apply(code):\n    return code\n")
+        write(self.root, "tests/test_coupon.py",
+              "from discounts.coupon import apply\n\n\ndef test_apply():\n    apply('X')\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ranked_ids = [r["id"] for r in plan["ranked"]]
+        self.assertIn("payments/refund.py::apply", ranked_ids)
+
+
+    def test_basename_collision_does_not_hide_an_untested_unit_from_ranked(self):
+        # C1 at the rank() level: the reproduction reported units_discovered 2
+        # with ranked/remainder/not_netted ALL empty -- lib/utils.py::helper had
+        # no test at all and the skill said there was nothing to do.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_helper():\n    assert helper() == 1\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        self.assertIn("lib/utils.py::helper", [r["id"] for r in plan["ranked"]])
+        self.assertEqual(plan["covered"], ["app/utils.py::helper"])
+
+
+class TestMain(TempRepo):
+    def _run(self, argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = rank_risk.main(argv)
+        return code, stdout.getvalue()
+
+    def test_success_on_a_valid_repo_exits_0_and_prints_json_with_the_eight_expected_keys(self):
+        import json
+        write(self.root, "core.py", "def solo():\n    pass\n")
+        code, out = self._run([self.root, "--since", "10 years ago"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(set(payload.keys()),
+                         {"root", "stack", "window", "units_discovered",
+                          "ranked", "remainder", "not_netted", "covered"})
+
+    def test_nonexistent_path_exits_2(self):
+        code, _ = self._run([os.path.join(self.root, "does-not-exist")])
+        self.assertEqual(code, 2)
+
+    def test_path_that_is_a_file_not_a_directory_exits_2(self):
+        f = write(self.root, "notadir.py", "x = 1\n")
+        code, _ = self._run([f])
+        self.assertEqual(code, 2)
+
+    def test_directory_with_no_python_files_exits_0_with_empty_ranked(self):
+        import json
+        empty_dir = os.path.join(self.root, "empty")
+        os.makedirs(empty_dir, exist_ok=True)
+        code, out = self._run([empty_dir])
+        self.assertEqual(code, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["units_discovered"], 0)
+        self.assertEqual(payload["ranked"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

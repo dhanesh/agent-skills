@@ -48,6 +48,7 @@ UNPROVEN and WORSE both fail.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -75,7 +76,25 @@ INTEGRATION_REFS = ("origin/main", "main")
 # moment this change merged.
 SINCE_ONTOLOGY = "077c432"   # world-model-ledger predicate-ontology guardrails
 SINCE_ABVALIDATE = "6b51b41"  # the A/B harness itself, and its first corpus
-SINCE_AUDIT_2026_09 = "7b94236"  # the 2026-09 whole-repo review fixes
+SINCE_AUDIT_2026_09 = "5daa2cf"  # the 2026-09 whole-repo review fixes (repinned:
+# the original "7b94236" was rewritten to this hash on the way into main — same
+# author date/message/diff, orphaned object left dangling in the local odb)
+SINCE_TEST_SAFETY_NET = "4f88919"  # test-safety-net: the tier >= 3 netting guard
+SINCE_TSN_FIXROUND_4 = "5c69c68"  # test-safety-net: the rank_risk correctness cluster
+# (C1 basename-collision coverage, C2 the os exec/spawn family, I4 attribute
+# over-count, I5 import-time I/O floor, I6 subdirectory churn)
+SINCE_TSN_FIXROUND_5 = "dba1199"  # test-safety-net: the filesystem marker family
+# (C3), the shipped runtime guard (I1), and the document reconciliation
+# (I5 guard-trip outcome, M2 unittest fallback, M3/M4 spec drift)
+SINCE_TSN_FIXROUND_6 = "903fc56"  # test-safety-net: the guard under its OWN
+# documented command (N1), pkgutil.get_data through the _io layer (N2), a
+# worker-thread violation reaching the run (N3), class-valued patch targets
+# staying classes (N5), os.environ reads (M-a), and same-directory coverage
+# evidence under a basename collision (N4)
+SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
+# scoped to the call it judges (F1 -- a module body read arbitrary files at
+# tier 1 under `1 passed`, missed by BOTH layers), a call site required on the
+# same-directory credit route (F4), and the eval's inert-plugin arm (F3)
 
 
 def _git_out(*args):
@@ -883,6 +902,797 @@ def check_starlight(old, new):
         "a gate that exists but is not wired is not a gate", kind="guard")
 
 
+# ── test-safety-net (the tier >= 3 guard: never net a unit that dials out) ──
+def check_test_safety_net(old, new):
+    """The guardrail: a unit that dials out in its constructor must NOT be netted."""
+    scratch = tempfile.mkdtemp()
+    os.makedirs(os.path.join(scratch, "repo"), exist_ok=True)
+    with open(os.path.join(scratch, "repo", "client.py"), "w") as f:
+        f.write("import socket\n\n\nclass Client:\n    def __init__(self, host):\n"
+                "        self.sock = socket.create_connection((host, 80))\n")
+
+    def netted_unsafely(tree):
+        ranker = os.path.join(tree, "test-safety-net", "assets", "rank_risk.py")
+        if not os.path.isfile(ranker):
+            return 1        # baseline has no ranker: nothing stops the unsafe test
+        r = subprocess.run([sys.executable, ranker, os.path.join(scratch, "repo")],
+                           capture_output=True, text=True, timeout=120)
+        try:
+            plan = json.loads(r.stdout)
+        except ValueError:
+            return 1
+        return 1 if any(row["id"].endswith("::Client") for row in plan["ranked"]) else 0
+
+    a, b = netted_unsafely(old), netted_unsafely(new)
+    row("test-safety-net", "unit that dials out in __init__ is netted (lower=better)",
+        a, b, b < a,
+        "writing a test for it would open a real socket; the skill must decline",
+        since=SINCE_TEST_SAFETY_NET)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ── test-safety-net, fix round 4: the rank_risk.py correctness cluster ──
+def _tsn_probe(tree, root, top_n=10):
+    """Run a tree's rank_risk.py over `root` and return its plan, or None.
+
+    None means "this tree cannot answer" — the baseline predates the skill, so
+    every row below scores that as the WORST possible value rather than
+    skipping it. A missing ranker nets nothing, credits nothing and ranks
+    nothing, which is exactly the failure each row measures.
+    """
+    ranker = os.path.join(tree, "test-safety-net", "assets", "rank_risk.py")
+    if not os.path.isfile(ranker):
+        return None
+    r = subprocess.run([sys.executable, ranker, root, "--top-n", str(top_n),
+                        "--since", "10 years ago"],
+                       capture_output=True, text=True, timeout=120)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def check_test_safety_net_ranker(old, new):
+    """Five findings, five fixtures, each reproduced by the review before the fix."""
+    scratch = tempfile.mkdtemp()
+
+    # C1 — a basename collision credited coverage to a unit with no test.
+    c1 = os.path.join(scratch, "c1")
+    for rel, body in (("app/utils.py", "def helper():\n    return 1\n"),
+                      ("lib/utils.py", "def helper():\n    return 2\n"),
+                      ("tests/test_app.py",
+                       "from app.utils import helper\n\n\ndef test_helper():\n"
+                       "    assert helper() == 1\n")):
+        os.makedirs(os.path.join(c1, os.path.dirname(rel)), exist_ok=True)
+        with open(os.path.join(c1, rel), "w") as f:
+            f.write(body)
+
+    def falsely_covered(tree):
+        plan = _tsn_probe(tree, c1)
+        if plan is None:
+            return 1
+        return 1 if "lib/utils.py::helper" in plan["covered"] else 0
+
+    # C2 — half the os exec/spawn family was missing from the marker table.
+    c2 = os.path.join(scratch, "c2")
+    os.makedirs(c2, exist_ok=True)
+    with open(os.path.join(c2, "proc.py"), "w") as f:
+        f.write("import os\n\n\ndef a(c):\n    return os.execlp('sh', 'sh', '-c', c)\n\n\n"
+                "def b(p):\n    return os.posix_spawnp(p, [p], {})\n\n\n"
+                "def c(p):\n    return os.spawnlp(os.P_WAIT, p, p)\n")
+
+    def spawners_netted(tree):
+        plan = _tsn_probe(tree, c2)
+        if plan is None:
+            return 3
+        return sum(1 for r in plan["ranked"] + plan["remainder"]
+                   if r["path"] == "proc.py")
+
+    # I4 — `buf.write(...)` on a foreign receiver counted as reach.
+    i4 = os.path.join(scratch, "i4")
+    os.makedirs(i4, exist_ok=True)
+    with open(os.path.join(i4, "sink.py"), "w") as f:
+        f.write("def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+    with open(os.path.join(i4, "user.py"), "w") as f:
+        f.write("import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+                "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+                "    return sink.other()\n")
+
+    def phantom_refs(tree):
+        plan = _tsn_probe(tree, i4)
+        if plan is None:
+            return 3
+        for r in plan["ranked"] + plan["remainder"]:
+            if r["id"] == "sink.py::write":
+                return r["inbound_refs"]      # real callers: 0
+        return 3
+
+    # I5 — import-time file I/O left every unit "directly callable".
+    i5 = os.path.join(scratch, "i5")
+    os.makedirs(i5, exist_ok=True)
+    with open(os.path.join(i5, "cfg.py"), "w") as f:
+        f.write('import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+                "def get_timeout():\n    return _CFG['timeout'] * 2\n")
+
+    def import_io_netted(tree):
+        plan = _tsn_probe(tree, i5)
+        if plan is None:
+            return 1
+        return 1 if any(r["id"] == "cfg.py::get_timeout"
+                        for r in plan["ranked"] + plan["remainder"]) else 0
+
+    # I6 — analysing a subdirectory of a git repo zeroed all churn.
+    i6 = os.path.join(scratch, "i6", "pkg", "sub")
+    os.makedirs(i6, exist_ok=True)
+    repo = os.path.join(scratch, "i6")
+    git_ok = subprocess.run(["git", "init", "-q", "."], cwd=repo,
+                            capture_output=True).returncode == 0
+    for i in range(5):
+        with open(os.path.join(i6, "mod.py"), "w") as f:
+            f.write("def a():\n    return %d\n" % i)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "c%d" % i], cwd=repo, capture_output=True)
+
+    def subdir_churn(tree):
+        if not git_ok:
+            return -1                        # identical in both arms; row holds
+        plan = _tsn_probe(tree, i6)
+        if plan is None:
+            return 0
+        for r in plan["ranked"] + plan["remainder"]:
+            if r["id"] == "mod.py::a":
+                return r["churn"]
+        return 0
+
+    s = "test-safety-net"
+    a, b = falsely_covered(old), falsely_covered(new)
+    row(s, "coverage credited across a basename collision (lower=better)", a, b, b < a,
+        "C1: lib/utils.py::helper has no test at all; crediting it emptied `ranked`",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = spawners_netted(old), spawners_netted(new)
+    row(s, "os.execlp/posix_spawnp/spawnlp units netted (lower=better)", a, b, b < a,
+        "C2: `os.exec*` replaces the process image, so no runtime guard can "
+        "backstop it -- the filter is the only defence",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = phantom_refs(old), phantom_refs(new)
+    row(s, "phantom refs on a zero-caller `write` (lower=better)", a, b, b < a,
+        "I4: three io.StringIO.write calls were credited to sink.py::write, "
+        "which outranked the one unit with a real caller",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = import_io_netted(old), import_io_netted(new)
+    row(s, "unit in a module that reads a file at import is netted (lower=better)",
+        a, b, b < a,
+        "I5: the harness takes an IOError on `import cfg` before any test body "
+        "runs; Tier 1 'directly callable' was false",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = subdir_churn(old), subdir_churn(new)
+    row(s, "churn seen when analysing a subdirectory (higher=better)", a, b, b > a,
+        "I6: churn keyed to the git repo root while units keyed to the analysed "
+        "root, so a 5-commit file ranked 0.0",
+        since=SINCE_TSN_FIXROUND_4)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ── test-safety-net, fix round 5: the filesystem family + the shipped guard ──
+_GUARD_PROBE = r"""
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("ESCAPES:5"); print("WROTE:1"); raise SystemExit(0)
+tmp = tempfile.mkdtemp()
+victim = os.path.join(tmp, "escaped.txt")
+probe = os.path.join(tmp, "d")
+os.makedirs(probe, exist_ok=True)
+escapes = []
+def attempt(label, fn):
+    try:
+        fn()
+        escapes.append(label)
+    except io_guard.IOGuardViolation:
+        pass
+    except BaseException:
+        escapes.append(label + "!")
+io_guard.arm(1)
+try:
+    attempt("write", lambda: open(victim, "w").write("x"))
+    attempt("listdir", lambda: os.listdir(probe))
+    attempt("stat", lambda: os.stat(probe))
+    attempt("walk", lambda: list(os.walk(probe)))
+    attempt("glob", lambda: __import__("glob").glob(probe + "/*"))
+finally:
+    io_guard.disarm()
+print("ESCAPES:%d" % len(escapes))
+print("WROTE:%d" % (1 if os.path.exists(victim) else 0))
+"""
+
+
+def _tsn_read(tree, *parts):
+    path = os.path.join(tree, "test-safety-net", *parts)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def check_test_safety_net_guard(old, new):
+    """Round 5: one filter row, two guard rows, three document rows.
+
+    The guard rows run the tree's OWN `io_guard.py` in a subprocess and count
+    what still reaches the disk. A tree without the file scores the worst
+    possible value rather than skipping, because "no guard ships" is precisely
+    the state the row measures — that was finding I1.
+    """
+    scratch = tempfile.mkdtemp()
+
+    # C3 — the filesystem marker family was half-enumerated, so os.listdir /
+    # scandir / walk / stat / rename / glob.glob read "no I/O markers;
+    # directly callable" while os.remove and os.mkdir read Tier 2.
+    c3 = os.path.join(scratch, "c3")
+    os.makedirs(c3, exist_ok=True)
+    with open(os.path.join(c3, "fs.py"), "w") as f:
+        f.write("import glob\nimport os\n\n\n"
+                "def a(p):\n    return os.listdir(p)\n\n\n"
+                "def b(p):\n    return os.scandir(p)\n\n\n"
+                "def c(p):\n    return list(os.walk(p))\n\n\n"
+                "def d(p):\n    return os.stat(p)\n\n\n"
+                "def e(p):\n    return os.rename(p, p)\n\n\n"
+                "def f(p):\n    return glob.glob(p)\n")
+
+    def fs_units_called_tier_1(tree):
+        plan = _tsn_probe(tree, c3)
+        if plan is None:
+            return 6
+        return sum(1 for r in plan["ranked"] + plan["remainder"]
+                   if r["path"] == "fs.py" and r["tier"] == 1)
+
+    def guard_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _GUARD_PROBE, assets],
+                           capture_output=True, text=True, timeout=120)
+        escapes, wrote = 5, 1
+        for line in r.stdout.splitlines():
+            if line.startswith("ESCAPES:"):
+                escapes = int(line.split(":", 1)[1])
+            elif line.startswith("WROTE:"):
+                wrote = int(line.split(":", 1)[1])
+        return escapes, wrote
+
+    def contradicting_docs(tree):
+        """Sentences that reclassify after a guard trip without naming Tier 3."""
+        skill = _tsn_read(tree, "SKILL.md")
+        triage = _tsn_read(tree, "references", "triage.md")
+        if skill is None or triage is None:
+            return 2
+        bad = 0
+        for text in (skill, triage):
+            flat = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*>\s?", "", text))
+            for sentence in re.split(r"(?<=[.;])\s+", flat):
+                if "reclassif" not in sentence.lower():
+                    continue
+                if "Tier 3" not in sentence or re.search(r"Tier 2 or 3", sentence):
+                    bad += 1
+        return bad
+
+    def hedged_unittest_gap(tree):
+        stacks = _tsn_read(tree, "references", "stacks.md")
+        if stacks is None:
+            return 1
+        return 1 if "imported anywhere earlier in the same process" in stacks else 0
+
+    def stale_spec_claims(tree):
+        path = os.path.join(tree, "docs", "superpowers", "specs",
+                            "2026-09-09-test-safety-net-design.md")
+        try:
+            with open(path, encoding="utf-8") as f:
+                spec = f.read()
+        except OSError:
+            return 3
+        stale = 0
+        if "not yet implemented" in spec:
+            stale += 1
+        # each claim counts as stale unless an amendment retracts it
+        if ("This gets a dedicated\ntest and a negative eval fixture." in spec
+                or "gets a dedicated test and a negative eval fixture" in spec) \
+                and "no captured-output emitter ships" not in spec:
+            stale += 1
+        if "plus a cross-tool agreement test" in spec \
+                and "No detector ships, and none" not in spec:
+            stale += 1
+        return stale
+
+    s = "test-safety-net"
+    a, b = fs_units_called_tier_1(old), fs_units_called_tier_1(new)
+    row(s, "filesystem units the filter calls tier 1 'no I/O markers' (lower=better)",
+        a, b, b < a,
+        "C3: os.listdir/scandir/walk/stat/rename and glob.glob are real I/O; "
+        "the table detected os.remove and os.mkdir but not their siblings",
+        since=SINCE_TSN_FIXROUND_5)
+    (ea, wa), (eb, wb) = guard_probe(old), guard_probe(new)
+    row(s, "real I/O escaping an armed tier-1 guard (lower=better)", ea, eb, eb < ea,
+        "I1: the guard was the SOLE enforcement of the frontmatter's "
+        "never-real-I/O promise and did not ship at all",
+        since=SINCE_TSN_FIXROUND_5)
+    row(s, "a file created during an armed tier-1 proof (lower=better)", wa, wb, wb < wa,
+        "I1: the invariant is about side effects, so the file must not exist "
+        "afterwards -- an exception raised after the write would be no guard",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = contradicting_docs(old), contradicting_docs(new)
+    row(s, "reclassify sentences that do not name Tier 3 (lower=better)", a, b, b < a,
+        "I5: triage.md licensed 'drop it at least to Tier 2 or 3', turning the "
+        "one unconditional decline in the design into a retry loop",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = hedged_unittest_gap(old), hedged_unittest_gap(new)
+    row(s, "conditional hedge on the unittest guard gap (lower=better)", a, b, b < a,
+        "M2: the generated test module imports the unit at its own top level, "
+        "which ALWAYS precedes setUpModule -- the gap is unconditional",
+        since=SINCE_TSN_FIXROUND_5)
+    a, b = stale_spec_claims(old), stale_spec_claims(new)
+    row(s, "spec claims the tree contradicts (lower=better)", a, b, b < a,
+        "M3/M4: the binding authority asserted a test and a negative fixture "
+        "that were never built, a detector that never shipped, and a status of "
+        "'not yet implemented' on a branch about to merge",
+        since=SINCE_TSN_FIXROUND_5)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ── test-safety-net, fix round 6: the guard under its own documented command ──
+#
+# Every probe below scores a tree with no `io_guard.py`/`rank_risk.py` at the
+# WORST possible value rather than skipping it: at the merge base this skill
+# does not exist, and "no guard ships" is a real state each row measures. The
+# round's numbers against the PRE-ROUND tip (14bfbeb), where the skill does
+# exist, are recorded in the round-6 report -- that is the arm that shows the
+# fixes moved something, and it is why the disclosure matters.
+
+_ENTRY_POINT_PROBE = r"""
+import io_guard, tempfile
+io_guard.arm(1)
+try:
+    tempfile.mkdtemp()          # the ENTRY SCRIPT's own I/O, via the stdlib
+    print("BLOCKED:0")
+except BaseException:
+    print("BLOCKED:1")
+"""
+
+_ROUND6_PROBE = r"""
+import os, sys, tempfile, threading
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("PKGUTIL:1"); print("SSL:3"); print("THREAD:1"); print("ENV:4")
+    raise SystemExit(0)
+
+tmp = tempfile.mkdtemp()
+
+# N2 -- pkgutil.get_data reads a real file through the loader, not through any
+# `io` name and not through `os`.
+io_guard.arm(1)
+try:
+    try:
+        __import__("pkgutil").get_data("json", "__init__.py")
+        pkgutil_escape = 1
+    except io_guard.IOGuardViolation:
+        pkgutil_escape = 0
+    except BaseException:
+        pkgutil_escape = 1
+finally:
+    io_guard.disarm()
+print("PKGUTIL:%d" % pkgutil_escape)
+
+# N5 -- `socket.socket` is a class; wrapping it as a function breaks `import
+# ssl`, and with it every HTTP client in the stdlib. Fresh interpreter per
+# module so an already-imported one cannot mask the failure.
+ssl_broken = 0
+for mod in ("ssl", "urllib.request", "http.client"):
+    r = __import__("subprocess").run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, %r)\n"
+         "import io_guard; io_guard.arm(1)\n"
+         "import %s\n" % (sys.argv[1], mod)],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        ssl_broken += 1
+print("SSL:%d" % ssl_broken)
+
+# N3 -- a violation on a worker thread: swallowed by the thread bootstrap, so
+# the run reports green and a test performing real I/O ships.
+io_guard.arm(1)
+thread_escape = 1
+try:
+    box = {}
+    t = threading.Thread(target=lambda: box.setdefault("n", len(open(
+        os.path.join(tmp, "seed.txt"), "w").name)))
+    t.start()
+    try:
+        t.join()
+    except io_guard.IOGuardViolation:
+        thread_escape = 0
+    if thread_escape:
+        try:
+            if hasattr(io_guard, "pending_thread_violations") \
+                    and io_guard.pending_thread_violations():
+                thread_escape = 0
+        except BaseException:
+            pass
+finally:
+    try:
+        io_guard.disarm()
+    except BaseException:
+        thread_escape = 0
+print("THREAD:%d" % thread_escape)
+
+# M-a -- os.environ reads. `.get`/`.copy` are MutableMapping methods that
+# bottom out in __getitem__ and never call os.getenv.
+io_guard.arm(1)
+env_escapes = 0
+try:
+    alias = os.environ
+    for fn in (lambda: os.environ["PATH"], lambda: os.environ.get("PATH"),
+               lambda: alias.get("PATH"), lambda: os.environ.copy()):
+        try:
+            fn()
+            env_escapes += 1
+        except io_guard.IOGuardViolation:
+            pass
+        except BaseException:
+            env_escapes += 1
+finally:
+    io_guard.disarm()
+print("ENV:%d" % env_escapes)
+"""
+
+
+def check_test_safety_net_round6(old, new):
+    """Six rows: the guard under its own documented command, and five holes."""
+    scratch = tempfile.mkdtemp()
+
+    def round6_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _ROUND6_PROBE, assets],
+                           capture_output=True, text=True, timeout=180)
+        out = {"PKGUTIL": 1, "SSL": 3, "THREAD": 1, "ENV": 4}
+        for line in r.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key in out and value.strip().isdigit():
+                out[key] = int(value)
+        return out
+
+    def entry_point_blocked(tree):
+        """I/O the ENTRY-POINT SCRIPT itself makes, wrongly blocked (1 = yes).
+
+        Pytest-free on purpose. The defect is that a console script's frame
+        (`<prefix>/bin/pytest`) is under none of the interpreter's library
+        roots and sits at the base of every stack, so the guard read pytest's
+        own capture and environment handling as the unit's. A file named
+        `harness` with no `.py` extension reproduces exactly that shape, and
+        needs nothing installed -- so this row is measured in every
+        environment, while the row below runs the real documented command only
+        where pytest exists.
+        """
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        if not os.path.isfile(os.path.join(assets, "io_guard.py")):
+            return 1
+        harness_dir = tempfile.mkdtemp(dir=scratch)
+        harness = os.path.join(harness_dir, "harness")
+        with open(harness, "w", encoding="utf-8") as f:
+            f.write(_ENTRY_POINT_PROBE)
+        r = subprocess.run([sys.executable, harness],
+                           env=dict(os.environ, PYTHONPATH=assets),
+                           capture_output=True, text=True, timeout=120)
+        for line in r.stdout.splitlines():
+            if line.startswith("BLOCKED:"):
+                return int(line.split(":", 1)[1])
+        return 1
+
+    _DOC_CMD = re.compile(
+        r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+        r'pytest\s+-p\s+io_guard\s+\S+$')
+
+    def documented_commands_failing(tree):
+        """How many of the tree's OWN documented invocations do not pass."""
+        skill_dir = os.path.join(tree, "test-safety-net")
+        commands = []
+        for rel in ("SKILL.md", "references/triage.md", "references/stacks.md"):
+            text = _tsn_read(tree, *rel.split("/"))
+            if not text:
+                continue
+            for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                joined = re.sub(r"\\\n\s*", " ", block)
+                for line in joined.splitlines():
+                    if _DOC_CMD.match(line.strip()):
+                        commands.append(line.strip())
+        if not commands:
+            return 5                      # no guard, no documented command
+        proof = tempfile.mkdtemp(dir=scratch)
+        with open(os.path.join(proof, "pure.py"), "w") as f:
+            f.write("def add(a, b):\n    return a + b\n")
+        with open(os.path.join(proof, "test_pure.py"), "w") as f:
+            f.write("import pure\n\n\ndef test_add():\n"
+                    "    assert pure.add(2, 3) == 5\n")
+        failing = 0
+        for command in commands:
+            cmd = command.replace("<path>::<test_name>", "test_pure.py::test_add")
+            env = dict(os.environ, SKILL_DIR=skill_dir)
+            env.pop("PYTHONPATH", None)
+            env.pop("TEST_SAFETY_NET_TIER", None)
+            env.pop("TEST_SAFETY_NET_ALLOW", None)
+            r = subprocess.run(["/bin/sh", "-c",
+                                cmd + " -q -p no:cacheprovider"],
+                               cwd=proof, env=env, capture_output=True,
+                               text=True, timeout=180)
+            if r.returncode != 0 or "1 passed" not in r.stdout:
+                failing += 1
+        return failing
+
+    # N4 fixture: two colliding `harvest.py`, one of them tested from beside it.
+    n4 = os.path.join(scratch, "n4")
+    for pkg in ("one", "two"):
+        d = os.path.join(n4, pkg, "assets")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "harvest.py"), "w") as f:
+            f.write("def collect():\n    return 1\n\n\n"
+                    "def gather():\n    return 2\n")
+    with open(os.path.join(n4, "one", "assets", "test_one.py"), "w") as f:
+        f.write("import harvest\n\n\ndef test_c():\n"
+                "    assert harvest.collect() == 1\n\n\n"
+                "def test_g():\n    assert harvest.gather() == 2\n")
+
+    def colliding_units_credited(tree):
+        """Genuinely-tested colliding units credited, or -1 on ANY over-credit.
+
+        Folding the invariant into the score rather than into a separate guard
+        row: `two/assets/harvest.py` has no test at all, so crediting it hides
+        an untested unit -- the direction round 4 closed and this row must
+        never reopen. -1 is therefore worse than crediting nothing.
+        """
+        plan = _tsn_probe(tree, n4)
+        if plan is None:
+            return -1
+        covered = set(plan.get("covered", []))
+        if any(i.startswith("two/assets/harvest.py::") for i in covered):
+            return -1
+        return sum(1 for i in covered if i.startswith("one/assets/harvest.py::"))
+
+    s = "test-safety-net"
+    a, b = entry_point_blocked(old), entry_point_blocked(new)
+    row(s, "the entry-point script's own I/O wrongly blocked (lower=better)",
+        a, b, b < a,
+        "N1: a console script lives in <prefix>/bin, under none of the four "
+        "sysconfig roots, so its frame -- at the base of every stack -- read as "
+        "'code under test' and pytest's own capture and env handling tripped "
+        "the guard",
+        since=SINCE_TSN_FIXROUND_6)
+
+    if shutil.which("pytest"):
+        a, b = documented_commands_failing(old), documented_commands_failing(new)
+        row(s, "documented `pytest -p io_guard` invocations that do not pass "
+               "(lower=better)", a, b, b < a,
+            "N1: the suite ran `python -m pytest` while every document prints "
+            "`pytest`; at tier 1 the documented command died inside pytest's "
+            "capture teardown with no test result, at tier 2 it ERRORed every "
+            "test on os.putenv. Row emitted only where pytest is installed",
+            since=SINCE_TSN_FIXROUND_6)
+
+    oldp, newp = round6_probe(old), round6_probe(new)
+    row(s, "pkgutil.get_data escaping an armed tier-1 guard (lower=better)",
+        oldp["PKGUTIL"], newp["PKGUTIL"], newp["PKGUTIL"] < oldp["PKGUTIL"],
+        "N2: `SourceFileLoader.get_data` -> `_io.open_code` is a Python name "
+        "the `io` re-exports do not cover, on a frozen-importlib frame the "
+        "provenance walk exempted unconditionally -- missed by BOTH layers",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "stdlib modules that fail to import while armed (lower=better)",
+        oldp["SSL"], newp["SSL"], newp["SSL"] < oldp["SSL"],
+        "N5: `socket.socket` is a CLASS; as a function it broke "
+        "`class SSLSocket(socket)`, so `import ssl` -- and asyncio, "
+        "http.client, urllib.request, requests -- raised TypeError at BOTH "
+        "tiers: a fourth proof outcome the contract cannot express",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "worker-thread I/O that leaves the proof green (lower=better)",
+        oldp["THREAD"], newp["THREAD"], newp["THREAD"] < oldp["THREAD"],
+        "N3: `Thread._bootstrap_inner` catches BaseException, so the trip "
+        "became a warning beside `1 passed` and a test performing real I/O "
+        "shipped with a green proof",
+        since=SINCE_TSN_FIXROUND_6)
+    row(s, "os.environ read forms escaping an armed tier-1 guard (lower=better)",
+        oldp["ENV"], newp["ENV"], newp["ENV"] < oldp["ENV"],
+        "M-a: `.get`/`.copy`/`.pop` are MutableMapping methods bottoming out "
+        "in __getitem__ and never calling os.getenv -- and the FILTER does see "
+        "`os.environ.get(...)`, so the two layers disagreed rather than agreed",
+        since=SINCE_TSN_FIXROUND_6)
+    a, b = colliding_units_credited(old), colliding_units_credited(new)
+    row(s, "tested units credited under a basename collision, -1 on any "
+           "over-credit (higher=better)", a, b, b > a,
+        "N4: path-qualified evidence is unrepresentable for a test sitting "
+        "beside its module, so 105 of this repo's 320 units could not be "
+        "credited at all and four tested ones went back into `ranked`",
+        since=SINCE_TSN_FIXROUND_6)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ── test-safety-net, fix round 7: the exemption scoped to the call it judges ──
+#
+# Same convention as round 6: a tree with no guard/ranker scores the WORST
+# value rather than being skipped, because "no guard ships" is a real state
+# each row measures. The import-control row is the exception and is a GUARD:
+# "nothing blocks a genuine import" is true of a tree with no guard too, so
+# comparing it honestly means requiring the two arms to agree.
+
+_ROUND7_PROBE = r"""
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("BODY:2"); print("IMPORTS:0"); raise SystemExit(0)
+
+tmp = tempfile.mkdtemp()
+seed = os.path.join(tmp, "seed.txt")
+with open(seed, "w") as f:
+    f.write("real bytes on a real disk\n")
+with open(os.path.join(tmp, "bodyio_a.py"), "w") as f:
+    f.write("import pkgutil\nBLOB = pkgutil.get_data('json', '__init__.py')\n")
+with open(os.path.join(tmp, "bodyio_b.py"), "w") as f:
+    f.write("import importlib.machinery\n"
+            "DATA = importlib.machinery.SourceFileLoader('x', %r).get_data(%r)\n"
+            % (seed, seed))
+sys.path.insert(0, tmp)
+
+# F1 -- a module BODY reading a real file through a loader frame. An import is
+# on the stack for the whole of `exec_module`, so a whole-stack scan for the
+# import protocol exempted every one of these. Shape (b) reads a file that is
+# not a module at all, which is why this is not a packaging nicety.
+escapes = 0
+for mod in ("bodyio_a", "bodyio_b"):
+    io_guard.arm(1)
+    try:
+        __import__(mod)
+        escapes += 1
+    except io_guard.IOGuardViolation:
+        pass
+    except BaseException:
+        escapes += 1
+    finally:
+        io_guard.disarm()
+        sys.modules.pop(mod, None)
+print("BODY:%d" % escapes)
+
+# The control, in the direction narrowing the scan could break: a genuine
+# import must never trip. Five first-time routes -- plain, dotted, from-import,
+# importlib, and lazy inside a function.
+io_guard.arm(1)
+blocked = 0
+def _lazy():
+    import difflib
+    return difflib.SequenceMatcher
+for route in (lambda: __import__("wave"),
+              lambda: __import__("xml.sax.saxutils"),
+              lambda: __import__("statistics").mean([1, 3]),
+              lambda: __import__("importlib").import_module("email.headerregistry"),
+              _lazy):
+    try:
+        route()
+    except BaseException:
+        blocked += 1
+io_guard.disarm()
+print("IMPORTS:%d" % blocked)
+"""
+
+
+def check_test_safety_net_round7(old, new):
+    """Four rows: the both-layers miss, its control, and two checks that could
+    not fail."""
+    scratch = tempfile.mkdtemp()
+
+    def round7_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _ROUND7_PROBE, assets],
+                           capture_output=True, text=True, timeout=180)
+        out = {"BODY": 2, "IMPORTS": 0}
+        for line in r.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key in out and value.strip().isdigit():
+                out[key] = int(value)
+        return out
+
+    # F4 fixture: two colliding `utils.py`. `one/` has a real test; `two/`'s
+    # only test STUBS the unit out and mentions it in a comment.
+    f4 = os.path.join(scratch, "f4")
+    for pkg in ("one", "two"):
+        d = os.path.join(f4, pkg)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "utils.py"), "w") as f:
+            f.write("def parse(s):\n    return s.strip()\n")
+    with open(os.path.join(f4, "one", "test_one.py"), "w") as f:
+        f.write("import utils\n\n\ndef test_parse():\n"
+                "    assert utils.parse(' a ') == 'a'\n")
+    with open(os.path.join(f4, "two", "test_two.py"), "w") as f:
+        f.write("from unittest import mock\nimport utils\n\n\n"
+                "# utils.parse is not tested here\n"
+                "def test_stub():\n"
+                "    with mock.patch('utils.parse', return_value='s'):\n"
+                "        assert True\n")
+
+    def credited_on_evidence(tree):
+        """Genuinely-tested colliding units credited, or -1 on ANY over-credit.
+
+        `two/utils.py::parse` has no test: it is patched out and named in a
+        comment. Crediting it hides an untested unit, so -1 is worse than
+        crediting nothing at all.
+        """
+        plan = _tsn_probe(tree, f4)
+        if plan is None:
+            return -1
+        covered = set(plan.get("covered", []))
+        if any(i.startswith("two/utils.py::") for i in covered):
+            return -1
+        return sum(1 for i in covered if i.startswith("one/utils.py::"))
+
+    def inert_plugin_passes_eval(tree):
+        """1 when the tree's own eval still says PASS with a guard that never
+        arms -- the F3 defect, measured by mutating a COPY of the skill."""
+        skill = os.path.join(tree, "test-safety-net")
+        guard = os.path.join(skill, "assets", "io_guard.py")
+        if not os.path.isfile(os.path.join(skill, "eval", "run_eval.py")) \
+                or not os.path.isfile(guard):
+            return 1
+        copy = os.path.join(tempfile.mkdtemp(dir=scratch), "test-safety-net")
+        shutil.copytree(skill, copy)
+        target = os.path.join(copy, "assets", "io_guard.py")
+        with open(target, encoding="utf-8") as f:
+            text = f.read()
+        armed_call = "    arm(_ENV_TIER, _ENV_ALLOW)\n"
+        if armed_call not in text:
+            return 1                       # nothing to make inert: no plugin
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(text.replace(armed_call, "    pass\n", 1))
+        r = subprocess.run([sys.executable,
+                            os.path.join(copy, "eval", "run_eval.py")],
+                           capture_output=True, text=True, timeout=300)
+        return 0 if "EVAL_RESULT: FAIL" in r.stdout else 1
+
+    s = "test-safety-net"
+    oldp, newp = round7_probe(old), round7_probe(new)
+    row(s, "module-body loader reads escaping an armed tier-1 guard "
+           "(lower=better)",
+        oldp["BODY"], newp["BODY"], newp["BODY"] < oldp["BODY"],
+        "F1: `_import_in_progress` scanned to the TOP of the stack, so the "
+        "`_call_with_frames_removed` frame live for the whole of `exec_module` "
+        "exempted EVERY module body -- `pkgutil.get_data` and an arbitrary "
+        "file via `SourceFileLoader.get_data` both read real bytes at tier 1 "
+        "under `1 passed`, and the filter cannot see them either",
+        since=SINCE_TSN_FIXROUND_7)
+    row(s, "genuine import routes blocked while armed (lower=better)",
+        oldp["IMPORTS"], newp["IMPORTS"],
+        newp["IMPORTS"] == oldp["IMPORTS"] == 0,
+        "the control for the row above: narrowing the scan too far declines "
+        "every candidate that imports anything, which is how N1 broke the "
+        "documented command. Plain, dotted, from-import, importlib and lazy "
+        "routes, all first-time", kind="guard")
+    a, b = credited_on_evidence(old), credited_on_evidence(new)
+    row(s, "colliding units credited on real evidence, -1 on any over-credit "
+           "(higher=better)", a, b, b > a,
+        "F4: the same-directory route matched the textual chain `utils.parse`, "
+        "so a `mock.patch(\"utils.parse\")` string -- proof the unit is "
+        "STUBBED -- and a bare comment each credited a unit with no test",
+        since=SINCE_TSN_FIXROUND_7)
+    if shutil.which("pytest"):
+        a, b = inert_plugin_passes_eval(old), inert_plugin_passes_eval(new)
+        row(s, "eval still PASSes with a plugin that never arms (lower=better)",
+            a, b, b < a,
+            "F3: check 34 asserted only that a clean unit passes, so replacing "
+            "the body of `pytest_configure` with `pass` -- a guard doing "
+            "literally nothing under the command the round exists to prove -- "
+            "still gave EVAL_RESULT: PASS. Row emitted only where pytest is "
+            "installed", since=SINCE_TSN_FIXROUND_7)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -935,6 +1745,41 @@ def self_test():
         print("PASS: the default baseline resolves without a hardcoded pin")
     else:
         print("INFO: no merge base here (detached or no main) — SKIP path exercised")
+
+    # Every SINCE_* pin must still be REACHABLE from the integration branch or
+    # HEAD. A rebase or a rebuilt branch gives every commit a new SHA, and the
+    # abandoned object often still exists — so the pin resolves, `_is_ancestor`
+    # quietly returns False, and every row that depends on it misclassifies as
+    # a live delta that cannot move. That is exactly what happened here: the
+    # branch was rebuilt by cherry-pick and a pin kept pointing into the
+    # discarded history, turning 11 settled rows into WORSE/UNPROVEN.
+    # A shallow or partial clone cannot answer "is X an ancestor of Y" for any X:
+    # with no history, `merge-base --is-ancestor` is False for everything, so a
+    # fail-closed check reports EVERY pin as orphaned. That is indistinguishable
+    # from the real bug this test exists to catch, and it is a lie in the more
+    # damaging direction -- it cries wolf on a healthy tree, which trains a
+    # reader to ignore the one time it is right. CI now clones with
+    # fetch-depth: 0 so the check actually runs; this guard is what keeps it
+    # honest anywhere else (a fresh shallow clone, a worktree of one).
+    shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                             cwd=REPO, capture_output=True, text=True)
+    if shallow.stdout.strip() == "true":
+        print("SKIP: since-pin reachability -- shallow clone, no history to "
+              "resolve ancestry against (clone with fetch-depth: 0 to enable)")
+    else:
+        dangling = []
+        for name, val in sorted(globals().items()):
+            if not name.startswith("SINCE_") or not isinstance(val, str):
+                continue
+            if not (_is_ancestor(val, "origin/main") or _is_ancestor(val, "HEAD")):
+                dangling.append("%s=%s" % (name, val))
+        if dangling:
+            print("FAIL: since-pin(s) not reachable from origin/main or HEAD: %s"
+                  % ", ".join(dangling))
+            print("      a rebase or rebuilt branch invalidates a pin without deleting it")
+            rc = 1
+        else:
+            print("PASS: every SINCE_* pin is reachable from the integration branch")
 
     # Every delta row in the shipped corpus must declare `since`, or it can
     # never convert to a guard and will fail the run after it merges.
@@ -1019,6 +1864,11 @@ def main():
         check_spec_planning(old, REPO)
         check_clean_code(old, REPO)
         check_starlight(old, REPO)
+        check_test_safety_net(old, REPO)
+        check_test_safety_net_ranker(old, REPO)
+        check_test_safety_net_guard(old, REPO)
+        check_test_safety_net_round6(old, REPO)
+        check_test_safety_net_round7(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

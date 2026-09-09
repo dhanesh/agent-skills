@@ -78,6 +78,9 @@ Pick the mode that fits the task. Most requests are one of these.
   4. If there is no test covering what you are about to restructure, say so and
      either add one first or keep the change to something you can verify by
      inspection. "There is no test here" is a finding, not a blocker to hide.
+     If `test-safety-net` has run against this repo, its Tier 3/4 seam list
+     names exactly the units it declined to net (and why) — start there
+     instead of rediscovering the same untestable seams by hand.
 
   Without this loop the skill is a style checklist that can silently break
   working code — which is the opposite of its point. Details in

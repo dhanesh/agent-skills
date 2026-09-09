@@ -26,6 +26,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The since-pin reachability self-test in scripts/ab-validate.py asks
+          # whether each SINCE_* commit is an ancestor of origin/main or HEAD.
+          # checkout's default depth-1 clone has no history, so NOTHING is an
+          # ancestor of anything and every pin reads as orphaned. Full history
+          # is also what lets `make ab-validate` resolve a merge-base baseline
+          # rather than skipping.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

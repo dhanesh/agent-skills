@@ -121,6 +121,10 @@ Skipped (already present): <rails the plan found existing, with their commands>
 Follow-ups for the owner: <branch protection, placeholder targets to fill, …>
 ```
 
+The loop now runs, but its `test` rail proves only the smoke test this skill wrote — it does not
+mean the codebase is netted. Point the owner at `test-safety-net` to fill it with real,
+change-detecting tests.
+
 ## Guardrails
 
 - **Read-only until step 2's confirmation** — detection never writes; installs
