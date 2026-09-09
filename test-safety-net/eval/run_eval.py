@@ -711,7 +711,20 @@ def main():
             #    bytes at tier 1. The control below is what keeps the fix from
             #    being "block imports": a real import must still be exempt, or
             #    the guard declines every candidate.
-            pkg_trip, import_ok = None, None
+            #    The SECOND negative arm is the one that matters: the same
+            #    call from a MODULE BODY, i.e. with an import genuinely in
+            #    progress. The exemption used to be scoped to the whole stack,
+            #    so `_call_with_frames_removed` -- live for the whole of
+            #    `exec_module` -- exempted every module body, and the read went
+            #    through at tier 1 while the documented command reported
+            #    `1 passed`. Drawn at the direct call alone, this check passed
+            #    with that hole wide open.
+            body_dir = os.path.join(tmp, "bodyio")
+            write(body_dir, "tsn_eval_bodyio.py",
+                  "import pkgutil\n"
+                  "BLOB = pkgutil.get_data('json', '__init__.py')\n")
+            sys.path.insert(0, body_dir)
+            pkg_trip, body_trip, import_ok = None, None, None
             try:
                 io_guard.arm(1)
                 try:
@@ -722,20 +735,36 @@ def main():
                 except BaseException as exc:            # noqa: BLE001
                     pkg_trip = "wrong type: %r" % (exc,)
                 try:
+                    __import__("tsn_eval_bodyio")
+                    body_trip = ("no exception -- a module body read a real "
+                                 "file while being imported")
+                except io_guard.IOGuardViolation as exc:
+                    body_trip = exc
+                except BaseException as exc:            # noqa: BLE001
+                    body_trip = "wrong type: %r" % (exc,)
+                try:
                     __import__("importlib").import_module("wave")
                     import_ok = True
                 except BaseException as exc:            # noqa: BLE001
                     import_ok = "import blocked: %r" % (exc,)
             finally:
                 io_guard.disarm()
+                sys.modules.pop("tsn_eval_bodyio", None)
+                if body_dir in sys.path:
+                    sys.path.remove(body_dir)
             check("30 NEGATIVE: pkgutil.get_data trips at tier 1 (the _io "
-                  "layer), while a real import stays exempt",
+                  "layer) both directly and from a module body being "
+                  "imported, while a real import stays exempt",
                   isinstance(pkg_trip, io_guard.IOGuardViolation)
                   and pkg_trip.group == "filesystem"
+                  and isinstance(body_trip, io_guard.IOGuardViolation)
+                  and body_trip.group == "filesystem"
                   and import_ok is True,
-                  "trip=%s import=%s"
+                  "trip=%s body=%s import=%s"
                   % (pkg_trip if isinstance(pkg_trip, str)
-                     else pkg_trip.target, import_ok))
+                     else pkg_trip.target,
+                     body_trip if isinstance(body_trip, str)
+                     else body_trip.target, import_ok))
 
             # 31 NEGATIVE: a violation raised on a worker thread. The thread
             #    bootstrap catches BaseException, so this used to become a
@@ -834,6 +863,19 @@ def main():
         #    print. A SUBPROCESS invocation needs no import here, so the path
         #    is graded whenever pytest is installed and reported as ungraded
         #    when it is not. `assets/test_io_guard.py` runs the same commands.
+        #
+        #    TWO arms, because the positive one alone cannot fail for the
+        #    reason that matters: replacing the body of `pytest_configure`
+        #    with `pass` -- a plugin that loads and arms NOTHING -- still made
+        #    every documented command exit 0 and print `1 passed`, so this
+        #    check could not tell a working guard from an inert one. The
+        #    NEGATIVE arm runs the same extracted commands over a unit that
+        #    really does I/O and requires them to fail with the guard's own
+        #    type. Its violation is `network` (constructing a socket, no
+        #    connection attempted, offline-safe) because that group is
+        #    UNCONTROLLABLE: it is blocked at tier 1 and at tier 2 alike, so
+        #    one fixture holds for every documented command including the
+        #    `TEST_SAFETY_NET_ALLOW=filesystem,clock` ones.
         pytest_present = subprocess.run(
             [sys.executable, "-c", "import pytest"],
             capture_output=True, text=True).returncode == 0
@@ -845,6 +887,12 @@ def main():
             write(proof, "test_pure.py",
                   "import pure\n\n\ndef test_add():\n"
                   "    print('captured')\n    assert pure.add(2, 3) == 5\n")
+            write(proof, "leaky.py",
+                  "import socket\n\n\ndef resolve():\n"
+                  "    return socket.socket() is not None\n")
+            write(proof, "test_leaky.py",
+                  "import leaky\n\n\ndef test_resolve():\n"
+                  "    assert leaky.resolve()\n")
             commands = []
             for label, text in (("SKILL.md", skill_text),
                                 ("references/triage.md", triage_text),
@@ -861,25 +909,35 @@ def main():
             if not commands:
                 doc_fail.append("no documented invocation found to run")
             for label, command in commands:
-                cmd = command.replace("<path>::<test_name>",
-                                      "test_pure.py::test_add")
                 env = dict(os.environ, SKILL_DIR=SKILL)
                 env.pop("PYTHONPATH", None)
                 env.pop("TEST_SAFETY_NET_TIER", None)
                 env.pop("TEST_SAFETY_NET_ALLOW", None)
-                run = subprocess.run(
-                    ["/bin/sh", "-c", cmd + " -q -p no:cacheprovider"],
-                    cwd=proof, env=env, capture_output=True, text=True,
-                    timeout=120)
-                if run.returncode != 0 or "1 passed" not in run.stdout:
-                    doc_fail.append("%s: %s -> %s"
-                                    % (label, cmd,
-                                       (run.stdout + run.stderr).strip()[-200:]))
+                for target, expect in (("test_pure.py::test_add", "pass"),
+                                       ("test_leaky.py::test_resolve",
+                                        "trip")):
+                    cmd = command.replace("<path>::<test_name>", target)
+                    run = subprocess.run(
+                        ["/bin/sh", "-c", cmd + " -q -p no:cacheprovider"],
+                        cwd=proof, env=env, capture_output=True, text=True,
+                        timeout=120)
+                    output = run.stdout + run.stderr
+                    if expect == "pass":
+                        ok = run.returncode == 0 and "1 passed" in run.stdout
+                    else:
+                        ok = (run.returncode != 0
+                              and "IOGuardViolation" in output
+                              and "1 passed" not in run.stdout)
+                    if not ok:
+                        doc_fail.append("%s [%s]: %s -> %s"
+                                        % (label, expect, cmd,
+                                           output.strip()[-200:]))
         check("34 the DOCUMENTED `pytest -p io_guard` command, extracted from "
-              "each document and run verbatim, passes cleanly",
+              "each document and run verbatim, passes a clean unit AND fails "
+              "a unit that really does I/O (so an inert plugin cannot pass)",
               not doc_fail,
               "; ".join(doc_fail) if doc_fail else
-              ("%d command(s)" % len(commands) if pytest_present
+              ("%d command(s), each run twice" % len(commands) if pytest_present
                else "NOT GRADED HERE: pytest is not installed in this "
                     "environment; assets/test_io_guard.py grades it where it is"))
 
