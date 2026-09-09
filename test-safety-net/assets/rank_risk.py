@@ -45,12 +45,21 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
                                                  a name, or "" (unnameable)
 
   grammar
-    module_bindings(module, text) -> (aliases, names)
+    module_bindings(module, text, *, src_rel, ref_rel) -> (aliases, names)
                                                  what `text` binds for
                                                  `module` by an actual import
-    reached_through_module(module, name, text) -> bool
+    reached_through_module(module, name, text, *, src_rel, ref_rel) -> bool
                                                  does `text` CALL `name`
                                                  through such an import?
+                                                 Both are given the DEFINING
+                                                 file and the REFERENCING one:
+                                                 a language whose imports name
+                                                 a path (`from "../utils"`)
+                                                 cannot resolve one without
+                                                 both, and matching a
+                                                 specifier's last segment
+                                                 instead credits every
+                                                 same-named file in the repo.
 
   analysis
     discover_units(root) -> (units, path)        the units, plus WHICH
@@ -495,7 +504,9 @@ def already_covered(root: str, units, stack=None) -> dict:
                 if qualified is not None and qualified.search(text):
                     pass                          # path-qualified: unambiguous
                 elif (stack.is_test_for(rel, u["path"])
-                        and stack.reached_through_module(module, u["name"], text)
+                        and stack.reached_through_module(
+                            module, u["name"], text,
+                            src_rel=u["path"], ref_rel=rel)
                         and not any(r.search(text) for r in rivals)):
                     pass                          # positioned as its test, and imports it
                 else:

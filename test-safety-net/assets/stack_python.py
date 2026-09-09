@@ -184,8 +184,19 @@ def preceding_qualifier(text: str, start: int):
 
 # ── Import/binding grammar ───────────────────────────────────────────────
 
-def module_bindings(module: str, text: str) -> tuple:
+def module_bindings(module: str, text: str, *, src_rel: str, ref_rel: str) -> tuple:
     """(aliases, names) the file binds for `module` by an actual import.
+
+    `src_rel` is the file that DEFINES the module; `ref_rel` is the file
+    `text` was read from. Python needs neither: an `import` statement names a
+    module by exactly the bare token `module_of` returns, so the token is the
+    whole question and this implementation ignores both paths. They are in the
+    signature for the stacks whose import statements name a PATH instead --
+    node's `from "../utils"` is only resolvable against the referencing file's
+    own directory, and a stack that could not see it would be reduced to
+    comparing a specifier's last segment, which cannot tell `../utils` from
+    any other `utils` in the repo. Passing them is therefore the core's job,
+    not a stack's to reconstruct.
 
     `aliases` are the names the module object itself is bound to
     (`import harvest` -> "harvest"; `import harvest as H` -> "H"); `names` are
@@ -230,8 +241,15 @@ def module_bindings(module: str, text: str) -> tuple:
     return tuple(sorted(aliases)), tuple(sorted(names))
 
 
-def reached_through_module(module: str, name: str, text: str) -> bool:
+def reached_through_module(module: str, name: str, text: str, *,
+                           src_rel: str, ref_rel: str) -> bool:
     """True when `text` CALLS `name` through an import of `module`.
+
+    `src_rel` (the defining file) and `ref_rel` (the file `text` came from)
+    are ignored here for the reason `module_bindings` records: Python's import
+    statements name the bare module token, so the paths add nothing. A stack
+    with path specifiers resolves them against `ref_rel` and compares to
+    `src_rel`.
 
     The call site is the point (fix round 7). Matching the chain `module.name`
     alone credited `mock.patch("harvest.collect")` — evidence that the unit was
@@ -241,7 +259,7 @@ def reached_through_module(module: str, name: str, text: str) -> bool:
     credited units on this repo, byte-identical evidence files, before and
     after) and closes both.
     """
-    aliases, names = module_bindings(module, text)
+    aliases, names = module_bindings(module, text, src_rel=src_rel, ref_rel=ref_rel)
     called = re.compile(r"(?<![A-Za-z0-9_.])%s[ \t]*\(" % re.escape(name))
     if name in names and called.search(text):
         return True
