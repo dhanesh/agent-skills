@@ -123,9 +123,11 @@ Pure path algebra over `__file__` (`os.path.join`/`dirname`/`basename`/`abspath`
 `HERE = os.path.dirname(os.path.abspath(__file__))` is the commonest module-level statement there
 is. Re-measured 2026-09-09 (fix round 6), because the original figure ("138 of this repo's own 305
 units") did not reproduce at any tree: re-running `triage` over this repo with
-`IMPORT_TIME_INERT = ()` moves **80 of 320** units out of the net (239 nettable with the exemption,
+`IMPORT_TIME_INERT = ()` moves **80 of 321** units out of the net (239 nettable with the exemption,
 159 without). The method is given alongside the number because the number moves as the repo does,
-and an unreproducible measurement is worse than none. Inertness is judged per
+and an unreproducible measurement is worse than none: every denominator on this page is
+`units_discovered` from `python3 test-safety-net/assets/rank_risk.py .`, re-measured at fix round
+7's HEAD (it read 320 one commit earlier, which is how stale it gets and how fast). Inertness is judged per
 CALL, not per marker, so `os.path.exists` (a real stat) still floors while `os.path.join` does
 not, and the exemption applies ONLY to the import-time scan: inside a function body `os.path.join`
 still marks a unit Tier 2.
@@ -306,6 +308,21 @@ on the receiving side.
       `os.environ` marker DOES see `os.environ.get(...)`, so the layers did not agree — the filter
       tiered such a unit 2 while the guard said nothing. What remains uncovered is stated in
       `references/triage.md`: `len(...)`, `in`, and `os.environb`.
+
+   **Amended 2026-09-09 (fix round 7) — the import exemption is scoped to the call it judges.**
+   Item 3 above closed only half the hole. The predicate walked the stack to the TOP looking for
+   an import protocol frame, so it answered "is an import happening anywhere below me?" rather
+   than "is THIS machinery frame running for an import?". Every module body answers the first yes
+   — `_call_with_frames_removed` is live for the whole of `exec_module` — so a module body calling
+   `pkgutil.get_data(...)`, or `SourceFileLoader("x", "/etc/hosts").get_data(...)` for an
+   arbitrary file, was exempted at Tier 1 and the documented command reported `1 passed` while
+   real bytes came off disk. The filter tiers such a unit 1 as well (its import-time floor is
+   scoped to the analysed file's own body, so a read inside a module it merely imports is
+   invisible to it), so this was a BOTH-LAYERS miss — the one shape the filter/guard split exists
+   to prevent. The scan now stops at the first frame that is neither `<frozen ...>` nor a library
+   frame, i.e. at the caller. Genuine imports are unaffected: for `import x`, `from x import y`,
+   `importlib.import_module`, lazy imports inside a function, packages and zipimport alike, the
+   protocol frames sit inside the machinery below any user frame, and are reached first.
 3. **Never ships an unproven test.** A test that did not go red is discarded and listed under
    *could not prove*.
 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the report.
@@ -330,12 +347,18 @@ Stdlib + git only. No MCP, no network, no third-party packages. Emits determinis
   under-crediting costs a redundant test. Round 4 closed an over-credit (a bare basename crediting
   a colliding sibling's unit) by demanding path-qualified evidence — which the dominant Python
   idiom, a test file beside the module doing `import x`, can never produce, so under a collision
-  correct evidence became UNREPRESENTABLE: 105 of this repo's 320 units, credited 0. Round 6 adds
+  correct evidence became UNREPRESENTABLE: 105 of this repo's 321 units, credited 0. Round 6 adds
   one further route and only one: the test file is in the same directory as the defining file AND
   reaches the unit through an import of that module (`import x` + `x.name`, `import x as y` +
   `y.name`, `from x import name`). That predicate is stronger than the bare-name match used
   elsewhere, because the weaker form credited two `::main` units to files whose only `main` was
-  `unittest.main()`. Repo-wide effect: 122 → 126 credited, none lost.
+  `unittest.main()`. Repo-wide effect: 122 → 126 credited, none lost. Narrowed 2026-09-09 (fix
+  round 7): that route must see a CALL SITE (`x.name(`), because matching the textual chain alone
+  credited `mock.patch("x.name")` — which proves the unit was stubbed out, the opposite of
+  coverage — and a `# x.name` comment, so a colliding unit with no test could read as covered.
+  Repo-wide effect: none (126 credited, byte-identical evidence), which is the point. What
+  remains, and is not claimed away: a call-SHAPED mention in a comment or docstring still counts,
+  the same text-not-call-graph residue Reference counting declares below.
 - **Score** — `(normalised churn + 1) × (normalised inbound refs + 1) − 1`; ties broken by unit
   `id` (`path::name`). Corrected 2026-09-09 (fix round 6) from "normalised churn × normalised
   inbound refs; ties broken by path sort", which was wrong in both halves. The `+1` floor is

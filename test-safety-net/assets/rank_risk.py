@@ -250,11 +250,21 @@ def _module_bindings(module: str, text: str) -> tuple:
     A test file beside `harvest.py` that says `import harvest` and also
     contains the token `main` — because it ends with `unittest.main()`, or
     calls a DIFFERENT module's `main` through an alias — must not credit
-    `harvest.py::main`, which has no test at all. Requiring the unit's name to
-    be reached THROUGH the module's own binding is what makes the recovered
-    evidence exact instead of merely more generous. Measured on this repo: the
+    `harvest.py::main`, which has no test at all. Measured on this repo: the
     weaker form credited 6 units, 2 of them (`::main` twice) false; this form
     credits exactly the 4 genuine ones.
+
+    What that buys is NARROWER evidence, not exact evidence, and the
+    difference matters in the over-credit direction. Two things it does rule
+    out, both measured: a bare token that the module never supplies, and — via
+    `_reached_through_module`'s call-site requirement — a `mock.patch(
+    "harvest.collect")` string or a `# harvest.collect` comment, each of which
+    named the binding while proving nothing (the patch string proves the
+    opposite: the unit is stubbed out). What it does NOT rule out is a
+    call-SHAPED mention in a comment or a docstring: like every other
+    predicate here, this one reads text, not a call graph, and the file says
+    so under Reference counting. That residue is parity with the rest of the
+    file, not a new class of error.
     """
     aliases, names = set(), set()
     esc = re.escape(module)
@@ -274,11 +284,21 @@ def _module_bindings(module: str, text: str) -> tuple:
 
 
 def _reached_through_module(module: str, name: str, text: str) -> bool:
-    """True when `text` reaches `name` through an import of `module`."""
+    """True when `text` CALLS `name` through an import of `module`.
+
+    The call site is the point (fix round 7). Matching the chain `module.name`
+    alone credited `mock.patch("harvest.collect")` — evidence that the unit was
+    replaced by a stub, i.e. the opposite of coverage — and a `# harvest.collect`
+    comment, so under a basename collision a unit with no test at all could
+    read as covered. Requiring `(` after the name costs nothing measured (126
+    credited units on this repo, byte-identical evidence files, before and
+    after) and closes both.
+    """
     aliases, names = _module_bindings(module, text)
-    if name in names:
+    called = re.compile(r"(?<![A-Za-z0-9_.])%s[ \t]*\(" % re.escape(name))
+    if name in names and called.search(text):
         return True
-    return any(re.search(r"(?<![A-Za-z0-9_.])%s[ \t]*\.[ \t]*%s\b"
+    return any(re.search(r"(?<![A-Za-z0-9_.])%s[ \t]*\.[ \t]*%s[ \t]*\("
                          % (re.escape(alias), re.escape(name)), text)
                for alias in aliases)
 
@@ -1039,7 +1059,7 @@ def already_covered(root: str, units) -> dict:
     beside the module it imports — `assets/test_ledger.py` doing
     `sys.path.insert(0, dirname(__file__)); import harvest` — can never emit
     the string `context-hygiene-kit.assets.harvest`, so under a collision
-    CORRECT evidence had no way to be seen. Measured on this repo: 105 of 320
+    CORRECT evidence had no way to be seen. Measured on this repo: 105 of 321
     units live in a colliding-basename file and the round-4 rule credited
     exactly ZERO of them, which put four genuinely-tested units back into
     `ranked` — one of them at the top, sending the user to write a test for a
@@ -1051,11 +1071,15 @@ def already_covered(root: str, units) -> dict:
     is in the SAME DIRECTORY as the defining file, and reaches the unit THROUGH
     an import of that module — `import harvest` then `harvest.<name>`,
     `import harvest as H` then `H.<name>`, or `from harvest import <name>`
-    (`_reached_through_module`). Note what that is not: it is not the bare
-    whole-identifier match used elsewhere here. The weaker form would credit
-    `harvest.py::main` to a file whose only `main` is `unittest.main()` — 2 of
-    6 recovered units were exactly that — so the same-directory route uses the
-    stronger predicate and recovers 4 units, all genuine.
+    (`_reached_through_module`), AT A CALL SITE. Note what that is not: it is
+    not the bare whole-identifier match used elsewhere here. The weaker form
+    would credit `harvest.py::main` to a file whose only `main` is
+    `unittest.main()` — 2 of 6 recovered units were exactly that — so the
+    same-directory route uses the stronger predicate and recovers 4 units, all
+    genuine. The call-site half was added in round 7: without it,
+    `mock.patch("harvest.collect")` and a `# harvest.collect` comment both
+    credited a unit that has no test, which is over-credit in the route this
+    fix opened.
 
     The cross-directory over-credit round 4 closed stays closed, because the
     colliding sibling is by definition in a different directory. And the one

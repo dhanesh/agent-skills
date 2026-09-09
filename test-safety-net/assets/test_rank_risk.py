@@ -1056,7 +1056,7 @@ class TestAlreadyCovered(TempRepo):
         # under a collision -- but the dominant Python idiom, a test file
         # beside the module doing `import harvest`, can never emit the string
         # `pkg/assets/harvest`. So correct evidence was UNREPRESENTABLE, not
-        # merely discounted: measured on this repo, 105 of 320 units live in a
+        # merely discounted: measured on this repo, 105 of 321 units live in a
         # colliding-basename file and the rule credited exactly 0 of them,
         # putting four genuinely-tested units back into `ranked`.
         write(self.root, "one/assets/harvest.py",
@@ -1134,6 +1134,63 @@ class TestAlreadyCovered(TempRepo):
         cov = rank_risk.already_covered(self.root, units)
         self.assertIn("one/assets/harvest.py::collect", cov)
         self.assertNotIn("one/assets/harvest.py::main", cov)
+
+    def test_a_mock_patch_string_beside_the_module_is_not_evidence(self):
+        # NEGATIVE (fix round 7). `mock.patch("harvest.collect")` names the
+        # module binding textually while proving the OPPOSITE of coverage: the
+        # unit is replaced by a stub for the duration of the test. Crediting it
+        # hid a unit with no test at all behind a basename collision, which is
+        # the over-credit direction this file calls never acceptable.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n\n\ndef tally():\n    return 2\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n\n\ndef tally():\n    return 3\n")
+        write(self.root, "one/assets/test_one.py",
+              "import unittest\nfrom unittest import mock\nimport harvest\n\n\n"
+              "class T(unittest.TestCase):\n"
+              "    def test_stub(self):\n"
+              "        with mock.patch('harvest.collect', return_value='s'):\n"
+              "            self.assertTrue(True)\n\n"
+              "    def test_tally(self):\n"
+              "        self.assertEqual(harvest.tally(), 2)\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::tally"),
+                         "one/assets/test_one.py")
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+
+    def test_a_commented_mention_beside_the_module_is_not_evidence(self):
+        # NEGATIVE (fix round 7), the other half: a bare `harvest.collect` in
+        # prose is a mention, not a use.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "import harvest\n\n\n"
+              "# TODO: harvest.collect still has no test\n"
+              "def test_nothing():\n    assert True\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertNotIn("one/assets/harvest.py::collect", cov)
+
+    def test_a_stubbed_unit_that_is_also_really_called_stays_credited(self):
+        # The control for the two above: requiring a CALL SITE must not cost a
+        # genuine test that also patches the same name somewhere.
+        write(self.root, "one/assets/harvest.py",
+              "def collect():\n    return 1\n")
+        write(self.root, "two/assets/harvest.py",
+              "def collect():\n    return 2\n")
+        write(self.root, "one/assets/test_one.py",
+              "from unittest import mock\nimport harvest\n\n\n"
+              "def test_c():\n"
+              "    with mock.patch('harvest.collect', return_value=9):\n"
+              "        pass\n"
+              "    assert harvest.collect() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("one/assets/harvest.py::collect"),
+                         "one/assets/test_one.py")
 
     def test_a_from_import_beside_the_module_is_evidence(self):
         write(self.root, "one/assets/harvest.py",
