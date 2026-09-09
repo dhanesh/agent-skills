@@ -8,6 +8,7 @@ the output, so this runs anywhere the repo does.
 from __future__ import annotations
 
 import ast
+import collections
 import os
 import re
 import subprocess
@@ -78,25 +79,32 @@ def discover_units(root: str):
 def churn(root: str, since: str = "6 months ago") -> dict:
     """Commits touching each repo-relative path within the window.
 
-    Exact where git is present, and the best available proxy for "what a person
-    keeps changing" — which is what an agent will touch next. Absent git or
-    history, returns {} rather than raising: churn is one signal of two, and a
-    tarball checkout must still get a ranking.
+    The best available proxy for "what a person keeps changing" — which is
+    what an agent will touch next — but not exact. It uses `-z` so a path
+    containing a quote or non-ASCII byte comes back raw instead of git's
+    default C-quoted escaping (which would otherwise fail to match the plain
+    path `iter_py_files` produces, silently reading that file's churn as 0).
+    It also inherits git's default rename detection: a renamed file's history
+    is attributed to its new path only, so pre-rename commits are not counted
+    there. Absent git or history, returns {} rather than raising: churn is one
+    signal of two, and a tarball checkout must still get a ranking.
     """
     try:
         r = subprocess.run(
-            ["git", "log", "--format=", "--name-only", f"--since={since}"],
+            ["git", "log", "--format=", "--name-only", "-z", f"--since={since}"],
             cwd=root, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return {}
     if r.returncode != 0:
         return {}
     counts: dict = {}
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line:
-            counts[line] = counts.get(line, 0) + 1
+    for part in r.stdout.split("\0"):
+        if part:
+            counts[part] = counts.get(part, 0) + 1
     return counts
+
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def inbound_refs(root: str, units) -> dict:
@@ -107,15 +115,23 @@ def inbound_refs(root: str, units) -> dict:
     dynamic `getattr(mod, name)` call does not. A real call graph would do this
     better — the report says so and names it as an optional upgrade — but
     requiring one would make the skill undeployable in the repos that need it most.
+
+    Each file's identifiers are tokenised once into a per-file Counter, summed
+    into a global Counter; a unit's count is the global total for its name minus
+    that name's count in the unit's own defining file. This is O(total bytes +
+    units) rather than O(units x total bytes) — the naive per-unit regex scan
+    does not survive on a repo with thousands of units.
     """
-    texts = {rel: read_text(root, rel) for rel in iter_py_files(root, include_tests=True)}
+    per_file_counts = {}
+    global_counts: collections.Counter = collections.Counter()
+    for rel in iter_py_files(root, include_tests=True):
+        text = read_text(root, rel)
+        counter = collections.Counter(_IDENTIFIER_RE.findall(text))
+        per_file_counts[rel] = counter
+        global_counts.update(counter)
+
     counts = {}
     for u in units:
-        pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
-        total = 0
-        for rel, text in texts.items():
-            if rel == u["path"]:
-                continue                  # never count a unit's own definition site
-            total += len(pattern.findall(text))
-        counts[u["id"]] = total
+        own_file_count = per_file_counts.get(u["path"], {}).get(u["name"], 0)
+        counts[u["id"]] = global_counts.get(u["name"], 0) - own_file_count
     return counts

@@ -77,6 +77,25 @@ class TestChurn(TempRepo):
         write(self.root, "a.py", "def a():\n    pass\n")
         self.assertEqual(rank_risk.churn(self.root), {})
 
+    def test_counts_a_filename_containing_a_quote(self):
+        # git C-quotes filenames with a quote, backslash, or non-ASCII byte in
+        # its default `--name-only` output (e.g. `"quo\"te.py"`); without `-z`
+        # that quoted key never matches the plain path iter_py_files produces,
+        # and the file's churn silently reads as 0.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        rel = 'quo"te.py'
+        try:
+            write(self.root, rel, "def a():\n    pass\n")
+        except OSError:
+            self.skipTest("filesystem rejects quote in filename")
+        git(self.root, "add", "-A")
+        r = git(self.root, "commit", "-qm", "1")
+        if r.returncode != 0:
+            self.skipTest("git rejects quote in filename")
+        c = rank_risk.churn(self.root)
+        self.assertEqual(c.get(rel), 1)
+
 
 class TestInboundRefs(TempRepo):
     def test_counts_references_outside_the_defining_file(self):
