@@ -406,6 +406,29 @@ UNCONTROLLABLE = {
                    "os.fork", "os.forkpty"),
 }
 
+# Call targets that are PURE COMPUTATION even though they sit under a marker
+# prefix. Used ONLY when deciding whether a module does I/O at IMPORT time
+# (`_analyze_file`), never when tiering a unit — inside a function body
+# `os.path.join` still marks the unit as filesystem-adjacent Tier 2, which is
+# the pre-existing, tested behaviour.
+#
+# Why the exception exists: `HERE = os.path.dirname(os.path.abspath(__file__))`
+# is the commonest module-level statement there is, and it touches nothing —
+# it is string algebra over `__file__`. Flooring on it moved 138 of this
+# repo's own 305 units out of the net, which is the same over-flagging
+# `_is_main_guard` exists to prevent. Inertness is judged per CALL, not per
+# marker, so `os.path.exists` (a real stat) still floors while `os.path.join`
+# does not.
+IMPORT_TIME_INERT = ("os.path.join", "os.path.dirname", "os.path.basename",
+                     "os.path.abspath", "os.path.normpath", "os.path.split",
+                     "os.path.splitext", "os.path.relpath")
+
+
+def _drop_inert(targets):
+    """`targets` minus the calls that perform no I/O at import time."""
+    return [t for t in targets
+            if not any(t == i or t.startswith(i + ".") for i in IMPORT_TIME_INERT)]
+
 
 def _import_alias_map(tree):
     """Local name -> canonical dotted path, from this MODULE's top-level
@@ -747,7 +770,7 @@ def _unambiguous_methods(tree):
 
 
 def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs,
-                local_classes, local_methods, visited):
+                local_classes, local_methods, visited, drop_inert=False):
     """Direct marker hits for `own_targets`, plus (recursively) hits from
     same-module callables any of `own_candidates` might reach — so a thin
     wrapper, a module-level `_boot()` call, or a `.fetch(...)` method
@@ -768,7 +791,15 @@ def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs,
     same-module callable name (`function`, or `Class.method`) the hit was
     reached through, or None when the marker sits directly in the scanned
     region.
+
+    `drop_inert` is set only by the import-time scan: it strips the calls that
+    are pure computation despite matching a marker prefix (see
+    `IMPORT_TIME_INERT`), at every level of the chase, so a module-level
+    `_HERE = _locate()` whose helper only joins paths does not read as
+    import-time I/O.
     """
+    if drop_inert:
+        own_targets = _drop_inert(own_targets)
     hits = [(g, m, c, None) for g, m, c in _markers(own_targets)]
     for qualified in sorted(set(own_candidates)):
         if qualified in local_funcs and qualified not in visited:
@@ -782,13 +813,15 @@ def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs,
                                                        callee_class)
             for g, m, c, _via in _hits_from(callee_targets, callee_candidates,
                                              module_alias_map, local_funcs,
-                                             local_classes, local_methods, visited):
+                                             local_classes, local_methods, visited,
+                                             drop_inert):
                 hits.append((g, m, c, qualified))
     return hits
 
 
 _FileAnalysis = collections.namedtuple(
-    "_FileAnalysis", "tree alias_map local_funcs local_classes local_methods tier4")
+    "_FileAnalysis",
+    "tree alias_map local_funcs local_classes local_methods tier4 import_floor")
 
 
 @functools.lru_cache(maxsize=None)
@@ -808,7 +841,8 @@ def _analyze_file(root, rel):
         tree = ast.parse(text)
     except SyntaxError:
         return _FileAnalysis(None, None, None, None, None,
-                              (4, "file does not parse; nothing in it can be pinned"))
+                              (4, "file does not parse; nothing in it can be pinned"),
+                              None)
 
     alias_map = _import_alias_map(tree)
     local_funcs = _local_callables(tree)
@@ -818,7 +852,8 @@ def _analyze_file(root, rel):
     mod_hits = _hits_from(_call_targets(regions, alias_map),
                            _callable_candidates(regions, alias_map, local_classes,
                                                  local_methods, None),
-                           alias_map, local_funcs, local_classes, local_methods, set())
+                           alias_map, local_funcs, local_classes, local_methods, set(),
+                           drop_inert=True)
     uncontrollable_mod = [h for h in mod_hits if not h[2]]
     tier4 = None
     if uncontrollable_mod:
@@ -828,8 +863,27 @@ def _analyze_file(root, rel):
                          f"({marker}); not reachable")
         else:
             tier4 = (4, f"module does {group} I/O at import time ({marker}); not reachable")
+    # Import-time CONTROLLABLE I/O floors every unit in the file at Tier 3.
+    # `_CFG = json.load(open("/etc/app/config.json"))` was reported Tier 1
+    # "directly callable", which is wrong twice: importing the module performs
+    # real file I/O, so the harness takes an IOError on `import cfg` before a
+    # single test body runs, and the routine Tier 2 controls (a temp dir, a
+    # frozen clock) live in FIXTURES, which the spec notes run strictly AFTER
+    # the module under test is imported. A boundary already crossed at import
+    # cannot be controlled from one -- so per the spec's tier table this is
+    # "no honest boundary without adding code": Tier 3, needs a seam (make the
+    # load lazy). It is also the tier the runtime guard reclassifies to when it
+    # trips at import, so filter and guard now agree instead of disagreeing.
+    controllable_mod = [h for h in mod_hits if h[2]]
+    import_floor = None
+    if controllable_mod:
+        group, marker, _, via = controllable_mod[0]
+        via_txt = f" via {via}" if via else ""
+        import_floor = (3, f"module does {group} I/O at import time{via_txt} "
+                            f"({marker}); a fixture runs too late to control it — "
+                            f"needs a seam")
     return _FileAnalysis(tree, alias_map, local_funcs, local_classes,
-                          local_methods, tier4)
+                          local_methods, tier4, import_floor)
 
 
 def already_covered(root: str, units) -> dict:
@@ -952,6 +1006,8 @@ def triage(root: str, unit) -> tuple:
                        analysis.local_funcs, analysis.local_classes,
                        analysis.local_methods, {unit["name"]})
 
+    if analysis.import_floor is not None:
+        return analysis.import_floor      # floors every unit in the file
     if not hits:
         return 1, "no I/O markers; directly callable"
     uncontrollable = [h for h in hits if not h[2]]

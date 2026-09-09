@@ -329,6 +329,83 @@ class TestTriage(TempRepo):
         self.assertEqual(tier, 4)
         self.assertIn("import time", reason)
 
+    def test_import_time_file_read_floors_every_unit_in_the_file(self):
+        # FIX round 4 (I5): `_CFG = json.load(open("/etc/app/config.json"))`
+        # runs at IMPORT. The unit read as Tier 1 "directly callable", which is
+        # wrong twice over: the harness takes an IOError on `import cfg` before
+        # any test body runs, and a fixture cannot control a boundary that was
+        # crossed before the fixture existed. Floored to Tier 3 -- the tier the
+        # runtime guard would itself reclassify it to when it trips at import.
+        tier, reason = self._tier(
+            "cfg.py",
+            'import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def get_timeout():\n    return _CFG['timeout'] * 2\n",
+            "get_timeout")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+        self.assertIn("filesystem", reason)
+
+    def test_import_time_io_also_floors_a_unit_that_would_be_tier_2(self):
+        # It is a FLOOR, not a tier-1 special case: a unit doing its own
+        # controllable I/O still cannot be pinned while importing its module
+        # does uncontrolled I/O first.
+        tier, reason = self._tier(
+            "cfg2.py",
+            'import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def load(path):\n    with open(path) as f:\n        return f.read()\n",
+            "load")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_import_time_env_read_floors_the_tier(self):
+        # `os.environ.get(...)` at module level reads process state at import;
+        # a fixture setting the variable afterwards is too late. (The bare
+        # subscript form `os.environ["HOME"]` stays invisible here: markers
+        # match a CALL's resolved target throughout this tool, deliberately, so
+        # that a data literal spelling a marker is not read as behaviour. That
+        # is a pre-existing boundary of `_markers`, not of the floor.)
+        tier, reason = self._tier(
+            "envcfg.py",
+            'import os\nHOME = os.environ.get("HOME", "/")\n\n\n'
+            "def where():\n    return HOME\n",
+            "where")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_import_time_path_algebra_does_not_floor_the_tier(self):
+        # THE control. `HERE = os.path.dirname(os.path.abspath(__file__))` is
+        # the single commonest module-level statement in this repo -- and it
+        # performs no I/O at all: it is string manipulation over `__file__`.
+        # Flooring on it would have moved 138 of this repo's own 305 units out
+        # of the net, the same over-flagging `_is_main_guard` was added to stop.
+        tier, reason = self._tier(
+            "paths.py",
+            "import os\nHERE = os.path.dirname(os.path.abspath(__file__))\n\n\n"
+            "def rel(name):\n    return name\n",
+            "rel")
+        self.assertEqual(tier, 1)
+
+    def test_import_time_path_probe_does_floor_the_tier(self):
+        # The other side of that control: `os.path.exists` is not path algebra,
+        # it stats the filesystem. Inertness is per CALL, not per marker.
+        tier, reason = self._tier(
+            "probe.py",
+            'import os\nFOUND = os.path.exists("/etc/app/config.json")\n\n\n'
+            "def ok():\n    return FOUND\n",
+            "ok")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_import_time_io_inside_the_main_guard_does_not_floor_the_tier(self):
+        # The main-guard exclusion must apply to the new floor too -- that body
+        # does not run on import.
+        tier, reason = self._tier(
+            "cli.py",
+            "def go(p):\n    return p\n\n\n"
+            "if __name__ == '__main__':\n    print(open('/etc/hosts').read())\n",
+            "go")
+        self.assertEqual(tier, 1)
+
     def test_module_level_data_naming_a_marker_is_not_import_time_io(self):
         # A module-level allowlist that MENTIONS a driver is data, not behaviour.
         # Reading it as I/O condemned every unit in the file to tier 4 and
