@@ -203,6 +203,73 @@ class TestInboundRefs(TempRepo):
         self.assertEqual(refs["alpha.py::helper"], 2)   # import + call, both in caller.py
         self.assertEqual(refs["beta.py::helper"], 0)
 
+    def test_attribute_call_on_a_foreign_receiver_is_not_a_reference(self):
+        # FIX round 4 (I4): `user.py` imports `sink`, so it joins sink's
+        # reference-file list -- and its three `buf.write(...)` calls on an
+        # io.StringIO were counted as references to `sink.py::write`, which has
+        # ZERO callers. The zero-caller unit outranked the one with a real
+        # caller. `X.name` where X is not the unit's own module must not count.
+        write(self.root, "sink.py",
+              "def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+        write(self.root, "user.py",
+              "import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+              "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+              "    return sink.other()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 0)
+        self.assertEqual(refs["sink.py::other"], 1)   # `sink.other()` names the module
+
+    def test_module_qualified_and_bare_forms_still_count(self):
+        # The control for the test above: the three forms that DO name the unit
+        # must survive -- `from mod import name`, a bare `name(...)` call, and
+        # `mod.name(...)`. Killing attribute counting outright would zero the
+        # commonest real caller shape there is.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "a.py", "from sink import write\nwrite('x')\n")
+        write(self.root, "b.py", "import sink\nsink.write('y')\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 3)   # import + bare call + mod.name
+
+    def test_unresolvable_receiver_attribute_is_not_a_reference(self):
+        # `make_buffer().write(...)` -- the receiver is a call result, not a
+        # name, so nothing says it is the unit's module. Not counted.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "user.py",
+              "import sink\n\n\ndef emit(mk):\n    return mk().write('a')\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["sink.py::write"], 0)
+
+    def test_attribute_over_count_no_longer_outranks_a_real_caller(self):
+        # The ranking consequence, pinned at the rank() level: before the fix
+        # the zero-caller `write` scored above the genuinely-called `other`.
+        write(self.root, "sink.py",
+              "def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+        write(self.root, "user.py",
+              "import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+              "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+              "    return sink.other()\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("sink.py::other"), ids.index("sink.py::write"))
+
+    def test_documented_residual_a_bare_same_named_local_still_over_counts(self):
+        # Pins the RESIDUAL the docstring now claims, so the claim is
+        # falsifiable rather than asserted. `user.py` names `sink` but its
+        # bare `write(...)` calls are `other`'s, not sink's -- and they still
+        # count for `sink.py::write`. Resolving that needs per-file name
+        # binding, the boundary this approximation stops at. If a later change
+        # narrows it, this test fails and the docstring gets updated WITH it.
+        write(self.root, "sink.py", "def write(data):\n    return data\n")
+        write(self.root, "other.py", "def write(x):\n    return x\n")
+        write(self.root, "user.py",
+              "import sink\nfrom other import write\n\n\ndef emit():\n"
+              "    write('a')\n    write('b')\n    return sink\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["sink.py::write"], 3)   # over-counted, documented
+
     def test_digit_glued_identifier_is_not_a_reference(self):
         # "2x" must not count as a reference to a unit named `x` — the old \bx\b
         # boundary semantics, which the single-pass tokeniser has to preserve.

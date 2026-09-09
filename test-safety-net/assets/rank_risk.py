@@ -112,6 +112,51 @@ _IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
 _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
+def _preceding_qualifier(text: str, start: int):
+    """The receiver an identifier at `start` is an attribute OF, or None.
+
+    None  — the identifier stands on its own (`write(...)`, `import write`).
+    "sink" — it was written `sink.write`, receiver a plain name.
+    ""    — it is an attribute of something unnameable (`mk().write`,
+            `d["k"].write`), which can never be shown to be the unit's module.
+
+    Whitespace either side of the dot is skipped, so a wrapped chain
+    (`foo()\n    .write(x)`) reads the same as the unwrapped form.
+    """
+    i = start - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    if i < 0 or text[i] != ".":
+        return None
+    j = i - 1
+    while j >= 0 and text[j].isspace():
+        j -= 1
+    end = j + 1
+    while j >= 0 and (text[j].isalnum() or text[j] == "_"):
+        j -= 1
+    qual = text[j + 1:end]
+    return qual if qual and not qual[0].isdigit() else ""
+
+
+def _name_occurrences(text: str):
+    """(bare, attr) occurrence counters for one file's text.
+
+    `bare[name]` counts occurrences that stand on their own; `attr[(recv,
+    name)]` counts occurrences written `recv.name`. Splitting them is what
+    lets `inbound_refs` count `sink.write` for module `sink` while refusing
+    `buf.write` — see its docstring for why that distinction is load-bearing.
+    """
+    bare = collections.Counter()
+    attr = collections.Counter()
+    for m in _IDENTIFIER_RE.finditer(text):
+        qual = _preceding_qualifier(text, m.start())
+        if qual is None:
+            bare[m.group(0)] += 1
+        else:
+            attr[(qual, m.group(0))] += 1
+    return bare, attr
+
+
 def _references_module(module: str, text: str, path_tokens) -> bool:
     """True if `text`, or `path_tokens` (from the file's own path), plausibly names `module`.
 
@@ -183,12 +228,37 @@ def inbound_refs(root: str, units) -> dict:
     This replaces the earlier rule of crediting a unit with a bare name match
     ANYWHERE in the repo, which handed every same-named unit reach it did not
     have — e.g. 13 unrelated local `write` helpers each inheriting ~470
-    references that belonged to entirely different files. The remaining
-    failure mode is now the opposite one, and deliberate: UNDER-counting. A
+    references that belonged to entirely different files. The chief remaining
+    failure mode is the opposite one, and deliberate: UNDER-counting. A
     caller that reaches a unit only through a re-export, without ever naming
     the unit's own module, stops counting. Understating reach is the
     direction this skill wants to be wrong in — inventing reach a unit does
     not have is exactly what produced the false 470s.
+
+    RULING (fix round 4): an occurrence written `X.name` counts only when `X`
+    IS the unit's own module. Bare `name`, `from mod import name` and
+    `mod.name` count as before; `buf.write(...)` no longer does. The bug this
+    closes: any file that imports a module AND separately calls a popular
+    method name on some unrelated object (`write`/`read`/`get`/`run`/`close`/
+    `update`/`send`) credited every one of those calls to the module's
+    same-named unit. Reproduced at 3 references for a `sink.py::write` with
+    ZERO callers — all three were `io.StringIO.write` — which then OUTRANKED
+    the one unit in that file that did have a caller. A receiver that is not
+    a plain name at all (`mk().write(...)`) can never be shown to be the
+    module, so it does not count either.
+
+    THE HONEST RESIDUAL, stated narrowly because the broad version of this
+    claim ("understating, never inventing") was false and a review round
+    caught it. Reach can still be invented by ONE remaining path: a BARE
+    occurrence of the name inside a file that references the module, where
+    that bare name actually means something else — a same-named function
+    defined locally in that file, one imported from a DIFFERENT module
+    (`import sink` and `from other import write` in the same file), or a
+    mention in a comment or docstring. Resolving those needs per-file name
+    binding, which is the scope-analysis boundary this approximation stops
+    at. So: for the `mod.name` and `X.name` forms, reach is never invented;
+    for bare occurrences it still can be, bounded to files that name the
+    module. Every consumer sees `inbound_approx: True` beside the number.
 
     RULING (fix round 3): the per-module reference-file list is memoised by
     module BASENAME (see below) because many units share a basename — but a
@@ -222,18 +292,26 @@ def inbound_refs(root: str, units) -> dict:
     files could never earn membership in each other's reference lists by path,
     with or without this exclusion.
     """
-    per_file_counts = {}
+    bare_counts = {}
+    attr_counts = {}
     file_lines = {}
     file_texts = {}
     path_tokens = {}
     for rel in iter_py_files(root, include_tests=True):
         text = read_text(root, rel)
-        per_file_counts[rel] = collections.Counter(_IDENTIFIER_RE.findall(text))
+        bare_counts[rel], attr_counts[rel] = _name_occurrences(text)
         file_lines[rel] = text.splitlines()
         file_texts[rel] = text
         path_tokens[rel] = set(_PATH_TOKEN_RE.findall(rel))
 
-    all_files = sorted(per_file_counts)
+    def occurrences(rel, name, module):
+        """Occurrences of `name` in `rel` that could name `module`'s unit:
+        every bare one, plus those written `module.name`. An occurrence
+        written `something_else.name` is an attribute of another object and
+        is not counted."""
+        return bare_counts[rel][name] + attr_counts[rel][(module, name)]
+
+    all_files = sorted(bare_counts)
     module_reffiles_cache = {}
 
     counts = {}
@@ -265,13 +343,14 @@ def inbound_refs(root: str, units) -> dict:
             ]
         ref_files = module_reffiles_cache[module]
 
-        total = per_file_counts[own_path].get(name, 0)
+        total = occurrences(own_path, name, module)
         lines = file_lines.get(own_path, [])
         lineno = u["lineno"]
         if 1 <= lineno <= len(lines):
-            total -= sum(1 for tok in _IDENTIFIER_RE.findall(lines[lineno - 1]) if tok == name)
+            def_bare, def_attr = _name_occurrences(lines[lineno - 1])
+            total -= def_bare[name] + def_attr[(module, name)]
         for rel in ref_files:
-            total += per_file_counts[rel].get(name, 0)
+            total += occurrences(rel, name, module)
 
         counts[u["id"]] = total
     return counts
