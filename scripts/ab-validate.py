@@ -91,6 +91,10 @@ SINCE_TSN_FIXROUND_6 = "903fc56"  # test-safety-net: the guard under its OWN
 # worker-thread violation reaching the run (N3), class-valued patch targets
 # staying classes (N5), os.environ reads (M-a), and same-directory coverage
 # evidence under a basename collision (N4)
+SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
+# scoped to the call it judges (F1 -- a module body read arbitrary files at
+# tier 1 under `1 passed`, missed by BOTH layers), a call site required on the
+# same-directory credit route (F4), and the eval's inert-plugin arm (F3)
 
 
 def _git_out(*args):
@@ -1511,6 +1515,184 @@ def check_test_safety_net_round6(old, new):
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ── test-safety-net, fix round 7: the exemption scoped to the call it judges ──
+#
+# Same convention as round 6: a tree with no guard/ranker scores the WORST
+# value rather than being skipped, because "no guard ships" is a real state
+# each row measures. The import-control row is the exception and is a GUARD:
+# "nothing blocks a genuine import" is true of a tree with no guard too, so
+# comparing it honestly means requiring the two arms to agree.
+
+_ROUND7_PROBE = r"""
+import os, sys, tempfile
+sys.path.insert(0, sys.argv[1])
+try:
+    import io_guard
+except Exception:
+    print("BODY:2"); print("IMPORTS:0"); raise SystemExit(0)
+
+tmp = tempfile.mkdtemp()
+seed = os.path.join(tmp, "seed.txt")
+with open(seed, "w") as f:
+    f.write("real bytes on a real disk\n")
+with open(os.path.join(tmp, "bodyio_a.py"), "w") as f:
+    f.write("import pkgutil\nBLOB = pkgutil.get_data('json', '__init__.py')\n")
+with open(os.path.join(tmp, "bodyio_b.py"), "w") as f:
+    f.write("import importlib.machinery\n"
+            "DATA = importlib.machinery.SourceFileLoader('x', %r).get_data(%r)\n"
+            % (seed, seed))
+sys.path.insert(0, tmp)
+
+# F1 -- a module BODY reading a real file through a loader frame. An import is
+# on the stack for the whole of `exec_module`, so a whole-stack scan for the
+# import protocol exempted every one of these. Shape (b) reads a file that is
+# not a module at all, which is why this is not a packaging nicety.
+escapes = 0
+for mod in ("bodyio_a", "bodyio_b"):
+    io_guard.arm(1)
+    try:
+        __import__(mod)
+        escapes += 1
+    except io_guard.IOGuardViolation:
+        pass
+    except BaseException:
+        escapes += 1
+    finally:
+        io_guard.disarm()
+        sys.modules.pop(mod, None)
+print("BODY:%d" % escapes)
+
+# The control, in the direction narrowing the scan could break: a genuine
+# import must never trip. Five first-time routes -- plain, dotted, from-import,
+# importlib, and lazy inside a function.
+io_guard.arm(1)
+blocked = 0
+def _lazy():
+    import difflib
+    return difflib.SequenceMatcher
+for route in (lambda: __import__("wave"),
+              lambda: __import__("xml.sax.saxutils"),
+              lambda: __import__("statistics").mean([1, 3]),
+              lambda: __import__("importlib").import_module("email.headerregistry"),
+              _lazy):
+    try:
+        route()
+    except BaseException:
+        blocked += 1
+io_guard.disarm()
+print("IMPORTS:%d" % blocked)
+"""
+
+
+def check_test_safety_net_round7(old, new):
+    """Four rows: the both-layers miss, its control, and two checks that could
+    not fail."""
+    scratch = tempfile.mkdtemp()
+
+    def round7_probe(tree):
+        assets = os.path.join(tree, "test-safety-net", "assets")
+        r = subprocess.run([sys.executable, "-c", _ROUND7_PROBE, assets],
+                           capture_output=True, text=True, timeout=180)
+        out = {"BODY": 2, "IMPORTS": 0}
+        for line in r.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key in out and value.strip().isdigit():
+                out[key] = int(value)
+        return out
+
+    # F4 fixture: two colliding `utils.py`. `one/` has a real test; `two/`'s
+    # only test STUBS the unit out and mentions it in a comment.
+    f4 = os.path.join(scratch, "f4")
+    for pkg in ("one", "two"):
+        d = os.path.join(f4, pkg)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "utils.py"), "w") as f:
+            f.write("def parse(s):\n    return s.strip()\n")
+    with open(os.path.join(f4, "one", "test_one.py"), "w") as f:
+        f.write("import utils\n\n\ndef test_parse():\n"
+                "    assert utils.parse(' a ') == 'a'\n")
+    with open(os.path.join(f4, "two", "test_two.py"), "w") as f:
+        f.write("from unittest import mock\nimport utils\n\n\n"
+                "# utils.parse is not tested here\n"
+                "def test_stub():\n"
+                "    with mock.patch('utils.parse', return_value='s'):\n"
+                "        assert True\n")
+
+    def credited_on_evidence(tree):
+        """Genuinely-tested colliding units credited, or -1 on ANY over-credit.
+
+        `two/utils.py::parse` has no test: it is patched out and named in a
+        comment. Crediting it hides an untested unit, so -1 is worse than
+        crediting nothing at all.
+        """
+        plan = _tsn_probe(tree, f4)
+        if plan is None:
+            return -1
+        covered = set(plan.get("covered", []))
+        if any(i.startswith("two/utils.py::") for i in covered):
+            return -1
+        return sum(1 for i in covered if i.startswith("one/utils.py::"))
+
+    def inert_plugin_passes_eval(tree):
+        """1 when the tree's own eval still says PASS with a guard that never
+        arms -- the F3 defect, measured by mutating a COPY of the skill."""
+        skill = os.path.join(tree, "test-safety-net")
+        guard = os.path.join(skill, "assets", "io_guard.py")
+        if not os.path.isfile(os.path.join(skill, "eval", "run_eval.py")) \
+                or not os.path.isfile(guard):
+            return 1
+        copy = os.path.join(tempfile.mkdtemp(dir=scratch), "test-safety-net")
+        shutil.copytree(skill, copy)
+        target = os.path.join(copy, "assets", "io_guard.py")
+        with open(target, encoding="utf-8") as f:
+            text = f.read()
+        armed_call = "    arm(_ENV_TIER, _ENV_ALLOW)\n"
+        if armed_call not in text:
+            return 1                       # nothing to make inert: no plugin
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(text.replace(armed_call, "    pass\n", 1))
+        r = subprocess.run([sys.executable,
+                            os.path.join(copy, "eval", "run_eval.py")],
+                           capture_output=True, text=True, timeout=300)
+        return 0 if "EVAL_RESULT: FAIL" in r.stdout else 1
+
+    s = "test-safety-net"
+    oldp, newp = round7_probe(old), round7_probe(new)
+    row(s, "module-body loader reads escaping an armed tier-1 guard "
+           "(lower=better)",
+        oldp["BODY"], newp["BODY"], newp["BODY"] < oldp["BODY"],
+        "F1: `_import_in_progress` scanned to the TOP of the stack, so the "
+        "`_call_with_frames_removed` frame live for the whole of `exec_module` "
+        "exempted EVERY module body -- `pkgutil.get_data` and an arbitrary "
+        "file via `SourceFileLoader.get_data` both read real bytes at tier 1 "
+        "under `1 passed`, and the filter cannot see them either",
+        since=SINCE_TSN_FIXROUND_7)
+    row(s, "genuine import routes blocked while armed (lower=better)",
+        oldp["IMPORTS"], newp["IMPORTS"],
+        newp["IMPORTS"] == oldp["IMPORTS"] == 0,
+        "the control for the row above: narrowing the scan too far declines "
+        "every candidate that imports anything, which is how N1 broke the "
+        "documented command. Plain, dotted, from-import, importlib and lazy "
+        "routes, all first-time", kind="guard")
+    a, b = credited_on_evidence(old), credited_on_evidence(new)
+    row(s, "colliding units credited on real evidence, -1 on any over-credit "
+           "(higher=better)", a, b, b > a,
+        "F4: the same-directory route matched the textual chain `utils.parse`, "
+        "so a `mock.patch(\"utils.parse\")` string -- proof the unit is "
+        "STUBBED -- and a bare comment each credited a unit with no test",
+        since=SINCE_TSN_FIXROUND_7)
+    if shutil.which("pytest"):
+        a, b = inert_plugin_passes_eval(old), inert_plugin_passes_eval(new)
+        row(s, "eval still PASSes with a plugin that never arms (lower=better)",
+            a, b, b < a,
+            "F3: check 34 asserted only that a clean unit passes, so replacing "
+            "the body of `pytest_configure` with `pass` -- a guard doing "
+            "literally nothing under the command the round exists to prove -- "
+            "still gave EVAL_RESULT: PASS. Row emitted only where pytest is "
+            "installed", since=SINCE_TSN_FIXROUND_7)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1672,6 +1854,7 @@ def main():
         check_test_safety_net_ranker(old, REPO)
         check_test_safety_net_guard(old, REPO)
         check_test_safety_net_round6(old, REPO)
+        check_test_safety_net_round7(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
