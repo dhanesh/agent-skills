@@ -515,5 +515,47 @@ class TestAlreadyCovered(TempRepo):
         self.assertNotIn("core.py::bare", cov)
 
 
+class TestRank(TempRepo):
+    def _repo(self):
+        write(self.root, "hot.py", "def risky(a, b):\n    return a + b\n")
+        write(self.root, "cold.py", "def quiet(a):\n    return a\n")
+        write(self.root, "net.py",
+              "import requests\n\n\ndef fetch(u):\n    return requests.get(u)\n")
+        write(self.root, "caller.py",
+              "from hot import risky\nrisky(1, 2)\nrisky(3, 4)\n")
+
+    def test_tier_3_units_are_not_netted_never_ranked(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ranked_ids = [r["id"] for r in plan["ranked"]]
+        self.assertNotIn("net.py::fetch", ranked_ids)
+        self.assertIn("net.py::fetch", [r["id"] for r in plan["not_netted"]])
+
+    def test_more_referenced_unit_outranks_a_quiet_one(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("hot.py::risky"), ids.index("cold.py::quiet"))
+
+    def test_top_n_bounds_the_ranked_list(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=1)
+        self.assertEqual(len(plan["ranked"]), 1)
+
+    def test_output_is_byte_identical_across_runs(self):
+        import json
+        self._repo()
+        a = json.dumps(rank_risk.rank(self.root, since="10 years ago", top_n=10), sort_keys=True)
+        b = json.dumps(rank_risk.rank(self.root, since="10 years ago", top_n=10), sort_keys=True)
+        self.assertEqual(a, b)
+
+    def test_every_ranked_row_flags_the_reference_count_as_approximate(self):
+        self._repo()
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        self.assertTrue(plan["ranked"])
+        for row in plan["ranked"]:
+            self.assertIs(row["inbound_approx"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

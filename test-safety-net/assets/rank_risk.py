@@ -7,12 +7,15 @@ the output, so this runs anywhere the repo does.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import collections
 import functools
+import json
 import os
 import re
 import subprocess
+import sys
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build",
              "dist", ".tox", ".mypy_cache", ".pytest_cache", "vendor",
@@ -691,3 +694,79 @@ def triage(root: str, unit) -> tuple:
         return 2, (f"{group} I/O via {via} ({marker}); "
                     f"pin at a wider boundary with {group} controlled")
     return 2, f"{group} I/O ({marker}); pin at a wider boundary with {group} controlled"
+
+
+def _normalise(value, hi):
+    return 0.0 if hi <= 0 else round(value / hi, 6)
+
+
+def rank(root: str, since: str = "6 months ago", top_n: int = 10) -> dict:
+    """The plan: what to net, what cannot be netted, and what is already covered."""
+    units = discover_units(root)
+    churn_by_path = churn(root, since)
+    refs = inbound_refs(root, units)
+    covered = already_covered(root, units)
+
+    rows = []
+    for u in units:
+        tier, reason = triage(root, u)
+        row = dict(u)
+        row["churn"] = churn_by_path.get(u["path"], 0)
+        row["inbound_refs"] = refs.get(u["id"], 0)
+        row["inbound_approx"] = True
+        row["tier"] = tier
+        row["tier_reason"] = reason
+        row["covered_by"] = covered.get(u["id"])
+        rows.append(row)
+
+    max_churn = max((r["churn"] for r in rows), default=0)
+    max_refs = max((r["inbound_refs"] for r in rows), default=0)
+    for r in rows:
+        if r["tier"] >= 3 or r["covered_by"]:
+            r["score"] = 0.0
+            continue
+        # Churn and reach are both weak alone: a file nobody calls but everyone
+        # edits is churny noise; a stable widely-used helper rarely breaks. The
+        # product favours units that are BOTH reached and moving, which is where
+        # an agent is most likely to do damage. +1 keeps a zero on one axis from
+        # annihilating a strong signal on the other.
+        r["score"] = round((_normalise(r["churn"], max_churn) + 1)
+                           * (_normalise(r["inbound_refs"], max_refs) + 1) - 1, 6)
+
+    netted = [r for r in rows if r["tier"] < 3 and not r["covered_by"]]
+    netted.sort(key=lambda r: (-r["score"], r["id"]))   # ties broken by id: deterministic
+    not_netted = sorted((r for r in rows if r["tier"] >= 3),
+                        key=lambda r: (r["tier"], r["id"]))
+
+    return {
+        "root": os.path.abspath(root),
+        "stack": "python",
+        "window": since,
+        "units_discovered": len(units),
+        "ranked": netted[:top_n],
+        "remainder": netted[top_n:],
+        "not_netted": not_netted,
+        "covered": sorted(covered),
+    }
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description="Rank untested units by risk and triage their testability.")
+    p.add_argument("repo", help="path to the repository to analyse")
+    p.add_argument("--top-n", type=int, default=10,
+                   help="how many units to net in this pass (default: 10)")
+    p.add_argument("--since", default="6 months ago",
+                   help="churn window, any git --since expression (default: 6 months ago)")
+    args = p.parse_args(argv)
+    if not os.path.isdir(args.repo):
+        sys.stderr.write(f"error: not a directory: {args.repo}\n")
+        return 2
+    json.dump(rank(args.repo, args.since, args.top_n), sys.stdout,
+              indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
