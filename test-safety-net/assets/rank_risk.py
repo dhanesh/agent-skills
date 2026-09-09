@@ -104,7 +104,7 @@ def churn(root: str, since: str = "6 months ago") -> dict:
     return counts
 
 
-_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
 
 
 def inbound_refs(root: str, units) -> dict:

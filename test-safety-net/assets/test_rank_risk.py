@@ -119,6 +119,14 @@ class TestInboundRefs(TempRepo):
         units = rank_risk.discover_units(self.root)
         self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::apply"], 0)
 
+    def test_digit_glued_identifier_is_not_a_reference(self):
+        # "2x" must not count as a reference to a unit named `x` — the old \bx\b
+        # boundary semantics, which the single-pass tokeniser has to preserve.
+        write(self.root, "core.py", "def x():\n    pass\n")
+        write(self.root, "notes.py", "# scale by 2x and 3x for the 4k display\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::x"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
