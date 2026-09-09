@@ -20,10 +20,17 @@ things and nothing more:
 It does NOT exercise the runtime guard's behaviour, because there is no guard
 to run. Claiming otherwise here would be exactly the kind of oversold eval
 this repo's own standard forbids.
+
+The literal-emission rule (SKILL.md's "one real injection surface") gets the
+SAME treatment, for the SAME reason: no captured-output emitter ships in this
+skill yet, so there is no code path that could turn a hostile captured string
+into executable source, and nothing here to run against one. That surface has
+NO EXECUTABLE COVERAGE in this eval. It is graded as prose only — a check
+that the rule is actually stated in SKILL.md, not a demonstration that the
+(not-yet-built) emitter honours it.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
@@ -78,12 +85,17 @@ _NEG_RE = re.compile(r"\b(not|never|cannot|no|nothing)\b", re.I)
 
 
 def slice_between(text, start_pat, end_pat):
-    """Text from the first match of start_pat up to (excluding) end_pat."""
+    """Text from the first match of start_pat up to (excluding) the next
+    match of end_pat AFTER it. Searches for end_pat starting at m1.end(),
+    not m1.start() — a naive search from m1.start() lets end_pat match the
+    start_pat's own heading line right back (e.g. start_pat=`^## Foo`,
+    end_pat=`^## ` both match position 0 of the slice), collapsing the
+    result to an empty string instead of the section's actual body."""
     m1 = re.search(start_pat, text, re.M)
     if not m1:
         return ""
-    m2 = re.search(end_pat, text[m1.start():], re.M)
-    return text[m1.start():m1.start() + m2.start()] if m2 else text[m1.start():]
+    m2 = re.search(end_pat, text[m1.end():], re.M)
+    return text[m1.start():m1.end() + m2.start()] if m2 else text[m1.start():]
 
 
 def all_mentions_negated(text, needle, window=220):
@@ -337,27 +349,33 @@ def main():
         )
 
         # =====================================================================
-        # 13. Injection surface: hostile captured values round-trip inertly
+        # Fixture "samebase": two same-basename files in different
+        # directories, each defining a unit with the same name, neither
+        # referenced by anything. Regression fixture for the round-3 caching
+        # bug in inbound_refs (fixed in rank_risk.py: module_reffiles_cache
+        # was memoised purely by module basename, so a/util.py and b/util.py
+        # trivially satisfied _references_module against EACH OTHER via the
+        # path-token half — every file named X.py "references" module X
+        # against itself — and each ended up crediting the other's own
+        # definition-line occurrence as an inbound call). This is not
+        # hypothetical: it shipped and needed its own fix commit.
         # =====================================================================
-        hostile_values = [
-            '"; import os; os.system("x")',
-            "line\nbreak",
-            "back\\slash",
-            "quo'te",
-        ]
-        bad13 = []
-        for v in hostile_values:
-            try:
-                back = ast.literal_eval(repr(v))
-            except (ValueError, SyntaxError) as exc:
-                bad13.append(f"{v!r} -> raised {exc}")
-                continue
-            if back != v:
-                bad13.append(f"{v!r} -> round-tripped to {back!r}")
+        samebase_repo = os.path.join(tmp, "samebase")
+        write(samebase_repo, "teamA/util.py", "def run_it(x):\n    return x\n")
+        write(samebase_repo, "teamB/util.py", "def run_it(x):\n    return x\n")
+        r_samebase = run_ranker(samebase_repo, "--top-n", "10")
+        samebase_plan = load_json(r_samebase)
+        samebase_by_id = {row["id"]: row for row in samebase_plan.get("ranked", [])}
+        team_a = samebase_by_id.get("teamA/util.py::run_it")
+        team_b = samebase_by_id.get("teamB/util.py::run_it")
         check(
-            "13 hostile captured values round-trip inertly via repr()/literal_eval",
-            not bad13,
-            "; ".join(bad13),
+            "21 same-basename files in different directories do not credit "
+            "each other's inbound_refs",
+            r_samebase.returncode == 0
+            and team_a is not None and team_a.get("inbound_refs") == 0
+            and team_b is not None and team_b.get("inbound_refs") == 0,
+            f"teamA={team_a and team_a.get('inbound_refs')} "
+            f"teamB={team_b and team_b.get('inbound_refs')}",
         )
 
         # =====================================================================
@@ -380,6 +398,28 @@ def main():
             "15 SKILL.md's report template carries both a tier and a kind column",
             "tier" in header_line.lower() and "kind" in header_line.lower(),
             header_line.strip(),
+        )
+
+        # 13. SKILL.md states the literal-emission rule as prose. Scoped to
+        #     its own section (not the whole file) so this cannot be
+        #     satisfied by the rule being merely quoted inside a code fence
+        #     elsewhere, and so deleting the rule's prose — not any other
+        #     mention of `repr(` — is specifically what flips this red.
+        #     NOTE: this grades the rule's PROSE only; no captured-output
+        #     emitter ships in this skill yet, so there is no executable
+        #     coverage of the injection surface itself (see module docstring).
+        literal_rule_section = slice_between(
+            skill_text, r"^## The literal-emission rule", r"^## ")
+        normalised_rule = re.sub(r"(?m)^\s*>\s?", "", literal_rule_section)
+        normalised_rule = re.sub(r"\s+", " ", normalised_rule).lower()
+        check(
+            "13 SKILL.md states the literal-emission rule (repr(), never "
+            "concatenation/interpolation) as prose",
+            "repr(" in normalised_rule
+            and "never" in normalised_rule
+            and ("concatenation" in normalised_rule
+                 or "interpolation" in normalised_rule),
+            normalised_rule[:160],
         )
 
         # 16. SKILL.md states the proof's limit (normalised: the source wraps
@@ -422,18 +462,32 @@ def main():
         )
 
         # 19. the guard is a pytest plugin loaded via -p, never described as a
-        #     written conftest.py
+        #     written conftest.py — checked TWO ways: prose (a doc rewording
+        #     that starts describing the guard as a conftest.py) AND the
+        #     filesystem (an actual conftest.py landing under this skill,
+        #     which the prose scan alone would never see since it only reads
+        #     SKILL.md and triage.md).
         combined = skill_text + "\n" + triage_text
         has_plugin_desc = (
             "pytest plugin" in skill_text and "`-p`" in skill_text
             and "pytest plugin" in triage_text and "`-p`" in triage_text
         )
         conftest_ok, conftest_bad = all_mentions_negated(combined, "conftest.py")
+        conftest_on_disk = []
+        for base, dirs, files in os.walk(SKILL):
+            dirs[:] = [d for d in dirs if d not in {".git", "__pycache__"}]
+            if "conftest.py" in files:
+                conftest_on_disk.append(
+                    os.path.relpath(os.path.join(base, "conftest.py"), SKILL))
+        detail19 = "; ".join(conftest_bad)
+        if conftest_on_disk:
+            detail19 = (detail19 + "; " if detail19 else "") \
+                + "on disk: " + ", ".join(sorted(conftest_on_disk))
         check(
             "19 guard described as a pytest plugin via -p; never as a "
-            "written conftest.py",
-            has_plugin_desc and conftest_ok,
-            "; ".join(conftest_bad) if conftest_bad else "",
+            "written conftest.py (prose AND filesystem)",
+            has_plugin_desc and conftest_ok and not conftest_on_disk,
+            detail19,
         )
 
         n, k = len(_checks), sum(_checks)
