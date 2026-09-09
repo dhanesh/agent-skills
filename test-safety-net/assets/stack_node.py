@@ -978,10 +978,12 @@ def _object_keys(text: str, depths, defs, open_i: int, close_i: int, stmt: int):
         if k < 0 or text[k] not in "{,":
             continue
         j = _skip_ws(text, m.end())
-        if j > close_i or (j < close_i and text[j] not in ",:}"):
+        if j > close_i or (j < close_i and text[j] not in ",:}("):
             continue          # j == close_i: the last key before `}`
         name = m.group(0)
-        if text[j] == ":":
+        if j < close_i and text[j] == "(":
+            kind = "function"           # method shorthand: `{ parse(s) {...} }`
+        elif text[j] == ":":
             kind = _classify_value(text, depths, defs, j + 1,
                                    _key_value_end(text, depths, j + 1, close_i))
             kind = kind or "function"

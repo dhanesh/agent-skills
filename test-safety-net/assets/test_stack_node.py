@@ -122,6 +122,13 @@ class TestExportForms(NodeCase):
         self.assertEqual(sorted(by), ["VERSION", "format", "parse"])
         self.assertEqual(by["parse"]["lineno"], 1)
 
+    def test_module_exports_method_shorthand(self):
+        write(self.root, "src/a.js",
+              "module.exports = {\n  parse(s) { return s; },\n  format: (x) => x,\n};\n")
+        by = self.units_by_name()
+        self.assertEqual(sorted(by), ["format", "parse"])
+        self.assertEqual(by["parse"]["kind"], "function")
+
     def test_module_exports_property(self):
         write(self.root, "src/a.js", "module.exports.parse = function (s) { return s; };\n")
         self.assertEqual(self.ids(), ["src/a.js::parse"])
@@ -254,6 +261,31 @@ class TestNegatives(NodeCase):
         write(self.root, "src/a.d.ts", "export declare function ambient(): void;\n")
         write(self.root, "src/a.js", "export function real() {}\n")
         self.assertEqual(self.ids(), ["src/a.js::real"])
+
+    def test_nested_template_literals(self):
+        write(self.root, "src/a.js",
+              "const t = `a ${ `b ${c}` } d`;\nexport function real() {}\n")
+        self.assertEqual(self.ids(), ["src/a.js::real"])
+
+    def test_an_apostrophe_in_jsx_text_costs_at_most_its_own_line(self):
+        # The stripper reads it as a string opening and bounds it to the line,
+        # so the export above and the one below both survive.
+        write(self.root, "src/a.tsx",
+              "export function A() {\n  return <p>don't {x} stop</p>;\n}\n"
+              "export function B() {}\n")
+        self.assertEqual(sorted(self.units_by_name()), ["A", "B"])
+
+    def test_generic_arrow_and_decorated_class(self):
+        write(self.root, "src/a.tsx", "export const f = <T,>(x: T) => x;\n")
+        write(self.root, "src/b.ts", "@Injectable()\nexport class Svc {}\n")
+        by = self.units_by_name()
+        self.assertEqual((by["f"]["kind"], by["Svc"]["kind"]), ("function", "class"))
+
+    def test_destructured_export_is_a_known_miss(self):
+        # Recorded, not accepted: `export const { a, b } = make()` names units
+        # this reader cannot see. Task 3's precise path is where it closes.
+        write(self.root, "src/a.js", "export const { a, b } = make();\n")
+        self.assertEqual(self.ids(), [])
 
     def test_a_file_of_only_comments_and_strings_yields_nothing(self):
         write(self.root, "src/a.js",
