@@ -98,6 +98,11 @@ SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
 SINCE_TSN_NODE = "0a02273"   # test-safety-net: the node stack's heuristic
 # discovery, and the two interface corrections that had to precede it
 # (`name_pattern`, and the file context the import grammar resolves against).
+SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
+# detection (first match wins reclassified this repo's own corpus as node),
+# then node's I/O marker tables, triage, and registration. One constant for
+# the campaign: both commits land together, so both become ancestors of the
+# baseline at the same merge.
 
 
 def _git_out(*args):
@@ -1806,6 +1811,163 @@ def check_test_safety_net_node(old, new):
         since=SINCE_TSN_NODE)
 
 
+# ── test-safety-net: node triage, and the detector that had to precede it ───
+#
+# Every probe returns its "cannot answer" value against a tree with no node
+# stack — which is what the baseline is. That is not a rigged comparison: "a
+# node repo is ranked as Python, discovers nothing and reads as clean" IS the
+# baseline behaviour, and it is the thing being fixed.
+
+_NODE_TRIAGE_PROBE = r"""
+res = {"node_rows": 0, "declined": 0, "marked_builtins": 0,
+       "repo_stack": "", "ambiguous": 0, "template_stack": ""}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+# 1/2. a node repo, ranked end to end through the stack-agnostic core.
+nd = tree({
+    "package.json": '{"name": "demo"}\n',
+    "src/utils.js": ("export function parse(s) { return JSON.parse(s); }\n"
+                     "export function stamp(x) { return { x, at: Date.now() }; }\n"),
+    "src/io.js": ('import fs from "node:fs";\n'
+                  'import { execSync } from "child_process";\n'
+                  "export function save(p, d) { fs.writeFileSync(p, d); }\n"
+                  "export function run(c) { return execSync(c); }\n"),
+})
+try:
+    plan = rank_risk.rank(nd, "10 years ago", 10)
+    rows = plan["ranked"] + plan["remainder"] + plan["not_netted"]
+    res["node_rows"] = len([r for r in rows if r["path"].endswith((".js", ".ts"))])
+    res["declined"] = len([r for r in plan["not_netted"] if r["tier"] >= 3])
+except Exception:
+    pass
+
+# 3. how much of node's own I/O surface the marker tables actually name.
+IO_BUILTINS = ["fs", "child_process", "cluster", "worker_threads", "dns", "tls",
+               "http", "https", "http2", "net", "dgram", "inspector", "os",
+               "perf_hooks", "timers", "crypto", "process", "wasi",
+               "trace_events", "sqlite"]
+try:
+    import stack_node
+    tables = (stack_node.CONTROLLABLE, stack_node.UNCONTROLLABLE)
+
+    def marked(mod):
+        for table in tables:
+            for markers in table.values():
+                for k in markers:
+                    c = k[5:] if k.startswith("node:") else k
+                    if c == mod or c.startswith(mod + ".") or c.startswith(mod + "/"):
+                        return True
+        return False
+
+    res["marked_builtins"] = len([m for m in IO_BUILTINS if marked(m)])
+except Exception:
+    pass
+
+# 4. THIS checkout's own corpus: 51 non-test .py against 17 .mjs/.ts, and one
+#    package.json belonging to a scaffold it ships.
+root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(rank_risk.__file__))))
+try:
+    res["repo_stack"] = rank_risk.detect_stack(root).STACK_NAME
+except AttributeError:
+    # No detector at all: before the stack seam was cut, the ranker WAS the
+    # Python stack, so "python" is what this tree does to every repo. Reading
+    # that as an error would report a guard as broken when it is intact.
+    res["repo_stack"] = "python"
+except Exception:
+    res["repo_stack"] = "ERROR"
+
+# 5. a dead heat: reported, or guessed?
+half = tree({"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 1\n",
+             "a.ts": "export function a() {}\n", "b.ts": "export function b() {}\n"})
+try:
+    rank_risk.detect_stack(half)
+except Exception as exc:
+    res["ambiguous"] = 1 if type(exc).__name__ == "AmbiguousStack" else 0
+
+# 6. this repo's shape in miniature: a Python majority, a stray .mjs, and the
+#    only manifest inside a shipped scaffold.
+tpl = tree(dict(
+    [("mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(10)]
+    + [("tools/build.mjs", "export function build() {}\n"),
+       ("kit/assets/templates/scaffold/package.json", "{}\n"),
+       ("kit/assets/templates/scaffold/src/app.ts", "export function boot() {}\n")]))
+try:
+    res["template_stack"] = rank_risk.detect_stack(tpl).STACK_NAME
+except AttributeError:
+    res["template_stack"] = "python"
+except Exception:
+    res["template_stack"] = "ERROR"
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_triage(old, new):
+    """Is a node repo ranked at all, are its hazards declined, and did the
+    detector stay right about the repo the ranker lives in?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_TRIAGE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_TRIAGE_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "node units a full `rank()` run reports for a JS repo (higher=better)",
+        oldp["node_rows"], newp["node_rows"], newp["node_rows"] > oldp["node_rows"],
+        "the end-to-end half of the silent zero: detection, discovery, triage "
+        "and ranking together, not one module in isolation",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "node units DECLINED as needing a seam rather than netted "
+           "(higher=better)",
+        oldp["declined"], newp["declined"], newp["declined"] > oldp["declined"],
+        "`execSync` at tier 3 is the filter working; with no node triage the "
+        "unit is not declined, it simply does not exist",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "I/O-performing node builtins the marker tables name, of 20 "
+           "(higher=better)",
+        oldp["marked_builtins"], newp["marked_builtins"],
+        newp["marked_builtins"] > oldp["marked_builtins"],
+        "the enumeration hole the Python branch hit twice (`os.remove` marked, "
+        "`os.rename` not), measured for node: `dns`, `tls`, `http2`, `cluster`, "
+        "`worker_threads`, `wasi` and `perf_hooks` were all absent from the "
+        "first draft and are derived from `module.builtinModules` now",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "stack detected for the ranker's OWN corpus (python=right)",
+        oldp["repo_stack"], newp["repo_stack"],
+        newp["repo_stack"] == "python" == oldp["repo_stack"],
+        "registering a stack that claims any tree holding a `.mjs` is exactly "
+        "how a repo gets reclassified out from under its own ranker; this row "
+        "fails if node ever wins here",
+        kind="guard")
+    row(s, "a Python majority with a stray `.mjs` and a scaffold's "
+           "`package.json` (python=right)",
+        oldp["template_stack"], newp["template_stack"],
+        newp["template_stack"] == "python" == oldp["template_stack"],
+        "this repo's shape in miniature, and vacuous at the baseline (no node "
+        "stack to lose to): a manifest under `assets/templates/` describes a "
+        "scaffold the repo SHIPS and must score nothing",
+        kind="guard")
+    row(s, "a 50/50 polyglot tree REPORTS the tie instead of guessing "
+           "(higher=better)",
+        oldp["ambiguous"], newp["ambiguous"], newp["ambiguous"] > oldp["ambiguous"],
+        "first match wins answered a dead heat silently, by registration "
+        "order; the run now exits 2, prints both scores and names `--stack`",
+        since=SINCE_TSN_NODE_TRIAGE)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1983,6 +2145,7 @@ def main():
         check_test_safety_net_round6(old, REPO)
         check_test_safety_net_round7(old, REPO)
         check_test_safety_net_node(old, REPO)
+        check_test_safety_net_node_triage(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
