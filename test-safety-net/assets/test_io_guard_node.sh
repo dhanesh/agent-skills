@@ -208,8 +208,12 @@ deadline_run() {   # seconds tier file pattern
   mkfifo "$WORK/fifo"
   exec 7<>"$WORK/fifo"
   set +e
+  # The file is named by ABSOLUTE path, so both the runner and the child it
+  # spawns carry $WORK in their argv -- which is what makes the watcher's
+  # `pkill` below able to reach either of them. With a relative name only the
+  # child matched, and a broken guard left the runner hung on the FIFO forever.
   ( cd "$WORK" && TEST_SAFETY_NET_TIER="$2" \
-      node --require "$GUARD" --test --test-name-pattern "$4" "$3" \
+      node --require "$GUARD" --test --test-name-pattern "$4" "$WORK/$3" \
       >"$WORK/out" 2>&1 <"$WORK/fifo" ) &
   runner=$!
   ( i=0
