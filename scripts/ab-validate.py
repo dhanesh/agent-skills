@@ -75,7 +75,10 @@ INTEGRATION_REFS = ("origin/main", "main")
 # moment this change merged.
 SINCE_ONTOLOGY = "077c432"   # world-model-ledger predicate-ontology guardrails
 SINCE_ABVALIDATE = "6b51b41"  # the A/B harness itself, and its first corpus
-SINCE_AUDIT_2026_09 = "7b94236"  # the 2026-09 whole-repo review fixes
+SINCE_AUDIT_2026_09 = "5daa2cf"  # the 2026-09 whole-repo review fixes (repinned:
+# the original "7b94236" was rewritten to this hash on the way into main — same
+# author date/message/diff, orphaned object left dangling in the local odb)
+SINCE_TEST_SAFETY_NET = "4f88919"  # test-safety-net: the tier >= 3 netting guard
 
 
 def _git_out(*args):
@@ -883,6 +886,34 @@ def check_starlight(old, new):
         "a gate that exists but is not wired is not a gate", kind="guard")
 
 
+# ── test-safety-net (the tier >= 3 guard: never net a unit that dials out) ──
+def check_test_safety_net(old, new):
+    """The guardrail: a unit that dials out in its constructor must NOT be netted."""
+    scratch = tempfile.mkdtemp()
+    os.makedirs(os.path.join(scratch, "repo"), exist_ok=True)
+    with open(os.path.join(scratch, "repo", "client.py"), "w") as f:
+        f.write("import socket\n\n\nclass Client:\n    def __init__(self, host):\n"
+                "        self.sock = socket.create_connection((host, 80))\n")
+
+    def netted_unsafely(tree):
+        ranker = os.path.join(tree, "test-safety-net", "assets", "rank_risk.py")
+        if not os.path.isfile(ranker):
+            return 1        # baseline has no ranker: nothing stops the unsafe test
+        r = subprocess.run([sys.executable, ranker, os.path.join(scratch, "repo")],
+                           capture_output=True, text=True, timeout=120)
+        try:
+            plan = json.loads(r.stdout)
+        except ValueError:
+            return 1
+        return 1 if any(row["id"].endswith("::Client") for row in plan["ranked"]) else 0
+
+    a, b = netted_unsafely(old), netted_unsafely(new)
+    row("test-safety-net", "unit that dials out in __init__ is netted (lower=better)",
+        a, b, b < a,
+        "writing a test for it would open a real socket; the skill must decline",
+        since=SINCE_TEST_SAFETY_NET)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1019,6 +1050,7 @@ def main():
         check_spec_planning(old, REPO)
         check_clean_code(old, REPO)
         check_starlight(old, REPO)
+        check_test_safety_net(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
