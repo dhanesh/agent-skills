@@ -429,7 +429,7 @@ CONTROLLABLE = {
                    "os.listdir", "os.scandir", "os.walk", "os.fwalk",
                    "os.stat", "os.lstat", "os.fstat", "os.statvfs",
                    "os.fstatvfs", "os.access", "os.pathconf", "os.fpathconf",
-                   "os.readlink", "os.getcwd", "os.getcwdb",
+                   "os.readlink",
                    # mutation
                    "os.remove", "os.unlink", "os.rename", "os.renames",
                    "os.replace", "os.mkdir", "os.makedirs", "os.rmdir",
