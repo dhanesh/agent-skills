@@ -430,7 +430,17 @@ def _should_block(group, target):
     provenance calls `os.path.realpath`, which calls `os.lstat` -- itself a
     guarded primitive. Without the flag the guard trips on its own bookkeeping
     and every call reports `os.lstat` no matter what was really called.
-    Single-threaded by construction: the proof runs one test at a time.
+
+    The flag is a module global, and the claim "single-threaded by
+    construction" it used to carry is not quite true: the proof does run one
+    TEST at a time, but a unit may start worker threads, and a guarded call
+    made by one of those during the microseconds the main thread spends inside
+    `_initiated_by_code_under_test` (a `realpath` -> `lstat` on a filename not
+    yet in `_frame_verdicts`) reads the flag as set and is permitted.
+    Measured, not theorised. The window is tiny and warms shut as the verdict
+    cache fills; making the flag thread-local would close it, which is a
+    behaviour change to the guard's core and is left to a round that can
+    review it rather than slipped in beside an unrelated fix.
     """
     if not _state["armed"] or _state["inside"] or group not in _state["blocked"]:
         return False
