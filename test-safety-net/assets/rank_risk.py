@@ -12,12 +12,44 @@ tests, what a unit is, and what tier a unit lands in -- lives behind the stack
 interface and is implemented once per stack (`stack_python.py`, and one module
 per stack added beside it).
 
-THE STACK INTERFACE. A stack module supplies exactly six names:
+THE STACK INTERFACE. A stack module supplies exactly thirteen names. The rule
+that decides membership: if answering the question requires READING A LANGUAGE,
+it belongs to the stack; if it only orchestrates or scores, it stays here.
 
+  identity
     STACK_NAME                                   str; the report's "stack" key
     matches(root) -> bool                        is this repo of this stack?
+
+  files
     iter_source_files(root, include_tests=False) sorted repo-relative paths
     is_test_path(rel) -> bool                    is this path a test file?
+    is_test_for(test_rel, src_rel) -> bool       is it positioned as a test OF
+                                                 that file?
+
+  naming
+    module_of(rel) -> str                        the module identity `rel`
+                                                 defines -- the name other
+                                                 files use to talk about it
+    path_pattern(rel) -> compiled re | None      `rel` written as a module
+                                                 path, bounded at both ends;
+                                                 None when it has no qualifier
+
+  lexing
+    IDENTIFIER_RE                                compiled re; what an
+                                                 identifier IS
+    preceding_qualifier(text, start)             the receiver an identifier is
+                                                 an attribute OF: None (bare),
+                                                 a name, or "" (unnameable)
+
+  grammar
+    module_bindings(module, text) -> (aliases, names)
+                                                 what `text` binds for
+                                                 `module` by an actual import
+    reached_through_module(module, name, text) -> bool
+                                                 does `text` CALL `name`
+                                                 through such an import?
+
+  analysis
     discover_units(root) -> (units, path)        the units, plus WHICH
                                                  discovery path ran
                                                  ("precise" | "heuristic")
@@ -26,12 +58,19 @@ THE STACK INTERFACE. A stack module supplies exactly six names:
                                                  guard enforces the no-I/O
                                                  invariant
 
-The walk and the test-file predicate are part of that interface, not local
-Python details, because `inbound_refs` and `already_covered` both iterate the
-source tree and both must recognise a test file. Hard-coding `test_*.py` here
-would make a node repo's `*.test.ts` invisible to coverage detection, which
-credits a tested unit with no coverage and ranks it as a gap -- guessing in the
-one place this file must not guess.
+Six of those were named when the seam was cut; seven more followed, each from
+a place this file was still reading Python without asking. The walk and the
+test-file predicate, because `inbound_refs` and `already_covered` both iterate
+the source tree and both must recognise a test file: hard-coding `test_*.py`
+here would make a node repo's `*.test.ts` invisible to coverage detection,
+which credits a tested unit with no coverage and ranks it as a gap. Naming and
+lexing, because `os.path.splitext(basename(rel))[0]` and a `.`-only qualifier
+are Python answers to questions every language answers differently. And the
+binding grammar, because it is `already_covered`'s STRONGEST evidence -- the
+same-directory route that recovered 105 units' worth of collision cases here.
+A stack that inherited Python's `import X as Y` / `from X import Y` forms
+would credit exactly nothing through that route and report a clean result,
+which is the one failure this file must not have: guessing where it must ask.
 """
 from __future__ import annotations
 
@@ -147,48 +186,27 @@ def churn(root: str, since: str = "6 months ago") -> dict:
         counts[part] = counts.get(part, 0) + 1
     return counts
 
-_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
 _PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
-def _preceding_qualifier(text: str, start: int):
-    """The receiver an identifier at `start` is an attribute OF, or None.
-
-    None  — the identifier stands on its own (`write(...)`, `import write`).
-    "sink" — it was written `sink.write`, receiver a plain name.
-    ""    — it is an attribute of something unnameable (`mk().write`,
-            `d["k"].write`), which can never be shown to be the unit's module.
-
-    Whitespace either side of the dot is skipped, so a wrapped chain
-    (`foo()\n    .write(x)`) reads the same as the unwrapped form.
-    """
-    i = start - 1
-    while i >= 0 and text[i].isspace():
-        i -= 1
-    if i < 0 or text[i] != ".":
-        return None
-    j = i - 1
-    while j >= 0 and text[j].isspace():
-        j -= 1
-    end = j + 1
-    while j >= 0 and (text[j].isalnum() or text[j] == "_"):
-        j -= 1
-    qual = text[j + 1:end]
-    return qual if qual and not qual[0].isdigit() else ""
-
-
-def _name_occurrences(text: str):
+def _name_occurrences(stack, text: str):
     """(bare, attr) occurrence counters for one file's text.
 
     `bare[name]` counts occurrences that stand on their own; `attr[(recv,
     name)]` counts occurrences written `recv.name`. Splitting them is what
     lets `inbound_refs` count `sink.write` for module `sink` while refusing
     `buf.write` — see its docstring for why that distinction is load-bearing.
+
+    WHAT an identifier is, and what counts as its receiver, are the stack's
+    calls (`stack.IDENTIFIER_RE`, `stack.preceding_qualifier`). The counting
+    is the same in every language; the lexing is not — `$` is an identifier
+    character in JS and not in Python, and `?.` is a qualifier there and a
+    syntax error here.
     """
     bare = collections.Counter()
     attr = collections.Counter()
-    for m in _IDENTIFIER_RE.finditer(text):
-        qual = _preceding_qualifier(text, m.start())
+    for m in stack.IDENTIFIER_RE.finditer(text):
+        qual = stack.preceding_qualifier(text, m.start())
         if qual is None:
             bare[m.group(0)] += 1
         else:
@@ -199,7 +217,8 @@ def _name_occurrences(text: str):
 def _references_module(module: str, text: str, path_tokens) -> bool:
     """True if `text`, or `path_tokens` (from the file's own path), plausibly names `module`.
 
-    `module` is a defining file's basename without `.py`. Shared by
+    `module` is a defining file's module identity — `stack.module_of(rel)`,
+    which for Python is the basename without `.py`. Shared by
     `inbound_refs` and `already_covered` so the "does this OTHER file talk
     about that module" predicate cannot drift between the two call sites —
     they need the same answer to the same question for opposite reasons: one
@@ -213,103 +232,13 @@ def _references_module(module: str, text: str, path_tokens) -> bool:
     ambiguity — and both were fixed against the same reproduction class:
       * `inbound_refs` drops every same-basename file from a module's
         reference-file list outright (RULING fix round 3, below).
-      * `already_covered` requires PATH-qualified evidence (`_path_pattern`)
+      * `already_covered` requires PATH-qualified evidence (`stack.path_pattern`)
         when a basename is shared by more than one discovered file, and only
         falls back to this predicate when the basename is unique.
     """
     if re.search(r"\b%s\b" % re.escape(module), text):
         return True
     return module in path_tokens
-
-
-def _path_pattern(rel: str):
-    """A regex matching `rel` written as a module path — `app.utils` or
-    `app/utils` for `app/utils.py` — or None when `rel` has no parent
-    directory to qualify it with.
-
-    This is the evidence `already_covered` demands when a basename is shared,
-    and it is deliberately BOUNDED at both ends rather than a substring test:
-    `myapp.utils` contains "app.utils", so a substring match would credit
-    `app/utils.py` with a test that exercises `myapp/utils.py` — the
-    OVER-crediting direction this file must never take. The trailing lookahead
-    still permits a following `.`, so `app.utils.helper` and
-    `from app.utils import helper` both match.
-
-    Returns None for a repo-root file (`utils.py`), which has no qualifier to
-    offer: under ambiguity such a unit reads as uncovered and gets ranked. That
-    is the accepted under-credit — a redundant test, never a hidden gap.
-    """
-    stem = rel[:-3] if rel.endswith(".py") else rel
-    parts = stem.split("/")
-    if len(parts) < 2:
-        return None
-    body = r"[./]".join(re.escape(p) for p in parts)
-    return re.compile(r"(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])" % body)
-
-
-def _module_bindings(module: str, text: str) -> tuple:
-    """(aliases, names) the file binds for `module` by an actual import.
-
-    `aliases` are the names the module object itself is bound to
-    (`import harvest` -> "harvest"; `import harvest as H` -> "H"); `names` are
-    the members pulled out of it (`from harvest import apply_markers`).
-
-    This is `already_covered`'s SAME-DIRECTORY evidence, and it is deliberately
-    stronger than the bare whole-identifier match used elsewhere in this file.
-    A test file beside `harvest.py` that says `import harvest` and also
-    contains the token `main` — because it ends with `unittest.main()`, or
-    calls a DIFFERENT module's `main` through an alias — must not credit
-    `harvest.py::main`, which has no test at all. Measured on this repo: the
-    weaker form credited 6 units, 2 of them (`::main` twice) false; this form
-    credits exactly the 4 genuine ones.
-
-    What that buys is NARROWER evidence, not exact evidence, and the
-    difference matters in the over-credit direction. Two things it does rule
-    out, both measured: a bare token that the module never supplies, and — via
-    `_reached_through_module`'s call-site requirement — a `mock.patch(
-    "harvest.collect")` string or a `# harvest.collect` comment, each of which
-    named the binding while proving nothing (the patch string proves the
-    opposite: the unit is stubbed out). What it does NOT rule out is a
-    call-SHAPED mention in a comment or a docstring: like every other
-    predicate here, this one reads text, not a call graph, and the file says
-    so under Reference counting. That residue is parity with the rest of the
-    file, not a new class of error.
-    """
-    aliases, names = set(), set()
-    esc = re.escape(module)
-    for m in re.finditer(r"^[ \t]*import[ \t]+%s(?:[ \t]+as[ \t]+(\w+))?[ \t]*(?:#.*)?$"
-                         % esc, text, re.M):
-        aliases.add(m.group(1) or module)
-    for m in re.finditer(r"^[ \t]*from[ \t]+\.?%s[ \t]+import[ \t]+(\(?[^()]*\)?)"
-                         % esc, text, re.M):
-        for piece in m.group(1).replace("(", " ").replace(")", " ").split(","):
-            piece = piece.strip()
-            if not piece:
-                continue
-            parts = piece.split()
-            names.add(parts[-1] if len(parts) > 2 and parts[-2] == "as"
-                      else parts[0])
-    return tuple(sorted(aliases)), tuple(sorted(names))
-
-
-def _reached_through_module(module: str, name: str, text: str) -> bool:
-    """True when `text` CALLS `name` through an import of `module`.
-
-    The call site is the point (fix round 7). Matching the chain `module.name`
-    alone credited `mock.patch("harvest.collect")` — evidence that the unit was
-    replaced by a stub, i.e. the opposite of coverage — and a `# harvest.collect`
-    comment, so under a basename collision a unit with no test at all could
-    read as covered. Requiring `(` after the name costs nothing measured (126
-    credited units on this repo, byte-identical evidence files, before and
-    after) and closes both.
-    """
-    aliases, names = _module_bindings(module, text)
-    called = re.compile(r"(?<![A-Za-z0-9_.])%s[ \t]*\(" % re.escape(name))
-    if name in names and called.search(text):
-        return True
-    return any(re.search(r"(?<![A-Za-z0-9_.])%s[ \t]*\.[ \t]*%s[ \t]*\("
-                         % (re.escape(alias), re.escape(name)), text)
-               for alias in aliases)
 
 
 def inbound_refs(root: str, units, stack=None) -> dict:
@@ -404,7 +333,7 @@ def inbound_refs(root: str, units, stack=None) -> dict:
     path_tokens = {}
     for rel in stack.iter_source_files(root, include_tests=True):
         text = read_text(root, rel)
-        bare_counts[rel], attr_counts[rel] = _name_occurrences(text)
+        bare_counts[rel], attr_counts[rel] = _name_occurrences(stack, text)
         file_lines[rel] = text.splitlines()
         file_texts[rel] = text
         path_tokens[rel] = set(_PATH_TOKEN_RE.findall(rel))
@@ -423,7 +352,7 @@ def inbound_refs(root: str, units, stack=None) -> dict:
     for u in units:
         name = u["name"]
         own_path = u["path"]
-        module = os.path.splitext(os.path.basename(own_path))[0]
+        module = stack.module_of(own_path)
 
         if module not in module_reffiles_cache:
             # Cached purely by module string, and shared by every unit whose
@@ -443,7 +372,7 @@ def inbound_refs(root: str, units, stack=None) -> dict:
             # needed, and the cache stays keyed, and shared, purely by module.
             module_reffiles_cache[module] = [
                 rel for rel in all_files
-                if os.path.splitext(os.path.basename(rel))[0] != module
+                if stack.module_of(rel) != module
                 and _references_module(module, file_texts[rel], path_tokens[rel])
             ]
         ref_files = module_reffiles_cache[module]
@@ -452,7 +381,7 @@ def inbound_refs(root: str, units, stack=None) -> dict:
         lines = file_lines.get(own_path, [])
         lineno = u["lineno"]
         if 1 <= lineno <= len(lines):
-            def_bare, def_attr = _name_occurrences(lines[lineno - 1])
+            def_bare, def_attr = _name_occurrences(stack, lines[lineno - 1])
             total -= def_bare[name] + def_attr[(module, name)]
         for rel in ref_files:
             total += occurrences(rel, name, module)
@@ -482,7 +411,7 @@ def already_covered(root: str, units, stack=None) -> dict:
     covered and `lib/utils.py::helper`, which has no test at all, vanished from
     `ranked` entirely (the reproduction reported two units discovered and every
     output bucket empty). Under that ambiguity the module half is raised to
-    PATH-qualified evidence (`_path_pattern`: `app.utils` / `app/utils`, bounded
+    PATH-qualified evidence (`stack.path_pattern`: `app.utils` / `app/utils`, bounded
     at both ends), which no sibling can satisfy; the test file's own path tokens
     stop counting too, since `tests/test_utils.py` names both equally well. When
     the basename IS unique in the repo, nothing changes.
@@ -505,10 +434,11 @@ def already_covered(root: str, units, stack=None) -> dict:
     costs the user's attention just as a hidden one costs their safety.
 
     So a SECOND kind of evidence is admitted, and only this one: the test file
-    is in the SAME DIRECTORY as the defining file, and reaches the unit THROUGH
+    is POSITIONED AS A TEST OF the defining file (`stack.is_test_for`; for
+    Python, the same directory), and reaches the unit THROUGH
     an import of that module — `import harvest` then `harvest.<name>`,
     `import harvest as H` then `H.<name>`, or `from harvest import <name>`
-    (`_reached_through_module`), AT A CALL SITE. Note what that is not: it is
+    (`stack.reached_through_module`), AT A CALL SITE. Note what that is not: it is
     not the bare whole-identifier match used elsewhere here. The weaker form
     would credit `harvest.py::main` to a file whose only `main` is
     `unittest.main()` — 2 of 6 recovered units were exactly that — so the
@@ -538,19 +468,18 @@ def already_covered(root: str, units, stack=None) -> dict:
     path_tokens = {rel: set(_PATH_TOKEN_RE.findall(rel)) for rel in test_files}
     by_basename = collections.defaultdict(list)
     for rel in stack.iter_source_files(root):
-        by_basename[os.path.splitext(os.path.basename(rel))[0]].append(rel)
+        by_basename[stack.module_of(rel)].append(rel)
     covered = {}
     for u in units:
         name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
-        module = os.path.splitext(os.path.basename(u["path"]))[0]
+        module = stack.module_of(u["path"])
         siblings = by_basename.get(module, ())
         ambiguous = len(siblings) > 1
-        qualified = _path_pattern(u["path"]) if ambiguous else None
+        qualified = stack.path_pattern(u["path"]) if ambiguous else None
         rivals = ()
         if ambiguous:
-            rivals = tuple(p for p in (_path_pattern(r) for r in siblings
+            rivals = tuple(p for p in (stack.path_pattern(r) for r in siblings
                                        if r != u["path"]) if p is not None)
-        home = os.path.dirname(u["path"])
         for rel in sorted(texts):
             text = texts[rel]
             if not name_pattern.search(text):
@@ -558,10 +487,10 @@ def already_covered(root: str, units, stack=None) -> dict:
             if ambiguous:
                 if qualified is not None and qualified.search(text):
                     pass                          # path-qualified: unambiguous
-                elif (os.path.dirname(rel) == home
-                        and _reached_through_module(module, u["name"], text)
+                elif (stack.is_test_for(rel, u["path"])
+                        and stack.reached_through_module(module, u["name"], text)
                         and not any(r.search(text) for r in rivals)):
-                    pass                          # beside the module it imports
+                    pass                          # positioned as its test, and imports it
                 else:
                     continue
             elif not _references_module(module, text, path_tokens[rel]):

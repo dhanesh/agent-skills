@@ -23,6 +23,7 @@ import ast
 import collections
 import functools
 import os
+import re
 import sys
 
 # The shipped assets are a flat directory, not a package, and callers load
@@ -70,6 +71,164 @@ def iter_source_files(root: str, include_tests: bool = False):
                 continue
             out.append(rel)
     return sorted(out)
+
+
+def is_test_for(test_rel: str, src_rel: str) -> bool:
+    """True when `test_rel` is positioned to be a test OF `src_rel`.
+
+    Python's idiom is a single one: the test file sits BESIDE the module it
+    imports (`assets/test_harvest.py` next to `assets/harvest.py`), which is
+    what makes `sys.path.insert(0, dirname(__file__)); import harvest`
+    resolve. So same directory is the whole rule, and it is exactly the rule
+    `already_covered` applied inline before this became an interface name.
+
+    POSITION ONLY, never proof. This says the file is placed where a test of
+    `src_rel` would be placed; whether it actually exercises a given unit is
+    `reached_through_module`'s question, and `already_covered` asks both.
+    Stacks whose tests live in a sibling directory (`__tests__/`) or a
+    mirrored tree (`test/` against `src/`) widen this predicate; none of that
+    is expressible through `is_test_path`, which says only WHETHER a path is
+    a test, never WHAT it tests.
+    """
+    return os.path.dirname(test_rel) == os.path.dirname(src_rel)
+
+
+# ── Naming ───────────────────────────────────────────────────────────────
+
+def module_of(rel: str) -> str:
+    """The module identity `rel` defines: its basename without `.py`.
+
+    This is the key `inbound_refs` and `already_covered` both group by, so it
+    must be the name OTHER files would use to talk about `rel`. For Python
+    that is the basename; a stack whose specifiers are extensionless, path
+    relative, or where a directory index file stands for its directory
+    answers differently, which is why the core asks rather than computes it.
+    """
+    return os.path.splitext(os.path.basename(rel))[0]
+
+
+def path_pattern(rel: str):
+    """A regex matching `rel` written as a module path — `app.utils` or
+    `app/utils` for `app/utils.py` — or None when `rel` has no parent
+    directory to qualify it with.
+
+    This is the evidence `already_covered` demands when a basename is shared,
+    and it is deliberately BOUNDED at both ends rather than a substring test:
+    `myapp.utils` contains "app.utils", so a substring match would credit
+    `app/utils.py` with a test that exercises `myapp/utils.py` — the
+    OVER-crediting direction this file must never take. The trailing lookahead
+    still permits a following `.`, so `app.utils.helper` and
+    `from app.utils import helper` both match.
+
+    Returns None for a repo-root file (`utils.py`), which has no qualifier to
+    offer: under ambiguity such a unit reads as uncovered and gets ranked. That
+    is the accepted under-credit — a redundant test, never a hidden gap.
+    """
+    stem = rel[:-3] if rel.endswith(".py") else rel
+    parts = stem.split("/")
+    if len(parts) < 2:
+        return None
+    body = r"[./]".join(re.escape(p) for p in parts)
+    return re.compile(r"(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])" % body)
+
+
+# ── Lexing ───────────────────────────────────────────────────────────────
+
+IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
+
+
+def preceding_qualifier(text: str, start: int):
+    """The receiver an identifier at `start` is an attribute OF, or None.
+
+    None  — the identifier stands on its own (`write(...)`, `import write`).
+    "sink" — it was written `sink.write`, receiver a plain name.
+    ""    — it is an attribute of something unnameable (`mk().write`,
+            `d["k"].write`), which can never be shown to be the unit's module.
+
+    Whitespace either side of the dot is skipped, so a wrapped chain
+    (`foo()\n    .write(x)`) reads the same as the unwrapped form.
+    """
+    i = start - 1
+    while i >= 0 and text[i].isspace():
+        i -= 1
+    if i < 0 or text[i] != ".":
+        return None
+    j = i - 1
+    while j >= 0 and text[j].isspace():
+        j -= 1
+    end = j + 1
+    while j >= 0 and (text[j].isalnum() or text[j] == "_"):
+        j -= 1
+    qual = text[j + 1:end]
+    return qual if qual and not qual[0].isdigit() else ""
+
+
+# ── Import/binding grammar ───────────────────────────────────────────────
+
+def module_bindings(module: str, text: str) -> tuple:
+    """(aliases, names) the file binds for `module` by an actual import.
+
+    `aliases` are the names the module object itself is bound to
+    (`import harvest` -> "harvest"; `import harvest as H` -> "H"); `names` are
+    the members pulled out of it (`from harvest import apply_markers`).
+
+    This is `already_covered`'s SAME-DIRECTORY evidence, and it is deliberately
+    stronger than the bare whole-identifier match the core uses elsewhere
+    (`rank_risk._references_module`).
+    A test file beside `harvest.py` that says `import harvest` and also
+    contains the token `main` — because it ends with `unittest.main()`, or
+    calls a DIFFERENT module's `main` through an alias — must not credit
+    `harvest.py::main`, which has no test at all. Measured on this repo: the
+    weaker form credited 6 units, 2 of them (`::main` twice) false; this form
+    credits exactly the 4 genuine ones.
+
+    What that buys is NARROWER evidence, not exact evidence, and the
+    difference matters in the over-credit direction. Two things it does rule
+    out, both measured: a bare token that the module never supplies, and — via
+    `reached_through_module`'s call-site requirement — a `mock.patch(
+    "harvest.collect")` string or a `# harvest.collect` comment, each of which
+    named the binding while proving nothing (the patch string proves the
+    opposite: the unit is stubbed out). What it does NOT rule out is a
+    call-SHAPED mention in a comment or a docstring: like every other
+    predicate here, this one reads text, not a call graph, and the file says
+    so under Reference counting. That residue is parity with the rest of the
+    file, not a new class of error.
+    """
+    aliases, names = set(), set()
+    esc = re.escape(module)
+    for m in re.finditer(r"^[ \t]*import[ \t]+%s(?:[ \t]+as[ \t]+(\w+))?[ \t]*(?:#.*)?$"
+                         % esc, text, re.M):
+        aliases.add(m.group(1) or module)
+    for m in re.finditer(r"^[ \t]*from[ \t]+\.?%s[ \t]+import[ \t]+(\(?[^()]*\)?)"
+                         % esc, text, re.M):
+        for piece in m.group(1).replace("(", " ").replace(")", " ").split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            parts = piece.split()
+            names.add(parts[-1] if len(parts) > 2 and parts[-2] == "as"
+                      else parts[0])
+    return tuple(sorted(aliases)), tuple(sorted(names))
+
+
+def reached_through_module(module: str, name: str, text: str) -> bool:
+    """True when `text` CALLS `name` through an import of `module`.
+
+    The call site is the point (fix round 7). Matching the chain `module.name`
+    alone credited `mock.patch("harvest.collect")` — evidence that the unit was
+    replaced by a stub, i.e. the opposite of coverage — and a `# harvest.collect`
+    comment, so under a basename collision a unit with no test at all could
+    read as covered. Requiring `(` after the name costs nothing measured (126
+    credited units on this repo, byte-identical evidence files, before and
+    after) and closes both.
+    """
+    aliases, names = module_bindings(module, text)
+    called = re.compile(r"(?<![A-Za-z0-9_.])%s[ \t]*\(" % re.escape(name))
+    if name in names and called.search(text):
+        return True
+    return any(re.search(r"(?<![A-Za-z0-9_.])%s[ \t]*\.[ \t]*%s[ \t]*\("
+                         % (re.escape(alias), re.escape(name)), text)
+               for alias in aliases)
 
 
 def discover_units(root: str):
