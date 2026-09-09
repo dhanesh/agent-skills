@@ -45,6 +45,9 @@ rather than proceeding on assumptions.
     pytest -p io_guard <path>::<test_name>
   ```
 
+  Copy the whole block: the `PYTHONPATH` assignment is what makes `-p io_guard` resolvable, and
+  `pytest -p io_guard ...` on its own fails with `ImportError: Error importing plugin "io_guard"`.
+
   See `references/triage.md` for exactly what it patches, how it signals a guard trip versus an
   ordinary assertion failure, and why a plugin (not a written file) is what keeps Invariant 1
   clean.
@@ -63,6 +66,12 @@ rather than proceeding on assumptions.
   the report whenever the fallback is used, as a weaker guarantee than the pytest path — and
   prefer pytest whenever the repo will tolerate it, since this is the one gap the fallback cannot
   close.
+
+  Worker-thread trips ARE covered on this path, by a different route: the guard re-raises a
+  swallowed off-main-thread violation from `Thread.join` and, failing that, from `disarm()` — so
+  the `addModuleCleanup(io_guard.disarm)` above turns it into a module-teardown ERROR rather than
+  a silent pass. (On the pytest path a `pytest_runtest_teardown` hook attributes it to the test
+  itself, which is the sharper signal; that hook is the only part of this the fallback loses.)
 
 ## The `make` case
 

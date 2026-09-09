@@ -106,11 +106,11 @@ patches, per group:
 
 | group | what the guard replaces |
 |---|---|
-| filesystem | `builtins.open`, `io.open`, `io.open_code`, `io.FileIO`, `codecs.open`, `mmap.mmap`, and the `os` primitives: the fd-level data family (`open`/`read`/`write`/`close`/`fdopen`/`pread`/`pwrite`/`readv`/`writev`/`sendfile`/`fsync`/`truncate`), the directory-and-metadata family (`listdir`/`scandir`/`walk`/`fwalk`/`stat`/`lstat`/`fstat`/`statvfs`/`access`/`readlink`/`pathconf`), and the mutation family (`remove`/`unlink`/`rename`/`renames`/`replace`/`mkdir`/`makedirs`/`rmdir`/`removedirs`/`link`/`symlink`/`mkfifo`/`mknod`/`chdir`/`chmod`/`chown`/`chflags`/`utime`/`*xattr`) |
+| filesystem | `builtins.open`, `io.open`, `io.open_code`, `io.FileIO`, **`_io.open`, `_io.open_code`, `_io.FileIO`** (the C module the frozen import machinery holds directly — `pkgutil.get_data` goes there and to no `io` name, so patching only the `io` re-exports left it reading real files), `codecs.open`, `mmap.mmap`, and the `os` primitives: the fd-level data family (`open`/`read`/`write`/`close`/`fdopen`/`pread`/`pwrite`/`readv`/`writev`/`sendfile`/`fsync`/`truncate`), the directory-and-metadata family (`listdir`/`scandir`/`walk`/`fwalk`/`stat`/`lstat`/`fstat`/`statvfs`/`access`/`readlink`/`pathconf`), and the mutation family (`remove`/`unlink`/`rename`/`renames`/`replace`/`mkdir`/`makedirs`/`rmdir`/`removedirs`/`link`/`symlink`/`mkfifo`/`mknod`/`chdir`/`chmod`/`chown`/`chflags`/`utime`/`*xattr`) |
 | clock | `time.time`, `time.time_ns`, `time.sleep`, `time.localtime`, `time.gmtime`, `time.ctime`, and guarded subclasses of `datetime.datetime` / `datetime.date` (their `now`/`utcnow`/`today`/`fromtimestamp` are C classmethods and cannot be patched in place) |
 | randomness | the module-level `random` methods, `uuid.uuid1/3/4/5`, the `secrets` token functions, `os.urandom` |
-| environment | `os.getenv`, `os.getenvb`, `os.putenv`, `os.unsetenv` |
-| network | `socket.socket`, `socket.create_connection`, `socket.create_server`, `socket.socketpair`, `socket.getaddrinfo`, `socket.gethostbyname*` |
+| environment | `os.getenv`, `os.getenvb`, `os.putenv`, `os.unsetenv`, and `os.environ` itself, rebound to a guarded mapping — its `.get`/`.pop`/`.setdefault`/`.items`/`.copy` are `MutableMapping` methods that bottom out in `__getitem__` and never call `os.getenv`, so patching the functions alone caught none of them |
+| network | `socket.socket` (as a guarded SUBCLASS — see "A patched class stays a class" below), `socket.create_connection`, `socket.create_server`, `socket.socketpair`, `socket.getaddrinfo`, `socket.gethostbyname*` |
 | subprocess | `subprocess.Popen` and its `run`/`call`/`check_*` wrappers, `os.system`, `os.popen`, `os.startfile`, and the whole `exec*`/`spawn*`/`fork*` family derived from `dir(os)` at runtime |
 | database | `sqlite3.connect`, and `psycopg2`/`psycopg`/`pymysql`/`MySQLdb`/`pymongo`/`sqlalchemy` entry points — patched only once the target repo has imported them, never imported by the guard |
 
@@ -157,6 +157,12 @@ PYTHONPATH="$SKILL_DIR/assets:$PYTHONPATH" \
   TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem,clock \
   pytest -p io_guard <path>::<test_name>
 ```
+**Copy the whole block, not the `pytest` line.** The `PYTHONPATH` assignment is what makes
+`-p io_guard` resolvable at all; on its own, `pytest -p io_guard ...` dies with
+`ImportError: Error importing plugin "io_guard"` before a single test runs. Both forms of the
+command are exercised verbatim by `assets/test_io_guard.py`'s `TestTheDocumentedInvocation`,
+which extracts them from *this file* and runs them, so what is printed here is what is tested.
+
  A plugin loads before collection — which is what makes pre-import blocking work —
 and, because it is passed on the command line rather than written to disk, it touches nothing in
 the user's tree: it cannot collide with a `conftest.py` the repo already has, and it cannot
@@ -180,21 +186,64 @@ Tier 2; `TEST_SAFETY_NET_ALLOW=none` fakes nothing. At Tier 1 it is ignored outr
 import-time I/O runs before it exists — but it only *fires* on I/O initiated from the target
 repo's own code: the test module and the unit under test. pytest's collection, assertion
 rewriting, output capture and failure reporting run on stacks that never leave the interpreter's
-library directories and are exempt, so a guarded run reports an ordinary assertion failure
-ordinarily. Where the two directions trade off the guard over-fires: a false trip costs one
-declined candidate, a missed one ships a test that performs real I/O.
+library directories **or its console-script entry point** and are exempt, so a guarded run
+reports an ordinary assertion failure ordinarily. Where the two directions trade off the guard
+over-fires: a false trip costs one declined candidate, a missed one ships a test that performs
+real I/O.
 
-**State the residuals honestly.** Four of them:
+The entry point is in that list because leaving it out was a real defect, not a hypothetical:
+`<prefix>/bin/pytest` is under none of the interpreter's library directories, its frame sits at
+the base of every stack in a console-script run, and so the guard read pytest's OWN capture and
+environment handling as the unit's. At Tier 1 pytest died inside its capture teardown with no
+test result at all; at Tier 2 every test ERRORed on pytest setting `PYTEST_CURRENT_TEST`. Only
+`python -m pytest` — which no document here tells you to run — was unaffected. The exemption is
+narrow by construction: it applies to a **non-`.py`** `argv[0]`, which is what a console script
+is, so `python3 some_module.py`, where `argv[0]` is the target repo's own code, can never be
+exempted by it.
+
+**A patched class stays a class.** `socket.socket`, `io.FileIO`, `_io.FileIO`, `mmap.mmap`,
+`subprocess.Popen` and `pymongo.MongoClient` are classes, and the guard replaces each with a
+guarded **subclass** — the same technique as `datetime.datetime`. Replacing them with plain
+functions produced a *fourth* proof outcome this contract has no rule for: `ssl.py` does
+`class SSLSocket(socket)` at module level, so `import ssl` — and with it `asyncio`,
+`http.client`, `urllib.request`, `smtplib`, `requests`, `httpx` — raised
+`TypeError: function() argument 'code' must be code, not str`, at both tiers, on a unit that was
+correctly Tier 1. The subclass carries one stated caveat, the same one the clock patch carries:
+while armed, an object constructed BEFORE arming is not an instance of the rebound name.
+
+**A violation off the main thread is surfaced, not swallowed.** `Thread._bootstrap_inner`
+catches `BaseException` and hands it to `threading.excepthook`, so a trip on a worker thread
+could not reach the test result on its own — pytest turned it into a warning and reported the
+run as PASSED, and the skill shipped a test whose captured value existed only because the guard
+was armed. The guard now records every off-main-thread trip at the raise (which also sees a
+`concurrent.futures` future nobody reads, where no excepthook fires at all) and re-raises it on
+the main thread at `Thread.join`, at pytest teardown, or at `disarm()` — whichever comes first.
+The residual is named in the list below.
+
+**State the residuals honestly.** Six of them:
 
 1. A test that spawns a subprocess which itself dials out to the network escapes an in-process
    guard — the guard patches this process's primitives, not a child process's.
 2. A C extension that reaches the syscall directly (`numpy.fromfile`, `ctypes.CDLL(...)`) bypasses
-   every Python name and is not intercepted by anything.
+   every Python name and is not intercepted by anything. Measured, not assumed: with the guard
+   armed at Tier 1, `ctypes.CDLL(None)` open/read/close returns the real contents of `/etc/hosts`.
 3. A reference bound *before* the guard armed keeps the original. Arming ahead of collection is
-   what makes this rare rather than routine.
-4. `os.environ["HOME"]` as a bare **subscript** is not intercepted — only `os.getenv`/`putenv`/
-   `unsetenv` are. This is the same residual the filter has, since its markers match a *call*, so
-   the two layers agree on what neither can see.
+   what makes this rare rather than routine. The same shape covers `posix`/`nt` reached directly
+   (`import posix; posix.stat(p)`), which bypasses the `os` re-exports the guard patches.
+4. `os.environ` **reads** are intercepted — the subscript included, and `.get`/`.pop`/
+   `.setdefault`/`.items`/`.copy`, which are the forms that never call `os.getenv`. What is not:
+   `len(os.environ)` and `key in os.environ`, neither of which reads a value, and `os.environb`,
+   a separate object. An earlier version of this list said the subscript was uninterceptable *and*
+   that the filter shared the blind spot; both halves were false. The filter's `os.environ` marker
+   DOES see `os.environ.get(...)` — so the two layers disagreed, in the direction where the filter
+   tiered a unit 2 while the guard stayed silent, and an ordinary module alias (`ENV = os.environ`)
+   hid it from the filter as well. That two-layer miss is what closing this residual removed.
+5. A daemon thread that is never joined and outlives the proof run can trip after the last point
+   at which the record could be re-raised. The pytest plugin fails the session on any record it
+   still holds at `pytest_sessionfinish`, so the observable outcome is a failed run rather than a
+   silent pass — but a thread still running when the interpreter exits takes its record with it.
+6. If the unit under test is imported from site-packages rather than from the working tree, its
+   frames are exempt and the guard under-fires. Run the proof against the working tree.
 
 **Process-replacing calls are declined statically, and that is not redundancy.** The guard does
 patch `os.exec*`, so a Python-level `os.execv` raises before the image is replaced. But an

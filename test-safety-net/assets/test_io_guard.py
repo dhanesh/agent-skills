@@ -368,6 +368,21 @@ class TestFilterGuardAgreement(unittest.TestCase):
                 with self.subTest(marker=marker):
                     self.assertGreater(len(reason), 40)
 
+    def test_the_filters_docstring_names_every_group_the_guard_blocks(self):
+        # M1 -> N7 -> here: `triage()`'s docstring described the guard from a
+        # snapshot of the spec and went stale twice, once by listing six tier-1
+        # groups (dropping `environment`) and once by carrying a four-name
+        # patch list the spec had already replaced. Pinning it to the guard's
+        # own decision table is what stops a third round of the same drift.
+        doc = rank_risk.triage.__doc__.lower()
+        missing = [g for g in sorted(io_guard.blocked_groups(1))
+                   if g not in doc]
+        self.assertEqual(missing, [], "triage()'s docstring omits tier-1 "
+                                      "blocked group(s): %s" % missing)
+        self.assertIn("io_guard", rank_risk.triage.__doc__,
+                      "the docstring must name the guard as the authority for "
+                      "the patch list rather than restating it")
+
     def test_the_process_family_the_filter_declines_is_also_patched(self):
         derived = set(io_guard._os_process_family())
         table = {m[3:] for m in rank_risk.UNCONTROLLABLE["subprocess"]

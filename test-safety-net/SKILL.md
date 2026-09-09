@@ -137,6 +137,11 @@ than none, because it makes the invariant look enforced when it is not.
      pytest -p io_guard <path>::<test_name>
    ```
 
+   **Copy the whole block, not just the `pytest` line.** The `PYTHONPATH` assignment is what makes
+   `-p io_guard` resolvable; without it the run dies with `ImportError: Error importing plugin
+   "io_guard"` before a single test executes. Both commands above are extracted from this file and
+   run verbatim by the skill's own test suite, so what is printed here is what is proved to work.
+
    The tier is passed per invocation by environment variable, which is sufficient because the proof
    runs one unit at a time — a single run has a single tier:
    - **Tier 1 candidate:** blocks *everything* — filesystem, clock, randomness, environment,
@@ -149,12 +154,17 @@ than none, because it makes the invariant look enforced when it is not.
      variable falls back to permitting all four controllable groups, which is looser than the test
      actually needs.
 
-   The guard patches the **lowest** layer reachable, which for CPython is the `os` primitives plus
-   the file-object constructors — every name the ranker's marker tables classify on, including the
-   directory-and-metadata family (`os.listdir`, `os.scandir`, `os.walk`, `os.stat`, `os.rename`)
-   that no fd-level patch can see. `os.open` is not the builtin `open`; `pathlib` reaches neither;
-   `os.posix_spawn` never routes through `subprocess.Popen`. The full patch list, the
-   filter↔guard coverage table and the residuals are in `references/triage.md`.
+   The guard patches the **lowest** layer reachable, which for CPython is the `os` primitives, the
+   `_io` C module, and the file-object constructors — every name the ranker's marker tables
+   classify on, including the directory-and-metadata family (`os.listdir`, `os.scandir`, `os.walk`,
+   `os.stat`, `os.rename`) that no fd-level patch can see. `os.open` is not the builtin `open`;
+   `pathlib` reaches neither; `pkgutil.get_data` reaches neither *and* neither `io` name;
+   `os.posix_spawn` never routes through `subprocess.Popen`. Two consequences worth knowing before
+   you read a trip: a patched **class** (`socket.socket`, `mmap.mmap`, `subprocess.Popen`) is
+   replaced by a guarded subclass, so `isinstance` against an object built before arming is False;
+   and a violation raised on a worker thread is re-raised on the main one, so it lands as a real
+   failure rather than a warning beside a green run. The full patch list, the filter↔guard
+   coverage table and the residuals are in `references/triage.md`.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

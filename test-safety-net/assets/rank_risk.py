@@ -1130,16 +1130,29 @@ def triage(root: str, unit) -> tuple:
     proof, by the guard the spec specifies:
 
       * TIER-AWARE, not one blanket block. A Tier 1 candidate claims to touch
-        nothing, so everything is blocked — filesystem, clock and randomness
-        as well as network, subprocess and DB — and any touch falsifies the
-        classification. A Tier 2 candidate is blocked only on the
-        UNCONTROLLED groups: its temp dir and frozen clock are the point of
-        the test, not a violation.
-      * PATCHED AT THE OS-LEVEL SYSCALL LAYER, not at the ergonomic wrappers.
-        `os.open` is not the builtin `open`; `os.posix_spawn` never goes
-        through `subprocess.Popen`; `mmap` and `io.FileIO` bypass Python file
-        objects entirely. So the guard patches the `os` primitives, `io.FileIO`,
-        `mmap.mmap` and `socket.socket`.
+        nothing, so ALL SEVEN groups are blocked — the four controllable ones
+        (filesystem, clock, randomness, ENVIRONMENT) as well as network,
+        subprocess and database — and any touch falsifies the classification.
+        A Tier 2 candidate is blocked only on the UNCONTROLLED groups: its temp
+        dir and frozen clock are the point of the test, not a violation. Seven,
+        not six: this sentence has now twice drifted by dropping `environment`,
+        so the authority is `io_guard.blocked_groups(1)`, which returns
+        `io_guard.GROUPS`, which is built from the group names in THIS file's
+        CONTROLLABLE/UNCONTROLLABLE tables. `test_io_guard.py` asserts that
+        identity, so the two cannot disagree without failing the gate.
+      * PATCHED AT THE LOWEST LAYER REACHABLE FROM PYTHON, not at the ergonomic
+        wrappers. `os.open` is not the builtin `open`; `pathlib` reaches
+        neither; `os.posix_spawn` never goes through `subprocess.Popen`;
+        `os.listdir` and `os.stat` pass through no fd a data-level patch ever
+        sees. THE PATCH LIST IS NOT REPEATED HERE. Every earlier attempt to
+        restate it went stale — the version that stood in this docstring named
+        four targets and would have missed `builtins.open`, every `pathlib`
+        read and the whole directory-and-metadata family. It lives in
+        `assets/io_guard.py` (`arm`, and the `FILTER_MARKER_INTERCEPTS` /
+        `PARTIALLY_INTERCEPTED` / `NOT_INTERCEPTED` tables), and those tables
+        are asserted to partition THIS file's marker tables exactly, so a
+        marker added here with no guard-layer intercept fails the gate rather
+        than opening a silent two-layer hole.
       * LOADED AS A PYTEST PLUGIN (`-p`), never written into the target repo
         as a `conftest.py` — a plugin loads BEFORE collection, which is what
         arms it ahead of `import unit_module` and therefore ahead of any I/O
