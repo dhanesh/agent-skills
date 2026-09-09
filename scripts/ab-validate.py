@@ -95,6 +95,9 @@ SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
 # scoped to the call it judges (F1 -- a module body read arbitrary files at
 # tier 1 under `1 passed`, missed by BOTH layers), a call site required on the
 # same-directory credit route (F4), and the eval's inert-plugin arm (F3)
+SINCE_TSN_NODE = "0a02273"   # test-safety-net: the node stack's heuristic
+# discovery, and the two interface corrections that had to precede it
+# (`name_pattern`, and the file context the import grammar resolves against).
 
 
 def _git_out(*args):
@@ -1693,6 +1696,116 @@ def check_test_safety_net_round7(old, new):
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ── test-safety-net: the node stack ─────────────────────────────────────────
+#
+# Every probe returns its "cannot answer" value when the tree has no
+# `stack_node.py`, exactly as the ranker rows score a tree with no ranker: at
+# the baseline this stack does not exist, and "a node repo discovers nothing,
+# credits nothing, and reads as a clean result" is the real state each row
+# measures. The probe never raises, because a crashed probe measures nothing.
+
+_NODE_PROBE = r"""
+res = {"forms": 0, "phantom": 0, "dollar": 0, "credited": 0}
+try:
+    import stack_node
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+forms = tree({"src/forms.js": "\n".join([
+    "export function a() {}",
+    "export default function b() {}",
+    "export const c = (x) => x;",
+    "export const d = function () {};",
+    "export class E {}",
+    "function f() {}",
+    "export { f };",
+    "module.exports.g = () => 1;",
+    "exports.h = function () {};",
+]) + "\n",
+    "src/noise.js": "\n".join([
+    "// export function ghost1() {}",
+    "/* export class Ghost2 {} */",
+    "const s = 'export function ghost3() {}';",
+    "const t = `export function ghost4() {}`;",
+    "const u = 'https://example.com//ghost5';",
+    "const re = /export function ghost6/g;",
+]) + "\n"})
+units, _mode = stack_node.discover_units(forms)
+res["forms"] = len([u for u in units if u["path"] == "src/forms.js"])
+res["phantom"] = len([u for u in units if u["path"] == "src/noise.js"])
+
+dollar = tree({
+    "src/api.js": "export function $fetch(u) { return u; }\n",
+    "src/api.test.js": ('import { $fetch } from "./api";\n'
+                        'test("fetches", () => { $fetch("x"); });\n'),
+})
+du, _ = stack_node.discover_units(dollar)
+res["dollar"] = 1 if "src/api.js::$fetch" in rank_risk.already_covered(
+    dollar, du, stack_node) else 0
+
+coll = tree({
+    "packages/a/src/utils.js": "export function parse(s) { return s; }\n",
+    "packages/b/src/utils.js": "export function parse(s) { return s; }\n",
+    "packages/a/src/__tests__/utils.test.js": (
+        'import { parse } from "../utils";\n'
+        'test("parses", () => { parse("x"); });\n'),
+})
+cu, _ = stack_node.discover_units(coll)
+cov = rank_risk.already_covered(coll, cu, stack_node)
+res["credited"] = ((1 if "packages/a/src/utils.js::parse" in cov else 0)
+                   - (1 if "packages/b/src/utils.js::parse" in cov else 0))
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node(old, new):
+    """Does a JS/TS repo get a ranking at all, and is the coverage it gets honest?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_PROBE)
+    if "_error" in oldp or "_error" in newp:
+        return
+    row(s, "exported node units discovered from a nine-form fixture (higher=better)",
+        oldp["forms"], newp["forms"], newp["forms"] > oldp["forms"],
+        "a node repo detected as Python discovers nothing and reports a clean "
+        "result -- the silent zero this stack exists to close",
+        since=SINCE_TSN_NODE)
+    row(s, "node units credited to a test that only names them in a comment, "
+           "a string or a regex (lower=better)",
+        oldp["phantom"], newp["phantom"],
+        newp["phantom"] == oldp["phantom"] == 0,
+        "the stripper's regression guard, and vacuous at the baseline (no node "
+        "stack, so no phantom either): a `//` in a URL, an export inside a "
+        "template literal and one inside a regex literal must all stay unread",
+        kind="guard")
+    row(s, "a `$`-named export matched to its own test (higher=better)",
+        oldp["dollar"], newp["dollar"], newp["dollar"] > oldp["dollar"],
+        "the core built `\\b%s\\b`, and `\\b` is defined against [A-Za-z0-9_] "
+        "-- so `$fetch` could never be matched in any test file and read as an "
+        "uncovered gap forever. `name_pattern` moved that to the stack",
+        since=SINCE_TSN_NODE)
+    row(s, "colliding node units credited by a `__tests__` sibling test, "
+           "-1 on any cross-credit (higher=better)",
+        oldp["credited"], newp["credited"], newp["credited"] > oldp["credited"],
+        "widening `is_test_for` to `__tests__/` and mirrored trees re-opens fix "
+        "round 6's over-credit unless the specifier is RESOLVED against the "
+        "referencing file: package b has no test and must stay uncovered",
+        since=SINCE_TSN_NODE)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1869,6 +1982,7 @@ def main():
         check_test_safety_net_guard(old, REPO)
         check_test_safety_net_round6(old, REPO)
         check_test_safety_net_round7(old, REPO)
+        check_test_safety_net_node(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
