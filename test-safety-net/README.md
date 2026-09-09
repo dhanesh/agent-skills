@@ -94,7 +94,10 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `references/triage.md` — the four-tier triage, boundary controls, and the runtime guard.
 - `references/stacks.md` — per-stack facts (find units / where tests go / run one test).
 - `references/parameters.md` — `rank_risk.py`'s CLI flags and JSON output shape.
-- `assets/rank_risk.py` — the ranker: churn, approximate blast radius, testability tier, score.
+- `assets/rank_risk.py` — the stack-agnostic ranker: churn, approximate blast radius,
+  scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
+- `assets/stack_python.py` — the Python stack: unit discovery and testability triage.
+- `assets/stack_common.py` — the two file helpers the ranker and every stack share.
 - `assets/io_guard.py` — the tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
 - `assets/test_rank_risk.py`, `assets/test_io_guard.py` — their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).
