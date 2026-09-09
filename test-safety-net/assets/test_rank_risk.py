@@ -128,5 +128,56 @@ class TestInboundRefs(TempRepo):
         self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::x"], 0)
 
 
+class TestTriage(TempRepo):
+    def _tier(self, rel, src, name):
+        write(self.root, rel, src)
+        unit = [u for u in rank_risk.discover_units(self.root) if u["name"] == name][0]
+        return rank_risk.triage(self.root, unit)
+
+    def test_pure_function_is_tier_1(self):
+        tier, reason = self._tier("a.py", "def add(x, y):\n    return x + y\n", "add")
+        self.assertEqual(tier, 1)
+        self.assertIn("no I/O", reason)
+
+    def test_filesystem_use_is_tier_2_with_a_named_boundary(self):
+        tier, reason = self._tier(
+            "b.py", "def load(path):\n    with open(path) as f:\n        return f.read()\n", "load")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_clock_use_is_tier_2(self):
+        tier, reason = self._tier(
+            "c.py", "import datetime\n\n\ndef stamp():\n    return datetime.datetime.now()\n", "stamp")
+        self.assertEqual(tier, 2)
+        self.assertIn("clock", reason)
+
+    def test_network_call_is_tier_3(self):
+        tier, reason = self._tier(
+            "d.py", "import requests\n\n\ndef fetch(u):\n    return requests.get(u).json()\n", "fetch")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_network_in_a_constructor_is_tier_3(self):
+        # THE headline negative: a class that dials out when you instantiate it
+        # cannot be pinned without a seam, and must never get a test written.
+        tier, reason = self._tier(
+            "e.py",
+            "import socket\n\n\nclass Client:\n    def __init__(self, host):\n"
+            "        self.sock = socket.create_connection((host, 80))\n",
+            "Client")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_module_level_io_makes_every_unit_in_the_file_tier_4(self):
+        # Importing the module does I/O, so nothing in it can be reached at all.
+        tier, reason = self._tier(
+            "f.py",
+            "import requests\n\nCONFIG = requests.get('http://x/cfg').json()\n\n\n"
+            "def pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 4)
+        self.assertIn("import time", reason)
+
+
 if __name__ == "__main__":
     unittest.main()

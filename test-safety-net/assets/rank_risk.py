@@ -135,3 +135,89 @@ def inbound_refs(root: str, units) -> dict:
         own_file_count = per_file_counts.get(u["path"], {}).get(u["name"], 0)
         counts[u["id"]] = global_counts.get(u["name"], 0) - own_file_count
     return counts
+
+
+# I/O markers, grouped by whether the boundary can be CONTROLLED in a test.
+# Controllable -> tier 2 (pin at a wider boundary, with the boundary named).
+# Uncontrollable without a seam -> tier 3 (report the seam; write nothing).
+CONTROLLABLE = {
+    "filesystem": ("open(", "pathlib.", "os.path.", "os.remove", "os.mkdir",
+                   "shutil.", "tempfile."),
+    "clock": ("datetime.now", "datetime.utcnow", "time.time", "time.sleep",
+              "date.today"),
+    "randomness": ("random.", "uuid.uuid4", "secrets."),
+    "environment": ("os.environ", "os.getenv"),
+}
+UNCONTROLLABLE = {
+    "network": ("requests.", "urllib.request", "httpx.", "socket.", "aiohttp.",
+                "boto3.", "urlopen("),
+    "database": ("psycopg2.", "sqlite3.connect", "pymongo.", "MongoClient",
+                 "create_engine", "cursor()"),
+    "subprocess": ("subprocess.", "os.system", "os.popen"),
+}
+
+
+def _markers(text):
+    """(group, marker) for every I/O marker present in `text`. Deterministic order."""
+    hits = []
+    for group in sorted(UNCONTROLLABLE):
+        for m in UNCONTROLLABLE[group]:
+            if m in text:
+                hits.append((group, m, False))
+    for group in sorted(CONTROLLABLE):
+        for m in CONTROLLABLE[group]:
+            if m in text:
+                hits.append((group, m, True))
+    return hits
+
+
+def _module_level_source(tree, lines):
+    """Source of statements OUTSIDE any def/class — what runs on import."""
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.Import, ast.ImportFrom)):
+            continue
+        seg = lines[node.lineno - 1: getattr(node, "end_lineno", node.lineno)]
+        out.extend(seg)
+    return "\n".join(out)
+
+
+def triage(root: str, unit) -> tuple:
+    """Classify how testable a unit is. Returns (tier, reason).
+
+    The ranker is deliberately CONSERVATIVE: it reads text, not semantics, so a
+    call that is actually behind an injected parameter still reads as I/O. The
+    SKILL.md permits promoting a unit after inspection — but only by recording
+    the promotion, never silently.
+    """
+    text = read_text(root, unit["path"])
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return 4, "file does not parse; nothing in it can be pinned"
+    lines = text.splitlines()
+
+    # Tier 4 first: if importing the module does I/O, no unit in it is reachable.
+    mod_hits = _markers(_module_level_source(tree, lines))
+    uncontrollable_mod = [h for h in mod_hits if not h[2]]
+    if uncontrollable_mod:
+        group, marker, _ = uncontrollable_mod[0]
+        return 4, f"module does {group} I/O at import time ({marker}); not reachable"
+
+    # The unit's own span.
+    node = next((n for n in tree.body
+                 if getattr(n, "name", None) == unit["name"]), None)
+    if node is None:
+        return 4, "unit not found on re-parse"
+    span = "\n".join(lines[node.lineno - 1: getattr(node, "end_lineno", node.lineno)])
+
+    hits = _markers(span)
+    if not hits:
+        return 1, "no I/O markers; directly callable"
+    uncontrollable = [h for h in hits if not h[2]]
+    if uncontrollable:
+        group, marker, _ = uncontrollable[0]
+        return 3, f"{group} I/O inside the unit ({marker}); needs a seam"
+    group, marker, _ = hits[0]
+    return 2, f"{group} I/O ({marker}); pin at a wider boundary with {group} controlled"
