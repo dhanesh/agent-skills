@@ -365,7 +365,8 @@ def strip_noncode(text: str, keep_strings: bool = False) -> str:
     out = list(text)
     i = 0
     prev = ""            # last significant code character
-    prev_word = ""       # last identifier ending at `prev`, for regex detection
+    prev_idx = -2        # its index, so an identifier is only extended when contiguous
+    prev_word = ""       # last identifier ENDING at `prev`, for regex detection
     modes = ["code"]     # top of stack: "code" or "template"
     interp = []          # bracket depth at each open `${`
     depth = 0
@@ -452,12 +453,24 @@ def strip_noncode(text: str, keep_strings: bool = False) -> str:
                 i += 1
                 continue
         if not c.isspace():
-            prev = c
             if c.isalnum() or c in "_$":
-                m = _IDENT_AT.match(text, i)
-                prev_word = m.group(0) if m else ""
+                # The identifier ENDING here, accumulated as the word is walked.
+                # It used to be `_IDENT_AT.match(text, i)` -- the identifier
+                # STARTING here -- so by the last character of `return` the
+                # word was "n", `_REGEX_PREV_WORDS` never matched anything, and
+                # every `return /re/` in the repo was read as division. That
+                # left the regex text visible, and a `{` inside one (a
+                # quantifier, or `/\{[A-Za-z]/`) then opened a bracket that
+                # never closed: bracket depth stayed above zero for the REST OF
+                # THE FILE, so every export below it stopped being top level and
+                # vanished. Silently fewer units, which is the one direction
+                # this reader is not allowed to be wrong in.
+                prev_word = (prev_word + c
+                             if prev_word and prev_idx == i - 1 else c)
             else:
                 prev_word = ""
+            prev = c
+            prev_idx = i
         i += 1
     return "".join(out)
 

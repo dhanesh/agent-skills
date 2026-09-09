@@ -1979,7 +1979,7 @@ def check_test_safety_net_node_triage(old, new):
 _NODE_PRECISE_PROBE = r"""
 res = {"tooling_stack": "ERROR", "tooling_units": -1, "fresh_node": "ERROR",
        "declared_node": "ERROR", "discovery_key": 0, "survives_a_bad_toolchain": 0,
-       "precise_extra": -1}
+       "precise_extra": -1, "past_a_regex": 0}
 try:
     import rank_risk
 except Exception:
@@ -2060,7 +2060,19 @@ if stack_node is not None:
     except Exception:
         res["survives_a_bad_toolchain"] = 0
 
-# 6. what precision BUYS, where a real typescript exists to buy it with.
+# 6. exports below a function that RETURNS A REGEX LITERAL. Found by running
+#    both discovery paths over a real repo and diffing them.
+if stack_node is not None:
+    try:
+        regex_tree = tree({"src/re.js":
+                           "export function head(t) { return /\\{[A-Za-z]/.test(t); }\n"
+                           "export function mid(t) { return t; }\n"
+                           "export function tail(t) { return t; }\n"})
+        res["past_a_regex"] = len(stack_node._units_heuristic(regex_tree))
+    except Exception:
+        res["past_a_regex"] = 0
+
+# 7. what precision BUYS, where a real typescript exists to buy it with.
 lib = os.environ.get("TSN_TYPESCRIPT_LIB", "")
 if lib and os.path.isfile(lib) and stack_node is not None:
     forms = tree({
@@ -2150,6 +2162,20 @@ def check_test_safety_net_node_precise(old, new):
         "dependency. A `node_modules/typescript` that throws on require must "
         "cost the run nothing at all -- the heuristic still returns every unit "
         "and the run still reports which reader found them",
+        since=SINCE_TSN_NODE_PRECISE)
+    row(s, "exports the heuristic finds in a file below a `return /re/` line, "
+           "of 3 (higher=better)",
+        oldp["past_a_regex"], newp["past_a_regex"],
+        newp["past_a_regex"] > oldp["past_a_regex"],
+        "found by running BOTH discovery paths over a real repo and diffing "
+        "them -- three exports of one TypeScript file were invisible to the "
+        "heuristic and plain to the parser. `_REGEX_PREV_WORDS` was matched "
+        "against the identifier STARTING at the cursor, so walking `return` "
+        "left `prev_word` as \"n\" and the list matched nothing; the regex text "
+        "stayed visible and one `{` inside it opened a bracket that never "
+        "closed, so every export in the rest of the file stopped being top "
+        "level. It scored 1 of 3 before the fix and 0 at this baseline, which "
+        "has no node stack at all",
         since=SINCE_TSN_NODE_PRECISE)
     if newp.get("precise_extra", -1) >= 0:
         row(s, "export forms the precise path finds that the heuristic cannot "

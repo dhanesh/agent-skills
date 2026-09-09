@@ -301,6 +301,12 @@ class TestNegatives(NodeCase):
 # ── The stripper ─────────────────────────────────────────────────────────
 
 class TestStripper(unittest.TestCase):
+    def root_for_stripper(self):
+        if not getattr(self, "_root", None):
+            self._root = tempfile.mkdtemp(prefix="tsn-strip-")
+            self.addCleanup(shutil.rmtree, self._root, ignore_errors=True)
+        return self._root
+
     def test_offsets_and_lines_are_preserved(self):
         src = "const a = 1; // c\n/* b */ const t = `x${ y }z`;\n"
         out = stack_node.strip_noncode(src)
@@ -319,6 +325,36 @@ class TestStripper(unittest.TestCase):
         out = stack_node.strip_noncode("const t = `a ${ compute(1) } b`;")
         self.assertIn("compute(1)", out)
         self.assertNotIn("a ", out.split("compute")[0].replace("const t = ", ""))
+
+    def test_a_regex_after_return_is_a_regex_not_division(self):
+        # FOUND BY THE PRECISE/HEURISTIC COMPARISON, on a real repo: three
+        # exports of one 130-line TypeScript file were invisible to the
+        # heuristic and visible to the parser. `_REGEX_PREV_WORDS` was matched
+        # against the identifier STARTING at the current character, so walking
+        # `return` left `prev_word == "n"` and the list never matched anything.
+        # The regex text then stayed visible, and one `{` inside it opened a
+        # bracket that never closed -- so bracket depth stayed above zero for
+        # the REST OF THE FILE and every export below stopped being top level.
+        out = stack_node.strip_noncode("return /abc/.test(x);")
+        self.assertNotIn("abc", out)
+        for word in ("typeof", "instanceof", "in", "of", "case", "do", "else",
+                     "yield", "await", "delete", "void", "new"):
+            if word in stack_node._REGEX_PREV_WORDS:
+                self.assertNotIn("zz", stack_node.strip_noncode("%s /zz/;" % word), word)
+
+    def test_division_is_still_division(self):
+        # The other direction, and the reason this is a word list rather than
+        # "always a regex": blanking a division blanks CODE, which is the
+        # failure the whole stripper is arranged to avoid.
+        for src in ("x = a / b / c;", "const r = 1/2/3;", "total = sum / n;"):
+            self.assertEqual(stack_node.strip_noncode(src), src, src)
+
+    def test_a_regex_containing_a_brace_does_not_swallow_the_file(self):
+        src = ("export function head(t) { return /\\{[A-Za-z]/.test(t); }\n"
+               "export function tail(t) { return t; }\n")
+        write(self.root_for_stripper(), "src/re.js", src)
+        units, _ = stack_node.discover_units(self.root_for_stripper())
+        self.assertEqual([u["name"] for u in units], ["head", "tail"])
 
     def test_unterminated_string_stops_at_the_newline(self):
         # Wrong in the visible-text direction on purpose: a phantom unit, not
