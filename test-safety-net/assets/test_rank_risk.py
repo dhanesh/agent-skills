@@ -78,5 +78,28 @@ class TestChurn(TempRepo):
         self.assertEqual(rank_risk.churn(self.root), {})
 
 
+class TestInboundRefs(TempRepo):
+    def test_counts_references_outside_the_defining_file(self):
+        write(self.root, "core.py", "def widely_used():\n    pass\n\n\ndef lonely():\n    pass\n")
+        write(self.root, "a.py", "from core import widely_used\nwidely_used()\n")
+        write(self.root, "b.py", "import core\ncore.widely_used()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["core.py::widely_used"], 3)   # import + 2 call sites
+        self.assertEqual(refs["core.py::lonely"], 0)
+
+    def test_does_not_count_the_definition_itself(self):
+        write(self.root, "core.py", "def solo():\n    return solo\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::solo"], 0)
+
+    def test_matches_whole_identifiers_only(self):
+        # `apply` must not be found inside `apply_discount` or `reapply`.
+        write(self.root, "core.py", "def apply():\n    pass\n")
+        write(self.root, "other.py", "def apply_discount():\n    pass\n\n\ndef reapply():\n    pass\n")
+        units = rank_risk.discover_units(self.root)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::apply"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

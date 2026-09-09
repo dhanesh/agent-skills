@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build",
@@ -95,4 +96,26 @@ def churn(root: str, since: str = "6 months ago") -> dict:
         line = line.strip()
         if line:
             counts[line] = counts.get(line, 0) + 1
+    return counts
+
+
+def inbound_refs(root: str, units) -> dict:
+    """Approximate blast radius: whole-identifier references outside the definition file.
+
+    APPROXIMATE, on purpose, and labelled as such wherever it surfaces. It counts
+    identifier occurrences, so a mention in a comment or a docstring counts and a
+    dynamic `getattr(mod, name)` call does not. A real call graph would do this
+    better — the report says so and names it as an optional upgrade — but
+    requiring one would make the skill undeployable in the repos that need it most.
+    """
+    texts = {rel: read_text(root, rel) for rel in iter_py_files(root, include_tests=True)}
+    counts = {}
+    for u in units:
+        pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
+        total = 0
+        for rel, text in texts.items():
+            if rel == u["path"]:
+                continue                  # never count a unit's own definition site
+            total += len(pattern.findall(text))
+        counts[u["id"]] = total
     return counts
