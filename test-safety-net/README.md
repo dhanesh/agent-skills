@@ -97,7 +97,11 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `assets/rank_risk.py` — the stack-agnostic ranker: churn, approximate blast radius,
   scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
 - `assets/stack_python.py` — the Python stack: unit discovery and testability triage.
+- `assets/stack_node.py` — the node/TypeScript stack: heuristic discovery of exported
+  units, plus the naming, lexing and import-grammar answers JS gives. Not yet registered
+  as a stack the ranker will select — its triage half is still to come.
 - `assets/stack_common.py` — the two file helpers the ranker and every stack share.
 - `assets/io_guard.py` — the tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
-- `assets/test_rank_risk.py`, `assets/test_io_guard.py` — their stdlib test suites.
+- `assets/test_rank_risk.py`, `assets/test_io_guard.py`, `assets/test_stack_node.py` —
+  their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).
