@@ -471,4 +471,58 @@ case "$OUT" in
   *) bad "11 arm/disarm did not round-trip (exit=$ST)"; note "$OUT" ;;
 esac
 
+# ── 12. WHO node --test BLAMES for an ASYNC violation ────────────────────
+# The rule with no python equivalent, and the reason SKILL.md tells an agent to
+# read `$?` and not the per-test lines. When a violation lands AFTER the test
+# that caused it resolved, `node --test` does not blame that test: it prints
+# `ok` for it and puts the `not ok` on a DIFFERENT entry -- the enclosing file
+# on node 22, and one test further along on the build this rule was first
+# reproduced against. Either way an agent reading per-test results keeps the
+# test that performs real I/O and discards a clean one, which is exactly
+# inverted and completely silent.
+#
+# So the assertion is deliberately shaped as "the culprit says ok AND somebody
+# else carries the not ok", which holds for both observed shapes and fails the
+# moment either half stops being true:
+#   * a guard that never arms  -> the read succeeds, exit 0, no violation;
+#   * node learning to blame the right test -> `blamed` becomes the culprit,
+#     this goes red, and the prose in SKILL.md / references/stacks.md gets
+#     WEAKER rather than quietly staying wrong.
+#
+# The whole FILE is run, with no `--test-name-pattern`: the batch is the unit
+# the rule is about.
+cat > "$WORK/asyncmisattrib.js" <<'EOF'
+const fs = require("node:fs");
+function scheduleRead() {
+  setTimeout(() => { fs.readFileSync("/etc/hosts", "utf8"); }, 40);
+  return true;
+}
+module.exports = { scheduleRead };
+EOF
+cat > "$WORK/test_asyncmisattrib.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { scheduleRead } = require("./asyncmisattrib.js");
+test("fast_test_slow_violation", () => { assert.ok(scheduleRead()); });
+test("second_test_keeps_process_alive", async () => {
+  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(true);
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=clock \
+       node --require "$GUARD" --test test_asyncmisattrib.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - fast_test_slow_violation$' || true)"
+blamed="$(printf '%s\n' "$OUT" | grep -E '^not ok [0-9]+ - ' \
+          | sed -e 's/^not ok [0-9]* - //' | head -1 || true)"
+if [ "$ST" -ne 0 ] && tripped && [ "$culprit_ok" -eq 1 ] \
+   && [ -n "$blamed" ] && [ "$blamed" != "fast_test_slow_violation" ]; then
+  ok "12 an ASYNC violation exits nonzero but is blamed on the wrong entry (\"$blamed\", not fast_test_slow_violation, which printed ok) -- so the EXIT STATUS is the only trustworthy signal on this stack"
+else
+  bad "12 the async-misattribution shape SKILL.md documents did not reproduce (exit=$ST, culprit_ok=$culprit_ok, blamed='$blamed')"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -4)"
+fi
+
 exit "$rc"

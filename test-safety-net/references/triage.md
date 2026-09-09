@@ -220,7 +220,7 @@ was armed. The guard now records every off-main-thread trip at the raise (which 
 the main thread at `Thread.join`, at pytest teardown, or at `disarm()` — whichever comes first.
 The residual is named in the list below.
 
-**State the residuals honestly.** Six of them:
+**State the residuals honestly.** Seven of them:
 
 1. A test that spawns a subprocess which itself dials out to the network escapes an in-process
    guard — the guard patches this process's primitives, not a child process's.
@@ -244,6 +244,17 @@ The residual is named in the list below.
    silent pass — but a thread still running when the interpreter exits takes its record with it.
 6. If the unit under test is imported from site-packages rather than from the working tree, its
    frames are exempt and the guard under-fires. Run the proof against the working tree.
+7. **The import exemption is keyed on CPython's own frame names.** `_IMPORT_PROTOCOL_FRAMES` in
+   `assets/io_guard.py` is a hand-derived list (`_find_and_load`, `_gcd_import`,
+   `_call_with_frames_removed`, …), matched against `co_name` on a `<frozen importlib...>` frame.
+   Those names are an implementation detail of the interpreter, not an API. A CPython release that
+   renames them does not make the guard noisy, it makes it **over-fire**: a genuine `import`
+   stops being recognised as one and every candidate that imports anything gets declined. Rename
+   in the other direction — a frame that stops resolving as machinery — and it under-fires. The
+   node guard carries the same dependency in a different shape (it matches the literal
+   `node:internal/` prefix in stack text); `references/stacks.md` states it there. Both are pinned
+   by their suites' documented-command assertion, which is the thing that goes red first, and only
+   on a machine where that suite runs.
 
 **Process-replacing calls are declined statically, and that is not redundancy.** The guard does
 patch `os.exec*`, so a Python-level `os.execv` raises before the image is replaced. But an
