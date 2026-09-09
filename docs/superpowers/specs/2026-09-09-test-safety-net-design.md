@@ -140,6 +140,27 @@ on the receiving side.
      controllable ones are deliberately faked by the test — a temp dir and a frozen clock are the
      point, not a violation.
 
+   **The guard patches the syscall layer, not the convenience wrappers.** A third amendment,
+   after a review found five escapes that shared one root cause: real I/O reached through an entry
+   point *underneath* the Python names the guard was scoped to patch. `os.open` is not the builtin
+   `open`; `os.posix_spawn` never goes through `subprocess.Popen`; `mmap`, `io.FileIO` and a
+   `ctypes` C call bypass Python-level file objects entirely. So the guard patches the lowest
+   available layer — the `os` primitives (`open`, `write`, `posix_spawn`, `spawn*`, `fork`),
+   `io.FileIO`, `mmap.mmap` and `socket.socket` — not only the ergonomic wrappers above them.
+
+   **The guard is installed BEFORE the module under test is imported.** Otherwise a module doing
+   I/O at import time runs its side effects during `import unit_module`, before any fixture body
+   executes — once per proof run, for every module, regardless of tier. In pytest that means a
+   `conftest.py` loaded ahead of collection, not a fixture inside the generated test.
+
+   **The split between filter and guard is deliberate, and neither alone is sufficient.** The
+   guard covers what the filter cannot see: dynamic dispatch, unresolvable receivers, cross-module
+   indirection. The filter must cover what the guard structurally *cannot*: `os.execv` and friends
+   replace the entire process image, taking every in-process patch with them, so no runtime guard
+   can survive one. Process-replacing calls therefore have to be declined statically — they are in
+   the marker table as uncontrollable, and that is not redundancy with the guard, it is the one
+   case the guard cannot reach.
+
    Residual, stated plainly: a test that spawns a subprocess which itself dials out escapes an
    in-process guard. That is a smaller residual than trusting static analysis alone, and naming
    it is the point.
