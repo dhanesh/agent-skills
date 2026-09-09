@@ -46,7 +46,7 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
-from stack_common import (MANIFEST_BONUS, SKIP_DIRS, has_manifest,   # noqa: E402
+from stack_common import (SKIP_DIRS, evidence_score, has_manifest,   # noqa: E402,F401
                           read_text)
 
 STACK_NAME = "node"
@@ -87,17 +87,15 @@ def evidence(root: str) -> int:
     question a polyglot repo actually poses is "what is this repo MOSTLY", and
     only a score can answer it.
 
-    ZERO WHEN THERE ARE NO SOURCE FILES AT ALL, manifest or not: a
-    `package.json` carrying nothing but a `lint` script (in a Python repo, the
-    commonest reason one exists) must not win a repo this stack would then
-    discover no units in. `has_manifest` additionally refuses a manifest that
-    is nested under a template directory or more than `MANIFEST_MAX_DEPTH`
-    below `root`.
+    A manifest SCALES that count rather than adding to it, and this stack is
+    where the difference bites: a `package.json` carrying nothing but a `lint`
+    script is, in a Python repo, the commonest reason one exists at all. The
+    rule itself lives in `stack_common.evidence_score` -- shared, so the two
+    stacks cannot drift into weighing the same evidence differently -- and it
+    scores zero when no source files stand behind the manifest.
     """
-    n = sum(1 for _rel in iter_source_files(root))
-    if not n:
-        return 0
-    return n + (MANIFEST_BONUS if has_manifest(root, MANIFESTS) else 0)
+    return evidence_score(sum(1 for _rel in iter_source_files(root)),
+                          root, MANIFESTS)
 
 
 # ── Files ────────────────────────────────────────────────────────────────

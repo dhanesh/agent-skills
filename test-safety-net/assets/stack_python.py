@@ -33,7 +33,7 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
-from stack_common import (MANIFEST_BONUS, SKIP_DIRS, has_manifest,   # noqa: E402
+from stack_common import (SKIP_DIRS, evidence_score, has_manifest,   # noqa: E402,F401
                           read_text)
 
 STACK_NAME = "python"
@@ -45,21 +45,18 @@ MANIFESTS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt",
 
 
 def evidence(root: str) -> int:
-    """How much of `root` is Python: non-test `.py` files, plus a manifest bonus.
+    """How much of `root` is Python: non-test `.py` files, scaled by a manifest.
 
-    ZERO WHEN THERE ARE NO SOURCE FILES AT ALL, manifest or not. A manifest
-    with nothing behind it must not win a repo this stack would then discover
-    no units in -- and a `requirements.txt` beside a pure-TypeScript tree (a
-    docs build, a lint shim) is exactly that. The bonus multiplies a real
-    claim; it never manufactures one.
+    The whole rule lives in `stack_common.evidence_score`, so the two stacks
+    cannot drift into weighing the same evidence differently -- a detector
+    whose stacks disagree about what a manifest is worth is not comparing
+    scores, it is comparing scales.
 
     Python is also `rank_risk.detect_stack`'s fallback, so a score of 0 here
     never means "this repo cannot be ranked".
     """
-    n = sum(1 for _rel in iter_source_files(root))
-    if not n:
-        return 0
-    return n + (MANIFEST_BONUS if has_manifest(root, MANIFESTS) else 0)
+    return evidence_score(sum(1 for _rel in iter_source_files(root)),
+                          root, MANIFESTS)
 
 
 def is_test_path(rel: str) -> bool:

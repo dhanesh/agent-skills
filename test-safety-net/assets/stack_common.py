@@ -45,11 +45,32 @@ SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build",
 TEMPLATE_DIRS = {"assets", "template", "templates", "fixture", "fixtures",
                  "example", "examples", "testdata", "__fixtures__", "golden"}
 
-# What a manifest is worth, in units of "source files this stack claims". Big
-# enough to be decisive against a scattering of stray files (a Python repo with
-# one `.mjs` helper), small enough that a genuine several-hundred-file majority
-# still outweighs a manifest.
-MANIFEST_BONUS = 100
+# What a manifest is worth: it SCALES a stack's claim, it does not add to it.
+#
+# The additive form this replaced (`files + 100`) was wrong in the mainline
+# case, and reproducibly so: 40 `.py` files, 5 `.js` files and a root
+# `package.json` holding a `prettier` script scored node 105 against python 40,
+# so the skill ranked five files and ignored forty. A root `package.json` for
+# formatting or git hooks is ordinary in a Python repo, which makes that shape
+# common rather than a corner. Any additive bonus large enough to carry the
+# case it was written for -- a two-file node package that a handful of vendored
+# Python scripts must not outvote -- is by construction large enough to swamp a
+# real majority, because "decisive against a scattering" and "swamped by a
+# scattering" are the same number seen from two sides.
+#
+# Multiplying cannot do that. A multiplier applied to a small claim stays
+# small, and when BOTH stacks declare themselves it appears on both sides and
+# cancels, leaving the file counts to decide -- which is what a polyglot repo
+# that honestly declares both halves wants.
+#
+# THE CONSTANTS WERE CHOSEN AGAINST `CASE_TABLE` in `test_stack_node.py`, eight
+# real repo shapes with the verdict each must reach, and they are pinned from
+# BOTH sides by that table: raise them and row 1 (40 `.py`, 5 `.js`, a tooling
+# `package.json`) flips to node; lower them and a one-file node package with a
+# real `package.json` loses to six vendored Python scripts. Change one only
+# with the whole table in front of you.
+MANIFEST_FLOOR = 5
+MANIFEST_MULTIPLIER = 2
 
 # How far below `root` a manifest still describes `root`. 2 covers a monorepo's
 # `packages/<pkg>/<manifest>`.
@@ -86,3 +107,25 @@ def read_text(root: str, rel: str) -> str:
             return f.read()
     except OSError:
         return ""
+
+
+def evidence_score(n_files: int, root: str, manifests) -> int:
+    """A stack's evidence: its source files, scaled when it declares itself.
+
+    ZERO WHEN THERE ARE NO SOURCE FILES AT ALL, manifest or not. A manifest
+    with nothing behind it must not win a repo the stack would then discover no
+    units in -- a `package.json` carrying one `lint` script, or a
+    `requirements.txt` beside a pure-TypeScript tree. The multiplier scales a
+    real claim; it never manufactures one, which is why this is a guard clause
+    and not a `max(files, 1)`.
+
+    `MANIFEST_FLOOR` is what makes a SMALL declared project beat a scattering
+    of another language's scripts: two `.ts` files and a `package.json` are a
+    node repo even beside three Python helpers, and without a floor the
+    multiplier on a claim of 2 cannot say so.
+    """
+    if not n_files:
+        return 0
+    if not has_manifest(root, manifests):
+        return n_files
+    return (n_files + MANIFEST_FLOOR) * MANIFEST_MULTIPLIER

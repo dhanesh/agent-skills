@@ -23,8 +23,9 @@ version does not cover it and stop rather than proceeding on assumptions.
 ## Node: ranked, not yet written
 
 `assets/rank_risk.py` **does** cover node/TypeScript repositories for the first half of the
-workflow. It detects them (each stack scores the repo — non-test source files plus a bonus for a
-manifest at or near the root — and the highest score wins; `--stack` overrides, and a tie is
+workflow. It detects them (each stack scores the repo — the non-test source files it claims, doubled
+(plus a floor) when a manifest at or near the root declares that stack — and the highest score
+wins; `--stack` overrides, and a tie is
 reported rather than guessed), discovers top-level `export`ed functions and classes
 heuristically, and triages them against node's own I/O marker tables into the same four tiers
 Python uses.

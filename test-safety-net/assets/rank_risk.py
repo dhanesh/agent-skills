@@ -700,10 +700,22 @@ def main(argv=None) -> int:
         sys.stderr.write("       re-run with --stack {%s} to choose.\n"
                          % ",".join(name for name, _ in scores))
         return 2
-    sys.stderr.write("note: stack=%s (evidence: %s%s)\n"
-                     % (stack.STACK_NAME,
-                        ", ".join("%s=%d" % (n, v) for n, v in scores),
-                        "; forced by --stack" if args.stack else ""))
+    if args.stack is None and not any(v for _n, v in scores):
+        # NOTHING CLAIMS THIS TREE. `detect_stack` still returns the Python
+        # fallback so the run produces a well-formed empty report rather than
+        # an error -- but printing `stack=python` alone would read as a
+        # verdict about a repo no stack recognised, and an empty `ranked` under
+        # a confident-looking verdict is the silent zero this skill exists to
+        # close. Say which it is.
+        sys.stderr.write("note: no stack claims %s (evidence: %s); reporting an "
+                         "empty plan\n"
+                         % (os.path.abspath(args.repo),
+                            ", ".join("%s=%d" % (n, v) for n, v in scores)))
+    else:
+        sys.stderr.write("note: stack=%s (evidence: %s%s)\n"
+                         % (stack.STACK_NAME,
+                            ", ".join("%s=%d" % (n, v) for n, v in scores),
+                            "; forced by --stack" if args.stack else ""))
     json.dump(rank(args.repo, args.since, args.top_n, stack), sys.stdout,
               indent=2, sort_keys=True)
     sys.stdout.write("\n")

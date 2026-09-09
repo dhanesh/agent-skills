@@ -34,6 +34,7 @@ def _load(name):
 
 
 stack_node = _load("stack_node")
+stack_common = _load("stack_common")
 rank_risk = _load("rank_risk")
 
 
@@ -355,14 +356,13 @@ class TestInterfaceNames(NodeCase):
                 self.assertTrue(hasattr(stack, attr),
                                 "%s lacks %s" % (stack.STACK_NAME, attr))
 
-    def test_evidence_counts_sources_and_adds_a_manifest_bonus(self):
+    def test_evidence_counts_sources(self):
+        # The manifest half of this lives in `TestManifestCaseTable`, with the
+        # eight repo shapes that decide what the scaling is worth.
         self.assertEqual(stack_node.evidence(self.root), 0)
         write(self.root, "src/a.mjs", "export function a() {}\n")
         write(self.root, "src/b.ts", "export function b() {}\n")
         self.assertEqual(stack_node.evidence(self.root), 2)
-        write(self.root, "package.json", "{}\n")
-        self.assertEqual(stack_node.evidence(self.root),
-                         2 + stack_node.MANIFEST_BONUS)
 
     def test_a_manifest_with_no_source_behind_it_scores_nothing(self):
         # The commonest reason a Python repo has a `package.json`: a `lint` or
@@ -593,9 +593,13 @@ class TestStackDetection(unittest.TestCase):
         self.assertEqual(rank_risk.detect_stack(REPO_ROOT).STACK_NAME, "python")
         scores = dict(rank_risk.stack_evidence(REPO_ROOT))
         self.assertGreater(scores["python"], scores["node"])
-        # And no manifest bonus reached either side: the scaffold's
-        # `package.json` is the only manifest in the tree.
-        self.assertLess(scores["node"], stack_node.MANIFEST_BONUS)
+        # And no manifest scaling reached either side: the scaffold's
+        # `package.json` is the only manifest in the tree, and it describes a
+        # site this repo INSTALLS ELSEWHERE. Both scores are raw file counts.
+        self.assertEqual(scores["node"],
+                         sum(1 for _ in stack_node.iter_source_files(REPO_ROOT)))
+        self.assertEqual(scores["python"],
+                         sum(1 for _ in rank_risk.stack_python.iter_source_files(REPO_ROOT)))
 
     def test_a_manifest_inside_a_template_dir_is_not_evidence(self):
         write(self.root, "assets/templates/scaffold/package.json", "{}")
@@ -688,6 +692,163 @@ class TestStackDetection(unittest.TestCase):
         self.assertIn("stack=python", err.getvalue())
         self.assertIn("node=0", err.getvalue())
         self.assertEqual(json.loads(out.getvalue())["stack"], "python")
+
+# ── The manifest weight ───────────────────────────────────
+
+CASE_TABLE = [
+    # (label, .py files, node files, node extension, manifests, expected)
+    #
+    # EIGHT REAL REPO SHAPES, AND THE VERDICT EACH MUST REACH. This table is
+    # the specification of what a manifest is WORTH; `MANIFEST_FLOOR` and
+    # `MANIFEST_MULTIPLIER` were chosen to satisfy it, in that order. Fitting
+    # the constants to any one row is how the bug this replaced happened: an
+    # additive `MANIFEST_BONUS = 100` is exactly right for row 4 and ranks
+    # five files while ignoring forty in row 1.
+    ("a Python repo with JS tooling (prettier/husky)",
+     40, 5, ".js", ("package.json",), "python"),
+    ("a Python repo whose only manifest belongs to a shipped template",
+     75, 17, ".ts", ("kit/assets/templates/scaffold/package.json",), "python"),
+    ("a JS repo with a handful of Python scripts",
+     3, 200, ".js", ("package.json",), "node"),
+    ("a fresh node project beside some Python tooling",
+     3, 2, ".js", ("package.json",), "node"),
+    ("a Python service with a JS frontend, both declared",
+     300, 20, ".js", ("pyproject.toml", "package.json"), "python"),
+    ("a TypeScript repo with Python tooling scripts",
+     4, 150, ".ts", ("package.json",), "node"),
+    ("a 50/50 polyglot tree with no manifest at all",
+     10, 10, ".js", (), "ambiguous"),
+    ("an empty repo",
+     0, 0, ".js", (), "neither"),
+]
+
+
+class TestManifestCaseTable(unittest.TestCase):
+    """What a manifest is worth, decided against cases rather than in the abstract.
+
+    A manifest SCALES a stack's claim; it does not add to it. The additive form
+    this replaced (`files + 100`) let a root `package.json` -- the commonest
+    thing in a Python repo that has one, a `prettier`/`husky` entry and nothing
+    else -- outscore a forty-file Python majority 105 to 40, so the skill
+    ranked five files and ignored forty. Multiplying cannot do that: a
+    multiplier applied to a small claim stays small.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="tsn-cases-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self._stacks = rank_risk.STACKS
+        rank_risk.STACKS = [stack_node, rank_risk.stack_python]
+        self.addCleanup(setattr, rank_risk, "STACKS", self._stacks)
+
+    def _build(self, root, py, node, ext, manifests):
+        for i in range(py):
+            write(root, "srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+        for i in range(node):
+            write(root, "web/mod%d%s" % (i, ext), "export function go%d() {}\n" % i)
+        for rel in manifests:
+            write(root, rel, "{}\n" if rel.endswith(".json") else "[project]\n")
+
+    def _verdict(self, root):
+        """python | node | ambiguous | neither -- the four answers a run can give."""
+        scores = dict(rank_risk.stack_evidence(root))
+        if not any(scores.values()):
+            return "neither"
+        try:
+            return rank_risk.detect_stack(root).STACK_NAME
+        except rank_risk.AmbiguousStack:
+            return "ambiguous"
+
+    def test_every_row_of_the_case_table(self):
+        for label, py, node, ext, manifests, expected in CASE_TABLE:
+            with self.subTest(label):
+                root = tempfile.mkdtemp(prefix="tsn-case-", dir=self.root)
+                self._build(root, py, node, ext, manifests)
+                scores = dict(rank_risk.stack_evidence(root))
+                self.assertEqual(
+                    self._verdict(root), expected,
+                    "%s: python=%d node=%d" % (label, scores["python"], scores["node"]))
+
+    def test_the_reproduction_that_forced_the_change(self):
+        # The controller-reproduced shape, kept as its own named test because a
+        # row inside a loop is easy to delete by accident. 40 .py + 5 .js + a
+        # root `package.json` reported `stack=node (node=105, python=40)` and
+        # `units: 5`: a Python repo whose skill looked at the JavaScript.
+        self._build(self.root, 40, 5, ".js", ("package.json",))
+        scores = dict(rank_risk.stack_evidence(self.root))
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+        self.assertGreater(scores["python"], scores["node"])
+        units, _mode = rank_risk.stack_python.discover_units(self.root)
+        self.assertEqual(len(units), 40)
+
+    def test_a_manifest_scales_the_claim_it_finds(self):
+        write(self.root, "src/a.mjs", "export function a() {}\n")
+        write(self.root, "src/b.ts", "export function b() {}\n")
+        self.assertEqual(stack_node.evidence(self.root), 2)
+        write(self.root, "package.json", "{}\n")
+        self.assertEqual(
+            stack_node.evidence(self.root),
+            (2 + stack_common.MANIFEST_FLOOR) * stack_common.MANIFEST_MULTIPLIER)
+
+    def test_the_multiplier_cancels_when_both_stacks_declare_themselves(self):
+        # Row 5 of the table, stated as the property that makes it work: when
+        # both stacks carry a manifest the multiplier is on both sides, so the
+        # file counts decide -- which is what a polyglot repo that declares
+        # both halves honestly wants.
+        self._build(self.root, 30, 6, ".ts", ("pyproject.toml", "package.json"))
+        scores = dict(rank_risk.stack_evidence(self.root))
+        self.assertEqual(scores["python"] / scores["node"], 35 / 11)
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+
+    def test_an_unclaimed_repo_says_so_and_exits_cleanly(self):
+        # Row 8. Nothing to rank is a legitimate answer; it must be a
+        # well-formed empty report and a line saying WHY, never an error and
+        # never a silent `stack=python` that reads like a verdict.
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = rank_risk.main([self.root])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["units_discovered"], 0)
+        self.assertIn("no stack claims", err.getvalue())
+
+
+class TestAmbiguityMargin(unittest.TestCase):
+    """`AMBIGUITY_MARGIN` shipped untested. Both directions, derived from it.
+
+    The numbers below are computed FROM the constant rather than written
+    against today's value, so moving the margin moves the test with it and a
+    change that makes the detector guess more (or refuse more) has to be a
+    deliberate edit to the constant.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="tsn-margin-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self._stacks = rank_risk.STACKS
+        rank_risk.STACKS = [stack_node, rank_risk.stack_python]
+        self.addCleanup(setattr, rank_risk, "STACKS", self._stacks)
+
+    def _pair(self, py, node):
+        for i in range(py):
+            write(self.root, "srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+        for i in range(node):
+            write(self.root, "web/mod%d.js" % i, "export function go%d() {}\n" % i)
+
+    def test_a_pair_inside_the_margin_is_reported_not_guessed(self):
+        leader = 20
+        gap = max(1, int(leader * rank_risk.AMBIGUITY_MARGIN))
+        self._pair(leader, leader - gap)           # exactly ON the boundary: <= is ambiguous
+        with self.assertRaises(rank_risk.AmbiguousStack) as caught:
+            rank_risk.detect_stack(self.root)
+        self.assertEqual(dict(caught.exception.scores),
+                         {"python": leader, "node": leader - gap})
+
+    def test_a_pair_outside_the_margin_is_decided(self):
+        leader = 20
+        gap = int(leader * rank_risk.AMBIGUITY_MARGIN) + 1
+        self._pair(leader, leader - gap)
+        self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
+
 
 # ── Triage ───────────────────────────────────────────────────────────────
 
