@@ -243,6 +243,88 @@ class TestTriage(TempRepo):
             "pure_helper2")
         self.assertEqual(tier, 4)
 
+    def test_function_local_import_does_not_shadow_the_module_level_alias(self):
+        # The alias map is scoped to MODULE-level imports only. An unrelated
+        # function's local `import ... as requests` must not rewrite what
+        # `requests` means for the rest of the file — the round-1 fix
+        # introduced this regression by walking the whole tree.
+        tier, reason = self._tier(
+            "shadow.py",
+            "import requests\n\n\n"
+            "def unrelated():\n    import collections.abc as requests\n"
+            "    return requests.Mapping\n\n\n"
+            "def net_call(u):\n    return requests.get(u)\n",
+            "net_call")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_class_base_expression_call_at_definition_time_taints_the_module(self):
+        # `class C(make_base()):` evaluates `make_base()` at class-CREATION
+        # time — import time — even though the call lives in the base-class
+        # list, not the class body or a decorator.
+        tier, reason = self._tier(
+            "basecls.py",
+            "import requests\n\n\ndef make_base():\n"
+            "    return requests.get('http://x').json()\n\n\n"
+            "class C(make_base()):\n    pass\n\n\ndef pure(x):\n    return x\n",
+            "pure")
+        self.assertEqual(tier, 4)
+
+    def test_method_call_through_a_fresh_instance_is_tier_3_named_by_method(self):
+        # `Client().fetch(u)` — the receiver is a fresh instantiation, not a
+        # resolvable name, but the METHOD name alone must still be enough to
+        # find a same-module `fetch` that does real network I/O.
+        tier, reason = self._tier(
+            "method.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef get_data(u):\n"
+            "    return Client().fetch(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_module_level_call_to_a_same_module_helper_taints_the_module(self):
+        # `_STARTED = _boot()` at module level must inherit whatever `_boot`
+        # itself reaches — the module-taint check chases the same-module
+        # call graph transitively, not just the direct call target.
+        tier, reason = self._tier(
+            "boot.py",
+            "import subprocess\n\n\ndef _boot():\n    return subprocess.run(['true'])\n\n\n"
+            "_STARTED = _boot()\n\n\ndef pure_helper3(x):\n    return x\n",
+            "pure_helper3")
+        self.assertEqual(tier, 4)
+
+    def test_main_guard_does_not_taint_the_module(self):
+        # `if __name__ == "__main__": main()` is THE standard idiom written
+        # specifically so its body does not run at import time. Making the
+        # module-taint check transitive (chasing `_boot()` above) must not
+        # also start chasing into `main()` through this guard — that false
+        # positive was observed to taint 128 of this repo's own 296 units
+        # before `_is_main_guard` excluded it.
+        tier, reason = self._tier(
+            "script.py",
+            "import subprocess\n\n\ndef main():\n    return subprocess.run(['true'])\n\n\n"
+            "def pure_helper4(x):\n    return x\n\n\n"
+            "if __name__ == '__main__':\n    main()\n",
+            "pure_helper4")
+        self.assertEqual(tier, 1)
+
+    def test_function_local_import_is_still_visible_within_its_own_function(self):
+        # Scoping the alias map to module level (previous test) must not
+        # also blind a function to its OWN local import — this repo's own
+        # scripts/ab-validate.py::check_audit_guardrails does exactly this
+        # (`import subprocess as sp` then `sp.run(...)`, both inside the
+        # same function) and was observed to silently drop to tier 2 before
+        # `_local_alias_map` restored per-function visibility.
+        tier, reason = self._tier(
+            "localimport.py",
+            "def run_it(cmd):\n    import subprocess as sp\n"
+            "    return sp.run(cmd)\n",
+            "run_it")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import functools
 import os
 import re
 import subprocess
@@ -166,7 +167,8 @@ UNCONTROLLABLE = {
 
 
 def _import_alias_map(tree):
-    """Local name -> canonical dotted path, from every import in the module.
+    """Local name -> canonical dotted path, from this MODULE's top-level
+    import statements only (`tree.body`, not `ast.walk`).
 
         import socket                    -> {"socket": "socket"}
         import socket as s               -> {"s": "socket"}
@@ -175,11 +177,17 @@ def _import_alias_map(tree):
         from os import system as run_cmd -> {"run_cmd": "os.system"}
         from requests import get         -> {"get": "requests.get"}
 
-    Walks the whole tree, not just the module body, so a function-local
-    import is resolved the same way as a module-level one.
+    Scoped to the module body ON PURPOSE: an `import X as name` INSIDE a
+    function body must not rewrite what `name` means for the rest of the
+    file. A prior version walked the whole tree with `ast.walk` and let an
+    unrelated function's local `import collections.abc as requests` shadow
+    a real, module-level `requests.get(...)` call elsewhere in the same
+    file — turning genuinely dangerous code invisible. That was the most
+    dangerous defect a review round found: a false Tier 1, not merely an
+    imprecise one.
     """
     aliases = {}
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
@@ -191,6 +199,34 @@ def _import_alias_map(tree):
             for alias in node.names:
                 aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
     return aliases
+
+
+def _local_alias_map(node, module_alias_map):
+    """`module_alias_map`, overridden by any import found ANYWHERE inside
+    `node`'s own subtree (including a nested closure within it).
+
+    Recomputed per node so a function-local alias is visible WITHIN the
+    function that defines and uses it (`import subprocess as sp` used two
+    lines later in the same function is real, common code, and must resolve
+    — this repo's own `scripts/ab-validate.py::check_audit_guardrails` does
+    exactly this) while still never leaking to an unrelated sibling
+    function (`_import_alias_map`'s module-only scope is what stops that).
+    Each caller passes its own `node`, so the override never crosses a
+    function boundary it doesn't already own.
+    """
+    local = dict(module_alias_map)
+    for n in ast.walk(node):
+        if isinstance(n, ast.Import):
+            for alias in n.names:
+                if alias.asname:
+                    local[alias.asname] = alias.name
+                else:
+                    root = alias.name.split(".")[0]
+                    local[root] = root
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            for alias in n.names:
+                local[alias.asname or alias.name] = f"{n.module}.{alias.name}"
+    return local
 
 
 def _resolve(node, alias_map):
@@ -212,7 +248,8 @@ def _resolve(node, alias_map):
 
 def _call_targets(node_or_nodes, alias_map):
     """Resolved dotted call targets for every `ast.Call` reachable from the
-    given node (or list of nodes).
+    given node (or list of nodes) — used for MARKER matching, which needs
+    the full dotted path (`requests.get`), not just a bare method name.
 
     Only a Call's func matters here — a bare data literal that merely NAMES
     a marker string contains no Call node, so it contributes nothing.
@@ -228,6 +265,33 @@ def _call_targets(node_or_nodes, alias_map):
                 if resolved is not None:
                     targets.append(resolved)
     return targets
+
+
+def _callable_candidates(node_or_nodes, alias_map):
+    """Bare same-module callable names a Call in this subtree might reach —
+    used for CHASING into local functions/methods, not for marker matching.
+
+    A `Name` call resolves through the alias map like `_call_targets` does.
+    An `Attribute` call contributes its ATTRIBUTE NAME ALONE, regardless of
+    whether the receiver resolves: `Client().fetch(u)`'s receiver is a
+    freshly-constructed instance with no resolvable name at all, but the
+    method name `fetch` is still visible — and that is what same-module
+    method chasing keys on.
+    """
+    nodes = node_or_nodes if isinstance(node_or_nodes, list) else [node_or_nodes]
+    names = []
+    for root in nodes:
+        if root is None:
+            continue
+        for n in ast.walk(root):
+            if not isinstance(n, ast.Call):
+                continue
+            func = n.func
+            if isinstance(func, ast.Name):
+                names.append(alias_map.get(func.id, func.id))
+            elif isinstance(func, ast.Attribute):
+                names.append(func.attr)
+    return names
 
 
 def _markers(names):
@@ -254,92 +318,194 @@ def _markers(names):
     return hits
 
 
-def _module_level_targets(tree, alias_map):
-    """Resolved call targets for whatever runs at IMPORT time: statements
-    outside any def/class, plus the parts of a def/class that Python
-    evaluates at DEFINITION time rather than call time — decorator
-    arguments, argument defaults, and class-body statements (but not method
-    bodies, which run only when called, not when the class is defined).
+def _is_main_guard(node):
+    """True for `if __name__ == "__main__":` (either operand order).
+
+    This is THE standard Python idiom written specifically so its body does
+    NOT run at import time — it is the single most common top-level `if` in
+    any runnable script. Recognizing it is a fixed, well-known syntactic
+    special case, not general points-to analysis: without it, the module-
+    taint check would flag nearly every script-shaped file in a typical repo
+    (its `main()` call, and everything `main` transitively reaches) as
+    import-time I/O, which is false and was observed to taint 128 of this
+    repo's own 296 units before this check was added.
     """
-    targets = []
+    test = node.test
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)):
+        return False
+    operands = (test.left, test.comparators[0])
+    names = {n.id for n in operands if isinstance(n, ast.Name)}
+    consts = {c.value for c in operands if isinstance(c, ast.Constant)}
+    return "__name__" in names and "__main__" in consts
+
+
+def _module_level_regions(tree):
+    """AST nodes that run at IMPORT time: everything at module level outside
+    a def/class body, plus the parts of a def/class that Python evaluates at
+    DEFINITION time rather than call time — decorator arguments, argument
+    defaults, class BASES and KEYWORDS (`metaclass=...` lives in keywords;
+    both execute at class-CREATION time, i.e. import time), and class-body
+    statements (but not method bodies, which run only when called). The
+    `if __name__ == "__main__":` guard is explicitly excluded — see
+    `_is_main_guard`.
+    """
+    regions = []
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             continue
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            targets.extend(_call_targets(node.decorator_list, alias_map))
-            targets.extend(_call_targets(node.args.defaults, alias_map))
-            targets.extend(_call_targets(
-                [d for d in node.args.kw_defaults if d is not None], alias_map))
+            regions.extend(node.decorator_list)
+            regions.extend(node.args.defaults)
+            regions.extend(d for d in node.args.kw_defaults if d is not None)
         elif isinstance(node, ast.ClassDef):
-            targets.extend(_call_targets(node.decorator_list, alias_map))
+            regions.extend(node.decorator_list)
+            regions.extend(node.bases)
+            regions.extend(node.keywords)
             for stmt in node.body:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue                # a method body runs only when called
-                targets.extend(_call_targets(stmt, alias_map))
+                regions.append(stmt)
+        elif isinstance(node, ast.If) and _is_main_guard(node):
+            continue                        # never runs when the module is imported
         else:
-            targets.extend(_call_targets(node, alias_map))
-    return targets
+            regions.append(node)
+    return regions
 
 
-def _transitive_hits(node, alias_map, local_funcs, visited):
-    """Hits for `node`'s own body, plus (recursively) hits from same-module
-    module-level functions it calls — so a thin wrapper over a Tier-3 helper
-    reads as Tier 3, not Tier 1. Only same-module, name-resolved calls are
-    followed; cross-module analysis is out of scope.
+def _local_callables(tree):
+    """Bare call-name -> [(qualified_name, node), ...] for every same-module
+    callable that name might mean: a module-level function (qualified name
+    is just its own name), or a method of a module-level class (qualified
+    name is `ClassName.method`).
 
-    `visited` guards mutual/self recursion. Each hit is
-    `(group, marker, controllable, via)` — `via` names the same-module
-    function the hit was reached through, or None when the marker sits
-    directly in `node`'s own body.
+    Keyed by the BARE method name on purpose: an attribute call like
+    `.fetch(...)` cannot know which class's `fetch` it means — the receiver
+    may not even resolve (see `_callable_candidates`) — so every same-module
+    callable with that name is a candidate, and the worst tier among them
+    wins. Over-flagging when two classes happen to share a method name is
+    accepted: declining to write a test for something safe costs nothing;
+    missing a real socket does not.
     """
-    targets = _call_targets(node, alias_map)
-    hits = [(g, m, c, None) for g, m, c in _markers(targets)]
-    for name in sorted(set(targets)):
+    callables = collections.defaultdict(list)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            callables[node.name].append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    callables[stmt.name].append((f"{node.name}.{stmt.name}", stmt))
+    return dict(callables)
+
+
+def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs, visited):
+    """Direct marker hits for `own_targets`, plus (recursively) hits from
+    same-module callables any of `own_candidates` might reach — so a thin
+    wrapper, a module-level `_boot()` call, or a `.fetch(...)` method
+    dispatch all inherit the worst tier reachable from them.
+
+    `module_alias_map` is the MODULE-level alias map; each callee's own
+    scan uses `_local_alias_map(callee_node, module_alias_map)` so that
+    callee's own local imports resolve within its own body without leaking
+    anywhere else. `visited` (keyed by bare candidate name) guards
+    mutual/self recursion. Each hit is `(group, marker, controllable, via)`
+    — `via` is the qualified same-module callable name (`function`, or
+    `Class.method`) the hit was reached through, or None when the marker
+    sits directly in the scanned region.
+    """
+    hits = [(g, m, c, None) for g, m, c in _markers(own_targets)]
+    for name in sorted(set(own_candidates)):
         if name in local_funcs and name not in visited:
             visited.add(name)
-            for g, m, c, _via in _transitive_hits(local_funcs[name], alias_map,
-                                                    local_funcs, visited):
-                hits.append((g, m, c, name))
+            for qualified, callee_node in local_funcs[name]:
+                callee_alias_map = _local_alias_map(callee_node, module_alias_map)
+                callee_targets = _call_targets(callee_node, callee_alias_map)
+                callee_candidates = _callable_candidates(callee_node, callee_alias_map)
+                for g, m, c, _via in _hits_from(callee_targets, callee_candidates,
+                                                 module_alias_map, local_funcs, visited):
+                    hits.append((g, m, c, qualified))
     return hits
+
+
+_FileAnalysis = collections.namedtuple("_FileAnalysis", "tree alias_map local_funcs tier4")
+
+
+@functools.lru_cache(maxsize=None)
+def _analyze_file(root, rel):
+    """Parse `rel` once and precompute everything `triage()` needs for every
+    unit in it — the import-alias map, the same-module callable index, and
+    whether the module itself is tainted at import time (checked
+    TRANSITIVELY: `_STARTED = _boot()` inherits whatever `_boot` reaches,
+    not just its own direct call target).
+
+    Cached per (root, rel) for the life of the process: several units
+    typically share a file, and re-parsing plus re-resolving aliases PER
+    UNIT (rather than per file) was most of a `triage()` call's cost.
+    """
+    text = read_text(root, rel)
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _FileAnalysis(None, None, None,
+                              (4, "file does not parse; nothing in it can be pinned"))
+
+    alias_map = _import_alias_map(tree)
+    local_funcs = _local_callables(tree)
+    regions = _module_level_regions(tree)
+    mod_hits = _hits_from(_call_targets(regions, alias_map),
+                           _callable_candidates(regions, alias_map),
+                           alias_map, local_funcs, set())
+    uncontrollable_mod = [h for h in mod_hits if not h[2]]
+    tier4 = None
+    if uncontrollable_mod:
+        group, marker, _, via = uncontrollable_mod[0]
+        if via:
+            tier4 = (4, f"module does {group} I/O at import time via {via} "
+                         f"({marker}); not reachable")
+        else:
+            tier4 = (4, f"module does {group} I/O at import time ({marker}); not reachable")
+    return _FileAnalysis(tree, alias_map, local_funcs, tier4)
 
 
 def triage(root: str, unit) -> tuple:
     """Classify how testable a unit is. Returns (tier, reason).
 
-    Resolves calls through this module's import-alias map — so a renamed
-    import (`import socket as s`) is still visible as network I/O — and
-    follows same-module function calls transitively, so a thin wrapper over
-    a Tier-3 helper is Tier 3 too. Still a static, CONSERVATIVE
-    approximation, not execution: it cannot see cross-module indirection,
-    dynamic dispatch (`getattr`, `**kwargs`), or I/O reached only through a
-    variable that happens to hold a function. The SKILL.md permits promoting
-    a unit after inspection — but only by recording the promotion, never
-    silently.
+    A FILTER, not the sole enforcement. It resolves calls through this
+    module's import-alias map, follows same-module function AND method
+    calls transitively (so a thin wrapper, a `.fetch(...)` dispatch, or a
+    module-level `_boot()` call all inherit the worst tier reachable from
+    them), and treats class bases/keywords and argument defaults as
+    import-time code. It is still a static approximation — Python
+    reachability is undecidable from source alone, so it cannot see
+    cross-module indirection, dynamic dispatch (`getattr`, `**kwargs`), or
+    I/O reached only through a variable that happens to hold a function.
+
+    The actual backstop against writing a test that performs real I/O is a
+    RUNTIME guard elsewhere in this skill: the candidate test's red->green
+    proof runs with the network/subprocess/DB entry points monkeypatched to
+    raise, so a test that genuinely reaches real I/O fails loudly instead of
+    passing, and its unit gets reclassified. `triage` exists to keep that
+    guard from firing often — it narrows the field, it does not have to be
+    airtight on its own. The SKILL.md permits promoting a unit after
+    inspection — but only by recording the promotion, never silently.
     """
-    text = read_text(root, unit["path"])
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return 4, "file does not parse; nothing in it can be pinned"
-
-    alias_map = _import_alias_map(tree)
-
-    # Tier 4 first: if importing the module does I/O, no unit in it is reachable.
-    mod_hits = _markers(_module_level_targets(tree, alias_map))
-    uncontrollable_mod = [h for h in mod_hits if not h[2]]
-    if uncontrollable_mod:
-        group, marker, _ = uncontrollable_mod[0]
-        return 4, f"module does {group} I/O at import time ({marker}); not reachable"
+    analysis = _analyze_file(root, unit["path"])
+    if analysis.tree is None:
+        return analysis.tier4
+    if analysis.tier4 is not None:
+        return analysis.tier4
 
     # The unit's own node.
-    node = next((n for n in tree.body
+    node = next((n for n in analysis.tree.body
                  if getattr(n, "name", None) == unit["name"]), None)
     if node is None:
         return 4, "unit not found on re-parse"
 
-    local_funcs = {n.name: n for n in tree.body
-                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    hits = _transitive_hits(node, alias_map, local_funcs, {unit["name"]})
+    own_alias_map = _local_alias_map(node, analysis.alias_map)
+    own_targets = _call_targets(node, own_alias_map)
+    own_candidates = _callable_candidates(node, own_alias_map)
+    hits = _hits_from(own_targets, own_candidates, analysis.alias_map,
+                       analysis.local_funcs, {unit["name"]})
 
     if not hits:
         return 1, "no I/O markers; directly callable"
