@@ -33,8 +33,10 @@ from __future__ import annotations
 import bisect
 import collections
 import functools
+import json
 import os
 import re
+import subprocess
 import sys
 
 # The shipped assets are a flat directory, not a package, and callers load
@@ -698,12 +700,366 @@ _STMT_KEYWORDS = ("export", "import", "const", "let", "var", "function",
 def discover_units(root: str):
     """Interface entry point: `(units, discovery_path)`.
 
-    Always `"heuristic"` here. Task 3 adds the precise path -- the repo's own
-    `typescript`, when it has one -- and this becomes the fallback. The label
-    is reported rather than assumed because a run that silently degraded is
-    not comparable to one that did not (multistack design, D1).
+    Two paths, and the label says which one ran (multistack design, D1),
+    because a run that silently degraded is not comparable to one that did
+    not. `"precise"` means the repo's OWN `typescript` parsed these files;
+    `"heuristic"` means the stripper-and-brackets reader did.
+
+    THE HEURISTIC IS THE ONE THAT ALWAYS RUNS. Precision is an upgrade, never
+    a dependency: every way the toolchain path can fail ends here, in the
+    reader that needs nothing installed. A precise path that could fail a run
+    would be worse than no precise path at all -- it would make the skill's
+    answer depend on whether somebody had run `npm ci` today.
     """
-    return _units_heuristic(root), "heuristic"
+    units = _units_precise(root)
+    if units is None:
+        return _units_heuristic(root), "heuristic"
+    return units, "precise"
+
+
+# ── The precise path: the repo's own typescript, or nothing ──────────────
+#
+# NEVER `npx tsc`: on a miss that DOWNLOADS, which turns a read-only analysis
+# into a network install of an unpinned compiler. This resolves a file that is
+# already on disk and `require`s it, or declines. There is no third option and
+# no package runner anywhere in this module -- a test asserts that by scanning
+# the source for one.
+
+# How long the toolchain gets. A hard bound, not a courtesy: `subprocess.run`
+# kills the child when it expires, so the worst case is this many seconds
+# followed by the heuristic, never a hung skill.
+PRECISE_TIMEOUT = 20
+
+# The walker, run with `node -e`. It reads {"files": [...]} on stdin and writes
+# {"units": [...], "unreadable": n} on stdout, and it is deliberately ES5-flat:
+# it has to run under whatever node the repo's toolchain came with.
+#
+# WHAT IT BUYS OVER THE HEURISTIC is exactly the list Task 2 recorded as
+# deliberate misses -- destructured exports (`export const { a, b } = make()`),
+# quoted object keys (`module.exports = { "parse": parse }`), a whole-module
+# `module.exports = fn`, and TypeScript's `export =` -- plus it drops the
+# heuristic's phantoms, because a constant in an exports object is a
+# `PropertyAssignment` with a literal initialiser rather than a word that
+# looked like a name. On a real tree it must therefore return MORE units than
+# the heuristic; fewer means something is filtering rather than parsing.
+#
+# WHAT IT DELIBERATELY KEEPS FROM THE HEURISTIC, so the two stay comparable:
+# the file set is `iter_source_files` (never a tsconfig `include`, which
+# disagrees about `.d.ts`, `SKIP_DIRS` and test files), a call expression
+# counts as a function (the factory form), `new X()` does not, and an
+# anonymous `export default` yields nothing because a test cannot import a
+# name that does not exist.
+_PRECISE_JS = r""""use strict";
+// Reads {"files": [<repo-relative path>, ...]} on stdin, writes
+// {"units": [{path, name, kind, lineno}], "unreadable": n} on stdout.
+var fs = require("fs");
+var path = require("path");
+var tsLib = process.argv[1];
+var root = process.argv[2];
+var ts = require(tsLib);
+var SK = ts.SyntaxKind;
+var input = JSON.parse(fs.readFileSync(0, "utf8"));
+var units = [];
+var unreadable = 0;
+
+function scriptKind(rel) {
+  var ext = path.extname(rel).toLowerCase();
+  if (ext === ".tsx") return ts.ScriptKind.TSX;
+  if (ext === ".ts" || ext === ".mts" || ext === ".cts") return ts.ScriptKind.TS;
+  return ts.ScriptKind.JSX;   // .js/.jsx/.mjs/.cjs — JSX is the permissive superset
+}
+
+function modsOf(node) {
+  var m = node.modifiers || [];
+  var out = [];
+  for (var i = 0; i < m.length; i++) out.push(m[i].kind);
+  return out;
+}
+
+function each(file) {
+  var src, text;
+  try {
+    text = fs.readFileSync(path.join(root, file), "utf8");
+    src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, scriptKind(file));
+  } catch (e) { unreadable++; return; }
+
+  function line(node) {
+    try { return src.getLineAndCharacterOfPosition(node.getStart(src)).line + 1; }
+    catch (e) { return 1; }
+  }
+
+  var locals = Object.create(null);
+  var seen = Object.create(null);
+
+  function unwrap(e) {
+    while (e && (e.kind === SK.ParenthesizedExpression
+                 || e.kind === SK.AsExpression
+                 || e.kind === SK.SatisfiesExpression
+                 || e.kind === SK.TypeAssertionExpression
+                 || e.kind === SK.NonNullExpression)) e = e.expression;
+    return e;
+  }
+
+  function valueKind(e) {
+    e = unwrap(e);
+    if (!e) return null;
+    if (e.kind === SK.ArrowFunction || e.kind === SK.FunctionExpression) return "function";
+    if (e.kind === SK.ClassExpression) return "class";
+    if (e.kind === SK.CallExpression) return "function";
+    if (e.kind === SK.Identifier) return locals[e.text] ? locals[e.text].kind : null;
+    return null;
+  }
+
+  function declKind(d) {
+    if (d.type && (d.type.kind === SK.FunctionType || d.type.kind === SK.ConstructorType)) return "function";
+    return valueKind(d.initializer);
+  }
+
+  function produced(e) {
+    e = unwrap(e);
+    return !!e && (e.kind === SK.CallExpression || e.kind === SK.Identifier
+                   || e.kind === SK.PropertyAccessExpression || e.kind === SK.AwaitExpression);
+  }
+
+  function bindingNames(name, out) {
+    for (var i = 0; i < name.elements.length; i++) {
+      var el = name.elements[i];
+      if (!el.name) continue;                       // an array hole
+      if (el.name.kind === SK.Identifier) out.push(el.name.text);
+      else if (el.name.elements) bindingNames(el.name, out);
+    }
+    return out;
+  }
+
+  function emit(name, kind, lineno) {
+    if (!name || seen[name]) return;
+    seen[name] = 1;
+    units.push({path: file, name: name, kind: kind, lineno: lineno});
+  }
+
+  function propName(p) {
+    var n = p.name;
+    if (!n) return null;
+    if (n.kind === SK.Identifier || n.kind === SK.StringLiteral
+        || n.kind === SK.NoSubstitutionTemplateLiteral || n.kind === SK.NumericLiteral) return n.text;
+    return null;                                    // computed key: unaddressable
+  }
+
+  // Pass 1: what this file declares at the top level, for kind/line lookups.
+  for (var i = 0; i < src.statements.length; i++) {
+    var st = src.statements[i];
+    if (st.kind === SK.FunctionDeclaration && st.name) locals[st.name.text] = {kind: "function", line: line(st)};
+    else if (st.kind === SK.ClassDeclaration && st.name) locals[st.name.text] = {kind: "class", line: line(st)};
+    else if (st.kind === SK.VariableStatement) {
+      var ds = st.declarationList.declarations;
+      for (var j = 0; j < ds.length; j++) {
+        if (ds[j].name.kind !== SK.Identifier) continue;
+        var k = declKind(ds[j]);
+        if (k) locals[ds[j].name.text] = {kind: k, line: line(st)};
+      }
+    }
+  }
+
+  function objectMembers(obj) {
+    for (var i = 0; i < obj.properties.length; i++) {
+      var p = obj.properties[i];
+      var nm = propName(p);
+      if (p.kind === SK.MethodDeclaration) { if (nm) emit(nm, "function", line(p)); continue; }
+      if (p.kind === SK.ShorthandPropertyAssignment) {
+        var l = locals[p.name.text];
+        if (l) emit(p.name.text, l.kind, l.line);
+        continue;
+      }
+      if (p.kind === SK.PropertyAssignment && nm) {
+        var kk = valueKind(p.initializer);
+        if (!kk) continue;
+        var e = unwrap(p.initializer);
+        var loc = (e && e.kind === SK.Identifier && locals[e.text]) ? locals[e.text].line : line(p);
+        emit(nm, kk, loc);
+      }
+    }
+  }
+
+  function memberPath(e) {
+    if (e.kind === SK.Identifier) return e.text;
+    if (e.kind === SK.PropertyAccessExpression) {
+      var b = memberPath(e.expression);
+      return b ? b + "." + e.name.text : null;
+    }
+    if (e.kind === SK.ElementAccessExpression && e.argumentExpression
+        && e.argumentExpression.kind === SK.StringLiteral) {
+      var b2 = memberPath(e.expression);
+      return b2 ? b2 + "." + e.argumentExpression.text : null;
+    }
+    return null;
+  }
+
+  // Pass 2: the exports.
+  for (var i2 = 0; i2 < src.statements.length; i2++) {
+    var s = src.statements[i2];
+    var kinds = modsOf(s);
+    var isExport = kinds.indexOf(SK.ExportKeyword) >= 0;
+    if (kinds.indexOf(SK.DeclareKeyword) >= 0) continue;   // no runtime body to pin
+
+    if (s.kind === SK.FunctionDeclaration) {
+      if (isExport && s.name && s.body) emit(s.name.text, "function", line(s));
+    } else if (s.kind === SK.ClassDeclaration) {
+      if (isExport && s.name) emit(s.name.text, "class", line(s));
+    } else if (s.kind === SK.VariableStatement && isExport) {
+      var dds = s.declarationList.declarations;
+      for (var j2 = 0; j2 < dds.length; j2++) {
+        var d = dds[j2];
+        if (d.name.kind === SK.Identifier) {
+          var k2 = declKind(d);
+          if (k2) emit(d.name.text, k2, line(s));
+        } else if (produced(d.initializer)) {
+          var names = bindingNames(d.name, []);
+          for (var n2 = 0; n2 < names.length; n2++) emit(names[n2], "function", line(s));
+        }
+      }
+    } else if (s.kind === SK.ExportDeclaration) {
+      if (s.moduleSpecifier || s.isTypeOnly || !s.exportClause || !s.exportClause.elements) continue;
+      for (var e2 = 0; e2 < s.exportClause.elements.length; e2++) {
+        var sp = s.exportClause.elements[e2];
+        if (sp.isTypeOnly) continue;
+        var localName = (sp.propertyName || sp.name).text;
+        var l2 = locals[localName];
+        emit(sp.name.text, l2 ? l2.kind : "function", l2 ? l2.line : line(s));
+      }
+    } else if (s.kind === SK.ExportAssignment) {
+      var ex = unwrap(s.expression);
+      if (!ex) continue;
+      if (ex.kind === SK.Identifier) {
+        var l3 = locals[ex.text];
+        if (l3) emit(ex.text, l3.kind, l3.line);
+      } else if ((ex.kind === SK.FunctionExpression || ex.kind === SK.ClassExpression) && ex.name) {
+        emit(ex.name.text, ex.kind === SK.ClassExpression ? "class" : "function", line(s));
+      }
+    } else if (s.kind === SK.ExpressionStatement && s.expression.kind === SK.BinaryExpression
+               && s.expression.operatorToken.kind === SK.EqualsToken) {
+      var lhs = memberPath(s.expression.left);
+      if (!lhs) continue;
+      var rhs = unwrap(s.expression.right);
+      if (lhs === "module.exports" || lhs === "exports") {
+        if (rhs.kind === SK.ObjectLiteralExpression) objectMembers(rhs);
+        else if (rhs.kind === SK.Identifier) {
+          var l4 = locals[rhs.text];
+          if (l4) emit(rhs.text, l4.kind, l4.line);
+        } else if ((rhs.kind === SK.FunctionExpression || rhs.kind === SK.ClassExpression) && rhs.name) {
+          emit(rhs.name.text, rhs.kind === SK.ClassExpression ? "class" : "function", line(s));
+        }
+      } else if (lhs.indexOf("module.exports.") === 0 || lhs.indexOf("exports.") === 0) {
+        var nm2 = lhs.split(".").pop();
+        var k4 = valueKind(rhs);
+        if (k4) emit(nm2, k4, line(s));
+      }
+    }
+  }
+}
+
+for (var f = 0; f < input.files.length; f++) each(input.files[f]);
+process.stdout.write(JSON.stringify({units: units, unreadable: unreadable}));
+"""
+
+
+def _typescript_lib(root: str):
+    """The repo's own `typescript`, or None.
+
+    Only what is already installed, and only `lib/typescript.js` -- the entry
+    point every 3.x-5.x release ships at that path. A pnpm store is reached
+    through the symlink node itself would follow; a Yarn PnP tree resolves
+    nothing here and gets the heuristic, which is the correct answer rather
+    than a reason to start guessing at zip-backed resolution.
+    """
+    lib = os.path.join(root, "node_modules", "typescript", "lib", "typescript.js")
+    return lib if os.path.isfile(lib) else None
+
+
+def _units_from_payload(raw, files):
+    """Unit dicts from the walker's JSON, or None if ANY row is malformed.
+
+    ALL OR NOTHING on purpose. Dropping the rows it could not read would let
+    the precise path report FEWER units than the heuristic while still calling
+    itself precise -- a silent under-report wearing the label of the better
+    path. Declining hands the run back to a reader that works.
+    """
+    if not isinstance(raw, list):
+        return None
+    wanted = frozenset(files)
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        rel, name = item.get("path"), item.get("name")
+        kind, lineno = item.get("kind"), item.get("lineno")
+        if not isinstance(rel, str) or not isinstance(name, str) or not name:
+            return None
+        if kind not in ("function", "class"):
+            return None
+        if isinstance(lineno, bool) or not isinstance(lineno, int) or lineno < 1:
+            return None
+        if rel not in wanted:
+            return None               # a file we did not ask about is not a file we walked
+        out.append({"id": "%s::%s" % (rel, name), "path": rel, "name": name,
+                    "lineno": lineno, "kind": kind})
+    return sorted(out, key=lambda u: u["id"])
+
+
+def _units_precise(root: str, ts_lib=None, timeout: int = PRECISE_TIMEOUT,
+                   node_exe: str = "node"):
+    """The units the repo's own typescript sees, or None to fall back.
+
+    NONE IS NOT AN ERROR, it is the whole contract: no toolchain, no node, a
+    non-zero exit, output this cannot parse, or a walk that outran `timeout`
+    all return None, and `discover_units` runs the heuristic instead. Nothing
+    in here may raise into a run.
+
+    A toolchain that was FOUND and then failed is the surprising case, so it
+    says so on stderr; simply not having one is ordinary and is reported by
+    the `discovery` label alone.
+    """
+    ts_lib = ts_lib or _typescript_lib(root)
+    if ts_lib is None:
+        return None
+    files = list(iter_source_files(root))
+    if not files:
+        return None                   # nothing to walk: do not pay for a process
+    try:
+        proc = subprocess.run(
+            [node_exe, "-e", _PRECISE_JS, "--", ts_lib, os.path.abspath(root)],
+            input=json.dumps({"files": files}), capture_output=True, text=True,
+            timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _precise_declined("timed out after %ss" % timeout)
+        return None
+    except (OSError, ValueError):
+        # No `node` on PATH, or an environment that cannot spawn one.
+        _precise_declined("could not run %s" % node_exe)
+        return None
+    if proc.returncode != 0:
+        _precise_declined("exit %d: %s"
+                          % (proc.returncode, proc.stderr.strip().splitlines()[-1]
+                              if proc.stderr.strip() else "no diagnostic"))
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+        units = _units_from_payload(payload["units"], files)
+    except (ValueError, TypeError, KeyError, IndexError):
+        _precise_declined("unparseable output")
+        return None
+    if units is None:
+        _precise_declined("malformed unit in the output")
+        return None
+    return units
+
+
+def _precise_declined(why: str):
+    """Say that a toolchain we FOUND did not answer. One line, stderr, never raises."""
+    try:
+        sys.stderr.write("note: node precise discovery declined (%s); "
+                         "using the heuristic reader\n" % why)
+    except Exception:                 # a closed or replaced stderr must not fail a run
+        pass
 
 
 def _units_heuristic(root: str):
@@ -775,6 +1131,25 @@ def _line_starts(text: str):
         i = text.find("\n", i + 1)
     return starts
 
+
+
+def _position_of_line(code: str, depths, lineno):
+    """Offset of the first code character on `lineno`, or None.
+
+    TOP LEVEL ONLY: a position at bracket depth > 0 is not a statement this
+    reader can span, and guessing at one would hand `_unit_span` a region
+    belonging to something else. None then means "not found", which triage
+    already knows how to answer honestly.
+    """
+    if not isinstance(lineno, int) or isinstance(lineno, bool) or lineno < 1:
+        return None
+    starts = _line_starts(code)
+    if lineno > len(starts):
+        return None
+    pos = _skip_ws(code, starts[lineno - 1])
+    if pos >= len(code) or depths[pos] != 0:
+        return None
+    return pos
 
 def _local_defs(text: str, depths) -> dict:
     """name -> (kind, position) for every top-level declaration in the file.
@@ -1527,6 +1902,20 @@ def triage(root: str, unit) -> tuple:
     if analysis.tier4 is not None:
         return analysis.tier4
     pos = analysis.positions.get(unit["name"])
+    if pos is None:
+        # A unit the PRECISE path found and this reader cannot name -- a
+        # destructured export, a quoted key, a `module.exports = fn`. Its
+        # statement is still right there, so place it by the line discovery
+        # recorded and read the markers in it. Without this every precise-only
+        # unit lands at Tier 4 and is reported as unnettable, which would make
+        # the better discovery path produce the worse plan.
+        pos = _position_of_line(analysis.code, analysis.depths, unit.get("lineno"))
+        if pos in analysis.positions.values():
+            # That line already belongs to an export this reader CAN name, so
+            # the unit is not there -- it is a stale id from a file that
+            # changed between discovery and triage. Declining is the honest
+            # answer; triaging it against somebody else's statement is not.
+            pos = None
     if pos is None:
         return 4, "unit not found on re-read"
 

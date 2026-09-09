@@ -693,6 +693,281 @@ class TestStackDetection(unittest.TestCase):
         self.assertIn("node=0", err.getvalue())
         self.assertEqual(json.loads(out.getvalue())["stack"], "python")
 
+# ── Precise discovery, and every way it must decline ─────────────────────
+
+def _typescript_lib():
+    """A real `typescript` on this machine, or None.
+
+    Looked up through node itself so a checkout that happens to have one --
+    a parent directory\'s `node_modules`, a globally linked install -- can
+    exercise the agreement test. `TSN_TYPESCRIPT_LIB` overrides, for CI images
+    that put it somewhere node will not look from here.
+    """
+    env = os.environ.get("TSN_TYPESCRIPT_LIB")
+    if env and os.path.isfile(env):
+        return env
+    try:
+        r = subprocess.run(
+            ["node", "-p", "require.resolve('typescript/lib/typescript.js')"],
+            cwd=_HERE, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = r.stdout.strip()
+    return path if r.returncode == 0 and os.path.isfile(path) else None
+
+
+def _skip_no_typescript():
+    """Skip LOUDLY. A silent skip is a test that reports success for a path
+    nobody ran, which is the exact failure mode this suite exists to prevent
+    elsewhere."""
+    sys.stderr.write(
+        "\nSKIP: no `typescript` resolvable from %s -- the PRECISE discovery "
+        "path is NOT exercised on this machine. Install typescript (or point "
+        "TSN_TYPESCRIPT_LIB at a `typescript.js`) to run it.\n" % _HERE)
+    raise unittest.SkipTest("no typescript available; precise path unexercised")
+
+
+class TestPreciseDiscovery(NodeCase):
+    """The optional path. The bar it must clear is NOT accuracy -- it is that
+    it can never fail a run: the heuristic is what always runs, so precision
+    is an upgrade and never a dependency."""
+
+    def stub_typescript(self, body):
+        """Install a fake `node_modules/typescript/lib/typescript.js`.
+
+        `node_modules` is in `SKIP_DIRS`, so the stub is never itself a source
+        file -- these fixtures stay exactly as many units as they look.
+        """
+        return write(self.root, "node_modules/typescript/lib/typescript.js", body)
+
+    def test_falls_back_to_heuristic_when_toolchain_missing(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        units, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+
+    def test_falls_back_when_the_toolchain_throws(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        self.stub_typescript('throw new Error("boom");\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            units, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+        # A toolchain that was FOUND and then failed is the surprising case,
+        # so it is named on stderr rather than left to the `discovery` key.
+        self.assertIn("precise discovery", err.getvalue())
+
+    def test_falls_back_when_the_toolchain_prints_unparseable_output(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        self.stub_typescript('process.stdout.write("<html>nope</html>");'
+                             'process.exit(0);\n')
+        with contextlib.redirect_stderr(io.StringIO()):
+            units, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+
+    def test_falls_back_when_the_toolchain_hangs(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        lib = self.stub_typescript(
+            "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(stack_node._units_precise(self.root, ts_lib=lib, timeout=2))
+        self.assertIn("timed out", err.getvalue())
+
+    def test_falls_back_when_node_itself_is_absent(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        lib = self.stub_typescript("module.exports = {};\n")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(stack_node._units_precise(
+                self.root, ts_lib=lib, node_exe="node-that-is-not-installed"))
+
+    def test_a_yarn_pnp_tree_resolves_no_toolchain_and_says_heuristic(self):
+        # Yarn PnP ships no `node_modules/typescript` at all. Nothing to
+        # resolve is not an error: it is the ordinary case, and the mode label
+        # is where the run reports it.
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        write(self.root, ".pnp.cjs", "// zip-backed resolution\n")
+        self.assertIsNone(stack_node._typescript_lib(self.root))
+        self.assertEqual(stack_node.discover_units(self.root)[1], "heuristic")
+
+    def test_the_mode_label_follows_the_path_that_actually_ran(self):
+        write(self.root, "src/util.ts", "export function parse(s: string) { return 1; }\n")
+        real = stack_node._units_precise
+        stack_node._units_precise = lambda root, **kw: [
+            {"id": "src/util.ts::parse", "path": "src/util.ts", "name": "parse",
+             "lineno": 1, "kind": "function"}]
+        self.addCleanup(setattr, stack_node, "_units_precise", real)
+        units, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "precise")
+        self.assertEqual([u["id"] for u in units], ["src/util.ts::parse"])
+
+    def test_a_malformed_unit_in_the_payload_declines_the_whole_run(self):
+        # Half-trusting a payload is worse than not trusting it: a run that
+        # dropped the rows it could not read would report FEWER units than the
+        # heuristic and call itself precise.
+        files = ["src/util.ts"]
+        good = [{"path": "src/util.ts", "name": "parse", "kind": "function", "lineno": 3}]
+        self.assertEqual([u["id"] for u in stack_node._units_from_payload(good, files)],
+                         ["src/util.ts::parse"])
+        for bad in ([{"path": "src/util.ts", "name": "parse", "kind": "function"}],
+                    [{"path": "src/util.ts", "name": "parse", "kind": "enum", "lineno": 1}],
+                    [{"path": "other.ts", "name": "parse", "kind": "function", "lineno": 1}],
+                    [{"path": "src/util.ts", "name": "parse", "kind": "function",
+                      "lineno": "3"}],
+                    ["src/util.ts::parse"]):
+            self.assertIsNone(stack_node._units_from_payload(bad, files), bad)
+
+    def test_the_toolchain_is_never_downloaded(self):
+        # `npx tsc` on a miss DOWNLOADS. The precise path resolves a file that
+        # already exists and requires it directly; nothing here may shell out
+        # to a package runner.
+        import inspect
+        # The mechanism, not the prose: the only executable the precise path
+        # ever names is `node`, and the only module it loads is a file already
+        # on disk. A grep for "npx" would fail on the paragraph explaining why
+        # `npx tsc` is forbidden, which is why this asserts the argv instead.
+        self.assertEqual(
+            inspect.signature(stack_node._units_precise).parameters["node_exe"].default,
+            "node")
+        self.assertIn('[node_exe, "-e", _PRECISE_JS, "--", ts_lib',
+                      inspect.getsource(stack_node._units_precise))
+        # And the walker spawns nothing of its own.
+        for forbidden in ("child_process", "spawn", "execSync", "fetch("):
+            self.assertNotIn(forbidden, stack_node._PRECISE_JS, forbidden)
+        # Nothing to resolve is a decline, never a fetch.
+        self.assertIsNone(stack_node._typescript_lib(self.root))
+
+
+class TestDiscoveryIsReported(NodeCase):
+    """The ninth key. A run that degraded must say so IN THE REPORT."""
+
+    def test_a_node_repo_reports_which_reader_produced_its_units(self):
+        write(self.root, "package.json", '{"name": "demo"}\n')
+        write(self.root, "src/utils.js", "export function parse(s) { return s; }\n")
+        err, out = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = rank_risk.main([self.root, "--since", "10 years ago"])
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["stack"], "node")
+        # No `node_modules/typescript` in the fixture, so the toolchain path
+        # never ran -- and the report says so rather than presenting heuristic
+        # units as if a parser had produced them.
+        self.assertEqual(payload["discovery"], "heuristic")
+        self.assertEqual(payload["units_discovered"], 1)
+
+    def test_the_key_is_the_stack_s_own_answer(self):
+        write(self.root, "src/utils.js", "export function parse(s) { return s; }\n")
+        real = stack_node._units_precise
+        stack_node._units_precise = lambda root, **kw: [
+            {"id": "src/utils.js::parse", "path": "src/utils.js", "name": "parse",
+             "lineno": 1, "kind": "function"}]
+        self.addCleanup(setattr, stack_node, "_units_precise", real)
+        plan = rank_risk.rank(self.root, since="10 years ago", stack=stack_node)
+        self.assertEqual(plan["discovery"], "precise")
+
+
+class TestPreciseAgainstTheRealToolchain(NodeCase):
+    """Both paths, on trees a real `typescript` can read.
+
+    Skipped -- loudly -- where no toolchain exists. That skip is the honest
+    outcome on a machine without one, and the noise is deliberate: a silent
+    skip here reads exactly like a pass.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.lib = _typescript_lib()
+        if self.lib is None:
+            _skip_no_typescript()
+
+    def precise(self):
+        units = stack_node._units_precise(self.root, ts_lib=self.lib)
+        self.assertIsNotNone(units, "the precise path declined a tree it should read")
+        return units
+
+    def test_both_paths_agree_on_a_fixture_both_can_read(self):
+        write(self.root, "src/forms.js", "\n".join([
+            "export function a() {}",
+            "export default function b() {}",
+            "export const c = (x) => x;",
+            "export const d = function () {};",
+            "export class E {}",
+            "function f() {}",
+            "export { f };",
+        ]) + "\n")
+        heuristic, mode = stack_node.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")            # no node_modules in the fixture
+        self.assertEqual([u["id"] for u in self.precise()],
+                         [u["id"] for u in heuristic])
+
+    def test_precise_finds_what_the_heuristic_documented_as_misses(self):
+        # Task 2 recorded these four as deliberate under-reports of a reader
+        # with no parse tree. They are what precision BUYS, and the comparison
+        # is the test: on a real tree the precise path must return MORE units
+        # than the heuristic, never fewer.
+        write(self.root, "src/codec.js",
+              "export const { encode, decode } = makeCodec();\n")
+        write(self.root, "src/cjs.js",
+              "function fn(x) { return x; }\nmodule.exports = fn;\n")
+        write(self.root, "src/quoted.js",
+              "function parse(s) { return s; }\n"
+              'module.exports = { "parse": parse };\n')
+        heuristic = {u["id"] for u in stack_node.discover_units(self.root)[0]}
+        precise = {u["id"] for u in self.precise()}
+        self.assertEqual(sorted(precise - heuristic),
+                         ["src/cjs.js::fn", "src/codec.js::decode",
+                          "src/codec.js::encode", "src/quoted.js::parse"])
+        self.assertEqual(precise & heuristic, heuristic)
+
+    def test_precise_declines_the_types_that_have_no_runtime_body(self):
+        write(self.root, "src/types.ts", "\n".join([
+            "export interface Shape { x: number }",
+            "export type Alias = string;",
+            "export declare function ghost(): void;",
+            "export const MAX = 5;",
+            "export function real(): number { return 1; }",
+        ]) + "\n")
+        self.assertEqual([u["id"] for u in self.precise()], ["src/types.ts::real"])
+
+    def test_a_file_that_does_not_parse_costs_only_itself(self):
+        write(self.root, "src/broken.ts", "export function ((( {\n")
+        write(self.root, "src/fine.ts", "export function ok() { return 1; }\n")
+        self.assertIn("src/fine.ts::ok", [u["id"] for u in self.precise()])
+
+    def test_a_precise_unit_the_heuristic_cannot_place_is_still_triaged(self):
+        # The interaction worth pinning: triage re-reads the file with the
+        # HEURISTIC reader, so a precise-only unit has no export position to
+        # find. It is placed by the line discovery recorded instead, which
+        # keeps its markers readable rather than declining it as "not found" —
+        # otherwise the better discovery path would produce the worse plan,
+        # every unit it alone found landing at Tier 4 as unnettable.
+        write(self.root, "src/quoted.js",
+              'import fs from "node:fs";\n'
+              "function parse(p) { return fs.readFileSync(p); }\n"
+              'module.exports = { "parse": parse };\n')
+        unit = next(u for u in self.precise() if u["name"] == "parse")
+        self.assertNotIn("src/quoted.js::parse",
+                         [u["id"] for u in stack_node.discover_units(self.root)[0]])
+        tier, reason = stack_node.triage(self.root, unit)
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_a_destructured_export_keeps_its_import_time_floor(self):
+        # And the fallback does not become a way around the import-time floor:
+        # `makeLoader(...)` runs when the module is imported, so a fixture is
+        # too late to control it whatever the unit's own span says.
+        write(self.root, "src/codec.js",
+              'import fs from "node:fs";\n'
+              "export const { load } = makeLoader(fs.readFileSync);\n")
+        unit = next(u for u in self.precise() if u["name"] == "load")
+        tier, reason = stack_node.triage(self.root, unit)
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+
 # ── The manifest weight ───────────────────────────────────
 
 CASE_TABLE = [

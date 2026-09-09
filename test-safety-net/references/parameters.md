@@ -25,6 +25,7 @@ JSON across repeated runs on an unchanged repo.
 |---|---|---|
 | `root` | string | Absolute path to the analysed repo. |
 | `stack` | string | Which stack produced this report — `"python"` or `"node"`. Node repos are ranked but **not written**: no runtime guard ships for node yet, so stop after the report (`references/stacks.md`). |
+| `discovery` | string | Which reader produced the units — `"precise"` (a real parser) or `"heuristic"` (a text reader). Python is always `precise`: `ast` is stdlib and cannot go missing. Node is `precise` only where the repo ships its own `node_modules/typescript`, and falls back to `heuristic` — reporting it here — when it does not, when `node` cannot be run, or when the toolchain times out, exits non-zero or prints something unreadable (a note on stderr names the reason in the last three cases). **A `heuristic` run finds fewer units than a `precise` one on the same tree**, so two runs are only comparable when this key agrees. The toolchain is never downloaded: the precise path `require`s a compiler already on disk or declines. |
 | `window` | string | The `--since` value actually used. |
 | `units_discovered` | integer | Total units found, before triage or coverage filtering — module-level `def`/`class` for python, top-level `export`ed functions and classes for node. |
 | `ranked` | array of rows | The top `--top-n` netted units, highest score first, ties broken by `id`. **This is what you show the user at the confirmation gate.** |

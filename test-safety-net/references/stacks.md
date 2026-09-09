@@ -26,9 +26,18 @@ version does not cover it and stop rather than proceeding on assumptions.
 workflow. It detects them (each stack scores the repo — the non-test source files it claims, doubled
 (plus a floor) when a manifest at or near the root declares that stack — and the highest score
 wins; `--stack` overrides, and a tie is
-reported rather than guessed), discovers top-level `export`ed functions and classes
-heuristically, and triages them against node's own I/O marker tables into the same four tiers
-Python uses.
+reported rather than guessed), discovers top-level `export`ed functions and classes, and triages
+them against node's own I/O marker tables into the same four tiers Python uses.
+
+Discovery has **two** paths and the report's `discovery` key says which one ran. Where the repo
+ships its own `node_modules/typescript`, the ranker drives that compiler's parser and reads the
+export forms a text reader cannot — destructured exports, quoted keys in `module.exports`, a
+whole-module `module.exports = fn` — so a precise run finds *more* units than a heuristic one on
+the same tree. Where it does not (no install, Yarn PnP, no `node`, a compiler that times out or
+fails), it falls back to the heuristic reader and reports `heuristic`. **The toolchain is never
+downloaded** — `npx tsc` on a miss would fetch an unpinned compiler, so the precise path
+`require`s one already on disk or declines. Two node runs are comparable only when the key
+agrees.
 
 What does **not** exist yet is the second half: there is no runtime guard for node and no
 single-test invocation wired up, so **step 4's red→green proof cannot be performed**. Per the

@@ -601,11 +601,15 @@ def rank(root: str, since: str = "6 months ago", top_n: int = 10,
     the four keys partition cleanly.
     """
     stack = stack or detect_stack(root)
-    # The discovery path ("precise" / "heuristic") is part of the stack
-    # interface because a run that silently degraded is not comparable to
-    # one that did not. Reporting it is a separate change; this one alters
-    # no output, and Python never degrades.
-    units, _discovery_path = stack.discover_units(root)
+    # WHICH DISCOVERY PATH RAN, reported rather than assumed (multistack
+    # design, D1). A stack with an optional toolchain path can degrade to a
+    # heuristic reader for reasons that have nothing to do with the code --
+    # nobody ran an install, a compiler timed out -- and two runs that
+    # disagree about how many units exist are not comparable unless the report
+    # says which reader produced each. Python is always "precise" (`ast` is
+    # stdlib and cannot go missing); node is "precise" only where the repo
+    # ships its own `typescript`.
+    units, discovery = stack.discover_units(root)
     churn_by_path = churn(root, since)
     refs = inbound_refs(root, units, stack)
     covered = already_covered(root, units, stack)
@@ -656,6 +660,7 @@ def rank(root: str, since: str = "6 months ago", top_n: int = 10,
     return {
         "root": os.path.abspath(root),
         "stack": stack.STACK_NAME,
+        "discovery": discovery,
         "window": since,
         "units_discovered": len(units),
         "ranked": netted[:top_n],

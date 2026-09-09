@@ -83,7 +83,9 @@ than none, because it makes the invariant look enforced when it is not.
    argument and output-key reference. The output's `ranked` array is what you show the user next;
    `remainder` is where the next run resumes; `not_netted` is the Tier 3/4 seam-and-refactor list
    for `clean-code`; `covered` is a flat index of already-tested unit ids, not a fourth bucket — a
-   `not_netted` unit can also appear in `covered`.
+   `not_netted` unit can also appear in `covered`. `discovery` says which reader found the units
+   (`precise` = a real parser, `heuristic` = a text reader); a node repo reads `heuristic` unless
+   it ships its own `typescript`, and two runs are only comparable when it agrees.
 
    Every unit lands in exactly one of the four testability tiers described in full in
    `references/triage.md` — read it before writing anything. In short: Tier 1 (direct) gets a
