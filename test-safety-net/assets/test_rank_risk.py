@@ -108,9 +108,28 @@ class TestInboundRefs(TempRepo):
         self.assertEqual(refs["core.py::lonely"], 0)
 
     def test_does_not_count_the_definition_itself(self):
+        # Semantics changed by ruling: intra-module references now count, so the
+        # self-reference inside `solo`'s own body ("return solo") is a real
+        # intra-module use and counts as 1. Only the definition LINE itself
+        # ("def solo():") is excluded, not the whole defining file.
         write(self.root, "core.py", "def solo():\n    return solo\n")
         units = rank_risk.discover_units(self.root)
-        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::solo"], 0)
+        self.assertEqual(rank_risk.inbound_refs(self.root, units)["core.py::solo"], 1)
+
+    def test_intra_file_calls_are_counted(self):
+        write(self.root, "core.py",
+              "def helper():\n    pass\n\n\ndef a():\n    helper()\n\n\ndef b():\n    helper()\n\n\ndef c():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        refs = rank_risk.inbound_refs(self.root, units)
+        self.assertEqual(refs["core.py::helper"], 3)
+
+    def test_ranked_order_within_a_file_reflects_intra_file_call_counts(self):
+        write(self.root, "core.py",
+              "def busy():\n    pass\n\n\ndef quiet():\n    pass\n\n\n"
+              "def a():\n    busy()\n    busy()\n    busy()\n\n\ndef b():\n    quiet()\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        ids = [r["id"] for r in plan["ranked"]]
+        self.assertLess(ids.index("core.py::busy"), ids.index("core.py::quiet"))
 
     def test_matches_whole_identifiers_only(self):
         # `apply` must not be found inside `apply_discount` or `reapply`.

@@ -112,7 +112,7 @@ _IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*")
 
 
 def inbound_refs(root: str, units) -> dict:
-    """Approximate blast radius: whole-identifier references outside the definition file.
+    """Approximate blast radius: whole-identifier references, including intra-module callers.
 
     APPROXIMATE, on purpose, and labelled as such wherever it surfaces. It counts
     identifier occurrences, so a mention in a comment or a docstring counts and a
@@ -120,24 +120,40 @@ def inbound_refs(root: str, units) -> dict:
     better — the report says so and names it as an optional upgrade — but
     requiring one would make the skill undeployable in the repos that need it most.
 
+    RULING (post-launch): this now counts occurrences of a unit's name across
+    ALL files, INCLUDING its own defining file, and excludes only the
+    occurrences on the unit's own definition line (by exact line number, not a
+    flat -1, so a decorated def or a same-line annotation is handled
+    correctly). The earlier version excluded the whole defining file to avoid
+    counting the definition site, but that also discarded every intra-module
+    caller — and a CLI dispatcher, helper or internal API is called mostly
+    from its own module, so those units were silently scoring 0 regardless of
+    how central they are. A genuine self-reference elsewhere in the unit's own
+    body (not on the definition line) now counts as a real intra-module use.
+
     Each file's identifiers are tokenised once into a per-file Counter, summed
-    into a global Counter; a unit's count is the global total for its name minus
-    that name's count in the unit's own defining file. This is O(total bytes +
-    units) rather than O(units x total bytes) — the naive per-unit regex scan
-    does not survive on a repo with thousands of units.
+    into a global Counter; a unit's count is the global total for its name
+    minus however many of those occurrences fall on the unit's own definition
+    line. This is O(total bytes + units) rather than O(units x total bytes) —
+    the naive per-unit regex scan does not survive on a repo with thousands of
+    units.
     """
-    per_file_counts = {}
     global_counts: collections.Counter = collections.Counter()
+    file_lines = {}
     for rel in iter_py_files(root, include_tests=True):
         text = read_text(root, rel)
-        counter = collections.Counter(_IDENTIFIER_RE.findall(text))
-        per_file_counts[rel] = counter
-        global_counts.update(counter)
+        global_counts.update(_IDENTIFIER_RE.findall(text))
+        file_lines[rel] = text.splitlines()
 
     counts = {}
     for u in units:
-        own_file_count = per_file_counts.get(u["path"], {}).get(u["name"], 0)
-        counts[u["id"]] = global_counts.get(u["name"], 0) - own_file_count
+        lines = file_lines.get(u["path"], [])
+        lineno = u["lineno"]
+        def_line_count = 0
+        if 1 <= lineno <= len(lines):
+            def_line_count = sum(1 for tok in _IDENTIFIER_RE.findall(lines[lineno - 1])
+                                  if tok == u["name"])
+        counts[u["id"]] = global_counts.get(u["name"], 0) - def_line_count
     return counts
 
 
