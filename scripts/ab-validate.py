@@ -118,6 +118,14 @@ SINCE_TSN_NODE_WIRED = "0a02273"  # test-safety-net: the node stack WIRED THROUG
 # rank -> prove) has to be present for one of them to move. Same value as
 # SINCE_TSN_NODE by design -- the campaign lands at one merge, so every row of
 # it becomes HELD* together.
+SINCE_TSN_NODE_FIXES_1 = "ed219b1"  # test-safety-net: the node branch's first
+# fix round -- the guard's provenance default inverted so `util.promisify` can no
+# longer route a real filesystem WRITE past it at tier 1 (F1), a degraded precise
+# run declining instead of reporting zero units as `precise` (F2), Django's split
+# requirements earning Python its manifest credit (F3), an unresolvable path
+# alias crediting nothing rather than every same-named file (F4), and Python's
+# half of the stdin ruling (F7). One constant for the round: the fixes land at
+# one merge, so every row of it becomes HELD* together.
 SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # detection (first match wins reclassified this repo's own corpus as node),
 # then node's I/O marker tables, triage, and registration. One constant for
@@ -2499,6 +2507,299 @@ print(json.dumps(res))
 """
 
 
+_NODE_FIXROUND_1_PROBE = r"""
+import json, os, shutil, subprocess, sys, tempfile
+
+# EVERY MEASUREMENT HERE GOES THROUGH A SUBPROCESS, not an import. The baseline
+# for a bare `make ab-validate` is the merge base with the integration branch,
+# which predates the node stack entirely -- `import stack_node` crashes there
+# and a probe that crashed measured nothing. The CLI and the guard file exist
+# (or provably do not) on both trees, so both arms produce a number.
+res = {"promisify_blocked": 0, "promisify_left_no_file": 0,
+       "shim_units": 0, "shim_discovery": "",
+       "django_stack": "", "django_units": 0, "django_py_evidence": -1,
+       "untested_unit_ranked": 0, "py_stdin_fast": -1}
+
+assets = sys.path[0]
+ranker = os.path.join(assets, "rank_risk.py")
+guard_js = os.path.join(assets, "io_guard.js")
+node = shutil.which("node")
+work = tempfile.mkdtemp()
+
+
+def write(root, rel, text):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+NOTES = {}
+
+
+def plan(root, *flags):
+    # The documented step-2 command's JSON, or {} when it produced none.
+    # Its stderr is kept too: the evidence line is the only place the detection
+    # CONTEST is visible, and on a tree with no node stack there is no contest
+    # and no line.
+    try:
+        done = subprocess.run(
+            [sys.executable, ranker, root, "--since", "10 years ago"] + list(flags),
+            capture_output=True, text=True, timeout=120)
+        NOTES[root] = done.stderr or ""
+        return json.loads(done.stdout)
+    except Exception:
+        NOTES[root] = ""
+        return {}
+
+
+# -- F1: util.promisify routed a real WRITE past the guard at tier 1 --------
+if node:
+    p = os.path.join(work, "promisify")
+    escaped = os.path.join(p, "escaped.txt")
+    write(p, "unit.js",
+          'const util = require("node:util");\n'
+          'const fs = require("node:fs");\n'
+          'const writeAsync = util.promisify(fs.writeFile);\n'
+          "async function save(p) { await writeAsync(p, 'escaped\\n'); return p; }\n"
+          "module.exports = { save };\n")
+    write(p, "test_unit.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const path = require("node:path");\n'
+          'const { save } = require("./unit.js");\n'
+          'test("adds", async () => {\n'
+          '  assert.ok(await save(path.join(__dirname, "escaped.txt")));\n'
+          "});\n")
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    # A tree with no node guard runs the same proof UNGUARDED, which is what
+    # that tree really does with this unit -- and is what makes the
+    # `left_no_file` row a measurement rather than an artefact of a missing
+    # file.
+    argv = [node]
+    if os.path.isfile(guard_js):
+        argv += ["--require", guard_js]
+    argv += ["--test", "--test-name-pattern", "^adds$", "test_unit.js"]
+    try:
+        done = subprocess.run(argv, cwd=p, env=env, capture_output=True,
+                              text=True, stdin=subprocess.PIPE, timeout=60)
+        out = done.stdout + done.stderr
+        res["promisify_blocked"] = (
+            1 if done.returncode != 0 and "IOGuardViolation" in out else 0)
+    except subprocess.TimeoutExpired:
+        pass
+    # THE MEASUREMENT THAT MATTERS: a byte on a real disk, or not.
+    res["promisify_left_no_file"] = 0 if os.path.exists(escaped) else 1
+
+# -- F2: a typescript that loads and parses nothing -------------------------
+sh = os.path.join(work, "shim")
+for i in range(5):
+    write(sh, "src/m%d.ts" % i, "export function f%d(s: string) { return s; }\n" % i)
+write(sh, "package.json", '{"name": "s", "main": "src/m0.ts",\n'
+                          ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+write(sh, "node_modules/typescript/lib/typescript.js",
+      "module.exports = {\n"
+      "  createSourceFile: function () { throw new Error('shimmed'); },\n"
+      "  ScriptTarget: { Latest: 99 },\n"
+      "  SyntaxKind: {},\n"
+      "};\n")
+shim = plan(sh)
+res["shim_units"] = shim.get("units_discovered", 0)
+res["shim_discovery"] = shim.get("discovery", "")
+
+# -- F3: a conventional Django repo -----------------------------------------
+dj = os.path.join(work, "django")
+for i in range(30):
+    write(dj, "app/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+for i in range(20):
+    write(dj, "static/js/w%d.js" % i, "export function w%d() {}\n" % i)
+write(dj, "requirements/base.txt", "Django>=4.2\npsycopg[binary]>=3.1\n")
+write(dj, "package.json", '{"main": "static/js/w0.js",\n'
+                          ' "dependencies": {"react": "^18"}}\n')
+django = plan(dj)
+res["django_stack"] = django.get("stack", "")
+res["django_units"] = django.get("units_discovered", 0)
+# THE NUMBER THAT MOVES AGAINST EITHER BASELINE. The verdict alone cannot be a
+# delta row here: a tree with no node stack calls this repo python for the
+# trivial reason that nothing else claims it. What the fix changed is that
+# Python now EARNS its manifest multiplier on the split-requirements layout --
+# 30 raw files become 70 -- which is the thing that beats a declared
+# `package.json`'s 50.
+import re as _re
+_m = _re.search(r"python=(\d+)", NOTES.get(dj, ""))
+res["django_py_evidence"] = int(_m.group(1)) if _m else -1
+
+# -- F4: a tsconfig alias crediting a unit with no test anywhere -------------
+al = os.path.join(work, "alias")
+write(al, "src/utils.ts", "export function parse(s: string) { return s; }\n")
+write(al, "lib/utils.ts", "export function parse(s: string) { return s; }\n")
+write(al, "package.json", '{"name": "a", "main": "src/utils.ts",\n'
+                          ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+write(al, "tsconfig.json",
+      '{"compilerOptions": {"baseUrl": ".", "paths": {"@app/*": ["src/*"]}}}\n')
+write(al, "src/__tests__/utils.test.ts",
+      'import { parse } from "@app/utils";\n'
+      'test("parses", () => { parse("x"); });\n')
+alias = plan(al)
+# `lib/utils.ts` has NO test in this tree, so it must be IN THE PLAN. Measuring
+# its presence in `ranked` rather than its absence from `covered` is what makes
+# this a live claim against either baseline: a tree with no node stack ranks it
+# 0 times because it discovers nothing, the branch's pre-fix HEAD ranks it 0
+# times because the alias credited it as covered, and a correct tree ranks it.
+res["untested_unit_ranked"] = (
+    1 if "lib/utils.ts::parse" in [r.get("id") for r in (alias.get("ranked") or [])]
+    else 0)
+
+# -- F7: Python's half of the stdin ruling ----------------------------------
+py = os.path.join(work, "pystdin")
+write(py, "asker.py", "def ask():\n    return input('name? ')\n")
+write(py, "test_asker.py",
+      "from asker import ask\ndef test_asks():\n    assert ask()\n")
+try:
+    import pytest                                                 # noqa: F401
+    have_pytest = True
+except Exception:
+    have_pytest = False
+if have_pytest and os.path.isfile(os.path.join(assets, "io_guard.py")):
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1",
+               PYTHONPATH=assets + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    r_fd, w_fd = os.pipe()          # held open, never written: a REAL block
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "io_guard", "-s", "-q",
+             "-p", "no:cacheprovider", "test_asker.py::test_asks"],
+            cwd=py, env=env, stdin=r_fd, capture_output=True, text=True,
+            timeout=45)
+        out = done.stdout + done.stderr
+        # A HANG is the failure this measures, so the timeout IS the
+        # measurement: TimeoutExpired scores zero.
+        res["py_stdin_fast"] = (
+            1 if done.returncode != 0 and "IOGuardViolation" in out else 0)
+    except subprocess.TimeoutExpired:
+        res["py_stdin_fast"] = 0
+    finally:
+        os.close(r_fd)
+        os.close(w_fd)
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_fixround_1(old, new):
+    """The node branch's first fix round: five findings, measured end to end.
+
+    A NOTE ON WHAT THIS BASELINE CAN AND CANNOT SEE, because it decides which
+    rows here are deltas and which are guards. A bare `make ab-validate`
+    baselines on the merge base with the integration branch, which predates the
+    whole node stack -- so a row whose defect requires the node stack to EXIST
+    (F3's detection contest, F4's node coverage predicate) has no bad arm to
+    measure against and is recorded as a `guard`, not smuggled in as a win.
+    The rows that do move are the ones whose baseline arm really misbehaves:
+    the promisified write really lands on disk, the broken toolchain really
+    yields nothing, and Python's guard -- which DID exist at the baseline --
+    really hangs. To isolate the fix round itself, run
+    `make ab-validate BASE=<the branch HEAD before it>`; every row below moves
+    there, which is the measurement the round's own commits were watched
+    against.
+    """
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_1_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_1_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "a node unit reaching the filesystem through `util.promisify` FAILS "
+           "its proof run (higher=better)",
+        oldp["promisify_blocked"], newp["promisify_blocked"],
+        newp["promisify_blocked"] > oldp["promisify_blocked"],
+        "the Critical. `util.promisify`'s wrapper is DEFINED IN "
+        "`node:internal/util`, so under the rule this replaced -- stop at the "
+        "first internal frame and exempt -- the walk answered `not the code "
+        "under test` one frame before it would have found the unit. The "
+        "canonical pre-`fs/promises` async idiom, at tier 1, through the "
+        "documented command, green",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and NO FILE IS LEFT ON DISK after that proof run (higher=better)",
+        oldp["promisify_left_no_file"], newp["promisify_left_no_file"],
+        newp["promisify_left_no_file"] > oldp["promisify_left_no_file"],
+        "the row that is not about exit statuses. The invariant is about SIDE "
+        "EFFECTS, and the baseline arm really writes a file to a real disk "
+        "while the run reports `# pass`. A guard that raised AFTER the write "
+        "would satisfy the row above and fail this one",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "units the CLI reports for a repo whose `typescript` loads and "
+           "parses nothing (higher=better)",
+        oldp["shim_units"], newp["shim_units"],
+        newp["shim_units"] > oldp["shim_units"],
+        "a compiler that loads and reads nothing produced `discovery: "
+        "precise` with ZERO units and exit 0, while the heuristic would have "
+        "found five. Zero units reads as `this repo has nothing worth "
+        "testing`, wearing the label the report tells an agent to trust MORE",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and that degraded run is LABELLED (''=key absent, want heuristic)",
+        oldp["shim_discovery"] or "''", newp["shim_discovery"] or "''",
+        newp["shim_discovery"] == "heuristic",
+        "D1's whole point: two runs are comparable only when this key agrees, "
+        "which a key that can be WRONG does not deliver",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "python's evidence score for a conventional Django repo "
+           "(higher=better; -1 = no contest to report)",
+        oldp["django_py_evidence"], newp["django_py_evidence"],
+        newp["django_py_evidence"] > oldp["django_py_evidence"],
+        "30 modules under `app/`, `requirements/base.txt`, 20 JS files under "
+        "`static/js/`, and the `package.json` every Django repo keeps for its "
+        "frontend assets. `MANIFESTS` matched exact filenames AT THE ROOT and "
+        "Django's near-universal layout is a `requirements/` DIRECTORY, so "
+        "Python earned no multiplier (30) while node's manifest earned its own "
+        "(50) and the plan ranked the JavaScript. The SCORE is what this row "
+        "measures rather than the verdict, because a tree with no node stack "
+        "calls this repo python for the trivial reason that nothing contests "
+        "it -- the score moves against either baseline",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and the plan it produces covers the 30 python modules (guard, "
+           "0 = the JavaScript was ranked instead)",
+        oldp["django_units"] if oldp["django_stack"] == "python" else 0,
+        newp["django_units"] if newp["django_stack"] == "python" else 0,
+        newp["django_stack"] == "python" and newp["django_units"] == 30,
+        "the consequence a user meets: thirty modules with a plan, or twenty "
+        "JavaScript units and thirty modules with none. A GUARD against the "
+        "default baseline, where the claim is `adding a node stack must not "
+        "cost Python this repo's plan` and 30 == 30 is the whole assertion. "
+        "Against the branch's own pre-fix HEAD the same number reads 0 -> 30, "
+        "which is the fix landing rather than a guard breaking -- the row's "
+        "predicate asks about the NEW arm for exactly that reason",
+        kind="guard")
+    row(s, "a node unit with NO TEST ANYWHERE appears in `ranked` "
+           "(higher=better)",
+        oldp["untested_unit_ranked"], newp["untested_unit_ranked"],
+        newp["untested_unit_ranked"] > oldp["untested_unit_ranked"],
+        "C1 from the Python branch verbatim, in the coverage predicate, in the "
+        "never-over-credit direction. A `tsconfig` alias the resolver cannot "
+        "follow matched every same-named file, `is_test_for` was true for both "
+        "(`_dir_key` strips `src`, `lib` and `__tests__` alike), and `rivals` "
+        "never fires because such a test never emits `src/utils`. So "
+        "`lib/utils.ts::parse` was reported covered and VANISHED FROM THE "
+        "PLAN -- measured here as its presence in `ranked`, which is the "
+        "outcome a user actually loses",
+        since=SINCE_TSN_NODE_FIXES_1)
+    if oldp["py_stdin_fast"] >= 0 and newp["py_stdin_fast"] >= 0:
+        row(s, "a PYTHON unit that reads stdin fails fast instead of HANGING "
+               "the proof run (higher=better)",
+            oldp["py_stdin_fast"], newp["py_stdin_fast"],
+            newp["py_stdin_fast"] > oldp["py_stdin_fast"],
+            "R16 said both stacks move together and only node moved, so this "
+            "one IS measurable against a pre-node baseline: the Python guard "
+            "existed there and patched no stdin name. The probe's own timeout "
+            "is the measurement -- the baseline arm sits on a pipe nobody "
+            "writes to until the deadline kills it",
+            since=SINCE_TSN_NODE_FIXES_1)
+
+
 def check_test_safety_net_node_wired(old, new):
     """Does the SHIPPED SURFACE — the documented CLI, and the command SKILL.md
     prints — do what the documents now say it does?"""
@@ -2734,6 +3035,7 @@ def main():
         check_test_safety_net_node_precise(old, REPO)
         check_test_safety_net_node_guard(old, REPO)
         check_test_safety_net_node_wired(old, REPO)
+        check_test_safety_net_node_fixround_1(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

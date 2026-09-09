@@ -80,6 +80,16 @@ than none, because it makes the invariant look enforced when it is not.
    improvising, for anything with no complete row. Single-test invocation is load-bearing: step 4's
    proof is impossible without it.
 
+   **On node, check the runner before you plan to write anything.** A repo that already configures
+   **jest, vitest or mocha** — a `jest`/`vitest` key in `package.json`, a `jest.config.*`,
+   `vitest.config.*` or `.mocharc.*` — is a **rank-and-report** repo in this version: rank it, hand
+   over the report, and say which runner blocked the writing half. The tests this skill writes are
+   `node:test` tests proven under `node --require`, and dropping one into a jest suite either is not
+   collected (no safety net at all) or is collected and fails. That shape is not an edge case here —
+   "a JS/TS repo with no `*.test.js` to its name" is exactly how this skill gets triggered, and a
+   repo with jest configured and no tests yet is the commonest instance of it.
+   `references/stacks.md` has the full reasoning.
+
 2. **Rank** the risk surface:
 
    ```sh
