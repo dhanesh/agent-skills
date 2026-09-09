@@ -51,6 +51,6 @@ rely on. "The output" is not a contract; a named shape is.
 ## Success criteria
 
 TODO(repo2skill): the deterministic checks that decide the deliverable is done — the
-evaluate half of the generate -> evaluate -> repair loop. The shipped smoke suite
-(assets/test_test_safety_net_smoke.py) and outcome eval (eval/run_eval.py) are the seed:
+evaluate half of the generate -> evaluate -> repair loop. The shipped unit suite
+(assets/test_rank_risk.py) and outcome eval (eval/run_eval.py) are the seed:
 grow them as the skill grows.
