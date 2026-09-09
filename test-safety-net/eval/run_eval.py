@@ -33,6 +33,16 @@ What it still does NOT cover, said plainly rather than implied away:
     with no pytest grades the plugin path nowhere -- `assets/test_io_guard.py`
     skips there too -- so a `make gate` on such a machine is green on 34
     without having proved anything. That is stated rather than hidden.
+  * The node GUARD is covered CONDITIONALLY (check 39), in exactly the shape
+    check 34 has and for the same reason: this eval must not depend on a
+    toolchain it cannot install, so with no `node` on PATH check 39 reports
+    itself NOT GRADED HERE and passes. What remains ungated: a machine with
+    neither pytest nor node prints `EVAL_RESULT: PASS` while having graded
+    NEITHER guard — that is, neither stack's enforcement of the skill's
+    headline invariant. `assets/test_io_guard_node.sh` skips on the same
+    machine. CI pins both toolchains (`.github/workflows/skill-gates.yml` sets
+    up python AND node), so the grading there is a pin rather than an accident
+    of the runner image; a local `make gate` on a bare machine is not.
   * The literal-emission rule (SKILL.md's "one real injection surface") has NO
     EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
     ships in this skill, so there is no code path that could turn a hostile
@@ -1042,21 +1052,61 @@ def main():
               % (node_plan.get("stack"), node_plan.get("units_discovered"),
                  sorted(node_rows)))
 
-        # 36. the report NAMES WHICH READER produced the units (design
-        #     decision D1). A stack whose toolchain path is optional can
-        #     degrade for reasons that have nothing to do with the code, so
-        #     two runs are comparable only when this key agrees — and it is
-        #     graded on the node fixture, where the value is not a foregone
-        #     conclusion, as well as against the shipped documentation that
-        #     tells a reader to carry it into the report.
+        # 36. the report names WHICH READER produced the units (design
+        #     decision D1), and names it CORRECTLY.
+        #
+        #     THIS CHECK USED TO BE A TAUTOLOGY. It asserted
+        #     `discovery in ("precise", "heuristic")` — and `discover_units`
+        #     can only ever return one of those two strings, so the code half
+        #     could not fail. Mutating the heuristic reader to LIE about which
+        #     path ran (`return _units_heuristic(root), "precise"`) left the
+        #     eval at 39/39. The property D1 exists for is not "the key holds
+        #     an in-vocabulary value", it is "two runs are comparable when this
+        #     key agrees", and only a check that can see a WRONG label defends
+        #     it.
+        #
+        #     Both arms are deterministic without installing anything:
+        #       a. the fixture ships no `node_modules/typescript`, so the only
+        #          honest answer is `heuristic`;
+        #       b. a SECOND fixture ships a `typescript` that loads and then
+        #          reads nothing — an aliased or shimmed compiler. That used to
+        #          yield `discovery: "precise"` with ZERO units while the
+        #          heuristic would have found three: the silent zero, wearing
+        #          the label the report tells an agent to trust more. It must
+        #          decline, say so on stderr, and report the units anyway.
         node_stacks_md = open(os.path.join(SKILL, "references", "stacks.md"),
                               encoding="utf-8").read()
-        check("36 the node report NAMES which reader found its units, and the "
-              "docs tell the agent to carry that value into the report",
-              node_plan.get("discovery") in ("precise", "heuristic")
+        shim_repo = os.path.join(tmp, "nodeshim")
+        write(shim_repo, "package.json",
+              '{"name": "shim", "main": "src/a.js",\n'
+              ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+        for i in range(3):
+            write(shim_repo, "src/m%d.js" % i,
+                  "export function f%d(x) { return x; }\n" % i)
+        # Loads, exports the right NAMES, and throws on every file it is asked
+        # to parse. The walker counts each into `unreadable`.
+        write(shim_repo, "node_modules/typescript/lib/typescript.js",
+              "module.exports = {\n"
+              "  createSourceFile: function () { throw new Error('shimmed'); },\n"
+              "  ScriptTarget: { Latest: 99 },\n"
+              "  SyntaxKind: {},\n"
+              "};\n")
+        r_shim = run_ranker(shim_repo, "--top-n", "20")
+        shim_plan = load_json(r_shim)
+        check("36 the node report names which reader found its units, and "
+              "names it CORRECTLY: no toolchain reads `heuristic`, and a "
+              "toolchain that loads but reads nothing DECLINES rather than "
+              "reporting zero units as `precise`",
+              node_plan.get("discovery") == "heuristic"
+              and shim_plan.get("discovery") == "heuristic"
+              and shim_plan.get("units_discovered") == 3
+              and "declined" in (r_shim.stderr or "")
               and "discovery" in skill_text
               and "heuristic" in node_stacks_md,
-              "discovery=%r" % node_plan.get("discovery"))
+              "fixture=%r shim=%r shim_units=%r shim_note=%r"
+              % (node_plan.get("discovery"), shim_plan.get("discovery"),
+                 shim_plan.get("units_discovered"),
+                 (r_shim.stderr or "").strip().splitlines()[-1:]))
 
         # 37. NEGATIVE-SHAPED: a vendored unit is a syntactically valid export
         #     that must NEVER be ranked. Ranking a repo's dependencies as its

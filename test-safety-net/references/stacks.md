@@ -199,7 +199,7 @@ adds a sibling cannot quietly escape:
 | clock | `Date.now`; the `Date` constructor **only with no arguments** (`new Date(0)` reads no clock); `setTimeout`/`setInterval`/`setImmediate`; `process.hrtime`/`uptime`; `performance.now`; `node:perf_hooks` |
 | randomness | `Math.random`; `node:crypto`'s `random*`/`generateKey*`/`generatePrime*`/`getRandomValues`; `globalThis.crypto.getRandomValues`/`randomUUID` |
 | environment | a `Proxy` over `process.env` (every **value** read, destructuring included); the `process.argv`/`argv0` getters; `process.cwd`/`chdir`/`umask`; every own function of `node:os` |
-| *(not a group)* | `process.stdin`'s getter, `node:readline`, `node:readline/promises` — **tier 1 only**. Terminal input is in neither stack's marker table, so the filter cannot decline it, and the failure mode is a *hang* that yields no verdict at all rather than a failure |
+| *(not a group)* | `process.stdin`'s getter, `node:readline`, `node:readline/promises` — **tier 1 only**. Terminal input is in neither stack's marker table, so the filter cannot decline it, and the failure mode is a *hang* that yields no verdict at all rather than a failure. **Python's guard does the same** (`builtins.input`, `sys.stdin`'s read family), so this is one rule a reader can carry between stacks — see `references/triage.md` |
 
 Third-party clients are not patched and do not need to be: `axios`, `got`, `node-fetch`, `undici`
 and `superagent` all bottom out in `node:net` or `globalThis.fetch`, and `fs-extra`/`graceful-fs`

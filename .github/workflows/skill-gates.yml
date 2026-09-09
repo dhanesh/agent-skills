@@ -37,6 +37,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # PINNED, not assumed. `test-safety-net`'s node guard is the sole runtime
+      # enforcement of that skill's headline invariant on the node stack, and
+      # both the gate suite (`assets/test_io_guard_node.sh`) and eval check 39
+      # SKIP where `node` is absent — passing without having graded anything.
+      # GitHub's runner images happen to ship node, so this was being graded by
+      # accident; a runner image that stopped shipping it would have turned a
+      # silent skip green on every PR.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Run skill quality gates
         run: make gate
 

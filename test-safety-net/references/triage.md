@@ -145,6 +145,16 @@ filesystem could otherwise pass "RED" only because the guard's exception looked 
 deliberately-wrong assertion, then pass "GREEN" the same way once corrected — two runs that both
 "succeeded" while never proving the classification safe.
 
+**Terminal input fails fast at tier 1, on both stacks.** `input()`, `sys.stdin.read()`,
+`readline.createInterface({input: process.stdin})` and `process.stdin` are in **neither** stack's
+I/O marker table, so the *filter* cannot decline a unit that reads a line — and under a proof run
+such a unit does not fail, it **hangs**, waiting for a line nobody will type and yielding no
+verdict at all. A hang is strictly worse than a failure, so at tier 1 both guards make it a guard
+trip (`stdin`), reported and remedied like any other: reclassify to Tier 3 and discard the test.
+It is deliberately **not** an eighth group — the seven groups are the ranker's groups verbatim —
+so `TEST_SAFETY_NET_ALLOW` cannot name it, and tier 2 does not block it. Residual, the same on
+both stacks: a read of file descriptor 0 beneath both names (`os.read(0, n)`) is not fenced.
+
 **How the guard is loaded.** It **ships with this skill** as `assets/io_guard.py` — do not author
 your own. It loads as a **pytest plugin, via `-p`**, not as a `conftest.py` written into the
 target repo:
