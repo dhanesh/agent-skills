@@ -36,6 +36,8 @@ def triage(root: str, unit: dict) -> tuple: ...  # (tier:int, reason:str) — un
 
 The JSON contract is unchanged except that `stack` now reports the detected stack and a new top-level `discovery` field carries `"precise"` or `"heuristic"`.
 
+**This ninth key is an intended behaviour change and lands in Task 3.** `TestMain`'s "eight expected keys" assertion is the one existing test that legitimately changes, and only then. Tasks 1 and 1b must still leave the suite untouched; a reviewer seeing that assertion edited in Task 1 or 1b should reject it.
+
 ---
 
 ### Task 1: Extract the stack interface; move Python behind it, unchanged
@@ -94,6 +96,66 @@ git commit -m "refactor(test-safety-net): put Python discovery and triage behind
 
 ---
 
+### Task 1b: Extend the stack interface to everything that reads a language
+
+**Added after Task 1's report.** Task 1 established the seam and proved zero behaviour
+change (byte-identical JSON over 326 units). Its report then showed the six-name
+interface is still too small in four ways, each a place where the *core* keeps a Python
+assumption. Fixing them in node's discovery task would tangle a behaviour change with a
+pure extraction and lose the byte-identical proof, so they land here first — still with
+**zero behaviour change**.
+
+**Files:**
+- Modify: `test-safety-net/assets/rank_risk.py`, `test-safety-net/assets/stack_python.py`
+- Test: `test-safety-net/assets/test_rank_risk.py` — again, must pass **unmodified**
+
+**The interface after this task.** Grouped by what they do; the core orchestrates and
+scores, the stack reads the language:
+
+```
+identity   STACK_NAME, matches(root)
+files      iter_source_files(root, include_tests=False), is_test_path(rel),
+           is_test_for(test_rel, src_rel)
+naming     module_of(rel), path_pattern(rel)
+lexing     IDENTIFIER_RE, preceding_qualifier(text, start)
+grammar    module_bindings(module, text), reached_through_module(module, name, text)
+analysis   discover_units(root) -> (units, mode), triage(root, unit) -> (tier, reason)
+```
+
+- [ ] **Step 1: Record the baseline** — 158 tests, and capture `rank_risk.py . > /tmp/base.json` for the byte-identical check.
+
+- [ ] **Step 2: Move module identity** — `module_of(rel)` replaces the core's
+  `os.path.splitext(os.path.basename(rel))[0]`; `path_pattern(rel)` replaces
+  `_path_pattern`'s literal `".py"` strip. Python's implementations move verbatim.
+
+- [ ] **Step 3: Move the binding grammar** — `module_bindings` and
+  `reached_through_module` move to `stack_python` behind the interface names. These are
+  `already_covered`'s strongest evidence; the core must call through, never inline
+  Python's `import X as Y` / `from X import Y` forms.
+
+- [ ] **Step 4: Move lexing** — `IDENTIFIER_RE` and `preceding_qualifier` become stack
+  attributes. Keep the Python regex byte-identical, including the
+  `(?<![A-Za-z0-9_])` lookbehind that a prior round proved necessary (`2x` must not
+  yield a reference to `x`).
+
+- [ ] **Step 5: Add `is_test_for(test_rel, src_rel)`** — extract `already_covered`'s
+  same-directory rule into it. Python's implementation is exactly today's behaviour:
+  same directory. Node will later add `__tests__/` siblings and `src/`↔`test/` mirroring.
+
+- [ ] **Step 6: Prove nothing changed**
+
+Run the suite unmodified (158, OK), the eval (34/34), `make gate`, and:
+
+```bash
+python3 test-safety-net/assets/rank_risk.py . > /tmp/after.json && cmp /tmp/base.json /tmp/after.json && echo IDENTICAL
+```
+
+`IDENTICAL` is the bar, exactly as in Task 1.
+
+- [ ] **Step 7: Commit**
+
+---
+
 ### Task 2: Node heuristic discovery
 
 **Files:**
@@ -102,7 +164,7 @@ git commit -m "refactor(test-safety-net): put Python discovery and triage behind
 
 **Interfaces:**
 - Produces: `STACK_NAME = "node"`, `matches`, `discover_units`, and `_units_heuristic(root)` for Task 3 to fall back to.
-- Consumes: `rank_risk.read_text`, `rank_risk.SKIP_DIRS`.
+- Consumes: `stack_common.read_text`, `stack_common.SKIP_DIRS`. **Never import `rank_risk` from a stack module** — it is loaded by path and never lands in `sys.modules`, so importing it back executes a second copy of the ranker mid-import and dies on a half-initialised `stack_python`.
 
 `matches(root)`: True when a `package.json` exists at root, or any non-test `.js`/`.mjs`/`.cjs`/`.ts`/`.tsx` file exists outside `node_modules`.
 
