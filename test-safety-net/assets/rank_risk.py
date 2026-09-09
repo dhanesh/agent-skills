@@ -515,7 +515,7 @@ CONTROLLABLE = {
     "clock": ("datetime", "time.time", "time.sleep", "date.today"),
     "randomness": ("random", "uuid.uuid4", "secrets", "os.urandom"),
     "environment": ("os.environ", "os.getenv", "os.getenvb", "os.putenv",
-                    "os.unsetenv"),
+                    "os.reload_environ", "os.unsetenv"),
 }
 UNCONTROLLABLE = {
     "network": ("requests", "urllib.request", "httpx", "socket", "aiohttp",

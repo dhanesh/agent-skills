@@ -208,7 +208,8 @@ _OS_FILESYSTEM = (
     "chflags", "lchflags", "utime",
     "getxattr", "setxattr", "listxattr", "removexattr",
 )
-_OS_ENVIRONMENT = ("getenv", "getenvb", "putenv", "unsetenv")
+_OS_ENVIRONMENT = ("getenv", "getenvb", "putenv", "reload_environ",
+                   "unsetenv")
 _OS_RANDOMNESS = ("urandom",)
 _OS_SUBPROCESS = ("system", "popen", "startfile")
 

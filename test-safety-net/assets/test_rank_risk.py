@@ -924,7 +924,22 @@ class TestTriage(TempRepo):
             "os.fsencode": "pure str/bytes conversion",
             "os.fsdecode": "pure str/bytes conversion",
             "os.get_exec_path": "reads os.environ; covered by the environment group",
+            # 3.14 additions. `process_cpu_count` reports scheduler affinity --
+            # a syscall, but no path, no environment and no subprocess, so none
+            # of the tracked groups own it. (`os.reload_environ`, the other
+            # 3.14 addition, is NOT allow-listed: it re-reads the process
+            # environment, which is exactly the environment group's business,
+            # so it is marked there and patched in io_guard.)
+            "os.process_cpu_count": "scheduler affinity; no tracked I/O group",
         }
+        # NOTE: this test is SUPPOSED to fail when a Python release adds an
+        # `os` callable. That failure is the mechanism -- it forces someone to
+        # classify the new name into a marker group or allow-list it with a
+        # reason, instead of it silently landing in Tier 1 "no I/O markers".
+        # Found exactly that way: running this suite on Python 3.14 in an
+        # Ubuntu container surfaced `process_cpu_count` and `reload_environ`,
+        # which CI's 3.12 does not have yet. Do NOT "fix" a future failure by
+        # widening the derivation.
         table = (set(rank_risk.CONTROLLABLE["filesystem"])
                  | set(rank_risk.CONTROLLABLE["environment"])
                  | set(rank_risk.UNCONTROLLABLE["subprocess"]))
