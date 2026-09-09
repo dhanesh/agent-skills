@@ -112,6 +112,25 @@ on the receiving side.
    trusts yet, and it is why Tier 3 seams are reported rather than applied.
 2. **Never writes a test that performs real I/O.** If the boundary cannot be controlled, the unit
    drops to Tier 3 and no test is written. The skill declines rather than faking success.
+
+   **How this is enforced — amended 2026-09-09 during implementation.** The original design
+   assumed the static triage enforced this. It cannot. Two review rounds found seven distinct
+   constructions the classifier called safe that would have reached real I/O: aliased imports, a
+   same-module helper, an argument default, a class body, a base-class expression, a method call,
+   and a locally-shadowed import. Static analysis cannot decide reachability in Python —
+   `getattr`, dispatch tables and dynamic imports are undecidable — so each fix round closed
+   holes and revealed more.
+
+   So triage is demoted to a **filter**: it ranks candidates and declines obvious hazards. The
+   invariant is enforced at **runtime**, during the red→green proof: the candidate test runs with
+   I/O blocked (`socket.socket`, `subprocess.Popen` and the database drivers monkeypatched to
+   raise). A test that reaches the network errors instead of passing, its unit is reclassified
+   Tier 3, and no test is kept. That makes this invariant a property the tooling enforces rather
+   than one the prose asserts.
+
+   Residual, stated plainly: a test that spawns a subprocess which itself dials out escapes an
+   in-process guard. That is a smaller residual than trusting static analysis alone, and naming
+   it is the point.
 3. **Never ships an unproven test.** A test that did not go red is discarded and listed under
    *could not prove*.
 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the report.
