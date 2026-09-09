@@ -79,6 +79,9 @@ SINCE_AUDIT_2026_09 = "5daa2cf"  # the 2026-09 whole-repo review fixes (repinned
 # the original "7b94236" was rewritten to this hash on the way into main — same
 # author date/message/diff, orphaned object left dangling in the local odb)
 SINCE_TEST_SAFETY_NET = "4f88919"  # test-safety-net: the tier >= 3 netting guard
+SINCE_TSN_FIXROUND_4 = "5c69c68"  # test-safety-net: the rank_risk correctness cluster
+# (C1 basename-collision coverage, C2 the os exec/spawn family, I4 attribute
+# over-count, I5 import-time I/O floor, I6 subdirectory churn)
 
 
 def _git_out(*args):
@@ -912,6 +915,151 @@ def check_test_safety_net(old, new):
         a, b, b < a,
         "writing a test for it would open a real socket; the skill must decline",
         since=SINCE_TEST_SAFETY_NET)
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+# ── test-safety-net, fix round 4: the rank_risk.py correctness cluster ──
+def _tsn_probe(tree, root, top_n=10):
+    """Run a tree's rank_risk.py over `root` and return its plan, or None.
+
+    None means "this tree cannot answer" — the baseline predates the skill, so
+    every row below scores that as the WORST possible value rather than
+    skipping it. A missing ranker nets nothing, credits nothing and ranks
+    nothing, which is exactly the failure each row measures.
+    """
+    ranker = os.path.join(tree, "test-safety-net", "assets", "rank_risk.py")
+    if not os.path.isfile(ranker):
+        return None
+    r = subprocess.run([sys.executable, ranker, root, "--top-n", str(top_n),
+                        "--since", "10 years ago"],
+                       capture_output=True, text=True, timeout=120)
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def check_test_safety_net_ranker(old, new):
+    """Five findings, five fixtures, each reproduced by the review before the fix."""
+    scratch = tempfile.mkdtemp()
+
+    # C1 — a basename collision credited coverage to a unit with no test.
+    c1 = os.path.join(scratch, "c1")
+    for rel, body in (("app/utils.py", "def helper():\n    return 1\n"),
+                      ("lib/utils.py", "def helper():\n    return 2\n"),
+                      ("tests/test_app.py",
+                       "from app.utils import helper\n\n\ndef test_helper():\n"
+                       "    assert helper() == 1\n")):
+        os.makedirs(os.path.join(c1, os.path.dirname(rel)), exist_ok=True)
+        with open(os.path.join(c1, rel), "w") as f:
+            f.write(body)
+
+    def falsely_covered(tree):
+        plan = _tsn_probe(tree, c1)
+        if plan is None:
+            return 1
+        return 1 if "lib/utils.py::helper" in plan["covered"] else 0
+
+    # C2 — half the os exec/spawn family was missing from the marker table.
+    c2 = os.path.join(scratch, "c2")
+    os.makedirs(c2, exist_ok=True)
+    with open(os.path.join(c2, "proc.py"), "w") as f:
+        f.write("import os\n\n\ndef a(c):\n    return os.execlp('sh', 'sh', '-c', c)\n\n\n"
+                "def b(p):\n    return os.posix_spawnp(p, [p], {})\n\n\n"
+                "def c(p):\n    return os.spawnlp(os.P_WAIT, p, p)\n")
+
+    def spawners_netted(tree):
+        plan = _tsn_probe(tree, c2)
+        if plan is None:
+            return 3
+        return sum(1 for r in plan["ranked"] + plan["remainder"]
+                   if r["path"] == "proc.py")
+
+    # I4 — `buf.write(...)` on a foreign receiver counted as reach.
+    i4 = os.path.join(scratch, "i4")
+    os.makedirs(i4, exist_ok=True)
+    with open(os.path.join(i4, "sink.py"), "w") as f:
+        f.write("def write(data):\n    return data\n\n\ndef other():\n    return 1\n")
+    with open(os.path.join(i4, "user.py"), "w") as f:
+        f.write("import io\nimport sink\n\n\ndef emit():\n    buf = io.StringIO()\n"
+                "    buf.write('a')\n    buf.write('b')\n    buf.write('c')\n"
+                "    return sink.other()\n")
+
+    def phantom_refs(tree):
+        plan = _tsn_probe(tree, i4)
+        if plan is None:
+            return 3
+        for r in plan["ranked"] + plan["remainder"]:
+            if r["id"] == "sink.py::write":
+                return r["inbound_refs"]      # real callers: 0
+        return 3
+
+    # I5 — import-time file I/O left every unit "directly callable".
+    i5 = os.path.join(scratch, "i5")
+    os.makedirs(i5, exist_ok=True)
+    with open(os.path.join(i5, "cfg.py"), "w") as f:
+        f.write('import json\n_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+                "def get_timeout():\n    return _CFG['timeout'] * 2\n")
+
+    def import_io_netted(tree):
+        plan = _tsn_probe(tree, i5)
+        if plan is None:
+            return 1
+        return 1 if any(r["id"] == "cfg.py::get_timeout"
+                        for r in plan["ranked"] + plan["remainder"]) else 0
+
+    # I6 — analysing a subdirectory of a git repo zeroed all churn.
+    i6 = os.path.join(scratch, "i6", "pkg", "sub")
+    os.makedirs(i6, exist_ok=True)
+    repo = os.path.join(scratch, "i6")
+    git_ok = subprocess.run(["git", "init", "-q", "."], cwd=repo,
+                            capture_output=True).returncode == 0
+    for i in range(5):
+        with open(os.path.join(i6, "mod.py"), "w") as f:
+            f.write("def a():\n    return %d\n" % i)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "add", "-A"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "c%d" % i], cwd=repo, capture_output=True)
+
+    def subdir_churn(tree):
+        if not git_ok:
+            return -1                        # identical in both arms; row holds
+        plan = _tsn_probe(tree, i6)
+        if plan is None:
+            return 0
+        for r in plan["ranked"] + plan["remainder"]:
+            if r["id"] == "mod.py::a":
+                return r["churn"]
+        return 0
+
+    s = "test-safety-net"
+    a, b = falsely_covered(old), falsely_covered(new)
+    row(s, "coverage credited across a basename collision (lower=better)", a, b, b < a,
+        "C1: lib/utils.py::helper has no test at all; crediting it emptied `ranked`",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = spawners_netted(old), spawners_netted(new)
+    row(s, "os.execlp/posix_spawnp/spawnlp units netted (lower=better)", a, b, b < a,
+        "C2: `os.exec*` replaces the process image, so no runtime guard can "
+        "backstop it -- the filter is the only defence",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = phantom_refs(old), phantom_refs(new)
+    row(s, "phantom refs on a zero-caller `write` (lower=better)", a, b, b < a,
+        "I4: three io.StringIO.write calls were credited to sink.py::write, "
+        "which outranked the one unit with a real caller",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = import_io_netted(old), import_io_netted(new)
+    row(s, "unit in a module that reads a file at import is netted (lower=better)",
+        a, b, b < a,
+        "I5: the harness takes an IOError on `import cfg` before any test body "
+        "runs; Tier 1 'directly callable' was false",
+        since=SINCE_TSN_FIXROUND_4)
+    a, b = subdir_churn(old), subdir_churn(new)
+    row(s, "churn seen when analysing a subdirectory (higher=better)", a, b, b > a,
+        "I6: churn keyed to the git repo root while units keyed to the analysed "
+        "root, so a 5-commit file ranked 0.0",
+        since=SINCE_TSN_FIXROUND_4)
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def self_test():
@@ -1072,6 +1220,7 @@ def main():
         check_clean_code(old, REPO)
         check_starlight(old, REPO)
         check_test_safety_net(old, REPO)
+        check_test_safety_net_ranker(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
