@@ -160,7 +160,8 @@ on the receiving side.
    **The guard is installed BEFORE the module under test is imported.** Otherwise a module doing
    I/O at import time runs its side effects during `import unit_module`, before any fixture body
    executes — once per proof run, for every module, regardless of tier. In pytest that means a
-   `conftest.py` loaded ahead of collection, not a fixture inside the generated test.
+   plugin loaded ahead of collection (see "How the guard signals, and how it is loaded" below),
+   not a fixture inside the generated test.
 
    **The split between filter and guard is deliberate, and neither alone is sufficient.** The
    guard covers what the filter cannot see: dynamic dispatch, unresolvable receivers, cross-module
