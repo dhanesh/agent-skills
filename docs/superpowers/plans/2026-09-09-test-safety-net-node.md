@@ -424,6 +424,44 @@ Mirror the Python suite's `dir(os)`-derived test in spirit: assert every name in
 
 ### Task 5: `io_guard.js`
 
+**Phase 0 — a manifest's CONTENT decides whether it counts, not its existence.**
+Task 4 fixed the additive-bonus bug, and its own concern 3 survives, reproduced:
+
+    8 .py + 3 .js + a husky package.json  ->  stack=node (node=16, python=8)
+
+Task 4's report says no `(files + floor) * multiplier` shape fixes this without breaking
+the fresh-node-project row. That is true, and it is the shape that is wrong: **file counts
+alone cannot separate "a node project" from "a Python project with node tooling."** The
+manifest's content can, and it is derivable rather than another tuned constant.
+
+- [ ] **Step 0a: classify each manifest as `declaring` or `tooling-only`**
+
+A `package.json` declaring the repo a node package — `main`, `exports`, `bin`,
+`type: "module"`, runtime `dependencies`, or a real `scripts.build`/`start` — scales the
+claim. One carrying only `devDependencies` for tooling (husky, prettier, eslint,
+lint-staged) plus at most a `scripts.prepare` does **not**. Same rule the other way:
+`pyproject.toml` with `[project]` or `[tool.poetry]` declares; one with only
+`[tool.black]`/`[tool.ruff]` is tooling.
+
+- [ ] **Step 0b: the case table gains three rows, and the existing eight must still pass**
+
+| repo shape | expect |
+|---|---|
+| 8 `.py`, 3 `.js`, `package.json` with only husky in devDependencies | python |
+| 2 `.js`, `package.json` with `main` + dependencies, 3 `.py` | node |
+| 30 `.py`, `pyproject.toml` with only `[tool.ruff]`, 40 `.js` with a declaring manifest | node |
+
+This should also *loosen* the tightest rows Task 4 reported — row 1 and
+`test_a_manifest_at_the_root_beats_a_file_majority` were pulling opposite ways at 0.40
+slack precisely because existence was doing work that content should do. Report the new
+slack on both.
+
+- [ ] **Step 0c: green gate, green eval, this repo still python. Commit separately.**
+
+---
+
+### Task 5: `io_guard.js`
+
 **Files:**
 - Create: `test-safety-net/assets/io_guard.js`
 - Test: `test-safety-net/assets/test_io_guard_node.sh` (marked `# gate: offline`)
@@ -454,6 +492,12 @@ Carry across the Python guard's hard-won rules, each of which cost a review roun
 3. A violation raised asynchronously (a callback, a promise, a worker) must still reach the test result rather than being swallowed.
 4. Patch the **lowest** reachable layer: `node:fs` (both sync and promise faces), `node:net`, `node:http`/`https`, `node:child_process`, `node:dns`, and global `fetch` — not a convenience wrapper.
 5. Restore everything on teardown.
+6. **Block stdin at Tier 1** (R16, carried from Task 3's concern 3). Terminal I/O
+   (`readline`, `tty`, `repl`, process stdin) is in neither stack's marker table, so a
+   unit that reads stdin **hangs** the proof run rather than failing it. A hang is worse
+   than a failure: it yields no verdict at all and burns the user's wall clock until they
+   notice. Make it fail fast. Python's guard has the same gap — note in the report what
+   the equivalent change there would be, so the two stacks can move together later.
 
 - [ ] **Step 1: Write the failing shell test** — a clean test passes under the guard; a test reading `/etc/hosts` fails with `IOGuardViolation`; both under `node --test --test-name-pattern`.
 
