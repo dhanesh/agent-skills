@@ -261,6 +261,48 @@ Expected: all green.
 
 ### Task 4: Node precise discovery via the repo's own toolchain
 
+**Phase 0 — the manifest bonus is additive and swamps file counts.** Task 3 shipped
+`MANIFEST_BONUS = 100`, added to the file count. Controller-reproduced on the shape that
+matters most, because it is the common one:
+
+    40 .py + 5 .js + a root package.json (prettier/husky/eslint)
+    -> stack: node (node=105, python=40), units: 5
+
+That is a Python repo with JS tooling, and the skill would rank five files while ignoring
+forty. A root `package.json` is extremely common in Python repos for formatting and git
+hooks, so this is not a corner case.
+
+- [ ] **Step 0a: make the manifest multiply, not add**
+
+A manifest is evidence of *intent* and should scale a stack's claim rather than swamp it.
+Something of the shape `(files_claimed + floor) * multiplier` — but the exact constants
+are yours to choose and, more importantly, to **justify against cases**.
+
+- [ ] **Step 0b: write the case table as tests, before choosing the constants**
+
+At minimum these eight, each a real repo shape, with the expected winner:
+
+| repo shape | expect |
+|---|---|
+| 40 `.py`, 5 `.js`, root `package.json` (tooling) | python |
+| 75 `.py`, 17 `.mjs`/`.ts`, manifest only inside a template dir | python |
+| 200 `.js`, root `package.json`, 3 `.py` scripts | node |
+| 2 `.js`, root `package.json`, 3 `.py` (fresh node project) | node |
+| 300 `.py`, `pyproject.toml`, 20 `.js` frontend, root `package.json` | python |
+| 150 `.ts`, root `package.json`, 4 `.py` tooling scripts | node |
+| 10 `.py`, 10 `.js`, no manifest at all | ambiguous — reported, not guessed |
+| 0 `.py`, 0 `.js`, empty repo | neither; say so and exit cleanly |
+
+Pick constants that satisfy every row, then state in your report which row was tightest —
+that row is where the next person's change will break it.
+
+- [ ] **Step 0c: `AMBIGUITY_MARGIN` gets at least one test each way** — a pair inside the
+margin must raise, a pair outside must not. Task 3 shipped it untested.
+
+- [ ] **Step 0d: whole gate and eval green; this repo still detects python.**
+
+
+
 **Files:**
 - Modify: `test-safety-net/assets/stack_node.py`
 - Test: `test-safety-net/assets/test_stack_node.py`
