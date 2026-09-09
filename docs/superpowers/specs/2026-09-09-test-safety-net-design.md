@@ -214,7 +214,7 @@ on the receiving side.
    **Amended 2026-09-09 (fix round 5) — the guard is now BUILT, and building it moved five
    details.** Everything above was design; `test-safety-net/assets/io_guard.py` is the
    implementation, and it is a shipped asset rather than something the agent authors per repo —
-   house style in this collection, and the safer choice for ~500 lines that patch `os` primitives,
+   house style in this collection, and the safer choice for ~700 lines that patch `os` primitives,
    where a subtly wrong hand-rolled copy is worse than none. The five corrections, each because
    the built thing disagreed with the written thing:
 
