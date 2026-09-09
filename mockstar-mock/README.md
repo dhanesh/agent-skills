@@ -24,6 +24,10 @@ npx skills add dhanesh/agent-skills --skill mockstar-mock
   (`bun add -g @dhaneshpurohit/mockstar`) or rely on `bunx` to fetch it on first run.
   **Package name matters:** the unscoped `mockstar` on npm is an unrelated project.
   Requires **>= 0.2.2**; configurable webhook signing schemes require **>= 0.3.0**.
+  Verified against **0.4.0**. Nothing this skill emits requires 0.4.0, but from 0.4.0 the
+  per-tenant `requestsPerSecond` cap is actually enforced (429 + `Retry-After`, default
+  10,000/s) — earlier versions declared the field and ignored it, so a generated mock driven
+  above that rate now gets throttled where it previously would not.
 - **uv** — used to run the Python helper that converts PDF/DOCX inputs and documentation URLs
   to plain text.
 - **curl** — used by the smoke test suite to verify every generated route.
