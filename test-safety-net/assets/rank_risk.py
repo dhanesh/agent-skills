@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import os
+import subprocess
 
 SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "build",
              "dist", ".tox", ".mypy_cache", ".pytest_cache", "vendor",
@@ -71,3 +72,27 @@ def discover_units(root: str):
                 "kind": "class" if isinstance(node, ast.ClassDef) else "function",
             })
     return sorted(units, key=lambda u: u["id"])
+
+
+def churn(root: str, since: str = "6 months ago") -> dict:
+    """Commits touching each repo-relative path within the window.
+
+    Exact where git is present, and the best available proxy for "what a person
+    keeps changing" — which is what an agent will touch next. Absent git or
+    history, returns {} rather than raising: churn is one signal of two, and a
+    tarball checkout must still get a ranking.
+    """
+    try:
+        r = subprocess.run(
+            ["git", "log", "--format=", "--name-only", f"--since={since}"],
+            cwd=root, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if r.returncode != 0:
+        return {}
+    counts: dict = {}
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line:
+            counts[line] = counts.get(line, 0) + 1
+    return counts

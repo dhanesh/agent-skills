@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -48,6 +49,33 @@ class TestDiscoverUnits(TempRepo):
         write(self.root, "ok.py", "def fine():\n    pass\n")
         ids = [u["id"] for u in rank_risk.discover_units(self.root)]
         self.assertEqual(ids, ["ok.py::fine"])
+
+
+def git(root, *args):
+    return subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=root, capture_output=True, text=True)
+
+
+class TestChurn(TempRepo):
+    def test_counts_commits_per_file(self):
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "hot.py", "def a():\n    pass\n")
+        write(self.root, "cold.py", "def b():\n    pass\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        for i in range(3):
+            write(self.root, "hot.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        c = rank_risk.churn(self.root)
+        self.assertEqual(c["hot.py"], 4)
+        self.assertEqual(c["cold.py"], 1)
+
+    def test_no_git_history_degrades_to_empty_not_a_crash(self):
+        # A tarball checkout, or a brand-new directory, must not take the ranker
+        # down — churn is one signal of two, and the other still works.
+        write(self.root, "a.py", "def a():\n    pass\n")
+        self.assertEqual(rank_risk.churn(self.root), {})
 
 
 if __name__ == "__main__":
