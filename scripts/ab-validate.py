@@ -103,6 +103,10 @@ SINCE_TSN_NODE_PRECISE = "75d8de9"  # test-safety-net: the manifest bonus made
 # repo), and node's optional precise discovery path with the `discovery` key
 # that reports which reader ran. One constant for the campaign: both commits
 # land at the same merge.
+SINCE_TSN_NODE_GUARD = "483010b"  # test-safety-net: `io_guard.js`, node's
+# runtime enforcement -- and, one commit earlier, the manifest CLASSIFIER that
+# had to land before it (a guard is worth nothing in a repo the detector handed
+# to the wrong stack). One constant for the campaign.
 SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # detection (first match wins reclassified this repo's own corpus as node),
 # then node's I/O marker tables, triage, and registration. One constant for
@@ -2255,6 +2259,110 @@ def check_test_safety_net_node_precise(old, new):
             since=SINCE_TSN_NODE_PRECISE)
 
 
+_NODE_GUARD_PROBE = r"""
+import json, os, shutil, subprocess, sys, tempfile
+
+res = {"guard_present": 0, "blocks_fs": 0, "passes_clean": 0, "stdin_fast": 0}
+guard = os.path.join(sys.path[0], "io_guard.js")
+node = shutil.which("node")
+if node and os.path.isfile(guard):
+    res["guard_present"] = 1
+    work = tempfile.mkdtemp()
+
+    def write(rel, text):
+        with open(os.path.join(work, rel), "w") as f:
+            f.write(text)
+
+    write("pure.js", "function add(a, b) { return a + b; }\nmodule.exports = { add };\n")
+    write("test_pure.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { add } = require("./pure.js");\n'
+          'test("adds", () => { assert.strictEqual(add(2, 3), 5); });\n')
+    write("leaky.js",
+          'const fs = require("node:fs");\n'
+          'function hosts() { return fs.readFileSync("/etc/hosts", "utf8").length; }\n'
+          "module.exports = { hosts };\n")
+    write("test_leaky.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { hosts } = require("./leaky.js");\n'
+          'test("adds", () => { assert.ok(hosts() >= 0); });\n')
+    write("stdinleak.js",
+          'const readline = require("node:readline");\n'
+          "function ask() {\n"
+          "  const rl = readline.createInterface({ input: process.stdin });\n"
+          "  return new Promise((r) => rl.question('? ', r));\n"
+          "}\nmodule.exports = { ask };\n")
+    write("test_stdinleak.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { ask } = require("./stdinleak.js");\n'
+          'test("adds", async () => { assert.ok(await ask()); });\n')
+
+    def run(rel, timeout=60):
+        env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+        env.pop("TEST_SAFETY_NET_ALLOW", None)
+        try:
+            done = subprocess.run(
+                [node, "--require", guard, "--test",
+                 "--test-name-pattern", "^adds$", rel],
+                cwd=work, env=env, capture_output=True, text=True,
+                stdin=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, ""
+        return done.returncode, done.stdout + done.stderr
+
+    code, out = run("test_pure.js")
+    res["passes_clean"] = 1 if code == 0 and "IOGuardViolation" not in out else 0
+    code, out = run("test_leaky.js")
+    res["blocks_fs"] = 1 if code not in (0, None) and "IOGuardViolation" in out else 0
+    # A HANG is the failure this measures, so the timeout IS the measurement:
+    # `None` means the proof run never returned a verdict at all.
+    code, out = run("test_stdinleak.js", timeout=45)
+    res["stdin_fast"] = 1 if code not in (0, None) and "IOGuardViolation" in out else 0
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_guard(old, new):
+    """Can node PROVE a test, and not merely rank one?"""
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_GUARD_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_GUARD_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "a node unit that reads the filesystem FAILS its proof run "
+           "(higher=better)",
+        oldp["blocks_fs"], newp["blocks_fs"], newp["blocks_fs"] > oldp["blocks_fs"],
+        "the headline invariant, and the reason node could rank but not write: "
+        "static triage is a FILTER, and JavaScript's dynamic dispatch makes "
+        "reachability undecidable from source, so `never writes a test that "
+        "performs real I/O` is a RUNTIME property or it is nothing",
+        since=SINCE_TSN_NODE_GUARD)
+    row(s, "a CLEAN node unit still passes under the guard (higher=better)",
+        oldp["passes_clean"], newp["passes_clean"],
+        newp["passes_clean"] > oldp["passes_clean"],
+        "the half an inert guard also passes, which is why it is never asserted "
+        "alone -- but a guard that blocks everything is just as useless, and "
+        "that is the FIRST thing a naive port does: node reads every `.js` it "
+        "loads through `fs.readFileSync`, so blocking on the name kills a test "
+        "that touches no filesystem at all, inside the module loader",
+        since=SINCE_TSN_NODE_GUARD)
+    row(s, "a node unit that reads stdin fails fast instead of HANGING the "
+           "proof run (higher=better)",
+        oldp["stdin_fast"], newp["stdin_fast"],
+        newp["stdin_fast"] > oldp["stdin_fast"],
+        "terminal input is in neither stack's marker table, so the filter "
+        "cannot decline it -- and the failure mode is a hang, which yields no "
+        "verdict at all and burns the user's wall clock until they notice. The "
+        "probe's own timeout is the measurement: `None` scores zero",
+        since=SINCE_TSN_NODE_GUARD)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -2434,6 +2542,7 @@ def main():
         check_test_safety_net_node(old, REPO)
         check_test_safety_net_node_triage(old, REPO)
         check_test_safety_net_node_precise(old, REPO)
+        check_test_safety_net_node_guard(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
