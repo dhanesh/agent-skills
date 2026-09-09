@@ -80,8 +80,23 @@ def discover_units(root: str):
     return sorted(units, key=lambda u: u["id"])
 
 
+def _git_prefix(root: str) -> str:
+    """`root`'s path INSIDE its git repo, slash-terminated ("pkg/sub/"), or "".
+
+    "" means either "root IS the repo root" or "not a git repo at all" — the
+    two cases behave identically everywhere this is used, so they need no
+    distinction. `main()` prints it as a scope note when it is non-empty.
+    """
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-prefix"],
+                           cwd=root, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def churn(root: str, since: str = "6 months ago") -> dict:
-    """Commits touching each repo-relative path within the window.
+    """Commits touching each path within the window, keyed RELATIVE TO `root`.
 
     The best available proxy for "what a person keeps changing" — which is
     what an agent will touch next — but not exact. It uses `-z` so a path
@@ -92,6 +107,15 @@ def churn(root: str, since: str = "6 months ago") -> dict:
     is attributed to its new path only, so pre-rename commits are not counted
     there. Absent git or history, returns {} rather than raising: churn is one
     signal of two, and a tarball checkout must still get a ranking.
+
+    KEY SPACE (fix round 4). `git log --name-only` names files relative to the
+    GIT REPO ROOT, while `discover_units` names them relative to the ANALYSED
+    ROOT. The two agree only when you analyse the repo root — point the ranker
+    at `<repo>/pkg/sub` and every join missed, so a file with five commits
+    reported `churn: 0  score: 0.0`. Churn is the primary risk signal, so the
+    whole ranking silently collapsed to zero with no warning. The repo-relative
+    prefix is therefore stripped here, and paths outside the analysed subtree
+    are dropped rather than folded in under a wrong key.
     """
     try:
         r = subprocess.run(
@@ -101,10 +125,16 @@ def churn(root: str, since: str = "6 months ago") -> dict:
         return {}
     if r.returncode != 0:
         return {}
+    prefix = _git_prefix(root)
     counts: dict = {}
     for part in r.stdout.split("\0"):
-        if part:
-            counts[part] = counts.get(part, 0) + 1
+        if not part:
+            continue
+        if prefix:
+            if not part.startswith(prefix):
+                continue              # outside the analysed subtree
+            part = part[len(prefix):]
+        counts[part] = counts.get(part, 0) + 1
     return counts
 
 
@@ -1111,6 +1141,14 @@ def main(argv=None) -> int:
     if not os.path.isdir(args.repo):
         sys.stderr.write(f"error: not a directory: {args.repo}\n")
         return 2
+    # Say so when the analysed root is not the git repo root. Churn is scoped
+    # to that subtree (see `churn`), and a scope the caller did not intend is
+    # the difference between "this code is stable" and "you looked at a
+    # sixteenth of the history" — too big a difference to leave implicit.
+    prefix = _git_prefix(args.repo)
+    if prefix:
+        sys.stderr.write(f"note: analysing a subdirectory of a git repo; churn is "
+                         f"scoped to {prefix}\n")
     json.dump(rank(args.repo, args.since, args.top_n), sys.stdout,
               indent=2, sort_keys=True)
     sys.stdout.write("\n")

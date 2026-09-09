@@ -73,6 +73,57 @@ class TestChurn(TempRepo):
         self.assertEqual(c["hot.py"], 4)
         self.assertEqual(c["cold.py"], 1)
 
+    def test_analysing_a_subdirectory_still_reports_that_subtree_s_churn(self):
+        # FIX round 4 (I6): `churn` keyed by paths relative to the GIT REPO
+        # ROOT while `discover_units` keys by paths relative to the ANALYSED
+        # ROOT, so pointing the ranker at `<repo>/pkg/sub` joined nothing and
+        # every score collapsed to 0.0 -- silently, for a file with 5 commits.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        for i in range(5):
+            write(self.root, "pkg/sub/mod.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        sub = os.path.join(self.root, "pkg", "sub")
+        self.assertEqual(rank_risk.churn(sub).get("mod.py"), 5)
+
+    def test_a_subdirectory_run_scores_above_zero(self):
+        # The consequence, at the rank() level: churn is the primary risk
+        # signal, so the whole ranking was reading 0.0 with no warning.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        for i in range(5):
+            write(self.root, "pkg/sub/mod.py", f"def a():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"c{i}")
+        plan = rank_risk.rank(os.path.join(self.root, "pkg", "sub"),
+                              since="10 years ago", top_n=10)
+        row = [r for r in plan["ranked"] if r["id"] == "mod.py::a"][0]
+        self.assertEqual(row["churn"], 5)
+        self.assertGreater(row["score"], 0.0)
+
+    def test_churn_outside_the_analysed_subtree_is_not_attributed_to_it(self):
+        # The mirror: stripping the prefix must not turn a sibling directory's
+        # history into this subtree's churn.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "pkg/sub/mod.py", "def a():\n    return 1\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        for i in range(3):
+            write(self.root, "other/mod.py", f"def b():\n    return {i}\n")
+            git(self.root, "add", "-A"); git(self.root, "commit", "-qm", f"o{i}")
+        c = rank_risk.churn(os.path.join(self.root, "pkg", "sub"))
+        self.assertEqual(c, {"mod.py": 1})
+
+    def test_git_prefix_reports_the_analysed_subtree(self):
+        # The note `main()` prints on stderr when the analysed root is not the
+        # git repo root, so a 0-churn ranking is never silent about its scope.
+        if git(self.root, "init", "-q", ".").returncode != 0:
+            self.skipTest("git unavailable")
+        write(self.root, "pkg/sub/mod.py", "def a():\n    return 1\n")
+        git(self.root, "add", "-A"); git(self.root, "commit", "-qm", "1")
+        self.assertEqual(rank_risk._git_prefix(self.root), "")
+        self.assertEqual(rank_risk._git_prefix(os.path.join(self.root, "pkg", "sub")),
+                         "pkg/sub/")
+
     def test_no_git_history_degrades_to_empty_not_a_crash(self):
         # A tarball checkout, or a brand-new directory, must not take the ranker
         # down — churn is one signal of two, and the other still works.
