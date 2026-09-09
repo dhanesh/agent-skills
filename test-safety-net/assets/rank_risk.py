@@ -121,10 +121,46 @@ def _references_module(module: str, text: str, path_tokens) -> bool:
     they need the same answer to the same question for opposite reasons: one
     uses it to avoid crediting a unit with reach it does not have, the other
     to avoid crediting it with coverage it does not have.
+
+    AMBIGUITY IS NOT THIS PREDICATE'S JOB (fix round 4). A bare basename is a
+    weak identifier: `app/utils.py` and `lib/utils.py` are both "utils", and
+    text naming either satisfies this predicate for both. Each caller settles
+    that its own way, because the two need opposite treatments of the same
+    ambiguity — and both were fixed against the same reproduction class:
+      * `inbound_refs` drops every same-basename file from a module's
+        reference-file list outright (RULING fix round 3, below).
+      * `already_covered` requires PATH-qualified evidence (`_path_pattern`)
+        when a basename is shared by more than one discovered file, and only
+        falls back to this predicate when the basename is unique.
     """
     if re.search(r"\b%s\b" % re.escape(module), text):
         return True
     return module in path_tokens
+
+
+def _path_pattern(rel: str):
+    """A regex matching `rel` written as a module path — `app.utils` or
+    `app/utils` for `app/utils.py` — or None when `rel` has no parent
+    directory to qualify it with.
+
+    This is the evidence `already_covered` demands when a basename is shared,
+    and it is deliberately BOUNDED at both ends rather than a substring test:
+    `myapp.utils` contains "app.utils", so a substring match would credit
+    `app/utils.py` with a test that exercises `myapp/utils.py` — the
+    OVER-crediting direction this file must never take. The trailing lookahead
+    still permits a following `.`, so `app.utils.helper` and
+    `from app.utils import helper` both match.
+
+    Returns None for a repo-root file (`utils.py`), which has no qualifier to
+    offer: under ambiguity such a unit reads as uncovered and gets ranked. That
+    is the accepted under-credit — a redundant test, never a hidden gap.
+    """
+    stem = rel[:-3] if rel.endswith(".py") else rel
+    parts = stem.split("/")
+    if len(parts) < 2:
+        return None
+    body = r"[./]".join(re.escape(p) for p in parts)
+    return re.compile(r"(?<![A-Za-z0-9_.])%s(?![A-Za-z0-9_])" % body)
 
 
 def inbound_refs(root: str, units) -> dict:
@@ -722,27 +758,55 @@ def already_covered(root: str, units) -> dict:
     covered too — hiding a genuinely untested unit from `ranked` entirely,
     which is the opposite of safe.
 
+    FIX (round 4): a basename is only a usable identifier when it is UNIQUE.
+    When more than one discovered file shares it — `app/utils.py` and
+    `lib/utils.py` are both "utils" — the test file's `from app.utils import
+    helper` satisfies the bare-basename rule for BOTH, so both were marked
+    covered and `lib/utils.py::helper`, which has no test at all, vanished from
+    `ranked` entirely (the reproduction reported two units discovered and every
+    output bucket empty). Under that ambiguity the module half is raised to
+    PATH-qualified evidence (`_path_pattern`: `app.utils` / `app/utils`, bounded
+    at both ends), which no sibling can satisfy; the test file's own path tokens
+    stop counting too, since `tests/test_utils.py` names both equally well. When
+    the basename IS unique in the repo, nothing changes.
+
+    Ambiguity is measured over the non-test `.py` files — the same set units are
+    discovered from — so a repo whose basenames are all distinct (the common
+    case) takes the looser rule throughout.
+
     The remaining failure mode is milder: a unit exercised only through a
     re-export (a test that reaches it via a different module's name and never
     mentions its own module) reads as uncovered and may get a duplicate test
-    written for it. That direction is still safe — the worst case is a
-    redundant test, not a hidden gap.
+    written for it. Under a shared basename that widens — a repo-root
+    `utils.py` colliding with `pkg/utils.py` has no qualifier of its own, so it
+    reads as uncovered outright. That direction is still safe — the worst case
+    is a redundant test, not a hidden gap.
     """
     test_files = [rel for rel in iter_py_files(root, include_tests=True)
                   if _is_test_path(rel)]
     texts = {rel: read_text(root, rel) for rel in test_files}
     path_tokens = {rel: set(_PATH_TOKEN_RE.findall(rel)) for rel in test_files}
+    basenames = collections.Counter(
+        os.path.splitext(os.path.basename(rel))[0] for rel in iter_py_files(root))
     covered = {}
     for u in units:
         name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
         module = os.path.splitext(os.path.basename(u["path"]))[0]
+        ambiguous = basenames[module] > 1
+        qualified = _path_pattern(u["path"]) if ambiguous else None
+        if ambiguous and qualified is None:
+            continue                      # no evidence could name this file alone
         for rel in sorted(texts):
             text = texts[rel]
             if not name_pattern.search(text):
                 continue
-            if _references_module(module, text, path_tokens[rel]):
-                covered[u["id"]] = rel
-                break
+            if qualified is not None:
+                if not qualified.search(text):
+                    continue
+            elif not _references_module(module, text, path_tokens[rel]):
+                continue
+            covered[u["id"]] = rel
+            break
     return covered
 
 

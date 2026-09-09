@@ -611,6 +611,60 @@ class TestAlreadyCovered(TempRepo):
         self.assertEqual(cov.get("discounts/coupon.py::apply"), "tests/test_coupon.py")
         self.assertNotIn("payments/refund.py::apply", cov)
 
+    def test_shared_basename_needs_path_qualified_evidence_not_a_bare_basename(self):
+        # FIX round 4 (C1): `app/utils.py` and `lib/utils.py` share the basename
+        # "utils". A test naming `app.utils` matches the bare basename "utils"
+        # equally well for BOTH files, so crediting on it marked lib's entirely
+        # untested `helper` covered and emptied `ranked`. Ambiguous evidence must
+        # credit nobody; only evidence naming the unit's OWN path counts.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_helper():\n    assert helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/utils.py::helper"), "tests/test_app.py")
+        self.assertNotIn("lib/utils.py::helper", cov)
+
+    def test_unique_basename_still_credits_on_a_bare_module_match(self):
+        # The control for the test above: when the basename is unique in the
+        # repo a bare-basename match is NOT ambiguous, so the pre-existing
+        # (looser, path-token-friendly) rule must stand -- the C1 fix must not
+        # quietly stop crediting every ordinary test in the repo.
+        write(self.root, "app/solo.py", "def helper():\n    return 1\n")
+        write(self.root, "tests/test_app.py",
+              "import solo\n\n\ndef test_helper():\n    assert solo.helper() == 1\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/solo.py::helper"), "tests/test_app.py")
+
+    def test_package_qualified_evidence_credits_only_the_module_it_names(self):
+        # Both colliding modules have a test; each test names its own package.
+        # Each must be credited to its own file and to neither the other's.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_a():\n    helper()\n")
+        write(self.root, "tests/test_lib.py",
+              "from lib.utils import helper\n\n\ndef test_l():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("app/utils.py::helper"), "tests/test_app.py")
+        self.assertEqual(cov.get("lib/utils.py::helper"), "tests/test_lib.py")
+
+    def test_a_longer_module_path_is_not_credited_by_a_suffix_of_another(self):
+        # `myapp.utils` contains the substring "app.utils". A plain substring
+        # test would hand `app/utils.py` coverage it does not have -- the
+        # OVER-crediting direction this file must never take.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "myapp/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_myapp.py",
+              "from myapp.utils import helper\n\n\ndef test_h():\n    helper()\n")
+        units = rank_risk.discover_units(self.root)
+        cov = rank_risk.already_covered(self.root, units)
+        self.assertEqual(cov.get("myapp/utils.py::helper"), "tests/test_myapp.py")
+        self.assertNotIn("app/utils.py::helper", cov)
+
     def test_module_named_only_in_the_test_files_path_still_counts_as_covered(self):
         # The test's source never spells "refund" -- it imports the name as
         # re-exported through the package -- but the test file's own path
@@ -677,6 +731,19 @@ class TestRank(TempRepo):
         plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
         ranked_ids = [r["id"] for r in plan["ranked"]]
         self.assertIn("payments/refund.py::apply", ranked_ids)
+
+
+    def test_basename_collision_does_not_hide_an_untested_unit_from_ranked(self):
+        # C1 at the rank() level: the reproduction reported units_discovered 2
+        # with ranked/remainder/not_netted ALL empty -- lib/utils.py::helper had
+        # no test at all and the skill said there was nothing to do.
+        write(self.root, "app/utils.py", "def helper():\n    return 1\n")
+        write(self.root, "lib/utils.py", "def helper():\n    return 2\n")
+        write(self.root, "tests/test_app.py",
+              "from app.utils import helper\n\n\ndef test_helper():\n    assert helper() == 1\n")
+        plan = rank_risk.rank(self.root, since="10 years ago", top_n=10)
+        self.assertIn("lib/utils.py::helper", [r["id"] for r in plan["ranked"]])
+        self.assertEqual(plan["covered"], ["app/utils.py::helper"])
 
 
 class TestMain(TempRepo):
