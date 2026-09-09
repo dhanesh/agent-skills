@@ -107,6 +107,17 @@ SINCE_TSN_NODE_GUARD = "483010b"  # test-safety-net: `io_guard.js`, node's
 # runtime enforcement -- and, one commit earlier, the manifest CLASSIFIER that
 # had to land before it (a guard is worth nothing in a repo the detector handed
 # to the wrong stack). One constant for the campaign.
+SINCE_TSN_NODE_WIRED = "0a02273"  # test-safety-net: the node stack WIRED THROUGH
+# THE SHIPPED DOCUMENTS -- SKILL.md, references/stacks.md, references/parameters.md
+# and README.md stop saying node is ranked-but-not-written, and the guard
+# invocation an agent copies is printed where an agent will read it. Pinned to
+# Task 1's commit, the earliest point any part of the node stack existed,
+# because these rows measure the CAMPAIGN as one shipped surface rather than
+# any single commit in it: they run the documented CLI and the command
+# extracted from SKILL.md, so the whole chain (detect -> discover -> triage ->
+# rank -> prove) has to be present for one of them to move. Same value as
+# SINCE_TSN_NODE by design -- the campaign lands at one merge, so every row of
+# it becomes HELD* together.
 SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # detection (first match wins reclassified this repo's own corpus as node),
 # then node's I/O marker tables, triage, and registration. One constant for
@@ -2363,6 +2374,185 @@ def check_test_safety_net_node_guard(old, new):
         since=SINCE_TSN_NODE_GUARD)
 
 
+# ── test-safety-net: node, as an agent actually meets it ────────────────────
+#
+# Every other node row in this corpus probes an IMPORTED function. These four
+# probe the SHIPPED SURFACE instead: the ranker's CLI, run as `references/
+# parameters.md` documents it, and the guard invocation EXTRACTED FROM SKILL.md
+# and run verbatim. That distinction is the whole point. The Python half of this
+# skill once had 122 unit tests and 34 eval checks green over a guard whose only
+# user-facing invocation was broken three separate ways, because everything that
+# graded it called the code directly and nothing ran what the documents printed.
+# A row that imports `stack_node.discover_units` cannot see a SKILL.md that
+# still tells an agent to stop before writing.
+_NODE_WIRED_PROBE = r"""
+import glob, json, os, re, shutil, subprocess, sys, tempfile
+
+assets = sys.path[0]
+skill = os.path.dirname(assets)
+res = {"units": 0, "tier_for_fs_unit": 0, "discovery": "", "guard_documented": 0}
+
+# 1-3. the documented CLI over a node fixture repo. No `--stack`: the flag does
+#      not exist at the baseline, and the point is that DETECTION answers node.
+work = tempfile.mkdtemp()
+repo = os.path.join(work, "repo")
+for rel, text in {
+    "package.json": '{"name": "demo", "main": "src/index.js",\n'
+                    ' "dependencies": {"left-pad": "^1.0.0"}}\n',
+    "src/pure.js": "export function addNumbers(a, b) { return a + b; }\n",
+    "src/cache.js": 'import fs from "node:fs";\n'
+                    "export function readCache(p) { return fs.readFileSync(p, "
+                    '"utf8"); }\n',
+    "src/remote.js": 'import net from "node:net";\n'
+                     "export function connectRemote(h) { return new net.Socket(); }\n",
+    "node_modules/vendored/index.js": "export function vendoredUnit() { return 1; }\n",
+}.items():
+    path = os.path.join(repo, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+ranker = os.path.join(assets, "rank_risk.py")
+if os.path.isfile(ranker):
+    done = subprocess.run([sys.executable, ranker, repo, "--top-n", "20"],
+                          capture_output=True, text=True, timeout=120)
+    try:
+        plan = json.loads(done.stdout)
+    except ValueError:
+        plan = {}
+    res["units"] = plan.get("units_discovered", 0) or 0
+    res["discovery"] = plan.get("discovery", "") or ""
+    rows = (plan.get("ranked", []) + plan.get("remainder", [])
+            + plan.get("not_netted", []))
+    for r in rows:
+        if r.get("id") == "src/cache.js::readCache":
+            res["tier_for_fs_unit"] = r.get("tier", 0) or 0
+
+# 4. the guard invocation, EXTRACTED FROM SKILL.md and run verbatim in both
+#    directions. The negative arm is what makes this row mean anything: a guard
+#    that arms nothing also lets the clean unit pass.
+node = shutil.which("node")
+guard = os.path.join(assets, "io_guard.js")
+skill_md = os.path.join(skill, "SKILL.md")
+commands = []
+if os.path.isfile(skill_md):
+    text = open(skill_md, encoding="utf-8").read()
+    for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+        joined = re.sub(r"\\\n\s*", " ", block)
+        for line in joined.splitlines():
+            line = " ".join(line.split())
+            if re.match(r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+                        r'node\s+--require\s+\S*io_guard\.js\S*\s+.*<path>$',
+                        line):
+                commands.append(line)
+
+if node and os.path.isfile(guard) and commands:
+    proof = os.path.join(work, "proof")
+    os.makedirs(proof, exist_ok=True)
+    for rel, text in {
+        "pure.js": "function add(a, b) { return a + b; }\nmodule.exports = { add };\n",
+        "test_pure.js": 'const { test } = require("node:test");\n'
+                        'const assert = require("node:assert");\n'
+                        'const { add } = require("./pure.js");\n'
+                        'test("adds", () => { assert.strictEqual(add(2, 3), 5); });\n',
+        # The violation is NETWORK, not filesystem, and the reason is the
+        # reason this row exists at all: one of the documented commands is
+        # `TEST_SAFETY_NET_ALLOW=filesystem,clock`, which PERMITS a filesystem
+        # trip. A leaky fixture that reads a file passes that command, and the
+        # negative arm silently measures nothing. `network` is uncontrollable
+        # -- blocked at tier 1 and tier 2 alike, however the allow list is
+        # spelled -- so one fixture holds for every command a document prints.
+        # Nothing is dialled: CONSTRUCTING the socket is the guarded primitive,
+        # which keeps this offline.
+        "leaky.js": 'const net = require("node:net");\n'
+                    "function client() { return new net.Socket() !== null; }\n"
+                    "module.exports = { client };\n",
+        "test_leaky.js": 'const { test } = require("node:test");\n'
+                         'const assert = require("node:assert");\n'
+                         'const { client } = require("./leaky.js");\n'
+                         'test("adds", () => { assert.ok(client()); });\n',
+    }.items():
+        with open(os.path.join(proof, rel), "w") as f:
+            f.write(text)
+    env = dict(os.environ, SKILL_DIR=skill)
+    env.pop("TEST_SAFETY_NET_TIER", None)
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    good = True
+    for command in commands:
+        for target, want in (("test_pure.js", "pass"), ("test_leaky.js", "trip")):
+            cmd = command.replace("<test_name>", "adds").replace("<path>", target)
+            try:
+                done = subprocess.run(["/bin/sh", "-c", cmd], cwd=proof, env=env,
+                                      capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                good = False
+                continue
+            out = done.stdout + done.stderr
+            tripped = "IOGuardViolation" in out
+            if want == "pass":
+                good = good and done.returncode == 0 and not tripped
+            else:
+                good = good and done.returncode != 0 and tripped
+    res["guard_documented"] = 1 if good else 0
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_wired(old, new):
+    """Does the SHIPPED SURFACE — the documented CLI, and the command SKILL.md
+    prints — do what the documents now say it does?"""
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_WIRED_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_WIRED_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "units the DOCUMENTED CLI finds in a node fixture repo "
+           "(higher=better)",
+        oldp["units"], newp["units"], newp["units"] > oldp["units"],
+        "detect -> discover, end to end through `rank_risk.py <repo>` with no "
+        "`--stack` flag, because the flag is not the fix: a node repo handed to "
+        "the Python stack discovers nothing and reports a CLEAN result, which "
+        "is the silent zero the whole campaign exists to close. The three units "
+        "are one export each from three source files; the fixture's fourth "
+        "export is inside `node_modules` and must never appear",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "tier the CLI assigns a node unit that reads the filesystem "
+           "(2=right, 0=no answer)",
+        oldp["tier_for_fs_unit"], newp["tier_for_fs_unit"],
+        newp["tier_for_fs_unit"] == 2 and oldp["tier_for_fs_unit"] != 2,
+        "discovering a unit is not triaging one. `readCache` reaches a "
+        "CONTROLLABLE group, so it is a Tier 2 pin at a named boundary rather "
+        "than a Tier 1 unit test or a Tier 3 decline — and a triage that "
+        "answered the same tier for everything would satisfy neither this row "
+        "nor eval check 38",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "the node report NAMES which reader found its units "
+           "(''=key absent)",
+        oldp["discovery"] or "''", newp["discovery"] or "''",
+        newp["discovery"] in ("precise", "heuristic"),
+        "decision D1, read off the CLI rather than off the code: node's "
+        "discovery has two paths and they return different totals on the same "
+        "tree, so a run that silently degraded is a run whose numbers cannot be "
+        "compared to the last one's. `references/parameters.md` now tells the "
+        "agent to carry the value into its report, not just read it",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "the guard invocation PRINTED IN SKILL.md passes a clean node unit "
+           "and fails a leaking one (higher=better)",
+        oldp["guard_documented"], newp["guard_documented"],
+        newp["guard_documented"] > oldp["guard_documented"],
+        "the row that makes Task 6 and Task 7 one change instead of two. It "
+        "extracts the command from SKILL.md and runs it VERBATIM, in both "
+        "directions -- so it fails if the guard stops blocking, if SKILL.md "
+        "stops printing an invocation, and if the invocation drifts from the "
+        "guard. The Python half of this skill shipped a suite running "
+        "`python -m pytest` while every document printed `pytest`; nothing that "
+        "called the code directly could see it",
+        since=SINCE_TSN_NODE_WIRED)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -2543,6 +2733,7 @@ def main():
         check_test_safety_net_node_triage(old, REPO)
         check_test_safety_net_node_precise(old, REPO)
         check_test_safety_net_node_guard(old, REPO)
+        check_test_safety_net_node_wired(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
