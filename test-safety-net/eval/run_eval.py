@@ -270,7 +270,6 @@ def main():
         )
 
         # 8. a syntactically broken file is skipped without taking the run down
-        all_ids = ranked_ids + list(not_netted_by_id)
         check(
             "08 syntactically broken file is skipped, run does not crash",
             setup_ok and not any(row["path"] == "broken.py"

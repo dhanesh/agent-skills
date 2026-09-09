@@ -1001,16 +1001,44 @@ def triage(root: str, unit) -> tuple:
     The invariant "never writes a test that performs real I/O" is NOT
     enforced here — it CANNOT be, because static reachability in Python is
     undecidable from source alone. It is enforced at RUNTIME, during the
-    proof: the candidate test's red->green run executes with the
-    network/subprocess/DB entry points monkeypatched to raise, so a test
-    that genuinely reaches real I/O fails loudly instead of passing, and its
-    unit gets reclassified rather than netted. `triage` exists to keep that
-    guard from firing often, not to replace it — which is why it does not
-    and cannot attempt to see through dynamic dispatch (`getattr`,
-    `**kwargs`), a receiver whose method name resolves to no module-level
-    class (`cfg.get(...)` on a plain dict) or to more than one of them, or
-    cross-module indirection: all three are the points-to-analysis boundary
-    this filter stops at on purpose. The
+    proof, by the guard the spec specifies:
+
+      * TIER-AWARE, not one blanket block. A Tier 1 candidate claims to touch
+        nothing, so everything is blocked — filesystem, clock and randomness
+        as well as network, subprocess and DB — and any touch falsifies the
+        classification. A Tier 2 candidate is blocked only on the
+        UNCONTROLLED groups: its temp dir and frozen clock are the point of
+        the test, not a violation.
+      * PATCHED AT THE OS-LEVEL SYSCALL LAYER, not at the ergonomic wrappers.
+        `os.open` is not the builtin `open`; `os.posix_spawn` never goes
+        through `subprocess.Popen`; `mmap` and `io.FileIO` bypass Python file
+        objects entirely. So the guard patches the `os` primitives, `io.FileIO`,
+        `mmap.mmap` and `socket.socket`.
+      * LOADED AS A PYTEST PLUGIN (`-p`), never written into the target repo
+        as a `conftest.py` — a plugin loads BEFORE collection, which is what
+        arms it ahead of `import unit_module` and therefore ahead of any I/O
+        the module does at import time; it cannot collide with a `conftest.py`
+        the repo already has, and it leaves nothing behind, so invariant 1
+        ("never modifies source") needs no carve-out. The tier reaches it by
+        environment variable, read at plugin import: one proof run, one unit,
+        one tier.
+      * RAISING ITS OWN EXCEPTION TYPE, so the proof has three outcomes rather
+        than two: an `AssertionError` is the RED half of red->green, while the
+        guard's exception — at ANY point, red run or green run — means the
+        CLASSIFICATION is wrong, so the unit is reclassified Tier 3 and the
+        test is discarded regardless of red or green.
+
+    `triage` exists to keep that guard from firing often, not to replace it —
+    which is why it does not and cannot attempt to see through dynamic
+    dispatch (`getattr`, `**kwargs`), a receiver whose method name resolves to
+    no module-level class (`cfg.get(...)` on a plain dict) or to more than one
+    of them, or cross-module indirection: all three are the points-to-analysis
+    boundary this filter stops at on purpose. The split runs both ways, and
+    one case is the filter's alone: `os.execv` and its family REPLACE THE
+    PROCESS IMAGE, taking every in-process patch with them, so no runtime
+    guard can survive one. Those are declined statically here — the whole
+    family, derived from `dir(os)` and pinned by a test — and that is not
+    redundancy with the guard, it is the one case the guard cannot reach. The
     SKILL.md permits promoting a unit after inspection — but only by
     recording the promotion, never silently.
     """

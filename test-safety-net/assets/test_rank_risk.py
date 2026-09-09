@@ -457,6 +457,28 @@ class TestTriage(TempRepo):
             "go")
         self.assertEqual(tier, 1)
 
+    def test_file_that_stops_parsing_after_discovery_is_tier_4_not_a_crash(self):
+        # I12: the reviewer read `_analyze_file`'s SyntaxError branch and
+        # `triage`'s `tree is None` guard as unreachable, because
+        # `discover_units` already skips a file that does not parse. Both are
+        # REACHABLE, by two paths, so both stay:
+        #   * `triage(root, unit)` is public and takes a unit dict from any
+        #     caller -- it does not re-derive it from `discover_units`;
+        #   * even inside `rank()` the file is read TWICE, once at discovery
+        #     and once here, so a save mid-run (an editor writing a half-typed
+        #     file into a repo being ranked) lands between them. This test
+        #     reproduces exactly that race.
+        # Without the branch that race is an uncaught SyntaxError out of the
+        # CLI; with it the unit declines to Tier 4, which is the safe
+        # direction: never net what cannot be parsed.
+        write(self.root, "race.py", "def a():\n    return 1\n")
+        unit = [u for u in rank_risk.discover_units(self.root)
+                if u["id"] == "race.py::a"][0]
+        write(self.root, "race.py", "def (((\n")     # saved mid-run
+        tier, reason = rank_risk.triage(self.root, unit)
+        self.assertEqual(tier, 4)
+        self.assertIn("does not parse", reason)
+
     def test_module_level_data_naming_a_marker_is_not_import_time_io(self):
         # A module-level allowlist that MENTIONS a driver is data, not behaviour.
         # Reading it as I/O condemned every unit in the file to tier 4 and
