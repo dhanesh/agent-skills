@@ -377,6 +377,81 @@ class TestTriage(TempRepo):
         self.assertIn("network", reason)
         self.assertIn("Client.fetch", reason)
 
+    def test_parameter_held_instance_method_is_chased_when_unambiguous(self):
+        # `w` is a plain function PARAMETER — neither `self` nor an inline
+        # `Client()` — so the two narrow receiver shapes miss it. But `fetch`
+        # is defined by exactly one module-level class, so the resolution is
+        # forced and the real `requests.get` behind it must stay visible.
+        # This is the shape of this repo's own world_model.py CLI dispatchers
+        # (`def cmd_x(wm, a): wm.build(...)`), twelve of which regressed to a
+        # false Tier 1 when the chase was narrowed to those two shapes.
+        tier, reason = self._tier(
+            "param.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef use(w, u):\n"
+            "    return w.fetch(u)\n",
+            "use")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_module_level_singleton_method_call_is_chased(self):
+        # `_c = Client()` at module level, then `_c.fetch(u)` from a function:
+        # the receiver is an ordinary module global, not a constructor call in
+        # the expression itself, so it needs the unambiguous-method rule too.
+        tier, reason = self._tier(
+            "singleton.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\n_c = Client()\n\n\n"
+            "def grab(u):\n    return _c.fetch(u)\n",
+            "grab")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_class_name_dispatch_is_chased(self):
+        # `Client.fetch(u)` — static/classmethod dispatch by bare class name
+        # from an outside function. The receiver IS a module-level ClassDef,
+        # so this resolves exactly, with no ambiguity to weigh.
+        tier, reason = self._tier(
+            "static.py",
+            "import requests\n\n\nclass Client:\n    @staticmethod\n"
+            "    def fetch(u):\n        return requests.get(u)\n\n\n"
+            "def grab(u):\n    return Client.fetch(u)\n",
+            "grab")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
+    def test_bare_attribute_still_does_not_chase_a_module_level_function(self):
+        # THE control that must not regress. Widening the chase to class
+        # methods must not re-open it to module-level FUNCTIONS: `cfg.get`
+        # on a plain dict still must not resolve to a module-level `get()`
+        # that shells out. No class in this file defines `get`, so there is
+        # nothing to chase and the unit stays directly callable.
+        tier, reason = self._tier(
+            "c3.py",
+            "import subprocess\n\n\ndef get():\n    return subprocess.run(['true'])\n\n\n"
+            "def lookup(cfg):\n    return cfg.get('key')\n",
+            "lookup")
+        self.assertEqual(tier, 1)
+
+    def test_ambiguous_method_name_across_two_classes_is_not_chased(self):
+        # Two module-level classes both define `fetch`, one of them doing
+        # network I/O. Picking which one `w` holds needs the receiver's TYPE
+        # — points-to analysis, deliberately out of scope — and fanning out
+        # to both is the over-flagging that shrinks the net project-wide.
+        # So the name is dropped: assert only that the caller was NOT chased
+        # (no `Class.fetch` credited in the reason), not any particular tier,
+        # since the tier follows only from whatever the unit does itself.
+        tier, reason = self._tier(
+            "ambig.py",
+            "import requests\n\n\nclass A:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\nclass B:\n    def fetch(self, u):\n"
+            "        return u\n\n\ndef use(w, u):\n    return w.fetch(u)\n",
+            "use")
+        self.assertNotIn("fetch", reason)
+        self.assertNotIn("network", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

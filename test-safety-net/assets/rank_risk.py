@@ -286,7 +286,8 @@ def _call_targets(node_or_nodes, alias_map):
     return targets
 
 
-def _callable_candidates(node_or_nodes, alias_map, local_classes, enclosing_class=None):
+def _callable_candidates(node_or_nodes, alias_map, local_classes, local_methods,
+                          enclosing_class=None):
     """QUALIFIED same-module callable names a Call in this subtree might
     reach — used for CHASING into local functions/methods, not for marker
     matching.
@@ -297,20 +298,40 @@ def _callable_candidates(node_or_nodes, alias_map, local_classes, enclosing_clas
     same-module class instance — NOT on a bare `.attr` regardless of
     receiver, which is what an earlier version did and which review found
     over-broad: `.get`/`.run`/`.read`/`.write`/`.close`/`.open`/`.connect`
-    are everywhere, so a bare-name chase silently declines to test *any*
-    method sharing a name with a same-module I/O helper, project-wide —
-    `cfg.get('key')` on a plain dict must not chase into an unrelated
-    module-level `get()`. Two receiver shapes ARE trusted, both requiring
-    no variable-type tracking to recognize:
+    are everywhere, so a bare-name chase over EVERY same-module callable
+    silently declines to test *any* method sharing a name with a
+    same-module I/O helper, project-wide — `cfg.get('key')` on a plain dict
+    must not chase into an unrelated module-level `get()`. Four receiver
+    shapes ARE trusted, none of which needs variable-type tracking:
         `Client().fetch(u)` — receiver is a Call to a Name naming a
             module-level ClassDef — chased as `"Client.fetch"`.
+        `Client.fetch(u)`   — receiver is a bare Name that IS a
+            module-level ClassDef (static/classmethod dispatch, or an
+            explicit unbound call) — chased as `"Client.fetch"`.
         `self.fetch(u)`     — receiver is `self`, and this call sits
             inside a method — chased as `f"{enclosing_class}.fetch"`.
-    Any other receiver (a plain variable, an attribute chain, a subscript,
-    …) is left unresolved. That is the points-to-analysis boundary: seeing
-    through it would require tracking what a variable actually holds, which
-    is out of scope — the runtime guard is the backstop for what falls
-    outside it.
+        `w.fetch(u)`        — receiver is anything else, but `fetch` is a
+            method of EXACTLY ONE module-level class in this file, so the
+            resolution is unambiguous — chased as that one class's
+            `"Client.fetch"`.
+
+    That last shape is what makes the filter see the overwhelmingly common
+    "instance held in a variable" case: a plain parameter
+    (`def cmd(wm, a): wm.build(...)`, this repo's own world_model.py CLI
+    dispatchers) or a module-level singleton (`_c = Client()` then
+    `_c.fetch(u)`). Restricting it to CLASS METHODS — never module-level
+    functions — and only when the name resolves to a single class is what
+    keeps it from re-introducing the `cfg.get('key')` collision: a bare
+    `.get` chases nothing unless some module-level class actually defines a
+    `get` method, and nothing at all if two of them do.
+
+    Ambiguity is deliberately NOT resolved by fanning out to every matching
+    class: that is the over-flagging an earlier bare-name version produced.
+    Two classes defining `fetch` means the receiver's type genuinely
+    matters, which is points-to analysis — out of scope. That, and any
+    receiver whose attribute matches no module-level class method at all,
+    is where this filter stops on purpose; the runtime guard is the
+    backstop for what falls outside it.
     """
     nodes = node_or_nodes if isinstance(node_or_nodes, list) else [node_or_nodes]
     names = []
@@ -329,9 +350,13 @@ def _callable_candidates(node_or_nodes, alias_map, local_classes, enclosing_clas
                         and isinstance(receiver.func, ast.Name)
                         and receiver.func.id in local_classes):
                     names.append(f"{receiver.func.id}.{func.attr}")
+                elif isinstance(receiver, ast.Name) and receiver.id in local_classes:
+                    names.append(f"{receiver.id}.{func.attr}")
                 elif (enclosing_class is not None
                         and isinstance(receiver, ast.Name) and receiver.id == "self"):
                     names.append(f"{enclosing_class}.{func.attr}")
+                elif func.attr in local_methods:
+                    names.append(local_methods[func.attr])
     return names
 
 
@@ -447,8 +472,41 @@ def _local_classes(tree):
     return {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
 
 
+def _unambiguous_methods(tree):
+    """Bare method name -> the single `"Class.method"` that defines it, for
+    every method name owned by EXACTLY ONE module-level class in this file.
+
+    This is what lets the filter chase `w.fetch(u)` where `w` is a plain
+    parameter, or `_c.fetch(u)` where `_c = Client()` is a module-level
+    singleton — the two shapes that carry an instance in an ordinary
+    variable, and between them most real method dispatch. Neither receiver
+    is statically typed, but if `fetch` is defined by one class and one
+    class only, there is nothing to disambiguate: the resolution is forced.
+
+    Two rules keep this from becoming the over-broad bare-name chase a
+    review round removed:
+      * CLASS METHODS ONLY. A module-level `def get(...)` is never a
+        candidate for a bare `.get`, so `cfg.get('key')` on a plain dict
+        stays unchased (and Tier 1) even when the file happens to define a
+        module-level `get()` that shells out.
+      * ONE OWNER ONLY. If two module-level classes both define `fetch`,
+        the name is dropped entirely rather than fanned out to both —
+        picking between them needs the receiver's type, which is the
+        points-to analysis this filter does not do.
+    """
+    owners = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in node.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owners.setdefault(stmt.name, set()).add(node.name)
+    return {name: f"{next(iter(classes))}.{name}"
+            for name, classes in sorted(owners.items()) if len(classes) == 1}
+
+
 def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs,
-                local_classes, visited):
+                local_classes, local_methods, visited):
     """Direct marker hits for `own_targets`, plus (recursively) hits from
     same-module callables any of `own_candidates` might reach — so a thin
     wrapper, a module-level `_boot()` call, or a `.fetch(...)` method
@@ -479,16 +537,17 @@ def _hits_from(own_targets, own_candidates, module_alias_map, local_funcs,
             callee_alias_map = _local_alias_map(callee_node, module_alias_map)
             callee_targets = _call_targets(callee_node, callee_alias_map)
             callee_candidates = _callable_candidates(callee_node, callee_alias_map,
-                                                       local_classes, callee_class)
+                                                       local_classes, local_methods,
+                                                       callee_class)
             for g, m, c, _via in _hits_from(callee_targets, callee_candidates,
                                              module_alias_map, local_funcs,
-                                             local_classes, visited):
+                                             local_classes, local_methods, visited):
                 hits.append((g, m, c, qualified))
     return hits
 
 
 _FileAnalysis = collections.namedtuple(
-    "_FileAnalysis", "tree alias_map local_funcs local_classes tier4")
+    "_FileAnalysis", "tree alias_map local_funcs local_classes local_methods tier4")
 
 
 @functools.lru_cache(maxsize=None)
@@ -507,16 +566,18 @@ def _analyze_file(root, rel):
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return _FileAnalysis(None, None, None, None,
+        return _FileAnalysis(None, None, None, None, None,
                               (4, "file does not parse; nothing in it can be pinned"))
 
     alias_map = _import_alias_map(tree)
     local_funcs = _local_callables(tree)
     local_classes = _local_classes(tree)
+    local_methods = _unambiguous_methods(tree)
     regions = _module_level_regions(tree)
     mod_hits = _hits_from(_call_targets(regions, alias_map),
-                           _callable_candidates(regions, alias_map, local_classes, None),
-                           alias_map, local_funcs, local_classes, set())
+                           _callable_candidates(regions, alias_map, local_classes,
+                                                 local_methods, None),
+                           alias_map, local_funcs, local_classes, local_methods, set())
     uncontrollable_mod = [h for h in mod_hits if not h[2]]
     tier4 = None
     if uncontrollable_mod:
@@ -526,7 +587,8 @@ def _analyze_file(root, rel):
                          f"({marker}); not reachable")
         else:
             tier4 = (4, f"module does {group} I/O at import time ({marker}); not reachable")
-    return _FileAnalysis(tree, alias_map, local_funcs, local_classes, tier4)
+    return _FileAnalysis(tree, alias_map, local_funcs, local_classes,
+                          local_methods, tier4)
 
 
 def triage(root: str, unit) -> tuple:
@@ -538,9 +600,11 @@ def triage(root: str, unit) -> tuple:
     leaks outward to an enclosing function nor sideways to a sibling
     function or method), follows same-module function and method calls
     transitively (a thin wrapper, a `.fetch(...)` dispatch through a
-    same-module class, or a module-level `_boot()` call all inherit the
-    worst tier reachable from them), and treats class bases/keywords and
-    argument defaults as import-time code.
+    same-module class — whether the receiver is a fresh `Client()`, `self`,
+    the class name itself, or an ordinary variable whose method name only
+    one module-level class defines — or a module-level `_boot()` call all
+    inherit the worst tier reachable from them), and treats class
+    bases/keywords and argument defaults as import-time code.
 
     The invariant "never writes a test that performs real I/O" is NOT
     enforced here — it CANNOT be, because static reachability in Python is
@@ -551,9 +615,10 @@ def triage(root: str, unit) -> tuple:
     unit gets reclassified rather than netted. `triage` exists to keep that
     guard from firing often, not to replace it — which is why it does not
     and cannot attempt to see through dynamic dispatch (`getattr`,
-    `**kwargs`), an unresolvable receiver (`cfg.get(...)` where `cfg` could
-    be anything), or cross-module indirection: all three are the
-    points-to-analysis boundary this filter stops at on purpose. The
+    `**kwargs`), a receiver whose method name resolves to no module-level
+    class (`cfg.get(...)` on a plain dict) or to more than one of them, or
+    cross-module indirection: all three are the points-to-analysis boundary
+    this filter stops at on purpose. The
     SKILL.md permits promoting a unit after inspection — but only by
     recording the promotion, never silently.
     """
@@ -573,9 +638,11 @@ def triage(root: str, unit) -> tuple:
     own_alias_map = _local_alias_map(node, analysis.alias_map)
     own_targets = _call_targets(node, own_alias_map)
     own_candidates = _callable_candidates(node, own_alias_map,
-                                           analysis.local_classes, enclosing_class)
+                                           analysis.local_classes,
+                                           analysis.local_methods, enclosing_class)
     hits = _hits_from(own_targets, own_candidates, analysis.alias_map,
-                       analysis.local_funcs, analysis.local_classes, {unit["name"]})
+                       analysis.local_funcs, analysis.local_classes,
+                       analysis.local_methods, {unit["name"]})
 
     if not hits:
         return 1, "no I/O markers; directly callable"
