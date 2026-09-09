@@ -55,6 +55,28 @@
  * equivalent is `test_io_guard_node.sh` assertion 5, a module body that reads
  * `/etc/hosts` while `node:internal/modules/cjs/loader` is on the stack.
  *
+ * WHICH FRAMES ARE ATTRIBUTABLE, AND THE ONE THAT COST A ROUND
+ * -----------------------------------------------------------
+ * "First attributable frame" is doing all the work in that sentence, and the
+ * first version of this file got it wrong in the OPPOSITE direction to the
+ * Python guard. It treated every `node:internal/...` frame as the runtime's
+ * own and stopped there. `util.promisify(fs.readFile)` returns a wrapper
+ * DEFINED IN `node:internal/util`, so the innermost non-guard frame of every
+ * promisified call is internal, and the walk concluded "not the code under
+ * test" one frame before it would have found the unit. At tier 1, through the
+ * command printed above, a unit could really read `/etc/hosts`, really write
+ * `/tmp/x.txt` and really resolve DNS, and the run printed `# pass` and
+ * exited 0.
+ *
+ * Python's bug was scanning TOO FAR and its fix was to stop early; this one
+ * was stopping TOO EARLY, and copying Python's remedy would have made it
+ * worse. The rule now inverts the default: an internal frame is TRANSPARENT
+ * (keep walking outward) unless it names one of the four entries in
+ * `RUNTIME_OWN_WORK`, which are the module loader, the builtin loader, the
+ * test runner and the console. That is the same distinction `node:path`
+ * already had, generalised -- see `RUNTIME_OWN_WORK` for what each member
+ * buys and for the measurement that put it there.
+ *
  * WHAT IT PATCHES, AND WHY THAT LAYER
  * -----------------------------------
  * The lowest layer reachable from JavaScript, per group, and BOTH faces of the
@@ -94,17 +116,22 @@
  * loaded, before any test body executes. What is scoped is the BLOCK DECISION,
  * by provenance. Everything the test runner does on its own behalf -- reading
  * the test file, spawning one child process per test file, writing TAP to
- * stdout, arming its own timeouts -- runs on stacks whose innermost frame is
- * `node:internal/...`, and is exempt.
+ * stdout, arming its own timeouts -- runs on stacks that either reach an
+ * entry in `RUNTIME_OWN_WORK` or contain no target-repo frame at all, and is
+ * exempt.
  *
- * The cost is stated rather than implied: any call the target repo makes that
- * reaches a guarded primitive THROUGH a `node:internal` frame is exempt too.
- * `require("/etc/hosts")` is read by the loader before it fails to parse, and
- * `promise.then(fs.readFileSync)` -- the guarded function passed as the
- * continuation itself, with no user frame between it and the microtask queue
- * -- is exempt. Both are the same shape as the Python guard's import
- * exemption, and both are far rarer than the case the exemption buys, which is
- * "every test that imports anything at all".
+ * The cost is stated rather than implied, and it is now much narrower than it
+ * was: a call the target repo makes is exempt only when it reaches a guarded
+ * primitive THROUGH the module loader, the builtin loader, the test runner or
+ * the console. `require("/etc/hosts")` is read by the loader before it fails
+ * to parse, and `promise.then(fs.readFileSync)` -- the guarded function passed
+ * as the continuation itself, with no user frame between it and the microtask
+ * queue -- is exempt because the stack has nothing on it to attribute. Both
+ * are the same shape as the Python guard's import exemption, and both are far
+ * rarer than the case the exemption buys, which is "every test that imports
+ * anything at all". What is NOT exempt any more, and used to be:
+ * `util.promisify`, `util.callbackify`, and every other wrapper node defines
+ * in an internal module the target repo can enter directly.
  *
  * WHY A VIOLATION IS ALSO RECORDED, NOT ONLY THROWN
  * ------------------------------------------------
@@ -145,7 +172,13 @@
  *    is what makes this rare rather than routine -- it runs before any user
  *    module is loaded, including the test file.
  * 4. A guarded primitive reached with no attributable frame between it and the
- *    runtime is exempt: see "HOW ARMING IS SCOPED" above.
+ *    runtime is exempt: see "HOW ARMING IS SCOPED" above. The two shapes are
+ *    `require("<a data file>")`, which the loader reads before it fails to
+ *    parse, and a guarded function used AS a continuation
+ *    (`promise.then(fs.readFileSync)`), whose stack holds the microtask queue
+ *    and nothing else. `util.promisify(fs.readFile)` and
+ *    `util.callbackify(...)` are NOT in this class -- they were until the
+ *    provenance rule inverted its default, and assertion 15 pins each of them.
  * 5. `process.argv` and `process.env` are intercepted on READ, but
  *    `"KEY" in process.env`, `Object.keys(process.env).length` and
  *    `process.env` destructured before arming are not: the first two read no
@@ -155,6 +188,18 @@
  *    is one of its guarded constructors, so a worker cannot be started under
  *    the guard in the first place -- which is why this is a residual and not a
  *    hole.
+ * 7. The provenance walk reads at most 64 frames. A guarded call reached with
+ *    MORE than 64 runtime frames between it and the unit falls off the end of
+ *    the walk and is exempt. The deepest stack this skill's suite produces is
+ *    21, so the margin is large, but it is a limit and not a proof.
+ * 8. NOT a residual any more, recorded because a reader will wonder: a target
+ *    repo that replaces `Error.prepareStackTrace` (`source-map-support`, a
+ *    Sentry SDK) used to make every frame unreadable, so the walk fell through
+ *    to "the target repo" and a CLEAN unit tripped -- fail-safe, but a false
+ *    positive on a mainstream dependency. The walk now forces V8's default
+ *    formatter for its own `new Error()` and restores the repo's hook
+ *    immediately. Assertion 16 pins both halves: clean passes, leaky trips,
+ *    with the hook installed.
  */
 
 const GROUPS_CONTROLLABLE = ["clock", "environment", "filesystem", "randomness"];
@@ -388,11 +433,93 @@ function blockedGroups(tier, allow) {
 
 // ── Call provenance ──────────────────────────────────────────────────────
 
-const GUARD_FILE = "io_guard.js";
+// The guard's own RESOLVED path, not its basename. A basename match would skip
+// the frames of any file in the target repo whose path happens to contain
+// `io_guard.js`, and skipped frames are unattributable frames.
+const GUARD_FILE = __filename;
 
 // A frame in a PUBLIC builtin -- `node:path:1201:24`, `node:fs:449:35`. Not
 // `node:internal/...`, which is the runtime's own machinery.
 const PUBLIC_BUILTIN_FRAME = /\bnode:[a-z0-9_/]+:\d+/;
+
+/**
+ * The internal modules that mean "the runtime is doing its own work".
+ *
+ * THE DEFAULT FOR AN INTERNAL FRAME IS TRANSPARENT, and this list is the whole
+ * of the exception. It is spelled as an enumeration rather than as
+ * `node:internal/` plus carve-outs because the carve-out shape is what shipped
+ * the `util.promisify` hole: `util.promisify(fs.readFile)` returns a wrapper
+ * DEFINED IN `node:internal/util`, so the innermost non-guard frame of every
+ * promisified call is internal, and a rule that stopped at the first internal
+ * frame exempted the canonical pre-`fs/promises` async idiom -- a real
+ * filesystem write and a real DNS lookup, green, at tier 1, through the
+ * documented command. Inverting the default closes the CLASS; adding
+ * `node:internal/util` to a carve-out list would have closed one instance of
+ * it and left `node:internal/fs/`, `node:internal/dns`, `node:internal/url`
+ * and every wrapper a future node release introduces still exempt.
+ *
+ * Membership is EVIDENCE, not taxonomy: each entry is here because removing it
+ * turns the runner or a clean unit red, and the four together are the whole of
+ * what does. `assets/test_io_guard_node.sh` assertion 15e re-derives that both
+ * ways on every run -- every promisified/callbackified route blocks, and the
+ * runner still collects and reports -- so an entry added without a reason to
+ * fails the suite rather than silently widening the exemption.
+ *
+ *   `node:internal/modules/`   The CJS and ESM loaders for the TARGET REPO's
+ *                              own files. Node reads every file it loads
+ *                              through `fs.readFileSync`, and a module body
+ *                              always runs with the loader beneath it, so
+ *                              without this every `require` inside every
+ *                              module body is a filesystem violation. Removing
+ *                              it: shell assertions 1, 2, 4, 12 go red.
+ *   `node:internal/bootstrap/` The loader for node's OWN builtins --
+ *                              `BuiltinModule.compileForInternalLoader`,
+ *                              `requireBuiltin` in `bootstrap/realm`. The test
+ *                              runner lazy-loads its bundled `minimatch` while
+ *                              globbing for test files, and that module body
+ *                              calls `Math.random` (the `randomness` group) --
+ *                              through an `Array.map (<anonymous>)` frame,
+ *                              which is unattributable and therefore blocks.
+ *                              Same category as the line above: module
+ *                              loading. Removing it: the runner cannot collect
+ *                              a single test.
+ *   `node:internal/test_runner/`
+ *                              Collection, the execution harness and
+ *                              reporting. `test()` is called FROM the target
+ *                              repo's module body, so the harness's own clock
+ *                              and filesystem work sits between an internal
+ *                              frame and a user frame -- exactly the sandwich
+ *                              this list exists for. Removing it: same, the
+ *                              runner dies before the first test.
+ *   `node:internal/console/`   `console.log` from a test reaches
+ *                              `internal/util/colors.shouldColorize`, which
+ *                              reads `process.env.FORCE_COLOR` -- the
+ *                              `environment` group, blocked at tier 1. That is
+ *                              node deciding whether to colourise, not the
+ *                              unit reading its environment. Failing a unit
+ *                              for PRINTING is not the invariant this guard
+ *                              enforces, and it would make the verdict depend
+ *                              on where the caller redirected stdout. Removing
+ *                              it: any test that logs goes red.
+ *
+ * What is deliberately NOT here, and was removed once measured: `node:internal/util`
+ * (promisify, callbackify, inspect), `node:internal/fs/` (the promises face),
+ * `node:internal/dns`, `node:internal/timers`, `node:internal/url`,
+ * `node:internal/streams/`, `node:internal/process/`, `node:internal/main/`,
+ * `node:internal/crypto/`, `node:internal/deps/`. Every one of those is either
+ * a route the TARGET REPO can enter directly, or sits at the bottom of a stack
+ * that has no user frame on it at all -- and an all-internal stack already
+ * exempts itself by reaching the end of the walk. `main/`, `process/` and
+ * `streams/` were in the first draft of this list on plausibility alone; they
+ * were dropped because no fixture needed them, and an exemption nothing needs
+ * is a hole nothing guards.
+ */
+const RUNTIME_OWN_WORK = [
+  "node:internal/modules/",
+  "node:internal/bootstrap/",
+  "node:internal/test_runner/",
+  "node:internal/console/",
+];
 
 /**
  * True when the first ATTRIBUTABLE frame outward belongs to the target repo.
@@ -401,45 +528,85 @@ const PUBLIC_BUILTIN_FRAME = /\bnode:[a-z0-9_/]+:\d+/;
  *
  *   * this file's own frames are skipped -- deciding provenance must not read
  *     as provenance;
- *   * a `node:internal/...` or `node:diagnostics` frame STOPS the walk and
- *     exempts the call. That single line is what keeps the module loader
- *     alive: node reads every `.js` it loads through `fs.readFileSync`, so
- *     without it a test that touches no filesystem dies at `defaultLoadImpl
+ *   * an internal frame naming one of `RUNTIME_OWN_WORK` STOPS the walk and
+ *     exempts the call. That is what keeps the module loader alive: node reads
+ *     every `.js` it loads through `fs.readFileSync`, so without it a test
+ *     that touches no filesystem dies at `defaultLoadImpl
  *     (node:internal/modules/cjs/loader)`. It is also what exempts everything
  *     the test runner does on its own behalf -- globbing for test files,
  *     spawning a child per file, writing TAP, arming its own timeouts;
+ *   * EVERY OTHER internal frame is TRANSPARENT: the walk continues outward.
+ *     `node:internal/util` is the one that matters -- see `RUNTIME_OWN_WORK`
+ *     above -- but the rule is general, so the next `node:internal/...`
+ *     wrapper a node release puts between a unit and a primitive is
+ *     transparent by default rather than exempt by default. The fail-safe
+ *     direction for an unrecognised frame is to KEEP LOOKING for the unit, not
+ *     to assume there is none;
  *   * a PUBLIC builtin frame (`node:path`, `node:fs`, `node:url`) is
- *     TRANSPARENT: the walk continues outward rather than stopping. This is
- *     the one place the rule extends the spike that proved it, and it is a
- *     correction rather than a redesign. The spike patched only `fs`, `net`,
- *     `http`, `child_process`, `dns` and `fetch`, all of which the code under
- *     test enters directly. Widening the guard to the `environment` group
- *     reached a primitive that the RUNTIME enters through a public builtin:
- *     `createTestFileList` -> `Glob.globSync` -> `path.resolve` ->
- *     `process.cwd`, whose innermost non-guard frame is `node:path` and not
- *     `node:internal/...`. Stopping there blocked the runner before it had
- *     collected a single test. Transparency is also the direction that keeps
- *     the guard honest: a UNIT that calls `path.resolve("./x")` still reaches
- *     its own frame one step further out, and still trips;
+ *     TRANSPARENT for the same reason. This is the distinction the rule is
+ *     built on, and it is the one that generalised: the spike patched only
+ *     `fs`, `net`, `http`, `child_process`, `dns` and `fetch`, all of which
+ *     the code under test enters directly. Widening the guard to the
+ *     `environment` group reached a primitive that the RUNTIME enters through
+ *     a public builtin: `createTestFileList` -> `Glob.globSync` ->
+ *     `path.resolve` -> `process.cwd`, whose innermost non-guard frame is
+ *     `node:path`. Stopping there blocked the runner before it had collected a
+ *     single test -- and the fix was not to exempt `node:path` but to keep
+ *     walking, because the runner's stack has `node:internal/test_runner/`
+ *     further out and a UNIT's does not;
  *   * anything else -- a file path, `[eval]`, `<anonymous>`, a data URL --
  *     is the target repo, and the call blocks. Unattributable frames block by
  *     design: a false positive costs one declined candidate, a false negative
  *     ships a test that performs real I/O.
  *
  * Reaching the end of the stack without an attributable frame means the call
- * came from the runtime on its own behalf: exempt.
+ * came from the runtime on its own behalf: exempt. That end-of-stack case is
+ * what makes the enumeration small -- an operation the runtime performs with
+ * no user frame anywhere beneath it needs no entry here.
+ *
+ * `Error.stackTraceLimit` is raised to 64 for the duration of the walk, and
+ * that number is part of the rule rather than a constant nobody chose. Under
+ * the old stop-at-the-first-internal-frame rule the answer was always in the
+ * first two or three frames, so 24 was generous. Walking OUTWARD past
+ * transparent frames is deeper by construction -- the runner's own glob stack
+ * is 14 frames before the first exempting one -- and a stack TRUNCATED before
+ * the unit's frame falls off the end of the loop and exempts. 64 is chosen to
+ * be past every frame count this suite has produced (the longest, the ESM
+ * loader's, is 21) with room left over; the residual is stated in residual 7.
  */
 function initiatedByCodeUnderTest() {
   const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = 24;
-  const stack = new Error().stack;
-  Error.stackTraceLimit = limit;
+  const prepare = Error.prepareStackTrace;
+  // V8's DEFAULT formatter, forced for the duration of the walk. A target repo
+  // that installs `source-map-support` or a Sentry SDK replaces
+  // `Error.prepareStackTrace`, and every frame this rule reads -- `node:`
+  // prefixes, `node:internal/` paths, this file's own name -- is a property of
+  // the default format. Without this line such a repo produces frames that
+  // match nothing, the walk falls through to "the target repo", and a CLEAN
+  // unit trips: fail-safe, but wrong and confusing. Setting the hook to
+  // `undefined` and restoring it is two assignments per guarded call and makes
+  // the rule independent of what the repo did to its own stacks.
+  Error.stackTraceLimit = 64;
+  Error.prepareStackTrace = undefined;
+  let stack;
+  try {
+    stack = new Error().stack;
+  } finally {
+    Error.stackTraceLimit = limit;
+    Error.prepareStackTrace = prepare;
+  }
   const lines = String(stack).split("\n").slice(1);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.indexOf(GUARD_FILE) !== -1) continue;
-    if (line.indexOf("node:internal/") !== -1 ||
-        line.indexOf("node:diagnostics") !== -1) return false;
+    if (line.indexOf("node:internal/") !== -1) {
+      let exempt = false;
+      for (let j = 0; j < RUNTIME_OWN_WORK.length; j++) {
+        if (line.indexOf(RUNTIME_OWN_WORK[j]) !== -1) { exempt = true; break; }
+      }
+      if (exempt) return false;
+      continue;
+    }
     if (PUBLIC_BUILTIN_FRAME.test(line)) continue;
     return true;
   }

@@ -609,4 +609,148 @@ else
   note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -5)"
 fi
 
+# ── 15. THE PROVENANCE RULE, PROVEN IN BOTH DIRECTIONS ───────────────────
+# The Critical this file exists to keep closed, and the reason the rule's
+# default is TRANSPARENT rather than EXEMPT.
+#
+# `util.promisify(fs.readFile)` returns a wrapper DEFINED IN
+# `node:internal/util`. Under the first version of the rule -- stop at the
+# first `node:internal/` frame and exempt -- the innermost non-guard frame of
+# every promisified call was internal, so the walk answered "not the code under
+# test" one frame before it would have found the unit. At tier 1, through the
+# documented command, a unit really read /etc/hosts, really WROTE a file to
+# /tmp and really resolved DNS, and the run printed `# pass 2  # fail 0` and
+# exited 0. `network` is an uncontrollable group, blocked at EVERY tier, and it
+# went through anyway.
+#
+# 15a-15d are the escape routes. 15e is the other direction, and it is not
+# optional: the over-broad exemption was BUYING something -- the runner has to
+# be able to collect and report -- so a fix that blocks promisify and breaks
+# `node --test` has traded one failure for a louder one. It runs the same
+# `RUNTIME_OWN_WORK` members past their four jobs (loading the repo's modules,
+# loading node's own builtins, running the harness, printing from a test).
+cat > "$WORK/promisified.js" <<'EOF'
+const util = require("node:util");
+const fs = require("node:fs");
+const dns = require("node:dns");
+const readAsync = util.promisify(fs.readFile);
+const writeAsync = util.promisify(fs.writeFile);
+const lookupAsync = util.promisify(dns.lookup);
+async function readHosts() { return (await readAsync("/etc/hosts", "utf8")).length; }
+async function writeTemp(p) { await writeAsync(p, "escaped\n"); return p; }
+async function resolveLocal() { return (await lookupAsync("localhost")).address; }
+const readBack = util.callbackify(async () => (await readAsync("/etc/hosts", "utf8")).length);
+function readViaCallbackify() {
+  return new Promise((resolve, reject) =>
+    readBack((e, v) => (e ? reject(e) : resolve(v))));
+}
+module.exports = { readHosts, writeTemp, resolveLocal, readViaCallbackify };
+EOF
+cat > "$WORK/test_promisified.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const path = require("node:path");
+const u = require("./promisified.js");
+test("promisify_read", async () => { assert.ok(await u.readHosts() >= 0); });
+test("promisify_write", async () => {
+  assert.ok(await u.writeTemp(path.join(__dirname, "promisify_escaped.txt")));
+});
+test("promisify_dns", async () => { assert.ok(await u.resolveLocal()); });
+test("callbackify_read", async () => { assert.ok(await u.readViaCallbackify() >= 0); });
+EOF
+rm -f "$WORK/promisify_escaped.txt"
+guard_run 1 "" test_promisified.js '^promisify_read$'
+expect_trip "15a util.promisify(fs.readFile) trips -- an internal WRAPPER frame is transparent, not an exemption"
+guard_run 1 "" test_promisified.js '^promisify_write$'
+expect_trip "15b util.promisify(fs.writeFile) trips -- the WRITE half, which is the one that leaves a file behind"
+if [ -e "$WORK/promisify_escaped.txt" ]; then
+  bad "15b2 the promisified write really reached the filesystem: the file exists on disk"
+else
+  ok "15b2 …and nothing was written: no file on disk after the promisified write was blocked"
+fi
+guard_run 1 "" test_promisified.js '^promisify_dns$'
+expect_trip "15c util.promisify(dns.lookup) trips -- network is an UNCONTROLLABLE group, blocked at every tier, so this route escaping was the worst of the four"
+guard_run 1 "" test_promisified.js '^callbackify_read$'
+expect_trip "15d util.callbackify over a promisified read trips -- both directions of the internal wrapper pair"
+
+# 15e. The other direction. Each of these exercises one member of
+# `RUNTIME_OWN_WORK`: a clean unit that `require`s a sibling (the CJS loader),
+# the runner globbing for test files (the builtin loader, which lazy-loads
+# minimatch and calls Math.random through an `<anonymous>` frame), the harness
+# itself, and a test that prints (the console, which reads FORCE_COLOR).
+# `chatty.js` also runs with stdout redirected to a FILE, where a console write
+# becomes `fs.writeSync` rather than a socket write.
+cat > "$WORK/chatty.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { add } = require("./pure.js");
+test("prints", () => {
+  console.log("a unit is allowed to print");
+  console.error("…on either stream");
+  assert.strictEqual(add(1, 1), 2);
+});
+EOF
+mkdir -p "$WORK/glob"
+cat > "$WORK/glob/lib.js" <<'EOF'
+function add(a, b) { return a + b; }
+module.exports = { add };
+EOF
+cat > "$WORK/glob/lib.test.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { add } = require("./lib.js");
+test("adds", () => { assert.strictEqual(add(2, 3), 5); });
+EOF
+runner_ok=""
+guard_run 1 "" chatty.js '^prints$'
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [console:$ST]"
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" --test chatty.js > "$WORK/tap.out" 2>&1)"
+ST=$?
+set -e
+OUT="$(cat "$WORK/tap.out")"
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [console-to-file:$ST]"
+# Collection by GLOB: no file argument at all, so the runner walks the tree.
+set +e
+OUT="$(cd "$WORK/glob" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" --test 2>&1)"
+ST=$?
+set -e
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [glob:$ST]"
+# Reporting: a non-TAP reporter, and more than one file in one run.
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" \
+       --test --test-reporter=spec test_pure.js chatty.js 2>&1)"
+ST=$?
+set -e
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [spec-reporter:$ST]"
+if [ -z "$runner_ok" ]; then
+  ok "15e …and the runner still WORKS: a clean unit that requires a sibling, one that prints to a pipe and to a file, collection by glob with no file argument, and the spec reporter over two files -- every job the RUNTIME_OWN_WORK exemptions buy"
+else
+  bad "15e blocking the promisify routes broke the runner:$runner_ok"
+  note "$(printf '%s' "$OUT" | tail -8)"
+fi
+
+# ── 16. A repo that owns Error.prepareStackTrace ─────────────────────────
+# `source-map-support` and every Sentry SDK replace the stack FORMATTER, and
+# every frame this rule reads is a property of V8's default format. The walk
+# forces the default for its own `new Error()` and restores the repo's hook, so
+# the verdict does not depend on a dependency the target repo happens to have.
+# Both halves are asserted: without the fix the clean unit tripped too, which
+# is fail-safe but is a false positive on a mainstream package.
+cat > "$WORK/prepared.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+Error.prepareStackTrace = function (err, sites) {
+  return err.name + ": " + err.message + "\n" +
+         sites.map(() => "    at REWRITTEN-BY-THE-REPO").join("\n");
+};
+const fs = require("node:fs");
+test("clean", () => { assert.strictEqual(1 + 1, 2); });
+test("leaky", () => { assert.ok(fs.readFileSync("/etc/hosts", "utf8").length >= 0); });
+EOF
+guard_run 1 "" prepared.js '^clean$'
+expect_pass "16 a repo that replaces Error.prepareStackTrace does not make a CLEAN unit trip"
+guard_run 1 "" prepared.js '^leaky$'
+expect_trip "16b …and a leaky one still does: the walk reads V8's default format, not the repo's"
+
 exit "$rc"
