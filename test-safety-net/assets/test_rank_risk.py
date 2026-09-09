@@ -325,6 +325,58 @@ class TestTriage(TempRepo):
         self.assertEqual(tier, 3)
         self.assertIn("subprocess", reason)
 
+    def test_nested_def_local_import_does_not_hide_the_outer_functions_io(self):
+        # A NESTED def's own local import must not leak OUTWARD and
+        # overwrite the ENCLOSING function's correct, module-level alias —
+        # one boundary deeper than the shadow.py bug this fixes.
+        tier, reason = self._tier(
+            "nested.py",
+            "import requests as X\n\n\n"
+            "def outer(u):\n    def inner():\n        import os as X\n"
+            "        return X.getcwd()\n    return X.get(u)\n",
+            "outer")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_sibling_method_local_import_does_not_hide_another_methods_io(self):
+        # One METHOD's local import must not leak SIDEWAYS into a sibling
+        # method when the whole class is scanned as one unit.
+        tier, reason = self._tier(
+            "sibling.py",
+            "import requests as X\n\n\nclass Client:\n"
+            "    def helper(self):\n        import os as X\n"
+            "        return X.getcwd()\n\n"
+            "    def fetch(self, u):\n        return X.get(u)\n",
+            "Client")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
+    def test_bare_attribute_call_on_an_unresolvable_receiver_is_not_chased(self):
+        # `cfg.get('key')` on a plain dict must NOT resolve to a
+        # module-level `get()` just because the names coincide — chasing a
+        # bare `.attr` regardless of receiver was found to silently shrink
+        # the net project-wide (`.get`/`.run`/`.read`/... are everywhere).
+        tier, reason = self._tier(
+            "c2.py",
+            "import subprocess\n\n\ndef get():\n    return subprocess.run(['true'])\n\n\n"
+            "def lookup(cfg):\n    return cfg.get('key')\n",
+            "lookup")
+        self.assertEqual(tier, 1)
+
+    def test_fresh_instance_method_chase_still_works_after_narrowing(self):
+        # The control: narrowing the method chase (previous test) must not
+        # have disabled it outright. `Client().fetch(u)` is still the one
+        # receiver shape that IS trusted, and must still resolve.
+        tier, reason = self._tier(
+            "method2.py",
+            "import requests\n\n\nclass Client:\n    def fetch(self, u):\n"
+            "        return requests.get(u)\n\n\ndef get_data(u):\n"
+            "    return Client().fetch(u)\n",
+            "get_data")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+        self.assertIn("Client.fetch", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
