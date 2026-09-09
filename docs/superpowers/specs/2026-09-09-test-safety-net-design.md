@@ -1,6 +1,8 @@
 # test-safety-net — design
 
-**Status:** approved in brainstorming, not yet implemented
+**Status:** implemented on `feat/test-safety-net-spec`; amended eight times during
+implementation (each amendment is marked inline and dated). Where this document and the shipped
+code disagree, that is a defect in one of them — say which, do not leave it.
 **Date:** 2026-09-09
 
 ## The gap
@@ -106,6 +108,22 @@ never-performs-real-I/O invariant cheap to hold. A human may still promote such 
 and control the boundary, but only through the recorded-promotion discipline — never silently.
 Filesystem, clock, randomness and environment remain routine Tier 2 controls.
 
+**Amended 2026-09-09 (fix round 4) — I/O at IMPORT time floors the whole file.** The table above
+tiers a unit by what the unit itself reaches. A module that does I/O in its own body performs it
+during `import unit_module`, before any fixture can control anything — once per proof run, for
+every unit in that file, regardless of tier. So: module-level **controllable** I/O floors every
+unit in the file at **Tier 3** ("a fixture runs too late; needs a seam" — making the load lazy is
+a textbook additive seam), and module-level **uncontrollable** I/O keeps Tier 4. The floor is
+applied last and upward only, so a unit that dials out keeps its own, more specific reason.
+
+Pure path algebra over `__file__` (`os.path.join`/`dirname`/`basename`/`abspath`/`normpath`/
+`split`/`splitext`/`relpath`) is exempt from the floor: it performs no I/O, and
+`HERE = os.path.dirname(os.path.abspath(__file__))` is the commonest module-level statement there
+is — flooring on it moved 138 of this repo's own 305 units out of the net. Inertness is judged per
+CALL, not per marker, so `os.path.exists` (a real stat) still floors while `os.path.join` does
+not, and the exemption applies ONLY to the import-time scan: inside a function body `os.path.join`
+still marks a unit Tier 2.
+
 **Tiers 3 and 4 are output, not failure.** A risk-ranked "here is what blocks testing, and the
 smallest change that unblocks it" list is the missing input to `clean-code`, and often worth more
 to a human than the tests themselves.
@@ -192,6 +210,54 @@ on the receiving side.
    Residual, stated plainly: a test that spawns a subprocess which itself dials out escapes an
    in-process guard. That is a smaller residual than trusting static analysis alone, and naming
    it is the point.
+
+   **Amended 2026-09-09 (fix round 5) — the guard is now BUILT, and building it moved five
+   details.** Everything above was design; `test-safety-net/assets/io_guard.py` is the
+   implementation, and it is a shipped asset rather than something the agent authors per repo —
+   house style in this collection, and the safer choice for ~500 lines that patch `os` primitives,
+   where a subtly wrong hand-rolled copy is worse than none. The five corrections, each because
+   the built thing disagreed with the written thing:
+
+   1. **"The `os` primitives" was not enough, in the direction that matters.** Measured on CPython
+      3.12: `open(p)` reaches `builtins.open` and NOT `os.open`; `pathlib.Path.read_text` reaches
+      `io.open` and neither of those; `os.path.exists` is an `os.stat`; `os.walk` and `glob.glob`
+      are `os.scandir`. A guard patching `os.open`/`write`/`posix_spawn`/`fork`, `io.FileIO`,
+      `mmap.mmap` and `socket.socket` — this spec's own list — would have missed the builtin
+      `open`, every `pathlib` read, and the entire directory-and-metadata family. The guard
+      patches every name the filter's marker tables classify on, and a test asserts that
+      correspondence mechanically (see "Duplicated detection, guarded").
+   2. **Tier 1's group list omitted `environment`.** The prose said "filesystem, clock and
+      randomness as well as network, subprocess and DB", but the filter has four controllable
+      groups, the fourth being environment variables. Tier 1 blocks all seven.
+   3. **Tier 2 needs a SECOND environment variable.** The tier alone cannot say which controllable
+      groups this particular test fakes, and "block only the uncontrolled groups" permits all four
+      whether the test controls them or not. `TEST_SAFETY_NET_ALLOW` carries the list;
+      unset keeps this spec's baseline, `none` fakes nothing, and Tier 1 ignores it.
+   4. **A bogus or missing tier fails safe to Tier 1.** The spec did not say what an unset
+      variable means. It means "block everything": a misconfigured invocation must over-block,
+      because under-blocking ships a test that performs real I/O.
+   5. **`os.exec*` IS intercepted, and the static decline is still not redundant.** The guard
+      patches the family, so a Python-level `os.execv` raises before the image is replaced. What
+      no guard survives is an exec reached another way — a pre-bound reference, a C extension —
+      which takes every in-process patch with it and leaves nothing to report the trip. The
+      filter's static decline is the line that holds there, which is why the family must be
+      enumerated completely in the marker table.
+
+   **How arming is scoped.** The arming WINDOW is the whole pytest session, because import-time
+   I/O runs before any hook a fixture could install. The BLOCK DECISION is scoped by call
+   provenance: a guarded primitive raises only when the call was initiated from outside the
+   interpreter's own library directories — the target repo's test module or the unit under test.
+   pytest's collection, assertion rewriting, capture and reporting run on stacks that never leave
+   stdlib/site-packages and are exempt, as are the import machinery and the stdlib's
+   source-reading diagnostics (`linecache`, `traceback`). Where the two directions trade off the
+   guard over-fires: a false trip costs one declined candidate, a missed one ships a test that
+   performs real I/O.
+
+   **Two further residuals the original text did not name.** A C extension that reaches the
+   syscall directly (`numpy.fromfile`, `ctypes.CDLL`) bypasses every Python name and is
+   intercepted by nothing. And `os.environ["HOME"]` as a bare subscript is invisible to the guard,
+   which patches `os.getenv`/`putenv`/`unsetenv` — the same residual the filter has, since its
+   markers match a call, so the two layers agree on what neither can see.
 3. **Never ships an unproven test.** A test that did not go red is discarded and listed under
    *could not prove*.
 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the report.
@@ -219,6 +285,17 @@ Stdlib + git only. No MCP, no network, no third-party packages. Emits determinis
 A real call-graph tool would compute the blast-radius half better. The report names that as an
 **optional** upgrade the user may already have. It is never a dependency, and nothing in the
 skill or its eval requires one.
+
+### `assets/io_guard.py`
+
+**Added 2026-09-09 (fix round 5).** The tier-aware runtime guard, shipped as an asset rather than
+authored per repo. Stdlib only, no pip, no network, and it never imports a third-party package —
+database drivers are patched only once the target repo has imported them itself. Loaded as a
+pytest plugin (`-p io_guard`, with `$SKILL_DIR/assets` on `PYTHONPATH`) so it arms ahead of
+collection; tier by `TEST_SAFETY_NET_TIER`, faked groups by `TEST_SAFETY_NET_ALLOW`; raises
+`IOGuardViolation`, a `BaseException` subclass so `except Exception:` in legacy code cannot
+swallow it. Full contract in "How this is enforced" under Invariants, and in
+`references/triage.md`. Its suite is `assets/test_io_guard.py`, negative fixtures first.
 
 ### `references/stacks.md`
 
@@ -249,6 +326,24 @@ Skills install independently (`npx skills add --skill <name>`), so this cannot i
 
 Therefore: ship its own detector **plus a cross-tool agreement test** that runs when the sibling
 is installed and skips cleanly when it is not. Apply the fix pattern rather than re-earn the bug.
+
+**Amended 2026-09-09 (fix round 5) — superseded by a better outcome.** No detector ships, and none
+should. Step 1 of the workflow is prompt-guided off `references/stacks.md`, which carries the four
+per-stack facts as a table the agent reads; this version supports Python only, so "detection" is
+one question ("is this a Python repo?") that needs no tool. Nothing is duplicated, so there is
+nothing that can diverge, and the agreement test guards a divergence that cannot occur. This is
+strictly better than the section's original prescription — the whole point of the guarded
+duplication pattern was to make divergence detectable, and not duplicating makes it impossible —
+but it was an unrecorded deviation from a binding spec until now, which is why it is written down
+rather than quietly dropped. The duplication risk returns the moment a stack detector ships as
+tooling; if that happens, the cross-tool agreement test against
+`verifier-installer/assets/detect_stack.py` is mandatory and this amendment lapses.
+
+The one thing this skill DOES duplicate — the I/O marker vocabulary, shared between
+`assets/rank_risk.py` (the filter) and `assets/io_guard.py` (the guard) — is handled with exactly
+the pattern this section prescribes: `test_io_guard.py::TestFilterGuardAgreement` asserts the
+guard's coverage tables partition the ranker's marker tables, so a marker added to one layer and
+not the other fails the gate. See "How this is enforced" under Invariants.
 
 ## Data flow
 
@@ -297,8 +392,19 @@ No coverage percentage anywhere.
 Captured output from running the user's code is embedded into generated test files. That is
 **code generation from program output**, and it is the one real injection surface here. Values
 must be emitted as safely-escaped literals, never interpolated as code: a captured string
-containing a quote, a newline, or a backslash must not become executable. This gets a dedicated
-test and a negative eval fixture.
+containing a quote, a newline, or a backslash must not become executable.
+
+**Amended 2026-09-09 (fix round 5).** This section originally said the rule "gets a dedicated test
+and a negative eval fixture." Neither was built, and the reason is that there is nothing to test:
+**no captured-output emitter ships**. Emission is a prompt instruction in `SKILL.md` ("emit every
+captured value with `repr()`; never build an expected value by concatenation or f-string
+interpolation"), executed by the model, so there is no code path that could turn a hostile
+captured string into executable source and nothing for a fixture to run against. The surface is
+therefore graded as PROSE ONLY — `eval/run_eval.py` check 13 asserts the rule is stated — and the
+eval's own docstring says so in those words. If an emitter is ever shipped as tooling, the
+dedicated test and the negative fixture become mandatory again and this amendment lapses. Writing
+"gets a dedicated test" while none existed is exactly the defect this branch kept finding:
+structure checked, evidence claimed.
 
 ## How it is graded
 
@@ -319,6 +425,25 @@ git repo with churn history, several units, and one already-covered unit, run th
   blocker instead of claiming success
 - **NEGATIVE:** a captured value containing quotes / newlines / backslashes round-trips as a
   literal and cannot execute
+
+**Amended 2026-09-09 (fix round 5) — which of those four actually ship, and why.** Two do: no-git
+history (check 07) and a network call in a constructor triaged Tier 3 with no test written
+(check 05). Two do not, and the reason in both cases is that the behaviour they would grade is
+prompt-driven, not code: the make-fronted repo's "report the blocker" and the captured-value
+round-trip are both things the MODEL does, and this eval is model-free by the standard's own
+rule. They are graded as prose instead (the `make` case in `references/stacks.md`, the literal
+rule in `SKILL.md`, check 13), and the eval's docstring names the gap in its own words rather
+than leaving a reader to assume coverage. See "Security surface" for the fuller version of the
+same ruling.
+
+**What DID gain executable negative fixtures, since the guard now ships:** checks 22-27 arm
+`io_guard.py` for real and make it face real I/O — a file write at Tier 1 that must raise the
+guard's own exception type and leave no file behind; the directory/metadata, network and
+subprocess families that a fd-level patch would miss; the violation being neither an
+`AssertionError` nor swallowable by `except Exception:`; Tier 2 permitting only declared groups;
+and the filter↔guard marker correspondence. Check 29 is a cross-document check: SKILL.md and
+`references/triage.md` must agree that a guard trip means Tier 3 and discard, because the one
+time they disagreed no single-document check could see it.
 
 **What the eval cannot grade**, stated plainly rather than implied away: whether the model writes
 *good* tests. That is the limit `CLAUDE.md` already records for prompt-driven behaviour. So:
