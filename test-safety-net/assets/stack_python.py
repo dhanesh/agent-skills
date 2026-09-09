@@ -107,6 +107,25 @@ def module_of(rel: str) -> str:
     return os.path.splitext(os.path.basename(rel))[0]
 
 
+def name_pattern(name: str):
+    r"""A regex matching `name` as a whole identifier, for either call site.
+
+    The core needs this for two questions -- "does this test file mention the
+    unit's NAME" (`rank_risk.already_covered`) and "does this file plausibly
+    name that MODULE" (`rank_risk._references_module`) -- and both were built
+    inline as `re.compile(r"\b%s\b" % re.escape(...))` until a stack whose
+    identifiers are not Python's arrived. `\b` is defined against
+    `[A-Za-z0-9_]`, so it does not know `$` is an identifier character in JS:
+    `re.search(r"\b\$fetch\b", "$fetch(1)")` is False, and a `$`-named
+    export would read as uncovered in every test file forever. That is the
+    silent zero this file exists to avoid, so the pattern is the stack's to
+    build.
+
+    Python's answer is `\b%s\b`, byte-for-byte what the core built before.
+    """
+    return re.compile(r"\b%s\b" % re.escape(name))
+
+
 def path_pattern(rel: str):
     """A regex matching `rel` written as a module path — `app.utils` or
     `app/utils` for `app/utils.py` — or None when `rel` has no parent

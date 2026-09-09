@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank a repo's untested units by risk, and triage how testable each one is.
+r"""Rank a repo's untested units by risk, and triage how testable each one is.
 
 Stdlib + git only. No network, no third-party packages, no call-graph service:
 the blast-radius half is a deliberate static approximation, labelled as such in
@@ -12,7 +12,7 @@ tests, what a unit is, and what tier a unit lands in -- lives behind the stack
 interface and is implemented once per stack (`stack_python.py`, and one module
 per stack added beside it).
 
-THE STACK INTERFACE. A stack module supplies exactly thirteen names. The rule
+THE STACK INTERFACE. A stack module supplies exactly fourteen names. The rule
 that decides membership: if answering the question requires READING A LANGUAGE,
 it belongs to the stack; if it only orchestrates or scores, it stays here.
 
@@ -30,6 +30,9 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
     module_of(rel) -> str                        the module identity `rel`
                                                  defines -- the name other
                                                  files use to talk about it
+    name_pattern(name) -> compiled re            `name` as a whole
+                                                 identifier, bounded the way
+                                                 THAT language bounds one
     path_pattern(rel) -> compiled re | None      `rel` written as a module
                                                  path, bounded at both ends;
                                                  None when it has no qualifier
@@ -58,7 +61,7 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
                                                  guard enforces the no-I/O
                                                  invariant
 
-Six of those were named when the seam was cut; seven more followed, each from
+Six of those were named when the seam was cut; eight more followed, each from
 a place this file was still reading Python without asking. The walk and the
 test-file predicate, because `inbound_refs` and `already_covered` both iterate
 the source tree and both must recognise a test file: hard-coding `test_*.py`
@@ -71,6 +74,9 @@ same-directory route that recovered 105 units' worth of collision cases here.
 A stack that inherited Python's `import X as Y` / `from X import Y` forms
 would credit exactly nothing through that route and report a clean result,
 which is the one failure this file must not have: guessing where it must ask.
+And `name_pattern`, because `\b` is the same kind of guess: it is defined
+against `[A-Za-z0-9_]`, so an export named `$fetch` could never be matched in
+any test file and would read as an uncovered gap forever.
 """
 from __future__ import annotations
 
@@ -214,7 +220,7 @@ def _name_occurrences(stack, text: str):
     return bare, attr
 
 
-def _references_module(module: str, text: str, path_tokens) -> bool:
+def _references_module(stack, module: str, text: str, path_tokens) -> bool:
     """True if `text`, or `path_tokens` (from the file's own path), plausibly names `module`.
 
     `module` is a defining file's module identity — `stack.module_of(rel)`,
@@ -236,7 +242,7 @@ def _references_module(module: str, text: str, path_tokens) -> bool:
         when a basename is shared by more than one discovered file, and only
         falls back to this predicate when the basename is unique.
     """
-    if re.search(r"\b%s\b" % re.escape(module), text):
+    if stack.name_pattern(module).search(text):
         return True
     return module in path_tokens
 
@@ -373,7 +379,8 @@ def inbound_refs(root: str, units, stack=None) -> dict:
             module_reffiles_cache[module] = [
                 rel for rel in all_files
                 if stack.module_of(rel) != module
-                and _references_module(module, file_texts[rel], path_tokens[rel])
+                and _references_module(stack, module, file_texts[rel],
+                                       path_tokens[rel])
             ]
         ref_files = module_reffiles_cache[module]
 
@@ -471,7 +478,7 @@ def already_covered(root: str, units, stack=None) -> dict:
         by_basename[stack.module_of(rel)].append(rel)
     covered = {}
     for u in units:
-        name_pattern = re.compile(r"\b%s\b" % re.escape(u["name"]))
+        name_pattern = stack.name_pattern(u["name"])
         module = stack.module_of(u["path"])
         siblings = by_basename.get(module, ())
         ambiguous = len(siblings) > 1
@@ -493,7 +500,7 @@ def already_covered(root: str, units, stack=None) -> dict:
                     pass                          # positioned as its test, and imports it
                 else:
                     continue
-            elif not _references_module(module, text, path_tokens[rel]):
+            elif not _references_module(stack, module, text, path_tokens[rel]):
                 continue
             covered[u["id"]] = rel
             break
