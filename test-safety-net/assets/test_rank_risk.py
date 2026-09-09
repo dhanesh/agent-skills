@@ -408,6 +408,19 @@ class TestTriage(TempRepo):
         self.assertEqual(tier, 3)
         self.assertIn("import time", reason)
 
+    def test_the_floor_never_masks_a_units_own_more_severe_reason(self):
+        # It is a floor applied UPWARD only. A unit that dials out keeps its own
+        # Tier 3 reason -- "network", the specific and more severe fact -- rather
+        # than being relabelled with the module's import-time filesystem read.
+        tier, reason = self._tier(
+            "both.py",
+            'import json\nimport requests\n'
+            '_CFG = json.load(open("/etc/app/config.json"))\n\n\n'
+            "def fetch(u):\n    return requests.get(u)\n",
+            "fetch")
+        self.assertEqual(tier, 3)
+        self.assertIn("network", reason)
+
     def test_import_time_env_read_floors_the_tier(self):
         # `os.environ.get(...)` at module level reads process state at import;
         # a fixture setting the variable afterwards is too late. (The bare

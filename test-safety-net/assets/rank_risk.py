@@ -1064,8 +1064,17 @@ def triage(root: str, unit) -> tuple:
                        analysis.local_funcs, analysis.local_classes,
                        analysis.local_methods, {unit["name"]})
 
-    if analysis.import_floor is not None:
-        return analysis.import_floor      # floors every unit in the file
+    tier, reason = _tier_from_hits(hits)
+    # A FLOOR, applied last and only upward: a unit already at or above it
+    # keeps its OWN reason, which names something more specific (and more
+    # severe) than the module's import-time I/O does.
+    if analysis.import_floor is not None and tier < analysis.import_floor[0]:
+        return analysis.import_floor
+    return tier, reason
+
+
+def _tier_from_hits(hits) -> tuple:
+    """(tier, reason) from a unit's own marker hits, before any module-level floor."""
     if not hits:
         return 1, "no I/O markers; directly callable"
     uncontrollable = [h for h in hits if not h[2]]
