@@ -575,6 +575,45 @@ class TestTriage(TempRepo):
         self.assertEqual(tier, 3)
         self.assertIn("subprocess", reason)
 
+    def test_every_os_exec_spawn_fork_name_is_in_the_marker_table(self):
+        # FIX round 4 (C2): the table listed 11 of the family and missed the
+        # rest, so `os.execlp` / `os.posix_spawnp` / `os.spawnlp` read as Tier 1
+        # "no I/O markers; directly callable" while the near-identical
+        # `os.execv` read as Tier 3. DERIVED from `dir(os)` at runtime rather
+        # than restated as a literal list, so the table cannot silently rot
+        # when a Python release adds a sibling -- and so it stays honest on a
+        # platform whose `os` exposes a different subset.
+        #
+        # These are the calls the runtime guard structurally CANNOT backstop:
+        # `os.exec*` replaces the process image, taking every in-process
+        # monkeypatch with it. The static filter is the only line of defence.
+        derived = {"os." + n for n in dir(os)
+                   if n.startswith(("exec", "spawn", "fork", "posix_spawn"))
+                   and callable(getattr(os, n, None))}
+        # Deliberate exclusions, each with a reason. Empty today: every name
+        # the derivation finds really does start or replace a process.
+        allowed_unmarked = {}
+        table = set(rank_risk.UNCONTROLLABLE["subprocess"])
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "os process-family names absent from the marker table: "
+                         "%s" % sorted(missing))
+
+    def test_a_missed_exec_family_member_is_tier_3_like_its_siblings(self):
+        # The behavioural half of the test above, on three of the names that
+        # were absent: they must classify the same as `os.execv` already did.
+        for src_name, call in (("execlp", "os.execlp('sh', 'sh', '-c', c)"),
+                               ("posix_spawnp", "os.posix_spawnp('sh', ['sh'], {})"),
+                               ("spawnlp", "os.spawnlp(os.P_WAIT, 'sh', 'sh')"),
+                               ("forkpty", "os.forkpty()")):
+            with self.subTest(name=src_name):
+                tier, reason = self._tier(
+                    "%s_mod.py" % src_name,
+                    "import os\n\n\ndef go(c):\n    return %s\n" % call,
+                    "go")
+                self.assertEqual(tier, 3)
+                self.assertIn("subprocess", reason)
+
     def test_os_path_join_is_not_swept_into_subprocess_by_the_new_os_markers(self):
         # The control: the new `os.*` spawn/exec entries are exact-or-prefix
         # matches on a resolved dotted name, not a blanket "starts with os.".

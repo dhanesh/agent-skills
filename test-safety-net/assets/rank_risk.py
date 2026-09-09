@@ -312,9 +312,19 @@ UNCONTROLLABLE = {
     # survive one at all. These are the calls the filter must decline
     # statically because the guard structurally cannot reach them. Declined
     # (tier 3, not 2): no seam makes spawning a process safe to pin.
-    "subprocess": ("subprocess", "os.system", "os.popen", "os.posix_spawn",
-                   "os.spawnv", "os.spawnl", "os.spawnvp", "os.execv",
-                   "os.execve", "os.execvp", "os.execl", "os.fork"),
+    # The WHOLE family, not a sample of it. An earlier table listed 11 of
+    # these and missed 11 more, so `os.execlp`, `os.posix_spawnp` and
+    # `os.spawnlp` read as Tier 1 "directly callable" while the near-identical
+    # `os.execv` read as Tier 3. Every name `dir(os)` exposes under the
+    # exec/spawn/fork families is listed, and a test DERIVES that set at
+    # runtime and fails if the table falls behind again.
+    "subprocess": ("subprocess", "os.system", "os.popen",
+                   "os.posix_spawn", "os.posix_spawnp",
+                   "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
+                   "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",
+                   "os.execl", "os.execle", "os.execlp", "os.execlpe",
+                   "os.execv", "os.execve", "os.execvp", "os.execvpe",
+                   "os.fork", "os.forkpty"),
 }
 
 
