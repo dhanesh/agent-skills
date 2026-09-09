@@ -103,8 +103,17 @@ under the two readers, and the precise one is the larger.
 ### The rule that has no python equivalent: read the exit status
 
 `node --test` **misattributes a violation that lands after its test resolved.** The violating test
-prints `ok`; the `not ok` lands on a different entry in the TAP stream. On node 22.18 that entry is
-the enclosing **file**, and the runner adds a `# Error:` comment naming the real culprit:
+prints `ok`; the `not ok` is charged to **whatever the runner is executing when the violation
+lands**. That is one later test, or several, or — when nothing else is running — the enclosing
+file. It is never the test that caused it.
+
+**All three shapes below were reproduced on the same node, v22.18.0.** What selects between them is
+the fixture's own timing and how the violating call is reached, *not* the runtime version. Do not
+read "my node is newer than that" as a reason to trust the per-test lines.
+
+**(a) Nothing else is running: the FILE is charged.** The runner adds a `# Error:` comment that
+does name the real culprit — the only one of the three that leaves any trace of it, and it is a
+comment, not a result:
 
 ```
 ok 1 - fast_test_slow_violation              <- the test that violated
@@ -115,8 +124,9 @@ not ok 1 - test_units.js                     <- the FILE, not the test
 exit 1
 ```
 
-On the build this rule was first reproduced against, the blame lands one test further along
-instead — on an innocent neighbour:
+**(b) A later test is running: THAT test is charged, by name.** The violating chain here is
+*detached* — the test starts a promise chain it never awaits, and returns — so a later test is
+still executing when the chain reaches the guarded call:
 
 ```
 ok 1     - fast_test_slow_violation          <- the test that violated
@@ -124,8 +134,19 @@ not ok 2 - second_test_keeps_process_alive   <- an innocent test
 exit 1
 ```
 
-Either way an agent reading per-test results keeps the test that performs real I/O and discards a
-clean one. So:
+**(c) Two later tests are running: BOTH are charged.** One violation, two innocent failures, and
+the violator still green:
+
+```
+ok 1     - violator                              <- the test that violated
+not ok 2 - innocent_short                        <- an innocent test
+not ok 3 - innocent_long_running_when_it_lands   <- and another
+exit 1
+```
+
+Shape (c) is why the rule below is *discard the whole batch* and not *discard the neighbour*: there
+is no subset of the batch a reader can salvage from the TAP stream. In every shape an agent reading
+per-test results keeps the test that performs real I/O and discards clean ones. So:
 
 - **The exit status is the only trustworthy signal on this stack.** A zero exit means the batch is
   clean; a nonzero exit means something in it violated.
@@ -134,10 +155,13 @@ clean one. So:
   is cheap to re-run.
 - **Never keep a test reported `ok` from a run that exited nonzero.**
 
-`assets/test_io_guard_node.sh` builds that fixture and asserts the shape — the violating test `ok`,
-some *other* entry `not ok`, a nonzero exit, an `IOGuardViolation` in the output. If node ever
-starts blaming the right test, that assertion goes red and this section gets weaker, which is the
-intended direction.
+`assets/test_io_guard_node.sh` builds all three fixtures — assertion 12 is shape (a), 13 is (b),
+14 is (c) — and asserts the invariant they share: the violating test `ok`, some *other* entry
+`not ok`, a nonzero exit, an `IOGuardViolation` in the output. Assertion 14 additionally requires
+**two or more** innocent failures, so the paragraph above is a checked claim rather than a
+remembered one. Each shape was confirmed stable over 20 identical runs before it was committed. If
+node ever starts blaming the right test, those assertions go red and this section gets weaker,
+which is the intended direction.
 
 The mechanism behind it is stated in `assets/io_guard.js`: every violation is **recorded** at the
 raise as well as thrown, and a `process.exit` hook fails the run on any record that was not already

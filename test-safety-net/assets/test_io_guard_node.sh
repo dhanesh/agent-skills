@@ -475,15 +475,18 @@ esac
 # The rule with no python equivalent, and the reason SKILL.md tells an agent to
 # read `$?` and not the per-test lines. When a violation lands AFTER the test
 # that caused it resolved, `node --test` does not blame that test: it prints
-# `ok` for it and puts the `not ok` on a DIFFERENT entry -- the enclosing file
-# on node 22, and one test further along on the build this rule was first
-# reproduced against. Either way an agent reading per-test results keeps the
-# test that performs real I/O and discards a clean one, which is exactly
-# inverted and completely silent.
+# `ok` for it and puts the `not ok` somewhere else. WHERE else depends on what
+# the runner happens to be doing when the violation lands -- NOT on the node
+# version. All three shapes below were reproduced on the same node v22.18.0:
 #
-# So the assertion is deliberately shaped as "the culprit says ok AND somebody
-# else carries the not ok", which holds for both observed shapes and fails the
-# moment either half stops being true:
+#   this assertion (12) -- nothing else is executing, so the ENCLOSING FILE
+#                          carries it (`not ok 1 - test_asyncmisattrib.js`);
+#   assertion 13        -- one later test is running, and IT is charged;
+#   assertion 14        -- two later tests are running, and BOTH are charged.
+#
+# The violator says `ok` in every one of them. So the assertion is deliberately
+# shaped as "the culprit says ok AND somebody else carries the not ok", which
+# holds for all three and fails the moment either half stops being true:
 #   * a guard that never arms  -> the read succeeds, exit 0, no violation;
 #   * node learning to blame the right test -> `blamed` becomes the culprit,
 #     this goes red, and the prose in SKILL.md / references/stacks.md gets
@@ -523,6 +526,87 @@ if [ "$ST" -ne 0 ] && tripped && [ "$culprit_ok" -eq 1 ] \
 else
   bad "12 the async-misattribution shape SKILL.md documents did not reproduce (exit=$ST, culprit_ok=$culprit_ok, blamed='$blamed')"
   note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -4)"
+fi
+
+# ── 13. …and the shape where an INNOCENT TEST is charged instead ──────────
+# The variant assertion 12 cannot see, and the worse of the two: here the
+# `not ok` carries an innocent test's NAME, so per-test results are not merely
+# unhelpful, they are INVERTED. An agent reading them keeps
+# `fast_test_slow_violation` -- the test that really did I/O -- and discards
+# `second_test_keeps_process_alive`, which did nothing.
+#
+# What makes this shape rather than 12's: the violating chain is DETACHED (the
+# test never awaits the promise it starts, and returns immediately), and a
+# later test is still executing when the chain finally reaches the guarded
+# call. Node charges whatever it is running at that moment. Same runtime, same
+# guard, same command as assertion 12 -- only the fixture differs, which is the
+# whole reason this is an executable check and not a sentence.
+#
+# Stable: 20/20 identical runs on node v22.18.0 before it was committed.
+cat > "$WORK/t_detached.js" <<'EOF'
+const { test } = require("node:test");
+const fs = require("node:fs");
+test("fast_test_slow_violation", async () => {
+  Promise.resolve().then(() => new Promise(r => setTimeout(r, 40)))
+    .then(() => { fs.readFileSync("/etc/hosts"); });
+  return;
+});
+test("second_test_keeps_process_alive", async () => {
+  await new Promise(r => setTimeout(r, 120));
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
+       node --require "$GUARD" --test t_detached.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" \
+              | grep -cE '^ok [0-9]+ - fast_test_slow_violation$' || true)"
+innocent_failed="$(printf '%s\n' "$OUT" \
+                   | grep -cE '^not ok [0-9]+ - second_test_keeps_process_alive$' || true)"
+if [ "$ST" -ne 0 ] && tripped \
+   && [ "$culprit_ok" -eq 1 ] && [ "$innocent_failed" -eq 1 ]; then
+  ok "13 an async violation from a DETACHED chain is charged to an INNOCENT TEST BY NAME -- the violator reports ok and second_test_keeps_process_alive reports not ok, so per-test results are exactly inverted"
+else
+  bad "13 the innocent-test misattribution shape did not reproduce (exit=$ST, culprit_ok=$culprit_ok, innocent_failed=$innocent_failed)"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -4)"
+fi
+
+# ── 14. …and it is not limited to ONE innocent test ──────────────────────
+# This is the assertion SKILL.md's "discard the WHOLE BATCH and re-prove one
+# test at a time" rests on. If only ever one neighbour were charged, "discard
+# the neighbour" would be a cheaper rule and someone would eventually propose
+# it. Two innocents fail here from a single violation, and the violator still
+# passes -- so there is no subset of the batch an agent can salvage by reading
+# the TAP stream, and the only sound response is to throw the batch away.
+#
+# Stable: 20/20 identical runs on node v22.18.0 before it was committed.
+cat > "$WORK/t_three.js" <<'EOF'
+const { test } = require("node:test");
+const fs = require("node:fs");
+test("violator", async () => {
+  Promise.resolve().then(() => new Promise(r => setTimeout(r, 150)))
+    .then(() => { fs.readFileSync("/etc/hosts"); });
+  return;
+});
+test("innocent_short", async () => { await new Promise(r => setTimeout(r, 60)); });
+test("innocent_long_running_when_it_lands", async () => {
+  await new Promise(r => setTimeout(r, 200));
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
+       node --require "$GUARD" --test t_three.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - violator$' || true)"
+innocents="$(printf '%s\n' "$OUT" | grep -cE '^not ok [0-9]+ - innocent_' || true)"
+if [ "$ST" -ne 0 ] && tripped \
+   && [ "$culprit_ok" -eq 1 ] && [ "$innocents" -ge 2 ]; then
+  ok "14 ONE async violation fails $innocents innocent tests at once while the violator still reports ok -- there is no salvageable subset, which is why the rule is discard the WHOLE batch"
+else
+  bad "14 the multi-innocent shape did not reproduce (exit=$ST, culprit_ok=$culprit_ok, innocents_failed=$innocents)"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -5)"
 fi
 
 exit "$rc"

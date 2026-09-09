@@ -188,19 +188,23 @@ than none, because it makes the invariant look enforced when it is not.
    is printed here is what is proved to work.
 
    **On node, read the exit status, not the per-test results.** When a violation lands *after* the
-   test that caused it has resolved, `node --test` does not blame that test: the violating test
-   prints `ok`, and a different entry in the TAP stream carries the `not ok` — the enclosing **file**
-   on the node 22.18 this skill's suite runs against, an adjacent **innocent test** on the build the
-   rule was first reproduced on. Both shapes are silent in the same direction, and an agent reading
-   per-test results keeps the test that performs real I/O and discards a clean one:
+   test that caused it has resolved, `node --test` charges it to whatever the runner is executing at
+   that moment — one later test, **several** later tests, or, when nothing else is running, the
+   enclosing file. Never the test that caused it: that one reports `ok` in every case. All three
+   shapes reproduce on **one and the same node build**; what selects between them is when the
+   violation lands relative to the tests around it, not the runtime version — so "our node is newer"
+   is not a reason to trust the per-test lines. Reproduced verbatim on node v22.18.0:
 
    ```
-   ok 1     - fast_test_slow_violation          <- the test that violated
-   not ok 2 - second_test_keeps_process_alive   <- an innocent test
+   ok 1     - violator                              <- the test that violated
+   not ok 2 - innocent_short                        <- an innocent test
+   not ok 3 - innocent_long_running_when_it_lands   <- and another
    exit 1
    ```
 
-   So, in the node proof loop:
+   An agent reading per-test results keeps the test that performs real I/O and discards two that did
+   nothing wrong. There is no salvageable subset to be read out of the TAP stream, which is what the
+   second bullet below rests on. So, in the node proof loop:
    - **The exit status is the only trustworthy signal on this stack.** A zero exit means the batch
      is clean; a nonzero exit means something in it violated.
    - On a nonzero exit whose failure is an `IOGuardViolation`, **discard the whole batch and
@@ -208,10 +212,11 @@ than none, because it makes the invariant look enforced when it is not.
      and a batch is cheap to re-run.
    - **Never keep a test reported `ok` from a run that exited nonzero.**
 
-   `assets/test_io_guard_node.sh` builds that fixture and asserts the shape both variants share —
-   the culprit reporting `ok` while some *other* entry carries the `not ok` and the run exits
-   nonzero — so the rule cannot rot into prose while the behaviour it describes drifts.
-   `references/stacks.md` shows both transcripts side by side.
+   `assets/test_io_guard_node.sh` builds all three fixtures (assertions 12, 13 and 14) and asserts
+   both the invariant they share — the culprit reporting `ok` while some *other* entry carries the
+   `not ok` and the run exits nonzero — and, separately, that **two** innocent tests can fail from
+   one violation. So the rule cannot rot into prose while the behaviour it describes drifts.
+   `references/stacks.md` shows all three transcripts and what selects between them.
 
    The tier is passed per invocation by environment variable, which is sufficient because the proof
    runs one unit at a time — a single run has a single tier:
