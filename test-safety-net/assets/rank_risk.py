@@ -403,12 +403,47 @@ CONTROLLABLE = {
     # is not `open`, and a runtime guard patching the builtin never sees it —
     # but it is still CONTROLLABLE: a test can point an fd at a temp dir the
     # same way it points `open` at one.
-    "filesystem": ("open", "pathlib", "os.path", "os.remove", "os.mkdir",
-                   "shutil", "tempfile", "os.open", "os.write", "os.read",
-                   "os.close", "os.fdopen", "io.FileIO", "mmap.mmap"),
+    #
+    # THE WHOLE FAMILY, not a sample of it (fix round 5, finding C3). An
+    # earlier table listed `os.remove` and `os.mkdir` but not `os.rename`;
+    # `os.open`/`read`/`write` but not `os.listdir`/`scandir`/`walk`/`stat`.
+    # So `os.listdir(p)` — a real read that fails against a missing path —
+    # classified Tier 1 "no I/O markers; directly callable" while the
+    # equally-mutating `os.remove` classified Tier 2. That is the same
+    # enumeration hole C2 found in the exec/spawn family, in the family the
+    # runtime guard has to mirror: `assets/io_guard.py` intercepts what this
+    # table names, so a name missing here is a name missing from BOTH layers.
+    # Two derived tests now pin it (see `test_rank_risk.py`): one derives the
+    # path-taking primitives from CPython's own `os.supports_*` sets, one
+    # derives the pure-Python wrappers from `os.py` itself, and both fail if
+    # the table falls behind.
+    "filesystem": ("open", "io.open", "io.open_code", "codecs.open",
+                   "pathlib", "os.path", "glob", "fileinput",
+                   "shutil", "tempfile", "io.FileIO", "mmap.mmap",
+                   # fd-level data movement
+                   "os.open", "os.write", "os.read", "os.close", "os.fdopen",
+                   "os.pread", "os.pwrite", "os.preadv", "os.pwritev",
+                   "os.readv", "os.writev", "os.sendfile",
+                   "os.fsync", "os.fdatasync", "os.ftruncate", "os.truncate",
+                   # directory + metadata reads
+                   "os.listdir", "os.scandir", "os.walk", "os.fwalk",
+                   "os.stat", "os.lstat", "os.fstat", "os.statvfs",
+                   "os.fstatvfs", "os.access", "os.pathconf", "os.fpathconf",
+                   "os.readlink", "os.getcwd", "os.getcwdb",
+                   # mutation
+                   "os.remove", "os.unlink", "os.rename", "os.renames",
+                   "os.replace", "os.mkdir", "os.makedirs", "os.rmdir",
+                   "os.removedirs", "os.link", "os.symlink", "os.mkfifo",
+                   "os.mknod", "os.chdir", "os.fchdir", "os.chroot",
+                   "os.chmod", "os.fchmod", "os.lchmod",
+                   "os.chown", "os.fchown", "os.lchown",
+                   "os.chflags", "os.lchflags", "os.utime",
+                   "os.getxattr", "os.setxattr", "os.listxattr",
+                   "os.removexattr"),
     "clock": ("datetime", "time.time", "time.sleep", "date.today"),
-    "randomness": ("random", "uuid.uuid4", "secrets"),
-    "environment": ("os.environ", "os.getenv"),
+    "randomness": ("random", "uuid.uuid4", "secrets", "os.urandom"),
+    "environment": ("os.environ", "os.getenv", "os.getenvb", "os.putenv",
+                    "os.unsetenv"),
 }
 UNCONTROLLABLE = {
     "network": ("requests", "urllib.request", "httpx", "socket", "aiohttp",
@@ -427,7 +462,7 @@ UNCONTROLLABLE = {
     # `os.execv` read as Tier 3. Every name `dir(os)` exposes under the
     # exec/spawn/fork families is listed, and a test DERIVES that set at
     # runtime and fails if the table falls behind again.
-    "subprocess": ("subprocess", "os.system", "os.popen",
+    "subprocess": ("subprocess", "os.system", "os.popen", "os.startfile",
                    "os.posix_spawn", "os.posix_spawnp",
                    "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe",
                    "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe",

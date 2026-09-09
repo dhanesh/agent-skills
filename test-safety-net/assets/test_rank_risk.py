@@ -856,6 +856,111 @@ class TestTriage(TempRepo):
         self.assertIn("filesystem", reason)
         self.assertNotIn("subprocess", reason)
 
+    def test_every_path_taking_os_primitive_is_in_the_marker_table(self):
+        # FIX round 5 (C3): the filesystem family had the SAME enumeration hole
+        # C2 found in the exec/spawn family -- `os.remove` and `os.mkdir` were
+        # listed while `os.rename`, `os.listdir`, `os.scandir`, `os.walk` and
+        # `os.stat` were not, so equally-real I/O split across Tier 2 and
+        # Tier 1 "no I/O markers; directly callable".
+        #
+        # DERIVED from CPython itself, not restated as a literal list: the
+        # `os.supports_*` sets ARE the interpreter's own record of which `os`
+        # functions take a path (or a path-like fd), so this expectation
+        # follows the platform and the Python release instead of a human's
+        # memory of them.
+        derived = set()
+        for attr in ("supports_dir_fd", "supports_effective_ids",
+                     "supports_fd", "supports_follow_symlinks"):
+            for fn in getattr(os, attr, ()):
+                name = getattr(fn, "__name__", None)
+                if name:
+                    derived.add("os." + name)
+        # ...plus the fd (`f`-prefixed) and no-follow (`l`-prefixed) variants
+        # of each, which CPython exposes as separate callables and which the
+        # `supports_*` sets therefore do not list.
+        for variant in list(derived):
+            base = variant[len("os."):]
+            for prefix in ("f", "l"):
+                if callable(getattr(os, prefix + base, None)):
+                    derived.add("os." + prefix + base)
+        # Deliberate exclusions, each with a reason. Empty today: every name
+        # the derivation finds really does touch the filesystem.
+        allowed_unmarked = {}
+        table = set(rank_risk.CONTROLLABLE["filesystem"])
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "path-taking os primitives absent from the marker "
+                         "table: %s" % sorted(missing))
+
+    def test_every_pure_python_os_filesystem_wrapper_is_in_the_marker_table(self):
+        # The second derivation, covering what the first structurally cannot:
+        # `os.walk`, `os.makedirs`, `os.removedirs`, `os.renames` and `os.fwalk`
+        # are written in Python inside `os.py` and take no `dir_fd`/`fd`
+        # argument, so no `os.supports_*` set mentions them. Derive them from
+        # `os.py`'s own module membership instead, and allow-list the members
+        # that genuinely perform no filesystem I/O.
+        derived = {"os." + n for n in dir(os)
+                   if not n.startswith("_")
+                   and callable(getattr(os, n, None))
+                   and getattr(getattr(os, n), "__module__", None) == "os"}
+        allowed_unmarked = {
+            "os.PathLike": "an ABC, not a call",
+            "os.stat_result": "a result type, not a syscall",
+            "os.statvfs_result": "a result type, not a syscall",
+            "os.terminal_size": "a result type, not a syscall",
+            "os.fsencode": "pure str/bytes conversion",
+            "os.fsdecode": "pure str/bytes conversion",
+            "os.get_exec_path": "reads os.environ; covered by the environment group",
+        }
+        table = (set(rank_risk.CONTROLLABLE["filesystem"])
+                 | set(rank_risk.CONTROLLABLE["environment"])
+                 | set(rank_risk.UNCONTROLLABLE["subprocess"]))
+        missing = derived - table - set(allowed_unmarked)
+        self.assertEqual(missing, set(),
+                         "pure-python os wrappers absent from the marker "
+                         "table: %s" % sorted(missing))
+
+    def test_the_filesystem_family_tiers_consistently_not_half_at_tier_1(self):
+        # The behavioural half, on the six spellings the review reproduced at
+        # Tier 1 "no I/O markers; directly callable" while `os.remove`,
+        # `os.mkdir` and `open` in the same file read Tier 2.
+        for name, call in (("listdir", "os.listdir(p)"),
+                           ("scandir", "os.scandir(p)"),
+                           ("walk", "list(os.walk(p))"),
+                           ("stat", "os.stat(p)"),
+                           ("rename", "os.rename(p, p)"),
+                           ("globbed", "glob.glob(p)")):
+            with self.subTest(name=name):
+                tier, reason = self._tier(
+                    "fs_%s.py" % name,
+                    "import glob\nimport os\n\n\ndef go(p):\n    return %s\n" % call,
+                    "go")
+                self.assertEqual(tier, 2)
+                self.assertIn("filesystem", reason)
+
+    def test_import_time_path_algebra_still_inert_after_the_family_widened(self):
+        # Round 4's IMPORT_TIME_INERT judgement call must survive round 5's
+        # widening: `os.path.join`/`dirname`/`abspath` at module level are
+        # string algebra over `__file__` and must NOT floor the tier, while a
+        # real probe (`os.path.exists`) and the newly-added `os.listdir` must.
+        tier, reason = self._tier(
+            "algebra.py",
+            "import os\n\nHERE = os.path.dirname(os.path.abspath(__file__))\n"
+            "\n\ndef pure(x):\n    return x + 1\n",
+            "pure")
+        self.assertEqual(tier, 1, reason)
+        for name, stmt in (("exists", "FOUND = os.path.exists('/etc/hosts')"),
+                           ("listdir", "ENTRIES = os.listdir('/tmp')"),
+                           ("stat", "ST = os.stat('/etc/hosts')")):
+            with self.subTest(name=name):
+                tier, reason = self._tier(
+                    "probe_%s.py" % name,
+                    "import os\n\n%s\n\n\ndef pure_%s(x):\n    return x + 1\n"
+                    % (stmt, name),
+                    "pure_%s" % name)
+                self.assertEqual(tier, 3, reason)
+                self.assertIn("import time", reason)
+
 
 class TestAlreadyCovered(TempRepo):
     def test_unit_named_in_a_test_file_is_reported_covered(self):
