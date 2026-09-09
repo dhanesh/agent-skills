@@ -3,7 +3,8 @@
 Invoke as (see the `$SKILL_DIR` preamble in `SKILL.md`):
 
 ```sh
-python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"]
+python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"] \
+  [--stack python|node]
 ```
 
 Stdlib + git only. No network, no third-party packages, offline, deterministic — byte-identical
@@ -16,15 +17,16 @@ JSON across repeated runs on an unchanged repo.
 | `repo` | positional, required | — | Path to the repository to analyse. Must be a directory. |
 | `--top-n` | flag | `10` | How many units to net into `ranked` in this pass. Everything past this cutoff lands in `remainder`, not discarded — the next run picks up there. |
 | `--since` | flag | `"6 months ago"` | Churn window, any `git --since` expression. With no git history (or no `.git`), churn degrades to `0` for every unit rather than raising. When `repo` is a *subdirectory* of a git repo, churn is scoped to that subtree and a `note:` line naming the scope is written to **stderr** — the JSON on stdout is unchanged. |
+| `--stack` | flag | detected | Force the stack instead of detecting it. Detection scores each stack — the non-test source files it claims, plus a bonus for a manifest at or near the root — and the highest score wins; a manifest nested under `assets/`, `templates/`, `fixtures/`, `examples/` or `testdata/` describes a *template* and scores nothing. **Every run writes the verdict and the scores to stderr** (`note: stack=python (evidence: python=51, node=17)`). When the top two scores are within 10% of each other the run **exits 2 without producing JSON** and names the flag: a tie is reported, never guessed. |
 
 ## Output — top-level keys
 
 | Key | Shape | Meaning |
 |---|---|---|
 | `root` | string | Absolute path to the analysed repo. |
-| `stack` | string | Always `"python"` in this version. |
+| `stack` | string | Which stack produced this report — `"python"` or `"node"`. Node repos are ranked but **not written**: no runtime guard ships for node yet, so stop after the report (`references/stacks.md`). |
 | `window` | string | The `--since` value actually used. |
-| `units_discovered` | integer | Total module-level `def`/`class` units found, before triage or coverage filtering. |
+| `units_discovered` | integer | Total units found, before triage or coverage filtering — module-level `def`/`class` for python, top-level `export`ed functions and classes for node. |
 | `ranked` | array of rows | The top `--top-n` netted units, highest score first, ties broken by `id`. **This is what you show the user at the confirmation gate.** |
 | `remainder` | array of rows | Netted units past the `--top-n` cutoff, same sort order. Where the next run resumes. |
 | `not_netted` | array of rows | Units at Tier 3 or Tier 4 — sorted by `(tier, id)`. These never get a test written; they are the seam/refactor list for `clean-code`. |
@@ -37,7 +39,7 @@ JSON across repeated runs on an unchanged repo.
 | `id` | `"<path>::<name>"` — the unit's stable identifier. |
 | `path` | Repo-relative source path. |
 | `name` | The function or class name. |
-| `lineno` | Line the `def`/`class` starts on. |
+| `lineno` | Line the unit's declaration starts on. |
 | `kind` | `"function"` or `"class"`. |
 | `churn` | Commits touching this unit's file within the `--since` window. Exact, from git log. |
 | `inbound_refs` | Approximate blast radius: identifier occurrences of this unit's name, credited to its own file (excluding the definition line) plus other files that plausibly reference its module. **Static approximation, not a call graph** — it cannot tell a call from a comment, and a re-export can hide real reach. Qualified forms are exact (`mod.name` counts, `buf.name` does not); a **bare** occurrence in a file that references the module still counts even when it means something else — a same-named local, or one imported from a different module. Show it alongside `churn` in the report so a human can see which signal drove the placement (see "Reading a row's score" below). |

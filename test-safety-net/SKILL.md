@@ -14,7 +14,8 @@ description: >-
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
-  CLI. No pip, no network. Python repositories only in this version.
+  CLI. No pip, no network. Writes tests for Python repositories only in this version; node/
+  TypeScript repos are detected and ranked, but stop before writing (references/stacks.md).
 metadata:
   author: dhanesh
   version: "1.0.0"
@@ -61,14 +62,21 @@ than none, because it makes the invariant look enforced when it is not.
 ## Workflow
 
 1. **Detect** the stack and — critically — how to run exactly **one** test, not just the suite.
-   This version supports Python repositories only; consult `references/stacks.md` for the python
-   row and stop plainly, without improvising, if the repo is something else. Single-test
-   invocation is load-bearing: step 4's proof is impossible without it.
+   The ranker detects the stack itself and prints its verdict and the evidence behind it on
+   stderr (`note: stack=python (evidence: python=51, node=17)`); read that line rather than
+   assuming, and pass `--stack` when it is wrong or when it reports a tie. This version WRITES
+   tests for Python repositories only. A node/TypeScript repo is ranked, and then you stop and
+   hand over the report — there is no runtime guard for node yet, and a stack that cannot prove
+   the no-I/O invariant declines to write rather than writing unproven tests. Consult
+   `references/stacks.md` for the row that applies, and stop plainly, without improvising, for
+   anything with no complete row. Single-test invocation is load-bearing: step 4's proof is
+   impossible without it.
 
 2. **Rank** the risk surface:
 
    ```sh
-   python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"]
+   python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"] \
+     [--stack python|node]
    ```
 
    Offline, stdlib + git only, deterministic. Read `references/parameters.md` for the full

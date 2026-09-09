@@ -16,6 +16,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -328,17 +329,31 @@ class TestStripper(unittest.TestCase):
 # ── The rest of the interface ────────────────────────────────────────────
 
 class TestInterfaceNames(NodeCase):
-    def test_supplies_every_interface_name_except_triage(self):
+    def test_supplies_every_interface_name(self):
         for attr in ("STACK_NAME", "evidence", "iter_source_files", "is_test_path",
                      "is_test_for", "module_of", "name_pattern", "path_pattern",
                      "IDENTIFIER_RE", "preceding_qualifier", "module_bindings",
-                     "reached_through_module", "discover_units"):
+                     "reached_through_module", "discover_units", "triage"):
             self.assertTrue(hasattr(stack_node, attr), attr)
         self.assertEqual(stack_node.STACK_NAME, "node")
-        # `triage` is Task 4's, and registering a stack without it would raise
-        # inside `rank()` for every repo this stack claims.
-        self.assertFalse(hasattr(stack_node, "triage"))
-        self.assertNotIn(stack_node, rank_risk.STACKS)
+        # All fourteen, so registration cannot raise `AttributeError` inside
+        # `rank()` for a repo this stack wins. Compared by NAME, not identity:
+        # this file loads the stacks by path while `rank_risk` imports them by
+        # name, so the registry holds a different module object for the same
+        # source file.
+        self.assertIn("node", [s.STACK_NAME for s in rank_risk.STACKS])
+
+    def test_the_registry_holds_both_stacks(self):
+        self.assertEqual(sorted(s.STACK_NAME for s in rank_risk.STACKS),
+                         ["node", "python"])
+        for stack in rank_risk.STACKS:
+            for attr in ("STACK_NAME", "evidence", "iter_source_files",
+                         "is_test_path", "is_test_for", "module_of",
+                         "name_pattern", "path_pattern", "IDENTIFIER_RE",
+                         "preceding_qualifier", "module_bindings",
+                         "reached_through_module", "discover_units", "triage"):
+                self.assertTrue(hasattr(stack, attr),
+                                "%s lacks %s" % (stack.STACK_NAME, attr))
 
     def test_evidence_counts_sources_and_adds_a_manifest_bonus(self):
         self.assertEqual(stack_node.evidence(self.root), 0)
@@ -561,6 +576,10 @@ class TestStackDetection(unittest.TestCase):
         self._stacks = rank_risk.STACKS
         rank_risk.STACKS = [stack_node, rank_risk.stack_python]
         self.addCleanup(setattr, rank_risk, "STACKS", self._stacks)
+        # The list installed above is the SHIPPED registry, in a different
+        # order: highest evidence wins, so order is meaningless and these tests
+        # would pass with it reversed. `test_the_registry_holds_both_stacks`
+        # is the separate assertion that the shipped registry is these two.
 
     @unittest.skipUnless(IN_SOURCE_REPO, "assets are installed outside their own repo")
     def test_this_repo_classifies_as_python_not_node(self):
@@ -669,6 +688,343 @@ class TestStackDetection(unittest.TestCase):
         self.assertIn("stack=python", err.getvalue())
         self.assertIn("node=0", err.getvalue())
         self.assertEqual(json.loads(out.getvalue())["stack"], "python")
+
+# ── Triage ───────────────────────────────────────────────────────────────
+
+class TriageCase(NodeCase):
+    def tier(self, rel, text, name):
+        write(self.root, rel, text)
+        units, _ = stack_node.discover_units(self.root)
+        unit = next(u for u in units if u["path"] == rel and u["name"] == name)
+        return stack_node.triage(self.root, unit)
+
+
+class TestTiers(TriageCase):
+    def test_tier_1_no_markers_directly_callable(self):
+        tier, reason = self.tier("src/pure.js",
+                                 "export function add(a, b) {\n  return a + b;\n}\n", "add")
+        self.assertEqual(tier, 1)
+        self.assertEqual(reason, "no I/O markers; directly callable")
+
+    def test_tier_2_controllable_only(self):
+        for rel, src, name, group in (
+                ("src/clock.js", "export function stamp(x) { return Date.now() + x; }\n",
+                 "stamp", "clock"),
+                ("src/date.js", "export function mk() { return new Date(0); }\n",
+                 "mk", "clock"),
+                ("src/rand.js", "export function id() { return Math.random(); }\n",
+                 "id", "randomness"),
+                ("src/env.js", "export function home() { return process.env.HOME; }\n",
+                 "home", "environment"),
+                ("src/fs.js",
+                 'import fs from "node:fs";\nexport function save(p) { fs.writeFileSync(p, "x"); }\n',
+                 "save", "filesystem")):
+            with self.subTest(name=name):
+                tier, reason = self.tier(rel, src, name)
+                self.assertEqual(tier, 2)
+                self.assertIn(group, reason)
+                self.assertIn("pin at a wider boundary", reason)
+
+    def test_tier_3_uncontrollable_inside_the_unit(self):
+        for rel, src, name, group in (
+                ("src/net.js",
+                 'import { request } from "https";\nexport function ping(h) { return request(h); }\n',
+                 "ping", "network"),
+                ("src/proc.js",
+                 'import { spawn } from "node:child_process";\n'
+                 'export function run(c) { return spawn(c); }\n',
+                 "run", "subprocess"),
+                ("src/db.js",
+                 'import { MongoClient } from "mongodb";\n'
+                 'export function conn(u) { return new MongoClient(u); }\n',
+                 "conn", "database")):
+            with self.subTest(name=name):
+                tier, reason = self.tier(rel, src, name)
+                self.assertEqual(tier, 3)
+                self.assertIn(group, reason)
+                self.assertIn("needs a seam", reason)
+
+    def test_tier_4_uncontrollable_at_the_boundary(self):
+        # The Python stack's tier 4 in node's spelling: the I/O happens when
+        # the module is IMPORTED, so the harness takes it before any test body
+        # runs and no fixture exists yet to control it.
+        tier, reason = self.tier(
+            "src/boot.js",
+            'import axios from "axios";\n\n'
+            'const DATA = axios.get("http://x");\n\n'
+            "export function get() { return DATA; }\n", "get")
+        self.assertEqual(tier, 4)
+        self.assertIn("network I/O at import time", reason)
+        self.assertIn("not reachable", reason)
+
+    def test_import_time_controllable_floors_every_unit_at_tier_3(self):
+        # Mirrors the Python stack's import-time floor. `get` touches nothing
+        # itself and would be Tier 1; the module read a file to define CFG.
+        write(self.root, "src/cfg.js",
+              'import fs from "fs";\n\n'
+              'const CFG = JSON.parse(fs.readFileSync("/etc/a.json"));\n\n'
+              "export function get() { return CFG; }\n"
+              "export function untouched() { return 1; }\n")
+        units, _ = stack_node.discover_units(self.root)
+        for unit in units:
+            with self.subTest(name=unit["name"]):
+                tier, reason = stack_node.triage(self.root, unit)
+                self.assertEqual(tier, 3)
+                self.assertIn("filesystem I/O at import time", reason)
+                self.assertIn("a fixture runs too late", reason)
+
+    def test_an_import_statement_alone_is_not_import_time_io(self):
+        # The floor above must not fire on the IMPORT itself: `import fs` reads
+        # no file, and reading the specifier as a hit would floor every unit in
+        # every file that imports anything. This is the node counterpart of
+        # `stack_python._module_level_regions` skipping `ast.Import`.
+        tier, _reason = self.tier(
+            "src/only_import.js",
+            'import fs from "node:fs";\nimport { spawn } from "child_process";\n\n'
+            "export function add(a, b) { return a + b; }\n", "add")
+        self.assertEqual(tier, 1)
+
+    def test_a_function_body_does_not_run_at_import_time(self):
+        # A sibling function full of I/O must not floor the whole file: its
+        # body runs when it is CALLED. Only the unit that reaches it inherits.
+        write(self.root, "src/two.js",
+              'import fs from "fs";\n\n'
+              "export function reader(p) { return fs.readFileSync(p); }\n\n"
+              "export function pure(a) { return a + 1; }\n")
+        by = {u["name"]: u for u in stack_node.discover_units(self.root)[0]}
+        self.assertEqual(stack_node.triage(self.root, by["pure"])[0], 1)
+        self.assertEqual(stack_node.triage(self.root, by["reader"])[0], 2)
+
+    def test_a_same_file_helper_is_followed_transitively(self):
+        tier, reason = self.tier(
+            "src/wrap.js",
+            'import fs from "fs";\n\n'
+            "function _write(p, d) { fs.writeFileSync(p, d); }\n\n"
+            "export function save(p, d) { return _write(p, d); }\n", "save")
+        self.assertEqual(tier, 2)
+        self.assertIn("via _write", reason)
+
+    def test_an_inline_require_is_resolved_through_its_specifier(self):
+        # Binds no local name at all, so the alias map cannot help: the
+        # specifier is read out of the string-kept text at the same offsets.
+        tier, reason = self.tier(
+            "src/sh.js",
+            'export function sh(c) { return require("child_process").execSync(c); }\n',
+            "sh")
+        self.assertEqual(tier, 3)
+        self.assertIn("subprocess", reason)
+
+    def test_both_spellings_of_a_builtin_tier_identically(self):
+        # `node:fs` and `fs` are ONE marker, canonicalised, so the table holds
+        # one entry per marker instead of two spellings of half of them.
+        a = self.tier("src/p.js",
+                      'import fs from "fs";\nexport function s(p) { fs.writeFileSync(p, 1); }\n', "s")
+        b = self.tier("src/q.js",
+                      'import fs from "node:fs";\nexport function t(p) { fs.writeFileSync(p, 1); }\n', "t")
+        self.assertEqual(a[0], b[0])
+        self.assertEqual(a[0], 2)
+
+    def test_an_aliased_namespace_import_still_resolves(self):
+        tier, _ = self.tier(
+            "src/ns.js",
+            'import * as cp from "node:child_process";\n'
+            "export function run(c) { return cp.execSync(c); }\n", "run")
+        self.assertEqual(tier, 3)
+
+    def test_a_destructured_require_still_resolves(self):
+        tier, _ = self.tier(
+            "src/req.js",
+            'const { readFileSync } = require("fs");\n'
+            "export function read(p) { return readFileSync(p); }\n", "read")
+        self.assertEqual(tier, 2)
+
+    def test_a_marker_inside_a_comment_or_a_string_does_not_count(self):
+        # The stripper is the whole defence here: a unit is NOT tiered up
+        # because a comment mentions `fs`, because a string spells
+        # "child_process", or because a regex literal contains `Math.random`.
+        tier, reason = self.tier(
+            "src/quiet.js",
+            "export function add(a, b) {\n"
+            "  // fs.writeFileSync(a, b) -- used to, not any more\n"
+            "  /* spawn(a) */\n"
+            '  const label = "child_process";\n'
+            "  const re = /Math.random/g;\n"
+            "  const t = `axios.get(${a})`;\n"
+            "  return a + b + label.length + Number(re.source.length) + t.length;\n"
+            "}\n", "add")
+        self.assertEqual(tier, 1, reason)
+
+    def test_a_commented_out_import_binds_nothing_for_triage(self):
+        tier, _ = self.tier(
+            "src/dead.js",
+            '// import { execSync } from "child_process";\n'
+            "export function add(a, b) { return a + b; }\n", "add")
+        self.assertEqual(tier, 1)
+
+    def test_a_class_field_initialiser_is_not_import_time(self):
+        # Where node and Python genuinely differ: a JS class field runs at
+        # CONSTRUCTION, not when the class is defined, so a class body is cut
+        # out of the import-time region whole. `stack_python` treats class-body
+        # statements as import-time because Python evaluates them then.
+        write(self.root, "src/cls.js",
+              'import fs from "fs";\n\n'
+              "export class Store {\n  data = fs.readFileSync('/x');\n}\n\n"
+              "export function pure(a) { return a; }\n")
+        by = {u["name"]: u for u in stack_node.discover_units(self.root)[0]}
+        self.assertEqual(stack_node.triage(self.root, by["pure"])[0], 1)
+        self.assertEqual(stack_node.triage(self.root, by["Store"])[0], 2)
+
+    def test_a_unit_that_vanished_since_discovery_is_tier_4(self):
+        write(self.root, "src/a.js", "export function gone() {}\n")
+        unit = {"id": "src/a.js::ghost", "path": "src/a.js", "name": "ghost",
+                "lineno": 1, "kind": "function"}
+        self.assertEqual(stack_node.triage(self.root, unit),
+                         (4, "unit not found on re-read"))
+
+
+# ── The marker tables, derived rather than remembered ────────────────────
+
+# node 22.18's `module.builtinModules`, minus the `_`-prefixed internals node
+# documents as private. Frozen so this test still asserts something on a
+# machine with no node installed; when node IS installed the live list is used
+# instead, which is what makes a node upgrade able to fail this.
+FROZEN_BUILTIN_MODULES = (
+    "assert assert/strict async_hooks buffer child_process cluster console "
+    "constants crypto dgram diagnostics_channel dns dns/promises domain events "
+    "fs fs/promises http http2 https inspector inspector/promises module net os "
+    "path path/posix path/win32 perf_hooks process punycode querystring readline "
+    "readline/promises repl stream stream/consumers stream/promises stream/web "
+    "string_decoder sys timers timers/promises tls trace_events tty url util "
+    "util/types v8 vm wasi worker_threads zlib").split()
+
+# Every builtin that is NOT in a marker group, each with the reason it performs
+# no I/O in any group this filter tracks. The stdio family is one decision
+# taken five times: `stack_python` marks neither `input()` nor `sys.stdout`, so
+# marking node's terminal modules would put the two stacks' tables in
+# disagreement about what a group MEANS. Terminal I/O is left to the runtime
+# guard, which is the enforcement.
+ALLOWED_UNMARKED = {
+    "assert": "assertions over values already in memory",
+    "async_hooks": "in-process instrumentation of the async lifecycle",
+    "buffer": "bytes in memory",
+    "console": "terminal output; no tracked group (see the stdio note)",
+    "constants": "numeric constants",
+    "diagnostics_channel": "in-process pub/sub for instrumentation",
+    "domain": "deprecated error-context tracking; no external effect",
+    "events": "in-process emitter",
+    "module": "the loader reads files, but every user-facing entry point that "
+              "does is `import`/`require` itself, which cannot be marked "
+              "without marking every file in the repo",
+    "path": "pure string algebra over paths; touches no filesystem. This is "
+            "why node needs no equivalent of stack_python.IMPORT_TIME_INERT",
+    "punycode": "string encoding",
+    "querystring": "string encoding",
+    "readline": "terminal input; no tracked group (see the stdio note)",
+    "repl": "an interactive terminal; no tracked group (see the stdio note)",
+    "sea": "reads assets embedded in the executable, not the filesystem",
+    "stream": "plumbing; the endpoints it connects are what touch the world",
+    "string_decoder": "bytes to string, in memory",
+    "sys": "deprecated alias of util",
+    "test": "the test runner; a unit under test does not import it",
+    "tty": "terminal device queries; no tracked group (see the stdio note)",
+    "url": "string parsing; opens nothing",
+    "util": "formatting and promisification",
+    "vm": "compiles and runs code in-process; performs no I/O of its own",
+    "zlib": "compression over buffers in memory",
+}
+
+
+def _live_builtin_modules():
+    """node's own `module.builtinModules`, or None when node is not installed."""
+    try:
+        r = subprocess.run(
+            ["node", "-e",
+             "console.log(require('module').builtinModules.join(','))"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [name.strip() for name in r.stdout.split(",") if name.strip()]
+
+
+class TestMarkerTableCompleteness(unittest.TestCase):
+    """Every I/O-performing builtin is marked, DERIVED from node's own list.
+
+    The counterpart of the Python suite's `dir(os)`-derived tests, and it
+    exists for the same finding: a table that lists `os.remove` but not
+    `os.rename`, or `os.execv` but not `os.execlp`, splits equally-real I/O
+    across Tier 3 and Tier 1 "no I/O markers; directly callable" -- and nobody
+    notices, because both halves look deliberate.
+
+    THIS TEST IS SUPPOSED TO FAIL WHEN NODE ADDS A BUILTIN MODULE. That failure
+    is the mechanism: it forces someone to put the new module in a marker group
+    or in `ALLOWED_UNMARKED` with a reason, instead of it silently landing in
+    Tier 1. Do NOT "fix" such a failure by widening the derivation or by
+    deleting names from the frozen list.
+    """
+
+    def classify(self, mod):
+        """The group `mod` is marked in, "allowed", or None."""
+        for controllable, table in ((False, stack_node.UNCONTROLLABLE),
+                                    (True, stack_node.CONTROLLABLE)):
+            for group, markers in table.items():
+                for marker in markers:
+                    canon = stack_node._canon(marker)
+                    if (canon == mod or canon.startswith(mod + ".")
+                            or canon.startswith(mod + "/")):
+                        return group
+        if mod in ALLOWED_UNMARKED:
+            return "allowed"
+        if "/" in mod:                       # `path/posix` IS `path`
+            return self.classify(mod.rsplit("/", 1)[0])
+        return None
+
+    def test_every_builtin_module_is_marked_or_allow_listed(self):
+        derived = _live_builtin_modules() or list(FROZEN_BUILTIN_MODULES)
+        unclassified = sorted(
+            mod for mod in
+            {stack_node._canon(m) for m in derived if not m.startswith("_")}
+            if self.classify(mod) is None)
+        self.assertEqual(
+            unclassified, [],
+            "node builtin modules absent from both the marker tables and "
+            "ALLOWED_UNMARKED: %s" % unclassified)
+
+    def test_the_frozen_list_still_matches_the_installed_node(self):
+        # The frozen list is the fallback when node is absent; if it drifts
+        # from a real node, the offline arm of the test above is asserting
+        # about a runtime that no longer exists.
+        live = _live_builtin_modules()
+        if live is None:
+            self.skipTest("node is not installed")
+        missing = sorted(set(FROZEN_BUILTIN_MODULES)
+                         - {stack_node._canon(m) for m in live})
+        self.assertEqual(missing, [],
+                         "frozen builtins this node no longer has: %s" % missing)
+
+    def test_the_families_the_python_branch_got_wrong_are_whole_here(self):
+        # The behavioural half, on the siblings a hand-written table drops:
+        # `dns` and `tls` are as much network as `http` is, `cluster` and
+        # `worker_threads` start execution the way `child_process` does, and
+        # none of the four was in the first draft of these tables.
+        for mod, group in (("dns", "network"), ("tls", "network"),
+                           ("http2", "network"), ("inspector", "network"),
+                           ("cluster", "subprocess"), ("worker_threads", "subprocess"),
+                           ("wasi", "filesystem"), ("trace_events", "filesystem"),
+                           ("perf_hooks", "clock"), ("os", "environment")):
+            with self.subTest(module=mod):
+                self.assertEqual(self.classify(mod), group)
+
+    def test_the_marker_groups_are_the_seven_the_design_names(self):
+        self.assertEqual(sorted(stack_node.CONTROLLABLE),
+                         ["clock", "environment", "filesystem", "randomness"])
+        self.assertEqual(sorted(stack_node.UNCONTROLLABLE),
+                         ["database", "network", "subprocess"])
+        self.assertEqual(sorted(stack_node.CONTROLLABLE),
+                         sorted(rank_risk.stack_python.CONTROLLABLE))
+        self.assertEqual(sorted(stack_node.UNCONTROLLABLE),
+                         sorted(rank_risk.stack_python.UNCONTROLLABLE))
 
 
 if __name__ == "__main__":

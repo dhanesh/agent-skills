@@ -109,6 +109,7 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
+import stack_node                                                   # noqa: E402
 import stack_python                                                 # noqa: E402
 from stack_common import SKIP_DIRS, read_text                       # noqa: E402,F401
 
@@ -125,7 +126,7 @@ from stack_common import SKIP_DIRS, read_text                       # noqa: E402
 # `matches()` in front of Python therefore reclassified the ranker's own
 # corpus as node, and a stack picked that way discovers the wrong units,
 # triages them with the wrong tables, and reports it all as a clean result.
-STACKS = [stack_python]
+STACKS = [stack_node, stack_python]
 
 # How close two stacks may be before the answer is "I do not know". Relative,
 # so it scales with the size of the repo rather than firing on every small

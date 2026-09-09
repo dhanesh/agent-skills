@@ -9,16 +9,32 @@ indistinguishable from the one you're proving.
 | stack | find units | tests go | framework | run ONE test |
 |---|---|---|---|---|
 | python | module-level `def` / `class` | `tests/` or `test_*.py` beside the source | pytest, falling back to `unittest` | `pytest path/to/test_file.py::test_name` (or `pytest path/to/test_file.py::TestClass::test_name`); unittest fallback: `python3 -m unittest module.Class.test_name` |
-| node | *not yet supported — see the follow-up plan* | — | — | — |
+| node | top-level `export`ed function/class — **ranked, not yet written**, see below | — | — | — |
 | go | *not yet supported — see the follow-up plan* | — | — | — |
 | rust | *not yet supported — see the follow-up plan* | — | — | — |
 
-This version of the skill supports **Python repositories only**. The workflow itself (rank →
-confirm → write+prove → report) is language-agnostic, and adding a stack is meant to be a matter
-of filling in its row here plus a fixture set — it should never require reopening the workflow.
-Do not improvise support for node/go/rust by guessing at conventions; if `rank_risk.py` or the
-stack detection finds a non-Python repo, say plainly that this version does not cover it and stop
-rather than proceeding on assumptions.
+This version of the skill **writes tests for Python repositories only**. The workflow itself
+(rank → confirm → write+prove → report) is language-agnostic, and adding a stack is meant to be a
+matter of filling in its row here plus a fixture set — it should never require reopening the
+workflow. Do not improvise support for node/go/rust by guessing at conventions; if `rank_risk.py`
+or the stack detection finds a repo this file has no complete row for, say plainly that this
+version does not cover it and stop rather than proceeding on assumptions.
+
+## Node: ranked, not yet written
+
+`assets/rank_risk.py` **does** cover node/TypeScript repositories for the first half of the
+workflow. It detects them (each stack scores the repo — non-test source files plus a bonus for a
+manifest at or near the root — and the highest score wins; `--stack` overrides, and a tie is
+reported rather than guessed), discovers top-level `export`ed functions and classes
+heuristically, and triages them against node's own I/O marker tables into the same four tiers
+Python uses.
+
+What does **not** exist yet is the second half: there is no runtime guard for node and no
+single-test invocation wired up, so **step 4's red→green proof cannot be performed**. Per the
+multi-stack design, a stack that cannot prove the no-I/O invariant declines to write rather than
+writing unproven tests. So on a node repo: produce the ranking, hand over the report, and stop
+before writing any test. Filling in this row's remaining three columns is what makes node
+complete.
 
 ## Python row, in detail
 

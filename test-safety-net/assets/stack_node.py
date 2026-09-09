@@ -9,7 +9,7 @@ documents the interface the two meet at.
 HEURISTIC BY DESIGN, AND THE DIRECTION IT FAILS IN. Node exposes no public
 parser API, so there is no `ast` to reach for the way `stack_python` does
 (multistack design, D1). Discovery here is a comment/string stripper plus
-bracket matching, and Task 3 adds a precise path that drives the repo's own
+bracket matching, and Task 4 adds a precise path that drives the repo's own
 `typescript` when it has one, falling back to `_units_heuristic` when it does
 not. That makes every predicate below an approximation, and the architecture
 that makes an approximation acceptable is the one the original design already
@@ -19,16 +19,19 @@ a phantom unit costs the user a glance -- and never in the direction of less,
 where the cost is the bug the missing test would have caught. Every judgement
 call below is recorded with the direction it fails in.
 
-NOT REGISTERED IN `rank_risk.STACKS` YET. `triage` is the fourteenth interface
-name and it is Task 4's; a stack without it raises `AttributeError` inside
-`rank()` for any repo it claims. Registration therefore lands with `triage`,
-not here. Until then a node repo still falls through to `stack_python` and
-reports zero units, which is the silent zero this whole change exists to close
--- stated plainly rather than half-closed.
+REGISTERED IN `rank_risk.STACKS`, with all fourteen interface names. It could
+not be registered before `triage` existed -- `rank()` calls it for every unit
+-- and it could not be registered safely while detection took the FIRST stack
+that claimed a repo, because this module claims any tree holding a `.mjs`
+helper. Both are settled: `evidence` scores instead of claiming, and the
+detector takes the highest score. What a node repo got before that is worth
+naming, because it is the failure this stack exists to close: it fell through
+to `stack_python`, discovered zero units, and printed a clean report.
 """
 from __future__ import annotations
 
 import bisect
+import collections
 import functools
 import os
 import re
@@ -726,11 +729,13 @@ def _units_heuristic(root: str):
     return sorted(units, key=lambda u: u["id"])
 
 
-def _units_in_text(rel: str, text: str):
-    """The units one file's text defines. Public for the tests and for Task 3."""
-    stripped = strip_noncode(text)
-    depths = _depths(stripped)
-    defs = _local_defs(stripped, depths)
+def _found_exports(stripped: str, depths, defs):
+    """(name, kind, position) for every export form in already-stripped text.
+
+    Split out of `_units_in_text` so `triage` can ask WHERE a unit is without
+    re-deriving it: the two must agree on a unit's position exactly, or triage
+    would read a different span of the file than discovery named.
+    """
     found = []
     for m in _EXPORT_KW_RE.finditer(stripped):
         if depths[m.start()] == 0:
@@ -738,6 +743,15 @@ def _units_in_text(rel: str, text: str):
     for m in _CJS_HEAD_RE.finditer(stripped):
         if depths[m.start()] == 0:
             found.extend(_parse_cjs(stripped, depths, defs, m.start(), m.end()))
+    return found
+
+
+def _units_in_text(rel: str, text: str):
+    """The units one file's text defines. Public for the tests and for Task 4."""
+    stripped = strip_noncode(text)
+    depths = _depths(stripped)
+    defs = _local_defs(stripped, depths)
+    found = _found_exports(stripped, depths, defs)
 
     starts = _line_starts(stripped)
     units, seen = [], set()
@@ -807,26 +821,29 @@ def _stmt_end(text: str, depths, pos: int) -> int:
     return limit
 
 
-def _value_kind(text: str, depths, defs, pos: int):
-    """The kind of the value assigned at/after `pos`, or None if not callable.
+def _assign_op(text: str, depths, pos: int, end: int) -> int:
+    """Index of the `=` that assigns the declaration starting at `pos`, or -1.
 
     `pos` is just past the declared name, so a TypeScript type annotation may
-    still stand between here and the `=`. The assignment operator is found by
-    skipping anything that is a comparison or an arrow, which is what lets
-    `export const f: () => void = ...` be read correctly.
+    still stand between here and the `=`. Anything that is a comparison or an
+    arrow is skipped, which is what lets `export const f: () => void = ...` be
+    read correctly.
     """
-    n = len(text)
-    end = _stmt_end(text, depths, pos)
-    d0 = depths[pos] if pos < n else 0
-    eq = -1
+    d0 = depths[pos] if pos < len(text) else 0
     i = pos
     while i < end:
         c = text[i]
         if c == "=" and depths[i] == d0 and text[i + 1:i + 2] not in ("=", ">") \
                 and (i == 0 or text[i - 1] not in "=!<>+-*/%&|^"):
-            eq = i
-            break
+            return i
         i += 1
+    return -1
+
+
+def _value_kind(text: str, depths, defs, pos: int):
+    """The kind of the value assigned at/after `pos`, or None if not callable."""
+    end = _stmt_end(text, depths, pos)
+    eq = _assign_op(text, depths, pos, end)
     if eq < 0:
         return None
     return _classify_value(text, depths, defs, eq + 1, end)
@@ -1010,3 +1027,521 @@ def _key_value_end(text: str, depths, vpos: int, close_i: int) -> int:
         if text[j] == "," and depths[j] == d0:
             return j
     return close_i
+
+
+# ── I/O markers ──────────────────────────────────────────────────────────
+#
+# The vocabulary of "this unit touches the world", split the way the original
+# design splits it: CONTROLLABLE groups are the ones a test can point somewhere
+# safe (a temp dir, a frozen clock, a seeded random, a set environment variable)
+# and UNCONTROLLABLE groups are the ones it cannot, which need a seam in the
+# code before a characterization test is honest.
+#
+# TWO VOCABULARIES IN ONE TABLE, because JavaScript has two. A marker is either
+# a MODULE SPECIFIER (`fs`, `child_process`, `axios`) or a CODE PATH
+# (`Math.random`, `process.env`, `fetch`). Both resolve to the same dotted
+# strings before matching: an import binds its locals to `<specifier>.<member>`
+# (`import { spawn } from "child_process"` binds `spawn` ->
+# `child_process.spawn`), and an unimported chain is matched as written. So
+# `spawn(cmd)`, `cp.spawn(cmd)` after `import * as cp`, and
+# `require("child_process").spawn(cmd)` are one marker hit, not three rules.
+#
+# `node:` IS NOT A SEPARATE SPELLING. `_canon` strips the prefix from both
+# sides before matching, so `fs` covers `node:fs` and the table carries ONE
+# entry per marker. Listing both spellings would have made the table look
+# exhaustive where it was merely repetitive -- and the Python branch's two
+# worst bugs were both a table that listed one member of a family and not its
+# twin (`os.remove` marked, `os.rename` not; `os.execv` marked, `os.execlp`
+# not). A test pins that both spellings tier identically.
+#
+# WHAT MAKES THE BUILTIN HALF EXHAUSTIVE rather than remembered: a derived test
+# in `test_stack_node.py` walks node's own `module.builtinModules` and fails
+# unless every module in it is either marked here or allow-listed there with a
+# reason. The third-party half (`axios`, `pg`, `prisma`) can never be
+# exhaustive and is not claimed to be -- it is a convenience over the runtime
+# guard, which is the enforcement.
+CONTROLLABLE = {
+    # `path` is deliberately absent, and that is why node needs no equivalent
+    # of `stack_python.IMPORT_TIME_INERT`: node's path algebra lives in a
+    # module of its own that touches nothing, where Python's `os.path.join`
+    # sits under the same `os.` prefix as `os.stat` and had to be exempted by
+    # name at import time.
+    "filesystem": ("fs", "fs/promises", "fsPromises", "fs-extra", "graceful-fs",
+                   # A WASI instance is handed a preopened directory: its whole
+                   # purpose is giving a guest module real filesystem access.
+                   "wasi",
+                   # Writes trace files to the working directory.
+                   "trace_events",
+                   # `v8` is otherwise pure (serialize, heap statistics); this
+                   # one entry writes a file, so it is marked by name rather
+                   # than flooring every unit that reads a heap statistic.
+                   "v8.writeHeapSnapshot"),
+    "clock": ("Date.now", "new Date", "setTimeout", "setInterval", "setImmediate",
+              "performance.now", "perf_hooks", "process.hrtime", "process.uptime",
+              "timers", "timers/promises"),
+    # Hashing, HMAC and cipher construction in `crypto` are pure functions of
+    # their input and stay unmarked; the entry points that draw entropy or
+    # generate a key are the nondeterministic ones and are marked by name.
+    "randomness": ("Math.random", "crypto.randomUUID", "crypto.randomBytes",
+                   "crypto.randomInt", "crypto.randomFill", "crypto.randomFillSync",
+                   "crypto.getRandomValues", "crypto.generateKey",
+                   "crypto.generateKeySync", "crypto.generateKeyPair",
+                   "crypto.generateKeyPairSync", "crypto.generatePrime",
+                   "crypto.generatePrimeSync", "crypto.randomUUIDSync"),
+    # `os` is marked whole rather than by member: every one of its exports
+    # reports the state of the machine the test happens to run on (hostname,
+    # tmpdir, cpus, network interfaces, EOL), which is the same thing
+    # `process.env` is and is controlled the same way.
+    "environment": ("process.env", "process.argv", "process.argv0",
+                    "process.cwd", "process.chdir", "process.umask", "os"),
+}
+UNCONTROLLABLE = {
+    # `inspector` opens the V8 debug protocol on a port; `dns` resolves against
+    # whatever resolver the machine has. Both are as much network as `http` is,
+    # and both were absent from the first draft of this table -- exactly the
+    # enumeration hole the derived test exists to close.
+    "network": ("http", "https", "http2", "net", "tls", "dgram",
+                "dns", "dns/promises", "quic", "inspector", "inspector/promises",
+                "fetch", "XMLHttpRequest", "WebSocket", "EventSource",
+                "axios", "got", "undici", "node-fetch", "superagent", "request"),
+    # `cluster` forks worker PROCESSES and `worker_threads` starts threads that
+    # run a file of their own; neither goes through `child_process`, so a guard
+    # patching that module would never see them -- the same shape as
+    # `os.posix_spawn` bypassing `subprocess.Popen` on the Python side.
+    "subprocess": ("child_process", "cluster", "worker_threads",
+                   "spawn", "exec", "execSync", "spawnSync", "fork",
+                   "execFile", "execFileSync"),
+    # `sqlite` is node's own built-in database module (`node:sqlite`); the rest
+    # are the drivers a repo actually has. That half of the list is best
+    # effort, unlike the builtins, and says so.
+    "database": ("sqlite", "pg", "mysql", "mysql2", "mongodb", "MongoClient",
+                 "redis", "ioredis", "sqlite3", "better-sqlite3", "knex",
+                 "prisma", "PrismaClient", "sequelize", "typeorm", "mongoose"),
+}
+
+
+def _canon(name: str) -> str:
+    """`node:fs` and `fs` are the same module. Strip the prefix from both sides."""
+    return name[5:] if name.startswith("node:") else name
+
+
+def _marker_hit(marker: str, name: str) -> bool:
+    """True when the resolved `name` is at or under `marker`.
+
+    Three forms, because a JS name is a module path as well as a call chain:
+    equal (`fetch`), a member of it (`fs.readFileSync` under `fs`), or a
+    submodule of it (`fs/promises` under `fs`).
+    """
+    m, n = _canon(marker), _canon(name)
+    return n == m or n.startswith(m + ".") or n.startswith(m + "/")
+
+
+def _markers(names):
+    """(group, marker, controllable) for every marker any resolved name hits.
+
+    Deterministic order, mirroring `stack_python._markers`: UNCONTROLLABLE
+    groups before CONTROLLABLE ones, each in sorted-group / table order -- so
+    the reason a unit is given is the same on every run.
+    """
+    hits = []
+    for group in sorted(UNCONTROLLABLE):
+        for m in UNCONTROLLABLE[group]:
+            if any(_marker_hit(m, n) for n in names):
+                hits.append((group, m, False))
+    for group in sorted(CONTROLLABLE):
+        for m in CONTROLLABLE[group]:
+            if any(_marker_hit(m, n) for n in names):
+                hits.append((group, m, True))
+    return hits
+
+
+# ── Resolving names to markers ───────────────────────────────────────────
+
+def _bind_clause(alias: dict, clause: str, spec: str):
+    """Add what one import/require clause binds to `alias`: local -> canonical."""
+    clause = clause.strip()
+    if not clause:
+        return                                    # side-effect import
+    brace = clause.find("{")
+    head = clause[:brace] if brace >= 0 else clause
+    body = ""
+    if brace >= 0:
+        end = clause.find("}", brace)
+        body = clause[brace + 1:end if end >= 0 else len(clause)]
+    for piece in head.split(","):
+        parts = piece.strip().rstrip(",").split()
+        if len(parts) >= 3 and parts[0] == "*" and parts[1] == "as":
+            alias.setdefault(parts[2], spec)      # import * as fs
+        elif len(parts) == 1 and _IDENT_FULL.match(parts[0]):
+            alias.setdefault(parts[0], spec)      # default import
+    for piece in body.split(","):
+        parts = piece.strip().split()
+        if not parts or parts[0] == "type":
+            continue                              # `import { type Foo }`: erased
+        if len(parts) >= 3 and parts[1] == "as":
+            member, local = parts[0], parts[2]
+        elif len(parts) == 1:
+            member = local = parts[0]
+        else:
+            continue
+        local = local.strip(":").strip()
+        if _IDENT_FULL.match(local) and _IDENT_FULL.match(member):
+            alias.setdefault(local, spec + "." + member)
+
+
+def _alias_map(ks: str, lo: int, hi: int) -> dict:
+    """Local name -> canonical `<specifier>[.<member>]`, for imports in [lo, hi).
+
+    Read off the COMMENT-STRIPPED, STRING-KEPT text, because a module specifier
+    IS a string literal -- the same reason `module_bindings` reads that text.
+    A commented-out import binds nothing.
+
+    Scoped by range on purpose, mirroring `stack_python._local_alias_map`: a
+    `const fs = require("fs")` inside one function must not rewrite what `fs`
+    means for the rest of the file.
+    """
+    alias = {}
+    for rx in (_IMPORT_RE, _REQUIRE_RE):
+        for m in rx.finditer(ks, lo, hi):
+            _bind_clause(alias, m.group("clause"), m.group("spec"))
+    return alias
+
+
+_SPEC_IN_CALL_RE = re.compile(r"""['"]([^'"]+)['"]""")
+
+
+def _chain_at(code: str, ks: str, i: int, hi: int, alias: dict):
+    """(resolved dotted name, index just past it, is-a-call) for the chain at `i`.
+
+    The head is resolved through `alias`, so `fs.readFileSync` after
+    `import fs from "node:fs"` comes back as `node:fs.readFileSync`. A
+    `require("...")` / `import("...")` head resolves to the specifier itself,
+    which is what catches the inline `require("child_process").execSync(cmd)`
+    form that binds no local name at all -- the specifier is read out of `ks`
+    at the same offsets, which is the point of the stripper preserving them.
+    """
+    head = _IDENT_AT.match(code, i)
+    if not head:
+        return "", i, False
+    word, j = head.group(0), head.end()
+    root = alias.get(word, word)
+    k = _skip_ws(code, j)
+    if word in ("require", "import") and k < len(code) and code[k] == "(":
+        close = code.find(")", k)
+        if close > 0:
+            spec = _SPEC_IN_CALL_RE.search(ks, k + 1, close)
+            if spec:
+                root, j = spec.group(1), close + 1
+    parts = [root]
+    while True:
+        k = _skip_ws(code, j)
+        if k < len(code) and code[k] == "?":
+            k = _skip_ws(code, k + 1)
+        if k >= len(code) or code[k] != ".":
+            break
+        nxt = _IDENT_AT.match(code, _skip_ws(code, k + 1))
+        if not nxt:
+            break
+        parts.append(nxt.group(0))
+        j = nxt.end()
+    tail = _skip_ws(code, j)
+    return ".".join(parts), j, tail < len(code) and code[tail] == "("
+
+
+def _scan(code: str, ks: str, lo: int, hi: int, alias: dict):
+    """(names, calls) for the region [lo, hi) of already-stripped `code`.
+
+    `names` are resolved dotted chains to match against the marker tables;
+    `calls` are the bare identifiers called there, which is how a unit reaches
+    a same-file helper.
+
+    EVERY OCCURRENCE COUNTS, not only a call. `stack_python` resolves
+    `ast.Call` targets alone, but `process.env.HOME` and `fsPromises.constants`
+    are real touches of the world with no call node in sight, and a reader with
+    no parse tree cannot tell a method reference from an invocation anyway. It
+    over-reports (naming `fs` without using it tiers the unit 2), which is the
+    direction this whole stack is allowed to be wrong in.
+    """
+    names, calls = [], set()
+    i = lo
+    while i < hi:
+        m = IDENTIFIER_RE.search(code, i, hi)
+        if not m:
+            break
+        start, word = m.start(), m.group(0)
+        i = m.end()
+        if preceding_qualifier(code, start) is not None:
+            continue                    # a property; its chain head owns it
+        if word == "new":
+            # `new Date()` / `new MongoClient(url)`: the constructor is scanned
+            # as its own head too, so this only has to add the `new X` spelling
+            # the clock group needs to tell `new Date` from a bare `Date`.
+            nxt = _IDENT_AT.match(code, _skip_ws(code, m.end()))
+            if nxt:
+                sub, _end, _called = _chain_at(code, ks, nxt.start(), hi, alias)
+                if sub:
+                    names.append("new " + sub)
+            continue
+        chain, _end, called = _chain_at(code, ks, start, hi, alias)
+        if not chain:
+            continue
+        names.append(chain)
+        if called and "." not in chain and "/" not in chain:
+            calls.add(word)
+    return names, calls
+
+
+# ── Regions: what a unit is, and what runs at import time ────────────────
+
+def _unit_span(code: str, depths, start: int):
+    """(start, end) of the code a unit occupies, from its statement's start.
+
+    A function or class body is its brace-matched block; a declaration with no
+    block (`export const f = (x) => x * 2;`) is its statement.
+    """
+    n = len(code)
+    d0 = depths[start]
+    i = start
+    while i < n:
+        c = code[i]
+        if depths[i] < d0:
+            return start, i
+        if c == "{" and depths[i] == d0:
+            close = _match_bracket(code, depths, i)
+            return start, (close + 1 if close >= 0 else n)
+        if c == ";" and depths[i] == d0:
+            return start, i
+        if c == "\n" and depths[i] == d0:
+            j = _skip_ws(code, i)
+            word = _IDENT_AT.match(code, j)
+            if word and word.group(0) in _STMT_KEYWORDS:
+                return start, i
+        i += 1
+    return start, n
+
+
+def _is_callable_literal(code: str, depths, pos: int) -> bool:
+    """True when the value assigned at/after `pos` is a function or class BODY.
+
+    Narrower than `_value_kind`, and the difference matters exactly once: a
+    CALL expression (`export const cfg = loadConfig()`) is discovered as a unit,
+    because a factory-produced function is still a function -- but the call
+    itself runs when the module is imported, so its span must stay part of the
+    import-time region. Treating it as a body was the node equivalent of
+    reporting `_CFG = json.load(open(...))` as "directly callable".
+    """
+    end = _stmt_end(code, depths, pos)
+    eq = _assign_op(code, depths, pos, end)
+    if eq < 0:
+        return False
+    v = _skip_ws(code, eq + 1)
+    if v >= end:
+        return False
+    d0 = depths[v]
+    arrow = code.find("=>", v, end)
+    while arrow >= 0:
+        if depths[arrow] == d0:
+            return True
+        arrow = code.find("=>", arrow + 2, end)
+    word, after = _word_at(code, v)
+    if word == "async":
+        word, after = _word_at(code, after)
+    return word in ("function", "class")
+
+
+def _callable_bodies(code: str, depths) -> dict:
+    """name -> (start, end) for every top-level function/class body in the file.
+
+    What `triage` follows a same-file call into, and what the import-time scan
+    cuts out: a function's body does not run because the module was imported.
+    A CLASS body is cut out whole, unlike `stack_python`'s, because a JS class
+    field initialiser runs at construction time, not at class-definition time
+    -- the language differs here and the region rule follows it.
+    """
+    bodies = {}
+    for m in _DECL_RE.finditer(code):
+        if depths[m.start()] == 0:
+            bodies.setdefault(m.group("name"), _unit_span(code, depths, m.start()))
+    for m in _VARDECL_RE.finditer(code):
+        if depths[m.start()] == 0 and _is_callable_literal(code, depths, m.end()):
+            bodies.setdefault(m.group("name"), _unit_span(code, depths, m.start()))
+    return bodies
+
+
+def _module_region(code: str, ks: str, depths, bodies) -> str:
+    """`code` with everything that does NOT run at import time blanked out.
+
+    Blanked: every top-level function/class body, and the import and require
+    STATEMENTS themselves. The second is the node counterpart of
+    `stack_python._module_level_regions` skipping `ast.Import` -- `import fs
+    from "node:fs"` performs no filesystem I/O, and reading the specifier as a
+    marker hit would floor every unit in every file that imports anything.
+
+    What survives is what actually executes on import: top-level calls,
+    initialisers, and IIFEs.
+    """
+    out = list(code)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    for lo, hi in bodies.values():
+        blank(lo, hi)
+    for rx in (_IMPORT_RE, _REQUIRE_RE):
+        for m in rx.finditer(ks):
+            if depths[m.start()] == 0:
+                blank(m.start(), m.end())
+    return "".join(out)
+
+
+# ── Triage ───────────────────────────────────────────────────────────────
+
+_FileAnalysis = collections.namedtuple(
+    "_FileAnalysis", "code ks depths bodies alias positions tier4 import_floor")
+
+
+@functools.lru_cache(maxsize=None)
+def _analyze_file(root: str, rel: str):
+    """Strip and index `rel` once, for every unit in it.
+
+    Cached per (root, rel) like the Python stack's: several units share a file,
+    and stripping plus re-indexing per UNIT rather than per file was most of
+    the cost.
+    """
+    text = read_text(root, rel)
+    code = strip_noncode(text)
+    ks = strip_noncode(text, keep_strings=True)
+    depths = _depths(code)
+    defs = _local_defs(code, depths)
+    bodies = _callable_bodies(code, depths)
+    alias = _alias_map(ks, 0, len(ks))
+    positions = {}
+    for name, _kind, pos in _found_exports(code, depths, defs):
+        positions.setdefault(name, pos)
+
+    region = _module_region(code, ks, depths, bodies)
+    names, calls = _scan(region, ks, 0, len(region), alias)
+    mod_hits = _hits_from(names, calls, code, ks, bodies, alias, set())
+
+    tier4 = None
+    uncontrollable_mod = [h for h in mod_hits if not h[2]]
+    if uncontrollable_mod:
+        group, marker, _c, via = uncontrollable_mod[0]
+        via_txt = f" via {via}" if via else ""
+        tier4 = (4, f"module does {group} I/O at import time{via_txt} "
+                    f"({marker}); not reachable")
+    # Import-time CONTROLLABLE I/O floors every unit in the file at Tier 3, for
+    # the reason the Python stack records: the harness takes the error on
+    # `import mod` before any test body runs, and the Tier 2 controls live in
+    # fixtures, which run strictly after the module under test is imported. A
+    # boundary already crossed at import cannot be controlled from one.
+    import_floor = None
+    controllable_mod = [h for h in mod_hits if h[2]]
+    if controllable_mod:
+        group, marker, _c, via = controllable_mod[0]
+        via_txt = f" via {via}" if via else ""
+        import_floor = (3, f"module does {group} I/O at import time{via_txt} "
+                           f"({marker}); a fixture runs too late to control it — "
+                           f"needs a seam")
+    return _FileAnalysis(code, ks, depths, bodies, alias, positions,
+                          tier4, import_floor)
+
+
+def _hits_from(names, calls, code, ks, bodies, alias, visited):
+    """Marker hits for one region, plus (recursively) the same-file helpers it calls.
+
+    A thin wrapper inherits the worst tier reachable from it, exactly as
+    `stack_python._hits_from` does: `export function save(x) { return _write(x); }`
+    is not Tier 1 just because the `fs` call is one hop away. Each hit is
+    `(group, marker, controllable, via)`, where `via` is the same-file callee it
+    was reached through, or None when the marker sits in the scanned region.
+
+    ONLY BARE CALLS ARE FOLLOWED (`_write(x)`, `new Ledger()`). A method call on
+    a value this reader cannot resolve is the points-to boundary the filter
+    stops at on purpose -- and the runtime guard, not this, is the enforcement.
+    """
+    hits = [(g, m, c, None) for g, m, c in _markers(names)]
+    for name in sorted(calls):
+        if name not in bodies or name in visited:
+            continue
+        visited.add(name)
+        lo, hi = bodies[name]
+        local = dict(alias)
+        local.update(_alias_map(ks, lo, hi))
+        sub_names, sub_calls = _scan(code, ks, lo, hi, local)
+        for g, m, c, _via in _hits_from(sub_names, sub_calls, code, ks, bodies,
+                                         local, visited):
+            hits.append((g, m, c, name))
+    return hits
+
+
+def _tier_from_hits(hits) -> tuple:
+    """(tier, reason) from a unit's own marker hits, before any module-level floor.
+
+    The tier rules are the Python stack's, word for word, because they are a
+    property of the design and not of the language: 1 nothing, 2 controllable
+    only, 3 uncontrollable inside the unit, 4 uncontrollable at the boundary
+    (which for both stacks means at import time, where no fixture can reach).
+    """
+    if not hits:
+        return 1, "no I/O markers; directly callable"
+    uncontrollable = [h for h in hits if not h[2]]
+    if uncontrollable:
+        group, marker, _c, via = uncontrollable[0]
+        if via:
+            return 3, f"{group} I/O via {via} ({marker}); needs a seam"
+        return 3, f"{group} I/O inside the unit ({marker}); needs a seam"
+    group, marker, _c, via = hits[0]
+    if via:
+        return 2, (f"{group} I/O via {via} ({marker}); "
+                    f"pin at a wider boundary with {group} controlled")
+    return 2, f"{group} I/O ({marker}); pin at a wider boundary with {group} controlled"
+
+
+def triage(root: str, unit) -> tuple:
+    """Classify how testable a unit is. Returns (tier, reason).
+
+    A FILTER, NEVER THE ENFORCEMENT -- and for this stack that sentence carries
+    more weight than it does for Python, because there is no parse tree here.
+    The reader below resolves imports, follows same-file calls, and reads
+    marker chains out of comment- and string-stripped text; it cannot see
+    through a method call on an unresolved receiver, a re-exported binding, or
+    a value returned by a factory. The invariant "never writes a test that
+    performs real I/O" is enforced at RUNTIME by the node guard, loaded with
+    `--require` before the module under test is ever imported.
+
+    Where it is wrong, it is wrong toward a HIGHER tier: every occurrence of a
+    marker counts, not only a call, and a `new Ledger()` inherits from the
+    whole class body rather than the constructor alone. A tier that is too
+    conservative costs a unit its place in the ranking; a tier that is too
+    generous is a test that does real I/O, which is the failure this skill
+    exists to prevent.
+
+    The one thing this does NOT mirror from the Python stack is a
+    file-does-not-parse verdict. There is no parser to fail: a file this reader
+    cannot make sense of yields no units at all rather than units it then
+    declines, so the "unit not found" branch below is the only way that shows
+    up.
+    """
+    analysis = _analyze_file(root, unit["path"])
+    if analysis.tier4 is not None:
+        return analysis.tier4
+    pos = analysis.positions.get(unit["name"])
+    if pos is None:
+        return 4, "unit not found on re-read"
+
+    lo, hi = _unit_span(analysis.code, analysis.depths, pos)
+    local = dict(analysis.alias)
+    local.update(_alias_map(analysis.ks, lo, hi))
+    names, calls = _scan(analysis.code, analysis.ks, lo, hi, local)
+    hits = _hits_from(names, calls, analysis.code, analysis.ks, analysis.bodies,
+                       local, {unit["name"]})
+
+    tier, reason = _tier_from_hits(hits)
+    # A FLOOR, applied last and only upward: a unit already at or above it
+    # keeps its own reason, which names something more specific.
+    if analysis.import_floor is not None and tier < analysis.import_floor[0]:
+        return analysis.import_floor
+    return tier, reason
