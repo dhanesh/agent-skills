@@ -126,6 +126,14 @@ SINCE_TSN_NODE_FIXES_1 = "ed219b1"  # test-safety-net: the node branch's first
 # alias crediting nothing rather than every same-named file (F4), and Python's
 # half of the stdin ruling (F7). One constant for the round: the fixes land at
 # one merge, so every row of it becomes HELD* together.
+SINCE_TSN_NODE_FIXES_2 = "a720be6"  # test-safety-net: the node branch's second
+# fix round -- a path-glob manifest honoured wherever it is ANCHORED rather than
+# only at the analysed root (N1: `backend/requirements/base.txt` detected node
+# and ranked three frontend files over twelve backend modules), the guard's
+# provenance walk reading a frame's LOCATION rather than any substring of its
+# line (N2, and C1's other half), and `environment.yaml`/`manage.py` declaring
+# by content like every other manifest (N3). One constant for the round: the
+# fixes land at one merge, so every row of it becomes HELD* together.
 SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # detection (first match wins reclassified this repo's own corpus as node),
 # then node's I/O marker tables, triage, and registration. One constant for
@@ -2800,6 +2808,212 @@ def check_test_safety_net_node_fixround_1(old, new):
             since=SINCE_TSN_NODE_FIXES_1)
 
 
+_NODE_FIXROUND_2_PROBE = r"""
+import json, os, re, shutil, subprocess, sys, tempfile
+
+# Same discipline as the first round's probe: SUBPROCESSES, never imports. The
+# default baseline predates the node stack, where `import stack_node` crashes
+# and a crashed probe measures nothing.
+res = {"monorepo_stack": "", "monorepo_units": 0, "monorepo_py_evidence": -1,
+       "jsapp_stack": "", "jsapp_units": 0,
+       "spoof_blocked": 0, "c1_shadow_blocked": 0}
+
+assets = sys.path[0]
+ranker = os.path.join(assets, "rank_risk.py")
+guard_js = os.path.join(assets, "io_guard.js")
+node = shutil.which("node")
+work = tempfile.mkdtemp()
+
+
+def write(root, rel, text):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+NOTES = {}
+
+
+def plan(root):
+    try:
+        done = subprocess.run(
+            [sys.executable, ranker, root, "--since", "10 years ago"],
+            capture_output=True, text=True, timeout=120)
+        NOTES[root] = done.stderr or ""
+        return json.loads(done.stdout)
+    except Exception:
+        NOTES[root] = ""
+        return {}
+
+
+def evidence(root, stack):
+    m = re.search(stack + r"=(\d+)", NOTES.get(root, ""))
+    return int(m.group(1)) if m else -1
+
+
+def guarded_run(root, rel, pattern):
+    # 1 when the proof run FAILED with a guard violation. A tree with no node
+    # guard runs the same proof unguarded, which is what that tree really does
+    # with this unit.
+    argv = [node]
+    if os.path.isfile(guard_js):
+        argv += ["--require", guard_js]
+    argv += ["--test", "--test-name-pattern", pattern, rel]
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    try:
+        done = subprocess.run(argv, cwd=root, env=env, capture_output=True,
+                              text=True, stdin=subprocess.PIPE, timeout=60)
+    except subprocess.TimeoutExpired:
+        return 0
+    out = done.stdout + done.stderr
+    return 1 if done.returncode != 0 and "IOGuardViolation" in out else 0
+
+
+# -- N1: a monorepo whose split requirements sit one directory down ---------
+mono = os.path.join(work, "monorepo")
+for i in range(12):
+    write(mono, "backend/app/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+for i in range(3):
+    write(mono, "frontend/src/c%d.js" % i, "export function c%d() {}\n" % i)
+write(mono, "frontend/package.json",
+      '{"name": "web", "main": "src/c0.js",\n'
+      ' "dependencies": {"react": "^18"}}\n')
+write(mono, "backend/requirements/base.txt", "Django>=4.2\npsycopg[binary]>=3.1\n")
+m = plan(mono)
+res["monorepo_stack"] = m.get("stack", "")
+res["monorepo_units"] = m.get("units_discovered", 0)
+res["monorepo_py_evidence"] = evidence(mono, "python")
+
+# -- N3: a JS app with Python helpers, a k8s environment.yaml, a manage.py --
+js = os.path.join(work, "jsapp")
+for i in range(5):
+    write(js, "src/m%d.js" % i, "export function f%d() {}\n" % i)
+for i in range(3):
+    write(js, "tools/h%d.py" % i, "def h%d():\n    return 1\n" % i)
+write(js, "package.json", '{"scripts": {"lint": "eslint ."}}\n')
+write(js, "config/environment.yaml", "name: prod\nreplicas: 3\n")
+write(js, "manage.py", '# not django\nprint("hi")\n')
+j = plan(js)
+res["jsapp_stack"] = j.get("stack", "")
+res["jsapp_units"] = j.get("units_discovered", 0)
+
+# -- N2 / C1: the provenance walk reads a frame's LOCATION ------------------
+if node:
+    sp = os.path.join(work, "spoof")
+    write(sp, "sneaky.js",
+          'const fs = require("node:fs");\n'
+          "const holder = {};\n"
+          'holder["node:internal/modules/x"] = function () {\n'
+          '  return fs.readFileSync("/etc/hosts", "utf8").length;\n'
+          "};\n"
+          'module.exports = { go: () => holder["node:internal/modules/x"]() };\n')
+    write(sp, "t_sneaky.test.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { go } = require("./sneaky.js");\n'
+          'test("spoofed_frame", () => { assert.ok(go() >= 0); });\n')
+    res["spoof_blocked"] = guarded_run(sp, "t_sneaky.test.js", "^spoofed_frame$")
+
+    c1 = os.path.join(work, "c1")
+    write(c1, "io_guard.js",
+          'const fs = require("node:fs");\n'
+          'const SIZE = fs.readFileSync("/etc/hosts", "utf8").length;\n'
+          "module.exports = { size: () => SIZE };\n")
+    write(c1, "t_shadow.test.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { size } = require("./io_guard.js");\n'
+          'test("shadowed", () => { assert.ok(size() >= 0); });\n')
+    res["c1_shadow_blocked"] = guarded_run(c1, "t_shadow.test.js", "^shadowed$")
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_fixround_2(old, new):
+    """The node branch's second fix round: three findings, and C1's missing row.
+
+    Which rows are deltas and which are guards is decided by what the DEFAULT
+    baseline can see, exactly as in round 1. The merge base predates the node
+    stack, so a row whose defect needs that stack to EXIST (the JS app's
+    verdict; the monorepo's unit count) has no bad arm there and is recorded as
+    a `guard`. The rows that move are the ones whose baseline arm really
+    misbehaves in both directions: Python's evidence on the monorepo, and two
+    real reads of /etc/hosts that a green proof run reported as passing.
+    """
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_2_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_2_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "python's evidence for a monorepo whose split requirements sit ONE "
+           "DIRECTORY DOWN (higher=better; -1 = no contest reported)",
+        oldp["monorepo_py_evidence"], newp["monorepo_py_evidence"],
+        newp["monorepo_py_evidence"] > oldp["monorepo_py_evidence"],
+        "N1, and the unfinished half of F3. `requirements/*.txt` was matched "
+        "against the manifest's WHOLE repo-relative path, and `fnmatch` wants "
+        "the whole string -- so the name Django's layout actually uses counted "
+        "at the analysed root and nowhere else. The same repo with "
+        "`backend/requirements.txt` scored `python=34, node=16`; with "
+        "`backend/requirements/base.txt` it scored `node=16, python=12` and "
+        "the plan ranked three frontend files. `backend/` + `frontend/` with a "
+        "declared frontend manifest is the commonest polyglot layout there is",
+        since=SINCE_TSN_NODE_FIXES_2)
+    row(s, "…and the plan for it covers the 12 backend modules (guard, 0 = the "
+           "JavaScript was ranked instead)",
+        oldp["monorepo_units"] if oldp["monorepo_stack"] == "python" else 0,
+        newp["monorepo_units"] if newp["monorepo_stack"] == "python" else 0,
+        newp["monorepo_stack"] == "python" and newp["monorepo_units"] == 12,
+        "the consequence a user meets. A GUARD against the default baseline, "
+        "where no node stack contests the repo and 12 == 12 is the whole "
+        "assertion; against the branch's own pre-fix HEAD the same number "
+        "reads 3 -> 12, which is the fix landing rather than a guard breaking "
+        "-- the predicate asks about the NEW arm for exactly that reason",
+        kind="guard")
+    row(s, "a JS app with three Python helpers still detects node when a "
+           "`config/environment.yaml` and a `manage.py` appear beside it "
+           "(guard, 0 = flipped to python)",
+        oldp["jsapp_units"] if oldp["jsapp_stack"] == "node" else 0,
+        newp["jsapp_units"] if newp["jsapp_stack"] == "node" else 0,
+        newp["jsapp_stack"] == "node" and newp["jsapp_units"] == 5,
+        "N3. Both names returned `declaring` without reading a byte -- the "
+        "`has_manifest` mistake this branch rejected once, reintroduced for "
+        "two filenames -- so a YAML holding `name: prod` and a script holding "
+        "`print(\"hi\")` moved python from 3 to 18 and took the plan with "
+        "them. A guard rather than a delta because the baseline has no node "
+        "stack to detect this repo AS node; against the branch's pre-fix HEAD "
+        "it reads 0 -> 5",
+        kind="guard")
+    row(s, "a unit whose FUNCTION NAME contains `node:internal/modules/` fails "
+           "its proof run (higher=better)",
+        oldp["spoof_blocked"], newp["spoof_blocked"],
+        newp["spoof_blocked"] > oldp["spoof_blocked"],
+        "N2. The exempting prefixes were matched against the whole formatted "
+        "frame, which carries the FUNCTION NAME as well as the location -- and "
+        "V8 renders computed property names into the name slot. One line of "
+        "target-repo code read 213 real bytes of /etc/hosts at tier 1, through "
+        "the documented command, under `# pass 1  # fail 0`",
+        since=SINCE_TSN_NODE_FIXES_2)
+    row(s, "…and a TARGET-REPO module called `io_guard.js` is still the target "
+           "repo (higher=better)",
+        oldp["c1_shadow_blocked"], newp["c1_shadow_blocked"],
+        newp["c1_shadow_blocked"] > oldp["c1_shadow_blocked"],
+        "C1, which was fixed in round 1 with no regression guard of any kind: "
+        "reverting `GUARD_FILE` to the basename left the whole suite green. "
+        "The shape where a skipped frame is fatal rather than merely wrong is "
+        "a MODULE BODY, whose only outer frames are the loader's -- so the "
+        "unit here reads /etc/hosts at import time and used to do it green. "
+        "Pinned to round 1's commit: the fix is that round's, only the "
+        "measurement is this one's",
+        since=SINCE_TSN_NODE_FIXES_1)
+
+
 def check_test_safety_net_node_wired(old, new):
     """Does the SHIPPED SURFACE — the documented CLI, and the command SKILL.md
     prints — do what the documents now say it does?"""
@@ -3036,6 +3250,7 @@ def main():
         check_test_safety_net_node_guard(old, REPO)
         check_test_safety_net_node_wired(old, REPO)
         check_test_safety_net_node_fixround_1(old, REPO)
+        check_test_safety_net_node_fixround_2(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
