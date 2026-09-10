@@ -438,9 +438,60 @@ function blockedGroups(tier, allow) {
 // `io_guard.js`, and skipped frames are unattributable frames.
 const GUARD_FILE = __filename;
 
-// A frame in a PUBLIC builtin -- `node:path:1201:24`, `node:fs:449:35`. Not
-// `node:internal/...`, which is the runtime's own machinery.
-const PUBLIC_BUILTIN_FRAME = /\bnode:[a-z0-9_/]+:\d+/;
+// A PUBLIC builtin location -- `node:path:1201:24`, `node:fs:449:35`. Not
+// `node:internal/...`, which is the runtime's own machinery. ANCHORED, because
+// this is tested against a frame's LOCATION and a location that merely
+// contains a builtin's name somewhere is not one.
+const PUBLIC_BUILTIN_FRAME = /^node:[a-z0-9_/]+:\d+/;
+
+/**
+ * The LOCATION half of one formatted stack frame, or null if it cannot be read.
+ *
+ * A V8 frame is `at <function name> (<location>)`, or `at <location>` when
+ * there is no name to print. EVERY RULE IN THE WALK BELOW IS ABOUT THE
+ * LOCATION -- "is this the guard's own file", "is this `node:internal/...`",
+ * "is this a public builtin" -- and the function name is target-repo text: a
+ * unit chooses it. Testing those rules against the whole line let the name
+ * answer a question about the location. V8 renders computed property names
+ * into the name slot, so
+ *
+ *     const holder = {};
+ *     holder["node:internal/modules/x"] = function () { …reads a file… };
+ *
+ * produced `at h.node:internal/modules/x (/repo/sneaky.js:4:13)`, and a
+ * substring test read the runtime's own module loader in a frame whose
+ * location is a file in the repo under test. At tier 1, through the documented
+ * command, that read 213 real bytes of `/etc/hosts` under `# pass 1 # fail 0`.
+ * The same hole existed for `GUARD_FILE`: a name containing the guard's path
+ * skipped the frame, and a skipped frame is an unattributable frame.
+ *
+ * THE LAST `(` IS THE LOCATION'S, not the first: a name may contain `(` (it is
+ * an arbitrary string), the location group is always appended last, and no
+ * name can add a group AFTER it. The one frame shape where that lands
+ * elsewhere is an `eval` frame, whose origin is itself parenthesised
+ * (`at eval (eval at f (/repo/x.js:1:1), <anonymous>:1:1)`); the text that
+ * comes back names the repo's own file, so it is read as the target repo,
+ * which is the fail-safe direction.
+ *
+ * NULL MEANS UNREADABLE, AND THE CALLER BLOCKS ON IT -- same as any other
+ * unattributable frame. A false positive costs one declined candidate; a false
+ * negative ships a test that performs real I/O. Nothing the target repo can do
+ * produces one in practice, because the walk forces V8's default formatter
+ * (see `initiatedByCodeUnderTest`), which is exactly why the fail-safe
+ * direction is free here.
+ */
+function frameLocation(line) {
+  let rest = String(line).trim();
+  if (rest.slice(0, 3) !== "at ") return null;
+  rest = rest.slice(3).trim();
+  if (rest.slice(0, 6) === "async ") rest = rest.slice(6).trim();
+  if (rest.charAt(rest.length - 1) === ")") {
+    const open = rest.lastIndexOf("(");
+    if (open === -1) return null;
+    return rest.slice(open + 1, rest.length - 1).trim();
+  }
+  return rest;
+}
 
 /**
  * The internal modules that mean "the runtime is doing its own work".
@@ -527,7 +578,9 @@ const RUNTIME_OWN_WORK = [
  * Walks the stack innermost-first:
  *
  *   * this file's own frames are skipped -- deciding provenance must not read
- *     as provenance;
+ *     as provenance. By the frame's LOCATION starting with this file's
+ *     resolved path: a target-repo file called `io_guard.js`, and a
+ *     target-repo function NAMED after the guard, are both the target repo;
  *   * an internal frame naming one of `RUNTIME_OWN_WORK` STOPS the walk and
  *     exempts the call. That is what keeps the module loader alive: node reads
  *     every `.js` it loads through `fs.readFileSync`, so without it a test
@@ -554,10 +607,17 @@ const RUNTIME_OWN_WORK = [
  *     single test -- and the fix was not to exempt `node:path` but to keep
  *     walking, because the runner's stack has `node:internal/test_runner/`
  *     further out and a UNIT's does not;
- *   * anything else -- a file path, `[eval]`, `<anonymous>`, a data URL --
- *     is the target repo, and the call blocks. Unattributable frames block by
- *     design: a false positive costs one declined candidate, a false negative
- *     ships a test that performs real I/O.
+ *   * anything else -- a file path, `[eval]`, `<anonymous>`, a data URL, or a
+ *     frame `frameLocation` cannot parse at all -- is the target repo, and the
+ *     call blocks. Unattributable frames block by design: a false positive
+ *     costs one declined candidate, a false negative ships a test that
+ *     performs real I/O.
+ *
+ * EVERY ONE OF THOSE TESTS READS THE FRAME'S LOCATION, ANCHORED AT ITS START,
+ * and never the formatted line. The line also carries the FUNCTION NAME, which
+ * is text the target repo chooses -- so a substring test let a unit name a
+ * property `node:internal/modules/x` and have its own frame read as the module
+ * loader's. See `frameLocation`.
  *
  * Reaching the end of the stack without an attributable frame means the call
  * came from the runtime on its own behalf: exempt. That end-of-stack case is
@@ -597,17 +657,21 @@ function initiatedByCodeUnderTest() {
   }
   const lines = String(stack).split("\n").slice(1);
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.indexOf(GUARD_FILE) !== -1) continue;
-    if (line.indexOf("node:internal/") !== -1) {
+    // Every test below reads the frame's LOCATION, at position 0 -- see
+    // `frameLocation`. A frame that cannot be parsed is unattributable and
+    // therefore the target repo's.
+    const loc = frameLocation(lines[i]);
+    if (loc === null) return true;
+    if (loc.indexOf(GUARD_FILE) === 0) continue;
+    if (loc.indexOf("node:internal/") === 0) {
       let exempt = false;
       for (let j = 0; j < RUNTIME_OWN_WORK.length; j++) {
-        if (line.indexOf(RUNTIME_OWN_WORK[j]) !== -1) { exempt = true; break; }
+        if (loc.indexOf(RUNTIME_OWN_WORK[j]) === 0) { exempt = true; break; }
       }
       if (exempt) return false;
       continue;
     }
-    if (PUBLIC_BUILTIN_FRAME.test(line)) continue;
+    if (PUBLIC_BUILTIN_FRAME.test(loc)) continue;
     return true;
   }
   return false;

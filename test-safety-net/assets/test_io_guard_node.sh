@@ -753,4 +753,80 @@ expect_pass "16 a repo that replaces Error.prepareStackTrace does not make a CLE
 guard_run 1 "" prepared.js '^leaky$'
 expect_trip "16b …and a leaky one still does: the walk reads V8's default format, not the repo's"
 
+# ── 17. A TARGET-REPO NAME CANNOT SPEAK FOR THE RUNTIME ───────────────────
+# The provenance walk reads FRAME POSITIONS, not the frame line. It used to ask
+# `line.indexOf("node:internal/modules/") !== -1` against the whole formatted
+# frame -- which carries the FUNCTION NAME as well as the location -- so a
+# property whose key contained an exempt prefix produced a frame the rule read
+# as the runtime's own work. V8 renders computed property names into the
+# function-name slot, so this is one line of target-repo code:
+#
+#   at h.node:internal/modules/x (/…/spoof.js:4:13)
+#
+# and the target-repo path is right there in the same line, losing to a
+# substring test. At tier 1, through the documented command, it read 213 real
+# bytes of /etc/hosts under `# pass 1  # fail 0`.
+cat > "$WORK/spoof.js" <<'EOF'
+const fs = require("node:fs");
+const holder = {};
+holder["node:internal/modules/x"] = function () {
+  return fs.readFileSync("/etc/hosts", "utf8").length;
+};
+module.exports = { go: () => holder["node:internal/modules/x"]() };
+EOF
+cat > "$WORK/test_spoof.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { go } = require("./spoof.js");
+test("spoofed_frame", () => { assert.ok(go() >= 0); });
+EOF
+guard_run 1 "" test_spoof.js '^spoofed_frame$'
+expect_trip "17 a unit whose FUNCTION NAME contains an exempt prefix still trips -- the exemption is a frame's LOCATION, not any substring of its line"
+
+# ── 18. …and the same rule for the guard's own frames (C1) ────────────────
+# The other half of the same predicate, and the change that had no regression
+# guard: `GUARD_FILE` is the guard's RESOLVED path and is matched at the START
+# of the frame's location, because a skipped frame is an unattributable frame.
+# Under the basename match this replaced, a target-repo module called
+# `io_guard.js` had every one of its frames skipped -- and a module BODY is the
+# shape where that is fatal rather than merely wrong, because the only frames
+# outside it are the loader's, which is exempt. The unit below really reads
+# /etc/hosts at import time and used to do it green.
+mkdir -p "$WORK/c1guard"
+cat > "$WORK/c1guard/io_guard.js" <<'EOF'
+const fs = require("node:fs");
+const SIZE = fs.readFileSync("/etc/hosts", "utf8").length;
+module.exports = { size: () => SIZE };
+EOF
+cat > "$WORK/c1guard/test_shadow.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { size } = require("./io_guard.js");
+test("shadowed", () => { assert.ok(size() >= 0); });
+EOF
+guard_run 1 "" c1guard/test_shadow.js '^shadowed$'
+expect_trip "18 a TARGET-REPO file called io_guard.js is still the target repo -- the guard skips its own frames by resolved path, at the location's start"
+
+# 18b. The adversarial form of the same hole, which needs a stack with no other
+# target-repo frame on it: a deferred callback runs on a FRESH stack, so the
+# spoofed name is the only attributable frame there is. Under a substring match
+# -- of the basename or of the resolved path -- it is skipped, the timer's
+# internal frames are transparent, the walk falls off the end of the stack and
+# the read is charged to the runtime.
+cat > "$WORK/spoof_guardname.js" <<EOF
+const fs = require("node:fs");
+const holder = {};
+holder["$GUARD"] = function () {
+  return fs.readFileSync("/etc/hosts", "utf8").length;
+};
+module.exports = { later: () => queueMicrotask(holder["$GUARD"]) };
+EOF
+cat > "$WORK/test_spoof_guardname.js" <<'EOF'
+const { test } = require("node:test");
+const { later } = require("./spoof_guardname.js");
+test("deferred_spoof", async () => { later(); await Promise.resolve(); });
+EOF
+guard_run 1 "" test_spoof_guardname.js '^deferred_spoof$'
+expect_trip "18b …and a function NAMED after the guard, called on a fresh stack where it is the only attributable frame, does not inherit the guard's own exemption"
+
 exit "$rc"

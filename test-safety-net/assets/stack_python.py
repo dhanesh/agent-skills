@@ -38,9 +38,10 @@ from stack_common import (SKIP_DIRS, evidence_score, has_manifest,   # noqa: E40
 
 STACK_NAME = "python"
 
-# Files that declare "this directory is a Python project". `setup.py` is a
-# source file too and so is counted twice; that is right -- it is both, and so
-# is `manage.py`.
+# Files that declare "this directory is a Python project" -- when their
+# CONTENT says so; see `classify_manifest`, which is what every name here is
+# read by. `setup.py` is a source file too and so is counted twice; that is
+# right -- it is both, and so is `manage.py`.
 #
 # ENTRIES MAY BE GLOBS (see `stack_common.iter_manifests`), and the ones that
 # are exist because this list was exact filenames at the root and Django's
@@ -97,12 +98,36 @@ _TOOLING_REQUIREMENTS = frozenset({
     "pydocstyle", "codespell",
 })
 
-# Manifests that exist only to declare a distribution or an environment. There
-# is no tooling-only form of a `setup.py`, and none of a Django `manage.py`:
-# it names a settings module and boots a framework, which is this stack's
-# analogue of node's `main`/`bin` entry-point keys.
-_SELF_DECLARING_MANIFESTS = frozenset({"setup.py", "Pipfile", "environment.yml",
-                                       "environment.yaml", "manage.py"})
+# Manifests whose NAME is the whole claim, because there is no tooling-only
+# form of them: a `setup.py` exists to build a distribution and a `Pipfile` to
+# pin one's environment. Neither name turns up by accident in a repo that is
+# something else.
+#
+# `manage.py` AND `environment.yml`/`environment.yaml` WERE HERE AND ARE NOT
+# ANY MORE. Both were justified by a claim about their CONTENT -- "it names a
+# settings module and boots a framework", "it is a conda environment" -- that
+# nothing checked, which is the `has_manifest` mistake `declaring_manifest`
+# exists to fix, wearing two filenames. Measured: a JavaScript app with five
+# `src/*.js`, a tooling-only `package.json` and three `tools/*.py` helpers
+# detected node until a `config/environment.yaml` holding `name: prod` appeared
+# beside it (`python=16, node=5`), and a `manage.py` holding `print("hi")` did
+# the same. `manage.py` is an ordinary script name and `environment.yaml` is
+# what a Kubernetes-flavoured repo calls its deploy values; neither says
+# anything about a language. Both are read below, on the rule every other
+# manifest here is read by.
+_SELF_DECLARING_MANIFESTS = frozenset({"setup.py", "Pipfile"})
+
+# A conda environment file declares an environment by LISTING it. `name:` alone
+# is a YAML document that happens to share the filename. Both spellings, and
+# they are one entry rather than two on purpose: a rule that read `.yaml` and
+# not `.yml` would leave the same misdetection one rename away.
+_CONDA_MANIFESTS = frozenset({"environment.yml", "environment.yaml"})
+
+# What makes a `manage.py` DJANGO's `manage.py` rather than a file with that
+# name: the settings module it points at, or the entry point it calls. These
+# are the two lines `django-admin startproject` writes, and a `manage.py`
+# without either boots no framework.
+_DJANGO_MARKERS = ("DJANGO_SETTINGS_MODULE", "execute_from_command_line")
 
 # Manifest keys read with `requirements.txt`'s CONTENT rule. The rule did not
 # change; only the set of names it answers for did.
@@ -127,6 +152,12 @@ def classify_manifest(name: str, text: str) -> str:
     """
     if name in _SELF_DECLARING_MANIFESTS:
         return "declaring"
+    if name in _CONDA_MANIFESTS:
+        return "declaring" if "dependencies:" in text else "tooling"
+    if name == "manage.py":
+        return ("declaring"
+                if any(marker in text for marker in _DJANGO_MARKERS)
+                else "tooling")
     if name in ("pyproject.toml", "setup.cfg"):
         low = text.lower()
         return ("declaring"

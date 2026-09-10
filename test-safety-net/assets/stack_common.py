@@ -81,25 +81,71 @@ MANIFEST_MULTIPLIER = 2
 
 # How far below `root` a manifest still describes `root`. 2 covers a monorepo's
 # `packages/<pkg>/<manifest>`.
+#
+# WHAT THE NUMBER COUNTS IS THE DIRECTORY THE MANIFEST IS ANCHORED IN, not the
+# file's own depth, and the distinction only became visible when `MANIFESTS`
+# grew entries with a `/` in them. `requirements/*.txt` is a NAME -- it is what
+# a split-requirements manifest is CALLED, the same way `Pipfile` is what a
+# Pipfile is called -- so its own leading segment is part of the name and
+# cannot be charged against an allowance that answers a different question:
+# how far below the root a manifest still describes the root. Charging it
+# bought `backend/requirements.txt` and refused `backend/requirements/base.txt`
+# in the same tree, which is one rename apart and the second is Django's own
+# layout.
+#
+# So the bound stays 2, unchanged and not tuned to any row: a manifest spec of
+# `n` segments is honoured for files up to `MANIFEST_MAX_DEPTH + n - 1`
+# directories down, which is `MANIFEST_MAX_DEPTH` levels of anchoring plus the
+# spec's own name. The case table pins it from both sides -- `packages/api/`
+# counts (row 19, the depth an exact name already reaches) and
+# `services/api/backend/` does not (row 20).
 MANIFEST_MAX_DEPTH = 2
+
+
+def _anchor_depth(path: str, spec: str):
+    """Depth of the directory `spec` is anchored in when it matches `path`, else None.
+
+    `path` is repo-relative and `/`-separated; `spec` is a `MANIFESTS` entry.
+    The anchor is `path` with the spec's own trailing segments removed, so
+    `("backend/requirements/base.txt", "requirements/*.txt")` anchors at
+    `backend/` -- depth 1 -- and the same file at the root anchors at depth 0.
+    """
+    segments = path.split("/")
+    own = spec.count("/") + 1
+    if len(segments) < own:
+        return None
+    if not fnmatch.fnmatchcase("/".join(segments[-own:]), spec):
+        return None
+    return len(segments) - own
 
 
 def iter_manifests(root: str, names):
     """Yield `(relative path, matched key)` for each of `names` at or near `root`.
 
-    Walks at most `MANIFEST_MAX_DEPTH` levels below `root` and prunes
-    `SKIP_DIRS`, dotted directories and `TEMPLATE_DIRS`, so a vendored
-    `node_modules/*/package.json` and a shipped scaffold's manifest are never
-    yielded at all.
+    Prunes `SKIP_DIRS`, dotted directories and `TEMPLATE_DIRS` at every level,
+    so a vendored `node_modules/*/package.json` and a shipped scaffold's
+    manifest are never yielded at all, and honours a manifest only while it is
+    ANCHORED within `MANIFEST_MAX_DEPTH` of `root` -- see that constant for
+    what "anchored" means and why it is not the file's own depth.
 
     AN ENTRY IN `names` IS A FILENAME OR A GLOB, and the second kind is why
     this yields the KEY THAT MATCHED rather than the basename. Exact names
-    yield themselves, so nothing changed for them. A glob containing `/` is
-    matched against the manifest's repo-relative PATH
-    (`requirements/*.txt` -> `requirements/base.txt`); one without is matched
-    against the basename (`requirements-*.txt`). Either way the caller's
-    `classify` receives the SPEC, not the file's own name -- `base.txt` says
-    nothing about its format, `requirements/*.txt` says everything.
+    yield themselves, so nothing changed for them. A spec is matched against
+    THE LAST N SEGMENTS OF the manifest's repo-relative path, where N is the
+    spec's own segment count: `requirements/*.txt` matches
+    `backend/requirements/base.txt` on `requirements/base.txt` and anchors at
+    `backend/`; `requirements-*.txt` matches on the basename alone. Either way
+    the caller's `classify` receives the SPEC, not the file's own name --
+    `base.txt` says nothing about its format, `requirements/*.txt` says
+    everything.
+
+    MATCHING THE WHOLE PATH IS WHAT THIS REPLACED, and it made the `/` forms
+    root-only: `fnmatch` wants the whole string, so `requirements/*.txt` found
+    Django's layout at the analysed root and nowhere else. One repo, one file
+    renamed, through the shipped CLI: `backend/requirements.txt` scored
+    `python=34, node=16` and `backend/requirements/base.txt` scored
+    `node=16, python=12`, ranking three frontend files and ignoring twelve
+    backend modules. `backend/` + `frontend/` is not an edge case.
 
     The reason the glob forms exist at all: `MANIFESTS` used to be exact
     filenames at the root, and Django's near-universal split-requirements
@@ -113,10 +159,17 @@ def iter_manifests(root: str, names):
     for spec in names:
         (globs.append(spec) if ("*" in spec or "?" in spec or "[" in spec)
          else exact.add(spec))
+    # How deep the WALK goes, as opposed to how deep a manifest may be
+    # ANCHORED. A two-segment spec anchored at the bound sits one directory
+    # further down than a bare name does, so the walk has to reach it -- and
+    # every pruning rule below still applies at every one of those levels, so
+    # the extra reach can never enter `node_modules/`, `vendor/`, `.venv/` or a
+    # template directory.
+    walk_depth = MANIFEST_MAX_DEPTH + max([s.count("/") for s in names] or [0])
     for base, dirs, files in os.walk(root):
         rel = os.path.relpath(base, root).replace(os.sep, "/")
         depth = 0 if rel == "." else rel.count("/") + 1
-        if depth >= MANIFEST_MAX_DEPTH:
+        if depth >= walk_depth:
             dirs[:] = []
         else:
             dirs[:] = sorted(d for d in dirs
@@ -125,11 +178,15 @@ def iter_manifests(root: str, names):
                              and not d.startswith("."))
         for name in sorted(files):
             path = ("%s/%s" % (rel, name) if rel != "." else name)
-            if name in exact:
+            # An exact name anchors where it sits, so the deeper walk a path
+            # glob needs must not widen it: `services/api/backend/setup.py` is
+            # as far out of range as it ever was.
+            if name in exact and depth <= MANIFEST_MAX_DEPTH:
                 yield path, name
                 continue
             for spec in globs:
-                if fnmatch.fnmatchcase(path if "/" in spec else name, spec):
+                anchor = _anchor_depth(path, spec)
+                if anchor is not None and anchor <= MANIFEST_MAX_DEPTH:
                     yield path, spec
                     break
 

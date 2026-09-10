@@ -214,8 +214,11 @@ in the python guard produced a *fourth* proof outcome the three-outcome contract
 The block decision is scoped by **call provenance**, not by name: node reads every `.js` it loads
 through `fs.readFileSync`, so a guard that blocks on the name alone kills a test that touches no
 filesystem at all, inside the module loader. The guard walks the stack outward from the innermost
-frame, skips its own, stops at a `node:internal/` frame and exempts, treats a *public* builtin frame
-(`node:path`, `node:fs`) as transparent, and blames anything else. The cost, stated rather than
+frame, skips its own, exempts an internal frame that names one of four `RUNTIME_OWN_WORK` prefixes
+(the two module loaders, the test runner, the console) and treats every *other* internal frame and
+every *public* builtin frame (`node:path`, `node:fs`) as transparent, and blames anything else.
+Every one of those tests reads the frame's **location**, anchored at its start — never the whole
+formatted line, which also carries the function name, which is text the unit under test chooses. The cost, stated rather than
 implied: any call the target repo makes that reaches a guarded primitive **through** a
 `node:internal` frame is exempt too — `require("/etc/hosts")` is read by the loader before it fails
 to parse. That is the same price python pays for `import`.
@@ -231,7 +234,7 @@ Two of the seven change what a trip, or its absence, means:
    a `network` trip in an ESM repo as proof the unit does no database work. No fixture covers this,
    because a fixture would need a real driver installed.
 2. **The provenance rule matches frame *text*** — the literal `node:internal/` prefix and the
-   `node:<builtin>:<line>` shape. A node release that renames or reformats internal frames would
+   `node:<builtin>:<line>` shape, at the start of the frame's parsed location. A node release that renames or reformats internal frames would
    turn the guard **inert** rather than noisy: it would stop blaming anything and every proof would
    pass. This is the same class of dependency as `assets/io_guard.py`'s `_IMPORT_PROTOCOL_FRAMES` —
    a hand-derived list of CPython's frozen-import function names, stated as residual 7 in

@@ -750,6 +750,46 @@ class TestStackDetection(unittest.TestCase):
         write(self.root, "b.py", "def go2():\n    return 1\n")
         self.assertEqual(rank_risk.detect_stack(self.root).STACK_NAME, "python")
 
+    def test_where_a_path_glob_manifest_still_describes_the_root(self):
+        # N1. `requirements/*.txt` was matched against the manifest's WHOLE
+        # repo-relative path, so the name Django's layout actually uses counted
+        # at the analysed root and nowhere else -- while every exact name in
+        # `MANIFESTS` counted anywhere in `MANIFEST_MAX_DEPTH`. The bound below
+        # is that same constant, counted from the directory the spec is
+        # ANCHORED in: the spec's own `requirements/` segment is part of the
+        # manifest's NAME, not part of how far it sits from the root.
+        cases = (("", True),                        # the root itself
+                 ("backend/", True),                # the reproduction
+                 ("packages/api/", True),           # what an exact name reaches
+                 ("services/api/backend/", False),  # one past the bound
+                 ("node_modules/pkg/", False),      # a dependency's own manifest
+                 ("vendor/pkg/", False),
+                 (".venv/lib/", False),
+                 ("assets/templates/scaffold/", False))   # a shipped scaffold
+        for anchor, expected in cases:
+            with self.subTest(anchor or "<root>"):
+                root = tempfile.mkdtemp(prefix="tsn-anchor-", dir=self.root)
+                write(root, anchor + "requirements/base.txt", "Django>=4.2\n")
+                found = list(stack_common.iter_manifests(
+                    root, rank_risk.stack_python.MANIFESTS))
+                self.assertEqual(bool(found), expected, found)
+                # And it yields the SPEC, not `base.txt`: the classifier reads
+                # `requirements/*.txt`'s content rule off the key it is handed.
+                for _rel, spec in found:
+                    self.assertEqual(spec, "requirements/*.txt")
+
+    def test_the_deeper_walk_a_path_glob_needs_does_not_widen_exact_names(self):
+        # The walk has to descend past `MANIFEST_MAX_DEPTH` for a two-segment
+        # spec to be found at the bound, and that extra reach must belong to
+        # the spec that needed it. An exact name at the same file depth is
+        # still out of range, or the glob's allowance quietly becomes
+        # everyone's.
+        write(self.root, "services/api/backend/requirements.txt", "Django>=4.2\n")
+        write(self.root, "services/api/backend/pyproject.toml",
+              MANIFEST_BODIES["pyproject.toml/declaring"])
+        self.assertEqual(list(stack_common.iter_manifests(
+            self.root, rank_risk.stack_python.MANIFESTS)), [])
+
     def test_a_dead_heat_is_reported_not_guessed(self):
         write(self.root, "a.py", "def a():\n    return 1\n")
         write(self.root, "b.py", "def b():\n    return 1\n")
@@ -1206,8 +1246,19 @@ MANIFEST_BODIES = {
     "base.txt/tooling": "ruff==0.5.0\nblack==24.4.2\n",
     "requirements-dev.txt/declaring": "Django>=4.2\npytest>=8\n",
     "requirements-dev.txt/tooling": "ruff==0.5.0\n",
-    # Django's entry point. Self-declaring the way `setup.py` is: there is no
-    # tooling-only form of it, so the table has one body and both keys use it.
+    # Django's entry point -- and it EARNS that by its content, like every
+    # other manifest here. The `declaring` body names the settings module and
+    # boots the framework; the `tooling` body is a file with the same name and
+    # nothing Django about it, which is a repo shape that exists (a `manage.py`
+    # is just a script name) and which used to flip a JS repo to python.
+    "manage.py/tooling": '# not django\nprint("hi")\n',
+    # A conda environment file, and the Kubernetes-flavoured YAML that shares
+    # its name in a repo that is not Python at all. `dependencies:` is what
+    # makes the first one a declaration of a Python environment.
+    "environment.yaml/declaring":
+        "name: srv\nchannels:\n  - conda-forge\n"
+        "dependencies:\n  - python=3.11\n  - django\n",
+    "environment.yaml/tooling": "name: prod\nreplicas: 3\n",
     "manage.py/declaring": (
         "#!/usr/bin/env python\n"
         "import os, sys\n"
@@ -1304,6 +1355,56 @@ CASE_TABLE = [
     # A repo tested with tox is not thereby a Python repo.
     ("a JS repo that runs its few Python scripts under tox",
      8, 40, ".js", (("tox.ini", "tooling"), ("package.json", "declaring")), "node"),
+    # ROWS 18-20 ARE WHERE A PATH-GLOB MANIFEST STILL DESCRIBES THE ROOT.
+    # Row 13 taught `MANIFESTS` the NAME `requirements/*.txt`; it matched the
+    # manifest's repo-relative path with `fnmatch`, which wants the whole
+    # string, so it matched at the analysed root and nowhere else. One repo,
+    # one file renamed, reproduced through the shipped CLI:
+    #
+    #   backend/requirements.txt       -> python=34, node=16   correct
+    #   backend/requirements/base.txt  -> node=16,  python=12   WRONG
+    #
+    # and `backend/` + `frontend/` with a declared frontend manifest is the
+    # commonest polyglot layout there is, so that is mainline rather than an
+    # edge.
+    #
+    # THE BOUND IS THE ONE THAT ALREADY EXISTS, APPLIED WHERE IT MEANS
+    # SOMETHING: `MANIFEST_MAX_DEPTH` counts the directory the spec is ANCHORED
+    # in, not the file. A spec's own leading segments are part of what the
+    # manifest is CALLED -- `requirements/base.txt` is the NAME of a
+    # `requirements/*.txt` manifest, exactly as `Pipfile` is a name -- so they
+    # cannot spend an allowance that exists to answer a different question
+    # ("how far below the root does a manifest still describe the root?").
+    # Row 19 pins the bound from below at the depth `packages/<pkg>/<manifest>`
+    # already reaches for an exact name; row 20 pins it from above.
+    ("a monorepo backend: split requirements one directory down, declared JS frontend",
+     12, 3, ".js",
+     (("backend/requirements/base.txt", "declaring"),
+      ("frontend/package.json", "declaring")), "python"),
+    ("…the same manifest at the depth an exact NAME already reaches",
+     12, 3, ".js",
+     (("packages/api/requirements/base.txt", "declaring"),
+      ("frontend/package.json", "declaring")), "python"),
+    ("…and one level past it, where a manifest describes something else",
+     12, 3, ".js",
+     (("services/api/backend/requirements/base.txt", "declaring"),
+      ("frontend/package.json", "declaring")), "node"),
+    # ROWS 21-22 ARE THE CONTENT RULE REACHING THE LAST TWO NAMES THAT ESCAPED
+    # IT. `environment.yaml` and `manage.py` returned "declaring" without
+    # reading a byte -- the `has_manifest` mistake this table exists to record,
+    # reintroduced for two filenames. Row 21 is the repro: a JavaScript app
+    # with three Python helpers detected node until a `config/environment.yaml`
+    # holding `name: prod` and a `manage.py` holding `print("hi")` appeared
+    # beside it. Row 22 is the other direction, without which row 21 could be
+    # satisfied by deleting the names from `MANIFESTS`.
+    ("a JS app with Python helpers, a k8s environment.yaml and a non-Django manage.py",
+     3, 5, ".js",
+     (("package.json", "tooling"), ("config/environment.yaml", "tooling"),
+      ("manage.py", "tooling")), "node"),
+    ("…and a conda-declared Python service still outweighs a declared JS frontend",
+     12, 3, ".js",
+     (("environment.yaml", "declaring"), ("frontend/package.json", "declaring")),
+     "python"),
 ]
 
 
@@ -1369,6 +1470,34 @@ class TestManifestCaseTable(unittest.TestCase):
         self.assertGreater(scores["python"], scores["node"])
         units, _mode = rank_risk.stack_python.discover_units(self.root)
         self.assertEqual(len(units), 40)
+
+    def test_the_monorepo_reproduction_one_file_renamed(self):
+        # N1 verbatim, and kept as its own named test because the difference
+        # between the two trees is a SINGLE RENAME and a row in a loop cannot
+        # show that. `backend/requirements.txt` was read; the same content at
+        # `backend/requirements/base.txt` -- Django's own layout, one directory
+        # down -- was not, and the plan ranked three frontend files while
+        # twelve backend modules got none.
+        verdicts = {}
+        for rel in ("backend/requirements.txt", "backend/requirements/base.txt",
+                    "requirements/base.txt"):
+            root = tempfile.mkdtemp(prefix="tsn-mono-", dir=self.root)
+            for i in range(12):
+                write(root, "backend/app/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+            for i in range(3):
+                write(root, "frontend/src/c%d.js" % i, "export function c%d() {}\n" % i)
+            write(root, "frontend/package.json",
+                  MANIFEST_BODIES["package.json/declaring"])
+            write(root, rel, MANIFEST_BODIES["base.txt/declaring"])
+            scores = dict(rank_risk.stack_evidence(root))
+            units, _mode = rank_risk.stack_python.discover_units(root)
+            verdicts[rel] = (self._verdict(root), scores, len(units))
+        for rel, (verdict, scores, n_units) in verdicts.items():
+            with self.subTest(rel):
+                self.assertEqual(verdict, "python",
+                                 "%s: python=%d node=%d"
+                                 % (rel, scores["python"], scores["node"]))
+                self.assertEqual(n_units, 12)
 
     def test_a_manifest_scales_the_claim_it_finds(self):
         write(self.root, "src/a.mjs", "export function a() {}\n")
@@ -1608,10 +1737,40 @@ class TestManifestContent(unittest.TestCase):
                              "flask==3.0.0\nruff\n")
 
     def test_the_manifests_that_exist_only_to_declare(self):
+        # What is left in this set after N3: two names with no tooling-only
+        # form at all. A `setup.py` exists to build a distribution and a
+        # `Pipfile` to pin one's environment; neither name is reachable by
+        # accident in a repo that is not Python.
         for name, text in (("setup.py", "from setuptools import setup\nsetup()\n"),
-                           ("Pipfile", "[packages]\n"),
-                           ("environment.yml", "name: srv\n")):
+                           ("Pipfile", "[packages]\n")):
             self.assertDeclaring(self.stack_python, name, text)
+
+    def test_a_conda_environment_declares_by_its_dependencies(self):
+        # N3. `environment.yaml` returned "declaring" without reading a byte,
+        # so a Kubernetes-flavoured `config/environment.yaml` holding
+        # `name: prod` flipped a JavaScript repo to python -- the `has_manifest`
+        # mistake, for one filename. BOTH SPELLINGS ARE TESTED because they are
+        # one manifest kind: a rule that read `.yaml` and not `.yml` would
+        # leave the same flip one rename away.
+        conda = ("name: srv\nchannels:\n  - conda-forge\n"
+                 "dependencies:\n  - python=3.11\n  - django\n")
+        for name in ("environment.yml", "environment.yaml"):
+            with self.subTest(name):
+                self.assertDeclaring(self.stack_python, name, conda)
+                self.assertTooling(self.stack_python, name, "name: prod\nreplicas: 3\n")
+                self.assertTooling(self.stack_python, name, "")
+
+    def test_a_manage_py_declares_by_booting_django(self):
+        # The other half of N3. The docstring's justification for the name --
+        # "it names a settings module and boots a framework" -- is a claim
+        # about CONTENT, and now something checks it. A `manage.py` that is
+        # merely a script called `manage.py` declares nothing.
+        for text in ("import os, sys\n"
+                     "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'srv.settings')\n",
+                     "from django.core.management import execute_from_command_line\n"):
+            self.assertDeclaring(self.stack_python, "manage.py", text)
+        for text in ('# not django\nprint("hi")\n', "", "import click\n"):
+            self.assertTooling(self.stack_python, "manage.py", text)
 
     # ── both, through the score ─────────────────────────────────────────
     def test_an_unknown_manifest_name_never_silently_declares(self):
