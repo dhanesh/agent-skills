@@ -143,6 +143,7 @@ class TestTier1BlocksEverything(GuardCase):
         self.assertTrips("filesystem", lambda: open(self.path).close())
 
 
+@unittest.skipUnless(_HAS_PYTEST, "pytest is not installed in this environment")
 class TestStdinFailsFastAtTier1(GuardCase):
     """R16's other half, which landed on node only.
 

@@ -44,6 +44,14 @@ jobs:
       # GitHub's runner images happen to ship node, so this was being graded by
       # accident; a runner image that stopped shipping it would have turned a
       # silent skip green on every PR.
+      - name: Install pytest
+        # The Python guard IS a pytest plugin, and ~20 of its tests drive it
+        # through a real pytest process. Without pytest here they skip, and a
+        # skipped test proves nothing: the guard's plugin path -- the only
+        # invocation the documentation gives a user -- would go permanently
+        # ungraded in CI while the gate reported green. The ranker itself
+        # stays stdlib-only; this is a test-time dependency, not a shipped one.
+        run: python -m pip install --quiet pytest
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
