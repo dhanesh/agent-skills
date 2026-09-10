@@ -33,6 +33,16 @@ What it still does NOT cover, said plainly rather than implied away:
     with no pytest grades the plugin path nowhere -- `assets/test_io_guard.py`
     skips there too -- so a `make gate` on such a machine is green on 34
     without having proved anything. That is stated rather than hidden.
+  * The node GUARD is covered CONDITIONALLY (check 39), in exactly the shape
+    check 34 has and for the same reason: this eval must not depend on a
+    toolchain it cannot install, so with no `node` on PATH check 39 reports
+    itself NOT GRADED HERE and passes. What remains ungated: a machine with
+    neither pytest nor node prints `EVAL_RESULT: PASS` while having graded
+    NEITHER guard — that is, neither stack's enforcement of the skill's
+    headline invariant. `assets/test_io_guard_node.sh` skips on the same
+    machine. CI pins both toolchains (`.github/workflows/skill-gates.yml` sets
+    up python AND node), so the grading there is a pin rather than an accident
+    of the runner image; a local `make gate` on a bare machine is not.
   * The literal-emission rule (SKILL.md's "one real injection surface") has NO
     EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
     ships in this skill, so there is no code path that could turn a hostile
@@ -109,6 +119,14 @@ _NEG_RE = re.compile(r"\b(not|never|cannot|no|nothing)\b", re.I)
 _DOC_CMD_RE = re.compile(
     r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
     r'pytest\s+-p\s+io_guard\s+\S+$')
+
+# The node equivalent. Deliberately anchored on `--require ...io_guard.js` and
+# on the `<path>` placeholder, because those are the two halves a document can
+# get wrong on this stack: `--require` is what arms the guard BEFORE the test
+# file loads, and a command with no target is prose, not an invocation.
+_DOC_CMD_NODE_RE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+    r'node\s+--require\s+\S*io_guard\.js\S*\s+.*<path>$')
 
 
 def slice_between(text, start_pat, end_pat):
@@ -976,6 +994,231 @@ def main():
         check("29 CROSS-DOC: SKILL.md and triage.md agree a guard trip means "
               "Tier 3 and discard, with no lower alternative",
               not reclass_bad, "; ".join(reclass_bad))
+
+        # =====================================================================
+        # Fixture "nodefx": the node stack, end to end, through the SAME CLI an
+        # agent runs — not through an imported function. Checks 35-38 grade the
+        # filter half (discovery, the reader it names, vendor exclusion, tiers)
+        # and check 39 grades the enforcement half under the command the
+        # documents actually print.
+        #
+        # Every one of these is vacuous before the node stack exists: a node
+        # repo read as Python discovers nothing and reports a clean result,
+        # which is the silent zero this stack was added to close.
+        # =====================================================================
+        node_repo = os.path.join(tmp, "nodefx")
+        write(node_repo, "package.json",
+              '{"name": "demo", "main": "src/index.js",\n'
+              ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+        # Tier 1: nothing reachable.
+        write(node_repo, "src/pure.js",
+              "export function addNumbers(a, b) { return a + b; }\n")
+        # Tier 2: a CONTROLLABLE group (filesystem) inside the unit.
+        write(node_repo, "src/cache.js",
+              'import fs from "node:fs";\n'
+              "export function readCache(p) { return fs.readFileSync(p, "
+              '"utf8"); }\n')
+        # Tier 3: an UNCONTROLLABLE group (network) inside the unit.
+        write(node_repo, "src/remote.js",
+              'import net from "node:net";\n'
+              "export function connectRemote(h) { return new net.Socket(); }\n")
+        # Tier 3: I/O in the MODULE BODY — a fixture runs too late to control it.
+        write(node_repo, "src/boot.js",
+              'import fs from "node:fs";\n'
+              'const CONFIG = fs.readFileSync("/etc/hosts", "utf8");\n'
+              "export function config() { return CONFIG; }\n")
+        # A vendored dependency. Its export is a perfectly good unit by every
+        # syntactic test — which is why excluding it has to be asserted rather
+        # than assumed.
+        write(node_repo, "node_modules/vendored/index.js",
+              "export function vendoredUnit() { return 1; }\n")
+
+        r_node = run_ranker(node_repo, "--top-n", "20")
+        node_plan = load_json(r_node)
+        node_rows = {}
+        for bucket in ("ranked", "remainder", "not_netted"):
+            for r_ in node_plan.get(bucket, []):
+                node_rows[r_["id"]] = r_
+
+        # 35. the node stack is detected and its exported units are found
+        check("35 a node repo is detected as node and its exported units are "
+              "discovered (0 units is what a repo read as the wrong stack "
+              "reports)",
+              r_node.returncode == 0
+              and node_plan.get("stack") == "node"
+              and node_plan.get("units_discovered", 0) >= 4
+              and "src/pure.js::addNumbers" in node_rows,
+              "stack=%s units=%s ids=%s"
+              % (node_plan.get("stack"), node_plan.get("units_discovered"),
+                 sorted(node_rows)))
+
+        # 36. the report names WHICH READER produced the units (design
+        #     decision D1), and names it CORRECTLY.
+        #
+        #     THIS CHECK USED TO BE A TAUTOLOGY. It asserted
+        #     `discovery in ("precise", "heuristic")` — and `discover_units`
+        #     can only ever return one of those two strings, so the code half
+        #     could not fail. Mutating the heuristic reader to LIE about which
+        #     path ran (`return _units_heuristic(root), "precise"`) left the
+        #     eval at 39/39. The property D1 exists for is not "the key holds
+        #     an in-vocabulary value", it is "two runs are comparable when this
+        #     key agrees", and only a check that can see a WRONG label defends
+        #     it.
+        #
+        #     Both arms are deterministic without installing anything:
+        #       a. the fixture ships no `node_modules/typescript`, so the only
+        #          honest answer is `heuristic`;
+        #       b. a SECOND fixture ships a `typescript` that loads and then
+        #          reads nothing — an aliased or shimmed compiler. That used to
+        #          yield `discovery: "precise"` with ZERO units while the
+        #          heuristic would have found three: the silent zero, wearing
+        #          the label the report tells an agent to trust more. It must
+        #          decline, say so on stderr, and report the units anyway.
+        node_stacks_md = open(os.path.join(SKILL, "references", "stacks.md"),
+                              encoding="utf-8").read()
+        shim_repo = os.path.join(tmp, "nodeshim")
+        write(shim_repo, "package.json",
+              '{"name": "shim", "main": "src/a.js",\n'
+              ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+        for i in range(3):
+            write(shim_repo, "src/m%d.js" % i,
+                  "export function f%d(x) { return x; }\n" % i)
+        # Loads, exports the right NAMES, and throws on every file it is asked
+        # to parse. The walker counts each into `unreadable`.
+        write(shim_repo, "node_modules/typescript/lib/typescript.js",
+              "module.exports = {\n"
+              "  createSourceFile: function () { throw new Error('shimmed'); },\n"
+              "  ScriptTarget: { Latest: 99 },\n"
+              "  SyntaxKind: {},\n"
+              "};\n")
+        r_shim = run_ranker(shim_repo, "--top-n", "20")
+        shim_plan = load_json(r_shim)
+        check("36 the node report names which reader found its units, and "
+              "names it CORRECTLY: no toolchain reads `heuristic`, and a "
+              "toolchain that loads but reads nothing DECLINES rather than "
+              "reporting zero units as `precise`",
+              node_plan.get("discovery") == "heuristic"
+              and shim_plan.get("discovery") == "heuristic"
+              and shim_plan.get("units_discovered") == 3
+              and "declined" in (r_shim.stderr or "")
+              and "discovery" in skill_text
+              and "heuristic" in node_stacks_md,
+              "fixture=%r shim=%r shim_units=%r shim_note=%r"
+              % (node_plan.get("discovery"), shim_plan.get("discovery"),
+                 shim_plan.get("units_discovered"),
+                 (r_shim.stderr or "").strip().splitlines()[-1:]))
+
+        # 37. NEGATIVE-SHAPED: a vendored unit is a syntactically valid export
+        #     that must NEVER be ranked. Ranking a repo's dependencies as its
+        #     own code buries every real unit under `node_modules`.
+        vendored = [i for i in node_rows
+                    if i.startswith("node_modules/")
+                    or "vendoredUnit" in i]
+        check("37 NEGATIVE: an exported unit inside node_modules is never "
+              "discovered, ranked or netted",
+              not vendored and node_plan.get("units_discovered") == 4,
+              "leaked=%s units=%s" % (vendored, node_plan.get("units_discovered")))
+
+        # 38. each unit lands in the tier its markers earn — all four
+        #     directions at once, because a triage that answers one tier for
+        #     everything satisfies any single-tier assertion.
+        want_tiers = {
+            "src/pure.js::addNumbers": 1,       # nothing reachable
+            "src/cache.js::readCache": 2,       # controllable group in the unit
+            "src/remote.js::connectRemote": 3,  # uncontrollable group
+            "src/boot.js::config": 3,           # I/O in the module body
+        }
+        got_tiers = {i: node_rows.get(i, {}).get("tier") for i in want_tiers}
+        not_netted_node = {r_["id"] for r_ in node_plan.get("not_netted", [])}
+        check("38 each node unit lands in the tier its markers earn, and the "
+              "Tier 3 ones are in not_netted rather than ranked",
+              got_tiers == want_tiers
+              and "src/remote.js::connectRemote" in not_netted_node
+              and "src/boot.js::config" in not_netted_node,
+              str(got_tiers))
+
+        # 39. THE ENFORCEMENT HALF, under the command the documents print.
+        #     Two arms, for the reason check 34 records: the positive arm alone
+        #     cannot fail for the reason that matters, because a guard that
+        #     loads and arms NOTHING also lets a clean test pass. The negative
+        #     arm's violation is `network` — constructing a socket, nothing
+        #     dialled, offline-safe — because that group is UNCONTROLLABLE and
+        #     so is blocked at tier 1 and tier 2 alike, which lets one fixture
+        #     hold for every documented command including the
+        #     TEST_SAFETY_NET_ALLOW=filesystem,clock ones.
+        node_present = shutil.which("node") is not None
+        node_fail = []
+        node_commands = []
+        if node_present:
+            nproof = os.path.join(tmp, "nproof")
+            os.makedirs(nproof, exist_ok=True)
+            write(nproof, "pure.js",
+                  "function add(a, b) { return a + b; }\n"
+                  "module.exports = { add };\n")
+            write(nproof, "test_pure.js",
+                  'const { test } = require("node:test");\n'
+                  'const assert = require("node:assert");\n'
+                  'const { add } = require("./pure.js");\n'
+                  'test("adds", () => { assert.strictEqual(add(2, 3), 5); });\n')
+            write(nproof, "leaky.js",
+                  'const net = require("node:net");\n'
+                  "function client() { return new net.Socket() !== null; }\n"
+                  "module.exports = { client };\n")
+            write(nproof, "test_leaky.js",
+                  'const { test } = require("node:test");\n'
+                  'const assert = require("node:assert");\n'
+                  'const { client } = require("./leaky.js");\n'
+                  'test("adds", () => { assert.ok(client()); });\n')
+            for label, text in (("SKILL.md", skill_text),
+                                ("references/stacks.md", node_stacks_md)):
+                for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                    joined = re.sub(r"\\\n\s*", " ", block)
+                    for line in joined.splitlines():
+                        line = line.strip()
+                        if _DOC_CMD_NODE_RE.match(line):
+                            node_commands.append((label, line))
+            if not node_commands:
+                node_fail.append("no documented node invocation found to run")
+            # SKILL.md SPECIFICALLY. `references/stacks.md` also prints the
+            # command, so without this the check stays green after the block is
+            # deleted from the one document an agent is guaranteed to read —
+            # the same "graded something adjacent to what the docs prescribe"
+            # shape every serious defect on this skill has had.
+            elif not any(lbl == "SKILL.md" for lbl, _ in node_commands):
+                node_fail.append("SKILL.md prints no node guard invocation; "
+                                 "only %s does"
+                                 % sorted({lbl for lbl, _ in node_commands}))
+            for label, command in node_commands:
+                env = dict(os.environ, SKILL_DIR=SKILL)
+                env.pop("TEST_SAFETY_NET_TIER", None)
+                env.pop("TEST_SAFETY_NET_ALLOW", None)
+                for target, expect in (("test_pure.js", "pass"),
+                                       ("test_leaky.js", "trip")):
+                    cmd = command.replace("<test_name>", "adds")
+                    cmd = cmd.replace("<path>", target)
+                    run = subprocess.run(["/bin/sh", "-c", cmd], cwd=nproof,
+                                         env=env, capture_output=True,
+                                         text=True, timeout=120)
+                    output = run.stdout + run.stderr
+                    tripped = "IOGuardViolation" in output
+                    if expect == "pass":
+                        ok_ = run.returncode == 0 and not tripped
+                    else:
+                        ok_ = run.returncode != 0 and tripped
+                    if not ok_:
+                        node_fail.append("%s [%s]: %s -> exit %s %s"
+                                         % (label, expect, cmd, run.returncode,
+                                            output.strip()[-200:]))
+        check("39 NEGATIVE: the DOCUMENTED `node --require ... io_guard.js` "
+              "command, extracted from each document and run verbatim, passes "
+              "a clean unit AND fails a unit that really does I/O (so a guard "
+              "that never arms cannot pass)",
+              not node_fail,
+              "; ".join(node_fail) if node_fail else
+              ("%d command(s), each run twice" % len(node_commands)
+               if node_present else
+               "NOT GRADED HERE: no `node` on PATH; "
+               "assets/test_io_guard_node.sh grades it where there is"))
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

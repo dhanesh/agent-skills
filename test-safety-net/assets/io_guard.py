@@ -78,6 +78,22 @@ candidate (the skill reports "could not prove" and moves on); a false NEGATIVE
 ships a test that performs real I/O, which is the thing this file exists to
 make impossible. Where the two trade off, this guard over-fires.
 
+WHY STDIN IS BLOCKED AT TIER 1, THOUGH IT IS IN NO MARKER TABLE
+--------------------------------------------------------------
+Terminal input (`input()`, `sys.stdin.read()`, `fileinput`) appears in neither
+stack's I/O marker table, so the FILTER cannot decline a unit that reads it.
+Under a proof run that unit does not fail -- it HANGS, waiting for a line that
+is never typed, yielding no verdict at all and burning the user's wall clock
+until they notice. (Under pytest's default capture it raises an OSError about
+capture instead, which is a failure but one that reads as a bug in the unit
+rather than as "the classification is wrong"; with `-s` it hangs outright.) A
+hang is strictly worse than a failure, so tier 1 makes it fail fast, as an
+`IOGuardViolation` carrying the reclassify-to-Tier-3 remedy. It is deliberately
+NOT a group: the groups are `rank_risk.py`'s groups, verbatim, and inventing an
+eighth would break the one-answer correspondence between the filter and this
+guard. `io_guard.js` blocks the same thing at the same tier, so a user learns
+this rule once.
+
 RESIDUALS, STATED RATHER THAN IMPLIED
 -------------------------------------
 1. A test that spawns a subprocess which itself dials out escapes an in-process
@@ -108,8 +124,13 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    observable failure direction there is a warning-only run, so the pytest
    plugin also fails the session (`pytest_sessionfinish`) on any record it
    still holds.
+8. Terminal input is fenced at the `builtins.input` and `sys.stdin` layer, not
+   at the file descriptor: `os.read(0, n)` reaches fd 0 beneath both names and
+   is not intercepted. `io_guard.js` stops at the same layer
+   (`process.stdin`'s getter), so the two stacks are honest in the same place.
 """
 
+import builtins
 import os
 import sys
 import sysconfig
@@ -117,7 +138,8 @@ import threading
 
 
 __all__ = ["IOGuardViolation", "arm", "disarm", "armed", "blocked_groups",
-           "pending_thread_violations", "raise_pending_thread_violation",
+           "stdin_blocked", "pending_thread_violations",
+           "raise_pending_thread_violation",
            "GROUPS", "CONTROLLABLE_GROUPS", "UNCONTROLLABLE_GROUPS"]
 
 
@@ -443,7 +465,12 @@ def _should_block(group, target):
     behaviour change to the guard's core and is left to a round that can
     review it rather than slipped in beside an unrelated fix.
     """
-    if not _state["armed"] or _state["inside"] or group not in _state["blocked"]:
+    if not _state["armed"] or _state["inside"]:
+        return False
+    if group == "stdin":
+        if not _state["stdin_blocked"]:
+            return False
+    elif group not in _state["blocked"]:
         return False
     _state["inside"] = True
     try:
@@ -580,12 +607,17 @@ def _initiated_by_code_under_test(depth=2):
 # Arming
 # --------------------------------------------------------------------------
 _state = {"armed": False, "tier": None, "blocked": frozenset(),
-          "inside": False, "thread_trips": []}
+          "stdin_blocked": False, "inside": False, "thread_trips": []}
 _undo = []
 
 
 def armed():
     return _state["armed"]
+
+
+def stdin_blocked():
+    """True when this run blocks terminal input. Tier 1 only; not a group."""
+    return _state["stdin_blocked"]
 
 
 def blocked_groups(tier, allow=None):
@@ -869,6 +901,86 @@ def _guarded_import(original):
     return importer
 
 
+class _GuardedStdin:
+    """`sys.stdin`, with the READ family fenced and everything else delegated.
+
+    A WRAPPER RATHER THAN A PATCHED METHOD, because `sys.stdin` is a
+    `TextIOWrapper` whose methods are C slots and cannot be reassigned. It is
+    also the layer node's guard chose (`process.stdin`'s getter): fence the
+    stream itself and `input()`, `sys.stdin.read()`, `fileinput.input()` and a
+    hand-rolled loop over the file object all reach the fence.
+
+    DELEGATION IS NOT POLITENESS. pytest asks `sys.stdin` for `fileno`,
+    `isatty`, `encoding` and `close` while it is capturing, and a wrapper that
+    answered only the read family would break every run rather than the one
+    unit that reads a line.
+    """
+
+    _FENCED = ("read", "readline", "readlines", "readinto", "readinto1",
+               "read1", "__next__")
+
+    def __init__(self, real, label="sys.stdin"):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_label", label)
+
+    def _fence(self, attr):
+        if _should_block("stdin", "%s.%s" % (self._label, attr)):
+            _violate("stdin", "%s.%s" % (self._label, attr))
+
+    def __getattr__(self, attr):
+        if attr in _GuardedStdin._FENCED:
+            def guarded(*args, **kwargs):
+                self._fence(attr)
+                return getattr(self._real, attr)(*args, **kwargs)
+            return guarded
+        if attr == "buffer":
+            return _GuardedStdin(self._real.buffer, self._label + ".buffer")
+        return getattr(self._real, attr)
+
+    def __iter__(self):
+        self._fence("__iter__")
+        return iter(self._real)
+
+    def __next__(self):
+        self._fence("__next__")
+        return next(self._real)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _patch_stdin():
+    """Terminal input, blocked at tier 1 only, and outside the group system.
+
+    R16, whose second half this is. Terminal input is in NEITHER stack's I/O
+    marker table, so the FILTER cannot decline a unit that reads it, and under
+    a proof run such a unit does not fail -- it HANGS, waiting for a line
+    nobody will type, yielding no verdict at all. A hang is strictly worse than
+    a failure. The ruling said both stacks move together; node shipped this and
+    Python did not, so `pytest -p io_guard -s` over a unit calling `input()`
+    still hung, and under pytest's default capture it raised an OSError about
+    capture -- a failure, but one that reads as a bug in the unit rather than
+    as "the CLASSIFICATION is wrong, reclassify to Tier 3".
+
+    Deliberately NOT an eighth group, for node's reason exactly: the seven
+    groups are `rank_risk`'s groups verbatim, and inventing another would break
+    the one-answer correspondence between the filter and this guard.
+
+    RESIDUAL, stated: `os.read(0, n)` reaches the file descriptor beneath both
+    names and is not fenced -- the same level node's guard does not reach
+    either, so the two stacks are honest in the same place.
+    """
+    _patch(builtins, "input", "stdin", "builtins.input")
+    real = sys.stdin
+    if real is None:
+        return
+    sys.stdin = _GuardedStdin(real)
+    _undo.append((sys, "stdin", real))
+
+
 def arm(tier, allow=None):
     """Install the guard for a proof run at `tier`. Idempotent."""
     global _roots
@@ -884,6 +996,7 @@ def arm(tier, allow=None):
     _state["inside"] = False
     _state["tier"] = tier
     _state["blocked"] = blocked_groups(tier, allow)
+    _state["stdin_blocked"] = tier == 1
     _state["armed"] = True
     del _state["thread_trips"][:]
     blocked = _state["blocked"]
@@ -925,6 +1038,8 @@ def arm(tier, allow=None):
         _patch_module("subprocess", _SUBPROCESS_NAMES, "subprocess")
         for name in _OS_SUBPROCESS + tuple(_os_process_family()):
             _patch(os, name, "subprocess", "os.%s" % name)
+    if _state["stdin_blocked"]:
+        _patch_stdin()
     if "database" in blocked:
         _patch_database()
         real_import = builtins.__import__
@@ -945,6 +1060,7 @@ def disarm():
             pass
     _state["tier"] = None
     _state["blocked"] = frozenset()
+    _state["stdin_blocked"] = False
     # Last, after every name is restored: a worker-thread violation nothing
     # else surfaced becomes a teardown ERROR here. On the pytest path
     # `pytest_runtest_teardown` has already drained the queue, so this is the

@@ -1,9 +1,9 @@
 # test-safety-net
 
 Writes real, proven-failing-before-passing tests into a repo that has none, so an agent (or a
-person) can change it without flying blind. Not a correctness audit — it pins current behaviour
-even where it looks wrong, and reports the suspicion rather than silently blessing it — and never
-a coverage-percentage chaser.
+person) can change it without flying blind. Python and node/TypeScript, both end to end. Not a
+correctness audit — it pins current behaviour even where it looks wrong, and reports the suspicion
+rather than silently blessing it — and never a coverage-percentage chaser.
 
 ## The gap it fills
 
@@ -45,16 +45,30 @@ Only filesystem, clock, randomness, and environment variables are controlled aut
 database and HTTP are declined to Tier 3 by default and are only ever pinned at Tier 2 with a
 recorded justification (an in-memory database, or `mockstar-mock` for HTTP), never silently.
 
-Static triage is a **filter**, not the enforcement — Python's dynamic dispatch means source
-analysis alone can't decide what a unit really touches. The invariant "never write a test that
-performs real I/O" is enforced at runtime instead, by a tier-aware guard that ships with the skill
-([`assets/io_guard.py`](assets/io_guard.py)) and is loaded as a pytest plugin ahead of collection
-rather than written into the repo. It patches the lowest layer Python exposes — `builtins.open`,
-`io.open`, the `os` primitives including the directory-and-metadata family no fd-level patch can
-see, `socket.socket`, `subprocess.Popen` and the DB entry points already imported — and raises its
-own exception type, so a guard trip (the classification is wrong) is never mistaken for an
-assertion failure (the captured value is wrong). Full mechanism, coverage table and residuals in
-[`references/triage.md`](references/triage.md).
+Static triage is a **filter**, not the enforcement — dynamic dispatch, in Python and in
+JavaScript alike, means source analysis cannot decide what a unit really touches. The invariant
+"never write a test that performs real I/O" is enforced at runtime instead, by a tier-aware guard
+per stack, loaded on the single-test invocation rather than written into the repo:
+
+- [`assets/io_guard.py`](assets/io_guard.py) — a **pytest plugin** loaded with `-p`, ahead of
+  collection. It patches the lowest layer Python exposes — `builtins.open`, `io.open`, the `os`
+  primitives including the directory-and-metadata family no fd-level patch can see,
+  `socket.socket`, `subprocess.Popen` and the DB entry points already imported.
+- [`assets/io_guard.js`](assets/io_guard.js) — **preloaded with `node --require`**, so it arms
+  before the test file, and therefore before the unit, is loaded. It patches every own function of
+  `node:fs`, of `node:fs/promises` (a different set from the callback face), of `node:net`,
+  `node:http`, `node:child_process` and the rest, each behind a `Proxy` so a patched class stays a
+  class; database drivers are patched the moment the repo requires one. Because node reads every
+  `.js` it loads through `fs.readFileSync`, the block decision is scoped by **call provenance** —
+  blocking on the name alone kills a test that touches no filesystem at all, inside the module
+  loader.
+
+Both raise their own exception type, so a guard trip (the classification is wrong) is never
+mistaken for an assertion failure (the captured value is wrong). Full mechanism, coverage table and
+residuals in [`references/triage.md`](references/triage.md) for python and
+[`references/stacks.md`](references/stacks.md) for node — including node's one rule with no Python
+equivalent: when a violation lands after its test resolved, `node --test` blames the wrong entry, so
+**the exit status is the only trustworthy signal on that stack.**
 
 Tiers 3 and 4 are output, not failure — a ranked "here's what blocks testing and the smallest fix"
 list is the handoff to `clean-code`, and is often worth more to a human than the tests themselves.
@@ -66,8 +80,11 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Python repositories only in this version — node/go/rust are on the follow-up plan
-(see [`references/stacks.md`](references/stacks.md)).
+churn signal). Two stacks are complete — **Python** (pytest, falling back to `unittest`) and
+**node/TypeScript** (node 18+, `node --test`, no dependency added). go and rust are not covered:
+neither is registered, so the ranker says so on stderr and returns an empty plan rather than
+guessing (see [`references/stacks.md`](references/stacks.md)). Node's optional precise discovery
+drives a `typescript` the repo already ships and never downloads one.
 
 ## Usage
 
@@ -91,10 +108,26 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 ## Layout
 
 - `SKILL.md` — the agent-facing workflow: detect → rank → confirm → write-and-prove → report.
-- `references/triage.md` — the four-tier triage, boundary controls, and the runtime guard.
-- `references/stacks.md` — per-stack facts (find units / where tests go / run one test).
+- `references/triage.md` — the four-tier triage, boundary controls, and python's runtime guard:
+  what it patches, how a trip is signalled, and its seven residuals.
+- `references/stacks.md` — per-stack facts (find units / where tests go / which framework / run one
+  test), and node's half of the guard story: its patch table, its residuals, and the exit-status
+  rule.
 - `references/parameters.md` — `rank_risk.py`'s CLI flags and JSON output shape.
-- `assets/rank_risk.py` — the ranker: churn, approximate blast radius, testability tier, score.
-- `assets/io_guard.py` — the tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
-- `assets/test_rank_risk.py`, `assets/test_io_guard.py` — their stdlib test suites.
+- `assets/rank_risk.py` — the stack-agnostic ranker: churn, approximate blast radius,
+  scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
+- `assets/stack_python.py` — the Python stack: unit discovery and testability triage.
+- `assets/stack_node.py` — the node/TypeScript stack: heuristic discovery of exported
+  units (plus the optional precise path through a `typescript` the repo already ships),
+  the naming, lexing and import-grammar answers JS gives, and node's own I/O marker
+  tables and triage.
+- `assets/stack_common.py` — the file helpers and the manifest-evidence rule the
+  ranker and every stack share.
+- `assets/io_guard.py` — python's tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
+- `assets/io_guard.js` — node's, preloaded with `node --require`; dependency-free CommonJS.
+- `assets/test_io_guard_node.sh` — the node guard's shell suite, whose first assertion extracts the
+  documented invocation from every document that prints it and runs it verbatim, in both
+  directions.
+- `assets/test_rank_risk.py`, `assets/test_io_guard.py`, `assets/test_stack_node.py` —
+  their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).

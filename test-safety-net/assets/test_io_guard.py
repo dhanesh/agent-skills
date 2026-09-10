@@ -7,6 +7,7 @@ The positive cases (pure computation, path algebra, a permitted Tier 2 group)
 are controls that keep the negatives from passing for the wrong reason.
 """
 import importlib.util
+import io
 import os
 import pathlib
 import re
@@ -140,6 +141,118 @@ class TestTier1BlocksEverything(GuardCase):
         # the classification. `allow` is a Tier 2 concept only.
         io_guard.arm(1, allow=("filesystem", "clock"))
         self.assertTrips("filesystem", lambda: open(self.path).close())
+
+
+@unittest.skipUnless(_HAS_PYTEST, "pytest is not installed in this environment")
+class TestStdinFailsFastAtTier1(GuardCase):
+    """R16's other half, which landed on node only.
+
+    Terminal input appears in NEITHER stack's I/O marker table, so the FILTER
+    cannot decline a unit that reads it. Under a proof run such a unit does not
+    fail -- it HANGS, waiting for a line nobody will type, yielding no verdict
+    and burning wall clock until someone notices. R16 ruled that the guard
+    should make it fail fast and that BOTH STACKS MOVE TOGETHER; node got the
+    `stdin` pseudo-group and Python got nothing, so `pytest -p io_guard -s`
+    over a unit calling `input()` still hung.
+
+    `stdin` is deliberately NOT an eighth group here either: the seven groups
+    are `rank_risk`'s groups verbatim, and inventing one would break the
+    one-answer correspondence between the filter and this guard.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # THE SUITE'S OWN STDIN IS REPLACED FIRST, and that is not incidental.
+        # If the guard regressed, `sys.stdin.read()` below would block forever
+        # on an interactive terminal and `make gate` would HANG rather than
+        # fail -- the exact outcome this class exists to make impossible. A
+        # stream already at EOF makes a regression report "no violation raised"
+        # in milliseconds. The HANG itself is pinned separately, by
+        # `test_a_unit_that_reads_stdin_fails_fast_instead_of_hanging` below,
+        # where a deadline is the assertion's teeth.
+        self._real_stdin = sys.stdin
+        sys.stdin = io.StringIO("")
+        self.addCleanup(setattr, sys, "stdin", self._real_stdin)
+
+    def test_input_trips_at_tier_1(self):
+        io_guard.arm(1)
+        import builtins
+        self.assertTrips("stdin", lambda: builtins.input("name? "))
+
+    def test_sys_stdin_read_trips_at_tier_1(self):
+        io_guard.arm(1)
+        self.assertTrips("stdin", lambda: sys.stdin.read())
+        self.assertTrips("stdin", lambda: sys.stdin.readline())
+        self.assertTrips("stdin", lambda: sys.stdin.readlines())
+        self.assertTrips("stdin", lambda: next(iter(sys.stdin)))
+
+    def test_everything_else_about_stdin_still_works(self):
+        # The wrapper DELEGATES: pytest asks `sys.stdin` for `fileno`,
+        # `isatty` and `encoding` while capturing, and a guard that broke those
+        # would break every run rather than the one unit that reads a line.
+        io_guard.arm(1)
+        self.assertIn(sys.stdin.isatty(), (True, False))
+        self.assertIsNotNone(sys.stdin.getvalue())      # delegated, not fenced
+
+    def test_a_unit_that_reads_stdin_fails_fast_instead_of_hanging(self):
+        # THE DEADLINE IS THE ASSERTION. The offence R16 named is not that the
+        # read succeeds -- it is that the run yields NO VERDICT AT ALL, forever.
+        # So this runs the documented invocation in a subprocess, with
+        # `--capture=no` (pytest's own capture raises an OSError of its own,
+        # which would mask the hang) and a stdin that never delivers a line: a
+        # pipe held open with nothing written to it. Without the guard this
+        # times out; with it, it exits non-zero in well under a second.
+        env = dict(os.environ, TEST_SAFETY_NET_TIER="1",
+                   PYTHONPATH=HERE + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        write = lambda rel, text: open(  # noqa: E731
+            os.path.join(self.tmp, rel), "w", encoding="utf-8").write(text)
+        write("asker.py", "def ask():\n    return input('name? ')\n")
+        write("test_asker.py",
+              "from asker import ask\ndef test_asks():\n    assert ask()\n")
+        read_fd, write_fd = os.pipe()          # never written to: a real block
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-p", "io_guard", "-s", "-q",
+                 "-p", "no:cacheprovider", "test_asker.py::test_asks"],
+                cwd=self.tmp, env=env, stdin=read_fd, capture_output=True,
+                text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            self.fail("a unit that reads stdin HUNG the proof run instead of "
+                      "failing it -- the outcome R16 called strictly worse "
+                      "than a failure")
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("IOGuardViolation", result.stdout + result.stderr)
+
+    def test_stdin_is_permitted_above_tier_1(self):
+        # Tier 2 says "this test fakes the groups it names". A unit that reads
+        # a line is not making a claim the allow list can express, and the
+        # tier-2 contract is about GROUPS -- so, exactly as on node, the stdin
+        # block is a tier-1-only fail-fast and nothing else.
+        io_guard.arm(2, ("filesystem",))
+        self.assertFalse(io_guard.stdin_blocked())
+
+    def test_stdin_is_not_an_eighth_group(self):
+        io_guard.arm(1)
+        self.assertNotIn("stdin", io_guard.GROUPS)
+        self.assertNotIn("stdin", io_guard.CONTROLLABLE_GROUPS)
+        self.assertNotIn("stdin", io_guard.UNCONTROLLABLE_GROUPS)
+
+    def test_disarm_restores_the_real_stdin(self):
+        real = sys.stdin
+        io_guard.arm(1)
+        self.assertIsNot(sys.stdin, real)
+        io_guard.disarm()
+        self.assertIs(sys.stdin, real)
+
+    def test_the_two_stacks_agree_that_stdin_is_a_tier_1_only_block(self):
+        # The cross-stack half of R16: a user learns this once and applies it
+        # to both. `io_guard.js` exports the same shape.
+        js = open(os.path.join(HERE, "io_guard.js"), encoding="utf-8").read()
+        self.assertIn('state.stdinBlocked = tier === 1', js)
+        self.assertIn('"stdin"', js)
 
 
 class TestTier2(GuardCase):

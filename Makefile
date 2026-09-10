@@ -48,7 +48,7 @@ gate: clean
 		for t in "$$d"/assets/test_*.py; do \
 			[ -f "$$t" ] || continue; \
 			out=$$(cd "$$d/assets" && python3 "$$(basename "$$t")" 2>&1); st=$$?; \
-			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; \
+			printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK( \(skipped=[0-9]+\))?|FAILED.*|Ran [0-9]+ tests' | tr '\n' ' ')"; \
 			[ $$st -eq 0 ] || { _fail "$$t" "$$out"; rc=1; }; \
 		done; \
 		for t in "$$d"/assets/test_*.sh; do \
@@ -176,7 +176,7 @@ gate-skill: clean
 	@for t in "$(SKILL)"/assets/test_*.py; do \
 		[ -f "$$t" ] || continue; \
 		out=$$(cd "$(SKILL)/assets" && python3 "$$(basename "$$t")" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \
-		printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK|Ran [0-9]+ tests' | tr '\n' ' ')"; \
+		printf 'UNIT %s: %s\n' "$$t" "$$(printf '%s\n' "$$out" | grep -oE 'OK( \(skipped=[0-9]+\))?|Ran [0-9]+ tests' | tr '\n' ' ')"; \
 	done
 	@for t in "$(SKILL)"/assets/test_*.sh; do \
 		[ -f "$$t" ] || continue; \

@@ -1324,15 +1324,24 @@ class TestMain(TempRepo):
             code = rank_risk.main(argv)
         return code, stdout.getvalue()
 
-    def test_success_on_a_valid_repo_exits_0_and_prints_json_with_the_eight_expected_keys(self):
+    def test_success_on_a_valid_repo_exits_0_and_prints_json_with_the_nine_expected_keys(self):
+        # NINE now, not eight. `discovery` says which reader produced the
+        # units -- the one addition to the report since the stack seam was
+        # cut, and the one this assertion is allowed to grow for: a stack
+        # whose toolchain path is optional can degrade for reasons that have
+        # nothing to do with the code, and two runs that disagree about how
+        # many units exist are not comparable without it.
         import json
         write(self.root, "core.py", "def solo():\n    pass\n")
         code, out = self._run([self.root, "--since", "10 years ago"])
         self.assertEqual(code, 0)
         payload = json.loads(out)
         self.assertEqual(set(payload.keys()),
-                         {"root", "stack", "window", "units_discovered",
+                         {"root", "stack", "discovery", "window", "units_discovered",
                           "ranked", "remainder", "not_netted", "covered"})
+        # Python's `ast` is stdlib: it cannot go missing, so this stack never
+        # degrades and the key is a constant for it.
+        self.assertEqual(payload["discovery"], "precise")
 
     def test_nonexistent_path_exits_2(self):
         code, _ = self._run([os.path.join(self.root, "does-not-exist")])

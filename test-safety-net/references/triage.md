@@ -145,6 +145,16 @@ filesystem could otherwise pass "RED" only because the guard's exception looked 
 deliberately-wrong assertion, then pass "GREEN" the same way once corrected — two runs that both
 "succeeded" while never proving the classification safe.
 
+**Terminal input fails fast at tier 1, on both stacks.** `input()`, `sys.stdin.read()`,
+`readline.createInterface({input: process.stdin})` and `process.stdin` are in **neither** stack's
+I/O marker table, so the *filter* cannot decline a unit that reads a line — and under a proof run
+such a unit does not fail, it **hangs**, waiting for a line nobody will type and yielding no
+verdict at all. A hang is strictly worse than a failure, so at tier 1 both guards make it a guard
+trip (`stdin`), reported and remedied like any other: reclassify to Tier 3 and discard the test.
+It is deliberately **not** an eighth group — the seven groups are the ranker's groups verbatim —
+so `TEST_SAFETY_NET_ALLOW` cannot name it, and tier 2 does not block it. Residual, the same on
+both stacks: a read of file descriptor 0 beneath both names (`os.read(0, n)`) is not fenced.
+
 **How the guard is loaded.** It **ships with this skill** as `assets/io_guard.py` — do not author
 your own. It loads as a **pytest plugin, via `-p`**, not as a `conftest.py` written into the
 target repo:
@@ -220,7 +230,7 @@ was armed. The guard now records every off-main-thread trip at the raise (which 
 the main thread at `Thread.join`, at pytest teardown, or at `disarm()` — whichever comes first.
 The residual is named in the list below.
 
-**State the residuals honestly.** Six of them:
+**State the residuals honestly.** Seven of them:
 
 1. A test that spawns a subprocess which itself dials out to the network escapes an in-process
    guard — the guard patches this process's primitives, not a child process's.
@@ -244,6 +254,17 @@ The residual is named in the list below.
    silent pass — but a thread still running when the interpreter exits takes its record with it.
 6. If the unit under test is imported from site-packages rather than from the working tree, its
    frames are exempt and the guard under-fires. Run the proof against the working tree.
+7. **The import exemption is keyed on CPython's own frame names.** `_IMPORT_PROTOCOL_FRAMES` in
+   `assets/io_guard.py` is a hand-derived list (`_find_and_load`, `_gcd_import`,
+   `_call_with_frames_removed`, …), matched against `co_name` on a `<frozen importlib...>` frame.
+   Those names are an implementation detail of the interpreter, not an API. A CPython release that
+   renames them does not make the guard noisy, it makes it **over-fire**: a genuine `import`
+   stops being recognised as one and every candidate that imports anything gets declined. Rename
+   in the other direction — a frame that stops resolving as machinery — and it under-fires. The
+   node guard carries the same dependency in a different shape (it matches the literal
+   `node:internal/` prefix in stack text); `references/stacks.md` states it there. Both are pinned
+   by their suites' documented-command assertion, which is the thing that goes red first, and only
+   on a machine where that suite runs.
 
 **Process-replacing calls are declined statically, and that is not redundancy.** The guard does
 patch `os.exec*`, so a Python-level `os.execv` raises before the image is replaced. But an

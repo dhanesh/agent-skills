@@ -95,6 +95,50 @@ SINCE_TSN_FIXROUND_7 = "243e977"  # test-safety-net: the import exemption
 # scoped to the call it judges (F1 -- a module body read arbitrary files at
 # tier 1 under `1 passed`, missed by BOTH layers), a call site required on the
 # same-directory credit route (F4), and the eval's inert-plugin arm (F3)
+SINCE_TSN_NODE = "0a02273"   # test-safety-net: the node stack's heuristic
+# discovery, and the two interface corrections that had to precede it
+# (`name_pattern`, and the file context the import grammar resolves against).
+SINCE_TSN_NODE_PRECISE = "75d8de9"  # test-safety-net: the manifest bonus made
+# multiplicative (an additive 100 ranked five JS files in a forty-file Python
+# repo), and node's optional precise discovery path with the `discovery` key
+# that reports which reader ran. One constant for the campaign: both commits
+# land at the same merge.
+SINCE_TSN_NODE_GUARD = "483010b"  # test-safety-net: `io_guard.js`, node's
+# runtime enforcement -- and, one commit earlier, the manifest CLASSIFIER that
+# had to land before it (a guard is worth nothing in a repo the detector handed
+# to the wrong stack). One constant for the campaign.
+SINCE_TSN_NODE_WIRED = "0a02273"  # test-safety-net: the node stack WIRED THROUGH
+# THE SHIPPED DOCUMENTS -- SKILL.md, references/stacks.md, references/parameters.md
+# and README.md stop saying node is ranked-but-not-written, and the guard
+# invocation an agent copies is printed where an agent will read it. Pinned to
+# Task 1's commit, the earliest point any part of the node stack existed,
+# because these rows measure the CAMPAIGN as one shipped surface rather than
+# any single commit in it: they run the documented CLI and the command
+# extracted from SKILL.md, so the whole chain (detect -> discover -> triage ->
+# rank -> prove) has to be present for one of them to move. Same value as
+# SINCE_TSN_NODE by design -- the campaign lands at one merge, so every row of
+# it becomes HELD* together.
+SINCE_TSN_NODE_FIXES_1 = "ed219b1"  # test-safety-net: the node branch's first
+# fix round -- the guard's provenance default inverted so `util.promisify` can no
+# longer route a real filesystem WRITE past it at tier 1 (F1), a degraded precise
+# run declining instead of reporting zero units as `precise` (F2), Django's split
+# requirements earning Python its manifest credit (F3), an unresolvable path
+# alias crediting nothing rather than every same-named file (F4), and Python's
+# half of the stdin ruling (F7). One constant for the round: the fixes land at
+# one merge, so every row of it becomes HELD* together.
+SINCE_TSN_NODE_FIXES_2 = "a720be6"  # test-safety-net: the node branch's second
+# fix round -- a path-glob manifest honoured wherever it is ANCHORED rather than
+# only at the analysed root (N1: `backend/requirements/base.txt` detected node
+# and ranked three frontend files over twelve backend modules), the guard's
+# provenance walk reading a frame's LOCATION rather than any substring of its
+# line (N2, and C1's other half), and `environment.yaml`/`manage.py` declaring
+# by content like every other manifest (N3). One constant for the round: the
+# fixes land at one merge, so every row of it becomes HELD* together.
+SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
+# detection (first match wins reclassified this repo's own corpus as node),
+# then node's I/O marker tables, triage, and registration. One constant for
+# the campaign: both commits land together, so both become ancestors of the
+# baseline at the same merge.
 
 
 def _git_out(*args):
@@ -1693,6 +1737,1337 @@ def check_test_safety_net_round7(old, new):
     shutil.rmtree(scratch, ignore_errors=True)
 
 
+# ── test-safety-net: the node stack ─────────────────────────────────────────
+#
+# Every probe returns its "cannot answer" value when the tree has no
+# `stack_node.py`, exactly as the ranker rows score a tree with no ranker: at
+# the baseline this stack does not exist, and "a node repo discovers nothing,
+# credits nothing, and reads as a clean result" is the real state each row
+# measures. The probe never raises, because a crashed probe measures nothing.
+
+_NODE_PROBE = r"""
+res = {"forms": 0, "phantom": 0, "dollar": 0, "credited": 0}
+try:
+    import stack_node
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+forms = tree({"src/forms.js": "\n".join([
+    "export function a() {}",
+    "export default function b() {}",
+    "export const c = (x) => x;",
+    "export const d = function () {};",
+    "export class E {}",
+    "function f() {}",
+    "export { f };",
+    "module.exports.g = () => 1;",
+    "exports.h = function () {};",
+]) + "\n",
+    "src/noise.js": "\n".join([
+    "// export function ghost1() {}",
+    "/* export class Ghost2 {} */",
+    "const s = 'export function ghost3() {}';",
+    "const t = `export function ghost4() {}`;",
+    "const u = 'https://example.com//ghost5';",
+    "const re = /export function ghost6/g;",
+]) + "\n"})
+units, _mode = stack_node.discover_units(forms)
+res["forms"] = len([u for u in units if u["path"] == "src/forms.js"])
+res["phantom"] = len([u for u in units if u["path"] == "src/noise.js"])
+
+dollar = tree({
+    "src/api.js": "export function $fetch(u) { return u; }\n",
+    "src/api.test.js": ('import { $fetch } from "./api";\n'
+                        'test("fetches", () => { $fetch("x"); });\n'),
+})
+du, _ = stack_node.discover_units(dollar)
+res["dollar"] = 1 if "src/api.js::$fetch" in rank_risk.already_covered(
+    dollar, du, stack_node) else 0
+
+coll = tree({
+    "packages/a/src/utils.js": "export function parse(s) { return s; }\n",
+    "packages/b/src/utils.js": "export function parse(s) { return s; }\n",
+    "packages/a/src/__tests__/utils.test.js": (
+        'import { parse } from "../utils";\n'
+        'test("parses", () => { parse("x"); });\n'),
+})
+cu, _ = stack_node.discover_units(coll)
+cov = rank_risk.already_covered(coll, cu, stack_node)
+res["credited"] = ((1 if "packages/a/src/utils.js::parse" in cov else 0)
+                   - (1 if "packages/b/src/utils.js::parse" in cov else 0))
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node(old, new):
+    """Does a JS/TS repo get a ranking at all, and is the coverage it gets honest?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_PROBE)
+    if "_error" in oldp or "_error" in newp:
+        return
+    row(s, "exported node units discovered from a nine-form fixture (higher=better)",
+        oldp["forms"], newp["forms"], newp["forms"] > oldp["forms"],
+        "a node repo detected as Python discovers nothing and reports a clean "
+        "result -- the silent zero this stack exists to close",
+        since=SINCE_TSN_NODE)
+    row(s, "node units credited to a test that only names them in a comment, "
+           "a string or a regex (lower=better)",
+        oldp["phantom"], newp["phantom"],
+        newp["phantom"] == oldp["phantom"] == 0,
+        "the stripper's regression guard, and vacuous at the baseline (no node "
+        "stack, so no phantom either): a `//` in a URL, an export inside a "
+        "template literal and one inside a regex literal must all stay unread",
+        kind="guard")
+    row(s, "a `$`-named export matched to its own test (higher=better)",
+        oldp["dollar"], newp["dollar"], newp["dollar"] > oldp["dollar"],
+        "the core built `\\b%s\\b`, and `\\b` is defined against [A-Za-z0-9_] "
+        "-- so `$fetch` could never be matched in any test file and read as an "
+        "uncovered gap forever. `name_pattern` moved that to the stack",
+        since=SINCE_TSN_NODE)
+    row(s, "colliding node units credited by a `__tests__` sibling test, "
+           "-1 on any cross-credit (higher=better)",
+        oldp["credited"], newp["credited"], newp["credited"] > oldp["credited"],
+        "widening `is_test_for` to `__tests__/` and mirrored trees re-opens fix "
+        "round 6's over-credit unless the specifier is RESOLVED against the "
+        "referencing file: package b has no test and must stay uncovered",
+        since=SINCE_TSN_NODE)
+
+
+# ── test-safety-net: node triage, and the detector that had to precede it ───
+#
+# Every probe returns its "cannot answer" value against a tree with no node
+# stack — which is what the baseline is. That is not a rigged comparison: "a
+# node repo is ranked as Python, discovers nothing and reads as clean" IS the
+# baseline behaviour, and it is the thing being fixed.
+
+_NODE_TRIAGE_PROBE = r"""
+res = {"node_rows": 0, "declined": 0, "marked_builtins": 0,
+       "repo_stack": "", "ambiguous": 0, "template_stack": ""}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+# 1/2. a node repo, ranked end to end through the stack-agnostic core.
+nd = tree({
+    "package.json": '{"name": "demo"}\n',
+    "src/utils.js": ("export function parse(s) { return JSON.parse(s); }\n"
+                     "export function stamp(x) { return { x, at: Date.now() }; }\n"),
+    "src/io.js": ('import fs from "node:fs";\n'
+                  'import { execSync } from "child_process";\n'
+                  "export function save(p, d) { fs.writeFileSync(p, d); }\n"
+                  "export function run(c) { return execSync(c); }\n"),
+})
+try:
+    plan = rank_risk.rank(nd, "10 years ago", 10)
+    rows = plan["ranked"] + plan["remainder"] + plan["not_netted"]
+    res["node_rows"] = len([r for r in rows if r["path"].endswith((".js", ".ts"))])
+    res["declined"] = len([r for r in plan["not_netted"] if r["tier"] >= 3])
+except Exception:
+    pass
+
+# 3. how much of node's own I/O surface the marker tables actually name.
+IO_BUILTINS = ["fs", "child_process", "cluster", "worker_threads", "dns", "tls",
+               "http", "https", "http2", "net", "dgram", "inspector", "os",
+               "perf_hooks", "timers", "crypto", "process", "wasi",
+               "trace_events", "sqlite"]
+try:
+    import stack_node
+    tables = (stack_node.CONTROLLABLE, stack_node.UNCONTROLLABLE)
+
+    def marked(mod):
+        for table in tables:
+            for markers in table.values():
+                for k in markers:
+                    c = k[5:] if k.startswith("node:") else k
+                    if c == mod or c.startswith(mod + ".") or c.startswith(mod + "/"):
+                        return True
+        return False
+
+    res["marked_builtins"] = len([m for m in IO_BUILTINS if marked(m)])
+except Exception:
+    pass
+
+# 4. THIS checkout's own corpus: 51 non-test .py against 17 .mjs/.ts, and one
+#    package.json belonging to a scaffold it ships.
+root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(rank_risk.__file__))))
+try:
+    res["repo_stack"] = rank_risk.detect_stack(root).STACK_NAME
+except AttributeError:
+    # No detector at all: before the stack seam was cut, the ranker WAS the
+    # Python stack, so "python" is what this tree does to every repo. Reading
+    # that as an error would report a guard as broken when it is intact.
+    res["repo_stack"] = "python"
+except Exception:
+    res["repo_stack"] = "ERROR"
+
+# 5. a dead heat: reported, or guessed?
+half = tree({"a.py": "def a():\n    return 1\n", "b.py": "def b():\n    return 1\n",
+             "a.ts": "export function a() {}\n", "b.ts": "export function b() {}\n"})
+try:
+    rank_risk.detect_stack(half)
+except Exception as exc:
+    res["ambiguous"] = 1 if type(exc).__name__ == "AmbiguousStack" else 0
+
+# 6. this repo's shape in miniature: a Python majority, a stray .mjs, and the
+#    only manifest inside a shipped scaffold.
+tpl = tree(dict(
+    [("mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(10)]
+    + [("tools/build.mjs", "export function build() {}\n"),
+       ("kit/assets/templates/scaffold/package.json", "{}\n"),
+       ("kit/assets/templates/scaffold/src/app.ts", "export function boot() {}\n")]))
+try:
+    res["template_stack"] = rank_risk.detect_stack(tpl).STACK_NAME
+except AttributeError:
+    res["template_stack"] = "python"
+except Exception:
+    res["template_stack"] = "ERROR"
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_triage(old, new):
+    """Is a node repo ranked at all, are its hazards declined, and did the
+    detector stay right about the repo the ranker lives in?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_TRIAGE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_TRIAGE_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "node units a full `rank()` run reports for a JS repo (higher=better)",
+        oldp["node_rows"], newp["node_rows"], newp["node_rows"] > oldp["node_rows"],
+        "the end-to-end half of the silent zero: detection, discovery, triage "
+        "and ranking together, not one module in isolation",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "node units DECLINED as needing a seam rather than netted "
+           "(higher=better)",
+        oldp["declined"], newp["declined"], newp["declined"] > oldp["declined"],
+        "`execSync` at tier 3 is the filter working; with no node triage the "
+        "unit is not declined, it simply does not exist",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "I/O-performing node builtins the marker tables name, of 20 "
+           "(higher=better)",
+        oldp["marked_builtins"], newp["marked_builtins"],
+        newp["marked_builtins"] > oldp["marked_builtins"],
+        "the enumeration hole the Python branch hit twice (`os.remove` marked, "
+        "`os.rename` not), measured for node: `dns`, `tls`, `http2`, `cluster`, "
+        "`worker_threads`, `wasi` and `perf_hooks` were all absent from the "
+        "first draft and are derived from `module.builtinModules` now",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "stack detected for the ranker's OWN corpus (python=right)",
+        oldp["repo_stack"], newp["repo_stack"],
+        newp["repo_stack"] == "python" == oldp["repo_stack"],
+        "registering a stack that claims any tree holding a `.mjs` is exactly "
+        "how a repo gets reclassified out from under its own ranker; this row "
+        "fails if node ever wins here",
+        kind="guard")
+    row(s, "a Python majority with a stray `.mjs` and a scaffold's "
+           "`package.json` (python=right)",
+        oldp["template_stack"], newp["template_stack"],
+        newp["template_stack"] == "python" == oldp["template_stack"],
+        "this repo's shape in miniature, and vacuous at the baseline (no node "
+        "stack to lose to): a manifest under `assets/templates/` describes a "
+        "scaffold the repo SHIPS and must score nothing",
+        kind="guard")
+    row(s, "a 50/50 polyglot tree REPORTS the tie instead of guessing "
+           "(higher=better)",
+        oldp["ambiguous"], newp["ambiguous"], newp["ambiguous"] > oldp["ambiguous"],
+        "first match wins answered a dead heat silently, by registration "
+        "order; the run now exits 2, prints both scores and names `--stack`",
+        since=SINCE_TSN_NODE_TRIAGE)
+
+
+
+# ── test-safety-net: the manifest weight, and the precise discovery path ────
+
+_NODE_PRECISE_PROBE = r"""
+res = {"tooling_stack": "ERROR", "tooling_units": -1, "fresh_node": "ERROR",
+       "declared_node": "ERROR", "discovery_key": 0, "survives_a_bad_toolchain": 0,
+       "precise_extra": -1, "past_a_regex": 0}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+try:
+    import stack_node
+except Exception:
+    # No node stack at all. That is what the baseline looks like, and it is a
+    # measurement rather than a crash: every row below still answers, so the
+    # probe must not bail the way one that imports it at the top would.
+    stack_node = None
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+def stack_of(root):
+    try:
+        return rank_risk.detect_stack(root).STACK_NAME
+    except AttributeError:
+        return "python"          # before the stack seam, the ranker WAS python
+    except Exception as exc:
+        return "ambiguous" if type(exc).__name__ == "AmbiguousStack" else "ERROR"
+
+
+# 1/2. THE REPRODUCTION: a Python repo with a `prettier` package.json. An
+#      additive bonus scored node 105 against python 40 and the skill ranked
+#      five files while ignoring forty.
+tooling = tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(40)]
+    + [("web/s%d.js" % i, "export function go%d() {}\n" % i) for i in range(5)]
+    + [("package.json", '{"devDependencies": {"prettier": "^3"}}\n')]))
+res["tooling_stack"] = stack_of(tooling)
+try:
+    plan = rank_risk.rank(tooling, "10 years ago", 10)
+    res["tooling_units"] = plan["units_discovered"]
+    res["discovery_key"] = 1 if "discovery" in plan else 0
+except Exception:
+    pass
+
+# A manifest only scales a claim when it DECLARES the stack -- an entry point,
+# runtime dependencies, a real build. `{"name": "app"}` declares nothing, and
+# the fixtures below mean "a real node package", so they say so.
+PKG_DECLARING = '{"name": "app", "main": "src/index.js", "dependencies": {"ky": "^1"}}\n'
+PKG_TOOLING = ('{"name": "app", "private": true, "scripts": {"prepare": "husky"},'
+               ' "devDependencies": {"husky": "^9", "prettier": "^3"}}\n')
+
+# 3. the direction the manifest scaling still has to carry: a fresh node
+#    project beside a few Python helper scripts is a node project.
+res["fresh_node"] = stack_of(tree({
+    "package.json": PKG_DECLARING,
+    "src/a.js": "export function a() {}\n",
+    "src/b.js": "export function b() {}\n",
+    "tools/gen.py": "def go():\n    return 1\n",
+    "tools/fmt.py": "def go():\n    return 1\n",
+    "tools/lint.py": "def go():\n    return 1\n"}))
+
+# 4. and a declared node package that vendors six Python scripts.
+res["declared_node"] = stack_of(tree(dict(
+    [("package.json", PKG_DECLARING), ("src/app.ts", "export function boot() {}\n")]
+    + [("tools/gen%d.py" % i, "def go():\n    return 1\n" % ()) for i in range(6)])))
+
+# 4b. THE SHAPE FILE COUNTS CANNOT SEPARATE. Eight `.py`, three `.js` and a
+#     `package.json` that carries husky and nothing else scored node 16 to
+#     python 8 -- identical counts to a fresh node project, opposite verdict.
+#     Only the manifest's CONTENT tells them apart.
+res["husky_python"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(8)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(3)]
+    + [("package.json", PKG_TOOLING)])))
+
+# 4c. the same rule run on the OTHER side: a `pyproject.toml` holding only
+#     `[tool.ruff]` is exactly as much a claim about the repo as a husky
+#     `package.json`, so 40 declared JS files beat 30 linted Python ones.
+res["ruff_only_pyproject"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(30)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(40)]
+    + [("pyproject.toml", "[tool.ruff]\nline-length = 100\n"),
+       ("package.json", PKG_DECLARING)])))
+
+# 4d. and the bound in the other direction, which content classification had to
+#     replace: a Python backend with no manifest of its own must not lose to a
+#     ten-file declared frontend.
+res["backend_beats_frontend"] = stack_of(tree(dict(
+    [("srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i) for i in range(40)]
+    + [("web/m%d.js" % i, "export function go%d() {}\n" % i) for i in range(10)]
+    + [("web/package.json", PKG_DECLARING)])))
+
+# 5. a toolchain that is present and BROKEN must not cost the run its units.
+broken = tree({
+    "package.json": PKG_DECLARING,
+    "src/util.js": "export function parse(s) { return s; }\n",
+    "node_modules/typescript/lib/typescript.js": 'throw new Error("boom");\n'})
+if stack_node is not None:
+    try:
+        import io as _io
+        import contextlib as _cl
+        err = _io.StringIO()
+        with _cl.redirect_stderr(err):
+            units, _mode = stack_node.discover_units(broken)
+        res["survives_a_bad_toolchain"] = 1 if [u["id"] for u in units] == \
+            ["src/util.js::parse"] else 0
+    except Exception:
+        res["survives_a_bad_toolchain"] = 0
+
+# 6. exports below a function that RETURNS A REGEX LITERAL. Found by running
+#    both discovery paths over a real repo and diffing them.
+if stack_node is not None:
+    try:
+        regex_tree = tree({"src/re.js":
+                           "export function head(t) { return /\\{[A-Za-z]/.test(t); }\n"
+                           "export function mid(t) { return t; }\n"
+                           "export function tail(t) { return t; }\n"})
+        res["past_a_regex"] = len(stack_node._units_heuristic(regex_tree))
+    except Exception:
+        res["past_a_regex"] = 0
+
+# 7. what precision BUYS, where a real typescript exists to buy it with.
+lib = os.environ.get("TSN_TYPESCRIPT_LIB", "")
+if lib and os.path.isfile(lib) and stack_node is not None:
+    forms = tree({
+        "src/codec.js": "export const { encode, decode } = makeCodec();\n",
+        "src/cjs.js": "function fn(x) { return x; }\nmodule.exports = fn;\n",
+        "src/quoted.js": ('function parse(s) { return s; }\n'
+                          'module.exports = { "parse": parse };\n')})
+    try:
+        heur = {u["id"] for u in stack_node.discover_units(forms)[0]}
+        prec = stack_node._units_precise(forms, ts_lib=lib)
+        res["precise_extra"] = -1 if prec is None else len({u["id"] for u in prec} - heur)
+    except Exception:
+        res["precise_extra"] = -1
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_precise(old, new):
+    """Does a Python repo with a `package.json` stay Python, and does the report
+    say which reader found its units?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_PRECISE_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_PRECISE_PROBE)
+    if _errored(oldp, newp):
+        return
+    # THESE TWO ARE GUARDS, NOT CLAIMS, AND THE REASON IS WORTH STATING. The
+    # swamping bug was introduced and fixed on the SAME branch, so it never
+    # reached the baseline: at the merge base there is no node stack to lose
+    # this repo to, and the shape below has always answered "python". Writing
+    # them as deltas would report UNPROVEN, which is the harness working -- a
+    # fix that moves no measurement against the baseline is not an improvement
+    # against the baseline. What they are worth is standing: from here on, any
+    # change that lets a tooling `package.json` outvote a file majority fails
+    # this row instead of shipping.
+    row(s, "stack for 40 `.py` + 5 `.js` + a `prettier` package.json "
+           "(python=right)",
+        oldp["tooling_stack"], newp["tooling_stack"],
+        newp["tooling_stack"] == "python" == oldp["tooling_stack"],
+        "the mainline shape, not a corner: an intra-branch `MANIFEST_BONUS = "
+        "100` ADDED to the file count scored node 105 against python 40, and a "
+        "root `package.json` for formatting or git hooks is ordinary in a "
+        "Python repo. A manifest now SCALES a claim -- `(files + 5) * 2` -- so "
+        "it cannot manufacture a majority it does not have",
+        kind="guard")
+    row(s, "units that repo's plan actually looks at (higher=better)",
+        oldp["tooling_units"], newp["tooling_units"],
+        newp["tooling_units"] >= oldp["tooling_units"] > 0,
+        "the consequence the label hides: under the additive bonus the run "
+        "ranked the five JavaScript files and never saw the forty Python "
+        "ones. A well-formed report about the wrong half of a repo is exactly "
+        "the failure this skill exists to close",
+        kind="guard")
+    row(s, "the report names WHICH reader produced its units (higher=better)",
+        oldp["discovery_key"], newp["discovery_key"],
+        newp["discovery_key"] > oldp["discovery_key"],
+        "decision D1's ninth key. A stack whose toolchain path is optional can "
+        "degrade for reasons that have nothing to do with the code, and two "
+        "runs that disagree about how many units exist are not comparable "
+        "unless the report says which reader produced each",
+        since=SINCE_TSN_NODE_PRECISE)
+    # These two DO move against the baseline, and they move because node was
+    # registered at all -- so they carry that campaign's constant rather than
+    # this one's. What they measure here is the other edge of the same
+    # constants: correcting the swamping bug by simply shrinking a manifest's
+    # weight would hand every small declared node package to whichever language
+    # vendored more helper scripts, and these fail if that happens.
+    row(s, "a fresh node project beside three Python scripts (node=right)",
+        oldp["fresh_node"], newp["fresh_node"], newp["fresh_node"] == "node",
+        "the direction opposite the swamping bug, and the reason the manifest "
+        "scaling carries a FLOOR: two source files plus a real `package.json` "
+        "is a node project even beside three Python helper scripts, and a "
+        "multiplier on a claim of 2 cannot say so without one",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "a declared node package vendoring six Python scripts (node=right)",
+        oldp["declared_node"], newp["declared_node"],
+        newp["declared_node"] == "node",
+        "the same edge one size up: a `package.json` beside a real source tree "
+        "is a claim about what the repo IS, and a scattering of another "
+        "language's scripts must not overturn it",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "a small Python repo whose `package.json` is only husky "
+           "(python=right)",
+        oldp["husky_python"], newp["husky_python"],
+        newp["husky_python"] == "python",
+        "the shape FILE COUNTS CANNOT SEPARATE, and the one Task 4 left open: "
+        "8 `.py`, 3 `.js` and a git-hooks `package.json` are the same counts as "
+        "a fresh node project with the opposite right answer, so no "
+        "`(files + floor) * multiplier` pair fixes both. A manifest now scales "
+        "a claim only when it DECLARES the stack -- an entry point, runtime "
+        "dependencies, a module system, a real build -- and husky declares "
+        "none of those",
+        kind="guard")
+    row(s, "a Python backend with no manifest beside a 10-file declared JS "
+           "frontend (python=right)",
+        oldp["backend_beats_frontend"], newp["backend_beats_frontend"],
+        newp["backend_beats_frontend"] == "python",
+        "the table's UPPER bound on `MANIFEST_FLOOR`/`MANIFEST_MULTIPLIER`, "
+        "which had to be replaced: while a tooling `package.json` still scaled "
+        "node's claim, the 40-`.py` row above was what stopped the constants "
+        "being raised. It cannot be broken by any pair any more, so this shape "
+        "holds the ceiling instead -- raise the floor past 6 and ten frontend "
+        "files outvote forty backend ones",
+        kind="guard")
+    row(s, "40 declared `.js` against 30 `.py` whose only manifest is a ruff "
+           "config (node=right)",
+        oldp["ruff_only_pyproject"], newp["ruff_only_pyproject"],
+        newp["ruff_only_pyproject"] == "node",
+        "the classification runs on BOTH sides or it is not weighing evidence, "
+        "it is picking a winner: a `pyproject.toml` holding only `[tool.ruff]` "
+        "is exactly as much a claim about what a repo IS as a husky "
+        "`package.json`, which is to say none",
+        since=SINCE_TSN_NODE_TRIAGE)
+    row(s, "units still discovered when a PRESENT toolchain is broken "
+           "(higher=better)",
+        oldp["survives_a_bad_toolchain"], newp["survives_a_bad_toolchain"],
+        newp["survives_a_bad_toolchain"] > oldp["survives_a_bad_toolchain"],
+        "the precise path's whole contract: it is an upgrade, never a "
+        "dependency. A `node_modules/typescript` that throws on require must "
+        "cost the run nothing at all -- the heuristic still returns every unit "
+        "and the run still reports which reader found them",
+        since=SINCE_TSN_NODE_PRECISE)
+    row(s, "exports the heuristic finds in a file below a `return /re/` line, "
+           "of 3 (higher=better)",
+        oldp["past_a_regex"], newp["past_a_regex"],
+        newp["past_a_regex"] > oldp["past_a_regex"],
+        "found by running BOTH discovery paths over a real repo and diffing "
+        "them -- three exports of one TypeScript file were invisible to the "
+        "heuristic and plain to the parser. `_REGEX_PREV_WORDS` was matched "
+        "against the identifier STARTING at the cursor, so walking `return` "
+        "left `prev_word` as \"n\" and the list matched nothing; the regex text "
+        "stayed visible and one `{` inside it opened a bracket that never "
+        "closed, so every export in the rest of the file stopped being top "
+        "level. It scored 1 of 3 before the fix and 0 at this baseline, which "
+        "has no node stack at all",
+        since=SINCE_TSN_NODE_PRECISE)
+    if newp.get("precise_extra", -1) >= 0:
+        row(s, "export forms the precise path finds that the heuristic cannot "
+               "(higher=better)",
+            max(oldp.get("precise_extra", -1), 0), newp["precise_extra"],
+            newp["precise_extra"] > max(oldp.get("precise_extra", -1), 0),
+            "destructured exports, a whole-module `module.exports = fn`, and a "
+            "quoted key -- three of the four forms Task 2 recorded as "
+            "deliberate misses of a reader with no parse tree. Row emitted "
+            "only where a real `typescript` is resolvable "
+            "(TSN_TYPESCRIPT_LIB)",
+            since=SINCE_TSN_NODE_PRECISE)
+
+
+_NODE_GUARD_PROBE = r"""
+import json, os, shutil, subprocess, sys, tempfile
+
+res = {"guard_present": 0, "blocks_fs": 0, "passes_clean": 0, "stdin_fast": 0}
+guard = os.path.join(sys.path[0], "io_guard.js")
+node = shutil.which("node")
+if node and os.path.isfile(guard):
+    res["guard_present"] = 1
+    work = tempfile.mkdtemp()
+
+    def write(rel, text):
+        with open(os.path.join(work, rel), "w") as f:
+            f.write(text)
+
+    write("pure.js", "function add(a, b) { return a + b; }\nmodule.exports = { add };\n")
+    write("test_pure.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { add } = require("./pure.js");\n'
+          'test("adds", () => { assert.strictEqual(add(2, 3), 5); });\n')
+    write("leaky.js",
+          'const fs = require("node:fs");\n'
+          'function hosts() { return fs.readFileSync("/etc/hosts", "utf8").length; }\n'
+          "module.exports = { hosts };\n")
+    write("test_leaky.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { hosts } = require("./leaky.js");\n'
+          'test("adds", () => { assert.ok(hosts() >= 0); });\n')
+    write("stdinleak.js",
+          'const readline = require("node:readline");\n'
+          "function ask() {\n"
+          "  const rl = readline.createInterface({ input: process.stdin });\n"
+          "  return new Promise((r) => rl.question('? ', r));\n"
+          "}\nmodule.exports = { ask };\n")
+    write("test_stdinleak.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { ask } = require("./stdinleak.js");\n'
+          'test("adds", async () => { assert.ok(await ask()); });\n')
+
+    def run(rel, timeout=60):
+        env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+        env.pop("TEST_SAFETY_NET_ALLOW", None)
+        try:
+            done = subprocess.run(
+                [node, "--require", guard, "--test",
+                 "--test-name-pattern", "^adds$", rel],
+                cwd=work, env=env, capture_output=True, text=True,
+                stdin=subprocess.PIPE, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None, ""
+        return done.returncode, done.stdout + done.stderr
+
+    code, out = run("test_pure.js")
+    res["passes_clean"] = 1 if code == 0 and "IOGuardViolation" not in out else 0
+    code, out = run("test_leaky.js")
+    res["blocks_fs"] = 1 if code not in (0, None) and "IOGuardViolation" in out else 0
+    # A HANG is the failure this measures, so the timeout IS the measurement:
+    # `None` means the proof run never returned a verdict at all.
+    code, out = run("test_stdinleak.js", timeout=45)
+    res["stdin_fast"] = 1 if code not in (0, None) and "IOGuardViolation" in out else 0
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_guard(old, new):
+    """Can node PROVE a test, and not merely rank one?"""
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_GUARD_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_GUARD_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "a node unit that reads the filesystem FAILS its proof run "
+           "(higher=better)",
+        oldp["blocks_fs"], newp["blocks_fs"], newp["blocks_fs"] > oldp["blocks_fs"],
+        "the headline invariant, and the reason node could rank but not write: "
+        "static triage is a FILTER, and JavaScript's dynamic dispatch makes "
+        "reachability undecidable from source, so `never writes a test that "
+        "performs real I/O` is a RUNTIME property or it is nothing",
+        since=SINCE_TSN_NODE_GUARD)
+    row(s, "a CLEAN node unit still passes under the guard (higher=better)",
+        oldp["passes_clean"], newp["passes_clean"],
+        newp["passes_clean"] > oldp["passes_clean"],
+        "the half an inert guard also passes, which is why it is never asserted "
+        "alone -- but a guard that blocks everything is just as useless, and "
+        "that is the FIRST thing a naive port does: node reads every `.js` it "
+        "loads through `fs.readFileSync`, so blocking on the name kills a test "
+        "that touches no filesystem at all, inside the module loader",
+        since=SINCE_TSN_NODE_GUARD)
+    row(s, "a node unit that reads stdin fails fast instead of HANGING the "
+           "proof run (higher=better)",
+        oldp["stdin_fast"], newp["stdin_fast"],
+        newp["stdin_fast"] > oldp["stdin_fast"],
+        "terminal input is in neither stack's marker table, so the filter "
+        "cannot decline it -- and the failure mode is a hang, which yields no "
+        "verdict at all and burns the user's wall clock until they notice. The "
+        "probe's own timeout is the measurement: `None` scores zero",
+        since=SINCE_TSN_NODE_GUARD)
+
+
+# ── test-safety-net: node, as an agent actually meets it ────────────────────
+#
+# Every other node row in this corpus probes an IMPORTED function. These four
+# probe the SHIPPED SURFACE instead: the ranker's CLI, run as `references/
+# parameters.md` documents it, and the guard invocation EXTRACTED FROM SKILL.md
+# and run verbatim. That distinction is the whole point. The Python half of this
+# skill once had 122 unit tests and 34 eval checks green over a guard whose only
+# user-facing invocation was broken three separate ways, because everything that
+# graded it called the code directly and nothing ran what the documents printed.
+# A row that imports `stack_node.discover_units` cannot see a SKILL.md that
+# still tells an agent to stop before writing.
+_NODE_WIRED_PROBE = r"""
+import glob, json, os, re, shutil, subprocess, sys, tempfile
+
+assets = sys.path[0]
+skill = os.path.dirname(assets)
+res = {"units": 0, "tier_for_fs_unit": 0, "discovery": "", "guard_documented": 0}
+
+# 1-3. the documented CLI over a node fixture repo. No `--stack`: the flag does
+#      not exist at the baseline, and the point is that DETECTION answers node.
+work = tempfile.mkdtemp()
+repo = os.path.join(work, "repo")
+for rel, text in {
+    "package.json": '{"name": "demo", "main": "src/index.js",\n'
+                    ' "dependencies": {"left-pad": "^1.0.0"}}\n',
+    "src/pure.js": "export function addNumbers(a, b) { return a + b; }\n",
+    "src/cache.js": 'import fs from "node:fs";\n'
+                    "export function readCache(p) { return fs.readFileSync(p, "
+                    '"utf8"); }\n',
+    "src/remote.js": 'import net from "node:net";\n'
+                     "export function connectRemote(h) { return new net.Socket(); }\n",
+    "node_modules/vendored/index.js": "export function vendoredUnit() { return 1; }\n",
+}.items():
+    path = os.path.join(repo, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+ranker = os.path.join(assets, "rank_risk.py")
+if os.path.isfile(ranker):
+    done = subprocess.run([sys.executable, ranker, repo, "--top-n", "20"],
+                          capture_output=True, text=True, timeout=120)
+    try:
+        plan = json.loads(done.stdout)
+    except ValueError:
+        plan = {}
+    res["units"] = plan.get("units_discovered", 0) or 0
+    res["discovery"] = plan.get("discovery", "") or ""
+    rows = (plan.get("ranked", []) + plan.get("remainder", [])
+            + plan.get("not_netted", []))
+    for r in rows:
+        if r.get("id") == "src/cache.js::readCache":
+            res["tier_for_fs_unit"] = r.get("tier", 0) or 0
+
+# 4. the guard invocation, EXTRACTED FROM SKILL.md and run verbatim in both
+#    directions. The negative arm is what makes this row mean anything: a guard
+#    that arms nothing also lets the clean unit pass.
+node = shutil.which("node")
+guard = os.path.join(assets, "io_guard.js")
+skill_md = os.path.join(skill, "SKILL.md")
+commands = []
+if os.path.isfile(skill_md):
+    text = open(skill_md, encoding="utf-8").read()
+    for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+        joined = re.sub(r"\\\n\s*", " ", block)
+        for line in joined.splitlines():
+            line = " ".join(line.split())
+            if re.match(r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+                        r'node\s+--require\s+\S*io_guard\.js\S*\s+.*<path>$',
+                        line):
+                commands.append(line)
+
+if node and os.path.isfile(guard) and commands:
+    proof = os.path.join(work, "proof")
+    os.makedirs(proof, exist_ok=True)
+    for rel, text in {
+        "pure.js": "function add(a, b) { return a + b; }\nmodule.exports = { add };\n",
+        "test_pure.js": 'const { test } = require("node:test");\n'
+                        'const assert = require("node:assert");\n'
+                        'const { add } = require("./pure.js");\n'
+                        'test("adds", () => { assert.strictEqual(add(2, 3), 5); });\n',
+        # The violation is NETWORK, not filesystem, and the reason is the
+        # reason this row exists at all: one of the documented commands is
+        # `TEST_SAFETY_NET_ALLOW=filesystem,clock`, which PERMITS a filesystem
+        # trip. A leaky fixture that reads a file passes that command, and the
+        # negative arm silently measures nothing. `network` is uncontrollable
+        # -- blocked at tier 1 and tier 2 alike, however the allow list is
+        # spelled -- so one fixture holds for every command a document prints.
+        # Nothing is dialled: CONSTRUCTING the socket is the guarded primitive,
+        # which keeps this offline.
+        "leaky.js": 'const net = require("node:net");\n'
+                    "function client() { return new net.Socket() !== null; }\n"
+                    "module.exports = { client };\n",
+        "test_leaky.js": 'const { test } = require("node:test");\n'
+                         'const assert = require("node:assert");\n'
+                         'const { client } = require("./leaky.js");\n'
+                         'test("adds", () => { assert.ok(client()); });\n',
+    }.items():
+        with open(os.path.join(proof, rel), "w") as f:
+            f.write(text)
+    env = dict(os.environ, SKILL_DIR=skill)
+    env.pop("TEST_SAFETY_NET_TIER", None)
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    good = True
+    for command in commands:
+        for target, want in (("test_pure.js", "pass"), ("test_leaky.js", "trip")):
+            cmd = command.replace("<test_name>", "adds").replace("<path>", target)
+            try:
+                done = subprocess.run(["/bin/sh", "-c", cmd], cwd=proof, env=env,
+                                      capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                good = False
+                continue
+            out = done.stdout + done.stderr
+            tripped = "IOGuardViolation" in out
+            if want == "pass":
+                good = good and done.returncode == 0 and not tripped
+            else:
+                good = good and done.returncode != 0 and tripped
+    res["guard_documented"] = 1 if good else 0
+
+print(json.dumps(res))
+"""
+
+
+_NODE_FIXROUND_1_PROBE = r"""
+import json, os, shutil, subprocess, sys, tempfile
+
+# EVERY MEASUREMENT HERE GOES THROUGH A SUBPROCESS, not an import. The baseline
+# for a bare `make ab-validate` is the merge base with the integration branch,
+# which predates the node stack entirely -- `import stack_node` crashes there
+# and a probe that crashed measured nothing. The CLI and the guard file exist
+# (or provably do not) on both trees, so both arms produce a number.
+res = {"promisify_blocked": 0, "promisify_left_no_file": 0,
+       "shim_units": 0, "shim_discovery": "",
+       "django_stack": "", "django_units": 0, "django_py_evidence": -1,
+       "untested_unit_ranked": 0, "py_stdin_fast": -1}
+
+assets = sys.path[0]
+ranker = os.path.join(assets, "rank_risk.py")
+guard_js = os.path.join(assets, "io_guard.js")
+node = shutil.which("node")
+work = tempfile.mkdtemp()
+
+
+def write(root, rel, text):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+NOTES = {}
+
+
+def plan(root, *flags):
+    # The documented step-2 command's JSON, or {} when it produced none.
+    # Its stderr is kept too: the evidence line is the only place the detection
+    # CONTEST is visible, and on a tree with no node stack there is no contest
+    # and no line.
+    try:
+        done = subprocess.run(
+            [sys.executable, ranker, root, "--since", "10 years ago"] + list(flags),
+            capture_output=True, text=True, timeout=120)
+        NOTES[root] = done.stderr or ""
+        return json.loads(done.stdout)
+    except Exception:
+        NOTES[root] = ""
+        return {}
+
+
+# -- F1: util.promisify routed a real WRITE past the guard at tier 1 --------
+if node:
+    p = os.path.join(work, "promisify")
+    escaped = os.path.join(p, "escaped.txt")
+    write(p, "unit.js",
+          'const util = require("node:util");\n'
+          'const fs = require("node:fs");\n'
+          'const writeAsync = util.promisify(fs.writeFile);\n'
+          "async function save(p) { await writeAsync(p, 'escaped\\n'); return p; }\n"
+          "module.exports = { save };\n")
+    write(p, "test_unit.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const path = require("node:path");\n'
+          'const { save } = require("./unit.js");\n'
+          'test("adds", async () => {\n'
+          '  assert.ok(await save(path.join(__dirname, "escaped.txt")));\n'
+          "});\n")
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    # A tree with no node guard runs the same proof UNGUARDED, which is what
+    # that tree really does with this unit -- and is what makes the
+    # `left_no_file` row a measurement rather than an artefact of a missing
+    # file.
+    argv = [node]
+    if os.path.isfile(guard_js):
+        argv += ["--require", guard_js]
+    argv += ["--test", "--test-name-pattern", "^adds$", "test_unit.js"]
+    try:
+        done = subprocess.run(argv, cwd=p, env=env, capture_output=True,
+                              text=True, stdin=subprocess.PIPE, timeout=60)
+        out = done.stdout + done.stderr
+        res["promisify_blocked"] = (
+            1 if done.returncode != 0 and "IOGuardViolation" in out else 0)
+    except subprocess.TimeoutExpired:
+        pass
+    # THE MEASUREMENT THAT MATTERS: a byte on a real disk, or not.
+    res["promisify_left_no_file"] = 0 if os.path.exists(escaped) else 1
+
+# -- F2: a typescript that loads and parses nothing -------------------------
+sh = os.path.join(work, "shim")
+for i in range(5):
+    write(sh, "src/m%d.ts" % i, "export function f%d(s: string) { return s; }\n" % i)
+write(sh, "package.json", '{"name": "s", "main": "src/m0.ts",\n'
+                          ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+write(sh, "node_modules/typescript/lib/typescript.js",
+      "module.exports = {\n"
+      "  createSourceFile: function () { throw new Error('shimmed'); },\n"
+      "  ScriptTarget: { Latest: 99 },\n"
+      "  SyntaxKind: {},\n"
+      "};\n")
+shim = plan(sh)
+res["shim_units"] = shim.get("units_discovered", 0)
+res["shim_discovery"] = shim.get("discovery", "")
+
+# -- F3: a conventional Django repo -----------------------------------------
+dj = os.path.join(work, "django")
+for i in range(30):
+    write(dj, "app/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+for i in range(20):
+    write(dj, "static/js/w%d.js" % i, "export function w%d() {}\n" % i)
+write(dj, "requirements/base.txt", "Django>=4.2\npsycopg[binary]>=3.1\n")
+write(dj, "package.json", '{"main": "static/js/w0.js",\n'
+                          ' "dependencies": {"react": "^18"}}\n')
+django = plan(dj)
+res["django_stack"] = django.get("stack", "")
+res["django_units"] = django.get("units_discovered", 0)
+# THE NUMBER THAT MOVES AGAINST EITHER BASELINE. The verdict alone cannot be a
+# delta row here: a tree with no node stack calls this repo python for the
+# trivial reason that nothing else claims it. What the fix changed is that
+# Python now EARNS its manifest multiplier on the split-requirements layout --
+# 30 raw files become 70 -- which is the thing that beats a declared
+# `package.json`'s 50.
+import re as _re
+_m = _re.search(r"python=(\d+)", NOTES.get(dj, ""))
+res["django_py_evidence"] = int(_m.group(1)) if _m else -1
+
+# -- F4: a tsconfig alias crediting a unit with no test anywhere -------------
+al = os.path.join(work, "alias")
+write(al, "src/utils.ts", "export function parse(s: string) { return s; }\n")
+write(al, "lib/utils.ts", "export function parse(s: string) { return s; }\n")
+write(al, "package.json", '{"name": "a", "main": "src/utils.ts",\n'
+                          ' "dependencies": {"left-pad": "^1.0.0"}}\n')
+write(al, "tsconfig.json",
+      '{"compilerOptions": {"baseUrl": ".", "paths": {"@app/*": ["src/*"]}}}\n')
+write(al, "src/__tests__/utils.test.ts",
+      'import { parse } from "@app/utils";\n'
+      'test("parses", () => { parse("x"); });\n')
+alias = plan(al)
+# `lib/utils.ts` has NO test in this tree, so it must be IN THE PLAN. Measuring
+# its presence in `ranked` rather than its absence from `covered` is what makes
+# this a live claim against either baseline: a tree with no node stack ranks it
+# 0 times because it discovers nothing, the branch's pre-fix HEAD ranks it 0
+# times because the alias credited it as covered, and a correct tree ranks it.
+res["untested_unit_ranked"] = (
+    1 if "lib/utils.ts::parse" in [r.get("id") for r in (alias.get("ranked") or [])]
+    else 0)
+
+# -- F7: Python's half of the stdin ruling ----------------------------------
+py = os.path.join(work, "pystdin")
+write(py, "asker.py", "def ask():\n    return input('name? ')\n")
+write(py, "test_asker.py",
+      "from asker import ask\ndef test_asks():\n    assert ask()\n")
+try:
+    import pytest                                                 # noqa: F401
+    have_pytest = True
+except Exception:
+    have_pytest = False
+if have_pytest and os.path.isfile(os.path.join(assets, "io_guard.py")):
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1",
+               PYTHONPATH=assets + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    r_fd, w_fd = os.pipe()          # held open, never written: a REAL block
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "io_guard", "-s", "-q",
+             "-p", "no:cacheprovider", "test_asker.py::test_asks"],
+            cwd=py, env=env, stdin=r_fd, capture_output=True, text=True,
+            timeout=45)
+        out = done.stdout + done.stderr
+        # A HANG is the failure this measures, so the timeout IS the
+        # measurement: TimeoutExpired scores zero.
+        res["py_stdin_fast"] = (
+            1 if done.returncode != 0 and "IOGuardViolation" in out else 0)
+    except subprocess.TimeoutExpired:
+        res["py_stdin_fast"] = 0
+    finally:
+        os.close(r_fd)
+        os.close(w_fd)
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_fixround_1(old, new):
+    """The node branch's first fix round: five findings, measured end to end.
+
+    A NOTE ON WHAT THIS BASELINE CAN AND CANNOT SEE, because it decides which
+    rows here are deltas and which are guards. A bare `make ab-validate`
+    baselines on the merge base with the integration branch, which predates the
+    whole node stack -- so a row whose defect requires the node stack to EXIST
+    (F3's detection contest, F4's node coverage predicate) has no bad arm to
+    measure against and is recorded as a `guard`, not smuggled in as a win.
+    The rows that do move are the ones whose baseline arm really misbehaves:
+    the promisified write really lands on disk, the broken toolchain really
+    yields nothing, and Python's guard -- which DID exist at the baseline --
+    really hangs. To isolate the fix round itself, run
+    `make ab-validate BASE=<the branch HEAD before it>`; every row below moves
+    there, which is the measurement the round's own commits were watched
+    against.
+    """
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_1_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_1_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "a node unit reaching the filesystem through `util.promisify` FAILS "
+           "its proof run (higher=better)",
+        oldp["promisify_blocked"], newp["promisify_blocked"],
+        newp["promisify_blocked"] > oldp["promisify_blocked"],
+        "the Critical. `util.promisify`'s wrapper is DEFINED IN "
+        "`node:internal/util`, so under the rule this replaced -- stop at the "
+        "first internal frame and exempt -- the walk answered `not the code "
+        "under test` one frame before it would have found the unit. The "
+        "canonical pre-`fs/promises` async idiom, at tier 1, through the "
+        "documented command, green",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and NO FILE IS LEFT ON DISK after that proof run (higher=better)",
+        oldp["promisify_left_no_file"], newp["promisify_left_no_file"],
+        newp["promisify_left_no_file"] > oldp["promisify_left_no_file"],
+        "the row that is not about exit statuses. The invariant is about SIDE "
+        "EFFECTS, and the baseline arm really writes a file to a real disk "
+        "while the run reports `# pass`. A guard that raised AFTER the write "
+        "would satisfy the row above and fail this one",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "units the CLI reports for a repo whose `typescript` loads and "
+           "parses nothing (higher=better)",
+        oldp["shim_units"], newp["shim_units"],
+        newp["shim_units"] > oldp["shim_units"],
+        "a compiler that loads and reads nothing produced `discovery: "
+        "precise` with ZERO units and exit 0, while the heuristic would have "
+        "found five. Zero units reads as `this repo has nothing worth "
+        "testing`, wearing the label the report tells an agent to trust MORE",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and that degraded run is LABELLED (''=key absent, want heuristic)",
+        oldp["shim_discovery"] or "''", newp["shim_discovery"] or "''",
+        newp["shim_discovery"] == "heuristic",
+        "D1's whole point: two runs are comparable only when this key agrees, "
+        "which a key that can be WRONG does not deliver",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "python's evidence score for a conventional Django repo "
+           "(higher=better; -1 = no contest to report)",
+        oldp["django_py_evidence"], newp["django_py_evidence"],
+        newp["django_py_evidence"] > oldp["django_py_evidence"],
+        "30 modules under `app/`, `requirements/base.txt`, 20 JS files under "
+        "`static/js/`, and the `package.json` every Django repo keeps for its "
+        "frontend assets. `MANIFESTS` matched exact filenames AT THE ROOT and "
+        "Django's near-universal layout is a `requirements/` DIRECTORY, so "
+        "Python earned no multiplier (30) while node's manifest earned its own "
+        "(50) and the plan ranked the JavaScript. The SCORE is what this row "
+        "measures rather than the verdict, because a tree with no node stack "
+        "calls this repo python for the trivial reason that nothing contests "
+        "it -- the score moves against either baseline",
+        since=SINCE_TSN_NODE_FIXES_1)
+    row(s, "…and the plan it produces covers the 30 python modules (guard, "
+           "0 = the JavaScript was ranked instead)",
+        oldp["django_units"] if oldp["django_stack"] == "python" else 0,
+        newp["django_units"] if newp["django_stack"] == "python" else 0,
+        newp["django_stack"] == "python" and newp["django_units"] == 30,
+        "the consequence a user meets: thirty modules with a plan, or twenty "
+        "JavaScript units and thirty modules with none. A GUARD against the "
+        "default baseline, where the claim is `adding a node stack must not "
+        "cost Python this repo's plan` and 30 == 30 is the whole assertion. "
+        "Against the branch's own pre-fix HEAD the same number reads 0 -> 30, "
+        "which is the fix landing rather than a guard breaking -- the row's "
+        "predicate asks about the NEW arm for exactly that reason",
+        kind="guard")
+    row(s, "a node unit with NO TEST ANYWHERE appears in `ranked` "
+           "(higher=better)",
+        oldp["untested_unit_ranked"], newp["untested_unit_ranked"],
+        newp["untested_unit_ranked"] > oldp["untested_unit_ranked"],
+        "C1 from the Python branch verbatim, in the coverage predicate, in the "
+        "never-over-credit direction. A `tsconfig` alias the resolver cannot "
+        "follow matched every same-named file, `is_test_for` was true for both "
+        "(`_dir_key` strips `src`, `lib` and `__tests__` alike), and `rivals` "
+        "never fires because such a test never emits `src/utils`. So "
+        "`lib/utils.ts::parse` was reported covered and VANISHED FROM THE "
+        "PLAN -- measured here as its presence in `ranked`, which is the "
+        "outcome a user actually loses",
+        since=SINCE_TSN_NODE_FIXES_1)
+    if oldp["py_stdin_fast"] >= 0 and newp["py_stdin_fast"] >= 0:
+        row(s, "a PYTHON unit that reads stdin fails fast instead of HANGING "
+               "the proof run (higher=better)",
+            oldp["py_stdin_fast"], newp["py_stdin_fast"],
+            newp["py_stdin_fast"] > oldp["py_stdin_fast"],
+            "R16 said both stacks move together and only node moved, so this "
+            "one IS measurable against a pre-node baseline: the Python guard "
+            "existed there and patched no stdin name. The probe's own timeout "
+            "is the measurement -- the baseline arm sits on a pipe nobody "
+            "writes to until the deadline kills it",
+            since=SINCE_TSN_NODE_FIXES_1)
+
+
+_NODE_FIXROUND_2_PROBE = r"""
+import json, os, re, shutil, subprocess, sys, tempfile
+
+# Same discipline as the first round's probe: SUBPROCESSES, never imports. The
+# default baseline predates the node stack, where `import stack_node` crashes
+# and a crashed probe measures nothing.
+res = {"monorepo_stack": "", "monorepo_units": 0, "monorepo_py_evidence": -1,
+       "jsapp_stack": "", "jsapp_units": 0,
+       "spoof_blocked": 0, "c1_shadow_blocked": 0}
+
+assets = sys.path[0]
+ranker = os.path.join(assets, "rank_risk.py")
+guard_js = os.path.join(assets, "io_guard.js")
+node = shutil.which("node")
+work = tempfile.mkdtemp()
+
+
+def write(root, rel, text):
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+NOTES = {}
+
+
+def plan(root):
+    try:
+        done = subprocess.run(
+            [sys.executable, ranker, root, "--since", "10 years ago"],
+            capture_output=True, text=True, timeout=120)
+        NOTES[root] = done.stderr or ""
+        return json.loads(done.stdout)
+    except Exception:
+        NOTES[root] = ""
+        return {}
+
+
+def evidence(root, stack):
+    m = re.search(stack + r"=(\d+)", NOTES.get(root, ""))
+    return int(m.group(1)) if m else -1
+
+
+def guarded_run(root, rel, pattern):
+    # 1 when the proof run FAILED with a guard violation. A tree with no node
+    # guard runs the same proof unguarded, which is what that tree really does
+    # with this unit.
+    argv = [node]
+    if os.path.isfile(guard_js):
+        argv += ["--require", guard_js]
+    argv += ["--test", "--test-name-pattern", pattern, rel]
+    env = dict(os.environ, TEST_SAFETY_NET_TIER="1")
+    env.pop("TEST_SAFETY_NET_ALLOW", None)
+    try:
+        done = subprocess.run(argv, cwd=root, env=env, capture_output=True,
+                              text=True, stdin=subprocess.PIPE, timeout=60)
+    except subprocess.TimeoutExpired:
+        return 0
+    out = done.stdout + done.stderr
+    return 1 if done.returncode != 0 and "IOGuardViolation" in out else 0
+
+
+# -- N1: a monorepo whose split requirements sit one directory down ---------
+mono = os.path.join(work, "monorepo")
+for i in range(12):
+    write(mono, "backend/app/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+for i in range(3):
+    write(mono, "frontend/src/c%d.js" % i, "export function c%d() {}\n" % i)
+write(mono, "frontend/package.json",
+      '{"name": "web", "main": "src/c0.js",\n'
+      ' "dependencies": {"react": "^18"}}\n')
+write(mono, "backend/requirements/base.txt", "Django>=4.2\npsycopg[binary]>=3.1\n")
+m = plan(mono)
+res["monorepo_stack"] = m.get("stack", "")
+res["monorepo_units"] = m.get("units_discovered", 0)
+res["monorepo_py_evidence"] = evidence(mono, "python")
+
+# -- N3: a JS app with Python helpers, a k8s environment.yaml, a manage.py --
+js = os.path.join(work, "jsapp")
+for i in range(5):
+    write(js, "src/m%d.js" % i, "export function f%d() {}\n" % i)
+for i in range(3):
+    write(js, "tools/h%d.py" % i, "def h%d():\n    return 1\n" % i)
+write(js, "package.json", '{"scripts": {"lint": "eslint ."}}\n')
+write(js, "config/environment.yaml", "name: prod\nreplicas: 3\n")
+write(js, "manage.py", '# not django\nprint("hi")\n')
+j = plan(js)
+res["jsapp_stack"] = j.get("stack", "")
+res["jsapp_units"] = j.get("units_discovered", 0)
+
+# -- N2 / C1: the provenance walk reads a frame's LOCATION ------------------
+if node:
+    sp = os.path.join(work, "spoof")
+    write(sp, "sneaky.js",
+          'const fs = require("node:fs");\n'
+          "const holder = {};\n"
+          'holder["node:internal/modules/x"] = function () {\n'
+          '  return fs.readFileSync("/etc/hosts", "utf8").length;\n'
+          "};\n"
+          'module.exports = { go: () => holder["node:internal/modules/x"]() };\n')
+    write(sp, "t_sneaky.test.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { go } = require("./sneaky.js");\n'
+          'test("spoofed_frame", () => { assert.ok(go() >= 0); });\n')
+    res["spoof_blocked"] = guarded_run(sp, "t_sneaky.test.js", "^spoofed_frame$")
+
+    c1 = os.path.join(work, "c1")
+    write(c1, "io_guard.js",
+          'const fs = require("node:fs");\n'
+          'const SIZE = fs.readFileSync("/etc/hosts", "utf8").length;\n'
+          "module.exports = { size: () => SIZE };\n")
+    write(c1, "t_shadow.test.js",
+          'const { test } = require("node:test");\n'
+          'const assert = require("node:assert");\n'
+          'const { size } = require("./io_guard.js");\n'
+          'test("shadowed", () => { assert.ok(size() >= 0); });\n')
+    res["c1_shadow_blocked"] = guarded_run(c1, "t_shadow.test.js", "^shadowed$")
+
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_node_fixround_2(old, new):
+    """The node branch's second fix round: three findings, and C1's missing row.
+
+    Which rows are deltas and which are guards is decided by what the DEFAULT
+    baseline can see, exactly as in round 1. The merge base predates the node
+    stack, so a row whose defect needs that stack to EXIST (the JS app's
+    verdict; the monorepo's unit count) has no bad arm there and is recorded as
+    a `guard`. The rows that move are the ones whose baseline arm really
+    misbehaves in both directions: Python's evidence on the monorepo, and two
+    real reads of /etc/hosts that a green proof run reported as passing.
+    """
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_2_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"),
+                 _NODE_FIXROUND_2_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "python's evidence for a monorepo whose split requirements sit ONE "
+           "DIRECTORY DOWN (higher=better; -1 = no contest reported)",
+        oldp["monorepo_py_evidence"], newp["monorepo_py_evidence"],
+        newp["monorepo_py_evidence"] > oldp["monorepo_py_evidence"],
+        "N1, and the unfinished half of F3. `requirements/*.txt` was matched "
+        "against the manifest's WHOLE repo-relative path, and `fnmatch` wants "
+        "the whole string -- so the name Django's layout actually uses counted "
+        "at the analysed root and nowhere else. The same repo with "
+        "`backend/requirements.txt` scored `python=34, node=16`; with "
+        "`backend/requirements/base.txt` it scored `node=16, python=12` and "
+        "the plan ranked three frontend files. `backend/` + `frontend/` with a "
+        "declared frontend manifest is the commonest polyglot layout there is",
+        since=SINCE_TSN_NODE_FIXES_2)
+    row(s, "…and the plan for it covers the 12 backend modules (guard, 0 = the "
+           "JavaScript was ranked instead)",
+        oldp["monorepo_units"] if oldp["monorepo_stack"] == "python" else 0,
+        newp["monorepo_units"] if newp["monorepo_stack"] == "python" else 0,
+        newp["monorepo_stack"] == "python" and newp["monorepo_units"] == 12,
+        "the consequence a user meets. A GUARD against the default baseline, "
+        "where no node stack contests the repo and 12 == 12 is the whole "
+        "assertion; against the branch's own pre-fix HEAD the same number "
+        "reads 3 -> 12, which is the fix landing rather than a guard breaking "
+        "-- the predicate asks about the NEW arm for exactly that reason",
+        kind="guard")
+    row(s, "a JS app with three Python helpers still detects node when a "
+           "`config/environment.yaml` and a `manage.py` appear beside it "
+           "(guard, 0 = flipped to python)",
+        oldp["jsapp_units"] if oldp["jsapp_stack"] == "node" else 0,
+        newp["jsapp_units"] if newp["jsapp_stack"] == "node" else 0,
+        newp["jsapp_stack"] == "node" and newp["jsapp_units"] == 5,
+        "N3. Both names returned `declaring` without reading a byte -- the "
+        "`has_manifest` mistake this branch rejected once, reintroduced for "
+        "two filenames -- so a YAML holding `name: prod` and a script holding "
+        "`print(\"hi\")` moved python from 3 to 18 and took the plan with "
+        "them. A guard rather than a delta because the baseline has no node "
+        "stack to detect this repo AS node; against the branch's pre-fix HEAD "
+        "it reads 0 -> 5",
+        kind="guard")
+    row(s, "a unit whose FUNCTION NAME contains `node:internal/modules/` fails "
+           "its proof run (higher=better)",
+        oldp["spoof_blocked"], newp["spoof_blocked"],
+        newp["spoof_blocked"] > oldp["spoof_blocked"],
+        "N2. The exempting prefixes were matched against the whole formatted "
+        "frame, which carries the FUNCTION NAME as well as the location -- and "
+        "V8 renders computed property names into the name slot. One line of "
+        "target-repo code read 213 real bytes of /etc/hosts at tier 1, through "
+        "the documented command, under `# pass 1  # fail 0`",
+        since=SINCE_TSN_NODE_FIXES_2)
+    row(s, "…and a TARGET-REPO module called `io_guard.js` is still the target "
+           "repo (higher=better)",
+        oldp["c1_shadow_blocked"], newp["c1_shadow_blocked"],
+        newp["c1_shadow_blocked"] > oldp["c1_shadow_blocked"],
+        "C1, which was fixed in round 1 with no regression guard of any kind: "
+        "reverting `GUARD_FILE` to the basename left the whole suite green. "
+        "The shape where a skipped frame is fatal rather than merely wrong is "
+        "a MODULE BODY, whose only outer frames are the loader's -- so the "
+        "unit here reads /etc/hosts at import time and used to do it green. "
+        "Pinned to round 1's commit: the fix is that round's, only the "
+        "measurement is this one's",
+        since=SINCE_TSN_NODE_FIXES_1)
+
+
+def check_test_safety_net_node_wired(old, new):
+    """Does the SHIPPED SURFACE — the documented CLI, and the command SKILL.md
+    prints — do what the documents now say it does?"""
+    s = "test-safety-net"
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_WIRED_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_WIRED_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "units the DOCUMENTED CLI finds in a node fixture repo "
+           "(higher=better)",
+        oldp["units"], newp["units"], newp["units"] > oldp["units"],
+        "detect -> discover, end to end through `rank_risk.py <repo>` with no "
+        "`--stack` flag, because the flag is not the fix: a node repo handed to "
+        "the Python stack discovers nothing and reports a CLEAN result, which "
+        "is the silent zero the whole campaign exists to close. The three units "
+        "are one export each from three source files; the fixture's fourth "
+        "export is inside `node_modules` and must never appear",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "tier the CLI assigns a node unit that reads the filesystem "
+           "(2=right, 0=no answer)",
+        oldp["tier_for_fs_unit"], newp["tier_for_fs_unit"],
+        newp["tier_for_fs_unit"] == 2 and oldp["tier_for_fs_unit"] != 2,
+        "discovering a unit is not triaging one. `readCache` reaches a "
+        "CONTROLLABLE group, so it is a Tier 2 pin at a named boundary rather "
+        "than a Tier 1 unit test or a Tier 3 decline — and a triage that "
+        "answered the same tier for everything would satisfy neither this row "
+        "nor eval check 38",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "the node report NAMES which reader found its units "
+           "(''=key absent)",
+        oldp["discovery"] or "''", newp["discovery"] or "''",
+        newp["discovery"] in ("precise", "heuristic"),
+        "decision D1, read off the CLI rather than off the code: node's "
+        "discovery has two paths and they return different totals on the same "
+        "tree, so a run that silently degraded is a run whose numbers cannot be "
+        "compared to the last one's. `references/parameters.md` now tells the "
+        "agent to carry the value into its report, not just read it",
+        since=SINCE_TSN_NODE_WIRED)
+    row(s, "the guard invocation PRINTED IN SKILL.md passes a clean node unit "
+           "and fails a leaking one (higher=better)",
+        oldp["guard_documented"], newp["guard_documented"],
+        newp["guard_documented"] > oldp["guard_documented"],
+        "the row that makes Task 6 and Task 7 one change instead of two. It "
+        "extracts the command from SKILL.md and runs it VERBATIM, in both "
+        "directions -- so it fails if the guard stops blocking, if SKILL.md "
+        "stops printing an invocation, and if the invocation drifts from the "
+        "guard. The Python half of this skill shipped a suite running "
+        "`python -m pytest` while every document printed `pytest`; nothing that "
+        "called the code directly could see it",
+        since=SINCE_TSN_NODE_WIRED)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -1869,6 +3244,13 @@ def main():
         check_test_safety_net_guard(old, REPO)
         check_test_safety_net_round6(old, REPO)
         check_test_safety_net_round7(old, REPO)
+        check_test_safety_net_node(old, REPO)
+        check_test_safety_net_node_triage(old, REPO)
+        check_test_safety_net_node_precise(old, REPO)
+        check_test_safety_net_node_guard(old, REPO)
+        check_test_safety_net_node_wired(old, REPO)
+        check_test_safety_net_node_fixround_1(old, REPO)
+        check_test_safety_net_node_fixround_2(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

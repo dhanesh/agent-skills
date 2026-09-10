@@ -1,0 +1,832 @@
+#!/bin/sh
+# test-safety-net/assets/test_io_guard_node.sh
+# gate: offline — runs in `make gate`. Must stay offline and deterministic: no
+# network (the network fixtures CONSTRUCT a socket and never dial), no fixed
+# ports, no wall-clock dependence, no writes outside $WORK.
+#
+# WHY THIS FILE EXISTS, AND WHY ITS FIRST ASSERTION IS THE ONE IT IS.
+#
+# `io_guard.js` is the sole enforcement of this skill's headline invariant,
+# "never writes a test that performs real I/O", for node. The static triage in
+# `stack_node.py` is a FILTER; this is the enforcement, so a guard that loads
+# but blocks nothing is indistinguishable from no guard at all in every check
+# that only asks "did the clean test pass".
+#
+# The Python guard learned that the expensive way. Its suite ran
+# `python -m pytest`, every document printed `pytest`, and the two are not the
+# same command: 122 unit tests and 34 eval checks were green over a guard whose
+# only user-facing invocation was broken three separate ways. So assertion 1
+# here EXTRACTS the invocation from the documents that print it and runs it
+# verbatim, in both directions — a clean unit must pass, a unit that really
+# does I/O must fail — and it is deliberately the first thing in the file.
+set -eu
+
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+SKILL="$(cd "$ASSETS/.." && pwd)"
+GUARD="$ASSETS/io_guard.js"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+rc=0
+ok()  { echo "PASS: $1"; }
+bad() { echo "FAIL: $1"; rc=1; }
+note() { echo "      $1"; }
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "SKIP: no \`node\` on PATH -- io_guard.js is NOT exercised on this machine."
+  echo "      Install node 18+ to run this suite."
+  exit 0
+fi
+
+# ── Fixtures ─────────────────────────────────────────────────────────────
+# A "unit" and a test for it, in each shape the guard has to tell apart.
+cat > "$WORK/pure.js" <<'EOF'
+function add(a, b) { return a + b; }
+module.exports = { add };
+EOF
+cat > "$WORK/test_pure.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { add } = require("./pure.js");
+test("adds", () => { console.log("captured output"); assert.strictEqual(add(2, 3), 5); });
+test("subtracts", () => { assert.strictEqual(add(2, -3), -1); });
+EOF
+
+cat > "$WORK/leaky.js" <<'EOF'
+const fs = require("node:fs");
+function hosts() { return fs.readFileSync("/etc/hosts", "utf8").length; }
+module.exports = { hosts };
+EOF
+cat > "$WORK/test_leaky.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { hosts } = require("./leaky.js");
+test("adds", () => { assert.ok(hosts() >= 0); });
+EOF
+
+# I/O in the MODULE BODY. The node analogue of the hole the Python guard shipped
+# for a round: every module body runs with the loader's own frames on the stack,
+# so a provenance rule that scans for "is an import happening anywhere below me"
+# exempts all of them, and a module that reads an arbitrary file at load time
+# does so at tier 1 with a green proof.
+cat > "$WORK/importleak.js" <<'EOF'
+const fs = require("node:fs");
+const SIZE = fs.readFileSync("/etc/hosts", "utf8").length;
+function size() { return SIZE; }
+module.exports = { size };
+EOF
+cat > "$WORK/test_importleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { size } = require("./importleak.js");
+test("adds", () => { assert.ok(size() >= 0); });
+EOF
+
+# Network, without a network: constructing a socket is the guarded primitive,
+# and nothing is ever dialled.
+cat > "$WORK/netleak.js" <<'EOF'
+const net = require("node:net");
+function client() { return new net.Socket() !== null; }
+module.exports = { client };
+EOF
+cat > "$WORK/test_netleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { client } = require("./netleak.js");
+test("adds", () => { assert.ok(client()); });
+EOF
+
+cat > "$WORK/spawnleak.js" <<'EOF'
+const { execSync } = require("node:child_process");
+function run() { return String(execSync("echo hi")).trim(); }
+module.exports = { run };
+EOF
+cat > "$WORK/test_spawnleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { run } = require("./spawnleak.js");
+test("adds", () => { assert.strictEqual(run(), "hi"); });
+EOF
+
+# A violation the UNIT swallows. JavaScript has no `BaseException`: a bare
+# `catch` catches everything, and `try { fs.readFileSync(cache) } catch {}` is
+# one of the commonest shapes in real code. Without a record kept at the raise,
+# this test passes, the runner exits 0, and the proof is green over a unit that
+# really did read the filesystem.
+cat > "$WORK/swallow.js" <<'EOF'
+const fs = require("node:fs");
+function cached() {
+  try { return fs.readFileSync("/etc/hosts", "utf8"); } catch { return "default"; }
+}
+module.exports = { cached };
+EOF
+cat > "$WORK/test_swallow.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { cached } = require("./swallow.js");
+test("adds", () => { assert.ok(cached().length > 0); });
+EOF
+
+# A violation raised on a later turn of the event loop.
+cat > "$WORK/asyncleak.js" <<'EOF'
+const fs = require("node:fs");
+function later() {
+  return new Promise((resolve) => {
+    setImmediate(() => { resolve(fs.readFileSync("/etc/hosts", "utf8").length); });
+  });
+}
+module.exports = { later };
+EOF
+cat > "$WORK/test_asyncleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { later } = require("./asyncleak.js");
+test("adds", async () => { assert.ok(await later() >= 0); });
+EOF
+
+# Terminal input. In NEITHER stack's marker table, so the filter cannot decline
+# it -- and a unit that reads stdin HANGS the proof run instead of failing it.
+cat > "$WORK/stdinleak.js" <<'EOF'
+const readline = require("node:readline");
+function ask() {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => rl.question("name? ", (a) => { rl.close(); resolve(a); }));
+}
+module.exports = { ask };
+EOF
+cat > "$WORK/test_stdinleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { ask } = require("./stdinleak.js");
+test("adds", async () => { assert.ok(await ask()); });
+EOF
+
+for group in clock:'Date.now()' randomness:'Math.random()' environment:'process.env.APP_REGION || "none"'; do
+  name="${group%%:*}"; expr="${group#*:}"
+  cat > "$WORK/$name.js" <<EOF
+function value() { return $expr; }
+module.exports = { value };
+EOF
+  cat > "$WORK/test_$name.js" <<EOF
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { value } = require("./$name.js");
+test("adds", () => { assert.ok(value() !== undefined); });
+EOF
+done
+
+cat > "$WORK/catcher.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { hosts } = require("./leaky.js");
+test("adds", () => {
+  try { hosts(); } catch (e) {
+    console.log("CAUGHT name=" + e.name
+                + " isAssertion=" + (e instanceof assert.AssertionError)
+                + " isError=" + (e instanceof Error));
+  }
+});
+EOF
+
+# ── Runners ──────────────────────────────────────────────────────────────
+# One helper per shape, and both of them run the guard the way a proof run
+# does: `--require` ahead of the test file, one test selected by name.
+guard_run() {   # tier allow file pattern
+  set +e
+  OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER="$1" TEST_SAFETY_NET_ALLOW="$2" \
+         node --require "$GUARD" --test --test-name-pattern "$4" "$3" 2>&1)"
+  ST=$?
+  set -e
+}
+
+# The same, with a deadline and a stdin that never delivers a line: a FIFO this
+# script holds open for writing, so a real read blocks forever rather than
+# seeing EOF. A guard that does not block stdin HANGS here, which is the
+# failure this asserts against -- so the deadline is the assertion's teeth.
+deadline_run() {   # seconds tier file pattern
+  rm -f "$WORK/fifo" "$WORK/out"
+  mkfifo "$WORK/fifo"
+  exec 7<>"$WORK/fifo"
+  set +e
+  # The file is named by ABSOLUTE path, so both the runner and the child it
+  # spawns carry $WORK in their argv -- which is what makes the watcher's
+  # `pkill` below able to reach either of them. With a relative name only the
+  # child matched, and a broken guard left the runner hung on the FIFO forever.
+  ( cd "$WORK" && TEST_SAFETY_NET_TIER="$2" \
+      node --require "$GUARD" --test --test-name-pattern "$4" "$WORK/$3" \
+      >"$WORK/out" 2>&1 <"$WORK/fifo" ) &
+  runner=$!
+  ( i=0
+    while [ "$i" -lt "$(( $1 * 10 ))" ]; do
+      kill -0 "$runner" 2>/dev/null || exit 0
+      sleep 0.1; i=$((i + 1))
+    done
+    echo "GUARD-TEST-TIMEOUT" >> "$WORK/out"
+    pkill -9 -f "$WORK" 2>/dev/null
+    kill -9 "$runner" 2>/dev/null ) &
+  watcher=$!
+  wait "$runner"; ST=$?
+  kill "$watcher" 2>/dev/null
+  set -e
+  exec 7>&-
+  OUT="$(cat "$WORK/out")"
+}
+
+tripped() { case "$OUT" in *IOGuardViolation*) return 0 ;; *) return 1 ;; esac; }
+
+expect_pass() {   # label
+  if [ "$ST" -eq 0 ] && ! tripped; then ok "$1"
+  else bad "$1 (exit=$ST)"; note "$(printf '%s' "$OUT" | tail -6)"; fi
+}
+expect_trip() {   # label
+  if [ "$ST" -ne 0 ] && tripped; then ok "$1"
+  else bad "$1 (exit=$ST, no IOGuardViolation in output)"
+       note "$(printf '%s' "$OUT" | tail -6)"; fi
+}
+
+# ── 1. THE DOCUMENTED COMMAND, EXTRACTED AND RUN VERBATIM ────────────────
+# Every place this skill prints a node guard invocation is a place it can be
+# wrong. The extraction below reads `io_guard.js`'s own header AND every
+# markdown file in the skill, strips comment leaders, joins backslash
+# continuations, and runs whatever comes out -- so a document that drifts from
+# the guard fails this suite rather than a user's proof run.
+extract_commands() {
+  for f in "$GUARD" "$SKILL"/*.md "$SKILL"/references/*.md; do
+    [ -f "$f" ] || continue
+    sed -e 's/^[[:space:]]*\*[[:space:]]\{0,1\}//' -e 's/^[[:space:]]*//' "$f" \
+      | awk '{ if (sub(/[\\]$/, "")) { printf "%s", $0 } else { print } }' \
+      | grep -E '^TEST_SAFETY_NET_TIER=[12] .*node .*--require .*io_guard\.js' \
+      | sed -e 's/[[:space:]]\{1,\}/ /g'
+  done
+}
+
+COMMANDS="$(extract_commands | sort -u || true)"
+if [ -z "$COMMANDS" ]; then
+  bad "1 the documented node guard invocation exists and is runnable"
+  note "no line matching a documented \`node --require ... io_guard.js\` invocation"
+  note "was found in io_guard.js or in any of the skill's markdown files"
+else
+  n=0
+  fail_doc=""
+  # `SKILL_DIR` is the variable every document uses, because an agent runs from
+  # the TARGET repo and a skill-relative path never resolves there.
+  SKILL_DIR="$SKILL"; export SKILL_DIR
+  while IFS= read -r command; do
+    [ -n "$command" ] || continue
+    n=$((n + 1))
+    for arm in pass:test_pure.js trip:test_netleak.js; do
+      want="${arm%%:*}"; file="${arm#*:}"
+      cmd="$(printf '%s' "$command" \
+             | sed -e "s|<path>|$file|g" -e "s|<test_name>|adds|g")"
+      set +e
+      OUT="$(cd "$WORK" && eval "$cmd" 2>&1)"; ST=$?
+      set -e
+      if [ "$want" = pass ]; then
+        { [ "$ST" -eq 0 ] && ! tripped; } || fail_doc="$fail_doc [clean: $cmd -> exit $ST]"
+      else
+        { [ "$ST" -ne 0 ] && tripped; } || fail_doc="$fail_doc [leaky: $cmd -> exit $ST]"
+      fi
+    done
+  done <<COMMANDS_EOF
+$COMMANDS
+COMMANDS_EOF
+  if [ -z "$fail_doc" ]; then
+    ok "1 the DOCUMENTED command, extracted from every document that prints it and run verbatim, passes a clean unit AND fails one that really does I/O ($n command(s), each run twice)"
+  else
+    bad "1 the DOCUMENTED command$fail_doc"
+  fi
+fi
+
+# ── 2. The module loader still works ─────────────────────────────────────
+# THE FIRST THING A NAIVE PORT BREAKS. Node reads every `.js` and `.mjs` file
+# it loads through `fs.readFileSync`, so a guard that blocks on the NAME alone
+# kills a test that touches no filesystem at all, at `defaultLoadImpl
+# (node:internal/modules/cjs/loader)`, before the test body ever runs.
+guard_run 1 "" test_pure.js '^adds$'
+expect_pass "2 a clean unit passes at tier 1 -- the module loader's own reads are not the unit's"
+
+# ── 3. A unit that really reads a file ───────────────────────────────────
+guard_run 1 "" test_leaky.js '^adds$'
+expect_trip "3 a unit that reads /etc/hosts trips at tier 1"
+case "$OUT" in
+  *"Tier 3"*) ok "3b the message says what to DO: reclassify to Tier 3 and discard" ;;
+  *) bad "3b the message names no remedy"; note "$(printf '%s' "$OUT" | tail -4)" ;;
+esac
+case "$OUT" in
+  *filesystem*) ok "3c the message names the GROUP that tripped" ;;
+  *) bad "3c the message does not name the group" ;;
+esac
+
+# ── 4. A guard trip is not an assertion failure ──────────────────────────
+guard_run 1 "" catcher.js '^adds$'
+case "$OUT" in
+  *"CAUGHT name=IOGuardViolation isAssertion=false"*)
+    ok "4 IOGuardViolation is NOT an assert.AssertionError -- a trip means the CLASSIFICATION is wrong, an assertion failure means the captured VALUE is" ;;
+  *) bad "4 IOGuardViolation is not distinguishable from an assertion failure"
+     note "$(printf '%s' "$OUT" | grep CAUGHT || echo 'no CAUGHT line')" ;;
+esac
+
+# ── 5. I/O in a module body ──────────────────────────────────────────────
+guard_run 1 "" test_importleak.js '^adds$'
+expect_trip "5 a module BODY that reads a file trips, though the loader's frames are on the stack"
+
+# ── 5b. A public builtin frame is transparent, not an exemption ──────────
+# `path.resolve("./x")` reads the cwd through `node:path`, which is exactly the
+# route the test runner's own file globbing takes. The runner's is exempt
+# because a `node:internal/` frame sits below it; the unit's is not, because
+# the walk keeps going outward and finds the unit.
+cat > "$WORK/pathleak.js" <<'EOF'
+const path = require("node:path");
+function absolute(p) { return path.resolve(p); }
+module.exports = { absolute };
+EOF
+cat > "$WORK/test_pathleak.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { absolute } = require("./pathleak.js");
+test("adds", () => { assert.ok(absolute("./x").length > 2); });
+EOF
+guard_run 1 "" test_pathleak.js '^adds$'
+expect_trip "5b a unit reaching process.cwd THROUGH node:path still trips -- a public builtin frame is transparent, not an exemption"
+
+# ── 5c. The same, through ESM ────────────────────────────────────────────
+# `--require` preloads CommonJS, and a reader could reasonably expect it to be
+# invisible to an `.mjs` test file. It is not: the preload runs before the ESM
+# loader starts, and a builtin's ESM namespace is built from the CJS object at
+# first import, so `import { readFileSync } from "node:fs"` binds the GUARDED
+# function. Pinned because the alternative -- documenting `--import` as a
+# second invocation -- is a second command to keep true.
+cat > "$WORK/leaky.mjs" <<'EOF'
+import { readFileSync } from "node:fs";
+export function hosts() { return readFileSync("/etc/hosts", "utf8").length; }
+EOF
+cat > "$WORK/test_leaky_esm.mjs" <<'EOF'
+import { test } from "node:test";
+import assert from "node:assert";
+import { hosts } from "./leaky.mjs";
+test("adds", () => { assert.ok(hosts() >= 0); });
+EOF
+cat > "$WORK/pure.mjs" <<'EOF'
+export function add(a, b) { return a + b; }
+EOF
+cat > "$WORK/test_pure_esm.mjs" <<'EOF'
+import { test } from "node:test";
+import assert from "node:assert";
+import { add } from "./pure.mjs";
+test("adds", () => { assert.strictEqual(add(2, 3), 5); });
+EOF
+guard_run 1 "" test_pure_esm.mjs '^adds$'
+expect_pass "5c a clean ESM unit passes -- the ESM loader's own reads are not the unit's either"
+guard_run 1 "" test_leaky_esm.mjs '^adds$'
+expect_trip "5d an ESM unit's NAMED import of readFileSync is the guarded binding, because --require runs before the loader"
+
+# ── 6. The uncontrollable groups ─────────────────────────────────────────
+guard_run 1 "" test_netleak.js '^adds$'
+expect_trip "6 constructing a socket trips at tier 1"
+guard_run 2 filesystem,clock,environment,randomness test_netleak.js '^adds$'
+expect_trip "6b network is NEVER permitted, at any tier, however TEST_SAFETY_NET_ALLOW is spelled"
+guard_run 2 filesystem test_spawnleak.js '^adds$'
+expect_trip "6c a subprocess is never permitted either"
+
+# ── 7. Swallowed and asynchronous violations still reach the result ──────
+guard_run 1 "" test_swallow.js '^adds$'
+expect_trip "7 a violation the unit CATCHES still fails the run (JavaScript has no uncatchable exception)"
+guard_run 2 clock test_asyncleak.js '^adds$'
+expect_trip "7b a violation raised on a later turn of the event loop still fails the run"
+
+# ── 8. stdin fails fast instead of hanging ───────────────────────────────
+deadline_run 20 1 test_stdinleak.js '^adds$'
+case "$OUT" in
+  *GUARD-TEST-TIMEOUT*)
+    bad "8 a unit that reads stdin HUNG the proof run instead of failing it" ;;
+  *) expect_trip "8 a unit that reads stdin fails fast at tier 1 rather than hanging the proof run" ;;
+esac
+
+# ── 9. Tiers ─────────────────────────────────────────────────────────────
+guard_run 2 filesystem test_leaky.js '^adds$'
+expect_pass "9 tier 2 permits the groups TEST_SAFETY_NET_ALLOW names"
+guard_run 2 "" test_leaky.js '^adds$'
+expect_pass "9b tier 2 with no allow list is the spec's baseline: block the UNCONTROLLABLE groups only"
+guard_run 2 none test_leaky.js '^adds$'
+expect_trip "9b2 TEST_SAFETY_NET_ALLOW=none tightens tier 2 to \"this test fakes nothing\""
+guard_run 1 filesystem,clock test_leaky.js '^adds$'
+expect_trip "9c tier 1 IGNORES the allow list: a unit that claimed to touch nothing gets everything blocked"
+guard_run "" "" test_leaky.js '^adds$'
+expect_trip "9d an absent tier defaults to tier 1, the fail-safe direction"
+guard_run banana "" test_leaky.js '^adds$'
+expect_trip "9e an unparseable tier defaults to tier 1 too"
+guard_run 2 filesystem,teleportation test_leaky.js '^adds$'
+expect_pass "9f an unknown group in the allow list is ignored, and the known one still works"
+guard_run 2 teleportation test_leaky.js '^adds$'
+expect_trip "9g an unknown group NEVER unblocks anything"
+
+for group in clock randomness environment; do
+  guard_run 1 "" "test_$group.js" '^adds$'
+  expect_trip "10 the $group group is blocked at tier 1"
+  guard_run 2 "$group" "test_$group.js" '^adds$'
+  expect_pass "10b tier 2 permits $group when the test says it fakes it"
+done
+
+# ── 11. Teardown restores every patched name ─────────────────────────────
+set +e
+OUT="$(cd "$WORK" && node -e '
+const fs = require("node:fs");
+const cp = require("node:child_process");
+const net = require("node:net");
+const before = {
+  read: fs.readFileSync, exec: cp.execSync, sock: net.Socket,
+  date: globalThis.Date, rand: Math.random, fetch: globalThis.fetch,
+  env: process.env, stdin: Object.getOwnPropertyDescriptor(process, "stdin").get,
+};
+process.env.TEST_SAFETY_NET_TIER = "1";
+const guard = require(process.argv[1]);
+const patched = Object.keys(before).filter((k) => {
+  switch (k) {
+    case "read": return fs.readFileSync !== before.read;
+    case "exec": return cp.execSync !== before.exec;
+    case "sock": return net.Socket !== before.sock;
+    case "date": return globalThis.Date !== before.date;
+    case "rand": return Math.random !== before.rand;
+    case "fetch": return globalThis.fetch !== before.fetch;
+    case "env": return process.env !== before.env;
+    default: return Object.getOwnPropertyDescriptor(process, "stdin").get !== before.stdin;
+  }
+});
+guard.disarm();
+const left = [];
+if (fs.readFileSync !== before.read) left.push("fs.readFileSync");
+if (cp.execSync !== before.exec) left.push("child_process.execSync");
+if (net.Socket !== before.sock) left.push("net.Socket");
+if (globalThis.Date !== before.date) left.push("Date");
+if (Math.random !== before.rand) left.push("Math.random");
+if (globalThis.fetch !== before.fetch) left.push("fetch");
+if (process.env !== before.env) left.push("process.env");
+if (Object.getOwnPropertyDescriptor(process, "stdin").get !== before.stdin) left.push("process.stdin");
+console.log("PATCHED=" + patched.length + " LEFTOVER=" + left.join(","));
+' "$GUARD" 2>&1)"
+ST=$?
+set -e
+case "$OUT" in
+  *"PATCHED=8 LEFTOVER="*) ok "11 arm patches every family, and disarm restores all of them" ;;
+  *) bad "11 arm/disarm did not round-trip (exit=$ST)"; note "$OUT" ;;
+esac
+
+# ── 12. WHO node --test BLAMES for an ASYNC violation ────────────────────
+# The rule with no python equivalent, and the reason SKILL.md tells an agent to
+# read `$?` and not the per-test lines. When a violation lands AFTER the test
+# that caused it resolved, `node --test` does not blame that test: it prints
+# `ok` for it and puts the `not ok` somewhere else. WHERE else depends on what
+# the runner happens to be doing when the violation lands -- NOT on the node
+# version. All three shapes below were reproduced on the same node v22.18.0:
+#
+#   this assertion (12) -- nothing else is executing, so the ENCLOSING FILE
+#                          carries it (`not ok 1 - test_asyncmisattrib.js`);
+#   assertion 13        -- one later test is running, and IT is charged;
+#   assertion 14        -- two later tests are running, and BOTH are charged.
+#
+# The violator says `ok` in every one of them. So the assertion is deliberately
+# shaped as "the culprit says ok AND somebody else carries the not ok", which
+# holds for all three and fails the moment either half stops being true:
+#   * a guard that never arms  -> the read succeeds, exit 0, no violation;
+#   * node learning to blame the right test -> `blamed` becomes the culprit,
+#     this goes red, and the prose in SKILL.md / references/stacks.md gets
+#     WEAKER rather than quietly staying wrong.
+#
+# The whole FILE is run, with no `--test-name-pattern`: the batch is the unit
+# the rule is about.
+cat > "$WORK/asyncmisattrib.js" <<'EOF'
+const fs = require("node:fs");
+function scheduleRead() {
+  setTimeout(() => { fs.readFileSync("/etc/hosts", "utf8"); }, 40);
+  return true;
+}
+module.exports = { scheduleRead };
+EOF
+cat > "$WORK/test_asyncmisattrib.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { scheduleRead } = require("./asyncmisattrib.js");
+test("fast_test_slow_violation", () => { assert.ok(scheduleRead()); });
+test("second_test_keeps_process_alive", async () => {
+  await new Promise((r) => setTimeout(r, 400));
+  assert.ok(true);
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=clock \
+       node --require "$GUARD" --test test_asyncmisattrib.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - fast_test_slow_violation$' || true)"
+blamed="$(printf '%s\n' "$OUT" | grep -E '^not ok [0-9]+ - ' \
+          | sed -e 's/^not ok [0-9]* - //' | head -1 || true)"
+if [ "$ST" -ne 0 ] && tripped && [ "$culprit_ok" -eq 1 ] \
+   && [ -n "$blamed" ] && [ "$blamed" != "fast_test_slow_violation" ]; then
+  ok "12 an ASYNC violation exits nonzero but is blamed on the wrong entry (\"$blamed\", not fast_test_slow_violation, which printed ok) -- so the EXIT STATUS is the only trustworthy signal on this stack"
+else
+  bad "12 the async-misattribution shape SKILL.md documents did not reproduce (exit=$ST, culprit_ok=$culprit_ok, blamed='$blamed')"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -4)"
+fi
+
+# ── 13. …and the shape where an INNOCENT TEST is charged instead ──────────
+# The variant assertion 12 cannot see, and the worse of the two: here the
+# `not ok` carries an innocent test's NAME, so per-test results are not merely
+# unhelpful, they are INVERTED. An agent reading them keeps
+# `fast_test_slow_violation` -- the test that really did I/O -- and discards
+# `second_test_keeps_process_alive`, which did nothing.
+#
+# What makes this shape rather than 12's: the violating chain is DETACHED (the
+# test never awaits the promise it starts, and returns immediately), and a
+# later test is still executing when the chain finally reaches the guarded
+# call. Node charges whatever it is running at that moment. Same runtime, same
+# guard, same command as assertion 12 -- only the fixture differs, which is the
+# whole reason this is an executable check and not a sentence.
+#
+# Stable: 20/20 identical runs on node v22.18.0 before it was committed.
+cat > "$WORK/t_detached.js" <<'EOF'
+const { test } = require("node:test");
+const fs = require("node:fs");
+test("fast_test_slow_violation", async () => {
+  Promise.resolve().then(() => new Promise(r => setTimeout(r, 40)))
+    .then(() => { fs.readFileSync("/etc/hosts"); });
+  return;
+});
+test("second_test_keeps_process_alive", async () => {
+  await new Promise(r => setTimeout(r, 120));
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
+       node --require "$GUARD" --test t_detached.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" \
+              | grep -cE '^ok [0-9]+ - fast_test_slow_violation$' || true)"
+innocent_failed="$(printf '%s\n' "$OUT" \
+                   | grep -cE '^not ok [0-9]+ - second_test_keeps_process_alive$' || true)"
+if [ "$ST" -ne 0 ] && tripped \
+   && [ "$culprit_ok" -eq 1 ] && [ "$innocent_failed" -eq 1 ]; then
+  ok "13 an async violation from a DETACHED chain is charged to an INNOCENT TEST BY NAME -- the violator reports ok and second_test_keeps_process_alive reports not ok, so per-test results are exactly inverted"
+else
+  bad "13 the innocent-test misattribution shape did not reproduce (exit=$ST, culprit_ok=$culprit_ok, innocent_failed=$innocent_failed)"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -4)"
+fi
+
+# ── 14. …and it is not limited to ONE innocent test ──────────────────────
+# This is the assertion SKILL.md's "discard the WHOLE BATCH and re-prove one
+# test at a time" rests on. If only ever one neighbour were charged, "discard
+# the neighbour" would be a cheaper rule and someone would eventually propose
+# it. Two innocents fail here from a single violation, and the violator still
+# passes -- so there is no subset of the batch an agent can salvage by reading
+# the TAP stream, and the only sound response is to throw the batch away.
+#
+# Stable: 20/20 identical runs on node v22.18.0 before it was committed.
+cat > "$WORK/t_three.js" <<'EOF'
+const { test } = require("node:test");
+const fs = require("node:fs");
+test("violator", async () => {
+  Promise.resolve().then(() => new Promise(r => setTimeout(r, 150)))
+    .then(() => { fs.readFileSync("/etc/hosts"); });
+  return;
+});
+test("innocent_short", async () => { await new Promise(r => setTimeout(r, 60)); });
+test("innocent_long_running_when_it_lands", async () => {
+  await new Promise(r => setTimeout(r, 200));
+});
+EOF
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
+       node --require "$GUARD" --test t_three.js 2>&1)"
+ST=$?
+set -e
+culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - violator$' || true)"
+innocents="$(printf '%s\n' "$OUT" | grep -cE '^not ok [0-9]+ - innocent_' || true)"
+if [ "$ST" -ne 0 ] && tripped \
+   && [ "$culprit_ok" -eq 1 ] && [ "$innocents" -ge 2 ]; then
+  ok "14 ONE async violation fails $innocents innocent tests at once while the violator still reports ok -- there is no salvageable subset, which is why the rule is discard the WHOLE batch"
+else
+  bad "14 the multi-innocent shape did not reproduce (exit=$ST, culprit_ok=$culprit_ok, innocents_failed=$innocents)"
+  note "$(printf '%s' "$OUT" | grep -E '^(ok|not ok)' | head -5)"
+fi
+
+# ── 15. THE PROVENANCE RULE, PROVEN IN BOTH DIRECTIONS ───────────────────
+# The Critical this file exists to keep closed, and the reason the rule's
+# default is TRANSPARENT rather than EXEMPT.
+#
+# `util.promisify(fs.readFile)` returns a wrapper DEFINED IN
+# `node:internal/util`. Under the first version of the rule -- stop at the
+# first `node:internal/` frame and exempt -- the innermost non-guard frame of
+# every promisified call was internal, so the walk answered "not the code under
+# test" one frame before it would have found the unit. At tier 1, through the
+# documented command, a unit really read /etc/hosts, really WROTE a file to
+# /tmp and really resolved DNS, and the run printed `# pass 2  # fail 0` and
+# exited 0. `network` is an uncontrollable group, blocked at EVERY tier, and it
+# went through anyway.
+#
+# 15a-15d are the escape routes. 15e is the other direction, and it is not
+# optional: the over-broad exemption was BUYING something -- the runner has to
+# be able to collect and report -- so a fix that blocks promisify and breaks
+# `node --test` has traded one failure for a louder one. It runs the same
+# `RUNTIME_OWN_WORK` members past their four jobs (loading the repo's modules,
+# loading node's own builtins, running the harness, printing from a test).
+cat > "$WORK/promisified.js" <<'EOF'
+const util = require("node:util");
+const fs = require("node:fs");
+const dns = require("node:dns");
+const readAsync = util.promisify(fs.readFile);
+const writeAsync = util.promisify(fs.writeFile);
+const lookupAsync = util.promisify(dns.lookup);
+async function readHosts() { return (await readAsync("/etc/hosts", "utf8")).length; }
+async function writeTemp(p) { await writeAsync(p, "escaped\n"); return p; }
+async function resolveLocal() { return (await lookupAsync("localhost")).address; }
+const readBack = util.callbackify(async () => (await readAsync("/etc/hosts", "utf8")).length);
+function readViaCallbackify() {
+  return new Promise((resolve, reject) =>
+    readBack((e, v) => (e ? reject(e) : resolve(v))));
+}
+module.exports = { readHosts, writeTemp, resolveLocal, readViaCallbackify };
+EOF
+cat > "$WORK/test_promisified.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const path = require("node:path");
+const u = require("./promisified.js");
+test("promisify_read", async () => { assert.ok(await u.readHosts() >= 0); });
+test("promisify_write", async () => {
+  assert.ok(await u.writeTemp(path.join(__dirname, "promisify_escaped.txt")));
+});
+test("promisify_dns", async () => { assert.ok(await u.resolveLocal()); });
+test("callbackify_read", async () => { assert.ok(await u.readViaCallbackify() >= 0); });
+EOF
+rm -f "$WORK/promisify_escaped.txt"
+guard_run 1 "" test_promisified.js '^promisify_read$'
+expect_trip "15a util.promisify(fs.readFile) trips -- an internal WRAPPER frame is transparent, not an exemption"
+guard_run 1 "" test_promisified.js '^promisify_write$'
+expect_trip "15b util.promisify(fs.writeFile) trips -- the WRITE half, which is the one that leaves a file behind"
+if [ -e "$WORK/promisify_escaped.txt" ]; then
+  bad "15b2 the promisified write really reached the filesystem: the file exists on disk"
+else
+  ok "15b2 …and nothing was written: no file on disk after the promisified write was blocked"
+fi
+guard_run 1 "" test_promisified.js '^promisify_dns$'
+expect_trip "15c util.promisify(dns.lookup) trips -- network is an UNCONTROLLABLE group, blocked at every tier, so this route escaping was the worst of the four"
+guard_run 1 "" test_promisified.js '^callbackify_read$'
+expect_trip "15d util.callbackify over a promisified read trips -- both directions of the internal wrapper pair"
+
+# 15e. The other direction. Each of these exercises one member of
+# `RUNTIME_OWN_WORK`: a clean unit that `require`s a sibling (the CJS loader),
+# the runner globbing for test files (the builtin loader, which lazy-loads
+# minimatch and calls Math.random through an `<anonymous>` frame), the harness
+# itself, and a test that prints (the console, which reads FORCE_COLOR).
+# `chatty.js` also runs with stdout redirected to a FILE, where a console write
+# becomes `fs.writeSync` rather than a socket write.
+cat > "$WORK/chatty.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { add } = require("./pure.js");
+test("prints", () => {
+  console.log("a unit is allowed to print");
+  console.error("…on either stream");
+  assert.strictEqual(add(1, 1), 2);
+});
+EOF
+mkdir -p "$WORK/glob"
+cat > "$WORK/glob/lib.js" <<'EOF'
+function add(a, b) { return a + b; }
+module.exports = { add };
+EOF
+cat > "$WORK/glob/lib.test.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { add } = require("./lib.js");
+test("adds", () => { assert.strictEqual(add(2, 3), 5); });
+EOF
+runner_ok=""
+guard_run 1 "" chatty.js '^prints$'
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [console:$ST]"
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" --test chatty.js > "$WORK/tap.out" 2>&1)"
+ST=$?
+set -e
+OUT="$(cat "$WORK/tap.out")"
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [console-to-file:$ST]"
+# Collection by GLOB: no file argument at all, so the runner walks the tree.
+set +e
+OUT="$(cd "$WORK/glob" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" --test 2>&1)"
+ST=$?
+set -e
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [glob:$ST]"
+# Reporting: a non-TAP reporter, and more than one file in one run.
+set +e
+OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 node --require "$GUARD" \
+       --test --test-reporter=spec test_pure.js chatty.js 2>&1)"
+ST=$?
+set -e
+[ "$ST" -eq 0 ] || runner_ok="$runner_ok [spec-reporter:$ST]"
+if [ -z "$runner_ok" ]; then
+  ok "15e …and the runner still WORKS: a clean unit that requires a sibling, one that prints to a pipe and to a file, collection by glob with no file argument, and the spec reporter over two files -- every job the RUNTIME_OWN_WORK exemptions buy"
+else
+  bad "15e blocking the promisify routes broke the runner:$runner_ok"
+  note "$(printf '%s' "$OUT" | tail -8)"
+fi
+
+# ── 16. A repo that owns Error.prepareStackTrace ─────────────────────────
+# `source-map-support` and every Sentry SDK replace the stack FORMATTER, and
+# every frame this rule reads is a property of V8's default format. The walk
+# forces the default for its own `new Error()` and restores the repo's hook, so
+# the verdict does not depend on a dependency the target repo happens to have.
+# Both halves are asserted: without the fix the clean unit tripped too, which
+# is fail-safe but is a false positive on a mainstream package.
+cat > "$WORK/prepared.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+Error.prepareStackTrace = function (err, sites) {
+  return err.name + ": " + err.message + "\n" +
+         sites.map(() => "    at REWRITTEN-BY-THE-REPO").join("\n");
+};
+const fs = require("node:fs");
+test("clean", () => { assert.strictEqual(1 + 1, 2); });
+test("leaky", () => { assert.ok(fs.readFileSync("/etc/hosts", "utf8").length >= 0); });
+EOF
+guard_run 1 "" prepared.js '^clean$'
+expect_pass "16 a repo that replaces Error.prepareStackTrace does not make a CLEAN unit trip"
+guard_run 1 "" prepared.js '^leaky$'
+expect_trip "16b …and a leaky one still does: the walk reads V8's default format, not the repo's"
+
+# ── 17. A TARGET-REPO NAME CANNOT SPEAK FOR THE RUNTIME ───────────────────
+# The provenance walk reads FRAME POSITIONS, not the frame line. It used to ask
+# `line.indexOf("node:internal/modules/") !== -1` against the whole formatted
+# frame -- which carries the FUNCTION NAME as well as the location -- so a
+# property whose key contained an exempt prefix produced a frame the rule read
+# as the runtime's own work. V8 renders computed property names into the
+# function-name slot, so this is one line of target-repo code:
+#
+#   at h.node:internal/modules/x (/…/spoof.js:4:13)
+#
+# and the target-repo path is right there in the same line, losing to a
+# substring test. At tier 1, through the documented command, it read 213 real
+# bytes of /etc/hosts under `# pass 1  # fail 0`.
+cat > "$WORK/spoof.js" <<'EOF'
+const fs = require("node:fs");
+const holder = {};
+holder["node:internal/modules/x"] = function () {
+  return fs.readFileSync("/etc/hosts", "utf8").length;
+};
+module.exports = { go: () => holder["node:internal/modules/x"]() };
+EOF
+cat > "$WORK/test_spoof.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { go } = require("./spoof.js");
+test("spoofed_frame", () => { assert.ok(go() >= 0); });
+EOF
+guard_run 1 "" test_spoof.js '^spoofed_frame$'
+expect_trip "17 a unit whose FUNCTION NAME contains an exempt prefix still trips -- the exemption is a frame's LOCATION, not any substring of its line"
+
+# ── 18. …and the same rule for the guard's own frames (C1) ────────────────
+# The other half of the same predicate, and the change that had no regression
+# guard: `GUARD_FILE` is the guard's RESOLVED path and is matched at the START
+# of the frame's location, because a skipped frame is an unattributable frame.
+# Under the basename match this replaced, a target-repo module called
+# `io_guard.js` had every one of its frames skipped -- and a module BODY is the
+# shape where that is fatal rather than merely wrong, because the only frames
+# outside it are the loader's, which is exempt. The unit below really reads
+# /etc/hosts at import time and used to do it green.
+mkdir -p "$WORK/c1guard"
+cat > "$WORK/c1guard/io_guard.js" <<'EOF'
+const fs = require("node:fs");
+const SIZE = fs.readFileSync("/etc/hosts", "utf8").length;
+module.exports = { size: () => SIZE };
+EOF
+cat > "$WORK/c1guard/test_shadow.js" <<'EOF'
+const { test } = require("node:test");
+const assert = require("node:assert");
+const { size } = require("./io_guard.js");
+test("shadowed", () => { assert.ok(size() >= 0); });
+EOF
+guard_run 1 "" c1guard/test_shadow.js '^shadowed$'
+expect_trip "18 a TARGET-REPO file called io_guard.js is still the target repo -- the guard skips its own frames by resolved path, at the location's start"
+
+# 18b. The adversarial form of the same hole, which needs a stack with no other
+# target-repo frame on it: a deferred callback runs on a FRESH stack, so the
+# spoofed name is the only attributable frame there is. Under a substring match
+# -- of the basename or of the resolved path -- it is skipped, the timer's
+# internal frames are transparent, the walk falls off the end of the stack and
+# the read is charged to the runtime.
+cat > "$WORK/spoof_guardname.js" <<EOF
+const fs = require("node:fs");
+const holder = {};
+holder["$GUARD"] = function () {
+  return fs.readFileSync("/etc/hosts", "utf8").length;
+};
+module.exports = { later: () => queueMicrotask(holder["$GUARD"]) };
+EOF
+cat > "$WORK/test_spoof_guardname.js" <<'EOF'
+const { test } = require("node:test");
+const { later } = require("./spoof_guardname.js");
+test("deferred_spoof", async () => { later(); await Promise.resolve(); });
+EOF
+guard_run 1 "" test_spoof_guardname.js '^deferred_spoof$'
+expect_trip "18b …and a function NAMED after the guard, called on a fresh stack where it is the only attributable frame, does not inherit the guard's own exemption"
+
+exit "$rc"
