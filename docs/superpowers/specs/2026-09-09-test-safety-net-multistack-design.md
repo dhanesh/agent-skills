@@ -104,3 +104,62 @@ One branch per stack, each cut from `main`. They necessarily touch shared files
 (`SKILL.md`, `references/stacks.md`, `eval/run_eval.py`, and whatever common module the
 ranker grows), so **each branch should merge before the next is cut**, or the second and
 third will conflict on every shared surface and re-litigate this spec.
+
+---
+
+## Amended 2026-09-10 — D2 is buildable, but not as written
+
+D2 said compiled stacks get an OS syscall sandbox "with no network and a read-only
+filesystem", and that "a violation kills the process, which is the same signal shape as
+`IOGuardViolation`". Spiked against real `go test` before planning the Go stack. The
+approach holds; three of its details do not.
+
+### The sandbox cannot wrap `go test`
+
+`go test` **compiles** before it runs, and compilation needs broad access — `GOCACHE`,
+`GOROOT`, the module cache. Sandboxing the whole invocation blocks the build, not the I/O.
+
+Two phases instead: compile unsandboxed with `go test -c -o <binary> ./pkg`, then run the
+**binary** under the sandbox with `-test.run '^Name$'`. Verified: a pure test passes and
+`os.WriteFile("/tmp/…")` fails with `operation not permitted`, file absent afterwards.
+
+### `deny file-read*` kills the process before `main`
+
+A blanket read denial produces no output at all — the binary cannot load its own dynamic
+linker. The workable shape denies **`file-read-data` on named trees** (the repo, `/etc`,
+`/tmp`, `$HOME`) while leaving the loader's own paths readable. Verified: pure test passes,
+`os.ReadFile("/etc/hosts")` fails.
+
+This is a real narrowing of D2's "read-only filesystem": what is enforced is *no data reads
+from the trees a test could plausibly depend on*, not a globally read-only view.
+
+### A sandbox denial is NOT distinguishable from an assertion failure
+
+This is the substantive correction. Both print exactly `--- FAIL: TestX` then `FAIL`. The
+original spec's whole point — that a guard trip means the **classification** is wrong while
+an assertion failure means the **captured value** is wrong, and the two demand opposite
+responses — has no signal to stand on. Parsing the sandbox's error text would work until a
+message changes, and would differ per platform.
+
+**Use a differential instead.** Run each proof twice and read the PAIR of exit codes:
+
+| sandboxed | free | meaning |
+|---|---|---|
+| 0 | 0 | clean — keep the test |
+| non-0 | 0 | the unit does real I/O — **classification wrong**, reclassify Tier 3, discard |
+| non-0 | non-0 | **assertion failure** — the captured value is wrong |
+| 0 | non-0 | anomaly — report, never keep |
+
+Verified across all four rows with real fixtures. It reads no error string, so it cannot
+rot when a message changes; it is platform-independent; and it works for Rust unchanged.
+
+The cost is honest and belongs in the docs: **two runs per proof** instead of one, and a
+unit whose I/O is non-deterministic can land in the anomaly row, which is why that row
+reports rather than guesses.
+
+### What still needs proving on Linux
+
+`sandbox-exec` is macOS-only and deprecated. The Linux equivalent (`bwrap`, or seccomp) has
+not been spiked, and the profile shape above may not translate. The Go stack must verify it
+in a container before claiming the platform, and decline to write — per D2's existing rule
+— wherever no sandbox is available.
