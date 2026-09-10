@@ -163,3 +163,45 @@ reports rather than guesses.
 not been spiked, and the profile shape above may not translate. The Go stack must verify it
 in a container before claiming the platform, and decline to write — per D2's existing rule
 — wherever no sandbox is available.
+
+### The sandbox profiles, spiked on both platforms
+
+All four differential rows verified against real `go test` binaries on macOS
+(`sandbox-exec`) and Linux (`bwrap`, in a container). The profiles are not symmetric and
+the differences are not cosmetic.
+
+**macOS** — `sandbox-exec -f <profile>`:
+
+    (version 1) (allow default)
+    (deny file-write*) (deny network*)
+    (deny file-read-data (subpath "<repo>") (subpath "/etc") (subpath "/tmp") (subpath "<home>"))
+    (allow file-write* (subpath "/dev"))
+
+**Linux** — `bwrap --ro-bind / / --proc /proc --ro-bind <empty-dir> <read-target> --die-with-parent`
+
+Four findings that a plan would not have predicted:
+
+1. **`--tmpfs` is the wrong tool for denying writes, and fails in the dangerous direction.**
+   It gives the write a throwaway filesystem to *succeed* into. A test writing
+   `/var/tmp/x` under `--tmpfs /var/tmp` returns exit 0 and the differential reads it as
+   clean. Real I/O passing the guard is the one outcome this design exists to prevent.
+   Deny writes with `--ro-bind / /` and add no tmpfs over the trees you are protecting.
+
+2. **A blanket read denial kills the process before `main`.** macOS `deny file-read*`
+   produces no output at all — the dynamic linker cannot load. Deny `file-read-data` on
+   named trees instead.
+
+3. **On Linux, `--ro-bind / /` blocks writes but permits reads.** Blocking a read needs an
+   empty directory bound over the target (`--ro-bind <empty> /etc`). Without that step
+   Linux and macOS disagree on a read-only unit — Linux calls it clean, macOS calls it
+   Tier 3 — so the bind list is what keeps the two platforms honest with each other, not a
+   refinement.
+
+4. **`bwrap` needs unprivileged user namespaces, which containers block by default.**
+   Inside Docker it fails with `Creating new namespace failed: Operation not permitted`
+   until the container is given `SYS_ADMIN` and unconfined seccomp/apparmor. Many CI
+   setups are containers, so the Go stack must *detect* a working sandbox rather than
+   assume one, and decline to write when it cannot get one — per D2's existing rule.
+   `--unshare-net` additionally failed loopback setup in that environment
+   (`RTM_NEWADDR: No child processes`), so network denial on Linux is **not yet proven**
+   and must be verified on a real runner before it is claimed.
