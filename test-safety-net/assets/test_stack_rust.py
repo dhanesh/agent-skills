@@ -1319,6 +1319,97 @@ class TestTriageReach(TriageCase):
         self.assertEqual(tier, 1, reason)
 
 
+class TestTriageFixRound1(TriageCase):
+    """Fix round 1: every `use` reading counts (A), the reach is crate-wide
+    (ruling R9), and the ruling-R10 markers."""
+
+    def test_an_inline_modules_use_does_not_replace_the_files(self):
+        # NEGATIVE (probe 4b): `clap::Command` in `mod cli` used to overwrite
+        # `std::process::Command`, and `spawn` read Tier 1.
+        lib = ("use std::process::Command;\n"
+               'pub fn spawn() -> bool { Command::new("ls").status().is_ok() }\n'
+               'mod cli { use clap::Command; pub fn c() -> Command { Command::new("x") } }\n')
+        tier, reason = self.tier({"src/lib.rs": lib}, "spawn")
+        self.assertEqual(tier, 3, reason)
+        self.assertIn("subprocess", reason)
+
+    def test_a_cfg_swapped_use_counts_the_real_module(self):
+        # NEGATIVE: a `tests/` crate builds the lib WITHOUT cfg(test), so the
+        # real `std::fs` runs; the later `crate::fakefs as fs` must not hide it.
+        files = {"src/lib.rs": "#[cfg(test)]\nmod fakefs;\n"
+                               "#[cfg(not(test))]\nuse std::fs;\n"
+                               "#[cfg(test)]\nuse crate::fakefs as fs;\n"
+                               "pub fn load(p: &str) -> usize { fs::read(p).unwrap().len() }\n",
+                 "src/fakefs.rs": "pub fn read(_p: &str) -> Result<Vec<u8>, ()> { Ok(vec![]) }\n"}
+        tier, reason = self.tier(files, "load")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("filesystem", reason)
+
+    def test_a_lazy_static_in_another_file_is_reached(self):
+        # Probe 1 (ruling R9).
+        files = {"src/lib.rs": "pub mod config;\npub mod calc;\n",
+                 "src/config.rs": "use std::sync::LazyLock;\n"
+                                  "pub static CFG: LazyLock<String> = "
+                                  'LazyLock::new(|| std::env::var("X").unwrap());\n',
+                 "src/calc.rs": "use crate::config::CFG;\npub fn f() -> usize { CFG.len() }\n"}
+        tier, reason = self.tier(files, "f", rel="src/calc.rs")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("via static crate::config::CFG", reason)
+
+    def test_a_helper_in_another_file_is_reached(self):
+        # Probe 1b (ruling R9).
+        files = {"src/lib.rs": "pub mod net;\npub mod calc;\n",
+                 "src/net.rs": 'pub fn dial() -> bool { std::net::TcpStream::connect("x:1").is_ok() }\n',
+                 "src/calc.rs": "pub fn f() -> bool { crate::net::dial() }\n"}
+        tier, reason = self.tier(files, "f", rel="src/calc.rs")
+        self.assertEqual(tier, 3, reason)
+        self.assertIn("via crate::net::dial", reason)
+
+    def test_super_self_relative_and_re_exported_paths_are_followed(self):
+        files = {"src/lib.rs": "pub mod a;\nmod config;\npub use config::load;\n"
+                               "pub fn rel() -> usize { a::helper() }\n",
+                 "src/config.rs": 'pub fn load() -> usize { std::fs::read("x").unwrap().len() }\n',
+                 "src/a.rs": "pub mod b;\npub fn helper() -> usize { self::b::deep() }\n"
+                             "pub fn up() -> usize { super::load() }\n",
+                 "src/a/b.rs": "use crate::load as l;\npub fn deep() -> usize { l() }\n"}
+        self.discover(files)
+        for rel, name in (("src/lib.rs", "rel"), ("src/a.rs", "helper"),
+                          ("src/a.rs", "up"), ("src/a/b.rs", "deep")):
+            with self.subTest(name=name):
+                tier, reason = stack_rust.triage(self.root, self.unit(rel, name))
+                self.assertEqual(tier, 2, reason)
+
+    def test_a_cycle_across_two_files_terminates(self):
+        files = {"src/lib.rs": "pub mod a;\npub mod b;\n",
+                 "src/a.rs": "pub fn ping(n: u32) -> u32 "
+                             "{ if n == 0 { 0 } else { crate::b::pong(n - 1) } }\n",
+                 "src/b.rs": "pub fn pong(n: u32) -> u32 { crate::a::ping(n) }\n"}
+        tier, reason = self.tier(files, "ping", rel="src/a.rs")
+        self.assertEqual(tier, 1, reason)
+
+    def test_an_external_path_of_the_same_shape_is_not_followed(self):
+        # NEGATIVE: `other::net::dial` is another crate's; this crate's
+        # `net::dial` is never reached by it.
+        files = {"src/lib.rs": "pub mod net;\npub fn f() -> bool { other::net::dial() }\n",
+                 "src/net.rs": 'pub fn dial() -> bool { std::net::TcpStream::connect("x:1").is_ok() }\n'}
+        self.assertEqual(self.tier(files, "f")[0], 1)
+
+    R10 = (("rand::rng().random::<u64>()", "randomness"),
+           ("chrono::Utc::now().timestamp() as u64", "clock"),
+           ("chrono::Local::now().timestamp() as u64", "clock"),
+           ("std::env::args_os().count() as u64", "environment"),
+           ("std::env::vars_os().count() as u64", "environment"),
+           ("std::env::current_exe().is_ok() as u64", "environment"),
+           ('std::env::set_current_dir("/").is_ok() as u64', "environment"))
+
+    def test_the_ruling_r10_markers(self):
+        for body, group in self.R10:
+            with self.subTest(body=body):
+                tier, reason = self.tier({"src/lib.rs": "pub fn f() -> u64 { %s }\n" % body}, "f")
+                self.assertEqual(tier, 2 if group == "environment" else 3, reason)
+                self.assertIn(group, reason)
+
+
 class TestTriageReachability(TriageCase):
     """Unreachable units are Tier 3; reachable ones carry their import (R7)."""
 

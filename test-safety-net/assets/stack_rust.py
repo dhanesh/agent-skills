@@ -1843,15 +1843,18 @@ _PATH_METHODS = ("canonicalize", "exists", "is_dir", "is_file", "metadata", "rea
 CONTROLLABLE = {
     "filesystem": ("std::fs", "File::open", "File::create", "OpenOptions", "tokio::fs",
                    "async_std::fs") + tuple("Path::" + m for m in _PATH_METHODS),
+    # The spec's nine, then ruling R10's four (fix round 1).
     "environment": tuple("std::env::" + n for n in (
         "var", "var_os", "vars", "args", "current_dir", "set_var", "remove_var",
-        "temp_dir", "home_dir")),
+        "temp_dir", "home_dir", "args_os", "vars_os", "current_exe", "set_current_dir")),
 }
 UNCONTROLLABLE = {
     "network": ("std::net", "tokio::net", "reqwest", "hyper", "ureq"),
     "subprocess": ("std::process::Command", "tokio::process"),
-    "clock": ("SystemTime::now", "Instant::now", "std::thread::sleep", "tokio::time"),
-    "randomness": ("rand::thread_rng", "rand::random", "OsRng", "getrandom"),
+    # Ruling R10 adds chrono's two clock reads and rand 0.9's `rand::rng`.
+    "clock": ("SystemTime::now", "Instant::now", "std::thread::sleep", "tokio::time",
+              "chrono::Utc::now", "chrono::Local::now"),
+    "randomness": ("rand::thread_rng", "rand::random", "OsRng", "getrandom", "rand::rng"),
     "database": ("sqlx", "diesel", "rusqlite", "postgres"),
 }
 GROUPS = tuple(sorted(set(CONTROLLABLE) | set(UNCONTROLLABLE)))
@@ -1896,13 +1899,23 @@ def _markers(entries):
 
 # ── Triage ───────────────────────────────────────────────────────────────
 #
-# THE REACH is the unit's signature and body, plus the bodies of same-file
-# fns it names -- a bare `helper`, `Self::m`/`self.m(` inside an impl,
-# `Type::m`, and `x.m(` when exactly one type in the file defines `m`, as
-# go's rule is -- transitively. It also takes the initialiser of every
-# same-file `static` the reach names, `lazy_static!`'s `static ref` included:
-# a `LazyLock`/`Lazy` initialises on first use, INSIDE the unit's call, so it
-# is judged there. Rust has no import-time floor like python's and go's.
+# THE REACH is the unit's signature and body, plus the bodies of the fns it
+# names -- a bare `helper`, `Self::m`/`self.m(` inside an impl, `Type::m`,
+# and `x.m(` when exactly one type in the file defines `m`, as go's rule is
+# -- transitively. It also takes the initialiser of every `static` the reach
+# names, `lazy_static!`'s `static ref` included: a `LazyLock`/`Lazy`
+# initialises on first use, INSIDE the unit's call, so it is judged there.
+# Rust has no import-time floor like python's and go's.
+#
+# CONTROLLER RULING R9 (fix round 1): the reach is CRATE-WIDE, as go's is
+# package-wide. A path resolved into this crate's library -- `crate::a::f`,
+# `super::`/`self::`, a path relative to the current module, a name a `use`
+# binds to one, a `pub use` re-export, a glob -- is followed into its file
+# through the module tree `reachability` built (`_CrateReach`), with a visited
+# set, so a cycle terminates. THE BOUNDARY, not followed: a method on a value
+# whose type this reader cannot see (beyond the one-owner rule), a fn value
+# or trait object, a macro's expansion, another crate's code, and a binary's
+# own modules. The guard is the backstop there.
 
 _RUST_KEYWORDS = frozenset((
     "as async await break const continue dyn else enum extern false fn for if "
@@ -1913,20 +1926,34 @@ _PATH_SEG = re.compile(r"\s*::\s*(?:(<)|((?:r#)?[A-Za-z_][A-Za-z0-9_]*))")
 _STATIC_AT = re.compile(
     r"(?<![A-Za-z0-9_'])static\s+(?:mut\s+)?(?:ref\s+)?((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*:")
 
-_FileReach = collections.namedtuple("_FileReach", "code fns methods by_name statics uses globs mods")
+_FileReach = collections.namedtuple("_FileReach",
+                                    "code fns methods by_name statics uses globs mods inline")
 
 
 @functools.lru_cache(maxsize=256)
 def _file_reach(text: str) -> _FileReach:
-    """What one file offers the reach: `{name: [span]}` for free fns,
-    `{Type::m: span}` for methods, `{m: {Type::m}}`, `{name: span}` for static
-    initialisers, the `use` map, and the inline module names. A span is
-    `(lo, hi, recv)` into the stripped code."""
+    """What one file offers the reach. A span is `(lo, hi, recv, chain)` into
+    the stripped code, `chain` the inline module names around it.
+
+      fns      {name: [span]} of free fns
+      methods  {Type::m: span}; by_name {m: {Type::m}}
+      statics  {name: span} of each static's initialiser
+      uses     {bound name: [(path, chain of the use)]} -- EVERY reading, not
+               the last (fix round 1, A)
+      globs    [(path, chain of the use)]
+      mods     inline module names; inline: their chains, as name tuples
+    """
     code = strip_noncode(text)
+    scan = _scan_file(text)
+    blocks = _inline_mods(code)
+
+    def chain_at(pos):
+        return tuple(nm for nm, a, b in blocks if a < pos < b)
+
     fns, methods, by_name = {}, {}, {}
-    for f in _scan_file(text).fns:
+    for f in scan.fns:
         span = (f.pos, _brace_end(code, _item_stop(code, f.pos, len(code))),
-                _bare(f.recv) if f.recv else None)
+                _bare(f.recv) if f.recv else None, _names(f.chain))
         if f.recv:
             key = "%s::%s" % (span[2], _bare(f.name))
             methods.setdefault(key, span)
@@ -1937,20 +1964,98 @@ def _file_reach(text: str) -> _FileReach:
     for m in _STATIC_AT.finditer(code):
         eq = _depth0(code, m.end(), len(code), "=;")
         if eq < len(code) and code[eq] == "=":
-            statics.setdefault(_bare(m.group(1)),
-                               (eq + 1, _depth0(code, eq + 1, len(code), ";"), None))
+            statics.setdefault(_bare(m.group(1)), (
+                eq + 1, _depth0(code, eq + 1, len(code), ";"), None, chain_at(m.start())))
     uses, globs = {}, []
     for m in _USE_KW.finditer(code):
         semi = code.find(";", m.end())
+        ch = chain_at(m.start())
         for segs, binding in _use_leaves(code[m.end():semi if semi >= 0 else len(code)]):
             if binding == "*":
-                globs.append(segs)
+                globs.append((segs, ch))
                 continue
             segs = segs[:-1] if segs and segs[-1] == "self" else segs
             if segs and binding != "_":
-                uses[binding or segs[-1]] = segs
-    mods = {n for chain in _scan_file(text).inline for n, _vis in chain}
-    return _FileReach(code, fns, methods, by_name, statics, uses, globs, mods)
+                uses.setdefault(binding or segs[-1], []).append((segs, ch))
+    inline = tuple(_names(c) for c in scan.inline)
+    mods = {n for chain in inline for n in chain}
+    return _FileReach(code, fns, methods, by_name, statics, uses, globs, mods, inline)
+
+
+class _CrateReach:
+    """The library's module tree, for following a path into another file (ruling R9)."""
+
+    def __init__(self, root, tree):
+        self.root, self.tree, self._fr, self._methods = root, tree, {}, None
+        self.by_mod = {}                       # module path -> (rel, inline chain)
+        for rel in sorted(tree.lib_files):
+            for mp in tree.lib_files[rel]:
+                self.by_mod.setdefault(mp, (rel, ()))
+                for ch in self.reach_of(rel).inline:
+                    self.by_mod.setdefault(mp + ch, (rel, ch))
+
+    def reach_of(self, rel):
+        if rel not in self._fr:
+            self._fr[rel] = _file_reach(read_text(self.root, rel))
+        return self._fr[rel]
+
+    def home(self, rel):
+        """`rel`'s module path (the least, when declared twice), or None outside the library."""
+        mps = self.tree.lib_files.get(rel)
+        return min(mps) if mps else None
+
+    def find(self, path, depth=0):
+        """[(via, rel, span)] for crate path `path`: a fn or a static in the
+        module it names, else what a `use` in that module re-exports under
+        the name, else any `Type::m` of the crate."""
+        path = tuple(path)
+        if not path or depth > _MAX_REEXPORT_HOPS:
+            return []
+        mod, item, out = path[:-1], path[-1], []
+        if mod in self.by_mod:
+            rel, ch = self.by_mod[mod]
+            fr = self.reach_of(rel)
+            via = "crate::" + "::".join(path)
+            out += [(via, rel, s) for s in fr.fns.get(item, ()) if s[3] == ch]
+            s = fr.statics.get(item)
+            if s is not None and s[3] == ch:
+                out.append(("static " + via, rel, s))
+            for segs, uch in ([] if out else fr.uses.get(item, [])):
+                t = _use_target(list(segs), list(mod)) if uch == ch else None
+                out += self.find(t, depth + 1) if t else []
+            for segs, uch in ([] if out else fr.globs):
+                t = _use_target(list(segs), list(mod)) if uch == ch else None
+                out += self.find(tuple(t) + (item,), depth + 1) if t is not None else []
+        if not out and len(path) > 1:
+            out += [("%s::%s" % (path[-2], item), rel, s)
+                    for rel, s in self._methods_named("%s::%s" % (path[-2], item))]
+        return out
+
+    def _methods_named(self, key):
+        if self._methods is None:
+            self._methods = {}
+            for rel in sorted(self.tree.lib_files):
+                for k, s in self.reach_of(rel).methods.items():
+                    self._methods.setdefault(k, []).append((rel, s))
+        return self._methods.get(key, [])
+
+
+_MAX_REEXPORT_HOPS = 16
+_CRATE_REACHES = {}
+
+
+def _crate_reach(root, rel):
+    """The `_CrateReach` of `rel`'s crate, rebuilt with its module tree; None
+    outside every crate."""
+    info = crate_of(root, rel)
+    if info is None:
+        return None
+    tree = _tree(root, info)
+    key = (os.path.realpath(root), info.dir)
+    held = _CRATE_REACHES.get(key)
+    if held is None or held.tree is not tree:
+        held = _CRATE_REACHES[key] = _CrateReach(root, tree)
+    return held
 
 
 def _depth0(code, i, hi, stops):
@@ -2037,22 +2142,54 @@ def _paths(code, lo, hi):
 
 
 def _resolve_entry(segs, called, fr):
-    """`segs` as the paths it may name: through a `use`, else as written plus,
-    for a call or a longer path, each glob import's reading of it."""
+    """`segs` as the paths it may name, for the marker tables: through EVERY
+    `use` that binds its head, else as written plus, for a call or a longer
+    path, each glob import's reading of it.
+
+    Every reading, not the last (fix round 1, A): one file-wide map, last
+    binding wins, let `mod cli { use clap::Command; }` replace the file's
+    `std::process::Command`, and `#[cfg(test)] use crate::fakefs as fs;`
+    hide the `std::fs` a `tests/` crate really builds -- both read Tier 1.
+    Killing tests: `TestTriageFixRound1.test_an_inline_modules_use_*` and
+    `test_a_cfg_swapped_use_counts_the_real_module`.
+    """
     if segs[0] == "self" and len(segs) > 1:
         segs = segs[1:]
     head = segs[0]
     if head in fr.uses:
-        return ["::".join(fr.uses[head] + segs[1:])]
+        return ["::".join(list(r) + segs[1:]) for r, _ch in fr.uses[head]]
     out = ["::".join(segs)]
     if head not in _OWN_HEADS and (called or len(segs) > 1):
-        out += ["::".join(g + segs) for g in fr.globs]
+        out += ["::".join(list(g) + segs) for g, _ch in fr.globs]
     return out
 
 
-def _read_region(fr, lo, hi, recv):
-    """(entries, [(key, [spans])]) for one region: resolved paths for the
-    marker tables, and the same-file items it names for the reach."""
+def _crate_targets(segs, called, fr, home, chain):
+    """Ruling R9: the crate paths `segs` may name from module `home + chain` --
+    through every `use` of its head (read at the `use`'s own module), as
+    `crate::`/`self::`/`super::`, relative to the current module, and, for a
+    call or a longer path, through each glob."""
+    head, here = segs[0], list(home + chain)
+    if head == "Self":
+        return []
+    if head in fr.uses:
+        return [t + segs[1:] for r, ch in fr.uses[head]
+                for t in [_use_target(list(r), list(home + ch))] if t]
+    if head in ("crate", "self", "super"):
+        t = _use_target(list(segs), here)
+        return [t] if t else []
+    out = [here + segs] if len(segs) > 1 else []
+    if called or len(segs) > 1:
+        out += [t + segs for g, ch in fr.globs
+                for t in [_use_target(list(g), list(home + ch))] if t is not None]
+    return out
+
+
+def _read_region(fr, span, home, ctx):
+    """(entries, [(via, rel or None, [spans])]) for one region: resolved paths
+    for the marker tables, and the items it names for the reach -- in this
+    file (rel None), or anywhere in the crate through `ctx` (ruling R9)."""
+    lo, hi, recv, chain = span
     entries, refs = set(), []
     for segs, kind, called in _paths(fr.code, lo, hi):
         if kind == "method":
@@ -2065,7 +2202,7 @@ def _read_region(fr, lo, hi, recv):
                 owners = fr.by_name.get(name, ())
                 key = next(iter(owners)) if len(owners) == 1 else None
             if key:
-                refs.append((key, [fr.methods[key]]))
+                refs.append((key, None, [fr.methods[key]]))
             continue
         if segs[0] in _RUST_KEYWORDS:
             continue
@@ -2073,43 +2210,54 @@ def _read_region(fr, lo, hi, recv):
         entries.update(p + "!" if kind == "macro" else p for p in paths)
         if kind == "macro":
             continue
+        if ctx is not None and home is not None:
+            for t in _crate_targets(segs, called, fr, home, chain):
+                refs += [(via, rel, [s]) for via, rel, s in ctx.find(t)]
         name = segs[-1]
         own = len(segs) == 1 or segs[0] in _OWN_HEADS or segs[-2] in fr.mods
         if len(segs) > 1:
             owner = recv if segs[-2] == "Self" and recv else segs[-2]
             if "%s::%s" % (owner, name) in fr.methods:
-                refs.append(("%s::%s" % (owner, name), [fr.methods["%s::%s" % (owner, name)]]))
+                refs.append(("%s::%s" % (owner, name), None,
+                             [fr.methods["%s::%s" % (owner, name)]]))
                 continue
         if own and name in fr.fns:
-            refs.append((name, fr.fns[name]))
+            refs.append((name, None, fr.fns[name]))
         if own and name in fr.statics:
-            refs.append(("static " + name, [fr.statics[name]]))
+            refs.append(("static " + name, None, [fr.statics[name]]))
     return entries, refs
 
 
-def _reach_hits(fr, fn):
+def _reach_hits(root, rel, text, fn):
     """Marker hits over the unit's reach, as (group, marker, controllable, via).
 
-    `via` is the first same-file item on the way (`helper`, `Store::flush`,
-    `static CFG`), None for the unit's own text. Breadth first, in sorted
-    order, so the reason is the same on every run.
+    `via` is the first item on the way (`helper`, `Store::flush`, `static
+    CFG`, `crate::net::dial`), None for the unit's own text. Breadth first,
+    in sorted order, so the reason is the same on every run; a span is
+    visited once, so a cycle terminates.
     """
+    fr, ctx = _file_reach(text), _crate_reach(root, rel)
     recv = _bare(fn.recv) if fn.recv else None
-    start = (fn.pos, _brace_end(fr.code, _item_stop(fr.code, fn.pos, len(fr.code))), recv)
-    seen = {"%s::%s" % (recv, _bare(fn.name)) if recv else _bare(fn.name)}
-    todo, hits = collections.deque([([start], None)]), []
+    start = (fn.pos, _brace_end(fr.code, _item_stop(fr.code, fn.pos, len(fr.code))),
+             recv, _names(fn.chain))
+    seen = {(rel, fn.pos)}
+    todo, hits = collections.deque([(rel, [start], None)]), []
     while todo:
-        spans, via = todo.popleft()
+        at, spans, via = todo.popleft()
+        here = fr if at == rel else ctx.reach_of(at)
+        home = ctx.home(at) if ctx is not None else None
         entries, refs = set(), []
-        for lo, hi, r in spans:
-            e, rf = _read_region(fr, lo, hi, r)
+        for span in spans:
+            e, rf = _read_region(here, span, home, ctx)
             entries |= e
             refs += rf
         hits += [(g, m, c, via) for g, m, c in _markers(entries)]
-        for key, sub in sorted(refs, key=lambda kv: kv[0]):
-            if key not in seen:
-                seen.add(key)
-                todo.append((sub, via or key))
+        for key, to, sub in sorted(refs, key=lambda r: (r[0], r[1] or "")):
+            to = to or at
+            new = [s for s in sub if (to, s[0]) not in seen]
+            if new:
+                seen.update((to, s[0]) for s in new)
+                todo.append((to, new, via or key))
     return hits
 
 
@@ -2151,11 +2299,12 @@ def triage(root: str, unit) -> tuple:
     crate writes for it, ``; import as `use <public_path>;` `` -- for a method,
     its type's path; for a re-export, the re-exported path.
     """
-    text = read_text(root, _norm(unit["path"]))
+    rel = _norm(unit["path"])
+    text = read_text(root, rel)
     fn = _declaration(_scan_file(text), text, unit)
     if fn is None:
         return 4, "unit not found on re-read"
-    hits = _reach_hits(_file_reach(text), fn)
+    hits = _reach_hits(root, rel, text, fn)
     declined = [h for h in hits if h[2] is None]
     if declined:
         return _tier_from_hits(declined)
