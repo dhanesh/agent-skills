@@ -221,6 +221,24 @@ class TestCrates(RustCase):
             dir="crates/k", name="klib", lib="crates/k/lib/k.rs",
             bins=("crates/k/cli/main.rs",)))
 
+    def test_a_quoted_table_header_opens_an_ignored_table(self):
+        # NEGATIVE (ruling R6). `[target.'cfg(unix)'.dependencies.foo]` did
+        # not match the header pattern, so its `path = ...` landed in the
+        # table before it -- here `[lib]`, overwriting `[lib] path`.
+        write(self.root, "Cargo.toml",
+              '[package]\nname = "calcx"\n\n[lib]\npath = "src/real.rs"\n\n'
+              "[target.'cfg(unix)'.dependencies.foo]\npath = \"../foo\"\n\n"
+              '[[bin]]\nname = "tool"\npath = "src/tool.rs"\n'
+              '[target."cfg(windows)".dependencies]\npath = "../win"\n'
+              '[ weird header with spaces ]\nname = "not-the-crate"\n')
+        write(self.root, "src/real.rs", "")
+        info = stack_rust.crate_of(self.root, "src/real.rs")
+        self.assertEqual(info, stack_rust.CrateInfo(
+            dir="", name="calcx", lib="src/real.rs", bins=("src/tool.rs",)))
+        tables = [t for t, _kv in stack_rust._toml_tables(
+            "[a]\n[target.'cfg(unix)'.x]\nk = 'v'\n[[b]]\n")]
+        self.assertEqual(tables, ["", "a", None, "b"])
+
     def test_no_lib_file_means_no_lib(self):
         write(self.root, "Cargo.toml", CALCX_TOML)
         write(self.root, "src/main.rs", "fn main() {}\n")

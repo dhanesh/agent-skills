@@ -138,15 +138,22 @@ def _toml_tables(text: str):
     `'value'`) lines are read -- every value this stack needs is a string --
     and everything else is skipped: arrays, inline tables, multi-line
     strings, dotted keys. A key before any header lands in table "".
+
+    EVERY line starting with `[` opens a table (ruling R6). One this reader
+    cannot name -- a quoted key such as `[target.'cfg(unix)'.dependencies.x]`
+    -- opens a table named None, which no lookup asks for, so its keys are
+    ignored rather than landing in the table before it (where a `path = …`
+    used to overwrite `[lib] path`). Killing test:
+    `TestCrates.test_a_quoted_table_header_opens_an_ignored_table`.
     """
     tables = [("", {})]
     for line in text.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        h = _TOML_HEADER.match(s)
-        if h:
-            tables.append((h.group(2), {}))
+        if s.startswith("["):
+            h = _TOML_HEADER.match(s)
+            tables.append((h.group(2) if h else None, {}))
             continue
         kv = _TOML_KEYVAL.match(s)
         if kv:
