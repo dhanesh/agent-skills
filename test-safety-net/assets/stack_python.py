@@ -250,7 +250,7 @@ def module_of(rel: str) -> str:
     return os.path.splitext(os.path.basename(rel))[0]
 
 
-def name_pattern(name: str):
+def name_pattern(name: str, module: str = None):
     r"""A regex matching `name` as a whole identifier, for either call site.
 
     The core needs this for two questions -- "does this test file mention the

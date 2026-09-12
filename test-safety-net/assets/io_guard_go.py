@@ -92,13 +92,22 @@ own behalf -- `testing` reads the clock around every test. The engine walks
     What it cannot exempt is repo code: a repo `defer` doing I/O during a
     panic, a `t.Cleanup` closure and a subtest body all put a repo frame
     INNERMOST, before any testing frame is reached;
+  * a frame that INVOKES A FUNCTION VALUE (`INVOKER_FRAMES`: testing's
+    cleanup runner, `testing.AllocsPerRun`, the finalizer and cleanup
+    goroutines) is judged by what it invoked, unless that is `testing`'s own
+    code. The second review forced this: `t.Cleanup(os.Clearenv)` and
+    `runtime.SetFinalizer(s, (*http.Server).ListenAndServe)` run a stdlib
+    function with no repo frame anywhere on the stack;
   * the first other frame -- the repo's code, or a third-party module, which
     is treated as the repo's the way io_guard.js treats node_modules -- is
     ATTRIBUTABLE, and the call is judged there;
   * reaching the end of the stack means THIS GOROUTINE holds no repo frame,
     and it is judged by the function that CREATED it -- the "created by"
-    line `runtime.Stack` appends. A stdlib or generated-runner creator is the
-    runtime doing its own work: EXEMPT. Any other creator is ATTRIBUTABLE.
+    line `runtime.Stack` appends. Only an ALLOWLISTED creator
+    (`BENIGN_CREATORS`: runtime, testing, os/signal, the profilers) or the
+    generated runner is the runtime doing its own work: EXEMPT. Any other
+    creator is ATTRIBUTABLE -- `time.AfterFunc`'s and `context.AfterFunc`'s
+    included, which the first version's "any stdlib creator" rule exempted.
     Review forced this: the rule used to exempt every such stack, and
     `go http.ListenAndServe(...)` in a unit bound a real port under a GREEN
     proof, because the compiler's wrapper for a `go` statement is hidden
@@ -131,14 +140,16 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    `golang.org/x/sys/unix`, cgo, assembly. The filter declines the raw and
    cgo shapes statically; a third-party library doing it internally escapes
    both layers.
-2. Standard-library work on a goroutine the standard library started ITSELF
-   -- whose creator is stdlib, and whose stack holds no repo frame -- is
-   exempt. A goroutine the UNIT started is judged by its creator, so
-   `go http.ListenAndServe(...)` trips; what stays open is, say, the
-   per-connection goroutines a stdlib server spawns. The `net/http` entry
-   points are hooked on the caller's goroutine for the case that matters.
-   A dependency's import-time I/O trips too, and is reported as the
-   dependency's, not as a verdict on the unit.
+2. A function value is judged only where a known invoker runs it or an
+   unlisted creator started its goroutine. A stdlib API that stores a
+   function and later calls it SYNCHRONOUSLY from inside another stdlib
+   function, with no repo frame and no listed invoker between, is unseen; a
+   new shape is a new `INVOKER_FRAMES` row. Invoker names are per release
+   (`runtime.runfinq` became `runtime.runFinalizers` in go1.25) and are NOT
+   checked the way hook targets are, so the versions CI job runs the
+   invoker fixtures on every supported Go. A dependency's import-time I/O
+   trips too, and is reported as the dependency's -- unless the unit's own
+   package initialisation made the call (`var home = dep.Home()`).
 3. Hook targets are found by text in THIS toolchain's sources. A release that
    renames a required one makes this exit 2; an optional one missing is
    recorded, not fatal.
@@ -357,6 +368,32 @@ TESTING_CONTROL_METHODS = {
 TESTING_CONTROLS = {"testing.(*%s).%s" % (recv, method): groups
                     for recv in ("common", "T", "B", "F")
                     for method, groups in TESTING_CONTROL_METHODS.items()}
+
+# Frames that INVOKE A FUNCTION VALUE someone else supplied. The second review
+# broke the guard through each: `t.Cleanup(os.Clearenv)`,
+# `testing.AllocsPerRun(1, os.Clearenv)` and
+# `runtime.SetFinalizer(s, (*http.Server).ListenAndServe)` all run a stdlib
+# function with no repo frame on the stack. When the function such a frame
+# invoked is not `testing`'s own (the TempDir removal and Setenv restore are
+# `testing` closures), the call is judged as the test's.
+#
+# The finalizer goroutine's frame is VERSION-SPECIFIC, and a probe on go1.26
+# found the first list naming only the old spelling. Read from each release's
+# runtime source: it is `runtime.runfinq` through go1.24 and
+# `runtime.runFinalizers` from go1.25, the release that also moved
+# `AddCleanup`'s cleanups to their own `runtime.runCleanups` goroutine. Neither goroutine has a
+# "created by" line, so the creator rule below cannot see them either.
+INVOKER_FRAMES = ("testing.(*common).Cleanup.func1", "testing.AllocsPerRun",
+                  "runtime.runfinq", "runtime.runFinalizers",
+                  "runtime.runCleanups")
+
+# The creators whose goroutines are the runtime's own work: the ONLY ones a
+# goroutine with no repo frame on its stack is exempted for. A list of what is
+# benign rather than of what is not, so an unrecognised creator -- `time.goFunc`
+# running an AfterFunc, `context` running an AfterFunc, whatever a future Go
+# adds -- is judged rather than waved through.
+BENIGN_CREATORS = ("runtime.", "testing.", "testing/", "os/signal.",
+                   "runtime/pprof.", "runtime/trace.", "runtime/coverage.")
 
 # Every OTHER exported method of testing's T, B and F, and why a call beneath
 # it is the runner's own work. This list is load-bearing in the permissive
@@ -601,6 +638,10 @@ var tsnEntryGroups = [...][2]string{__ENTRY__}
 
 var tsnControls = map[string]string{__CONTROLS__}
 
+var tsnInvokers = map[string]bool{__INVOKERS__}
+
+var tsnBenign = [...]string{__BENIGN__}
+
 func tsnEnv(key string) (string, bool) {
 	for _, kv := range runtime_envs() {
 		if len(kv) > len(key) && kv[len(key)] == '=' && kv[:len(key)] == key {
@@ -656,10 +697,10 @@ func tsnPkgOf(fn string) string {
 	}
 	for i := slash + 1; i < len(fn); i++ {
 		if fn[i] == '.' {
-			return fn[:i]
+			return tsnUnescape(fn[:i])
 		}
 	}
-	return fn
+	return tsnUnescape(fn)
 }
 
 func tsnIsStd(p string) bool {
@@ -723,13 +764,29 @@ func TSNHook(group, target string) {
 		return
 	}
 	frames := tsnFrames(group, target)
-	entry, control, runner := "", "", false
+	entry, control, runner, callee := "", "", false, ""
 	for i, f := range frames {
 		if f.Function == "" {
 			continue
 		}
 		pkg := tsnPkgOf(f.Function)
 		if tsnIsStd(pkg) {
+			// A frame that INVOKES A FUNCTION VALUE -- a cleanup, a benchmark
+			// body, a finalizer. If what it invoked is not its own package's
+			// code, somebody handed it a function -- `t.Cleanup(os.Clearenv)`,
+			// `runtime.SetFinalizer(s, (*http.Server).ListenAndServe)` -- and
+			// no repo frame will ever be on this stack. Judge it here.
+			// `testing`'s OWN closures (TempDir removal, Setenv/Chdir restore)
+			// stay runner work. BELT-AND-BRACES, measured: on darwin/linux
+			// each does I/O only in the group its control already needed
+			// allowed, so dropping that clause leaves the suite green.
+			if tsnInvokers[f.Function] && control == "" && callee != "" &&
+				tsnPkgOf(callee) != "testing" {
+				tsnJudge(group, target, entry, "", runtime.Frame{
+					Function: callee + " (a function value handed to " + f.Function + ")",
+					File:     f.File, Line: f.Line}, frames[i+1:])
+				return
+			}
 			entry = f.Function
 			if pkg == "testing" {
 				if c, ok := tsnControls[f.Function]; ok {
@@ -737,6 +794,9 @@ func TSNHook(group, target string) {
 				} else {
 					runner = true
 				}
+			}
+			if !tsnPlumbing(pkg) {
+				callee = f.Function
 			}
 			continue
 		}
@@ -824,10 +884,53 @@ func tsnCreator() (runtime.Frame, bool) {
 	if j := tsnLastIndex(loc, ":"); j >= 0 {
 		file, line = loc[:j], tsnAtoi(loc[j+1:])
 	}
-	if fn == "" || tsnIsStd(tsnPkgOf(fn)) || tsnHasSuffix(file, "_testmain.go") {
+	if fn == "" || tsnHasSuffix(file, "_testmain.go") || tsnBenignCreator(fn) {
 		return runtime.Frame{}, false
 	}
 	return runtime.Frame{Function: fn, File: file, Line: line}, true
+}
+
+// tsnBenignCreator: the ONLY creators whose frameless goroutines are the
+// runtime's own work. FAIL-CLOSED on purpose: "any stdlib creator" exempted
+// `time.AfterFunc(d, os.Clearenv)` and `context.AfterFunc(ctx, os.Clearenv)`,
+// whose goroutines a stdlib creator starts to run a function the unit handed
+// it. A creator this list does not name is judged.
+func tsnBenignCreator(fn string) bool {
+	for _, p := range tsnBenign {
+		if tsnHasPrefix(fn, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// tsnPlumbing: frames between an invoker and what it invoked -- reflectcall,
+// the ABI shims -- which name no function anyone chose.
+func tsnPlumbing(pkg string) bool {
+	return pkg == "runtime" || pkg == "reflect" || tsnHasPrefix(pkg, "internal/") ||
+		tsnHasPrefix(pkg, "runtime/internal/")
+}
+
+// tsnUnescape: runtime.Frame.Function escapes a `.` in an import path's last
+// element as `%2e` (`example.com/app.v2` -> `example.com/app%2ev2`), which no
+// module path or std name contains.
+func tsnUnescape(p string) string {
+	for {
+		i := tsnIndex(p, "%2e")
+		if i < 0 {
+			return p
+		}
+		p = p[:i] + "." + p[i+3:]
+	}
+}
+
+func tsnInModules(pkg string) bool {
+	for _, m := range tsnState.modules {
+		if pkg == m || tsnHasPrefix(pkg, m+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func tsnJudge(group, target, entry, control string, f runtime.Frame, rest []runtime.Frame) {
@@ -853,18 +956,18 @@ func tsnJudge(group, target, entry, control string, f runtime.Frame, rest []runt
 // tier-1 unit in any package importing it -- the right verdict, but not one
 // about the unit, and the message has to say so.
 func tsnDependencyInit(f runtime.Frame, rest []runtime.Frame) bool {
-	if len(tsnState.modules) == 0 {
+	if len(tsnState.modules) == 0 || tsnInModules(tsnPkgOf(f.Function)) {
 		return false
 	}
-	pkg := tsnPkgOf(f.Function)
-	for _, m := range tsnState.modules {
-		if pkg == m || tsnHasPrefix(pkg, m+"/") {
-			return false
-		}
-	}
+	// A module frame between the dependency and the init machinery means the
+	// REPO's initialisation made the call -- `var home = dep.Home()` -- and
+	// the choice, and the verdict, are the unit's package's.
 	for _, r := range rest {
 		if tsnHasPrefix(r.Function, "runtime.doInit") {
 			return true
+		}
+		if r.Function != "" && tsnInModules(tsnPkgOf(r.Function)) {
+			return false
 		}
 	}
 	return false
@@ -936,7 +1039,10 @@ def _engine_source(std):
             .replace("__ENTRY__", ", ".join("{%s, %s}" % (_go_str(p), _go_str(g))
                                             for p, g in ENTRY_GROUPS))
             .replace("__CONTROLS__", ", ".join("%s: %s" % (_go_str(k), _go_str(v))
-                                               for k, v in sorted(TESTING_CONTROLS.items()))))
+                                               for k, v in sorted(TESTING_CONTROLS.items())))
+            .replace("__INVOKERS__", ", ".join("%s: true" % _go_str(k)
+                                               for k in sorted(INVOKER_FRAMES)))
+            .replace("__BENIGN__", ", ".join(_go_str(p) for p in BENIGN_CREATORS)))
 
 
 # ── Building the overlay ─────────────────────────────────────────────────

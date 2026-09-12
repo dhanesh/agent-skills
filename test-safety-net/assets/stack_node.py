@@ -342,7 +342,7 @@ def module_of(rel: str) -> str:
     return stem
 
 
-def name_pattern(name: str):
+def name_pattern(name: str, module: str = None):
     r"""`name` as a whole identifier, bounded the way JS bounds one.
 
     Not `\b`: `\b` is defined against `[A-Za-z0-9_]`, so it does not know `$`

@@ -10,7 +10,7 @@ indistinguishable from the one you're proving.
 |---|---|---|---|---|
 | python | module-level `def` / `class` | `tests/` or `test_*.py` beside the source | pytest, falling back to `unittest` | `pytest path/to/test_file.py::test_name` (or `pytest path/to/test_file.py::TestClass::test_name`); unittest fallback: `python3 -m unittest module.Class.test_name` |
 | node | top-level `export`ed function/class (`export function`, `export default`, `export const f = …`, `export class`, `export { f }`, `module.exports`/`exports.f`) | `<name>.test.js` beside the source, `__tests__/<name>.test.js` beside it, or a mirrored `test/<dir>/<name>.test.js` — whichever the repo already uses | node's built-in runner, `node --test` (node 18+); **no dependency is added** | `node --test --test-name-pattern '^<test_name>$' <path>` |
-| go | exported top-level `func`, and exported methods on exported types (`func (r *T) M(` → unit `T.M`) | `<file>_test.go` beside the source, **in the same package** | `go test` (go 1.26); **no dependency is added** | `python3 "$SKILL_DIR/assets/io_guard_go.py" -run '^<test_name>$' <package>` — `go test -run` under the guard |
+| go | exported top-level `func`, and exported methods on exported types (`func (r *T) M(` → unit `T.M`) | `<file>_test.go` beside the source, **in the same package** | `go test` (go 1.22–1.26, see Supported versions); **no dependency is added** | `python3 "$SKILL_DIR/assets/io_guard_go.py" -run '^<test_name>$' <package>` — `go test -run` under the guard |
 | rust | *not supported — no stack is registered, see below* | — | — | — |
 
 ## Supported versions — the last five of each, proved in CI
@@ -21,7 +21,7 @@ suites on every one of them rather than assuming it:
 
 | stack | versions | what changes across them, and what the skill does about it |
 |---|---|---|
-| python | 3.10, 3.11, 3.12, 3.13, 3.14 | On 3.10 `pathlib` routes every call through `pathlib._NormalAccessor`, whose `open`/`stat`/`listdir`/... are the real functions **bound at import** — the guard patches those too (`io_guard._patch_prebound_stdlib`), or every `Path` read and write escaped it. 3.11 removed the accessor. |
+| python | 3.10, 3.11, 3.12, 3.13, 3.14 | On 3.10 `pathlib` routes every call through `pathlib._NormalAccessor`, whose `open`/`stat`/`listdir`/... are the real functions **bound at import** — the guard patches those too (`io_guard._patch_prebound_stdlib`), or every `Path` read and write escaped it. 3.11 removed the accessor. The same shape is on every version in other stdlib modules (`random._urandom` behind `SystemRandom`, `tokenize._builtin_open` behind `tokenize.open`), so arming rebinds any already-imported stdlib module's function-valued global that is a patched original. |
 | node | LTS lines 18, 20, 22, 24, 26 | Node 26's default test reporter is `spec` even when stdout is a pipe; the per-test transcripts quoted in `SKILL.md` are TAP (`--test-reporter=tap`), and the exit-status rule needs neither. `node:inspector/promises` arrived in 20. Running a `.ts` test directly needs 22.6+ (type stripping); older lines pin TypeScript through the repo's built JavaScript. Node 16 has no `node:test` at all, which is why the five lines start at 18. |
 | go | 1.22, 1.23, 1.24, 1.25, 1.26 | `go vet` on 1.22–1.23 ignores an overlay's added files, so the guard runs `-vet=off`. `crypto/internal/sysrand` (1.24+) is hooked where it exists; `crypto/rand`'s entry points are hooked on every version. The clock control, `testing/synctest`, is 1.25+: on 1.22–1.24 a clock unit is a **could not prove**, not a Tier 2 pin. |
 
@@ -346,11 +346,17 @@ measured) and every later run is warm.
 `runtime.Callers` from the innermost frame outward. A standard-library frame is transparent, and the
 last one passed is the ENTRY — the function the code under test called. A `testing` frame that is
 not one of its controls means the runner is doing its own work (reporting a failure, timing a test)
-and exempts the call; so does the generated `_testmain.go` runner. A goroutine whose stack holds no
-repo frame at all is judged by the function that CREATED it (the "created by" line
-`runtime.Stack` appends): exempt when that is the standard library's own or the generated runner's,
-attributable otherwise — which is what makes `go http.ListenAndServe(...)` in a unit trip, since
-the compiler hides a `go` statement's wrapper from `runtime.Callers`. The walk always reads the
+and exempts the call; so does the generated `_testmain.go` runner. A frame that INVOKES A FUNCTION
+VALUE — `testing`'s cleanup runner, `testing.AllocsPerRun`, the finalizer and cleanup goroutines
+(`runtime.runfinq` through go 1.24; `runtime.runFinalizers` and `runtime.runCleanups` from 1.25) — is
+judged by what it invoked: unless that is `testing`'s own code, somebody handed it a function, and
+`t.Cleanup(os.Clearenv)` or `runtime.SetFinalizer(s, (*http.Server).ListenAndServe)` trips with no
+repo frame on the stack. A goroutine whose stack holds no repo frame at all is judged by the
+function that CREATED it (the "created by" line `runtime.Stack` appends). It is exempt only when
+that creator is on a short ALLOWLIST (`runtime`, `testing`, `os/signal`, the profilers, the
+generated runner) and attributable otherwise, so `go http.ListenAndServe(...)`,
+`time.AfterFunc(d, os.Clearenv)` and `context.AfterFunc(ctx, os.Clearenv)` in a unit all trip, and
+a creator a future Go adds is judged rather than waved through. The walk always reads the
 whole stack; a fixed buffer that filled up used to read its cut-off tail as the end and exempt the
 call. The first other frame — the repo's own code, or a third-party module, which is treated
 like the repo — is judged: the call is blocked when the primitive's group OR the entry's is blocked.
@@ -368,20 +374,38 @@ six-row exit table in `SKILL.md` step 4 — including exit 2, NOT ARMED, wheneve
 (unsupported GOOS, a required hook target missing, a caller's own `-overlay`), because a proof that
 ran unguarded is worse than no proof.
 
+**How a run is read, measured on go 1.26.** GREEN needs exit 0, a `--- PASS:` line and no
+`--- SKIP:` line, so a run that proves nothing never reads as a proof:
+
+| run | exit |
+|---|---|
+| `-run '^TestParent$'` where one subtest calls `t.Skip` | 4 — select the passing subtest itself: `-run '^TestParent$/^ok$'` exits 0 |
+| `-run` matching no test | 4 |
+| `-run '^$' -bench '^BenchmarkX$'` | 4 — a benchmark is not a proof |
+| a unit calling `log.Printf` on the default logger, tier 1 | 3 as `clock`: the default flags stamp the time, so the filter's Tier 1 is overruled. The guard is right (the output depends on the clock); `log.New(w, "", 0)` reads no clock and passes |
+
+Those lines come from the test binary's stdout, which the repo's own code shares — residual 7.
+
 ### Go residuals — read these before you read a trip
 
 1. **Anything that bypasses package `syscall` is unseen by the guard:** a raw syscall through
    `golang.org/x/sys/unix`, cgo, assembly. The filter declines the raw, cgo and bodyless shapes
    statically; a third-party library doing one of them internally escapes both layers.
-2. **Standard-library work on a goroutine the standard library started itself** — whose creator is
-   stdlib and whose stack holds no repo frame — is exempt. A goroutine the unit started is judged by
-   its creator, so `go http.ListenAndServe(...)` trips; what stays open is, for example, the
-   per-connection goroutines a stdlib server spawns. A dependency's import-time I/O trips too, and
-   the message names the dependency rather than blaming the unit: nothing in a package importing it
-   can be proved at that tier.
-3. **Hook targets are found by text in this toolchain's sources.** A release that renames a required
-   one makes the guard exit 2; an optional one missing is recorded, not fatal. CI pins go 1.26, and
-   the suite ran green on darwin and on linux (`go1.26.8 linux/arm64`).
+2. **A function value is judged only where a known invoker runs it.** Goroutines with no repo frame
+   are judged by an allowlisted creator, and stdlib function values by the invoker list above. A
+   stdlib API that stores a function value and later calls it *synchronously on the caller's own
+   stack from inside another stdlib function*, with neither a repo frame nor a listed invoker between,
+   is not seen. The second review's four shapes are pinned (finalizer, cleanup, `AllocsPerRun`, both
+   `AfterFunc`s); a new one is a new invoker row. A dependency's import-time I/O trips too, and the
+   message names the dependency rather than blaming the unit — unless the unit's own package
+   initialisation made the call (`var home = dep.Home()`), which is the unit's.
+3. **Hook targets and invoker frames are found by name in this toolchain.** A release that renames a
+   required hook target makes the guard exit 2; an optional one missing is recorded, not fatal. An
+   invoker renamed is NOT caught that way, which a probe on go 1.26 proved: go 1.25 renamed
+   `runtime.runfinq` to `runtime.runFinalizers`, and a finalizer escaped until both spellings
+   were listed. The
+   versions CI job runs the finalizer, cleanup and `AfterFunc` fixtures on every supported Go
+   (1.22–1.26) so a rename fails CI rather than a proof.
 4. **`time.Sleep` and `os.Args` are marked by the filter and unseen by the guard.** `time.Sleep`
    has no Go body — it is linknamed to the runtime — and `os.Args` is a variable the runtime fills
    before `main`; neither calls anything a hook could sit in.
@@ -389,6 +413,11 @@ ran unguarded is worse than no proof.
    see. A characterization test must not pin them, and this is the one place the guard gives no
    warning.
 6. **darwin and linux only.** Anything else exits 2 rather than running unarmed.
+7. **The verdict is read from output the repo shares.** A package that prints `--- PASS:`,
+   `--- SKIP:` or `IOGuardViolation` itself can move a verdict. The trip and NO TEST directions are
+   safe: the candidate is declined. The GREEN direction is not defended. In a probe, an `init` that
+   printed `--- PASS: TestNobody` turned a `-run` matching no test from 4 into 0. It takes repo code
+   impersonating the test runner.
 
 ## Python row, in detail
 

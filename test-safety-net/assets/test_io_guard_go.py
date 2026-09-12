@@ -54,6 +54,7 @@ UNITS = r'''package fx
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"fmt"
 	"math/rand/v2"
@@ -62,10 +63,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
 )
+
+// A stdlib FUNCTION VALUE handed to a stdlib CALLBACK RUNNER. No repo frame is
+// ever on the stack that runs it -- the runtime, a timer, a context or the
+// testing package calls it -- so a rule that exempts "no repo frame" lets it
+// through. Constructing the server touches nothing; the finalizer listens.
+func FinalizeListen() {
+	func() {
+		s := &http.Server{Addr: "127.0.0.1:0"}
+		runtime.SetFinalizer(s, (*http.Server).ListenAndServe)
+	}()
+	for i := 0; i < 20; i++ {
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func CtxAfter() {
+	ctx, cancel := context.WithCancel(context.Background())
+	context.AfterFunc(ctx, os.Clearenv)
+	cancel()
+	time.Sleep(300 * time.Millisecond)
+}
+
+func TimerClear() {
+	time.AfterFunc(10*time.Millisecond, os.Clearenv)
+	time.Sleep(300 * time.Millisecond)
+}
 
 // A goroutine started with `go <stdlib call>` runs a stack with NO repo frame
 // on it: the compiler's wrapper closure is hidden from runtime.Callers.
@@ -133,9 +162,28 @@ TESTS = r'''package fx
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestFinalizeListen(t *testing.T)   { FinalizeListen() }
+func TestCtxAfter(t *testing.T)         { CtxAfter() }
+func TestTimerClear(t *testing.T)       { TimerClear() }
+func TestCleanupClearenv(t *testing.T)  { t.Cleanup(os.Clearenv) }
+func TestAllocs(t *testing.T)           { testing.AllocsPerRun(1, os.Clearenv) }
+
+// Garbage collection runs the standard library's OWN finalizers (files, net
+// conns); a rule that judged every finalizer would trip on clean code.
+func TestGCClean(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		runtime.GC()
+	}
+	if Add(2, 3) != 5 {
+		t.Fatal("bad")
+	}
+}
 
 func TestClean(t *testing.T) {
 	fmt.Println("printing is fine")
@@ -451,6 +499,49 @@ class TestNoRepoFrameOnTheStack(FixtureModule):
         self.assertEqual(label(out), "environment")
 
 
+class TestFunctionValuesHandedToTheStdlib(FixtureModule):
+    """A stdlib function the TEST handed to a stdlib callback runner.
+
+    The second review's break: the first creator rule caught `go <stdlib>`
+    written in repo code, but a finalizer, a timer, a context callback, a
+    `t.Cleanup` and `testing.AllocsPerRun` each run a function value from a
+    stack with no repo frame at all -- and each was GREEN at tier 1 while
+    binding a port, running a process or clearing the environment. The rule is
+    now fail-closed: a frameless goroutine is exempt only when its creator is
+    known-benign runtime machinery, and a testing/runtime frame that INVOKES a
+    function value exempts the call only when that function is its own.
+    """
+
+    def test_a_finalizer_that_listens_trips(self):
+        code, out = self.guard(1, None, "TestFinalizeListen")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "network")
+
+    def test_context_afterfunc_trips(self):
+        code, out = self.guard(1, None, "TestCtxAfter")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+    def test_time_afterfunc_trips_at_tier_2_with_the_clock_allowed(self):
+        code, out = self.guard(2, "clock", "TestTimerClear")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+    def test_t_cleanup_with_a_stdlib_func_trips(self):
+        code, out = self.guard(1, None, "TestCleanupClearenv")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+    def test_allocs_per_run_with_a_stdlib_func_trips(self):
+        code, out = self.guard(1, None, "TestAllocs")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+    def test_the_stdlibs_own_finalizers_do_not_trip_clean_code(self):
+        code, out = self.guard(1, None, "TestGCClean")
+        self.assertEqual(code, 0, out[-600:])
+
+
 class TestImportTime(unittest.TestCase):
     def test_init_io_trips_and_is_attributed_to_init(self):
         _need_go()
@@ -466,6 +557,24 @@ class TestImportTime(unittest.TestCase):
         code, out = run_guard(mod, 1, None, "-run", "^TestDouble$", "./")
         self.assertEqual(code, 3, out[-600:])
         self.assertIn("fx.init", out)
+
+    def test_a_dotted_module_path_is_still_the_repo_not_a_dependency(self):
+        # runtime.Frame.Function escapes a `.` in the last path element as
+        # `%2e`, so `example.com/app.v2` never matched the module list and the
+        # repo's own init was reported as a dependency's.
+        _need_go()
+        mod = tempfile.mkdtemp(prefix="tsn-go-dotted-")
+        self.addCleanup(shutil.rmtree, mod, ignore_errors=True)
+        write(mod, "go.mod", "module example.com/app.v2\n\ngo 1.22\n")
+        write(mod, "boot.go",
+              'package app\n\nimport "os"\n\nvar mode = os.Getenv("MODE")\n\n'
+              "func Double(n int) int { return n * 2 }\n")
+        write(mod, "boot_test.go",
+              'package app\n\nimport "testing"\n\n'
+              "func TestDouble(t *testing.T) { if Double(2) != 4 { t.Fatal(mode) } }\n")
+        code, out = run_guard(mod, 1, None, "-run", "^TestDouble$", "./")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertNotIn("dependency", out)
 
 
 # ── 5. Terminal input ─────────────────────────────────────────────────────
@@ -601,6 +710,28 @@ class TestThirdParty(unittest.TestCase):
         self.assertEqual(code, 3, out[-600:])
         self.assertIn("dependency", out)
         self.assertIn("example.com/dep", out)
+
+    def test_the_units_own_init_calling_a_dependency_is_not_the_dependencys(self):
+        # The repo's init CHOSE the call; the dependency's function merely did
+        # the I/O. Blaming the dependency would send the agent to the wrong
+        # place.
+        _need_go()
+        work = tempfile.mkdtemp(prefix="tsn-go-initcall-")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        write(work, "dep/go.mod", "module example.com/dep\n\ngo 1.22\n")
+        write(work, "dep/dep.go",
+              'package dep\n\nimport "os"\n\nfunc Home() string { return os.Getenv("HOME") }\n')
+        write(work, "app/go.mod",
+              "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v0.0.0\n\n"
+              "replace example.com/dep => ../dep\n")
+        write(work, "app/app.go",
+              'package app\n\nimport "example.com/dep"\n\nvar home = dep.Home()\n\n'
+              "func Twice(n int) int { return n * 2 }\n")
+        write(work, "app/app_test.go",
+              'package app\n\nimport "testing"\n\nfunc TestTwice(t *testing.T) { _ = home; Twice(1) }\n')
+        code, out = run_guard(os.path.join(work, "app"), 1, None, "-run", "^TestTwice$", "./")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertNotIn("dependency", out)
 
 
 # ── 8. Pure-Python halves: the env contract, the tables, the injector ────

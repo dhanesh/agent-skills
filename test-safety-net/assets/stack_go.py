@@ -224,7 +224,7 @@ def module_of(rel: str) -> str:
 _ID = r"[A-Za-z0-9_]"
 
 
-def name_pattern(name: str):
+def name_pattern(name: str, module: str = None):
     r"""`name` as a whole identifier -- or, for a method, as a CALL ON ITS TYPE.
 
     A plain name is bounded the way Go bounds an identifier (ASCII; a Unicode
@@ -233,11 +233,13 @@ def name_pattern(name: str):
     A method unit is named `T.M`, and it gets `_MethodPattern`, which answers
     the same `.search(text)` the core asks of every pattern. It is the ONLY
     thing the core consults for a package whose name is not ambiguous, which
-    is why the whole method rule lives here.
+    is why the whole method rule lives here. `module` is the unit's package
+    name (`module_of`), the only qualifier its type may carry in a test; with
+    none, only an unqualified type counts.
     """
     if "." in name:
         recv, meth = name.split(".", 1)
-        return _MethodPattern(recv, meth)
+        return _MethodPattern(recv, meth, module)
     return re.compile(r"(?<!%s)%s(?!%s)" % (_ID, re.escape(name), _ID))
 
 
@@ -254,39 +256,57 @@ class _MethodPattern:
         `errors.New("x").Error()`: the type is named, `.Error()` is called,
         and `ParseError.Error` never runs.
 
-    So a call counts when its receiver is bound to `T` in the same file -- by a
-    composite literal (`x := &T{...}`), a constructor (`x := NewT...(`, the Go
-    idiom), `new(T)`, `var x T`, or a parameter (`x *T,` / `x T)`) -- or is a
-    literal or constructor call itself (`(&T{...}).M(`, `NewT(...).M(`). The
-    type may be package-qualified (`billing.T`), which is how a black-box
-    `<pkg>_test` file writes it. This reads text, not types, so a value that
-    reaches the test some other way (a field, a factory with another name)
-    reads as uncovered: a redundant test at worst, never a hidden gap.
+    So a call counts when its receiver is bound to `T` in the SAME TEST
+    FUNCTION -- by a composite literal (`x := &T{...}`), the constructor
+    (`x := NewT(`, exactly), `new(T)`, `var x T`, or a parameter (`x *T,` /
+    `x T)`) -- or is a literal or constructor call itself (`(&T{...}).M(`,
+    `NewT(...).M(`). The type may be qualified ONLY by the unit's own package
+    name (`billing.T`), which is how a black-box `<pkg>_test` file writes it.
+
+    The second review broke the first version of this three ways, each now
+    pinned: any qualifier was accepted, so `httptest.NewServer(...)` +
+    `ts.Close()` and a `*http.Server` parameter covered the repo's
+    `Server.Close`; `New<T>*` let `NewParserConfig` bind a `Parser`; and a
+    name bound in one test (`s := NewStore()`) carried into another
+    (`s := NewCache(); s.Get()`). This reads text, not types, so a value that
+    reaches the test some other way reads as uncovered: a redundant test at
+    worst, never a hidden gap.
     """
 
-    def __init__(self, recv, meth):
+    def __init__(self, recv, meth, module=None):
         R, M = re.escape(recv), re.escape(meth)
-        q = r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?"
+        q = r"(?:%s\s*\.\s*)?" % re.escape(module) if module else ""
         ident = r"([A-Za-z_][A-Za-z0-9_]*)"
         also = r"(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)?"      # `x, err := NewT(...)`
         self.pattern = "%s.%s" % (recv, meth)
         self._call = r"\s*\.\s*%s\s*%s\s*\(" % (M, _TYPE_ARGS)
+        # `(?<![A-Za-z0-9_.])` before the type: a qualified reference is only
+        # ever the one `q` spells, never `other.T` with `other.` outside it.
+        t = r"(?<![A-Za-z0-9_.])%s%s(?![A-Za-z0-9_])" % (q, R)
+        ctor = r"(?<![A-Za-z0-9_.])%sNew%s(?![A-Za-z0-9_])" % (q, R)
         self._binders = [re.compile(p) for p in (
-            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*&?\s*%s%s\s*\{" % (ident, also, q, R),
-            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*%sNew%s[A-Za-z0-9_]*\s*\(" % (ident, also, q, R),
-            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*new\s*\(\s*%s%s\s*\)" % (ident, also, q, R),
-            r"(?<![A-Za-z0-9_])var\s+%s\s+\*?\s*%s%s(?![A-Za-z0-9_])" % (ident, q, R),
-            r"(?<![A-Za-z0-9_.])%s\s+\*?\s*%s%s\s*[,)]" % (ident, q, R),
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*&?\s*%s\s*\{" % (ident, also, t),
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*%s\s*\(" % (ident, also, ctor),
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*new\s*\(\s*%s\s*\)" % (ident, also, t),
+            r"(?<![A-Za-z0-9_])var\s+%s\s+\*?\s*%s" % (ident, t),
+            r"(?<![A-Za-z0-9_.])%s\s+\*?\s*%s\s*[,)]" % (ident, t),
         )]
         self._direct = [re.compile(p) for p in (
-            r"(?<![A-Za-z0-9_])%s%s\s*\{[^{}]*\}\s*\)?%s" % (q, R, self._call),
-            r"(?<![A-Za-z0-9_])%sNew%s[A-Za-z0-9_]*\s*\([^()]*\)%s" % (q, R, self._call),
+            r"%s\s*\{[^{}]*\}\s*\)?%s" % (t, self._call),
+            r"%s\s*\([^()]*\)%s" % (ctor, self._call),
         )]
 
     def search(self, text, *_args):
         code = strip_noncode(text)
         if not re.search(self._call, code):
             return None
+        for region in _function_regions(code):
+            m = self._search_region(region)
+            if m:
+                return m
+        return None
+
+    def _search_region(self, code):
         for rx in self._direct:
             m = rx.search(code)
             if m:
@@ -299,6 +319,24 @@ class _MethodPattern:
             if m:
                 return m
         return None
+
+
+def _function_regions(code: str):
+    """Each top-level function of stripped `code`, signature through body.
+
+    A binding counts only inside the function that makes it; a file with no
+    function declarations is one region.
+    """
+    depths = _depths(code)
+    regions = []
+    for m in _FUNC_AT.finditer(code):
+        pos = m.start(1)
+        if depths[pos] != 0:
+            continue
+        span = _body_span(code, depths, pos)
+        if span:
+            regions.append(code[span[0]:span[1]])
+    return regions or [code]
 
 
 def path_pattern(rel: str):
@@ -529,7 +567,7 @@ def reached_through_module(module: str, name: str, text: str, *,
         return False
     code = strip_noncode(text)
     if "." in name:
-        return bool(name_pattern(name).search(text))
+        return bool(name_pattern(name, module=module).search(text))
     esc = re.escape(name)
     if "*" in names and re.search(r"(?<![A-Za-z0-9_.])%s\s*%s\s*\(" % (esc, _TYPE_ARGS), code):
         return True

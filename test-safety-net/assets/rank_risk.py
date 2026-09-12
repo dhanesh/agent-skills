@@ -40,7 +40,7 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
     module_of(rel) -> str                        the module identity `rel`
                                                  defines -- the name other
                                                  files use to talk about it
-    name_pattern(name) -> compiled re            `name` as a whole
+    name_pattern(name, module=None) -> re        `name` as a whole
                                                  identifier, bounded the way
                                                  THAT language bounds one
     path_pattern(rel) -> compiled re | None      `rel` written as a module
@@ -576,8 +576,11 @@ def already_covered(root: str, units, stack=None) -> dict:
         by_basename[stack.module_of(rel)].append(rel)
     covered = {}
     for u in units:
-        name_pattern = stack.name_pattern(u["name"])
         module = stack.module_of(u["path"])
+        # The unit's module goes with its name: a stack whose unit names need
+        # a qualifier to be read honestly (Go's `T.M` may be spelled
+        # `billing.T` in a black-box test, and never `http.T`) asks for it.
+        name_pattern = stack.name_pattern(u["name"], module=module)
         siblings = by_basename.get(module, ())
         ambiguous = len(siblings) > 1
         qualified = stack.path_pattern(u["path"]) if ambiguous else None

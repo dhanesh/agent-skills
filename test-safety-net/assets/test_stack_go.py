@@ -778,6 +778,81 @@ class TestThroughTheCore(TriageCase):
         covered = self.rank_risk.already_covered(self.root, units, self.go)
         self.assertNotIn("svc/perr.go::ParseError.Error", covered)
 
+    def credited(self, files, unit):
+        root = tempfile.mkdtemp(prefix="tsn-go-cov-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        write(root, "go.mod", GO_MOD)
+        for rel, text in files.items():
+            write(root, rel, text)
+        units, _ = self.go.discover_units(root, precise=False)
+        return unit in self.rank_risk.already_covered(root, units, self.go)
+
+    def test_the_same_method_on_another_packages_type_credits_nothing(self):
+        # The second review: the qualifier accepted ANY package, so
+        # `httptest.NewServer(...)` + `ts.Close()` covered the repo's own
+        # `Server.Close`, and so did a `*http.Server` parameter.
+        src = ("package svc\n\ntype Server struct{}\n\n"
+               "func (s *Server) Close() error { return nil }\n")
+        test = ('package svc\n\nimport (\n\t"net/http"\n\t"net/http/httptest"\n\t"testing"\n)\n\n'
+                "func helper(srv *http.Server) { srv.Close() }\n\n"
+                "func TestX(t *testing.T) {\n"
+                "\tts := httptest.NewServer(http.NotFoundHandler())\n\tdefer ts.Close()\n"
+                "\tx := &http.Server{}\n\tx.Close()\n}\n")
+        self.assertFalse(self.credited({"svc/srv.go": src, "svc/srv_test.go": test},
+                                       "svc/srv.go::Server.Close"))
+        # The DIRECT literal form: `Server{}).Close(` is a suffix of
+        # `(&http.Server{}).Close(`, so without the boundary before the type
+        # this credited the repo's method (mutation S4 survived until this).
+        direct = ('package svc\n\nimport (\n\t"net/http"\n\t"testing"\n)\n\n'
+                  "func TestY(t *testing.T) { _ = (&http.Server{}).Close() }\n")
+        self.assertFalse(self.credited({"svc/srv.go": src, "svc/srv_test.go": direct},
+                                       "svc/srv.go::Server.Close"))
+        # ...while the repo's own type, written the same way, still credits.
+        own = ('package svc\n\nimport "testing"\n\n'
+               "func TestZ(t *testing.T) { _ = (&Server{}).Close() }\n")
+        self.assertTrue(self.credited({"svc/srv.go": src, "svc/srv_test.go": own},
+                                      "svc/srv.go::Server.Close"))
+
+    def test_a_longer_constructor_name_belongs_to_another_type(self):
+        src = ("package svc\n\ntype Parser struct{}\ntype ParserConfig struct{}\n\n"
+               "func (p *Parser) Parse() int { return 1 }\n"
+               "func (c *ParserConfig) Parse() int { return 2 }\n"
+               "func NewParserConfig() *ParserConfig { return &ParserConfig{} }\n")
+        test = ('package svc\n\nimport "testing"\n\n'
+                "func TestX(t *testing.T) {\n\tc := NewParserConfig()\n\t_ = c.Parse()\n}\n")
+        self.assertFalse(self.credited({"svc/p.go": src, "svc/p_test.go": test},
+                                       "svc/p.go::Parser.Parse"))
+
+    def test_a_binding_in_one_test_does_not_carry_into_another(self):
+        src = ("package svc\n\ntype Store struct{}\ntype Cache struct{}\n\n"
+               "func (s *Store) Get() int { return 1 }\nfunc (c *Cache) Get() int { return 2 }\n"
+               "func NewStore() *Store { return &Store{} }\nfunc NewCache() *Cache { return &Cache{} }\n")
+        test = ('package svc\n\nimport "testing"\n\n'
+                "func TestA(t *testing.T) { s := NewStore(); _ = s }\n"
+                "func TestB(t *testing.T) { s := NewCache(); _ = s.Get() }\n")
+        self.assertFalse(self.credited({"svc/s.go": src, "svc/s_test.go": test},
+                                       "svc/s.go::Store.Get"))
+
+    def test_the_testing_T_parameter_is_not_a_repo_type_named_T(self):
+        src = "package svc\n\ntype T struct{}\n\nfunc (x *T) Run() {}\n"
+        test = ('package svc\n\nimport "testing"\n\n'
+                'func TestX(t *testing.T) { t.Run("a", nil) }\n')
+        self.assertFalse(self.credited({"svc/t.go": src, "svc/t_test.go": test},
+                                       "svc/t.go::T.Run"))
+
+    def test_a_black_box_test_qualifies_by_the_packages_own_name(self):
+        src = ("package svc\n\ntype ParseError struct{ Msg string }\n\n"
+               "func (e *ParseError) Error() string { return e.Msg }\n\n"
+               "func NewParseError(m string) *ParseError { return &ParseError{Msg: m} }\n")
+        for body in ('pe := svc.NewParseError("x")\n\t_ = pe.Error()',
+                     'pe := &svc.ParseError{Msg: "x"}\n\t_ = pe.Error()'):
+            with self.subTest(body=body):
+                test = ('package svc_test\n\nimport (\n\t"testing"\n\n'
+                        '\t"example.com/m/svc"\n)\n\n'
+                        "func TestErr(t *testing.T) {\n\t%s\n}\n" % body)
+                self.assertTrue(self.credited({"svc/perr.go": src, "svc/perr_ext_test.go": test},
+                                              "svc/perr.go::ParseError.Error"))
+
     def test_each_way_of_holding_a_value_still_credits_the_method(self):
         forms = {
             "bound": 'pe := &ParseError{Msg: "x"}\n\t_ = pe.Error()',
