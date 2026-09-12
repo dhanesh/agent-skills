@@ -12,7 +12,7 @@ tests, what a unit is, and what tier a unit lands in -- lives behind the stack
 interface and is implemented once per stack (`stack_python.py`, and one module
 per stack added beside it).
 
-THE STACK INTERFACE. A stack module supplies exactly fourteen names. The rule
+THE STACK INTERFACE. A stack module supplies exactly fifteen names. The rule
 that decides membership: if answering the question requires READING A LANGUAGE,
 it belongs to the stack; if it only orchestrates or scores, it stays here.
 
@@ -29,6 +29,12 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
     is_test_path(rel) -> bool                    is this path a test file?
     is_test_for(test_rel, src_rel) -> bool       is it positioned as a test OF
                                                  that file?
+    scope_files(rel, all_files) -> [rel, ...]    the files whose BARE
+                                                 occurrences count as `rel`'s
+                                                 own scope: `[rel]` for python
+                                                 and node, the whole package
+                                                 directory for Go, where every
+                                                 file shares one scope
 
   naming
     module_of(rel) -> str                        the module identity `rel`
@@ -468,14 +474,21 @@ def inbound_refs(root: str, units, stack=None) -> dict:
             ]
         ref_files = module_reffiles_cache[module]
 
-        total = occurrences(own_path, name, module)
+        # The unit's OWN SCOPE, which is the stack's answer (`scope_files`):
+        # the defining file for python and node, the whole package directory
+        # for Go. A scope file is never also a reference file, so a file
+        # cannot be counted twice whichever way the two lists overlap.
+        scope = stack.scope_files(own_path, all_files)
+        total = sum(occurrences(rel, name, module) for rel in scope
+                    if rel in bare_counts)
         lines = file_lines.get(own_path, [])
         lineno = u["lineno"]
         if 1 <= lineno <= len(lines):
             def_bare, def_attr = _name_occurrences(stack, lines[lineno - 1])
             total -= def_bare[name] + def_attr[(module, name)]
         for rel in ref_files:
-            total += occurrences(rel, name, module)
+            if rel not in scope:
+                total += occurrences(rel, name, module)
 
         counts[u["id"]] = total
     return counts
