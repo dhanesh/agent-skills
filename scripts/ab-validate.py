@@ -139,6 +139,12 @@ SINCE_TSN_NODE_TRIAGE = "f463d71"  # test-safety-net: evidence-weighed stack
 # then node's I/O marker tables, triage, and registration. One constant for
 # the campaign: both commits land together, so both become ancestors of the
 # baseline at the same merge.
+SINCE_TSN_GO = "6263801"  # test-safety-net: the Go stack -- its files, naming
+# and import grammar (this commit, the first in which stack_go.py exists),
+# then heuristic and go/ast discovery, package-scoped triage and registration.
+# One constant for the campaign: it lands at one merge.
+SINCE_TSN_GO_GUARD = "62aff9d"  # test-safety-net: io_guard_go.py, the Go
+# stack's runtime enforcement through `go test -overlay`.
 
 
 def _git_out(*args):
@@ -3068,6 +3074,210 @@ def check_test_safety_net_node_wired(old, new):
         since=SINCE_TSN_NODE_WIRED)
 
 
+# ── test-safety-net: the Go stack ───────────────────────────────────────────
+#
+# Every value reads as its "cannot answer" form against a baseline with no Go
+# stack -- which is what the baseline is. That is the behaviour being fixed:
+# a Go repo handed to the ranker was claimed by no stack, fell through to the
+# Python fallback, discovered nothing and reported a clean empty plan.
+
+_GO_PROBE = r"""
+import hashlib, shutil, subprocess
+res = {"units": 0, "tiers_right": 0, "sibling_refs": 0, "buf_string_credit": 0,
+       "py_node_digest": "", "guard_trips": -1}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+GO_MOD = "module example.com/m\n\ngo 1.22\n"
+go = getattr(rank_risk, "stack_by_name", lambda _n: None)("go")
+
+# 1. Eight exported forms, two that must not count, through the full CLI path.
+forms = tree({"go.mod": GO_MOD, "pkg/a.go": (
+    "package pkg\n\ntype Report struct{}\ntype Set[K comparable] struct{}\n"
+    "type impl struct{}\n\n"
+    "func Plain() {}\n"
+    "func Map[T any](xs []T) []T { return xs }\n"
+    "func Multi(\n\ts string,\n) int {\n\treturn 0\n}\n"
+    "func (r Report) Total() int { return 0 }\n"
+    "func (r *Report) Add(n int) {}\n"
+    "func (*Report) Reset() {}\n"
+    "func (s *Set[K]) Put(k K) {}\n"
+    "var x = 1; func Semi() {}\n"
+    "func helper() {}\n"
+    "func (i *impl) Hidden() {}\n")})
+try:
+    plan = rank_risk.rank(forms, "10 years ago", 100)
+    res["units"] = plan["units_discovered"] if plan["stack"] == "go" else 0
+except Exception:
+    pass
+
+# 2. Eval check 43's seven tiers, every direction at once.
+tiers = tree({
+    "go.mod": GO_MOD,
+    "calc/c.go": ('package calc\n\nimport (\n\t"math/rand"\n\t"net"\n\t"os"\n\t"syscall"\n)\n\n'
+                  "func Pure(n int) int { return n * 2 }\n"
+                  "func Load(p string) ([]byte, error) { return os.ReadFile(p) }\n"
+                  'func Dial() error { _, err := net.Dial("tcp", "x:1"); return err }\n'
+                  "func Roll() int { return rand.Intn(6) }\n"
+                  "func Raw() { syscall.Syscall(20, 0, 0, 0) }\n"),
+    "boot/b.go": ('package boot\n\nimport "os"\n\nvar mode = os.Getenv("MODE")\n\n'
+                  "func Double(n int) int { return n * 2 }\n"),
+    "conn/c.go": ('package conn\n\nimport "net"\n\nvar conn, _ = net.Dial("tcp", "db:5432")\n\n'
+                  "func Twice(n int) int { return n * 2 }\n")})
+want = {"calc/c.go::Pure": 1, "calc/c.go::Load": 2, "calc/c.go::Dial": 3,
+        "calc/c.go::Roll": 3, "calc/c.go::Raw": 4, "boot/b.go::Double": 3,
+        "conn/c.go::Twice": 4}
+try:
+    plan = rank_risk.rank(tiers, "10 years ago", 100)
+    rows = {r["id"]: r for b in ("ranked", "remainder", "not_netted") for r in plan[b]}
+    if plan["stack"] == "go":
+        res["tiers_right"] = sum(1 for k, t in want.items() if rows.get(k, {}).get("tier") == t)
+except Exception:
+    pass
+
+# 3. Callers in a SIBLING FILE of the same package -- no import between them.
+sib = tree({"go.mod": GO_MOD,
+            "svc/a.go": "package svc\n\nfunc Parse(s string) int { return len(s) }\n",
+            "svc/b.go": 'package svc\n\nfunc use() int { return Parse("x") + Parse("y") }\n',
+            "svc/a_test.go": ('package svc\n\nimport "testing"\n\n'
+                              'func TestParse(t *testing.T) { Parse("z") }\n')})
+try:
+    if go is not None:
+        units, _ = go.discover_units(sib, precise=False)
+        res["sibling_refs"] = rank_risk.inbound_refs(sib, units, go).get("svc/a.go::Parse", 0)
+except Exception:
+    pass
+
+# 4. `buf.String()` in a same-directory test must credit no `T.String`.
+cov = tree({"go.mod": GO_MOD,
+            "svc/report.go": ('package svc\n\ntype Report struct{}\n\n'
+                              'func (r Report) String() string { return "" }\n'),
+            "svc/util.go": 'package svc\n\nfunc Fmt() string { return "" }\n',
+            "svc/util_test.go": ('package svc\n\nimport (\n\t"bytes"\n\t"testing"\n)\n\n'
+                                 "func TestFmt(t *testing.T) { var buf bytes.Buffer; "
+                                 "_ = buf.String(); _ = Fmt() }\n")})
+try:
+    if go is not None:
+        units, _ = go.discover_units(cov, precise=False)
+        covered = rank_risk.already_covered(cov, units, go)
+        res["buf_string_credit"] = 1 if "svc/report.go::Report.String" in covered else 0
+except Exception:
+    pass
+
+# 5. A fixed python repo and a fixed node repo, ranked in full. `root` is a
+#    temp path and differs between arms, so it is dropped before hashing.
+pyn = tree({"srv/a.py": "def parse(s):\n    return s\n\ndef use():\n    return parse('x')\n",
+            "srv/b.py": "from srv.a import parse\n\ndef go():\n    return parse('y')\n",
+            "tests/test_a.py": "from srv.a import parse\n\ndef test_parse():\n    assert parse('z')\n"})
+nd = tree({"package.json": '{"name": "d", "main": "src/a.js", "dependencies": {"x": "1"}}\n',
+           "src/a.js": ("export function parse(s) { return s; }\n"
+                        "export function use() { return parse('x'); }\n"),
+           "src/b.js": ('import { parse } from "./a.js";\n'
+                        'export function go() { return parse("y"); }\n')})
+try:
+    blobs = []
+    for root, name in ((pyn, "python"), (nd, "node")):
+        plan = rank_risk.rank(root, "10 years ago", 50, rank_risk.stack_by_name(name))
+        plan.pop("root", None)
+        blobs.append(json.dumps(plan, sort_keys=True))
+    res["py_node_digest"] = hashlib.sha256("\n".join(blobs).encode()).hexdigest()[:16]
+except Exception as exc:
+    res["py_node_digest"] = "ERROR " + type(exc).__name__
+
+# 6. The guard, through its documented wrapper, on a unit that reads a file.
+guard = os.path.join(sys.path[0], "io_guard_go.py")
+if shutil.which("go"):
+    res["guard_trips"] = 0
+    if os.path.isfile(guard):
+        mod = tree({"go.mod": "module example.com/fx\n\ngo 1.22\n",
+                    "fx.go": ('package fx\n\nimport "os"\n\n'
+                              'func Read() int { b, _ := os.ReadFile("/etc/hosts"); return len(b) }\n'),
+                    "fx_test.go": ('package fx\n\nimport "testing"\n\n'
+                                   "func TestRead(t *testing.T) { Read() }\n")})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TEST_SAFETY_NET")}
+        env.pop("GOFLAGS", None)
+        env["TEST_SAFETY_NET_TIER"] = "1"
+        r = subprocess.run([sys.executable, guard, "-run", "^TestRead$", "./"], cwd=mod,
+                           env=env, capture_output=True, text=True, timeout=300,
+                           stdin=subprocess.DEVNULL)
+        res["guard_trips"] = int(r.returncode == 3 and "IOGuardViolation" in r.stdout + r.stderr)
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_go(old, new):
+    """Is a Go repo ranked, tiered and credited honestly -- and did adding the
+    stack leave everything python and node report exactly as it was?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _GO_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _GO_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "exported Go units discovered from an eight-form fixture (higher=better)",
+        oldp["units"], newp["units"], newp["units"] > oldp["units"],
+        "plain, generic, multi-line and `;`-declared functions, and value, "
+        "pointer, unnamed and generic receivers -- with a lowercase function "
+        "and a method on an unexported type that must not count. A Go repo "
+        "used to be claimed by no stack and report a clean EMPTY plan",
+        since=SINCE_TSN_GO)
+    row(s, "Go units tiered as eval check 43 requires, out of 7 (higher=better)",
+        oldp["tiers_right"], newp["tiers_right"], newp["tiers_right"] > oldp["tiers_right"],
+        "every direction at once: pure 1, filesystem 2, network 3, the global "
+        "rand source 3 (uncontrollable on Go since rand.Seed became a no-op), a "
+        "raw syscall 4, an init-time env read flooring its PACKAGE to 3, and a "
+        "package-level dial flooring its package to 4",
+        since=SINCE_TSN_GO)
+    row(s, "same-package callers in SIBLING FILES counted as a Go unit's reach "
+           "(higher=better)",
+        oldp["sibling_refs"], newp["sibling_refs"],
+        newp["sibling_refs"] > oldp["sibling_refs"],
+        "the `scope_files` interface name: a Go package is a directory, and "
+        "`inbound_refs` used to drop every file sharing the unit's module -- "
+        "the commonest call site Go has. Two calls in b.go and one in a "
+        "white-box test: 3",
+        since=SINCE_TSN_GO)
+    row(s, "a same-directory test calling buf.String() credits Report.String "
+           "(must stay 0)",
+        oldp["buf_string_credit"], newp["buf_string_credit"],
+        newp["buf_string_credit"] == 0,
+        "a method unit's pattern requires its receiver TYPE named as well as "
+        "`.M(` called; `buf.String()` is in nearly every Go test file and "
+        "would otherwise cover every `T.String` in the package",
+        kind="guard")
+    row(s, "python and node rank a fixed pair of repos byte-identically in "
+           "both arms",
+        oldp["py_node_digest"], newp["py_node_digest"],
+        oldp["py_node_digest"] == newp["py_node_digest"]
+        and not str(newp["py_node_digest"]).startswith("ERROR"),
+        "the fifteenth interface name and a third registered stack must change "
+        "NOTHING for the other two; Task 1 proved it byte-identical over five "
+        "real trees, and this keeps it proved",
+        kind="guard")
+    if newp["guard_trips"] >= 0:          # -1: no `go` here, nothing to measure
+        row(s, "the Go guard trips a tier-1 os.ReadFile through its documented "
+               "wrapper (higher=better)",
+            oldp["guard_trips"], newp["guard_trips"],
+            newp["guard_trips"] > oldp["guard_trips"],
+            "the enforcement half: `go test -overlay` with hooks injected into "
+            "the standard library, exit 3 and an IOGuardViolation naming the "
+            "unit. The baseline has no guard to run",
+            since=SINCE_TSN_GO_GUARD)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -3251,6 +3461,7 @@ def main():
         check_test_safety_net_node_wired(old, REPO)
         check_test_safety_net_node_fixround_1(old, REPO)
         check_test_safety_net_node_fixround_2(old, REPO)
+        check_test_safety_net_go(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
