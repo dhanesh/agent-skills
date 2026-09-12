@@ -55,6 +55,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # PINNED, like node. `test-safety-net`'s go guard is the sole runtime
+      # enforcement on the go stack, and its suite (`assets/test_io_guard_go.py`)
+      # and eval check 44 SKIP where `go` is absent. The guard also finds its hook
+      # targets by name in the installed toolchain's sources, so the version CI
+      # proves is the version the docs claim. `cache: false`: there is no go.sum
+      # in this repo for setup-go to key a module cache on.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
       - name: Run skill quality gates
         run: make gate
 

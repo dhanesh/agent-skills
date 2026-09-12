@@ -143,6 +143,28 @@ def slice_between(text, start_pat, end_pat):
     return text[m1.start():m1.end() + m2.start()] if m2 else text[m1.start():]
 
 
+def section_outside_fences(text, heading):
+    """The lines from `heading` up to the next `## ` heading OUTSIDE a code fence.
+
+    `slice_between` matches its end pattern anywhere, so a `## ` line inside a
+    fenced example -- the Deliverable template opens with one -- ends the
+    section at the example's first line.
+    """
+    out, inside, fence = [], False, False
+    for line in text.splitlines():
+        if not inside:
+            if line.strip() == heading:
+                inside = True
+                out.append(line)
+            continue
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence and line.startswith("## "):
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
 def all_mentions_negated(text, needle, window=220):
     """True iff every occurrence of `needle` sits within `window` chars of a
     negation word (not/never/cannot/no/nothing) somewhere before it — used to
@@ -435,8 +457,18 @@ def main():
             f"RED@{red_i} GREEN@{green_i}",
         )
 
-        # 15. report template carries both a tier and a kind column
-        header_line = next((ln for ln in skill_text.splitlines()
+        # 15. report template carries both a tier and a kind column. READ FROM
+        #     THE DELIVERABLE SECTION, not from the first `| ... unit ... |`
+        #     line anywhere in the file: when the go block landed in step 4,
+        #     its exit table's "reclassify the unit to Tier 3" row became that
+        #     first line, and the check graded the exit table instead of the
+        #     report template. A check any later table can hijack is not
+        #     grading what its name says. FENCE-AWARE, because the template it
+        #     grades is itself a fenced block whose first line is
+        #     `## Test safety net: ...` -- a plain `^## ` end pattern stopped
+        #     there, one line in, and the check failed on a correct file.
+        deliverable = section_outside_fences(skill_text, "## Deliverable")
+        header_line = next((ln for ln in deliverable.splitlines()
                              if ln.strip().startswith("|") and "unit" in ln.lower()), "")
         check(
             "15 SKILL.md's report template carries both a tier and a kind column",
