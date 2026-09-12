@@ -1,6 +1,7 @@
 # test-safety-net: the Rust stack
 
-**Status:** design approved section by section by the owner, 2026-09-12. Implementation plan to follow.
+**Status:** design approved section by section by the owner, 2026-09-12, then revised by a
+`clean-code` review the owner requested (see "Clean-code review"). Implementation plan to follow.
 **Supersedes:** for Rust, the multistack spec's D2 (OS sandbox) and its per-stack row. See the amendment appended to
 `docs/superpowers/specs/2026-09-09-test-safety-net-multistack-design.md`.
 
@@ -16,7 +17,7 @@ differently.
 | O1 | Prove **1.82, 1.86, 1.90, 1.94, 1.98**: every 4th minor, about 22 months. Versions in between are "expected by bracketing, not proven". A toolchain pinned below 1.82 is ranked, but its proof is declined with the reason. | The literal last 5 minors, 1.94–1.98, cover only about 7 months at Rust's 6-week cadence. |
 | O2 | Tests go in **`tests/` only**. Invariant 1 stays absolute. | Appending `#[cfg(test)]` modules to source, whether always or as an opt-in. |
 | O3 | The runtime guard is **libc interposition**. | Rebuilding std with hooks (`-Zbuild-std`, `RUSTC_BOOTSTRAP`); D2's OS sandbox. |
-| O4 | Proofs build in the repo's **own build dir**, resolved by cargo. | A separate target dir (a cold rebuild of every dependency). |
+| O4 | Proofs build in the repo's **own target dir**, as cargo resolves it. | A separate target dir (a cold rebuild of every dependency). |
 
 An evidence audit (`base-in-reality`, requested by the owner) checked all four against fetched primary
 sources, with a three-lens refutation pass. All four held. Three negative findings were overturned in
@@ -26,8 +27,24 @@ refutation:
 - "`main.rs` is reachable by spawning the binary": that is subprocess I/O, which Invariant 2 forbids.
 
 Two findings stood and are designed in below:
-- **A1 (rustix):** see "Preconditions" in the guard section.
+- **A1 (rustix):** see "Build plan" in the guard section.
 - **A2 (Cargo.lock):** see "Build" in the guard section.
+
+### Clean-code review, 2026-09-12
+
+The owner asked for a `clean-code` review of this spec before the plan was written. All five findings
+were folded in:
+
+1. **The filter/guard agreement test was missing.** Python, go and node each assert that every filter
+   marker has a guard intercept or a recorded reason. Rust now does too, and the hook's name tables are
+   rendered from Python so that each name lives in one place. See "Verification" and "The hook".
+2. **The tier/allow contract would have had a third Python copy.** It is extracted into `guard_env.py`.
+   See "Shared guard contract".
+3. **The Rust guard had seven responsibilities in one file.** It is split into three files. See "The guard".
+4. **The rustix path was a mode flag threaded through build and run.** It is now decided once, as a
+   queried build plan.
+5. **"Build dir" and "target dir" were mixed.** "Target dir" is used throughout, and the floor is one
+   constant.
 
 ## Evidence the design rests on
 
@@ -132,9 +149,19 @@ The group names are the seven every stack uses. Rust's controllable line:
 - **Lazy statics.** `LazyLock`, `once_cell::Lazy` and `lazy_static!` initialise on first use, inside the
   unit's call, and are judged there. Rust has no import-time floor like python's and go's.
 
-## The guard: `assets/io_guard_rust.py` and its hook
+## The guard
 
-Its arguments and exit table are Go's:
+The guard is three files, split by reason to change:
+
+- **`assets/io_guard_rust.py`** orchestrates the proof and classifies its outcome. It owns the hook's
+  name tables and renders them into the hook source.
+- **`assets/rust_binary.py`** inspects an executable: dynamic or static, glibc or musl, whether it has
+  crate symbols. It is pure functions over the file's bytes, for both ELF and Mach-O, tested against
+  fixture binaries. It changes for platform reasons, not cargo reasons.
+- **`assets/io_guard_rust_hook.rs`** is the hook's source, a real asset file rather than a Python
+  string like Go's `_ENGINE`. `rustc` compiles files, and a `.rs` file can be formatted and linted.
+
+Its arguments and exit table are Go's, from `guard_env.py`:
 
 | exit | meaning |
 |---|---|
@@ -149,21 +176,37 @@ It never runs a proof it cannot guard.
 
 1. **Preconditions.** Any failure exits 2, with the reason.
    - The OS is darwin or linux.
-   - `rustc -V` run in the repo (so `rust-toolchain.toml` is honoured) is ≥ 1.82. A lower pin is declined (O1).
+   - `rustc -V` run in the repo (so `rust-toolchain.toml` is honoured) is ≥ `MIN_RUST`. That is one
+     constant, 1.82. A lower pin is declined (O1).
    - `Cargo.lock` exists (A2); otherwise decline, and point to `cargo generate-lockfile`.
-   - **A1, rustix:** on Linux, raw-backend `rustix` in `cargo metadata` switches the build to a separate
-     out-of-repo build dir, keyed by workspace, with `--cfg=rustix_use_libc`, so the user's cache is
-     never invalidated. If that build cannot be made, exit 2.
+   - **Build plan (A1).** The build mode is decided once. A query, `build_plan(repo)`, returns the
+     target dir, any extra `--cfg`, and the reason. Build and run take the plan and never branch on the
+     mode.
+     - **Normally:** cargo's own target dir, and no flags.
+     - **On Linux, when `cargo metadata` shows raw-backend `rustix`:** a separate out-of-repo target
+       dir (`CARGO_TARGET_DIR`, keyed by workspace) with `--cfg=rustix_use_libc`, so the user's cache
+       is never invalidated.
+
+     If the planned build cannot be made, exit 2.
 2. **Build.** `cargo test --locked --no-run --message-format=json [-p <pkg>] --test tsn_<x>` (A2: a plain
    build was shown to create or rewrite `Cargo.lock`).
-   - The executable path comes from the JSON artifact; the build dir is cargo's own.
+   - The executable path comes from the JSON artifact. The target dir is the build plan's: normally
+     cargo's own, honouring `CARGO_TARGET_DIR` and `build.target-dir`.
    - A compiler error exits **5**, never 1.
-   - The skill adds no `RUSTFLAGS`, except in A1's separate dir.
+   - The skill adds no `RUSTFLAGS`, except in the build plan's separate target dir.
    - Time waiting on cargo's file lock is excluded from the proof timeout.
 3. **Refusals.** Exit 2 for a binary that is static, stripped (no crate symbols) or musl: each makes the hook fail open.
-4. **The hook.** One Rust source file, built by the repo's own `rustc` with
-   `--crate-type cdylib -C panic=abort -C force-unwind-tables=yes`, cached outside the repo and keyed by
-   toolchain and source hash. It is loaded with `DYLD_INSERT_LIBRARIES` (via an `__interpose` section)
+4. **The hook.** `io_guard_rust_hook.rs`, built by the repo's own `rustc` with
+   `--crate-type cdylib -C panic=abort -C force-unwind-tables=yes`. It is cached outside the repo, keyed
+   by toolchain and by the hash of the rendered source.
+   - **One place for every name.** Its name tables live in `io_guard_rust.py` and are rendered into the
+     source before compiling, as `io_guard_go.py` renders its engine. The tables are:
+     - the intercepted calls, per group;
+     - the libtest runner prefixes;
+     - the `tsn_control_*` helpers and the groups they stand for;
+     - the per-toolchain seed-path names.
+
+     So the agreement test in "Verification" checks the same tables the hook enforces. It is loaded with `DYLD_INSERT_LIBRARIES` (via an `__interpose` section)
    on macOS, and `LD_PRELOAD` (via `dlsym(RTLD_NEXT)`) on Linux.
    - **Arm handshake.** The constructor reports that it loaded, and a self-check resolves one known crate
      frame. Either failing is exit 2; this closes Spike A2's 1.82 fail-open.
@@ -206,6 +249,34 @@ It never runs a proof it cannot guard.
 
    The verdict-spoofing residual (repo code sharing stdout) is shared with go.
 
+## Shared guard contract: `assets/guard_env.py`
+
+`io_guard.py` and `io_guard_go.py` each implement the same tier/allow contract, and the Go docstring
+says so:
+
+- an absent or invalid tier falls back to tier 1, with a note;
+- `none` allows nothing;
+- an unknown group is ignored and stays blocked;
+- tier 1 ignores the allow list.
+
+The copies differ only in which groups a stack can control. The Rust guard would have made a third
+copy, so the identical parts move into one module:
+
+- `read_env(env, controllable, uncontrollable, why_uncontrollable)`;
+- `blocked_groups(tier, allow, groups, controllable, uncontrollable)`;
+- the exit codes (`EXIT_GREEN` … `EXIT_NO_BUILD`) and their outcome messages.
+
+Classifying output stays in each stack's guard, because it reads a different test runner's format.
+
+**Order and scope:**
+
+1. `io_guard_go.py` moves to `guard_env.py` first, as its own behaviour-preserving commit. The Go
+   suites run green before and after it; refactor on green.
+2. `io_guard_rust.py` then imports the module.
+3. `io_guard.py`, the pytest plugin, keeps its copy for now, because its `allow` representation and
+   its module-level read at import differ. Adopting the module there is a stated follow-up.
+4. `io_guard.js` cannot share Python.
+
 ## Verification
 
 - **`test_stack_rust.py`** covers lexing, reachability (pub-mod chains, named and glob `pub use`,
@@ -220,6 +291,15 @@ It never runs a proof it cannot guard.
   - every row of the classify table.
 
   It skips cleanly without cargo.
+- **Filter/guard agreement.** `io_guard_rust.py` carries `FILTER_MARKER_INTERCEPTS`,
+  `PARTIALLY_INTERCEPTED` and `NOT_INTERCEPTED`, and a test asserts that together they partition
+  `stack_rust`'s marker tables exactly. This is the same test python and go carry. A marker added to
+  the filter with no hook intercept, and no recorded reason, fails the gate instead of opening a
+  silent hole.
+- **`rust_binary.py`** is tested against fixture binaries, static and dynamic, stripped and
+  unstripped, glibc and musl. It needs no cargo.
+- **`guard_env.py`** has its own tests. Its refactor commit leaves the Go guard's suites unchanged
+  and green.
 - **Mutation discipline, as on go.** Every fix is pinned by a test that turns red when the fix is removed.
 - **Eval checks 45–49** mirror go's 40–44:
   - 45: detection and discovery;
