@@ -386,13 +386,444 @@ class TestHeuristicDiscovery(GoCase):
         self.assertEqual(self.units(), [("pkg/k.go::Kept", "function", 5)])
 
 
+GO_MOD = "module example.com/m\n\ngo 1.22\n"
+
+
+class TriageCase(GoCase):
+    """Build a package, discover it, and ask for one unit's tier."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.root, "go.mod", GO_MOD)
+
+    def tier(self, name):
+        units, _ = stack_go.discover_units(self.root, precise=False)
+        by_name = {u["name"]: u for u in units}
+        self.assertIn(name, by_name, sorted(by_name))
+        return stack_go.triage(self.root, by_name[name])
+
+
+class TestTriageByGroup(TriageCase):
+    def test_a_pure_unit_is_tier_1(self):
+        write(self.root, "svc/a.go",
+              "package svc\n\nimport \"time\"\n\n"
+              "func Double(n int) int { return n * 2 }\n"
+              "func Wait() time.Duration { return 2 * time.Second }\n")
+        self.assertEqual(self.tier("Double")[0], 1)
+        # A time.Duration CONSTANT is arithmetic, not a read of the clock.
+        self.assertEqual(self.tier("Wait")[0], 1)
+
+    def test_filesystem_is_tier_2(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport "os"\n\n'
+              "func Load(p string) ([]byte, error) { return os.ReadFile(p) }\n")
+        tier, reason = self.tier("Load")
+        self.assertEqual(tier, 2)
+        self.assertIn("filesystem", reason)
+
+    def test_clock_and_environment_are_tier_2(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport (\n\t"os"\n\t"time"\n)\n\n'
+              "func Stamp() int64 { return time.Now().Unix() }\n"
+              "func Age(t0 time.Time) time.Duration { return time.Since(t0) }\n"
+              'func Mode() string { return os.Getenv("MODE") }\n')
+        self.assertEqual(self.tier("Stamp")[:1], (2,))
+        self.assertIn("clock", self.tier("Stamp")[1])
+        self.assertEqual(self.tier("Age")[0], 2)
+        self.assertIn("environment", self.tier("Mode")[1])
+
+    def test_network_subprocess_and_database_are_tier_3(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport (\n\t"database/sql"\n\t"net"\n\t"net/http"\n'
+              '\t"os/exec"\n)\n\n'
+              'func Dial(a string) error { _, err := net.Dial("tcp", a); return err }\n'
+              'func Fetch(u string) error { _, err := http.DefaultClient.Get(u); return err }\n'
+              'func List() error { return exec.Command("ls").Run() }\n'
+              'func Open(dsn string) error { _, err := sql.Open("pgx", dsn); return err }\n')
+        for name, group in (("Dial", "network"), ("Fetch", "network"),
+                            ("List", "subprocess"), ("Open", "database")):
+            with self.subTest(name):
+                tier, reason = self.tier(name)
+                self.assertEqual(tier, 3)
+                self.assertIn(group, reason)
+
+    def test_randomness_from_the_global_source_is_tier_3_on_go(self):
+        # rand.Seed is a no-op since Go 1.24, so the global source cannot be
+        # controlled from a test; a seeded *rand.Rand is plain computation.
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport (\n\t"math/rand"\n\tv2 "math/rand/v2"\n)\n\n'
+              "func Roll() int { return rand.Intn(6) }\n"
+              "func RollV2() int { return v2.IntN(6) }\n"
+              "func Seeded() int { return rand.New(rand.NewSource(1)).Intn(6) }\n")
+        self.assertEqual(self.tier("Roll")[:1], (3,))
+        self.assertIn("randomness", self.tier("Roll")[1])
+        self.assertEqual(self.tier("RollV2")[0], 3)
+        self.assertEqual(self.tier("Seeded")[0], 1)
+
+    def test_an_unaliased_v2_import_is_named_by_its_package_not_its_suffix(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport "math/rand/v2"\n\n'
+              "func Roll() int { return rand.IntN(6) }\n")
+        self.assertEqual(self.tier("Roll")[0], 3)
+
+    def test_the_syscall_package_is_classified_by_name(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport (\n\t"syscall"\n\t"golang.org/x/sys/unix"\n)\n\n'
+              'func Open() (int, error) { return syscall.Open("/x", 0, 0) }\n'
+              "func Sock() (int, error) { return syscall.Socket(2, 1, 0) }\n"
+              "func USock() (int, error) { return unix.Socket(2, 1, 0) }\n")
+        self.assertEqual(self.tier("Open")[0], 2)
+        self.assertEqual(self.tier("Sock")[0], 3)
+        self.assertEqual(self.tier("USock")[0], 3)
+
+
+class TestTriageReach(TriageCase):
+    def test_an_aliased_import_still_resolves(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport f "os"\n\nfunc Home() string { return f.Getenv("HOME") }\n')
+        self.assertEqual(self.tier("Home")[0], 2)
+
+    def test_a_dot_import_resolves_bare_names(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport . "time"\n\nfunc Stamp() int64 { return Now().Unix() }\n')
+        self.assertEqual(self.tier("Stamp")[0], 2)
+
+    def test_a_helper_in_a_sibling_file_is_chased(self):
+        # One package, two files, no import between them: the Go shape Python
+        # and node never had to read.
+        write(self.root, "svc/a.go",
+              "package svc\n\nfunc Save(b []byte) error { return write(b) }\n")
+        write(self.root, "svc/b.go",
+              'package svc\n\nimport "os"\n\n'
+              'func write(b []byte) error { return os.WriteFile("out", b, 0o644) }\n')
+        tier, reason = self.tier("Save")
+        self.assertEqual(tier, 2)
+        self.assertIn("via write", reason)
+
+    def test_a_same_named_helper_in_another_package_is_not_chased(self):
+        write(self.root, "svc/a.go",
+              "package svc\n\nfunc Save(b []byte) error { return write(b) }\n"
+              "func write(b []byte) error { return nil }\n")
+        write(self.root, "other/b.go",
+              'package other\n\nimport "os"\n\n'
+              'func write(b []byte) error { return os.WriteFile("out", b, 0o644) }\n')
+        self.assertEqual(self.tier("Save")[0], 1)
+
+    def test_a_method_on_the_receiver_is_chased(self):
+        write(self.root, "svc/s.go",
+              'package svc\n\nimport "os"\n\ntype Store struct{}\n\n'
+              "func (s *Store) Save() error { return s.flush() }\n"
+              'func (s *Store) flush() error { return os.WriteFile("db", nil, 0o644) }\n')
+        tier, reason = self.tier("Store.Save")
+        self.assertEqual(tier, 2)
+        self.assertIn("Store.flush", reason)
+
+    def test_a_method_only_one_type_defines_is_chased_through_a_variable(self):
+        write(self.root, "svc/s.go",
+              'package svc\n\nimport "os"\n\ntype Store struct{}\n\n'
+              'func (s *Store) flush() error { return os.WriteFile("db", nil, 0o644) }\n'
+              "func Run(st *Store) error { return st.flush() }\n")
+        self.assertEqual(self.tier("Run")[0], 2)
+
+    def test_the_receiver_resolves_what_the_method_name_cannot(self):
+        # Two types define `flush`, so the method name alone decides nothing --
+        # but inside a `*Store` method, `s.flush()` IS Store's. Without this
+        # fixture the receiver rule was unproven: every other receiver test is
+        # also satisfied by the only-one-type-defines-it rule.
+        write(self.root, "svc/s.go",
+              'package svc\n\nimport "os"\n\ntype Store struct{}\ntype Cache struct{}\n\n'
+              "func (s *Store) Save() error { return s.flush() }\n"
+              'func (s *Store) flush() error { return os.WriteFile("db", nil, 0o644) }\n'
+              "func (c *Cache) flush() error { return nil }\n")
+        tier, reason = self.tier("Store.Save")
+        self.assertEqual(tier, 2)
+        self.assertIn("Store.flush", reason)
+
+    def test_imports_are_file_scoped(self):
+        # `f` is `os` in a.go and an ordinary parameter in b.go. A package-wide
+        # alias map would read `f.Getenv` in b.go as `os.Getenv`.
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport f "os"\n\nfunc Home() string { return f.Getenv("HOME") }\n')
+        write(self.root, "svc/b.go",
+              "package svc\n\ntype getter interface{ Getenv(string) string }\n\n"
+              'func Lookup(f getter) string { return f.Getenv("x") }\n')
+        self.assertEqual(self.tier("Home")[0], 2)
+        self.assertEqual(self.tier("Lookup")[0], 1)
+
+    def test_a_method_two_types_define_is_the_points_to_boundary(self):
+        # Picking between them needs the receiver's type -- points-to analysis,
+        # which this filter does not do. The runtime guard is the backstop.
+        write(self.root, "svc/s.go",
+              'package svc\n\nimport "os"\n\ntype Store struct{}\ntype Cache struct{}\n\n'
+              'func (s *Store) flush() error { return os.WriteFile("db", nil, 0o644) }\n'
+              "func (c *Cache) flush() error { return nil }\n"
+              "func Run(st *Store) error { return st.flush() }\n")
+        self.assertEqual(self.tier("Run")[0], 1)
+
+    def test_markers_in_comments_and_strings_do_not_count(self):
+        write(self.root, "svc/a.go",
+              "package svc\n\n// os.ReadFile(p) would be I/O\n"
+              'func Name() string { return "net.Dial" }\n')
+        self.assertEqual(self.tier("Name")[0], 1)
+
+    def test_a_closure_inside_the_unit_is_part_of_the_unit(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport "os"\n\n'
+              'func Later() func() string { return func() string { return os.Getenv("X") } }\n')
+        self.assertEqual(self.tier("Later")[0], 2)
+
+
+class TestImportTimeAndStaticDeclines(TriageCase):
+    def test_init_io_floors_every_unit_in_the_package_across_files(self):
+        write(self.root, "svc/boot.go",
+              'package svc\n\nimport "os"\n\nvar mode string\n\n'
+              'func init() { mode = os.Getenv("MODE") }\n')
+        write(self.root, "svc/pure.go", "package svc\n\nfunc Double(n int) int { return n * 2 }\n")
+        tier, reason = self.tier("Double")
+        self.assertEqual(tier, 3)
+        self.assertIn("import time", reason)
+
+    def test_a_package_level_call_doing_uncontrollable_io_is_tier_4(self):
+        write(self.root, "svc/conn.go",
+              'package svc\n\nimport "net"\n\nvar conn, _ = net.Dial("tcp", "db:5432")\n')
+        write(self.root, "svc/pure.go", "package svc\n\nfunc Double(n int) int { return n * 2 }\n")
+        self.assertEqual(self.tier("Double")[0], 4)
+
+    def test_a_package_level_reference_without_a_call_is_not_import_time_io(self):
+        # `http.DefaultClient` is a pointer to a package variable; taking it
+        # performs no I/O. Python's import-time rule counts calls only, and Go
+        # can tell a call from a reference, so this one does too.
+        write(self.root, "svc/c.go",
+              'package svc\n\nimport "net/http"\n\nvar client = http.DefaultClient\n\n'
+              "func Double(n int) int { return n * 2 }\n")
+        self.assertEqual(self.tier("Double")[0], 1)
+
+    def test_a_function_literal_assigned_at_package_level_does_not_run_at_import(self):
+        # Its body runs when it is CALLED; every handler table would otherwise
+        # floor its whole package.
+        write(self.root, "svc/h.go",
+              'package svc\n\nimport "os"\n\n'
+              'var handlers = map[string]func() string{\n\t"home": func() string { return os.Getenv("HOME") },\n}\n\n'
+              "func Double(n int) int { return n * 2 }\n")
+        self.assertEqual(self.tier("Double")[0], 1)
+
+    def test_a_call_in_a_map_of_funcs_value_still_runs_at_import(self):
+        # The first `func` below is the map's TYPE; the `{` after it opens the
+        # VALUE, where `boot()` runs during package initialisation. Blanking
+        # from every `func` keyword hid exactly this call.
+        write(self.root, "svc/r.go",
+              'package svc\n\nimport "os"\n\n'
+              'var registry = map[string]func() string{"x": boot()}\n\n'
+              'func boot() func() string { _ = os.Getenv("X"); return nil }\n\n'
+              "func Double(n int) int { return n * 2 }\n")
+        tier, reason = self.tier("Double")
+        self.assertEqual(tier, 3)
+        self.assertIn("via boot", reason)
+
+    def test_the_init_floor_does_not_cross_into_another_package(self):
+        write(self.root, "svc/boot.go",
+              'package svc\n\nimport "os"\n\nfunc init() { _ = os.Getenv("MODE") }\n')
+        write(self.root, "calc/pure.go", "package calc\n\nfunc Double(n int) int { return n * 2 }\n")
+        self.assertEqual(self.tier("Double")[0], 1)
+
+    def test_cgo_is_statically_declined(self):
+        write(self.root, "svc/c.go",
+              'package svc\n\n// #include <stdio.h>\nimport "C"\n\n'
+              "func Put(s string) { C.puts(C.CString(s)) }\n"
+              "func Double(n int) int { return n * 2 }\n")
+        tier, reason = self.tier("Put")
+        self.assertEqual(tier, 4)
+        self.assertIn("cgo", reason)
+        # Only the unit that CALLS into C is declined; its neighbour is not.
+        self.assertEqual(self.tier("Double")[0], 1)
+
+    def test_a_variable_named_C_is_not_cgo_without_import_C(self):
+        write(self.root, "svc/c.go",
+              "package svc\n\ntype conf struct{ Level int }\n\n"
+              "func Level(C conf) int { return C.Level }\n")
+        self.assertEqual(self.tier("Level")[0], 1)
+
+    def test_a_raw_syscall_is_statically_declined(self):
+        write(self.root, "svc/r.go",
+              'package svc\n\nimport "syscall"\n\n'
+              "func Raw() { syscall.Syscall(20, 0, 0, 0) }\n")
+        tier, reason = self.tier("Raw")
+        self.assertEqual(tier, 4)
+        self.assertIn("raw", reason)
+
+    def test_a_unit_that_is_not_there_any_more_is_declined(self):
+        write(self.root, "svc/a.go", "package svc\n\nfunc Double(n int) int { return n * 2 }\n")
+        ghost = {"id": "svc/a.go::Gone", "path": "svc/a.go", "name": "Gone",
+                 "lineno": 3, "kind": "function"}
+        self.assertEqual(stack_go.triage(self.root, ghost)[0], 4)
+
+
+class TestSyscallTableIsDerived(unittest.TestCase):
+    """Every exported name of package `syscall`, on both platforms, is classified.
+
+    DERIVED from the installed Go's own `go doc`, not remembered. Its failure
+    on a Go upgrade is the MECHANISM, not a nuisance: a release that adds a
+    syscall name has added a way to reach the kernel that neither the filter
+    nor the guard knows about. Classify it; do not widen this test to skip it.
+    """
+
+    VOCAB = {"filesystem", "clock", "randomness", "environment", "network",
+             "subprocess", "database", "stdin", "fd", "pure", "raw"}
+
+    def test_every_value_is_in_the_vocabulary(self):
+        self.assertEqual(set(stack_go.SYSCALL_GROUPS.values()) - self.VOCAB, set())
+
+    def test_every_exported_syscall_name_is_classified(self):
+        go = shutil.which("go")
+        if not go:
+            raise unittest.SkipTest("no `go` on PATH: the syscall table is NOT "
+                                    "checked against a real toolchain here")
+        import subprocess
+        names = set()
+        for goos in ("darwin", "linux"):
+            env = dict(os.environ, GOOS=goos, GOTOOLCHAIN="local")
+            out = subprocess.run([go, "doc", "-all", "syscall"], env=env,
+                                 capture_output=True, text=True, timeout=120).stdout
+            for line in out.splitlines():
+                if line.startswith("func ") and line[5:6].isupper():
+                    names.add(line[5:].split("(")[0].strip())
+        self.assertGreater(len(names), 200)
+        self.assertEqual(sorted(names - set(stack_go.SYSCALL_GROUPS)), [])
+
+
+class TestThroughTheCore(TriageCase):
+    """The stack as `rank_risk` uses it: registered, ranked, and credited."""
+
+    def setUp(self):
+        super().setUp()
+        self.rank_risk = _load("rank_risk")
+        self.go = self.rank_risk.stack_by_name("go")
+
+    def test_the_registry_holds_go(self):
+        self.assertIsNotNone(self.go)
+        for attr in ("discover_units", "triage", "scope_files", "classify_manifest"):
+            self.assertTrue(hasattr(self.go, attr), attr)
+
+    def test_a_go_repo_is_ranked_end_to_end(self):
+        write(self.root, "svc/a.go",
+              'package svc\n\nimport "net"\n\n'
+              "func Double(n int) int { return n * 2 }\n"
+              'func Dial() error { _, err := net.Dial("tcp", "x:1"); return err }\n')
+        plan = self.rank_risk.rank(self.root, "10 years ago", 10)
+        self.assertEqual(plan["stack"], "go")
+        self.assertEqual(plan["discovery"], "heuristic")
+        self.assertEqual([r["id"] for r in plan["ranked"]], ["svc/a.go::Double"])
+        self.assertEqual([r["id"] for r in plan["not_netted"]], ["svc/a.go::Dial"])
+
+    def test_the_cli_accepts_stack_go(self):
+        import contextlib
+        import io
+        write(self.root, "svc/a.go", "package svc\n\nfunc Double(n int) int { return n * 2 }\n")
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = self.rank_risk.main([self.root, "--stack", "go"])
+        self.assertEqual(code, 0)
+        self.assertIn("stack=go", err.getvalue())
+
+    def test_callers_in_sibling_files_count_as_reach(self):
+        write(self.root, "svc/a.go", "package svc\n\nfunc Parse(s string) int { return len(s) }\n")
+        write(self.root, "svc/b.go",
+              'package svc\n\nfunc use() int { return Parse("x") + Parse("y") }\n')
+        write(self.root, "svc/a_test.go",
+              'package svc\n\nimport "testing"\n\nfunc TestParse(t *testing.T) { Parse("z") }\n')
+        units, _ = self.go.discover_units(self.root, precise=False)
+        refs = self.rank_risk.inbound_refs(self.root, units, self.go)
+        self.assertEqual(refs["svc/a.go::Parse"], 3)
+
+    def test_a_white_box_test_covers_its_unit_and_buf_string_covers_nothing(self):
+        write(self.root, "svc/report.go",
+              "package svc\n\ntype Report struct{}\n\nfunc (r Report) String() string { return \"\" }\n")
+        write(self.root, "svc/util.go", "package svc\n\nfunc Fmt() string { return \"\" }\n")
+        write(self.root, "svc/util_test.go",
+              'package svc\n\nimport (\n\t"bytes"\n\t"testing"\n)\n\n'
+              "func TestFmt(t *testing.T) { var buf bytes.Buffer; _ = buf.String(); _ = Fmt() }\n")
+        units, _ = self.go.discover_units(self.root, precise=False)
+        covered = self.rank_risk.already_covered(self.root, units, self.go)
+        self.assertIn("svc/util.go::Fmt", covered)
+        self.assertNotIn("svc/report.go::Report.String", covered)
+
+    def test_a_same_named_package_elsewhere_is_not_credited(self):
+        for pkg in ("a", "b"):
+            write(self.root, "%s/util/x.go" % pkg, "package util\n\nfunc Do() int { return 1 }\n")
+        write(self.root, "a/util/x_test.go",
+              'package util\n\nimport "testing"\n\nfunc TestDo(t *testing.T) { Do() }\n')
+        units, _ = self.go.discover_units(self.root, precise=False)
+        covered = self.rank_risk.already_covered(self.root, units, self.go)
+        self.assertIn("a/util/x.go::Do", covered)
+        self.assertNotIn("b/util/x.go::Do", covered)
+
+
+def _build_repo(root, go=0, py=0, ts=0, files=()):
+    for i in range(go):
+        write(root, "pkg%d/m.go" % i, "package pkg%d\n\nfunc Go%d() {}\n" % (i, i))
+    for i in range(py):
+        write(root, "srv/mod%d.py" % i, "def go%d():\n    return 1\n" % i)
+    for i in range(ts):
+        write(root, "web/mod%d.ts" % i, "export function go%d() {}\n" % i)
+    for rel, text in files:
+        write(root, rel, text)
+
+
+GO_CASES = [
+    # (label, go, py, ts, extra files, expected)
+    ("a Go service with a few Python scripts",
+     30, 5, 0, (("go.mod", GO_MOD),), "go"),
+    ("a Python repo that pins its linters in a tools module",
+     0, 40, 0, (("pyproject.toml", '[project]\nname = "srv"\n'),
+                ("tools/go.mod", "module example.com/tools\n\ngo 1.22\n"),
+                ("tools/tools.go", '//go:build tools\n\npackage tools\n\nimport _ "x/y"\n')),
+     "python"),
+    ("a declared TypeScript frontend outweighing a smaller declared Go backend",
+     12, 0, 20, (("go.mod", GO_MOD),
+                 ("package.json", '{"name": "web", "main": "web/mod0.ts",\n'
+                                  ' "dependencies": {"left-pad": "^1.0.0"}}\n')),
+     "node"),
+    ("a small Go module beside vendored Python it does not own",
+     3, 0, 0, (("go.mod", GO_MOD),) + tuple(
+         ("vendor/py/v%d.py" % i, "def v():\n    return 1\n") for i in range(6)), "go"),
+    ("ten Go files and ten Python files, nothing declared",
+     10, 10, 0, (), "ambiguous"),
+]
+
+
+class TestGoCaseTable(unittest.TestCase):
+    """Where Go sits among the three stacks, decided against real repo shapes."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="tsn-go-cases-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.rank_risk = _load("rank_risk")
+
+    def test_every_row(self):
+        for label, go, py, ts, files, expected in GO_CASES:
+            with self.subTest(label):
+                root = tempfile.mkdtemp(dir=self.root)
+                _build_repo(root, go, py, ts, files)
+                scores = dict(self.rank_risk.stack_evidence(root))
+                try:
+                    got = self.rank_risk.detect_stack(root).STACK_NAME
+                except self.rank_risk.AmbiguousStack:
+                    got = "ambiguous"
+                self.assertEqual(got, expected, "%s: %s" % (label, scores))
+
+    def test_this_repo_is_still_python(self):
+        repo = os.path.dirname(os.path.dirname(_HERE))
+        self.assertEqual(self.rank_risk.detect_stack(repo).STACK_NAME, "python")
+
+
 class TestInterfaceNames(unittest.TestCase):
     NAMES = ("STACK_NAME", "MANIFESTS", "evidence", "classify_manifest",
              "iter_source_files", "is_test_path", "is_test_for", "scope_files",
              "module_of", "name_pattern", "path_pattern", "IDENTIFIER_RE",
-             "preceding_qualifier", "module_bindings", "reached_through_module")
+             "preceding_qualifier", "module_bindings", "reached_through_module",
+             "discover_units", "triage")
 
-    def test_supplies_the_language_reading_names(self):
+    def test_supplies_every_interface_name(self):
         missing = [n for n in self.NAMES if not hasattr(stack_go, n)]
         self.assertEqual(missing, [])
         self.assertEqual(stack_go.STACK_NAME, "go")

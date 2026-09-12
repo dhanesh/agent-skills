@@ -667,3 +667,619 @@ def _line_starts(code: str):
         starts.append(i + 1)
         i = code.find("\n", i + 1)
     return starts
+
+
+# ── I/O markers ──────────────────────────────────────────────────────────
+#
+# A marker is an IMPORT PATH, optionally followed by a member chain:
+# `os.ReadFile`, `os/exec`, `net/http.DefaultClient`. Every chain in a unit is
+# resolved through its file's imports before matching, so `f.Getenv` after
+# `import f "os"`, `Getenv` after `import . "os"`, and `os.Getenv` are one
+# marker, not three rules. `_marker_hit` is node's rule without the `node:`
+# prefix: equal, a member of it, or a sub-path of it.
+#
+# The groups are the seven every stack shares. WHICH SIDE OF THE LINE THEY
+# SIT ON is the language's to say, and Go says one thing differently:
+# `randomness` is UNCONTROLLABLE. Since Go 1.24 `rand.Seed` is a no-op unless
+# the process runs with GODEBUG=randseednop=0, and the top-level `math/rand`
+# and `math/rand/v2` functions draw from a source no test can seed. A unit
+# using them needs a seam -- an injected `*rand.Rand` -- before a
+# characterization test of it is honest. A SEEDED `rand.New(rand.NewSource(1))`
+# is plain computation, which is why the table lists the top-level functions
+# by name instead of marking the packages whole.
+#
+# `clock` stays controllable because `testing/synctest` (Go 1.25+) fakes it;
+# on an older toolchain a clock unit is a "could not prove", not a Tier 2 pin.
+CONTROLLABLE = {
+    "filesystem": ("os.Open", "os.OpenFile", "os.Create", "os.ReadFile", "os.WriteFile",
+                   "os.ReadDir", "os.Stat", "os.Lstat", "os.Mkdir", "os.MkdirAll",
+                   "os.MkdirTemp", "os.CreateTemp", "os.Remove", "os.RemoveAll",
+                   "os.Rename", "os.Link", "os.Symlink", "os.Readlink", "os.Chmod",
+                   "os.Chown", "os.Lchown", "os.Chtimes", "os.Truncate", "os.DirFS",
+                   "os.CopyFS", "os.OpenRoot", "os.OpenInRoot", "os.Getwd", "os.Chdir",
+                   # `ioutil.ReadAll(r)` reads a READER, not a file, so the
+                   # package is marked by its filesystem members only.
+                   "io/ioutil.ReadFile", "io/ioutil.WriteFile", "io/ioutil.ReadDir",
+                   "io/ioutil.TempDir", "io/ioutil.TempFile",
+                   "path/filepath.Walk", "path/filepath.WalkDir", "path/filepath.Glob",
+                   "path/filepath.EvalSymlinks", "path/filepath.Abs",
+                   # Reads the zoneinfo database from disk.
+                   "time.LoadLocation"),
+    "clock": ("time.Now", "time.Since", "time.Until", "time.Sleep", "time.After",
+              "time.AfterFunc", "time.NewTimer", "time.NewTicker", "time.Tick"),
+    "environment": ("os.Getenv", "os.LookupEnv", "os.Environ", "os.Setenv", "os.Unsetenv",
+                    "os.Clearenv", "os.ExpandEnv", "os.Hostname", "os.Getpid", "os.Getppid",
+                    "os.Getuid", "os.Geteuid", "os.Getgid", "os.Getegid", "os.Getgroups",
+                    "os.Executable", "os.Args", "os.TempDir", "os.UserHomeDir",
+                    "os.UserCacheDir", "os.UserConfigDir", "os.Getpagesize"),
+}
+UNCONTROLLABLE = {
+    "randomness": tuple("math/rand." + n for n in (
+                      "ExpFloat64", "Float32", "Float64", "Int", "Int31", "Int31n", "Int63",
+                      "Int63n", "Intn", "NormFloat64", "Perm", "Read", "Seed", "Shuffle",
+                      "Uint32", "Uint64"))
+                  + tuple("math/rand/v2." + n for n in (
+                      "ExpFloat64", "Float32", "Float64", "Int", "Int32", "Int32N", "Int64",
+                      "Int64N", "IntN", "N", "NormFloat64", "Perm", "Shuffle", "Uint",
+                      "Uint32", "Uint32N", "Uint64", "Uint64N", "UintN"))
+                  + ("crypto/rand", "hash/maphash.MakeSeed"),
+    "network": tuple("net." + n for n in (
+                   "Dial", "DialIP", "DialTCP", "DialTimeout", "DialUDP", "DialUnix",
+                   "FileConn", "FileListener", "FilePacketConn", "InterfaceAddrs",
+                   "InterfaceByIndex", "InterfaceByName", "Interfaces", "Listen", "ListenIP",
+                   "ListenMulticastUDP", "ListenPacket", "ListenTCP", "ListenUDP",
+                   "ListenUnix", "ListenUnixgram", "LookupAddr", "LookupCNAME", "LookupHost",
+                   "LookupIP", "LookupMX", "LookupNS", "LookupPort", "LookupSRV", "LookupTXT",
+                   "Dialer", "Resolver", "ListenConfig"))
+               + ("net/http.Get", "net/http.Head", "net/http.Post", "net/http.PostForm",
+                  "net/http.DefaultClient", "net/http.Client", "net/http.ListenAndServe",
+                  "net/http.ListenAndServeTLS", "net/http.Serve", "net/http.ServeTLS",
+                  "net/rpc", "net/smtp", "crypto/tls.Dial", "crypto/tls.DialWithDialer",
+                  "crypto/tls.Listen", "google.golang.org/grpc"),
+    # `plugin.Open` loads and runs a shared object: code from outside the
+    # process image, which is the subprocess group's hazard in-process.
+    "subprocess": ("os/exec", "os.StartProcess", "os.FindProcess", "plugin.Open"),
+    # The standard library's own entry point, then the drivers a repo actually
+    # has. That second half is best effort and says so: every driver bottoms
+    # out in `net` or the filesystem, which the guard sees whatever this says.
+    "database": ("database/sql.Open", "database/sql.OpenDB", "github.com/jackc/pgx",
+                 "github.com/lib/pq", "go.mongodb.org/mongo-driver",
+                 "github.com/redis/go-redis", "github.com/go-redis/redis", "gorm.io/gorm",
+                 "github.com/jmoiron/sqlx", "github.com/mattn/go-sqlite3", "modernc.org/sqlite",
+                 "go.etcd.io/bbolt", "github.com/dgraph-io/badger"),
+}
+
+# Markers that are VARIABLES, not functions. The import-time scan counts calls
+# only -- `var client = http.DefaultClient` takes a pointer and does no I/O --
+# so a package-level read of one of these would slip through without this.
+_VARIABLE_MARKERS = ("os.Args",)
+
+
+def _names(spec: str):
+    return spec.split()
+
+
+# EVERY EXPORTED NAME OF PACKAGE `syscall`, on darwin and on linux, and the
+# group each one is. The filter applies it to `syscall.<Name>` and to
+# `golang.org/x/sys/unix.<Name>`, whose names mirror it; `io_guard_go.py`
+# applies it to decide which `syscall` functions get a hook. ONE COPY, used by
+# both layers, so the two cannot disagree about what a syscall is.
+#
+# Captured 2026-09-12 from `GOOS=darwin|linux go doc -all syscall` on go
+# 1.26.7 (272 names), and pinned by a DERIVED test in `test_stack_go.py` that
+# re-reads the installed toolchain and fails on any name missing here.
+#
+#   fd     an operation on a descriptor that is already open. The OPEN was the
+#          I/O and is classified; the read/write/close that follow are not,
+#          or printing to stdout would be filesystem I/O.
+#   stdin  `Read`, which the guard fires on only for fd 0.
+#   pure   no system state at all -- conversions and parsers.
+#   raw    an unclassifiable raw syscall: statically declined (Tier 4).
+SYSCALL_GROUPS = {}
+for _group, _spec in (
+        ("filesystem", "Access Acct Chdir Chflags Chmod Chown Chroot Creat Exchangedata "
+                       "Faccessat Fallocate Fchdir Fchflags Fchmod Fchmodat Fchown Fchownat "
+                       "Fstatat Futimesat Getcwd Getdents Getdirentries Getfsstat Getwd "
+                       "Getxattr InotifyAddWatch InotifyInit InotifyInit1 InotifyRmWatch "
+                       "Lchown Link Listxattr Lstat Mkdir Mkdirat Mkfifo Mknod Mknodat Mount "
+                       "Open Openat Pathconf PivotRoot ReadDirent Readlink Removexattr Rename "
+                       "Renameat Revoke Rmdir Setxattr Stat Statfs Symlink Sync Truncate "
+                       "Undelete Unlink Unlinkat Unmount Utime Utimes UtimesNano"),
+        ("network", "Accept Accept4 AttachLsf Bind BindToDevice BpfBuflen BpfDatalink "
+                    "BpfHeadercmpl BpfInterface BpfStats BpfTimeout CheckBpfVersion Connect "
+                    "DetachLsf FlushBpf Getpeername Getsockname GetsockoptByte "
+                    "GetsockoptICMPv6Filter GetsockoptInet4Addr GetsockoptInt GetsockoptIPMreq "
+                    "GetsockoptIPMreqn GetsockoptIPv6Mreq GetsockoptIPv6MTUInfo GetsockoptUcred "
+                    "Listen LsfSocket NetlinkRIB Recvfrom Recvmsg RouteRIB SetBpf SetBpfBuflen "
+                    "SetBpfDatalink SetBpfHeadercmpl SetBpfImmediate SetBpfInterface "
+                    "SetBpfPromisc SetBpfTimeout SetLsfPromisc Sendmsg SendmsgN Sendto "
+                    "SetsockoptByte SetsockoptICMPv6Filter SetsockoptInet4Addr SetsockoptInt "
+                    "SetsockoptIPMreq SetsockoptIPMreqn SetsockoptIPv6Mreq SetsockoptLinger "
+                    "SetsockoptString SetsockoptTimeval Shutdown Socket Socketpair"),
+        ("subprocess", "Exec ForkExec Kill PtraceAttach PtraceCont PtraceDetach "
+                       "PtraceGetEventMsg PtraceGetRegs PtracePeekData PtracePeekText "
+                       "PtracePokeData PtracePokeText PtraceSetOptions PtraceSetRegs "
+                       "PtraceSingleStep PtraceSyscall Reboot Setprivexec StartProcess Tgkill "
+                       "Unshare Wait4"),
+        ("environment", "Clearenv Environ Getegid Getenv Geteuid Getgid Getgroups Getpgid "
+                        "Getpgrp Getpid Getppid Getpriority Getrlimit Getrusage Getsid Gettid "
+                        "Getuid Issetugid Klogctl Setdomainname Setegid Setenv Seteuid Setfsgid "
+                        "Setfsuid Setgid Setgroups Sethostname Setlogin Setpgid Setpriority "
+                        "Setregid Setresgid Setresuid Setreuid Setrlimit Setsid Setuid Sysctl "
+                        "SysctlUint32 Sysinfo Umask Uname Unsetenv"),
+        ("clock", "Adjtime Adjtimex Gettimeofday Nanosleep Settimeofday Time Times"),
+        ("fd", "Close CloseOnExec Dup Dup2 Dup3 EpollCreate EpollCreate1 EpollCtl EpollWait "
+               "FcntlFlock Fdatasync Flock Fpathconf Fstat Fstatfs Fsync Ftruncate Futimes "
+               "Getdtablesize Getpagesize Kevent Kqueue Madvise Mlock Mlockall Mmap Mprotect "
+               "Munlock Munlockall Munmap Pause Pipe Pipe2 Pread Pwrite Seek Select Sendfile "
+               "SetKevent SetNonblock Splice SyncFileRange Tee Write Exit"),
+        ("stdin", "Read"),
+        ("pure", "BpfJump BpfStmt BytePtrFromString ByteSliceFromString CmsgLen CmsgSpace "
+                 "LsfJump LsfStmt NsecToTimespec NsecToTimeval ParseDirent ParseNetlinkMessage "
+                 "ParseNetlinkRouteAttr ParseRoutingMessage ParseRoutingSockaddr "
+                 "ParseSocketControlMessage ParseUnixCredentials ParseUnixRights "
+                 "SlicePtrFromStrings StringBytePtr StringByteSlice StringSlicePtr "
+                 "TimespecToNsec TimevalToNsec UnixCredentials UnixRights"),
+        ("raw", "AllThreadsSyscall AllThreadsSyscall6 RawSyscall RawSyscall6 Syscall Syscall6 "
+                "Syscall9")):
+    for _n in _names(_spec):
+        SYSCALL_GROUPS[_n] = _group
+del _group, _spec, _n
+
+GROUPS = tuple(sorted(set(CONTROLLABLE) | set(UNCONTROLLABLE)))
+_SYSCALL_PREFIXES = ("syscall", "golang.org/x/sys/unix")
+
+# Declined before any marker is read, because NEITHER layer can see what they
+# do -- the Go counterpart of Python's `os.exec*` static decline. A raw
+# syscall names a number, not an operation; a cgo call runs C, where no Go
+# hook reaches. An `x/sys/unix` member this table does not know is declined
+# the same way: that package's surface is far wider than `syscall`'s, and a
+# name nobody classified is exactly the case this exists for.
+STATIC_DECLINE = {
+    "raw syscall": tuple("%s.%s" % (p, n) for p in _SYSCALL_PREFIXES
+                         for n in sorted(k for k, g in SYSCALL_GROUPS.items() if g == "raw"))
+                   + ("golang.org/x/sys/unix.SyscallNoError",
+                      "golang.org/x/sys/unix.RawSyscallNoError"),
+    "cgo": ("cgo:C",),
+}
+
+
+def _marker_hit(marker: str, name: str) -> bool:
+    return name == marker or name.startswith(marker + ".") or name.startswith(marker + "/")
+
+
+def _syscall_member(name: str):
+    """(prefix, member) when `name` is a `syscall`/`x/sys/unix` selector, else None."""
+    for prefix in _SYSCALL_PREFIXES:
+        if name.startswith(prefix + "."):
+            return prefix, name[len(prefix) + 1:].split(".", 1)[0]
+    return None
+
+
+def _markers(names):
+    """(group, marker, controllable) for every hit, statically-declined kinds first.
+
+    `controllable` is None for a static decline. Deterministic order -- the
+    decline kinds, then UNCONTROLLABLE groups, then CONTROLLABLE, each sorted
+    -- so the reason a unit is given is the same on every run.
+    """
+    names = sorted(set(names))
+    hits = []
+    for kind in sorted(STATIC_DECLINE):
+        for m in STATIC_DECLINE[kind]:
+            if any(_marker_hit(m, n) for n in names):
+                hits.append((kind, m.replace("cgo:", ""), None))
+    for n in names:
+        sm = _syscall_member(n)
+        if sm and sm[0] == "golang.org/x/sys/unix" and sm[1] not in SYSCALL_GROUPS:
+            hits.append(("raw syscall", "%s.%s" % sm, None))
+    for table, controllable in ((UNCONTROLLABLE, False), (CONTROLLABLE, True)):
+        for group in sorted(table):
+            for m in table[group]:
+                if any(_marker_hit(m, n) for n in names):
+                    hits.append((group, m, controllable))
+            for n in names:
+                sm = _syscall_member(n)
+                if sm and SYSCALL_GROUPS.get(sm[1]) == group:
+                    hits.append((group, "%s.%s" % sm, controllable))
+    return hits
+
+
+# ── Resolving a file's names ─────────────────────────────────────────────
+
+_VERSION_ELEM = re.compile(r"^v[0-9]+$")
+
+
+def _default_package_name(path: str) -> str:
+    """The name an unaliased import binds: `math/rand/v2` -> `rand`.
+
+    Go binds the PACKAGE's declared name, which this cannot read, so it takes
+    the convention that name follows: the last path element, skipping a major
+    version suffix (`/v2`, `gopkg.in/yaml.v3`) and taking what follows a
+    dash (`go-redis` -> `redis`, `go-sqlite3` -> `sqlite3`). Where a package
+    breaks the convention its selectors resolve to nothing -- the filter
+    under-reads, and the guard, which reads no names at all, still sees it.
+    """
+    elems = [e for e in path.split("/") if e]
+    if not elems:
+        return path
+    last = elems[-1]
+    if _VERSION_ELEM.match(last) and len(elems) > 1:
+        last = elems[-2]
+    last = re.sub(r"\.v[0-9]+$", "", last)
+    if "-" in last:
+        last = last.rsplit("-", 1)[-1]
+    return last
+
+
+def _file_aliases(text: str):
+    """(alias -> import path, [dot-imported paths]) for one file."""
+    alias, dots = {}, []
+    for a, path in _imports(text):
+        if a == "_":
+            continue
+        if a == ".":
+            dots.append(path)
+            continue
+        alias[a or _default_package_name(path)] = path
+    return alias, dots
+
+
+_GO_KEYWORDS = frozenset({
+    "break", "case", "chan", "const", "continue", "default", "defer", "else",
+    "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
+    "package", "range", "return", "select", "struct", "switch", "type", "var"})
+
+
+def _called_at(code: str, j: int, hi: int) -> bool:
+    """True when the expression ending at `j` is called: `(` next, type arguments allowed."""
+    t = _skip_ws(code, j)
+    if t < hi and code[t] == "[":
+        close = code.find("]", t)
+        if 0 <= close < hi:
+            t = _skip_ws(code, close + 1)
+    return t < hi and code[t] == "("
+
+
+def _scan(code: str, lo: int, hi: int, alias: dict, dots, recv=None):
+    """(entries, calls) for the region [lo, hi) of stripped `code`.
+
+    `entries` are `(resolved chain, called)` pairs for marker matching. Every
+    occurrence is kept, not only calls -- `os.Args` is a real read with no
+    call in sight -- and each caller filters as its rule needs.
+
+    `calls` are the same-package callables the region may reach:
+      * `helper` for a bare `helper(`;
+      * `T.M` for `s.M(` where `s` is the enclosing method's receiver (`recv`
+        is `(var, Type)`);
+      * `("?", "M")` for any other `x.M(` -- resolved later, and only when
+        exactly ONE type in the package defines `M` (`_unambiguous_methods`).
+    """
+    entries, calls = [], set()
+    i = lo
+    while i < hi:
+        m = IDENTIFIER_RE.search(code, i, hi)
+        if not m:
+            break
+        start, word = m.start(), m.group(0)
+        i = m.end()
+        qual = preceding_qualifier(code, start)
+        if qual is not None:
+            # A selector. Its chain head owns the marker; all this adds is the
+            # method call on an unnameable receiver (`Store{}.flush()`).
+            if qual == "" and _called_at(code, m.end(), hi):
+                calls.add(("?", word))
+            continue
+        if word in _GO_KEYWORDS:
+            continue
+        parts, j = [word], m.end()
+        while True:
+            k = _skip_ws(code, j)
+            if k < hi and code[k] == ".":
+                nxt = _IDENT_AT.match(code, _skip_ws(code, k + 1))
+                if not nxt or nxt.start() >= hi:
+                    break
+                parts.append(nxt.group(0))
+                j = nxt.end()
+            else:
+                break
+        called = _called_at(code, j, hi)
+        tail = ".".join(parts[1:])
+        if word == "C" and alias.get("C") == "C":
+            entries.append(("cgo:C" + ("." + tail if tail else ""), called))
+        elif word in alias:
+            entries.append((alias[word] + ("." + tail if tail else ""), called))
+        else:
+            entries.append((".".join(parts), called))
+            for path in dots:
+                entries.append((path + "." + ".".join(parts), called))
+        if called and len(parts) == 1:
+            calls.add(word)
+        elif called and len(parts) == 2 and word not in alias:
+            if recv and word == recv[0]:
+                calls.add("%s.%s" % (recv[1], parts[1]))
+            else:
+                calls.add(("?", parts[1]))
+    return entries, calls
+
+
+# ── Package analysis ─────────────────────────────────────────────────────
+
+def _body_span(code: str, depths, pos: int):
+    """(start, end) of the declaration at `pos`: signature through its body.
+
+    The body is the first `{` at `pos`'s OWN depth -- skipping the braces of
+    an `interface{}` or `struct{...}` result type -- and before the newline
+    at that depth that ends a bodyless declaration (an assembly-implemented
+    func). None when there is no body.
+
+    RELATIVE to `pos`'s depth, not to 0: a function literal nested inside a
+    composite literal (`map[string]func(){"k": func() {...}}`) sits at depth
+    1, and a scan keyed to depth 0 walked straight past its body.
+    """
+    n = len(code)
+    d0 = depths[pos]
+    i = pos
+    while i < n:
+        c = code[i]
+        if depths[i] < d0:
+            return None
+        if depths[i] == d0 and c == "\n":
+            return None
+        if depths[i] == d0 and c == "{":
+            k = i - 1
+            while k >= 0 and code[k].isspace():
+                k -= 1
+            word_end = k + 1
+            while k >= 0 and (code[k].isalnum() or code[k] == "_"):
+                k -= 1
+            if code[k + 1:word_end] in ("interface", "struct"):
+                close = _match_bracket(code, depths, i)
+                if close < 0:
+                    return None
+                i = close + 1
+                continue
+            close = _match_bracket(code, depths, i)
+            return (pos, close + 1 if close >= 0 else n)
+        i += 1
+    return None
+
+
+def _receiver_var(inner: str):
+    """`s *Store` -> `s`; `*Store` -> None (an unnamed receiver binds nothing)."""
+    head = inner.split("[", 1)[0].split()
+    return head[0] if len(head) == 2 and _IDENT_FULL.match(head[0]) else None
+
+
+class _File:
+    __slots__ = ("rel", "code", "depths", "alias", "dots", "decls")
+
+    def __init__(self, rel, text):
+        self.rel = rel
+        self.code = strip_noncode(text)
+        self.depths = _depths(self.code)
+        self.alias, self.dots = _file_aliases(text)
+        # qualified name -> (start, end, receiver (var, Type) or None)
+        self.decls = {}
+        for m in _FUNC_AT.finditer(self.code):
+            pos = m.start()
+            if self.depths[pos] != 0:
+                continue
+            i = _skip_ws(self.code, m.end())
+            recv = None
+            if i < len(self.code) and self.code[i] == "(":
+                close = _match_bracket(self.code, self.depths, i)
+                if close < 0:
+                    continue
+                inner = self.code[i + 1:close]
+                rtype = _receiver_type(inner)
+                if rtype is None:
+                    continue
+                recv = (_receiver_var(inner), rtype)
+                i = _skip_ws(self.code, close + 1)
+            word = _IDENT_AT.match(self.code, i)
+            if not word:
+                continue
+            span = _body_span(self.code, self.depths, pos)
+            if span is None:
+                continue
+            key = "%s.%s" % (recv[1], word.group(0)) if recv else word.group(0)
+            if key == "init" and recv is None:
+                key = "init#%d" % pos        # several `init`s may coexist
+            self.decls.setdefault(key, (span[0], span[1], recv))
+
+
+class _Package:
+    __slots__ = ("files", "index", "methods", "tier4", "floor")
+
+
+@functools.lru_cache(maxsize=None)
+def _package_dirs(root: str):
+    """dir -> [non-test .go files], for the whole tree, once per root."""
+    out = {}
+    for rel in iter_source_files(root):
+        out.setdefault(os.path.dirname(rel), []).append(rel)
+    return out
+
+
+def _unambiguous_methods(files):
+    """Method name -> the single `T.M` that defines it, across the package."""
+    owners = {}
+    for f in files:
+        for key, (_lo, _hi, recv) in f.decls.items():
+            if recv:
+                owners.setdefault(key.split(".", 1)[1], set()).add(key)
+    return {m: next(iter(ks)) for m, ks in owners.items() if len(ks) == 1}
+
+
+def _resolve_calls(calls, pkg):
+    out = set()
+    for c in calls:
+        if isinstance(c, tuple):
+            q = pkg.methods.get(c[1])
+            if q:
+                out.add(q)
+        else:
+            out.add(c)
+    return out
+
+
+def _hits_from(entries, calls, pkg, visited):
+    """Marker hits for one region, plus those reached through same-package calls.
+
+    A callee is looked up in the PACKAGE index -- any file in the directory --
+    and scanned with its OWN file's imports, because Go imports are
+    file-scoped: `os` in `a.go` says nothing about what `os` means in `b.go`.
+    Each hit is `(group, marker, controllable, via)`.
+    """
+    hits = [(g, m, c, None) for g, m, c in _markers([e for e, _called in entries])]
+    for q in sorted(_resolve_calls(calls, pkg)):
+        if q not in pkg.index or q in visited:
+            continue
+        visited.add(q)
+        f, lo, hi, recv = pkg.index[q]
+        sub_entries, sub_calls = _scan(f.code, lo, hi, f.alias, f.dots, recv)
+        for g, m, c, _via in _hits_from(sub_entries, sub_calls, pkg, visited):
+            hits.append((g, m, c, q))
+    return hits
+
+
+def _import_region(f: _File):
+    """`f`'s code with every function body and import declaration blanked.
+
+    What survives is what runs when the package is initialised: package-level
+    `var` initializers. A function LITERAL assigned at package level
+    (`var h = func() { ... }`) does not run then, so its body is blanked too
+    -- otherwise every handler table in the repo would floor its package.
+
+    A LITERAL, NOT A TYPE. In `map[string]func() string{"x": boot()}` the
+    first `func` is part of the map's TYPE, and the `{` after it opens the
+    map's VALUE -- where `boot()` really does run at import. Blanking from
+    every `func` would hide that call. A literal stands where an expression
+    starts, after one of `= ( , : {`; a function type follows `]` or a name.
+    """
+    out = list(f.code)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != "\n":
+                out[k] = " "
+
+    for lo, hi, _recv in f.decls.values():
+        blank(lo, hi)
+    for m in _IMPORT_KW.finditer(f.code):
+        i = _skip_ws(f.code, m.end())
+        if i < len(f.code) and f.code[i] == "(":
+            close = _match_bracket(f.code, f.depths, i)
+            blank(m.start(), (close + 1) if close >= 0 else len(f.code))
+        else:
+            eol = f.code.find("\n", m.end())
+            blank(m.start(), eol if eol >= 0 else len(f.code))
+    code = "".join(out)
+    depths = _depths(code)
+    for m in re.finditer(r"(?<![A-Za-z0-9_])func\b", code):
+        k = m.start() - 1
+        while k >= 0 and code[k].isspace():
+            k -= 1
+        if k < 0 or code[k] not in "=(,:{":
+            continue                        # a function TYPE, not a literal
+        span = _body_span(code, depths, m.start())
+        if span:
+            blank(span[0], span[1])
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=None)
+def _analyze_package(root: str, pkg_dir: str) -> _Package:
+    """Index and floor one package directory, once, for every unit in it."""
+    pkg = _Package()
+    pkg.files = {}
+    for rel in _package_dirs(root).get(pkg_dir, []):
+        pkg.files[rel] = _File(rel, read_text(root, rel))
+    pkg.index = {}
+    for f in pkg.files.values():
+        for key, (lo, hi, recv) in f.decls.items():
+            if not key.startswith("init#"):
+                pkg.index.setdefault(key, (f, lo, hi, recv))
+    pkg.methods = _unambiguous_methods(pkg.files.values())
+
+    mod_hits = []
+    for f in sorted(pkg.files.values(), key=lambda x: x.rel):
+        region = _import_region(f)
+        entries, calls = _scan(region, 0, len(region), f.alias, f.dots)
+        entries = [(e, c) for e, c in entries
+                   if c or any(_marker_hit(v, e) for v in _VARIABLE_MARKERS)]
+        mod_hits += _hits_from(entries, calls, pkg, set())
+        for key, (lo, hi, recv) in f.decls.items():
+            if key.startswith("init#"):
+                e2, c2 = _scan(f.code, lo, hi, f.alias, f.dots, recv)
+                mod_hits += [(g, m, c, v or "init") for g, m, c, v
+                             in _hits_from(e2, c2, pkg, set())]
+
+    pkg.tier4, pkg.floor = None, None
+    hard = [h for h in mod_hits if h[2] is not True]
+    if hard:
+        group, marker, _c, via = hard[0]
+        pkg.tier4 = (4, "package does %s I/O at import time%s (%s); not reachable"
+                        % (group, " via " + via if via else "", marker))
+    soft = [h for h in mod_hits if h[2] is True]
+    if soft:
+        group, marker, _c, via = soft[0]
+        pkg.floor = (3, "package does %s I/O at import time%s (%s); a fixture runs "
+                        "too late to control it — needs a seam"
+                        % (group, " via " + via if via else "", marker))
+    return pkg
+
+
+def _tier_from_hits(hits) -> tuple:
+    """(tier, reason) from a unit's own hits, before the package floor."""
+    if not hits:
+        return 1, "no I/O markers; directly callable"
+    declined = [h for h in hits if h[2] is None]
+    if declined:
+        kind, marker, _c, via = declined[0]
+        return 4, ("%s (%s)%s: neither the filter nor the guard can see what it does"
+                   % (kind, marker, " via " + via if via else ""))
+    uncontrollable = [h for h in hits if h[2] is False]
+    if uncontrollable:
+        group, marker, _c, via = uncontrollable[0]
+        if via:
+            return 3, "%s I/O via %s (%s); needs a seam" % (group, via, marker)
+        return 3, "%s I/O inside the unit (%s); needs a seam" % (group, marker)
+    group, marker, _c, via = hits[0]
+    if via:
+        return 2, ("%s I/O via %s (%s); pin at a wider boundary with %s controlled"
+                   % (group, via, marker, group))
+    return 2, "%s I/O (%s); pin at a wider boundary with %s controlled" % (group, marker, group)
+
+
+def triage(root: str, unit) -> tuple:
+    """Classify how testable a unit is. Returns (tier, reason).
+
+    A FILTER, NEVER THE ENFORCEMENT. It resolves each file's imports, chases
+    same-package calls across the whole directory (a bare `helper(`, the
+    receiver's own methods, and a method name exactly one type defines), and
+    floors every unit in a package whose initialisation does I/O -- because
+    every file's `init` and package-level `var` runs when the package is
+    imported, before any test body or fixture. What it cannot see -- an
+    interface method whose implementation is chosen at run time, a function
+    value, reflection, a method two types define -- is the points-to boundary
+    it stops at on purpose. `io_guard_go.py` is the enforcement.
+
+    Wrong toward a HIGHER tier wherever it is wrong: every occurrence of a
+    marker inside a unit counts, not only a call.
+    """
+    pkg = _analyze_package(root, os.path.dirname(unit["path"]))
+    if pkg.tier4 is not None:
+        return pkg.tier4
+    f = pkg.files.get(unit["path"])
+    decl = f.decls.get(unit["name"]) if f else None
+    if decl is None:
+        return 4, "unit not found on re-read"
+    lo, hi, recv = decl
+    entries, calls = _scan(f.code, lo, hi, f.alias, f.dots, recv)
+    hits = _hits_from(entries, calls, pkg, {unit["name"]})
+    tier, reason = _tier_from_hits(hits)
+    if pkg.floor is not None and tier < pkg.floor[0]:
+        return pkg.floor
+    return tier, reason

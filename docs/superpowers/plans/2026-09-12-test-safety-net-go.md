@@ -455,7 +455,7 @@ and keep the existing `test_this_repo_classifies_as_python_not_node` green — t
 
   Then:
   - `init()` reading `os.Getenv` floors every unit in the package to 3, including a unit in a different file;
-  - a package-level `var client = http.DefaultClient` counts as import-time network, tier 4;
+  - a package-level `var conn, _ = net.Dial("tcp", "db:5432")` counts as import-time network, tier 4. (**Corrected during Task 4:** this line first read `var client = http.DefaultClient`, but taking a pointer to a package variable is no I/O at all. The import-time scan counts *calls*, as Python's does, plus the one variable marker `os.Args`, and a test pins the `DefaultClient` case at tier 1.)
   - `rand.Intn` is tier 3 while `rand.New(rand.NewSource(1)).Intn` is tier 1;
   - `C.puts` is tier 4 cgo, and `syscall.Syscall` is tier 4 raw.
 
@@ -690,7 +690,7 @@ docker run --rm -v "$PWD/test-safety-net:/skill:ro" -w /skill/assets golang:1.26
     | `rand.Intn` | 3 |
     | `init()` reads env (the whole package) | 3 |
     | `syscall.Syscall` | 4 |
-    | package-level `var c = http.DefaultClient` (the whole package) | 4 |
+    | package-level `var conn, _ = net.Dial(...)` (the whole package) | 4 |
   - **44** NEGATIVE: the DOCUMENTED Go guard command, extracted from SKILL.md and stacks.md and run verbatim, passes a clean unit and exits 3 on a socket-constructing one. It is NOT GRADED HERE without `go`, like 34 and 39. The module docstring gains the matching "what remains ungated" bullet.
 - [ ] **Step 2: A/B rows.**
   - `SINCE_TSN_GO = <Task 2's commit>` for rows 1–4 below. `SINCE_TSN_GO_GUARD = <Task 6's commit>` for row 5.
