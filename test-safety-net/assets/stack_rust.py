@@ -1516,6 +1516,10 @@ def reachability(root: str, unit: dict):
       "pub(crate)" (or pub(super)…)   the unit's own visibility
       "type Hidden is private"        a method whose type, declared beside
                                       its impl, is not `pub`
+      "type Hidden declared elsewhere: visibility unresolved"
+                                      a method whose type is declared in
+                                      another file, and not exactly once,
+                                      `pub`, in a public module (ruling R8)
       "module calc::inner is private" the first module on the path that is not
                                       public (or "... is pub(crate)")
       "no mod declares src/x.rs"      a file the crate never compiles
@@ -1572,14 +1576,18 @@ def _reach(root: str, unit: dict):
     if fn.vis != "pub":
         return [], fn.vis or "private"
     inner = _names(fn.chain)
+    bases = [mp + inner for mp in decls]
     if fn.recv:
         type_vis = scan.types.get((inner, fn.recv))
-        if type_vis is not None and type_vis != "pub":
+        if type_vis is None:
+            bases = _type_homes(root, tree, fn.recv)
+            if not bases:
+                return [], "type %s declared elsewhere: visibility unresolved" % fn.recv
+        elif type_vis != "pub":
             return [], "type %s is %s" % (fn.recv, type_vis or "private")
     item = fn.recv or fn.name
     paths, why = [], ""
-    for mp in decls:
-        full = mp + inner
+    for full in bases:
         if full in tree.pub_mods:
             paths.append(tree.pub_mods[full] + (item,))
         if (full, item) in tree.exported:
@@ -1587,6 +1595,26 @@ def _reach(root: str, unit: dict):
         if not paths:
             why = why or _first_closed(tree, full)
     return paths, ("" if paths else why)
+
+
+def _type_homes(root, tree, name):
+    """Ruling R8: the public module paths of type `name`, declared outside its impl's file.
+
+    `impl crate::types::Hidden { … }` in `src/ops.rs` names a type the impl's
+    module does not declare, and reading only that module credited
+    `calcx::ops::Hidden`, a path that does not exist. The type is looked up
+    by NAME across the library's files instead. It counts only when exactly
+    ONE declaration exists, that declaration is `pub`, and its module is
+    public; otherwise `[]`, and the method is unreachable. Killing tests:
+    `TestReachability.test_a_method_of_a_*_elsewhere_*`.
+    """
+    found = [(rel, chain, vis) for rel in sorted(tree.lib_files)
+             for (chain, n), vis in _scan_file(read_text(root, rel)).types.items()
+             if n == name]
+    if len(found) != 1 or found[0][2] != "pub":
+        return []
+    rel, chain, _vis = found[0]
+    return [mp + chain for mp in tree.lib_files[rel] if mp + chain in tree.pub_mods]
 
 
 def _declaration(scan, text, unit):
@@ -1781,3 +1809,362 @@ def _use_target(segs, mp):
                 return None
             path.pop()
     return path + rest
+
+
+# ── I/O markers ──────────────────────────────────────────────────────────
+#
+# A marker is a PATH. Every path the unit's reach names is first resolved
+# through the file's `use` declarations -- `fs::read` after `use std::fs;`,
+# `read_to_string` after `use std::fs::read_to_string;` or `use std::fs::*;`,
+# `disk::read` after `use std::fs as disk;` -- and then matched
+# (`_marker_hit`):
+#
+#   * `name!` hits a macro invocation of that last segment, however qualified;
+#   * a CAPITALISED marker (`SystemTime::now`, `OsRng`, `File::open`) hits
+#     wherever its segments appear in a row, so `std::time::SystemTime::now`
+#     and a re-export's path both count;
+#   * any other marker is a crate and a path inside it: `std::fs` hits
+#     `std::fs::read` and `std::os::unix::fs::symlink`, and `rand::thread_rng`
+#     hits `rand::prelude::thread_rng`.
+#   * `Path::<m>` also hits a method call `.m(` on ANY value: a text reader
+#     cannot see the receiver's type, so `.exists()` counts as a Path's.
+#
+# A path whose head is `crate`, `super` or `Self` is this crate's own and
+# hits nothing but a capitalised marker. Every occurrence counts, not only a
+# call (`fn f(file: File)` is filesystem): wrong toward a HIGHER tier. Stdin
+# is in no table -- as on every stack, only the guard watches it.
+#
+# The groups and their side of the line are the spec's table: libtest has
+# fixtures for a temp dir and the environment only (`tsn_control_temp_dir`,
+# `tsn_control_set_env`); std has no clock freeze, and `rand::thread_rng`
+# cannot be seeded. A SEEDED `StdRng::seed_from_u64(1)` names no marker.
+_PATH_METHODS = ("canonicalize", "exists", "is_dir", "is_file", "metadata", "read_dir",
+                 "read_link", "symlink_metadata", "try_exists")
+CONTROLLABLE = {
+    "filesystem": ("std::fs", "File::open", "File::create", "OpenOptions", "tokio::fs",
+                   "async_std::fs") + tuple("Path::" + m for m in _PATH_METHODS),
+    "environment": tuple("std::env::" + n for n in (
+        "var", "var_os", "vars", "args", "current_dir", "set_var", "remove_var",
+        "temp_dir", "home_dir")),
+}
+UNCONTROLLABLE = {
+    "network": ("std::net", "tokio::net", "reqwest", "hyper", "ureq"),
+    "subprocess": ("std::process::Command", "tokio::process"),
+    "clock": ("SystemTime::now", "Instant::now", "std::thread::sleep", "tokio::time"),
+    "randomness": ("rand::thread_rng", "rand::random", "OsRng", "getrandom"),
+    "database": ("sqlx", "diesel", "rusqlite", "postgres"),
+}
+GROUPS = tuple(sorted(set(CONTROLLABLE) | set(UNCONTROLLABLE)))
+
+# Declined before any marker is read: what neither layer can see. Inline
+# assembly is instructions no hook intercepts; a raw syscall names a number,
+# not an operation. FFI is NOT declined: C does its I/O through libc, which
+# the guard hooks.
+STATIC_DECLINE = {"inline assembly": ("asm!", "global_asm!", "naked_asm!"),
+                  "raw syscall": ("libc::syscall", "nix::libc::syscall")}
+
+
+def _marker_hit(marker: str, entry: str) -> bool:
+    if entry.startswith("."):
+        return marker.startswith("Path::") and marker[len("Path::"):] == entry[1:]
+    segs = entry.rstrip("!").split("::")
+    if marker.endswith("!"):
+        return entry.endswith("!") and segs[-1] == marker[:-1]
+    m = marker.split("::")
+    if m[0][:1].isupper():
+        return _in_a_row(segs, m)
+    return segs[0] == m[0] and (len(m) == 1 or _in_a_row(segs[1:], m[1:]))
+
+
+def _in_a_row(segs, m) -> bool:
+    k = len(m)
+    return any(segs[i:i + k] == m for i in range(len(segs) - k + 1))
+
+
+def _markers(entries):
+    """(group, marker, controllable) for every hit: declines, UNCONTROLLABLE,
+    CONTROLLABLE, each sorted, so a unit's reason is the same on every run.
+    `controllable` is None for a static decline."""
+    entries = sorted(entries)
+    hits = []
+    for table, ctl in ((STATIC_DECLINE, None), (UNCONTROLLABLE, False), (CONTROLLABLE, True)):
+        for group in sorted(table):
+            hits += [(group, m, ctl) for m in table[group]
+                     if any(_marker_hit(m, e) for e in entries)]
+    return hits
+
+
+# ── Triage ───────────────────────────────────────────────────────────────
+#
+# THE REACH is the unit's signature and body, plus the bodies of same-file
+# fns it names -- a bare `helper`, `Self::m`/`self.m(` inside an impl,
+# `Type::m`, and `x.m(` when exactly one type in the file defines `m`, as
+# go's rule is -- transitively. It also takes the initialiser of every
+# same-file `static` the reach names, `lazy_static!`'s `static ref` included:
+# a `LazyLock`/`Lazy` initialises on first use, INSIDE the unit's call, so it
+# is judged there. Rust has no import-time floor like python's and go's.
+
+_RUST_KEYWORDS = frozenset((
+    "as async await break const continue dyn else enum extern false fn for if "
+    "impl in let loop match mod move mut pub ref return static struct trait true "
+    "type unsafe use where while").split())
+_OWN_HEADS = ("crate", "super", "self", "Self")
+_PATH_SEG = re.compile(r"\s*::\s*(?:(<)|((?:r#)?[A-Za-z_][A-Za-z0-9_]*))")
+_STATIC_AT = re.compile(
+    r"(?<![A-Za-z0-9_'])static\s+(?:mut\s+)?(?:ref\s+)?((?:r#)?[A-Za-z_][A-Za-z0-9_]*)\s*:")
+
+_FileReach = collections.namedtuple("_FileReach", "code fns methods by_name statics uses globs mods")
+
+
+@functools.lru_cache(maxsize=256)
+def _file_reach(text: str) -> _FileReach:
+    """What one file offers the reach: `{name: [span]}` for free fns,
+    `{Type::m: span}` for methods, `{m: {Type::m}}`, `{name: span}` for static
+    initialisers, the `use` map, and the inline module names. A span is
+    `(lo, hi, recv)` into the stripped code."""
+    code = strip_noncode(text)
+    fns, methods, by_name = {}, {}, {}
+    for f in _scan_file(text).fns:
+        span = (f.pos, _brace_end(code, _item_stop(code, f.pos, len(code))),
+                _bare(f.recv) if f.recv else None)
+        if f.recv:
+            key = "%s::%s" % (span[2], _bare(f.name))
+            methods.setdefault(key, span)
+            by_name.setdefault(_bare(f.name), set()).add(key)
+        else:
+            fns.setdefault(_bare(f.name), []).append(span)
+    statics = {}
+    for m in _STATIC_AT.finditer(code):
+        eq = _depth0(code, m.end(), len(code), "=;")
+        if eq < len(code) and code[eq] == "=":
+            statics.setdefault(_bare(m.group(1)),
+                               (eq + 1, _depth0(code, eq + 1, len(code), ";"), None))
+    uses, globs = {}, []
+    for m in _USE_KW.finditer(code):
+        semi = code.find(";", m.end())
+        for segs, binding in _use_leaves(code[m.end():semi if semi >= 0 else len(code)]):
+            if binding == "*":
+                globs.append(segs)
+                continue
+            segs = segs[:-1] if segs and segs[-1] == "self" else segs
+            if segs and binding != "_":
+                uses[binding or segs[-1]] = segs
+    mods = {n for chain in _scan_file(text).inline for n, _vis in chain}
+    return _FileReach(code, fns, methods, by_name, statics, uses, globs, mods)
+
+
+def _depth0(code, i, hi, stops):
+    """Index of the first char of `stops` outside brackets from `i`, or of the
+    bracket that closes past `i`'s level, or `hi`."""
+    depth = 0
+    while i < hi:
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return i
+        elif depth == 0 and ch in stops:
+            return i
+        i += 1
+    return hi
+
+
+def _generic_end(code, i, hi):
+    """Index past the `>` closing the `<` at `i` (`->` is not a bracket), or -1."""
+    depth = 0
+    for j in range(i, hi):
+        if code[j] == "<":
+            depth += 1
+        elif code[j] == ">" and code[j - 1] != "-":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+def _called(code, j, hi) -> bool:
+    """True when the path ending at `j` is called: `(` next, a turbofish allowed."""
+    t = _skip_ws(code, j, hi)
+    if code.startswith("::", t):
+        t = _skip_ws(code, t + 2, hi)
+        if t < hi and code[t] == "<":
+            e = _generic_end(code, t, hi)
+            t = _skip_ws(code, e, hi) if e > 0 else hi
+    return t < hi and code[t] == "("
+
+
+def _paths(code, lo, hi):
+    """(segments, kind, called) for every path in `code[lo:hi]`.
+
+    kind "path" (`std::fs::read`, `x`), "macro" (`asm!`) or "method": a
+    `.m` selector, whose segments are `[receiver name or "", m]`.
+    """
+    i = lo
+    while True:
+        m = IDENTIFIER_RE.search(code, i, hi)
+        if not m:
+            return
+        k = m.start() - 1
+        while k >= lo and code[k].isspace():
+            k -= 1
+        j = m.end()
+        if k >= lo and code[k] == "." and not (k > lo and code[k - 1] == "."):
+            qual = preceding_qualifier(code, m.start()) or ""
+            yield [qual, _bare(m.group())], "method", _called(code, j, hi)
+            i = j
+            continue
+        segs = [_bare(m.group())]
+        while True:
+            s = _PATH_SEG.match(code, j, hi)
+            if not s:
+                break
+            if s.group(1):
+                e = _generic_end(code, s.start(1), hi)
+                if e < 0:
+                    break
+                j = e
+            else:
+                segs.append(_bare(s.group(2)))
+                j = s.end()
+        t = _skip_ws(code, j, hi)
+        if t < hi and code[t] == "!" and code[t + 1:t + 2] != "=":
+            yield segs, "macro", True
+        else:
+            yield segs, "path", _called(code, j, hi)
+        i = j
+
+
+def _resolve_entry(segs, called, fr):
+    """`segs` as the paths it may name: through a `use`, else as written plus,
+    for a call or a longer path, each glob import's reading of it."""
+    if segs[0] == "self" and len(segs) > 1:
+        segs = segs[1:]
+    head = segs[0]
+    if head in fr.uses:
+        return ["::".join(fr.uses[head] + segs[1:])]
+    out = ["::".join(segs)]
+    if head not in _OWN_HEADS and (called or len(segs) > 1):
+        out += ["::".join(g + segs) for g in fr.globs]
+    return out
+
+
+def _read_region(fr, lo, hi, recv):
+    """(entries, [(key, [spans])]) for one region: resolved paths for the
+    marker tables, and the same-file items it names for the reach."""
+    entries, refs = set(), []
+    for segs, kind, called in _paths(fr.code, lo, hi):
+        if kind == "method":
+            qual, name = segs
+            if not called:
+                continue
+            entries.add("." + name)
+            key = "%s::%s" % (recv, name) if qual == "self" and recv else None
+            if key not in fr.methods:
+                owners = fr.by_name.get(name, ())
+                key = next(iter(owners)) if len(owners) == 1 else None
+            if key:
+                refs.append((key, [fr.methods[key]]))
+            continue
+        if segs[0] in _RUST_KEYWORDS:
+            continue
+        paths = _resolve_entry(segs, called, fr)
+        entries.update(p + "!" if kind == "macro" else p for p in paths)
+        if kind == "macro":
+            continue
+        name = segs[-1]
+        own = len(segs) == 1 or segs[0] in _OWN_HEADS or segs[-2] in fr.mods
+        if len(segs) > 1:
+            owner = recv if segs[-2] == "Self" and recv else segs[-2]
+            if "%s::%s" % (owner, name) in fr.methods:
+                refs.append(("%s::%s" % (owner, name), [fr.methods["%s::%s" % (owner, name)]]))
+                continue
+        if own and name in fr.fns:
+            refs.append((name, fr.fns[name]))
+        if own and name in fr.statics:
+            refs.append(("static " + name, [fr.statics[name]]))
+    return entries, refs
+
+
+def _reach_hits(fr, fn):
+    """Marker hits over the unit's reach, as (group, marker, controllable, via).
+
+    `via` is the first same-file item on the way (`helper`, `Store::flush`,
+    `static CFG`), None for the unit's own text. Breadth first, in sorted
+    order, so the reason is the same on every run.
+    """
+    recv = _bare(fn.recv) if fn.recv else None
+    start = (fn.pos, _brace_end(fr.code, _item_stop(fr.code, fn.pos, len(fr.code))), recv)
+    seen = {"%s::%s" % (recv, _bare(fn.name)) if recv else _bare(fn.name)}
+    todo, hits = collections.deque([([start], None)]), []
+    while todo:
+        spans, via = todo.popleft()
+        entries, refs = set(), []
+        for lo, hi, r in spans:
+            e, rf = _read_region(fr, lo, hi, r)
+            entries |= e
+            refs += rf
+        hits += [(g, m, c, via) for g, m, c in _markers(entries)]
+        for key, sub in sorted(refs, key=lambda kv: kv[0]):
+            if key not in seen:
+                seen.add(key)
+                todo.append((sub, via or key))
+    return hits
+
+
+def _tier_from_hits(hits) -> tuple:
+    """(tier, reason) from a unit's hits, first match wins: decline, uncontrollable,
+    controllable, none."""
+    if not hits:
+        return 1, "no I/O markers; directly callable"
+    for ctl in (None, False, True):
+        found = [h for h in hits if h[2] is ctl]
+        if found:
+            group, marker, _c, via = found[0]
+            where = " via %s" % via if via else ""
+            if ctl is None:
+                return 4, ("%s (%s)%s: neither the filter nor the guard can see what it does"
+                           % (group, marker, where))
+            if ctl is False:
+                return 3, "%s I/O%s (%s); needs a seam" % (group, where or " inside the unit",
+                                                          marker)
+            return 2, ("%s I/O%s (%s); pin at a wider boundary with %s controlled"
+                       % (group, where, marker, group))
+    return 1, "no I/O markers; directly callable"
+
+
+def triage(root: str, unit) -> tuple:
+    """Classify how testable a unit is. Returns (tier, reason).
+
+    A FILTER, NEVER THE ENFORCEMENT: the runtime guard is. First match wins:
+
+      1. a static decline in the reach                  -> 4
+      2. `reachability` says a `tests/` crate cannot name it -> 3, with its
+         reason (`binary-only` reads as subprocess: the only way in is to
+         spawn the binary)
+      3. an UNCONTROLLABLE marker                       -> 3
+      4. a CONTROLLABLE marker                          -> 2
+      5. otherwise                                      -> 1
+
+    Ruling R7: a reachable unit at Tier 1 or 2 carries the import a `tests/`
+    crate writes for it, ``; import as `use <public_path>;` `` -- for a method,
+    its type's path; for a re-export, the re-exported path.
+    """
+    text = read_text(root, _norm(unit["path"]))
+    fn = _declaration(_scan_file(text), text, unit)
+    if fn is None:
+        return 4, "unit not found on re-read"
+    hits = _reach_hits(_file_reach(text), fn)
+    declined = [h for h in hits if h[2] is None]
+    if declined:
+        return _tier_from_hits(declined)
+    reachable, why = reachability(root, unit)
+    if not reachable:
+        if why == "binary-only":
+            return 3, "binary-only: reachable only by spawning the binary (subprocess)"
+        return 3, "not reachable from tests/ without modifying source (%s)" % why
+    tier, reason = _tier_from_hits(hits)
+    if tier <= 2:
+        reason += "; import as `use %s;`" % public_path(root, unit)
+    return tier, reason

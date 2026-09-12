@@ -381,10 +381,10 @@ class TestInterfaceNames(NodeCase):
         self.assertIn("node", [s.STACK_NAME for s in rank_risk.STACKS])
 
     def test_the_registry_holds_every_stack(self):
-        # Three since the Go stack registered. This is the one assertion in
+        # Four since the Rust stack registered. This is the one assertion in
         # this file that a new stack is SUPPOSED to change.
         self.assertEqual(sorted(s.STACK_NAME for s in rank_risk.STACKS),
-                         ["go", "node", "python"])
+                         ["go", "node", "python", "rust"])
         for stack in rank_risk.STACKS:
             for attr in ("STACK_NAME", "evidence", "iter_source_files",
                          "is_test_path", "is_test_for", "scope_files", "module_of",

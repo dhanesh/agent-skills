@@ -127,6 +127,7 @@ if _ASSETS not in sys.path:
 import stack_go                                                     # noqa: E402
 import stack_node                                                   # noqa: E402
 import stack_python                                                 # noqa: E402
+import stack_rust                                                   # noqa: E402
 from stack_common import SKIP_DIRS, read_text                       # noqa: E402,F401
 
 # ── Stack registry ───────────────────────────────────────────────────────
@@ -142,7 +143,7 @@ from stack_common import SKIP_DIRS, read_text                       # noqa: E402
 # `matches()` in front of Python therefore reclassified the ranker's own
 # corpus as node, and a stack picked that way discovers the wrong units,
 # triages them with the wrong tables, and reports it all as a clean result.
-STACKS = [stack_go, stack_node, stack_python]
+STACKS = [stack_go, stack_node, stack_python, stack_rust]
 
 # How close two stacks may be before the answer is "I do not know". Relative,
 # so it scales with the size of the repo rather than firing on every small

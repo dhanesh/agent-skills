@@ -1011,6 +1011,44 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.path("src/lib.rs", "Open::m"), "calcx::Open")
         self.assertIsNone(self.path("src/lib.rs", "Hidden::m"))
 
+    ELSEWHERE = "type Hidden declared elsewhere: visibility unresolved"
+
+    def test_a_method_of_a_private_type_declared_elsewhere_is_unreachable(self):
+        # NEGATIVE (ruling R8). The impl sits in a public module, the type in
+        # another file, private: reading only the impl's module over-credited
+        # it as `calcx::ops::Hidden`, a path that does not exist.
+        self.discover({"src/lib.rs": "pub mod types;\npub mod ops;\n",
+                       "src/types.rs": "struct Hidden;\n",
+                       "src/ops.rs": "impl crate::types::Hidden { pub fn m(&self) {} }\n"})
+        self.assertEqual(self.reach("src/ops.rs", "Hidden::m"), (False, self.ELSEWHERE))
+        self.assertIsNone(self.path("src/ops.rs", "Hidden::m"))
+
+    def test_a_method_of_a_type_declared_twice_elsewhere_is_unreachable(self):
+        # NEGATIVE (ruling R8): two `pub struct Hidden` -- which one the impl
+        # names is a path resolution this reader does not do.
+        self.discover({"src/lib.rs": "pub mod a;\npub mod b;\npub mod ops;\n",
+                       "src/a.rs": "pub struct Hidden;\n",
+                       "src/b.rs": "pub struct Hidden;\n",
+                       "src/ops.rs": "impl crate::a::Hidden { pub fn m(&self) {} }\n"})
+        self.assertEqual(self.reach("src/ops.rs", "Hidden::m"), (False, self.ELSEWHERE))
+        self.assertIsNone(self.path("src/ops.rs", "Hidden::m"))
+
+    def test_a_method_of_a_type_in_a_private_module_elsewhere_is_unreachable(self):
+        # NEGATIVE (ruling R8): the one declaration is `pub`, its module is not.
+        self.discover({"src/lib.rs": "mod types;\npub mod ops;\n",
+                       "src/types.rs": "pub struct Hidden;\n",
+                       "src/ops.rs": "impl crate::types::Hidden { pub fn m(&self) {} }\n"})
+        self.assertEqual(self.reach("src/ops.rs", "Hidden::m"), (False, self.ELSEWHERE))
+
+    def test_a_method_of_a_pub_type_declared_elsewhere_is_reachable_by_the_types_path(self):
+        # Ruling R8's positive: one `pub` declaration in a public module. The
+        # import path is the TYPE's module, not the impl's.
+        self.discover({"src/lib.rs": "pub mod types;\npub mod ops;\n",
+                       "src/types.rs": "pub struct Open;\n",
+                       "src/ops.rs": "impl crate::types::Open { pub fn m(&self) {} }\n"})
+        self.assertEqual(self.reach("src/ops.rs", "Open::m"), (True, ""))
+        self.assertEqual(self.path("src/ops.rs", "Open::m"), "calcx::types::Open")
+
     def test_a_path_attribute_is_resolved(self):
         self.discover({"src/lib.rs": '#[path = "x/y.rs"]\npub mod z;\n',
                        "src/x/y.rs": "pub fn deep() {}\npub mod w;\n",
@@ -1105,17 +1143,311 @@ class TestBinaryModulePaths(CalcxCase):
             ref_rel="src/bin/tool/main.rs"), ((), ("run",)))
 
 
+# ── Triage ───────────────────────────────────────────────────────────────
+
+class TriageCase(DiscoveryCase):
+    def tier(self, files, name, rel="src/lib.rs"):
+        self.discover(files)
+        return stack_rust.triage(self.root, self.unit(rel, name))
+
+
+class TestTriageByGroup(TriageCase):
+    """One unit per group, each in its tier. Mutation "swap filesystem into
+    UNCONTROLLABLE" is killed here."""
+
+    LIB = ("use std::env;\n"
+           "use std::fs;\n"
+           "use std::net::TcpStream;\n"
+           "use std::process::Command;\n"
+           "use std::time::SystemTime;\n"
+           "use std::arch::asm;\n"
+           "use rand::Rng;\n"
+           "pub fn pure(a: u32, b: u32) -> u32 { a + b }\n"
+           "pub fn load(p: &str) -> Vec<u8> { fs::read(p).unwrap() }\n"
+           'pub fn mode() -> String { env::var("MODE").unwrap() }\n'
+           'pub fn dial() -> bool { TcpStream::connect("db:5432").is_ok() }\n'
+           'pub fn list() -> bool { Command::new("ls").status().is_ok() }\n'
+           "pub fn stamp() -> SystemTime { SystemTime::now() }\n"
+           "pub fn roll() -> u32 { rand::thread_rng().gen_range(0..6) }\n"
+           'pub fn open() -> bool { rusqlite::Connection::open("x.db").is_ok() }\n'
+           'pub fn nop() { unsafe { asm!("nop") } }\n')
+
+    EXPECT = (("pure", 1, "no I/O markers"), ("load", 2, "filesystem"),
+              ("mode", 2, "environment"), ("dial", 3, "network"),
+              ("list", 3, "subprocess"), ("stamp", 3, "clock"),
+              ("roll", 3, "randomness"), ("open", 3, "database"),
+              ("nop", 4, "inline assembly"))
+
+    def test_each_group_lands_in_its_tier(self):
+        self.discover({"src/lib.rs": self.LIB})
+        for name, tier, word in self.EXPECT:
+            with self.subTest(name=name):
+                got, reason = stack_rust.triage(self.root, self.unit("src/lib.rs", name))
+                self.assertEqual(got, tier, reason)
+                self.assertIn(word, reason)
+
+    def test_the_tables_are_the_seven_groups_split_as_the_spec_says(self):
+        self.assertEqual(stack_rust.GROUPS, ("clock", "database", "environment", "filesystem",
+                                             "network", "randomness", "subprocess"))
+        self.assertEqual(sorted(stack_rust.CONTROLLABLE), ["environment", "filesystem"])
+        self.assertEqual(stack_rust.STATIC_DECLINE, {
+            "inline assembly": ("asm!", "global_asm!", "naked_asm!"),
+            "raw syscall": ("libc::syscall", "nix::libc::syscall")})
+        # Stdin is guard-only: in no table.
+        every = [m for t in (stack_rust.CONTROLLABLE, stack_rust.UNCONTROLLABLE,
+                             stack_rust.STATIC_DECLINE) for ms in t.values() for m in ms]
+        self.assertEqual([m for m in every if "stdin" in m], [])
+
+    def test_a_raw_syscall_is_declined(self):
+        lib = "use libc::syscall;\npub fn raw() -> i64 { unsafe { syscall(39) } }\n"
+        tier, reason = self.tier({"src/lib.rs": lib}, "raw")
+        self.assertEqual(tier, 4, reason)
+        self.assertIn("raw syscall", reason)
+
+    def test_uncontrollable_outranks_controllable(self):
+        lib = ('pub fn both() { let _ = std::fs::read("x"); '
+               'let _ = std::net::TcpStream::connect("x:1"); }\n')
+        tier, reason = self.tier({"src/lib.rs": lib}, "both")
+        self.assertEqual(tier, 3, reason)
+        self.assertIn("network", reason)
+
+    def test_every_way_of_naming_std_fs_is_filesystem(self):
+        cases = {
+            "leaf": "use std::fs::read_to_string;\n"
+                    "pub fn f(p: &str) -> String { read_to_string(p).unwrap() }\n",
+            "glob": "use std::fs::*;\npub fn f(p: &str) -> String { read_to_string(p).unwrap() }\n",
+            "alias": "use std::fs as disk;\npub fn f(p: &str) -> Vec<u8> { disk::read(p).unwrap() }\n",
+            "group": "use std::{fs::{self, File}, io::Read};\n"
+                     "pub fn f(p: &str) -> bool { File::open(p).is_ok() && fs::metadata(p).is_ok() }\n",
+            "qualified": "pub fn f(p: &str) -> bool { ::std::fs::remove_file(p).is_ok() }\n",
+            "path method": "use std::path::Path;\npub fn f(p: &str) -> bool { Path::new(p).exists() }\n",
+            "open options": "use std::fs::OpenOptions;\n"
+                            "pub fn f(p: &str) -> bool { OpenOptions::new().open(p).is_ok() }\n",
+            "tokio": "pub async fn f(p: &str) -> bool { tokio::fs::read(p).await.is_ok() }\n",
+        }
+        for label, lib in cases.items():
+            with self.subTest(label):
+                tier, reason = self.tier({"src/lib.rs": lib}, "f")
+                self.assertEqual(tier, 2, reason)
+                self.assertIn("filesystem", reason)
+
+    def test_a_crate_module_named_fs_is_not_std_fs(self):
+        # NEGATIVE: `crate::fs` is this crate's own module.
+        tier, reason = self.tier({"src/lib.rs": "pub mod fs;\n"
+                                                "pub fn f() -> u32 { crate::fs::read() }\n",
+                                  "src/fs.rs": "pub fn read() -> u32 { 1 }\n"}, "f")
+        self.assertEqual(tier, 1, reason)
+
+
+class TestTriageReach(TriageCase):
+    """The reach: the body, same-file callees transitively, and named statics.
+    Mutation "drop the lazy-static reach" is killed here."""
+
+    def test_a_same_file_helper_is_chased_transitively(self):
+        lib = ("use std::fs;\n"
+               "pub fn outer(p: &str) -> usize { middle(p) }\n"
+               "fn middle(p: &str) -> usize { inner(p).len() }\n"
+               "fn inner(p: &str) -> Vec<u8> { fs::read(p).unwrap() }\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "outer")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("via middle", reason)
+
+    def test_a_same_named_helper_in_another_file_is_not_chased(self):
+        # NEGATIVE: the reach stops at the file.
+        files = {"src/lib.rs": "pub mod other;\npub fn outer() -> u32 { helper() }\n"
+                               "fn helper() -> u32 { 1 }\n",
+                 "src/other.rs": 'pub fn helper() -> usize { std::fs::read("x").unwrap().len() }\n'}
+        self.assertEqual(self.tier(files, "outer")[0], 1)
+
+    def test_a_method_on_self_is_chased(self):
+        lib = ("pub struct Store;\n"
+               "impl Store {\n"
+               "    pub fn save(&self) { self.flush() }\n"
+               '    fn flush(&self) { std::fs::write("db", b"").unwrap() }\n'
+               "}\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "Store::save")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("via Store::flush", reason)
+        self.assertTrue(reason.endswith("; import as `use calcx::Store;`"), reason)
+
+    def test_a_lazy_lock_static_is_judged_at_the_units_call(self):
+        lib = ("use std::sync::LazyLock;\n"
+               'static CFG: LazyLock<String> = LazyLock::new(|| std::env::var("X").unwrap());\n'
+               "pub fn cfg_len() -> usize { CFG.len() }\n"
+               "pub fn other() -> usize { 1 }\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "cfg_len")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("environment", reason)
+        self.assertIn("via static CFG", reason)
+        # NEGATIVE: a unit that does not name the static is not judged by it.
+        self.assertEqual(stack_rust.triage(self.root, self.unit("src/lib.rs", "other"))[0], 1)
+
+    def test_a_lazy_static_macro_item_is_judged_at_the_units_call(self):
+        lib = ("lazy_static::lazy_static! {\n"
+               '    static ref PEERS: Vec<u8> = std::fs::read("peers").unwrap();\n'
+               "}\n"
+               "pub fn peers() -> usize { PEERS.len() }\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "peers")
+        self.assertEqual(tier, 2, reason)
+        self.assertIn("via static PEERS", reason)
+
+    def test_a_seeded_rng_is_plain_computation(self):
+        # NEGATIVE.
+        lib = ("use rand::{rngs::StdRng, Rng, SeedableRng};\n"
+               "pub fn roll() -> u32 { StdRng::seed_from_u64(1).gen_range(0..6) }\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "roll")
+        self.assertEqual(tier, 1, reason)
+
+    def test_fs_in_a_comment_or_string_is_not_a_marker(self):
+        # NEGATIVE.
+        lib = ("pub fn name() -> &'static str {\n"
+               "    // std::fs::read(p) would be I/O\n"
+               '    "std::fs::read(p)"\n'
+               "}\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "name")
+        self.assertEqual(tier, 1, reason)
+
+    def test_stdin_is_guard_only(self):
+        # NEGATIVE: stdin is in no marker table; the guard alone watches it.
+        lib = ("use std::io;\n"
+               "pub fn line() -> String {\n"
+               "    let mut s = String::new();\n"
+               "    io::stdin().read_line(&mut s).unwrap();\n"
+               "    s\n"
+               "}\n")
+        tier, reason = self.tier({"src/lib.rs": lib}, "line")
+        self.assertEqual(tier, 1, reason)
+
+
+class TestTriageReachability(TriageCase):
+    """Unreachable units are Tier 3; reachable ones carry their import (R7)."""
+
+    NOT_REACHABLE = "not reachable from tests/ without modifying source (%s)"
+
+    def test_an_unreachable_unit_is_tier_3_with_reachabilitys_reason(self):
+        files = {"src/lib.rs": "mod inner;\npub(crate) fn half() -> u32 { 1 }\n",
+                 "src/inner.rs": "pub fn hidden() -> u32 { 1 }\n"}
+        self.assertEqual(self.tier(files, "half"), (3, self.NOT_REACHABLE % "pub(crate)"))
+        self.assertEqual(stack_rust.triage(self.root, self.unit("src/inner.rs", "hidden")),
+                         (3, self.NOT_REACHABLE % "module inner is private"))
+
+    def test_a_binary_only_unit_is_tier_3_subprocess(self):
+        files = {"src/main.rs": "pub fn run() -> u32 { 1 }\nfn main() {}\n"}
+        self.assertEqual(self.tier(files, "run", rel="src/main.rs"),
+                         (3, "binary-only: reachable only by spawning the binary (subprocess)"))
+
+    def test_a_static_decline_comes_before_reachability(self):
+        files = {"src/lib.rs": 'pub(crate) fn nop() { unsafe { core::arch::asm!("nop") } }\n'}
+        self.assertEqual(self.tier(files, "nop")[0], 4)
+
+    def test_the_reason_carries_the_import_of_a_re_export(self):
+        # Ruling R7: a unit reachable only through `pub use` is imported by
+        # the RE-EXPORTED path.
+        files = {"src/lib.rs": "mod inner;\npub use inner::exported;\n",
+                 "src/inner.rs": "pub fn exported() -> u32 { 1 }\n"
+                                 'pub fn loads() -> usize { std::fs::read("x").unwrap().len() }\n'}
+        tier, reason = self.tier(files, "exported", rel="src/inner.rs")
+        self.assertEqual(tier, 1)
+        self.assertTrue(reason.endswith("; import as `use calcx::exported;`"), reason)
+        # NEGATIVE: `loads` is not re-exported, so it is Tier 3 and names no import.
+        tier, reason = stack_rust.triage(self.root, self.unit("src/inner.rs", "loads"))
+        self.assertEqual(tier, 3)
+        self.assertNotIn("import as", reason)
+
+    def test_a_tier_2_reason_carries_the_import_too(self):
+        files = {"src/lib.rs": "pub mod calc;\n",
+                 "src/calc.rs": 'pub fn load() -> usize { std::fs::read("x").unwrap().len() }\n'}
+        tier, reason = self.tier(files, "load", rel="src/calc.rs")
+        self.assertEqual(tier, 2)
+        self.assertTrue(reason.endswith("; import as `use calcx::calc::load;`"), reason)
+
+    def test_a_unit_that_is_not_there_any_more_is_declined(self):
+        self.discover({"src/lib.rs": "pub fn f() {}\n"})
+        ghost = {"id": "src/lib.rs::gone", "path": "src/lib.rs", "name": "gone",
+                 "lineno": 1, "kind": "function"}
+        self.assertEqual(stack_rust.triage(self.root, ghost)[0], 4)
+
+
+class TestThroughTheCore(RustCase):
+    """The stack as `rank_risk` uses it: registered, detected, ranked and credited."""
+
+    FILES = {
+        "Cargo.toml": CALCX_TOML,
+        "src/lib.rs": "pub mod calc;\npub mod net;\npub mod shapes;\npub mod text;\npub mod units;\n",
+        "src/calc.rs": "pub fn pure(a: u32, b: u32) -> u32 { a + b }\n",
+        "src/net.rs": 'pub fn dial() -> bool { std::net::TcpStream::connect("x:1").is_ok() }\n',
+        "src/shapes.rs": "pub fn area(w: u32, h: u32) -> u32 { w * h }\n",
+        "src/text.rs": "pub fn shout(s: &str) -> String { s.to_uppercase() }\n",
+        "src/units.rs": "pub fn km(m: u32) -> u32 { m / 1000 }\n",
+    }
+
+    def setUp(self):
+        super().setUp()
+        for rel, text in self.FILES.items():
+            write(self.root, rel, text)
+        self.rank_risk = _load("rank_risk")
+        self.rust = self.rank_risk.stack_by_name("rust")
+        self.addCleanup(setattr, self.rust, "_CURRENT_ROOT", None)
+
+    def test_the_registry_holds_stack_rust(self):
+        # `rank_risk` imports the stack by NAME and this file loads it by path,
+        # so the two are different module objects for one source file.
+        self.assertIsNotNone(self.rust)
+        self.assertEqual(os.path.realpath(self.rust.__file__),
+                         os.path.realpath(stack_rust.__file__))
+        self.assertIs(self.rust, sys.modules["stack_rust"])
+
+    def test_a_rust_tree_is_detected(self):
+        self.assertEqual(len([r for r in self.FILES if r.endswith(".rs")]), 6)
+        self.assertIs(self.rank_risk.detect_stack(self.root), self.rust)
+
+    def test_a_rust_repo_is_ranked_end_to_end(self):
+        plan = self.rank_risk.rank(self.root, "10 years ago", 10)
+        self.assertEqual((plan["stack"], plan["discovery"]), ("rust", "heuristic"))
+        self.assertEqual([r["id"] for r in plan["not_netted"]], ["src/net.rs::dial"])
+        pure = next(r for r in plan["ranked"] if r["id"] == "src/calc.rs::pure")
+        self.assertTrue(pure["tier_reason"].endswith("; import as `use calcx::calc::pure;`"))
+
+    def covered(self, test_text):
+        write(self.root, "tests/it.rs", test_text)
+        units, _ = self.rust.discover_units(self.root)
+        return self.rank_risk.already_covered(self.root, units, self.rust)
+
+    def test_an_existing_test_calling_the_public_path_credits_the_unit(self):
+        covered = self.covered("#[test]\nfn t() { assert_eq!(calcx::calc::pure(1, 2), 3); }\n")
+        self.assertIn("src/calc.rs::pure", covered)
+
+    def test_another_crates_same_named_fn_credits_nothing(self):
+        # NEGATIVE.
+        covered = self.covered("#[test]\nfn t() { assert_eq!(other::pure(1, 2), 3); }\n")
+        self.assertEqual(covered, {})
+
+    def test_the_cli_accepts_stack_rust(self):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = self.rank_risk.main([self.root, "--stack", "rust"])
+        self.assertEqual(code, 0)
+        self.assertIn("stack=rust", err.getvalue())
+
+
 class TestInterfaceNames(unittest.TestCase):
-    """The names this task supplies; discovery and triage land in Tasks 3-4."""
+    """All fifteen interface names `rank_risk.py`'s docstring lists, plus the
+    helpers the stack exposes beside them."""
 
-    NAMES = ("STACK_NAME", "MANIFESTS", "classify_manifest", "evidence",
-             "iter_source_files", "is_test_path", "is_test_for", "scope_files",
-             "module_of", "name_pattern", "path_pattern", "IDENTIFIER_RE",
-             "preceding_qualifier", "strip_noncode", "module_bindings",
-             "reached_through_module", "crate_of", "CrateInfo")
+    NAMES = ("STACK_NAME", "evidence", "iter_source_files", "is_test_path",
+             "is_test_for", "scope_files", "module_of", "name_pattern", "path_pattern",
+             "IDENTIFIER_RE", "preceding_qualifier", "module_bindings",
+             "reached_through_module", "discover_units", "triage")
+    EXTRAS = ("MANIFESTS", "classify_manifest", "strip_noncode", "crate_of", "CrateInfo",
+              "reachability", "public_path", "CONTROLLABLE", "UNCONTROLLABLE", "GROUPS",
+              "STATIC_DECLINE")
 
-    def test_supplies_every_task_2_name(self):
-        self.assertEqual([n for n in self.NAMES if not hasattr(stack_rust, n)], [])
+    def test_supplies_every_interface_name(self):
+        self.assertEqual(len(self.NAMES), 15)
+        self.assertEqual([n for n in self.NAMES + self.EXTRAS
+                          if not hasattr(stack_rust, n)], [])
         self.assertEqual(stack_rust.STACK_NAME, "rust")
         self.assertEqual(stack_rust.MANIFESTS, ("Cargo.toml",))
         self.assertEqual(stack_rust.IDENTIFIER_RE.pattern,
