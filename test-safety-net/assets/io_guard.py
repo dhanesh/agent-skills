@@ -692,6 +692,9 @@ def _guarded(group, target, original):
     guard.__name__ = getattr(original, "__name__", "guarded")
     guard.__doc__ = "test-safety-net io_guard wrapper around %s" % target
     guard.__wrapped__ = original
+    # What this wrapper enforces, so a pre-bound reference to the same original
+    # elsewhere in the stdlib can be guarded identically (`_patch_prebound_stdlib`).
+    guard._tsn_group_label = (group, target)
     return guard
 
 
@@ -1045,6 +1048,60 @@ def arm(tier, allow=None):
         real_import = builtins.__import__
         builtins.__import__ = _guarded_import(real_import)
         _undo.append((builtins, "__import__", real_import))
+    _patch_prebound_stdlib()
+
+
+def _patch_prebound_stdlib():
+    """Guard the standard library's OWN pre-bound references to patched names.
+
+    Residual 3 -- "a reference bound before the guard armed keeps the
+    original" -- is a residual for the TARGET REPO'S code. It must never be one
+    for the standard library the filter marks as I/O, and on Python 3.10 it
+    was: `pathlib` routes every filesystem call through
+    `pathlib._NormalAccessor`, whose `open`, `stat`, `listdir`, `scandir`,
+    `mkdir`, `unlink`, `rename`, ... are `io.open`, `os.stat`, ... BOUND AT
+    IMPORT. So `Path.read_text()`, `Path.exists()` and `Path.iterdir()` reached
+    the real primitives while the guard patched only the module names, and on
+    3.10 a tier 1 unit could read and write through `pathlib` under a green
+    proof -- while the filter marks `pathlib` as filesystem I/O. Measured in a
+    `python:3.10-slim` container; Python 3.11 removed the accessor, which is why
+    nothing newer showed it.
+
+    Matched by IDENTITY against the originals this arm already replaced (the
+    undo log), not by a list of names: every group is covered, and the
+    correspondence cannot drift from the patch list. Each is installed as a
+    `staticmethod`, because the guarded wrapper is a Python function and would
+    otherwise bind as a method and receive the accessor as its first argument.
+    On a Python with no accessor this does nothing.
+    """
+    import pathlib
+    accessor = getattr(pathlib, "_NormalAccessor", None)
+    if accessor is None:
+        return
+    # One original can sit under SEVERAL patched names: on 3.10 `builtins.open`,
+    # `io.open` and `_io.open` are the same object. Keep every label, then pick
+    # the one naming the accessor attribute's own module role -- `io.open` for
+    # `open`, `os.stat` for `stat`, which is also what 3.11+'s pathlib reaches
+    # -- so a trip reads the same on every supported Python.
+    replaced = {}
+    for obj, attr, original in _undo:
+        entry = _patched_label(obj, attr)
+        if entry is not None:
+            replaced.setdefault(id(original), []).append(entry)
+    for attr, value in sorted(vars(accessor).items()):
+        entries = replaced.get(id(value))
+        if not entries:
+            continue
+        preferred = ("io.%s" % attr, "os.%s" % attr)
+        group, label = next((e for e in entries if e[1] in preferred), entries[0])
+        setattr(accessor, attr, staticmethod(_guarded(group, label, value)))
+        _undo.append((accessor, attr, value))
+
+
+def _patched_label(obj, attr):
+    """(group, label) the wrapper now installed at `obj.attr` enforces, or None."""
+    current = getattr(obj, attr, None)
+    return getattr(current, "_tsn_group_label", None)
 
 
 def disarm():

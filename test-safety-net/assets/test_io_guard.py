@@ -89,6 +89,35 @@ class TestTier1BlocksEverything(GuardCase):
                 exc = self.assertTrips("filesystem", fn)
                 self.assertEqual(exc.target, target)
 
+    def test_every_pathlib_entry_point_trips_on_every_python(self):
+        # Python 3.10's pathlib routes through `_NormalAccessor`, whose
+        # attributes are `io.open`, `os.stat`, `os.listdir`, ... bound AT
+        # IMPORT, so patching the module names left every Path operation
+        # reaching the real primitive. The group, not the label, is asserted:
+        # which primitive a Path method reaches changes between releases
+        # (`iterdir` is `listdir` on 3.10-3.11 and `scandir` after), and the
+        # invariant is that it trips, as filesystem, on every version the
+        # skill supports.
+        io_guard.arm(1)
+        p = pathlib.Path(self.path)
+        cases = (
+            ("read_text", lambda: p.read_text()),
+            ("write_text", lambda: pathlib.Path(self.tmp, "new.txt").write_text("x")),
+            ("exists", lambda: p.exists()),
+            ("stat", lambda: p.stat()),
+            ("iterdir", lambda: list(pathlib.Path(self.tmp).iterdir())),
+            ("mkdir", lambda: pathlib.Path(self.tmp, "sub").mkdir()),
+            ("unlink", lambda: p.unlink()),
+        )
+        for name, fn in cases:
+            with self.subTest(method=name):
+                self.assertTrips("filesystem", fn)
+        io_guard.disarm()
+        self.assertTrue(os.path.exists(self.path), "a blocked unlink must not have run")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "sub")))
+        # And disarm puts the accessor back exactly: pathlib works again.
+        self.assertEqual(pathlib.Path(self.path).read_text(), "real bytes on a real disk\n")
+
     def test_writing_a_new_file_is_blocked_not_merely_reported(self):
         # The invariant is about SIDE EFFECTS, so prove the file is not there
         # afterwards: an exception raised after the write would be no guard.
