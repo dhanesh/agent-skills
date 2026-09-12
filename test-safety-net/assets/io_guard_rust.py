@@ -48,13 +48,18 @@ spike's 128 slots used to fall off the end and be exempt):
     (`<T as Trait>::m`, `<T>::m`) the crate of the SELF TYPE T (ruling R14),
     so a crate's own trait impl -- a `Drop`, a `Display`, a `Termination` --
     is judged, not read as transparent the way the raw `$LT$` prefix was.
-    `std`/`core`/`alloc` self types stay transparent;
+    `std`/`core`/`alloc` self types stay transparent, and so does a generic
+    parameter self type (`<T as Debug>`, `<*const T>`), which names no crate.
+    `core::ptr::drop_in_place<T>` is decided by T's crate the same way
+    (ruling R17b), so libtest dropping a crate's panic payload is judged; for
+    a tuple T the first element in a non-transparent crate decides;
   * a `RUNNER_CRATES` frame (libtest) is the runner's own work: exempt.
-    BUT `std::sys::backtrace::__rust_begin_short_backtrace` is the boundary
-    libtest calls the test body through; reaching it before any crate or
-    runner frame means an inlined test body made the call (ruling R13, which
-    closes the optimized-build hole where the body inlines into
-    `call_once`), and it is JUDGED as `(test body, inlined)`;
+    BUT a `TEST_BODY_BOUNDARY_MARKERS` frame IN THE `test` CRATE --
+    `test::__rust_begin_short_backtrace` (R13) or `test::assert_test_result`
+    (R17a) -- is where libtest calls back into the test's own code; reaching
+    one before any crate frame means that code was inlined into libtest's
+    generic, and the call is JUDGED as `(test body, inlined)`. std's own
+    `__rust_begin_short_backtrace` (thread spawn, lang_start) does not count;
   * a symbol without Rust's `17h<16 hex>E` hash, or a transparent-crate
     frame, is passed over -- so a runtime's C++ `_ZN` symbols are never read
     as crate code.
@@ -87,12 +92,18 @@ RUNNER_CRATES = ("test",)
 # std's HashMap seeding, per toolchain: `std::sys::pal::unix::rand` (1.82)
 # and `std::sys::random::linux` (1.92) both name `hashmap_random_keys`.
 SEED_MARKERS = ("hashmap_random_keys",)
-# The boundary libtest calls the test body through (ruling R13). Reaching it
-# before any crate or runner frame means an inlined test body made the call
-# -- the optimized-build hole, where the body inlines up into call_once and
-# the only named frames are std/core. libtest's own bookkeeping never runs
-# under this frame.
-TEST_BODY_BOUNDARY_MARKERS = ("__rust_begin_short_backtrace",)
+# The BODY-SIDE boundaries libtest reaches the test through, matched ONLY in
+# frames of the `test` crate (std's own `std::sys::backtrace::
+# __rust_begin_short_backtrace` on the thread-spawn path and lang_start does
+# not count). Reaching one before any crate frame means crate code inlined
+# into libtest's generic made the call, and it is judged `(test body,
+# inlined)`:
+#   * `test::__rust_begin_short_backtrace` calls the test body (ruling R13:
+#     at opt-level >=1 the body inlines up into call_once beneath it);
+#   * `test::assert_test_result<T>` calls the test's `Termination::report`
+#     (ruling R17a: an `#[inline(always)]` report is monomorphized into it).
+# libtest's own bookkeeping never runs under either frame.
+TEST_BODY_BOUNDARY_MARKERS = ("__rust_begin_short_backtrace", "assert_test_result")
 # The `tsn_control_*` helpers SKILL.md prints, and the group each stands for.
 # `TsnControlEnv` is BELT-AND-BRACES, measured (ruling R12): its drop restores
 # the variable with setenv/unsetenv, which are `environment` already, and the
@@ -115,19 +126,18 @@ CONTROL_HELPERS = {"tsn_control_temp_dir": "filesystem",
 # a measured reason like that one: every entry is a hole by construction.
 SYSTEM_INTERNAL_IMAGES = ("libsystem_malloc.dylib",)
 
-# `chdir` is filesystem and `getcwd` is environment (ruling R16). The
-# `set_current_dir`/`current_dir` markers are both environment in
-# stack_rust; `getcwd` mirrors `current_dir`, while `chdir` is the stricter
-# filesystem -- the fail-closed direction for a call that mutates cwd. Task 7
-# records that asymmetry in the partition. `readlink`/`rmdir`/`chmod`/
-# `symlink`/`realpath` are the calls std's read_link / remove_dir /
-# set_permissions / symlink / canonicalize bottom out in; `fchmodat` is
-# where some std versions put set_permissions.
+# `chdir` and `getcwd` are ENVIRONMENT (ruling R16 as amended): they mirror
+# the `set_current_dir` and `current_dir` markers, which stack_rust puts in
+# environment (R10), so the filter and the guard agree on the group a unit
+# must declare at tier 2. `readlink`/`rmdir`/`chmod`/`symlink`/`realpath` are
+# the calls std's read_link / remove_dir / set_permissions / symlink /
+# canonicalize bottom out in; `fchmodat` is where some std versions put
+# set_permissions.
 _FS_SHARED = ("open", "openat", "stat", "lstat", "fstatat", "access", "mkdir", "unlink",
               "rename", "opendir", "readlink", "rmdir", "chmod", "fchmodat", "symlink",
-              "chdir", "realpath")
+              "realpath")
 _SUBPROCESS = ("posix_spawn", "posix_spawnp", "fork", "execve")
-_ENV = ("getenv", "setenv", "unsetenv", "getcwd")
+_ENV = ("getenv", "setenv", "unsetenv", "getcwd", "chdir")
 _NET = ("socket", "connect", "bind", "getaddrinfo")
 
 # platform -> group -> the libc names the hook intercepts for it. The spec's

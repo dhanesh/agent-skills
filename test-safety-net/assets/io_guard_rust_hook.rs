@@ -99,7 +99,6 @@ static mut KEY: PthreadKey = 0;
 // ARMED is "TSN_BLOCKED is present"; without it every hook returns at once.
 static ARMED: AtomicBool = AtomicBool::new(false);
 static STDIN: AtomicBool = AtomicBool::new(false);
-static DIAG: AtomicBool = AtomicBool::new(false);
 // A TSN_BLOCKED too long to copy blocks EVERY group: fail closed, never open.
 static BLOCK_ALL: AtomicBool = AtomicBool::new(false);
 const BLOCKED_CAP: usize = 512;
@@ -117,13 +116,13 @@ static mut SELF_BASE: *mut c_void = core::ptr::null_mut();
 static TRANSPARENT: &[&[u8]] = &[b"std", b"core", b"alloc", b"panic_unwind", b"backtrace", b"hashbrown", b"std_detect"];
 static RUNNER: &[&[u8]] = &[b"test"];
 static SEED: &[&[u8]] = &[b"hashmap_random_keys"];
-static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace"];
+static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace", b"assert_test_result"];
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
 #[cfg(target_os = "macos")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"chdir", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 #[cfg(target_os = "linux")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"chdir", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 // @@TSN-TABLES-END@@
 
 /// Copies the value of `name` into `buf`; `None` when unset, else its full
@@ -154,8 +153,6 @@ extern "C" fn tsn_init() {
             TIER_LEN = copy_env(c"TSN_TIER", (&raw mut TIER) as *mut u8, TIER_CAP).map(|n| n.min(TIER_CAP)).unwrap_or(0);
             let s = real_getenv(c"TSN_STDIN".as_ptr());
             STDIN.store(!s.is_null() && CStr::from_ptr(s).to_bytes() == b"1", Ordering::Relaxed);
-            let d = real_getenv(c"TSN_DIAG".as_ptr());
-            DIAG.store(!d.is_null() && CStr::from_ptr(d).to_bytes() == b"1", Ordering::Relaxed);
             // Warm the unwinder (glibc's backtrace dlopens libgcc_s on first
             // use) and read the .symtab now, single-threaded, rather than
             // racing to do either inside the first intercepted call.
@@ -187,64 +184,127 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+fn transparent(k: &[u8]) -> bool {
+    k.is_empty() || TRANSPARENT.iter().any(|t| *t == k)
+}
+
+/// A generic type parameter (`T`, `R`, `F`, `K`...): all ASCII uppercase
+/// letters. It names no crate, so a blanket impl over it is transparent.
+fn generic_param(seg: &[u8]) -> bool {
+    !seg.is_empty() && seg.iter().all(|c| c.is_ascii_uppercase())
+}
+
+/// Bytes of the markers that can lead a mangled type: `&` $RF$, `*` $BP$,
+/// `mut ` mut$u20$, `const ` const$u20$, a space $u20$.
+fn skip_markers(t: &[u8]) -> usize {
+    let mut i = 0;
+    loop {
+        let r = &t[i..];
+        if r.starts_with(b"$RF$") || r.starts_with(b"$BP$") {
+            i += 4;
+        } else if r.starts_with(b"mut$u20$") {
+            i += 8;
+        } else if r.starts_with(b"const$u20$") {
+            i += 10;
+        } else if r.starts_with(b"$u20$") {
+            i += 5;
+        } else {
+            return i;
+        }
+    }
+}
+
+/// The deciding crate of the mangled TYPE starting at `t`, or `None` when it
+/// names no deciding crate: an empty segment, a generic parameter, or a
+/// tuple none of whose elements lies in a non-transparent crate. A tuple
+/// `(A, B)` mangles `$LP$A$C$$u20$B$RP$`; its first element in a
+/// non-transparent crate decides (ruling R17b). Otherwise the crate is the
+/// type path's first `..`-separated segment, ending at `..`, `$` (` as `,
+/// `>`, or the type's own generic `<`) or the end.
+fn type_crate(t: &[u8]) -> Option<&[u8]> {
+    let mut i = skip_markers(t);
+    if t[i..].starts_with(b"$LP$") {
+        i += 4;
+        let mut depth = 0usize;
+        let mut elem = true;
+        while i < t.len() {
+            if elem {
+                elem = false;
+                if let Some(k) = type_crate(&t[i..]) {
+                    if !transparent(k) {
+                        return Some(k);
+                    }
+                }
+            }
+            let r = &t[i..];
+            if r.starts_with(b"$LT$") || r.starts_with(b"$LP$") {
+                depth += 1;
+                i += 4;
+            } else if r.starts_with(b"$GT$") || r.starts_with(b"$RP$") {
+                if depth == 0 {
+                    return None; // the tuple closed with no deciding element
+                }
+                depth -= 1;
+                i += 4;
+            } else if depth == 0 && r.starts_with(b"$C$") {
+                i += 3;
+                elem = true;
+            } else {
+                i += 1;
+            }
+        }
+        return None;
+    }
+    let start = i;
+    while i < t.len() && t[i] != b'$' && !(t[i] == b'.' && i + 1 < t.len() && t[i + 1] == b'.') {
+        i += 1;
+    }
+    let seg = &t[start..i];
+    if seg.is_empty() || generic_param(seg) {
+        None
+    } else {
+        Some(seg)
+    }
+}
+
 /// The deciding crate of a mangled first path component `seg`. A plain path
 /// component IS the crate (`_ZN`'s first component is `<len>crate`). An impl
 /// component (`_$LT$...$GT$`, from `<T as Trait>::m` or `<T>::m`) is decided
-/// by the crate of the SELF TYPE T (ruling R14): skip the `$LT$`, skip any
-/// reference/pointer markers, and take T's first `..`-separated segment --
-/// before any ` as `, `>`, or T's own generic `<`.
+/// by the crate of the SELF TYPE T (ruling R14); a generic-parameter T names
+/// no crate and reads as transparent.
 fn seg_crate(seg: &[u8]) -> &[u8] {
-    let mut i = 0;
-    if seg.first() == Some(&b'_') {
-        i = 1;
-    }
+    let i = if seg.first() == Some(&b'_') { 1 } else { 0 };
     if !seg[i..].starts_with(b"$LT$") {
         return seg; // a plain path component: the crate itself
     }
-    i += 4;
-    // reference / pointer markers on T: `&` $RF$, `*` $BP$, `mut ` mut$u20$.
-    loop {
-        if seg[i..].starts_with(b"$RF$") || seg[i..].starts_with(b"$BP$") {
-            i += 4;
-        } else if seg[i..].starts_with(b"mut$u20$") {
-            i += 8;
-        } else {
-            break;
-        }
-    }
-    // T's first path segment ends at `..` (segment sep), `$` (a `$u20$as`,
-    // `$GT$`, or `$LT$` on T) or the end.
-    let start = i;
-    while i < seg.len() {
-        if seg[i] == b'$' {
-            break;
-        }
-        if seg[i] == b'.' && i + 1 < seg.len() && seg[i + 1] == b'.' {
-            break;
-        }
-        i += 1;
-    }
-    &seg[start..i]
+    type_crate(&seg[i + 4..]).unwrap_or(&[])
 }
 
-// 0 transparent, 1 crate code, 2 libtest runner, 3 std seeding its HashMap.
-fn classify(s: &[u8]) -> u8 {
-    if SEED.iter().any(|m| contains(s, m)) {
-        return 3;
-    }
+/// The deciding crate of a legacy-mangled Rust symbol, or `None` when `s` is
+/// not one (no `17h<16 hex>E` hash: a C or C++ symbol). A
+/// `core::ptr::drop_in_place<T>` frame is decided by T's crate (ruling
+/// R17b): libtest dropping a crate's panic payload runs that crate's Drop.
+fn crate_of(s: &[u8]) -> Option<&[u8]> {
     let n = s.len();
     if n < 20 || s[n - 1] != b'E' || &s[n - 20..n - 17] != b"17h" {
-        return 0;
+        return None;
     }
     if !s[n - 17..n - 1].iter().all(|c| c.is_ascii_hexdigit()) {
-        return 0;
+        return None;
     }
     let mut i = 0;
     while i < n && s[i] == b'_' {
         i += 1;
     }
     if i + 1 >= n || s[i] != b'Z' || s[i + 1] != b'N' {
-        return 0;
+        return None;
     }
     i += 2;
     let mut len = 0usize;
@@ -253,16 +313,41 @@ fn classify(s: &[u8]) -> u8 {
         i += 1;
     }
     if len == 0 || i + len > n {
-        return 0;
+        return None;
     }
-    let krate = seg_crate(&s[i..i + len]);
-    if krate.is_empty() || TRANSPARENT.iter().any(|t| *t == krate) {
-        return 0;
+    let mut krate = seg_crate(&s[i..i + len]);
+    if transparent(krate) {
+        const DIP: &[u8] = b"drop_in_place$LT$";
+        if let Some(p) = find(s, DIP) {
+            if let Some(k) = type_crate(&s[p + DIP.len()..]) {
+                krate = k;
+            }
+        }
     }
-    if RUNNER.iter().any(|t| *t == krate) {
-        return 2;
+    Some(krate)
+}
+
+// 0 transparent, 1 crate code, 2 libtest runner, 3 std seeding its HashMap.
+fn classify(s: &[u8]) -> u8 {
+    if SEED.iter().any(|m| contains(s, m)) {
+        return 3;
     }
-    1
+    match crate_of(s) {
+        None => 0,
+        Some(k) if transparent(k) => 0,
+        Some(k) if RUNNER.iter().any(|t| *t == k) => 2,
+        Some(_) => 1,
+    }
+}
+
+/// A body-side boundary (rulings R13, R17a): a TEST_BODY_BOUNDARY frame in
+/// libtest's own `test` crate. std's `__rust_begin_short_backtrace` (thread
+/// spawn, lang_start) is not one.
+fn test_boundary(s: &[u8]) -> bool {
+    match crate_of(s) {
+        Some(k) if RUNNER.iter().any(|t| *t == k) => TEST_BODY_BOUNDARY.iter().any(|m| contains(s, m)),
+        _ => false,
+    }
 }
 
 /// Does the mangled symbol `s` name the item `name`? Either as a legacy path
@@ -457,12 +542,6 @@ unsafe fn decide(what: &'static [u8]) {
     if !symtab::FOUND.load(Ordering::Relaxed) {
         cannot(b"no .symtab in /proc/self/exe");
     }
-    let diag = DIAG.load(Ordering::Relaxed);
-    if diag {
-        out(b"[tsn-diag] via ");
-        out(what);
-        out(if is_main_thread() { b" main-thread\n" } else { b" off-main\n" });
-    }
     let mut resolved = false;
     let mut first = true;
     for &pc in pcs.iter().take(n) {
@@ -476,9 +555,6 @@ unsafe fn decide(what: &'static [u8]) {
         if first {
             first = false;
             if found && system_internal(info.dli_fname) {
-                if diag {
-                    out(b"[tsn-diag]   exempt: system-internal image\n");
-                }
                 return;
             }
         }
@@ -497,34 +573,26 @@ unsafe fn decide(what: &'static [u8]) {
             None => continue,
         };
         resolved = true;
-        let c = classify(s);
-        if diag {
-            out(b"[tsn-diag]   [");
-            out(match c { 1 => b"crate", 2 => b"runner", 3 => b"seed ", _ => b"trans" });
-            out(b"] ");
-            out(s);
-            out(b"\n");
-        }
         // A control helper decides, with the group it stands for.
         if let Some(g) = control(s) {
             judge(g, what, s);
             return;
         }
-        // Ruling R13: libtest calls the test body through
-        // `__rust_begin_short_backtrace`. Reaching it before any crate frame
-        // (a crate frame would have decided and returned already) means an
-        // inlined test body made the call -- the optimized-build hole, where
-        // the body inlines up into call_once and the only named frames are
-        // std/core. This is checked BEFORE the runner exemption because
-        // libtest's own copy of the boundary mangles into the `test` crate
-        // (`_ZN4test28__rust_begin_short_backtrace`), which classify() would
-        // otherwise read as runner work and exempt. libtest's bookkeeping
-        // runs under its OTHER `test::` frames, never under this one.
-        if TEST_BODY_BOUNDARY.iter().any(|m| contains(s, m)) {
+        // Rulings R13 and R17a: libtest calls back into the test's own code
+        // through `test::__rust_begin_short_backtrace` (the test body) and
+        // `test::assert_test_result<T>` (its `Termination::report`).
+        // Reaching one before any crate frame (a crate frame would have
+        // decided and returned already) means that code was inlined into
+        // libtest's generic -- the optimized body under call_once, an
+        // `#[inline(always)]` report. Checked BEFORE the runner exemption,
+        // because both frames mangle into the `test` crate, which classify()
+        // reads as runner work. libtest's own bookkeeping never runs under
+        // either frame.
+        if test_boundary(s) {
             judge(group, what, b"(test body, inlined)");
             return;
         }
-        match c {
+        match classify(s) {
             1 => {
                 judge(group, what, s);
                 return;
