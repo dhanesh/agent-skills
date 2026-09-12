@@ -147,10 +147,23 @@ def _toml_tables(text: str):
     ignored rather than landing in the table before it (where a `path = …`
     used to overwrite `[lib] path`). Killing test:
     `TestCrates.test_a_quoted_table_header_opens_an_ignored_table`.
+
+    R6 AMENDED (fix round 1, probe P19): only a line reached OUTSIDE a value
+    can be a header. After `key = [` or `key = {` whose brackets do not
+    balance on the line, or a triple-quoted string that does not close on
+    it, lines are consumed until the value closes (`_toml_value_state`, which ignores
+    brackets in quoted strings and comments). Read literally, a nested
+    array's `["x"],` line opened a table and lost the `[lib] path` after it.
+    Killing tests: `TestCrates.test_a_multi_line_value_opens_no_table`,
+    `TestReachability.test_a_multi_line_toml_array_keeps_the_lib`.
     """
     tables = [("", {})]
+    depth, mstr = 0, None
     for line in text.splitlines():
         s = line.strip()
+        if depth or mstr:
+            depth, mstr = _toml_value_state(s, depth, mstr)
+            continue
         if not s or s.startswith("#"):
             continue
         if s.startswith("["):
@@ -165,7 +178,49 @@ def _toml_tables(text: str):
             else:
                 value = value.replace('\\"', '"').replace("\\\\", "\\")
             tables[-1][1][kv.group(1)] = value
+        eq = s.find("=")
+        if eq > 0:
+            depth, mstr = _toml_value_state(s[eq + 1:], 0, None)
     return tables
+
+
+def _toml_value_state(s: str, depth: int, mstr):
+    """(open bracket depth, open triple quote or None) after value text `s`.
+
+    Continues from `depth` / `mstr`. `[`/`{` open and `]`/`}` close; a
+    `"…"` or `'…'` string, and anything after a `#` outside one, count for
+    nothing; three double or three single quotes open a multi-line string
+    that only the same three quotes close.
+    """
+    i, n = 0, len(s)
+    while i < n:
+        if mstr:
+            j = s.find(mstr, i)
+            if j < 0:
+                return depth, mstr
+            i, mstr = j + 3, None
+            continue
+        c = s[i]
+        if c == "#":
+            break
+        if s.startswith('"""', i) or s.startswith("'''", i):
+            mstr = s[i:i + 3]
+            i += 3
+        elif c == '"':
+            i += 1
+            while i < n and s[i] != '"':
+                i += 2 if s[i] == "\\" else 1
+            i += 1
+        elif c == "'":
+            j = s.find("'", i + 1)
+            i = n if j < 0 else j + 1
+        else:
+            if c in "[{":
+                depth += 1
+            elif c in "]}":
+                depth -= 1
+            i += 1
+    return max(depth, 0), mstr
 
 
 def _join(d: str, path: str) -> str:
@@ -1124,8 +1179,9 @@ def discover_units(root: str, precise: bool = True):
     `pub(<restriction>)`, with a body, in a library or binary source file
     (`_source_files`; `tests/`, `examples/`, `benches/`, `build.rs`,
     `target/` and vendored code never are). `#[cfg(test)]` items are skipped
-    whole: an inline test module, a test-only fn or impl, and a file that
-    only a `#[cfg(test)] mod x;` declares.
+    whole: an inline test module, a test-only fn or impl, and every file
+    reached only at or below a `#[cfg(test)] mod` -- from the lib or a
+    binary, out of line or inside an inline test module (fix round 1).
 
     UNREACHABLE UNITS ARE STILL UNITS. A `pub(crate)` fn, a `pub fn` in a
     private module and a binary's fns are ranked and reported; `reachability`
@@ -1192,12 +1248,17 @@ def _scan_file(text: str):
     return out
 
 
-def _scan(code, ks, lo, hi, chain, recv, out):
+def _scan(code, ks, lo, hi, chain, recv, out, in_test=False):
     """Read the items of `code[lo:hi]` into `out`.
 
     `chain` is the inline modules around the region; `recv` is the type of
     the inherent impl whose body this is, else None. `ks` is the same text
     with literals kept, read only for a `#[path = "…"]` value.
+
+    `in_test` marks a cfg(test) region -- a `#[cfg(test)] mod x { … }`, or
+    one opening with `#![cfg(test)]`. Nothing in it is recorded except its
+    `mod x;` declarations, as cfg(test) ones, so the walk can mark every
+    file below them test-only (fix round 1, probe P2).
     """
     i = lo
     while True:
@@ -1205,12 +1266,16 @@ def _scan(code, ks, lo, hi, chain, recv, out):
         if i >= hi:
             return
         h = _item_head(code, ks, i, hi)
-        if h is None or h.inner_test:          # `#![cfg(test)]`: the region is test-only
+        if h is None:
             return
+        if h.inner_test and not in_test:       # `#![cfg(test)]`: the region is test-only
+            _scan(code, ks, lo, hi, chain, recv, out, True)
+            return
+        test = in_test or h.cfg_test
         if h.kw == "use":                      # a use tree holds `{`: it ends at `;`
             j = code.find(";", h.after, hi)
             j = hi if j < 0 else j
-            if recv is None and not h.cfg_test:
+            if recv is None and not test:
                 out.uses.append(_UseDecl(code[h.after:j], h.vis, chain))
             i = j + 1
             continue
@@ -1223,10 +1288,15 @@ def _scan(code, ks, lo, hi, chain, recv, out):
         else:
             nxt = j + 1
         if h.kw == "mod" and block is None:
-            if recv is None:                   # a cfg(test) `mod x;` is recorded as one
-                _record_mod_decl(code, h, chain, out)
-        elif not h.cfg_test:
+            if recv is None:
+                _record_mod_decl(code, h, chain, out, test)
+        elif not test:
             _record(code, ks, h, block, j, chain, recv, out)
+        elif h.kw == "mod" and block is not None and recv is None:
+            name = _WORD_AT.match(code, _skip_ws(code, h.after, j))
+            if name:                           # a test module: only its `mod x;`s count
+                _scan(code, ks, block[0], block[1],
+                      chain + ((_bare(name.group()), h.vis),), None, out, True)
         i = nxt
 
 
@@ -1311,10 +1381,10 @@ def _record(code, ks, h, block, stop, chain, recv, out):
             out.types.setdefault((_names(chain), name.group()), h.vis)
 
 
-def _record_mod_decl(code, h, chain, out):
+def _record_mod_decl(code, h, chain, out, cfg_test):
     name = _WORD_AT.match(code, _skip_ws(code, h.after, len(code)))
     if name:
-        out.mods.append(_ModDecl(_bare(name.group()), h.vis, h.path, chain, h.cfg_test))
+        out.mods.append(_ModDecl(_bare(name.group()), h.vis, h.path, chain, cfg_test))
 
 
 def _inherent_type(header: str):
@@ -1430,6 +1500,11 @@ _TREES = {}
 
 _MAX_MODULE_DEPTH = 64
 
+# A bound on `_publish`'s relaxation rounds. Each round only ever shortens a
+# path, so it converges well inside this; the bound is a backstop, and a
+# path left unshortened by it is still a real public path.
+_MAX_PUBLISH_ROUNDS = 256
+
 
 def reachability(root: str, unit: dict):
     """(reachable, why) for `unit`: can a `tests/` crate of its package name it?
@@ -1444,43 +1519,74 @@ def reachability(root: str, unit: dict):
       "module calc::inner is private" the first module on the path that is not
                                       public (or "... is pub(crate)")
       "no mod declares src/x.rs"      a file the crate never compiles
-      "cfg(test)"                     a file only a `#[cfg(test)] mod` declares
+      "cfg(test)"                     a file reached only at or below a
+                                      `#[cfg(test)] mod`
 
     A file declared more than once is reachable when any declaration is.
     """
+    paths, why = _reach(root, unit)
+    return (True, "") if paths else (False, why)
+
+
+def public_path(root: str, unit: dict):
+    """The path a `tests/` crate imports `unit` by, or None when it cannot.
+
+    CONTROLLER RULING R7 (fix round 1). `<crate>::<public path>`, the crate
+    as `use` spells it: `calcx::calc::pure` through a `pub mod` chain,
+    `calcx::exported` through a named `pub use` (the bound name, when
+    renamed), `calcx::deeper::d` when a glob re-exports `deeper`. A method's
+    path is its TYPE's: `calcx::calc::Report`. With several, the shortest
+    wins, ties to the lexically first. None exactly when `reachability`
+    says unreachable. Task 4 appends ``import as `use <public_path>;` `` to
+    each reachable unit's triage reason.
+    """
+    paths, _why = _reach(root, unit)
+    if not paths:
+        return None
+    info = crate_of(root, _norm(unit["path"]))
+    return "::".join((info.name,) + min(paths, key=lambda p: (len(p), p)))
+
+
+def _reach(root: str, unit: dict):
+    """([public path of `unit`], why not): what `reachability` and
+    `public_path` both answer from. A path is a tuple of segments after the
+    crate name; the list is empty exactly when `why` is set."""
     rel = _norm(unit["path"])
     info = crate_of(root, rel)
     if info is None:
-        return False, "%s is in no crate" % rel
+        return [], "%s is in no crate" % rel
     tree = _tree(root, info)
     decls = tree.lib_files.get(rel)
     if not decls:
         if (rel in tree.bin_files or info.lib is None
                 or _within(rel, info.dir).startswith("src/bin/")):
-            return False, "binary-only"
+            return [], "binary-only"
         if rel in tree.test_files:
-            return False, "cfg(test)"
-        return False, "no mod declares %s" % rel
+            return [], "cfg(test)"
+        return [], "no mod declares %s" % rel
     text = read_text(root, rel)
     scan = _scan_file(text)
     fn = _declaration(scan, text, unit)
     if fn is None:
-        return False, "no declaration of %s at line %s" % (unit["name"], unit.get("lineno"))
+        return [], "no declaration of %s at line %s" % (unit["name"], unit.get("lineno"))
     if fn.vis != "pub":
-        return False, fn.vis or "private"
+        return [], fn.vis or "private"
     inner = _names(fn.chain)
     if fn.recv:
         type_vis = scan.types.get((inner, fn.recv))
         if type_vis is not None and type_vis != "pub":
-            return False, "type %s is %s" % (fn.recv, type_vis or "private")
+            return [], "type %s is %s" % (fn.recv, type_vis or "private")
     item = fn.recv or fn.name
-    why = ""
+    paths, why = [], ""
     for mp in decls:
         full = mp + inner
-        if full in tree.pub_mods or (full, item) in tree.exported:
-            return True, ""
-        why = why or _first_closed(tree, full)
-    return False, why
+        if full in tree.pub_mods:
+            paths.append(tree.pub_mods[full] + (item,))
+        if (full, item) in tree.exported:
+            paths.append(tree.exported[(full, item)])
+        if not paths:
+            why = why or _first_closed(tree, full)
+    return paths, ("" if paths else why)
 
 
 def _declaration(scan, text, unit):
@@ -1529,7 +1635,7 @@ def _build_tree(root: str, info):
         _walk(root, info.lib, lib_files, mods, uses, test_files)
     bin_files = {}
     for b in info.bins:
-        _walk(root, b, bin_files, {}, [], set())
+        _walk(root, b, bin_files, {}, [], test_files)    # probe P3: a bin's test modules too
     pub_mods, exported = _publish(mods, uses)
     return _Tree(lib_files, frozenset(bin_files), frozenset(test_files),
                  mods, pub_mods, exported)
@@ -1547,19 +1653,28 @@ def _walk(root, start, files, mods, uses, test_files):
 
     Fills `files` (`{rel: [module path]}`), `mods` (`{module path: vis}`),
     `uses` (`[(declaring module path, _UseDecl)]`) and `test_files`.
+
+    The walk does NOT stop at a cfg(test) declaration (fix round 1, probe
+    P1): it descends, and every file reached at or below one goes to
+    `test_files` and nowhere else -- no module, no `pub use`, no file entry
+    -- so a file reached only that way is never a unit.
     """
-    stack, seen = [(start, (), True)], set()
+    stack, seen = [(start, (), True, False)], set()
     while stack:
-        rel, mp, mod_rs = stack.pop()
-        if (rel, mp) in seen or len(mp) > _MAX_MODULE_DEPTH or not _is_file(root, rel):
+        rel, mp, mod_rs, test = stack.pop()
+        if ((rel, mp, test) in seen or len(mp) > _MAX_MODULE_DEPTH
+                or not _is_file(root, rel)):
             continue
-        seen.add((rel, mp))
-        files.setdefault(rel, []).append(mp)
+        seen.add((rel, mp, test))
         scan = _scan_file(read_text(root, rel))
-        for chain in scan.inline:
-            mods[mp + _names(chain)] = chain[-1][1]
-        for u in scan.uses:
-            uses.append((mp + _names(u.chain), u))
+        if test:
+            test_files.add(rel)
+        else:
+            files.setdefault(rel, []).append(mp)
+            for chain in scan.inline:
+                mods[mp + _names(chain)] = chain[-1][1]
+            for u in scan.uses:
+                uses.append((mp + _names(u.chain), u))
         here = posixpath.dirname(rel)
         own = here if mod_rs else posixpath.join(
             here, posixpath.splitext(posixpath.basename(rel))[0])
@@ -1576,12 +1691,11 @@ def _walk(root, start, files, mods, uses, test_files):
                     target, child_mod_rs = nested, True
                 else:
                     continue
-            if m.cfg_test:
-                test_files.add(target)
-                continue
+            child_test = test or m.cfg_test
             child = mp + inner + (m.name,)
-            mods[child] = m.vis
-            stack.append((target, child, child_mod_rs))
+            if not child_test:
+                mods[child] = m.vis
+            stack.append((target, child, child_mod_rs, child_test))
 
 
 def _is_file(root: str, rel: str) -> bool:
@@ -1591,7 +1705,7 @@ def _is_file(root: str, rel: str) -> bool:
 
 
 def _publish(mods: dict, uses):
-    """(public module paths, exported (module path, item)) -- to a fixed point.
+    """({public module: path}, {(module, item): path}) -- shortest paths, to a fixed point.
 
     `resolved` holds each unrestricted `pub use` leaf as (declaring module,
     bound name or None for a glob, target path). A leaf takes effect once its
@@ -1619,25 +1733,39 @@ def _publish(mods: dict, uses):
                 continue
             name = binding or path[-1]
             resolved.append((mp, name, tuple(path)))
-    pub, exported = {()}, set()
-    changed = True
-    while changed:
+    # `pub[m]` is the shortest public path m's ITEMS are named under: m's own
+    # path for a `pub mod` chain, the re-exporting module's for a glob
+    # (`pub use inner::*;` at the root puts inner's items at the root), the
+    # bound name's for a named re-export of a module. `exported[(m, item)]`
+    # is the shortest public path of that one item. Ruling R7.
+    pub, exported = {(): ()}, {}
+
+    def offer(table, key, path):
+        old = table.get(key)
+        if old is None or (len(path), path) < (len(old), old):
+            table[key] = path
+            return True
+        return False
+
+    for _round in range(_MAX_PUBLISH_ROUNDS):
         changed = False
         for m, vis in mods.items():
-            if m and vis == "pub" and m not in pub and m[:-1] in pub:
-                pub.add(m)
-                changed = True
+            if m and vis == "pub" and m[:-1] in pub:
+                changed |= offer(pub, m, pub[m[:-1]] + (m[-1],))
         for mp, name, target in resolved:
-            if mp not in pub and (name is None or (mp, name) not in exported):
-                continue
-            if name is None or target in mods:
-                if target in mods and target not in pub:
-                    pub.add(target)
-                    changed = True
-            elif (target[:-1], target[-1]) not in exported:
-                exported.add((target[:-1], target[-1]))
-                changed = True
-    return frozenset(pub), frozenset(exported)
+            bases = []
+            if mp in pub:
+                bases.append(pub[mp] + ((name,) if name is not None else ()))
+            if name is not None and (mp, name) in exported:
+                bases.append(exported[(mp, name)])
+            for base in bases:
+                if target in mods:
+                    changed |= offer(pub, target, base)
+                elif name is not None:
+                    changed |= offer(exported, (target[:-1], target[-1]), base)
+        if not changed:
+            break
+    return pub, exported
 
 
 def _use_target(segs, mp):

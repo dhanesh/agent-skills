@@ -239,6 +239,22 @@ class TestCrates(RustCase):
             "[a]\n[target.'cfg(unix)'.x]\nk = 'v'\n[[b]]\n")]
         self.assertEqual(tables, ["", "a", None, "b"])
 
+    def test_a_multi_line_value_opens_no_table(self):
+        # NEGATIVE (probe P19, ruling R6 amended). A line starting with `[`
+        # INSIDE a multi-line array, or a triple-quoted string, is part of a
+        # value, not a header. Read literally, `["x"],` opened an ignored
+        # table and `[lib] path` was lost; `"["` inside the array must not
+        # count; and a `[lib]` line inside a description opened a second lib.
+        text = ('[package]\nname = "calcx"\ndescription = """\n[lib]\npath = "nope.rs"\n"""\n'
+                '[lib]\nfoo = [\n  ["x"],\n  "[",\n]\nbar = { a = [\n  [1],\n] }\n'
+                'path = "src/root.rs"\n[[bin]]\nname = "t"\npath = "src/t.rs"\n')
+        self.assertEqual([t for t, _kv in stack_rust._toml_tables(text)],
+                         ["", "package", "lib", "bin"])
+        write(self.root, "Cargo.toml", text)
+        write(self.root, "src/root.rs", "")
+        self.assertEqual(stack_rust.crate_of(self.root, "src/root.rs"), stack_rust.CrateInfo(
+            dir="", name="calcx", lib="src/root.rs", bins=("src/t.rs",)))
+
     def test_no_lib_file_means_no_lib(self):
         write(self.root, "Cargo.toml", CALCX_TOML)
         write(self.root, "src/main.rs", "fn main() {}\n")
@@ -749,6 +765,38 @@ class TestHeuristicDiscovery(DiscoveryCase):
                                      "src/test_support.rs": "pub fn fixture() {}\n"}),
                          ["kept"])
 
+    def cfg_test_why(self, rel, name):
+        unit = {"id": "%s::%s" % (rel, name), "path": rel, "name": name,
+                "lineno": 1, "kind": "function"}
+        return stack_rust.reachability(self.root, unit)
+
+    def test_a_cfg_test_modules_descendants_are_skipped(self):
+        # NEGATIVE (fix round 1, probe P1): a `mod` below a cfg(test) one is
+        # test-only too.
+        self.assertEqual(self.names({
+            "src/lib.rs": "pub fn keep() {}\n#[cfg(test)]\nmod testutil;\n",
+            "src/testutil/mod.rs": "pub mod fixtures;\npub fn a() {}\n",
+            "src/testutil/fixtures.rs": "pub fn fx() {}\n"}), ["keep"])
+        self.assertEqual(self.cfg_test_why("src/testutil/fixtures.rs", "fx"),
+                         (False, "cfg(test)"))
+
+    def test_a_mod_declared_inside_a_cfg_test_block_is_skipped(self):
+        # NEGATIVE (fix round 1, probe P2).
+        self.assertEqual(self.names({
+            "src/lib.rs": "pub fn keep() {}\n#[cfg(test)]\nmod tests {\n    mod common;\n}\n",
+            "src/tests/common.rs": "pub fn shared_helper() {}\n"}), ["keep"])
+        self.assertEqual(self.cfg_test_why("src/tests/common.rs", "shared_helper"),
+                         (False, "cfg(test)"))
+
+    def test_a_binarys_cfg_test_module_is_skipped(self):
+        # NEGATIVE (fix round 1, probe P3): the bin walk records test files too.
+        self.assertEqual(self.names({
+            "src/lib.rs": "pub fn keep() {}\n",
+            "src/main.rs": "fn main() {}\n#[cfg(test)]\nmod bintests;\n",
+            "src/bintests.rs": "pub fn bin_helper() {}\n"}), ["keep"])
+        self.assertEqual(self.cfg_test_why("src/bintests.rs", "bin_helper"),
+                         (False, "cfg(test)"))
+
     def test_a_fn_named_in_a_string_or_comment_is_not_a_unit(self):
         # NEGATIVE.
         text = ('pub const S: &str = "pub fn in_string() {}";\n'
@@ -811,11 +859,15 @@ class TestReachability(DiscoveryCase):
     def reach(self, rel, name):
         return stack_rust.reachability(self.root, self.unit(rel, name))
 
+    def path(self, rel, name):
+        return stack_rust.public_path(self.root, self.unit(rel, name))
+
     def test_a_pub_mod_chain_is_reachable(self):
         self.discover({"src/lib.rs": "pub mod a;\n",
                        "src/a.rs": "pub mod b;\n",
                        "src/a/b.rs": "pub fn run() {}\n"})
         self.assertEqual(self.reach("src/a/b.rs", "run"), (True, ""))
+        self.assertEqual(self.path("src/a/b.rs", "run"), "calcx::a::b::run")
 
     def test_a_private_mod_is_not_reachable(self):
         # NEGATIVE. Mutation "count a private mod as public" is killed here.
@@ -827,6 +879,9 @@ class TestReachability(DiscoveryCase):
                          (False, "module calc::inner is private"))
         self.assertEqual(self.reach("src/calc/shared.rs", "half"),
                          (False, "module calc::shared is pub(crate)"))
+        # NEGATIVE: an unreachable unit has no public path.
+        self.assertIsNone(self.path("src/calc/inner.rs", "hidden"))
+        self.assertIsNone(self.path("src/calc/shared.rs", "half"))
 
     def test_a_private_inline_mod_is_not_reachable(self):
         # NEGATIVE: an inline `mod name { }` is a module like any other.
@@ -834,6 +889,8 @@ class TestReachability(DiscoveryCase):
                                      "mod hid { pub fn shut() {} }\n"})
         self.assertEqual(self.reach("src/lib.rs", "open"), (True, ""))
         self.assertEqual(self.reach("src/lib.rs", "shut"), (False, "module hid is private"))
+        self.assertEqual(self.path("src/lib.rs", "open"), "calcx::api::open")
+        self.assertIsNone(self.path("src/lib.rs", "shut"))
 
     def test_a_named_pub_use_reaches_only_what_it_names(self):
         # Mutation "ignore `pub use`" is killed here and in the glob test.
@@ -843,6 +900,9 @@ class TestReachability(DiscoveryCase):
         # NEGATIVE: the sibling it did not name.
         self.assertEqual(self.reach("src/inner.rs", "sibling"),
                          (False, "module inner is private"))
+        # Ruling R7: the path a tests/ crate imports it by is the re-export's.
+        self.assertEqual(self.path("src/inner.rs", "exported"), "calcx::exported")
+        self.assertIsNone(self.path("src/inner.rs", "sibling"))
 
     def test_a_glob_pub_use_reaches_every_pub_item(self):
         self.discover({"src/lib.rs": "mod inner;\npub use self::inner::*;\n",
@@ -854,6 +914,46 @@ class TestReachability(DiscoveryCase):
                 self.assertEqual(self.reach("src/inner.rs", name), (True, ""))
         # NEGATIVE: a glob re-exports an item no further than its own visibility.
         self.assertEqual(self.reach("src/inner.rs", "three"), (False, "pub(crate)"))
+        # Ruling R7: a glob puts every item at the re-exporting module's path;
+        # a method's path is its TYPE's.
+        self.assertEqual([self.path("src/inner.rs", n) for n in ("one", "two", "W::m", "three")],
+                         ["calcx::one", "calcx::two", "calcx::W", None])
+
+    def test_a_glob_re_exports_pub_submodules_too(self):
+        # Probe P17 (ruling R7): `deeper` is nameable as `calcx::deeper`.
+        self.discover({"src/lib.rs": "mod inner;\npub use inner::*;\n",
+                       "src/inner.rs": "pub mod deeper;\nmod closed;\npub fn one() {}\n",
+                       "src/inner/deeper.rs": "pub fn d() {}\n",
+                       "src/inner/closed.rs": "pub fn c() {}\n"})
+        self.assertEqual(self.path("src/inner/deeper.rs", "d"), "calcx::deeper::d")
+        self.assertEqual(self.path("src/inner.rs", "one"), "calcx::one")
+        # NEGATIVE: a private submodule is not re-exported by the glob. The
+        # glob exposes `inner` itself, so the module that is closed is `closed`.
+        self.assertEqual(self.reach("src/inner/closed.rs", "c"),
+                         (False, "module inner::closed is private"))
+        self.assertIsNone(self.path("src/inner/closed.rs", "c"))
+
+    def test_public_path_prefers_the_shortest(self):
+        # Ruling R7: reachable by its module chain AND by a root re-export
+        # (renamed), the shorter path wins.
+        self.discover({"src/lib.rs": "pub mod calc;\npub use calc::add::sum as s;\n",
+                       "src/calc.rs": "pub mod add;\npub struct Report;\n"
+                                      "impl Report { pub fn total(&self) {} }\n",
+                       "src/calc/add.rs": "pub fn sum() {}\npub fn other() {}\n"})
+        self.assertEqual(self.path("src/calc/add.rs", "sum"), "calcx::s")
+        self.assertEqual(self.path("src/calc/add.rs", "other"), "calcx::calc::add::other")
+        self.assertEqual(self.path("src/calc.rs", "Report::total"), "calcx::calc::Report")
+
+    def test_public_path_uses_the_crates_use_name(self):
+        # Probe P15: a workspace member named `a-crate` is imported as `a_crate`.
+        write(self.root, "crates/a/Cargo.toml", '[package]\nname = "a-crate"\n')
+        self.discover({"crates/a/src/lib.rs": "pub mod m;\nmod p;\npub use p::g;\n",
+                       "crates/a/src/m.rs": "pub fn f() {}\n",
+                       "crates/a/src/p.rs": "pub fn g() {}\npub fn h() {}\n"},
+                      toml='[workspace]\nmembers = ["crates/a"]\n')
+        self.assertEqual(self.path("crates/a/src/m.rs", "f"), "a_crate::m::f")
+        self.assertEqual(self.path("crates/a/src/p.rs", "g"), "a_crate::g")
+        self.assertIsNone(self.path("crates/a/src/p.rs", "h"))
 
     def test_pub_use_paths_crate_super_and_relative(self):
         self.discover({"src/lib.rs": "mod a;\nmod b;\npub mod api;\n",
@@ -864,6 +964,8 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.reach("src/a.rs", "from_crate"), (True, ""))
         self.assertEqual(self.reach("src/b.rs", "from_super"), (True, ""))
         self.assertEqual(self.reach("src/a.rs", "not_named"), (False, "module a is private"))
+        self.assertEqual(self.path("src/a.rs", "from_crate"), "calcx::api::from_crate")
+        self.assertEqual(self.path("src/b.rs", "from_super"), "calcx::api::from_super")
 
     def test_a_pub_use_in_a_private_module_reaches_nothing(self):
         # NEGATIVE: the re-export must itself be public.
@@ -885,6 +987,7 @@ class TestReachability(DiscoveryCase):
                        "src/a.rs": "mod b;\npub use self::b::x;\n",
                        "src/a/b.rs": "pub fn x() {}\npub fn y() {}\n"})
         self.assertEqual(self.reach("src/a/b.rs", "x"), (True, ""))
+        self.assertEqual(self.path("src/a/b.rs", "x"), "calcx::x")
         # NEGATIVE: the item neither re-export names.
         self.assertEqual(self.reach("src/a/b.rs", "y"), (False, "module a is private"))
 
@@ -895,6 +998,8 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.reach("src/lib.rs", "up"), (False, "pub(super)"))
         self.assertEqual(self.reach("src/lib.rs", "scoped"), (False, "pub(in crate::x)"))
         self.assertEqual(self.reach("src/lib.rs", "open"), (True, ""))
+        self.assertEqual(self.path("src/lib.rs", "open"), "calcx::open")
+        self.assertIsNone(self.path("src/lib.rs", "crate_only"))
 
     def test_a_method_of_a_private_type_is_unreachable(self):
         self.discover({"src/lib.rs": "struct Hidden;\nimpl Hidden { pub fn m(&self) {} }\n"
@@ -903,6 +1008,8 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.reach("src/lib.rs", "Hidden::m"), (False, "type Hidden is private"))
         self.assertEqual(self.reach("src/lib.rs", "Open::m"), (True, ""))
         self.assertEqual(self.reach("src/lib.rs", "Open::c"), (False, "pub(crate)"))
+        self.assertEqual(self.path("src/lib.rs", "Open::m"), "calcx::Open")
+        self.assertIsNone(self.path("src/lib.rs", "Hidden::m"))
 
     def test_a_path_attribute_is_resolved(self):
         self.discover({"src/lib.rs": '#[path = "x/y.rs"]\npub mod z;\n',
@@ -913,6 +1020,10 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.reach("src/x/y.rs", "deep"), (True, ""))
         self.assertEqual(self.reach("src/x/w.rs", "under"), (True, ""))
         self.assertEqual(self.reach("src/z.rs", "decoy")[0], False)
+        # The module's NAME is `z`, whatever file it was read from.
+        self.assertEqual(self.path("src/x/y.rs", "deep"), "calcx::z::deep")
+        self.assertEqual(self.path("src/x/w.rs", "under"), "calcx::z::w::under")
+        self.assertIsNone(self.path("src/z.rs", "decoy"))
 
     def test_mod_rs_and_a_lib_path_are_followed(self):
         self.discover({"lib/root.rs": "pub mod calc;\n",
@@ -921,6 +1032,17 @@ class TestReachability(DiscoveryCase):
                       toml=CALCX_TOML + '\n[lib]\npath = "lib/root.rs"\n'
                       "[target.'cfg(unix)'.dependencies.foo]\npath = \"../foo\"\n")
         self.assertEqual(self.reach("lib/calc/add.rs", "sum"), (True, ""))
+        self.assertEqual(self.path("lib/calc/add.rs", "sum"), "calcx::calc::add::sum")
+
+    def test_a_multi_line_toml_array_keeps_the_lib(self):
+        # Probe P19 (ruling R6 amended): `["x"],` on its own line inside
+        # `[lib]` used to open a table and lose `path`, so `r` read as
+        # binary-only.
+        self.discover({"src/root.rs": "pub fn r() {}\n"},
+                      toml='[package]\nname = "calcx"\n[lib]\nfoo = [\n  ["x"],\n]\n'
+                           'path = "src/root.rs"\n')
+        self.assertEqual(self.reach("src/root.rs", "r"), (True, ""))
+        self.assertEqual(self.path("src/root.rs", "r"), "calcx::r")
 
     def test_main_rs_beside_lib_rs_is_binary_only(self):
         self.discover({"src/lib.rs": "pub fn lib_fn() {}\n",
@@ -929,6 +1051,8 @@ class TestReachability(DiscoveryCase):
         self.assertEqual(self.reach("src/main.rs", "run"), (False, "binary-only"))
         self.assertEqual(self.reach("src/cli.rs", "parse"), (False, "binary-only"))
         self.assertEqual(self.reach("src/lib.rs", "lib_fn"), (True, ""))
+        self.assertEqual(self.path("src/lib.rs", "lib_fn"), "calcx::lib_fn")
+        self.assertIsNone(self.path("src/main.rs", "run"))
 
     def test_a_crate_with_only_main_rs_is_all_binary_only(self):
         units = self.discover({"src/main.rs": "pub mod cli;\npub fn run() {}\nfn main() {}\n",
