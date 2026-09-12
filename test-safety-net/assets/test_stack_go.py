@@ -711,7 +711,9 @@ class TestThroughTheCore(TriageCase):
               'func Dial() error { _, err := net.Dial("tcp", "x:1"); return err }\n')
         plan = self.rank_risk.rank(self.root, "10 years ago", 10)
         self.assertEqual(plan["stack"], "go")
-        self.assertEqual(plan["discovery"], "heuristic")
+        # Whichever reader this machine can honestly run: `go/ast` wherever
+        # `go` is on PATH, the heuristic where it is not.
+        self.assertEqual(plan["discovery"], "precise" if shutil.which("go") else "heuristic")
         self.assertEqual([r["id"] for r in plan["ranked"]], ["svc/a.go::Double"])
         self.assertEqual([r["id"] for r in plan["not_netted"]], ["svc/a.go::Dial"])
 
@@ -756,6 +758,228 @@ class TestThroughTheCore(TriageCase):
         covered = self.rank_risk.already_covered(self.root, units, self.go)
         self.assertIn("a/util/x.go::Do", covered)
         self.assertNotIn("b/util/x.go::Do", covered)
+
+
+def _fake_go(root, body):
+    """An executable `go` stand-in: a shell script whose behaviour is `body`."""
+    path = os.path.join(root, "fake-go")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n" + body + "\n")
+    os.chmod(path, 0o755)
+    return path
+
+
+class TestPreciseDiscovery(GoCase):
+    """The `go/ast` path: an upgrade when it answers, invisible when it cannot.
+
+    Every way it can fail ends in the heuristic, and the label says so. A
+    toolchain that was FOUND and then failed says so on stderr too; simply not
+    having `go` is ordinary and is reported by the label alone.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tools = tempfile.mkdtemp(prefix="tsn-go-tools-")
+        self.addCleanup(shutil.rmtree, self.tools, ignore_errors=True)
+        write(self.root, "go.mod", GO_MOD)
+        for i in range(3):
+            write(self.root, "pkg/m%d.go" % i, "package pkg\n\nfunc F%d() {}\n" % i)
+
+    def precise(self, go_exe, timeout=20):
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = stack_go._units_precise(self.root, go_exe=go_exe, timeout=timeout)
+        return got, err.getvalue()
+
+    def test_no_go_at_all_falls_back_quietly(self):
+        got, err = self.precise("/nonexistent/go")
+        self.assertIsNone(got)
+        self.assertEqual(err, "")
+
+    def test_a_go_that_fails_declines_and_says_so(self):
+        got, err = self.precise(_fake_go(self.tools, "exit 1"))
+        self.assertIsNone(got)
+        self.assertIn("declined", err)
+
+    def test_zero_precise_units_where_the_heuristic_finds_some_declines(self):
+        # The silent zero, wearing the label the report tells an agent to
+        # trust more: node's precise path shipped exactly this once. Judged at
+        # `discover_units`, where both readers' answers are visible -- a Go
+        # repo that genuinely exports nothing (a `package main` CLI) is an
+        # honest precise zero, and must not be declined.
+        import contextlib
+        import io
+        stack_go.GO_EXE = _fake_go(
+            self.tools, 'cat >/dev/null; echo \'{"units": [], "unreadable": 0}\'')
+        self.addCleanup(setattr, stack_go, "GO_EXE", "go")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            units, mode = stack_go.discover_units(self.root)
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual(len(units), 3)
+        self.assertIn("declined", err.getvalue())
+
+    def test_one_unreadable_file_declines_the_whole_run(self):
+        got, _ = self.precise(_fake_go(
+            self.tools, 'cat >/dev/null; echo \'{"units": [{"path": "pkg/m0.go", "name": "F0", '
+                        '"kind": "function", "lineno": 3}], "unreadable": 1}\''))
+        self.assertIsNone(got)
+
+    def test_a_malformed_row_declines_the_whole_run(self):
+        got, _ = self.precise(_fake_go(
+            self.tools, 'cat >/dev/null; echo \'{"units": [{"path": "pkg/m0.go", "name": "F0", '
+                        '"kind": "function", "lineno": 0}], "unreadable": 0}\''))
+        self.assertIsNone(got)
+
+    def test_a_row_for_a_file_nobody_asked_about_declines(self):
+        got, _ = self.precise(_fake_go(
+            self.tools, 'cat >/dev/null; echo \'{"units": [{"path": "elsewhere.go", "name": "X", '
+                        '"kind": "function", "lineno": 1}], "unreadable": 0}\''))
+        self.assertIsNone(got)
+
+    def test_a_hung_toolchain_is_bounded_by_the_timeout(self):
+        got, err = self.precise(_fake_go(self.tools, "sleep 30"), timeout=1)
+        self.assertIsNone(got)
+        self.assertIn("timed out", err)
+
+    def test_precise_false_never_runs_a_process(self):
+        sentinel = os.path.join(self.tools, "ran")
+        _fake_go(self.tools, "touch %s; exit 1" % sentinel)
+        env_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.tools + os.pathsep + env_path
+        os.rename(os.path.join(self.tools, "fake-go"), os.path.join(self.tools, "go"))
+        try:
+            units, mode = stack_go.discover_units(self.root, precise=False)
+        finally:
+            os.environ["PATH"] = env_path
+        self.assertEqual(mode, "heuristic")
+        self.assertEqual(len(units), 3)
+        self.assertFalse(os.path.exists(sentinel))
+
+    def test_the_toolchain_is_pinned_local_and_left_undecorated(self):
+        # GOTOOLCHAIN=local: a repo whose go.mod asks for a newer Go must not
+        # make this analysis DOWNLOAD one. GOFLAGS empty and GOWORK=off: the
+        # helper is this skill's program, and the analysed repo's flags and
+        # workspace have no business shaping how it builds.
+        dump = os.path.join(self.tools, "env.txt")
+        self.precise(_fake_go(self.tools, "cat >/dev/null; env > %s; exit 1" % dump))
+        with open(dump, encoding="utf-8") as f:
+            env = dict(line.split("=", 1) for line in f.read().splitlines() if "=" in line)
+        self.assertEqual(env.get("GOTOOLCHAIN"), "local")
+        self.assertEqual(env.get("GOFLAGS"), "")
+        self.assertEqual(env.get("GOWORK"), "off")
+
+    def test_the_cli_no_precise_flag_reaches_the_go_stack(self):
+        import contextlib
+        import io
+        import json as _json
+        rank_risk = _load("rank_risk")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rank_risk.main([self.root, "--stack", "go", "--no-precise"])
+        self.assertEqual(_json.loads(out.getvalue())["discovery"], "heuristic")
+
+
+def _real_go():
+    go = shutil.which("go")
+    if not go:
+        raise unittest.SkipTest("no `go` on PATH: Go's precise discovery is NOT "
+                                "exercised on this machine")
+    return go
+
+
+class TestPreciseAgainstTheRealToolchain(TriageCase):
+    SHAPES = ("package pkg\n\ntype Report struct{}\ntype Set[K comparable] struct{}\n"
+              "type impl struct{}\n\n// Parse parses.\nfunc Parse(s string) int { return 1 }\n\n"
+              "func Map[T any, U any](xs []T, f func(T) U) []U { return nil }\n\n"
+              "func Multi(\n\ts string,\n) (int, error) {\n\treturn 0, nil\n}\n\n"
+              "func (r *Report) Add(n int) {}\nfunc (*Report) Reset()      {}\n"
+              "func (s *Set[K]) Put(k K)   {}\nfunc (i *impl) Do()         {}\n"
+              "func helper()               {}\n")
+
+    def test_both_paths_agree_on_what_both_can_read(self):
+        _real_go()
+        write(self.root, "pkg/a.go", self.SHAPES)
+        write(self.root, "pkg/gen.go",
+              "// Code generated by hand; DO NOT EDIT.\n\npackage pkg\n\nfunc Gen() {}\n")
+        precise, mode = stack_go.discover_units(self.root)
+        heuristic, _ = stack_go.discover_units(self.root, precise=False)
+        self.assertEqual(mode, "precise")
+        self.assertEqual(precise, heuristic)
+
+    def test_both_paths_read_declarations_gofmt_would_have_moved(self):
+        # The heuristic used to read column 0 only and documented these as its
+        # misses. It now reads Go's declaration position -- a line start or
+        # after `;` -- so the two readers agree here too, and the precise path
+        # is worth having because it IS Go's parser, not because the other
+        # reader was handicapped.
+        _real_go()
+        write(self.root, "pkg/a.go", self.MOVED)
+        precise, mode = stack_go.discover_units(self.root)
+        heuristic, _ = stack_go.discover_units(self.root, precise=False)
+        self.assertEqual(mode, "precise")
+        self.assertEqual(precise, heuristic)
+        self.assertEqual([u["name"] for u in precise], ["Commented", "Indented", "Semi"])
+
+    MOVED = ("package pkg\n\nvar x = 1; func Semi() {}\n\n\tfunc Indented() {}\n"
+             "/* note */ func Commented() {}\n")
+
+    def test_a_package_that_exports_nothing_is_an_honest_precise_zero(self):
+        import contextlib
+        import io
+        _real_go()
+        write(self.root, "main.go", "package main\n\nfunc helper() {}\nfunc main() { helper() }\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            units, mode = stack_go.discover_units(self.root)
+        self.assertEqual((units, mode), ([], "precise"))
+        self.assertNotIn("declined", err.getvalue())
+
+    def test_the_by_line_fallback_finds_a_declaration_the_index_lacks(self):
+        # The two discovery paths are separate readers; if they ever diverge,
+        # a unit only the precise path found must still be triaged, not read
+        # as "not found", Tier 4. Exercised directly, because with both
+        # readers on the same declaration rule nothing reaches it today.
+        text = 'package pkg\n\nimport "os"\n\nvar n = 1; func Semi() ([]byte, error) ' \
+               '{ return os.ReadFile("x") }\n'
+        f = stack_go._File("pkg/a.go", text)
+        key, span, recv = f.decl_at_line(5, "Semi")
+        self.assertEqual((key, recv), ("Semi", None))
+        self.assertIn("os.ReadFile", text[span[0]:span[1]])
+        self.assertIsNone(f.decl_at_line(5, "Other"))
+        self.assertIsNone(f.decl_at_line(99, "Semi"))
+
+
+class TestDeclarationPosition(TriageCase):
+    def test_the_heuristic_reads_declarations_gofmt_would_have_moved(self):
+        write(self.root, "pkg/a.go", TestPreciseAgainstTheRealToolchain.MOVED)
+        units, _ = stack_go.discover_units(self.root, precise=False)
+        self.assertEqual([(u["name"], u["lineno"]) for u in units],
+                         [("Commented", 6), ("Indented", 5), ("Semi", 3)])
+
+    def test_a_declaration_after_a_semicolon_is_triaged_as_itself(self):
+        # Before the declaration rule widened, this body was read as
+        # PACKAGE-LEVEL code, and `os.ReadFile` floored the package as
+        # "I/O at import time" -- Tier 3 for a plain Tier 2 unit.
+        write(self.root, "pkg/a.go",
+              'package pkg\n\nimport "os"\n\n'
+              'var n = 1; func Semi() ([]byte, error) { return os.ReadFile("x") }\n'
+              "\tfunc Pure() int { return 1 }\n")
+        self.assertEqual(self.tier("Semi")[0], 2)
+        self.assertEqual(self.tier("Pure")[0], 1)
+
+
+class TestBodylessFunctions(TriageCase):
+    def test_a_function_with_no_go_body_is_declined_honestly(self):
+        # Implemented in assembly, or linknamed to the runtime: callable and
+        # discovered, but there is nothing here for either layer to read.
+        write(self.root, "pkg/add.go",
+              "package pkg\n\n// Add is implemented in add_amd64.s.\nfunc Add(a, b int) int\n")
+        tier, reason = self.tier("Add")
+        self.assertEqual(tier, 4)
+        self.assertIn("no Go body", reason)
 
 
 def _build_repo(root, go=0, py=0, ts=0, files=()):

@@ -30,9 +30,14 @@ from __future__ import annotations
 
 import bisect
 import functools
+import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
 
 # The shipped assets are a flat directory, not a package, and callers load
 # them by path from directories that are not this one. Make the siblings
@@ -489,8 +494,234 @@ def discover_units(root: str, precise: bool = True):
     The heuristic reader below is the one that always runs; the `go/ast`
     precise path is an upgrade layered on it, never a dependency, and the
     label says which one produced the units (multistack design, D1).
+
+    WHEN PRECISE WINS. `go/parser` is Go's own parser, so when the helper
+    parsed every file its answer is authoritative -- a unit the heuristic has
+    and it lacks is a heuristic phantom, not a precise miss. It declines in
+    exactly the cases where its answer cannot be trusted: no `go`, a helper
+    that failed, timed out, printed something malformed or could not parse a
+    file (`_units_precise`), and one more that needs BOTH answers to see --
+    zero precise units while the heuristic found some. That is the silent
+    zero node's precise path once shipped under the label an agent is told
+    to trust more. A repo that genuinely exports nothing (a `package main`
+    CLI) is zero on both readers, and stays an honest precise zero.
+
+    `precise=False` (`--no-precise`) declines the helper without starting a
+    process. Unlike node's precise path, this one executes none of the
+    analysed repo's code -- the helper is this skill's own program, run by
+    the machine's `go`, reading the repo as text -- but the flag keeps ONE
+    meaning across stacks: heuristic only, nothing spawned.
     """
-    return _units_heuristic(root), "heuristic"
+    heuristic = _units_heuristic(root)
+    if not precise:
+        return heuristic, "heuristic"
+    units = _units_precise(root)
+    if units is None:
+        return heuristic, "heuristic"
+    if not units and heuristic:
+        _precise_declined("no units, where the heuristic reader found %d" % len(heuristic))
+        return heuristic, "heuristic"
+    return units, "precise"
+
+
+# ── The precise path: `go/ast`, under the machine's own `go` ─────────────
+
+# Which `go` runs the helper. A module attribute rather than a parameter of
+# `discover_units`, whose signature is shared by every stack.
+GO_EXE = "go"
+
+# A hard bound, not a courtesy. The first run compiles the helper (measured:
+# 3.9s against a cold GOCACHE, 0.4s warm), so this is generous; on expiry the
+# whole process GROUP is killed -- `go run` starts a child binary, and a killed
+# parent whose child still holds the pipe would hang the read until it exits.
+PRECISE_TIMEOUT = 60
+
+# The helper, written to a temporary directory and run with `go run`. It reads
+# {"root", "files"} on stdin and writes {"units", "unreadable"} on stdout. The
+# unit rules are the heuristic's, stated in the language's own terms: an
+# exported func, or an exported method on an exported receiver type; a
+# generated file (`ast.IsGenerated`, which is Go's definition) yields nothing.
+_GO_HELPER = r"""package main
+
+import (
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+)
+
+type input struct {
+	Root  string   `json:"root"`
+	Files []string `json:"files"`
+}
+
+type unit struct {
+	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Lineno int    `json:"lineno"`
+}
+
+func recvType(e ast.Expr) string {
+	for {
+		switch t := e.(type) {
+		case *ast.StarExpr:
+			e = t.X
+		case *ast.IndexExpr:
+			e = t.X
+		case *ast.IndexListExpr:
+			e = t.X
+		case *ast.ParenExpr:
+			e = t.X
+		case *ast.Ident:
+			return t.Name
+		default:
+			return ""
+		}
+	}
+}
+
+func main() {
+	var in input
+	if err := json.NewDecoder(os.Stdin).Decode(&in); err != nil {
+		os.Exit(2)
+	}
+	fset := token.NewFileSet()
+	units := []unit{}
+	unreadable := 0
+	for _, rel := range in.Files {
+		f, err := parser.ParseFile(fset, filepath.Join(in.Root, rel), nil,
+			parser.SkipObjectResolution|parser.ParseComments)
+		if err != nil {
+			unreadable++
+			continue
+		}
+		if ast.IsGenerated(f) {
+			continue
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || !fd.Name.IsExported() {
+				continue
+			}
+			u := unit{Path: rel, Name: fd.Name.Name, Kind: "function",
+				Lineno: fset.Position(fd.Pos()).Line}
+			if fd.Recv != nil && len(fd.Recv.List) > 0 {
+				rt := recvType(fd.Recv.List[0].Type)
+				if !ast.IsExported(rt) {
+					continue
+				}
+				u.Name = rt + "." + fd.Name.Name
+				u.Kind = "method"
+			}
+			units = append(units, u)
+		}
+	}
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"units": units, "unreadable": unreadable})
+}
+"""
+
+
+def _units_precise(root: str, go_exe=None, timeout: int = PRECISE_TIMEOUT):
+    """The units `go/ast` sees, or None to fall back. Never raises into a run.
+
+    The environment is pinned for the reasons the tests record:
+    `GOTOOLCHAIN=local`, so a repo whose `go.mod` asks for a newer Go cannot
+    make this analysis DOWNLOAD one; `GOFLAGS=` and `GOWORK=off`, because
+    the helper is this skill's program and the analysed repo's flags and
+    workspace have no say in how it builds; `CGO_ENABLED=0`, because it
+    needs none.
+    """
+    go_exe = go_exe or GO_EXE
+    files = list(iter_source_files(root))
+    if not files:
+        return None
+    tmp = tempfile.mkdtemp(prefix="tsn-go-ast-")
+    try:
+        with open(os.path.join(tmp, "main.go"), "w", encoding="utf-8") as f:
+            f.write(_GO_HELPER)
+        env = dict(os.environ, GOTOOLCHAIN="local", GOFLAGS="", GOWORK="off",
+                   GO111MODULE="on", CGO_ENABLED="0")
+        payload = json.dumps({"root": os.path.abspath(root), "files": files})
+        try:
+            proc = subprocess.Popen([go_exe, "run", "main.go"], cwd=tmp, env=env,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+        except (OSError, ValueError):
+            return None                   # no `go`: ordinary, and the label says so
+        try:
+            out, err = proc.communicate(payload, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            proc.communicate()
+            _precise_declined("timed out after %ss" % timeout)
+            return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if proc.returncode != 0:
+        last = err.strip().splitlines()[-1] if err.strip() else "no diagnostic"
+        _precise_declined("exit %d: %s" % (proc.returncode, last))
+        return None
+    try:
+        data = json.loads(out)
+        unreadable = data["unreadable"]
+        raw = data["units"]
+    except (ValueError, TypeError, KeyError):
+        _precise_declined("unparseable output")
+        return None
+    if isinstance(unreadable, bool) or not isinstance(unreadable, int):
+        _precise_declined("unparseable output")
+        return None
+    if unreadable > 0:
+        _precise_declined("%d file%s of %d unreadable"
+                          % (unreadable, "" if unreadable == 1 else "s", len(files)))
+        return None
+    units = _units_from_payload(raw, files)
+    if units is None:
+        _precise_declined("malformed unit in the output")
+    return units
+
+
+def _units_from_payload(raw, files):
+    """Unit dicts from the helper's JSON, or None if ANY row is malformed.
+
+    All or nothing, as node's is: dropping the rows it could not read would
+    let the precise path report fewer units while still calling itself
+    precise.
+    """
+    if not isinstance(raw, list):
+        return None
+    wanted = frozenset(files)
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        rel, name = item.get("path"), item.get("name")
+        kind, lineno = item.get("kind"), item.get("lineno")
+        if not isinstance(rel, str) or rel not in wanted:
+            return None
+        if not isinstance(name, str) or not name or kind not in ("function", "method"):
+            return None
+        if isinstance(lineno, bool) or not isinstance(lineno, int) or lineno < 1:
+            return None
+        out.append({"id": "%s::%s" % (rel, name), "path": rel, "name": name,
+                    "lineno": lineno, "kind": kind})
+    return sorted(out, key=lambda u: u["id"])
+
+
+def _precise_declined(why: str):
+    """Say that a `go` we FOUND did not answer. One line, stderr, never raises."""
+    try:
+        sys.stderr.write("note: go precise discovery declined (%s); "
+                         "using the heuristic reader\n" % why)
+    except Exception:                 # a closed or replaced stderr must not fail a run
+        pass
 
 
 # Go's own definition of a generated file: this line, before the first
@@ -558,20 +789,24 @@ def _exported(name: str) -> bool:
     return bool(name) and name[0].isupper()
 
 
-# A declaration starts at column 0. That is gofmt's layout, and gofmt is
-# close enough to universal that a reader built on it misses almost nothing;
-# what it does miss (hand-indented top-level code) is exactly what the
-# precise `go/ast` path exists to catch.
+# A declaration is a `func` in DECLARATION POSITION: at the start of a line
+# (after any indentation) or after a `;` -- the two places Go's grammar puts
+# a top-level declaration. It used to be column 0 alone, which is gofmt's
+# layout, and that missed a hand-indented declaration and one after a `;`;
+# worse, triage's index missed them too, so such a unit's body was read as
+# PACKAGE-LEVEL CODE and floored its whole package at "I/O at import time".
+# Measured, then fixed: a function literal or type never stands in either
+# position without a name, so widening the anchor admits no new phantom.
 #
 # WHAT THE ANCHOR DOES NOT DO, measured rather than assumed: it is not what
-# keeps `type HandlerFunc func(int) error` or `var F = func(n int) error {}`
-# out of the units. Unanchored, both still fail `_func_decls`'s SHAPE check
-# -- a function type or literal never has a name followed by `(` after its
-# parameter list -- and the test pinning them stays green. Only removing the
-# anchor AND the shape check together turns it red. So the anchor is
-# belt-and-braces over the shape check (plus fewer candidates to parse),
-# and its one real cost is the indented case above.
-_FUNC_AT = re.compile(r"(?m)^func\b")
+# keeps `type HandlerFunc func(r Request) Response` or
+# `var F = func(r Request) Response {}` out of the units. Unanchored, both
+# still fail `_func_decls`'s SHAPE check -- a function type or literal never
+# has a name followed by `(` after its parameter list -- and the test pinning
+# them stays green. Only removing the anchor AND the shape check together
+# turns it red. So the anchor is belt-and-braces over the shape check, plus
+# fewer candidates to parse. `pos` is group 1, the `func` keyword itself.
+_FUNC_AT = re.compile(r"(?m)(?:^|(?<=;))[ \t]*(func)\b")
 _IDENT_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _IDENT_FULL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -586,7 +821,7 @@ def _func_decls(code: str, depths):
     out = []
     n = len(code)
     for m in _FUNC_AT.finditer(code):
-        pos = m.start()
+        pos = m.start(1)
         if depths[pos] != 0:
             continue
         i = _skip_ws(code, m.end())
@@ -1051,8 +1286,32 @@ def _receiver_var(inner: str):
     return head[0] if len(head) == 2 and _IDENT_FULL.match(head[0]) else None
 
 
+def _parse_decl(code: str, depths, pos: int):
+    """(key, body span or None, receiver (var, Type) or None) for the `func` at `pos`.
+
+    None when `pos` does not start a declaration this reader can name.
+    """
+    i = _skip_ws(code, pos + 4)
+    recv = None
+    if i < len(code) and code[i] == "(":
+        close = _match_bracket(code, depths, i)
+        if close < 0:
+            return None
+        inner = code[i + 1:close]
+        rtype = _receiver_type(inner)
+        if rtype is None:
+            return None
+        recv = (_receiver_var(inner), rtype)
+        i = _skip_ws(code, close + 1)
+    word = _IDENT_AT.match(code, i)
+    if not word:
+        return None
+    key = "%s.%s" % (recv[1], word.group(0)) if recv else word.group(0)
+    return key, _body_span(code, depths, pos), recv
+
+
 class _File:
-    __slots__ = ("rel", "code", "depths", "alias", "dots", "decls")
+    __slots__ = ("rel", "code", "depths", "alias", "dots", "decls", "bodyless")
 
     def __init__(self, rel, text):
         self.rel = rel
@@ -1061,32 +1320,48 @@ class _File:
         self.alias, self.dots = _file_aliases(text)
         # qualified name -> (start, end, receiver (var, Type) or None)
         self.decls = {}
+        # Declarations with no Go body: assembly, or linknamed to the runtime.
+        self.bodyless = set()
         for m in _FUNC_AT.finditer(self.code):
-            pos = m.start()
+            pos = m.start(1)
             if self.depths[pos] != 0:
                 continue
-            i = _skip_ws(self.code, m.end())
-            recv = None
-            if i < len(self.code) and self.code[i] == "(":
-                close = _match_bracket(self.code, self.depths, i)
-                if close < 0:
-                    continue
-                inner = self.code[i + 1:close]
-                rtype = _receiver_type(inner)
-                if rtype is None:
-                    continue
-                recv = (_receiver_var(inner), rtype)
-                i = _skip_ws(self.code, close + 1)
-            word = _IDENT_AT.match(self.code, i)
-            if not word:
+            parsed = _parse_decl(self.code, self.depths, pos)
+            if parsed is None:
                 continue
-            span = _body_span(self.code, self.depths, pos)
-            if span is None:
-                continue
-            key = "%s.%s" % (recv[1], word.group(0)) if recv else word.group(0)
+            key, span, recv = parsed
             if key == "init" and recv is None:
                 key = "init#%d" % pos        # several `init`s may coexist
+            if span is None:
+                self.bodyless.add(key)
+                continue
             self.decls.setdefault(key, (span[0], span[1], recv))
+
+    def decl_at_line(self, lineno, name):
+        """The declaration of `name` on line `lineno`, for a unit the index lacks.
+
+        A FALLBACK, and a deliberate one: the two discovery paths are separate
+        readers, and a unit the precise path finds must never triage as "not
+        found", Tier 4 -- the better reader producing the worse plan, which is
+        the node stack's own lesson. Discovery records the line; this reads
+        every `func` at depth 0 on it and returns the one that declares
+        `name`, so it holds whatever position the declaration sits in.
+        """
+        if isinstance(lineno, bool) or not isinstance(lineno, int) or lineno < 1:
+            return None
+        starts = _line_starts(self.code)
+        if lineno > len(starts):
+            return None
+        lo = starts[lineno - 1]
+        hi = starts[lineno] if lineno < len(starts) else len(self.code)
+        for m in re.finditer(r"(?<![A-Za-z0-9_])func\b", self.code[lo:hi]):
+            pos = lo + m.start()
+            if self.depths[pos] != 0:
+                continue
+            parsed = _parse_decl(self.code, self.depths, pos)
+            if parsed and parsed[0] == name:
+                return parsed
+        return None
 
 
 class _Package:
@@ -1231,6 +1506,14 @@ def _analyze_package(root: str, pkg_dir: str) -> _Package:
     return pkg
 
 
+# A function declared with no Go body is implemented in assembly or linknamed
+# to the runtime. It is discovered -- it is callable and exported -- but there
+# is nothing for the filter to read, and a hook injected into Go source cannot
+# reach code that is not Go: the same opacity as cgo, declined the same way.
+_BODYLESS = ("no Go body (assembly, or linknamed to the runtime): neither the "
+             "filter nor the guard can see what it does")
+
+
 def _tier_from_hits(hits) -> tuple:
     """(tier, reason) from a unit's own hits, before the package floor."""
     if not hits:
@@ -1273,7 +1556,17 @@ def triage(root: str, unit) -> tuple:
     if pkg.tier4 is not None:
         return pkg.tier4
     f = pkg.files.get(unit["path"])
-    decl = f.decls.get(unit["name"]) if f else None
+    if f is None:
+        return 4, "unit not found on re-read"
+    if unit["name"] in f.bodyless:
+        return 4, _BODYLESS
+    decl = f.decls.get(unit["name"])
+    if decl is None:
+        found = f.decl_at_line(unit.get("lineno"), unit["name"])
+        if found:
+            if found[1] is None:
+                return 4, _BODYLESS
+            decl = (found[1][0], found[1][1], found[2])
     if decl is None:
         return 4, "unit not found on re-read"
     lo, hi, recv = decl
