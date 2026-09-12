@@ -177,9 +177,12 @@ if _ASSETS not in sys.path:
 
 import stack_go                                                     # noqa: E402
 from stack_go import SYSCALL_GROUPS                                 # noqa: E402
-
-TIER_ENV = "TEST_SAFETY_NET_TIER"
-ALLOW_ENV = "TEST_SAFETY_NET_ALLOW"
+import guard_env                                                    # noqa: E402
+from guard_env import (                                             # noqa: E402
+    TIER_ENV, ALLOW_ENV,
+    EXIT_GREEN, EXIT_RED, EXIT_NOT_ARMED, EXIT_TRIP, EXIT_NO_TEST, EXIT_NO_BUILD,
+    OUTCOME as _OUTCOME,
+)
 
 # The groups are the FILTER's, verbatim -- one answer to "what counts as
 # which I/O", owned by `stack_go.py`. `randomness` is uncontrollable on Go,
@@ -187,8 +190,6 @@ ALLOW_ENV = "TEST_SAFETY_NET_ALLOW"
 GROUPS = stack_go.GROUPS
 CONTROLLABLE_GROUPS = tuple(sorted(stack_go.CONTROLLABLE))
 UNCONTROLLABLE_GROUPS = tuple(sorted(stack_go.UNCONTROLLABLE))
-
-EXIT_GREEN, EXIT_RED, EXIT_NOT_ARMED, EXIT_TRIP, EXIT_NO_TEST, EXIT_NO_BUILD = 0, 1, 2, 3, 4, 5
 
 SUPPORTED_GOOS = ("darwin", "linux")
 
@@ -201,57 +202,21 @@ class GuardCannotArm(Exception):
 
 # ── Environment -> tier ──────────────────────────────────────────────────
 
-def read_env(env):
-    """`(tier, allow, notes)`. Never raises.
+def _why_uncontrollable(g):
+    return ("rand.Seed is a no-op since Go 1.24, so no test can seed the global source"
+            if g == "randomness" else "no test can control it")
 
-    The contract `io_guard.py`'s `read_env` and `io_guard.js`'s `readEnv`
-    share: an absent or invalid tier is tier 1 -- the fail-safe direction --
-    with a note; `none` allows nothing; an unknown group is ignored and stays
-    blocked; tier 1 ignores the allow list. One addition, because Go's
-    controllable set is smaller: naming `randomness` says why it stays
-    blocked instead of calling it unknown.
-    """
-    notes = []
-    raw = str(env.get(TIER_ENV, "")).strip()
-    if raw in ("1", "2"):
-        tier = int(raw)
-    else:
-        tier = 1
-        notes.append("%s=%r is not 1 or 2; defaulting to tier 1 (block everything), "
-                     "the fail-safe direction" % (TIER_ENV, raw))
-    raw_allow = env.get(ALLOW_ENV)
-    if raw_allow is None or not str(raw_allow).strip():
-        allow = None
-    elif str(raw_allow).strip().lower() == "none":
-        allow = []
-    else:
-        wanted = [g.strip() for g in re.split(r"[,;]", str(raw_allow)) if g.strip()]
-        allow = [g for g in wanted if g in CONTROLLABLE_GROUPS]
-        for g in wanted:
-            if g in CONTROLLABLE_GROUPS:
-                continue
-            if g in UNCONTROLLABLE_GROUPS:
-                why = ("rand.Seed is a no-op since Go 1.24, so no test can seed the "
-                       "global source" if g == "randomness" else "no test can control it")
-                notes.append("%s names %s, which is not controllable on go (%s); it stays "
-                             "blocked" % (ALLOW_ENV, g, why))
-            else:
-                notes.append("%s names unknown group %r; it is ignored and stays blocked"
-                             % (ALLOW_ENV, g))
-    if tier == 1 and allow:
-        notes.append("tier 1 ignores %s: a unit that claimed to touch nothing gets "
-                     "everything blocked" % ALLOW_ENV)
-    return tier, allow, notes
+
+def read_env(env):
+    """`(tier, allow, notes)`. The contract lives in guard_env.py; go supplies its tables."""
+    return guard_env.read_env(env, CONTROLLABLE_GROUPS, UNCONTROLLABLE_GROUPS, "go",
+                              _why_uncontrollable)
 
 
 def blocked_groups(tier, allow):
     """The groups a run at `tier` blocks. Tier 1: all. Tier 2: all but what it fakes."""
-    if tier == 1:
-        return set(GROUPS)
-    if allow is None:
-        return set(UNCONTROLLABLE_GROUPS)
-    permitted = {g for g in allow if g in CONTROLLABLE_GROUPS}
-    return set(GROUPS) - permitted
+    return guard_env.blocked_groups(tier, allow, GROUPS, CONTROLLABLE_GROUPS,
+                                    UNCONTROLLABLE_GROUPS)
 
 
 # ── What gets a hook ─────────────────────────────────────────────────────
@@ -1208,19 +1173,6 @@ def _main_modules(go, env):
     """The module path(s) under test, for telling the repo's code from a dependency's."""
     code, out, _err = _go(go, ["list", "-m", "-f", "{{.Path}}"], env, cwd=os.getcwd())
     return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
-
-
-_OUTCOME = {
-    EXIT_GREEN: "GREEN (exit 0): the selected test ran and passed",
-    EXIT_RED: "RED (exit 1): the selected test ran and failed",
-    EXIT_NOT_ARMED: "NOT ARMED (exit 2): the guard's overlay did not build on this "
-                    "toolchain; nothing was proved",
-    EXIT_TRIP: "GUARD TRIP (exit 3): the unit reached real I/O -- the CLASSIFICATION is "
-               "wrong: reclassify it to Tier 3 and discard the test, red or green",
-    EXIT_NO_TEST: "NO TEST (exit 4): nothing was proved -- -run matched no test, the "
-                  "package has no test files, or the test skipped itself",
-    EXIT_NO_BUILD: "NO BUILD (exit 5): the package did not build; a compile error is not RED",
-}
 
 
 def main(argv=None):
