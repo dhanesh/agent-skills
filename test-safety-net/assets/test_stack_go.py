@@ -466,6 +466,18 @@ class TestTriageByGroup(TriageCase):
               "func Roll() int { return rand.IntN(6) }\n")
         self.assertEqual(self.tier("Roll")[0], 3)
 
+    def test_a_server_started_on_a_goroutine_is_network(self):
+        # `go s.ListenAndServe()` is the commonest way a Go unit binds a port,
+        # and neither `http.Server` nor a method on a server VALUE was a
+        # marker: the filter scored this Tier 1 while the unit really listened.
+        write(self.root, "svc/srv.go",
+              'package svc\n\nimport "net/http"\n\n'
+              "func Start(a string) *http.Server {\n"
+              "\ts := &http.Server{Addr: a}\n\tgo s.ListenAndServe()\n\treturn s\n}\n")
+        tier, reason = self.tier("Start")
+        self.assertEqual(tier, 3, reason)
+        self.assertIn("network", reason)
+
     def test_the_syscall_package_is_classified_by_name(self):
         write(self.root, "svc/a.go",
               'package svc\n\nimport (\n\t"syscall"\n\t"golang.org/x/sys/unix"\n)\n\n'
@@ -748,6 +760,46 @@ class TestThroughTheCore(TriageCase):
         covered = self.rank_risk.already_covered(self.root, units, self.go)
         self.assertIn("svc/util.go::Fmt", covered)
         self.assertNotIn("svc/report.go::Report.String", covered)
+
+    def test_a_method_is_credited_only_through_a_value_of_its_type(self):
+        # Naming a type and calling `.Error()` on SOMETHING are both everywhere
+        # in Go tests: `var pe *ParseError; errors.As(err, &pe)` and
+        # `errors.New("x").Error()` in one test must not cover
+        # `ParseError.Error`, which that test never calls.
+        write(self.root, "svc/perr.go",
+              "package svc\n\ntype ParseError struct{ Msg string }\n\n"
+              "func (e *ParseError) Error() string { return e.Msg }\n\n"
+              "func NewParseError(m string) *ParseError { return &ParseError{Msg: m} }\n")
+        write(self.root, "svc/perr_test.go",
+              'package svc\n\nimport (\n\t"errors"\n\t"testing"\n)\n\n'
+              "func TestAs(t *testing.T) {\n\tvar pe *ParseError\n"
+              '\t_ = errors.As(errors.New("x"), &pe)\n\t_ = errors.New("x").Error()\n}\n')
+        units, _ = self.go.discover_units(self.root, precise=False)
+        covered = self.rank_risk.already_covered(self.root, units, self.go)
+        self.assertNotIn("svc/perr.go::ParseError.Error", covered)
+
+    def test_each_way_of_holding_a_value_still_credits_the_method(self):
+        forms = {
+            "bound": 'pe := &ParseError{Msg: "x"}\n\t_ = pe.Error()',
+            "declared": 'var pe ParseError\n\t_ = pe.Error()',
+            "literal": '_ = (&ParseError{Msg: "x"}).Error()',
+            "constructor": 'pe := NewParseError("x")\n\t_ = pe.Error()',
+        }
+        for name, body in forms.items():
+            with self.subTest(form=name):
+                root = tempfile.mkdtemp(prefix="tsn-go-cov-")
+                self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+                write(root, "go.mod", GO_MOD)
+                write(root, "svc/perr.go",
+                      "package svc\n\ntype ParseError struct{ Msg string }\n\n"
+                      "func (e *ParseError) Error() string { return e.Msg }\n\n"
+                      "func NewParseError(m string) *ParseError { return &ParseError{Msg: m} }\n")
+                write(root, "svc/perr_test.go",
+                      'package svc\n\nimport "testing"\n\n'
+                      "func TestErr(t *testing.T) {\n\t%s\n}\n" % body)
+                units, _ = self.go.discover_units(root, precise=False)
+                covered = self.rank_risk.already_covered(root, units, self.go)
+                self.assertIn("svc/perr.go::ParseError.Error", covered)
 
     def test_a_same_named_package_elsewhere_is_not_credited(self):
         for pkg in ("a", "b"):

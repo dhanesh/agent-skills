@@ -32,7 +32,8 @@ THE EXIT STATUS IS THE WHOLE PROTOCOL
     3  GUARD TRIP   IOGuardViolation: the CLASSIFICATION is wrong --
                     reclassify the unit to Tier 3 and discard the test,
                     whether the run was red or green
-    4  NO TEST      `-run` matched nothing; a zero-test run is not GREEN
+    4  NO TEST      nothing was proved: `-run` matched nothing, the package
+                    has no test files, or the test skipped itself
     5  NO BUILD     the package did not build; a compile error is not RED
 
 Node had to learn that per-test lines lie about asynchronous violations. Here
@@ -54,7 +55,10 @@ touching them on disk -- the standard library's included. So every run:
      `net/http` and `crypto/tls` entry points;
   3. adds the decision engine to package `syscall`, and a one-line forwarder
      to every other hooked package;
-  4. runs `go test -overlay <map> -count=1 ...` in a throwaway directory.
+  4. runs `go test -overlay <map> -count=1 -vet=off -v ...`. `-vet=off`
+     because `go vet` on Go 1.22-1.23 does not honour an overlay's ADDED
+     files and failed every run there; vet is a lint, not part of a proof.
+     `-v` because GREEN needs a `--- PASS:` line to point at.
 
 A cold build of the overlaid standard library took 5s on go 1.26.7; a warm
 one 0s -- the build cache keys on content, not path, so the overlay can live
@@ -91,7 +95,17 @@ own behalf -- `testing` reads the clock around every test. The engine walks
   * the first other frame -- the repo's code, or a third-party module, which
     is treated as the repo's the way io_guard.js treats node_modules -- is
     ATTRIBUTABLE, and the call is judged there;
-  * reaching the end of the stack is EXEMPT: the runtime did it for itself.
+  * reaching the end of the stack means THIS GOROUTINE holds no repo frame,
+    and it is judged by the function that CREATED it -- the "created by"
+    line `runtime.Stack` appends. A stdlib or generated-runner creator is the
+    runtime doing its own work: EXEMPT. Any other creator is ATTRIBUTABLE.
+    Review forced this: the rule used to exempt every such stack, and
+    `go http.ListenAndServe(...)` in a unit bound a real port under a GREEN
+    proof, because the compiler's wrapper for a `go` statement is hidden
+    from runtime.Callers and the goroutine's stack is all stdlib;
+  * the walk reads the WHOLE stack, growing its buffer as it goes. A fixed
+    64-frame buffer read its cut-off tail as "end of stack" and exempted a
+    40-level recursive template reading the environment.
 
 Provenance reads a frame's PACKAGE PATH (`runtime.Frame.Function`), never
 its file path, which `-trimpath` rewrites.
@@ -117,10 +131,14 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    `golang.org/x/sys/unix`, cgo, assembly. The filter declines the raw and
    cgo shapes statically; a third-party library doing it internally escapes
    both layers.
-2. Standard-library work on a goroutine the standard library started, with no
-   repo frame on it, is exempt. The `net/http` entry points are hooked for
-   exactly the case that matters -- the transport dials on its own goroutine
-   -- but the class is open.
+2. Standard-library work on a goroutine the standard library started ITSELF
+   -- whose creator is stdlib, and whose stack holds no repo frame -- is
+   exempt. A goroutine the UNIT started is judged by its creator, so
+   `go http.ListenAndServe(...)` trips; what stays open is, say, the
+   per-connection goroutines a stdlib server spawns. The `net/http` entry
+   points are hooked on the caller's goroutine for the case that matters.
+   A dependency's import-time I/O trips too, and is reported as the
+   dependency's, not as a verdict on the unit.
 3. Hook targets are found by text in THIS toolchain's sources. A release that
    renames a required one makes this exit 2; an optional one missing is
    recorded, not fatal.
@@ -437,6 +455,11 @@ FILTER_MARKER_INTERCEPTS.update(dict.fromkeys((
     "net/http.Get", "net/http.Head", "net/http.Post", "net/http.PostForm",
     "net/http.ListenAndServe", "net/http.ListenAndServeTLS", "net/http.Serve",
     "net/http.ServeTLS"), "net/http, hooked at its entry; net beneath"))
+FILTER_MARKER_INTERCEPTS["net/http.Server"] = (
+    "(*Server).ListenAndServe / Serve reach net.Listen, hooked -- and a "
+    "`go srv.ListenAndServe()` goroutine, whose stack holds no repo frame, is "
+    "judged by the unit that created it")
+FILTER_MARKER_INTERCEPTS["net/http.Transport"] = "(*Transport).RoundTrip, hooked at entry"
 FILTER_MARKER_INTERCEPTS.update(dict.fromkeys((
     "net/http.DefaultClient", "net/http.Client"),
     "(*Client).Do and (*Transport).RoundTrip, hooked on the CALLER's goroutine -- the dial "
@@ -569,6 +592,7 @@ var tsnState struct {
 	tier    string
 	blocked map[string]bool
 	stdin   bool
+	modules []string
 }
 
 var tsnStd = [...]string{__STD__}
@@ -612,6 +636,8 @@ func tsnArm() {
 	s, _ := tsnEnv("TEST_SAFETY_NET_GO_STDIN")
 	tsnState.stdin = s == "1"
 	tsnState.tier, _ = tsnEnv("TEST_SAFETY_NET_GO_TIER")
+	mods, _ := tsnEnv("TEST_SAFETY_NET_GO_MODULES")
+	tsnState.modules = tsnSplit(mods)
 	tsnState.armed = true
 }
 
@@ -696,59 +722,195 @@ func TSNHook(group, target string) {
 	if !tsnState.armed {
 		return
 	}
-	var pcs [64]uintptr
-	n := runtime.Callers(2, pcs[:])
-	frames := runtime.CallersFrames(pcs[:n])
+	frames := tsnFrames(group, target)
 	entry, control, runner := "", "", false
-	for {
-		f, more := frames.Next()
-		if f.Function != "" {
-			pkg := tsnPkgOf(f.Function)
-			if tsnIsStd(pkg) {
-				entry = f.Function
-				if pkg == "testing" {
-					if c, ok := tsnControls[f.Function]; ok {
-						control = c
-					} else {
-						runner = true
-					}
-				}
-			} else if pkg == "main" && tsnHasSuffix(f.File, "_testmain.go") {
-				return
-			} else {
-				if control == "" && runner {
-					return
-				}
-				groups := tsnGroupsFor(group, entry)
-				if control != "" {
-					groups = tsnSplit(control)
-				}
-				for _, g := range groups {
-					if g == "stdin" {
-						if tsnState.stdin {
-							tsnViolate(g, target, f)
-						}
-					} else if tsnState.blocked[g] {
-						tsnViolate(g, target, f)
-					}
-				}
-				return
-			}
+	for i, f := range frames {
+		if f.Function == "" {
+			continue
 		}
-		if !more {
+		pkg := tsnPkgOf(f.Function)
+		if tsnIsStd(pkg) {
+			entry = f.Function
+			if pkg == "testing" {
+				if c, ok := tsnControls[f.Function]; ok {
+					control = c
+				} else {
+					runner = true
+				}
+			}
+			continue
+		}
+		if pkg == "main" && tsnHasSuffix(f.File, "_testmain.go") {
 			return
+		}
+		if control == "" && runner {
+			return
+		}
+		tsnJudge(group, target, entry, control, f, frames[i+1:])
+		return
+	}
+	// No attributable frame on this goroutine's stack. That used to EXEMPT the
+	// call, and `go http.ListenAndServe(...)` in a unit bound a real port under
+	// a GREEN proof: the compiler's wrapper for a `go` statement is hidden from
+	// runtime.Callers, so such a goroutine's stack is ALL stdlib. It is judged
+	// by the function that CREATED it instead.
+	if runner || control != "" {
+		return
+	}
+	if creator, ok := tsnCreator(); ok {
+		tsnJudge(group, target, entry, "", creator, nil)
+	}
+}
+
+// tsnFrames is the WHOLE stack above the hook, never a truncated one. A fixed
+// buffer that filled up read its cut-off tail as "end of stack" and exempted
+// the call: a 40-level recursive template read the environment under a GREEN
+// proof. Past a million frames it fails closed rather than guess.
+func tsnFrames(group, target string) []runtime.Frame {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(3, pcs)
+	for n == len(pcs) {
+		if len(pcs) >= 1<<20 {
+			tsnViolate(group, target, runtime.Frame{Function: "(a stack too deep to attribute)"}, false)
+		}
+		pcs = make([]uintptr, len(pcs)*4)
+		n = runtime.Callers(3, pcs)
+	}
+	var out []runtime.Frame
+	it := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := it.Next()
+		out = append(out, f)
+		if !more {
+			return out
 		}
 	}
 }
 
-func tsnViolate(group, target string, f runtime.Frame) {
+// tsnCreator is the function that started this goroutine, read from the
+// "created by" line runtime.Stack appends, when it is not the standard
+// library's or the generated test main's. A goroutine the runtime or a stdlib
+// server started for itself has a stdlib creator and stays exempt.
+func tsnCreator() (runtime.Frame, bool) {
+	buf := make([]byte, 8192)
+	n := runtime.Stack(buf, false)
+	for n == len(buf) && len(buf) < 1<<24 {
+		buf = make([]byte, len(buf)*4)
+		n = runtime.Stack(buf, false)
+	}
+	s := string(buf[:n])
+	i := tsnLastIndex(s, "\ncreated by ")
+	if i < 0 {
+		return runtime.Frame{}, false
+	}
+	rest := s[i+len("\ncreated by "):]
+	fn, loc := rest, ""
+	if j := tsnIndex(rest, "\n"); j >= 0 {
+		fn, loc = rest[:j], rest[j+1:]
+	}
+	if j := tsnIndex(fn, " in goroutine"); j >= 0 {
+		fn = fn[:j]
+	}
+	for len(loc) > 0 && (loc[0] == '\t' || loc[0] == ' ') {
+		loc = loc[1:]
+	}
+	if j := tsnIndex(loc, " "); j >= 0 {
+		loc = loc[:j]
+	}
+	if j := tsnIndex(loc, "\n"); j >= 0 {
+		loc = loc[:j]
+	}
+	file, line := loc, 0
+	if j := tsnLastIndex(loc, ":"); j >= 0 {
+		file, line = loc[:j], tsnAtoi(loc[j+1:])
+	}
+	if fn == "" || tsnIsStd(tsnPkgOf(fn)) || tsnHasSuffix(file, "_testmain.go") {
+		return runtime.Frame{}, false
+	}
+	return runtime.Frame{Function: fn, File: file, Line: line}, true
+}
+
+func tsnJudge(group, target, entry, control string, f runtime.Frame, rest []runtime.Frame) {
+	groups := tsnGroupsFor(group, entry)
+	if control != "" {
+		groups = tsnSplit(control)
+	}
+	dep := tsnDependencyInit(f, rest)
+	for _, g := range groups {
+		if g == "stdin" {
+			if tsnState.stdin {
+				tsnViolate(g, target, f, dep)
+			}
+		} else if tsnState.blocked[g] {
+			tsnViolate(g, target, f, dep)
+		}
+	}
+}
+
+// tsnDependencyInit: the attributable frame belongs to NO module under test,
+// and the stack beneath it is package initialisation. The whole binary runs
+// guarded, so a dependency whose initializer reads the environment trips every
+// tier-1 unit in any package importing it -- the right verdict, but not one
+// about the unit, and the message has to say so.
+func tsnDependencyInit(f runtime.Frame, rest []runtime.Frame) bool {
+	if len(tsnState.modules) == 0 {
+		return false
+	}
+	pkg := tsnPkgOf(f.Function)
+	for _, m := range tsnState.modules {
+		if pkg == m || tsnHasPrefix(pkg, m+"/") {
+			return false
+		}
+	}
+	for _, r := range rest {
+		if tsnHasPrefix(r.Function, "runtime.doInit") {
+			return true
+		}
+	}
+	return false
+}
+
+func tsnViolate(group, target string, f runtime.Frame, dep bool) {
+	at := " (" + f.File + ":" + tsnItoa(f.Line) + ")"
+	where := " from " + f.Function + at
+	what := ". This is a CLASSIFICATION failure, not an assertion failure: reclassify the unit" +
+		" to Tier 3 and discard the test, regardless of red or green"
+	if dep {
+		where = " during the initialisation of dependency " + tsnPkgOf(f.Function) + at
+		what = ". That is the dependency's import-time work, not the unit's: nothing in a" +
+			" package importing it can be proved at tier " + tsnState.tier + ". Reclassify the" +
+			" unit to Tier 3, discard the test, and name the dependency in the report"
+	}
 	msg := "\nIOGuardViolation: a tier " + tsnState.tier + " candidate reached " + group +
-		" I/O via " + target + " from " + f.Function + " (" + f.File + ":" + tsnItoa(f.Line) +
-		"). This is a CLASSIFICATION failure, not an assertion failure: reclassify the unit" +
-		" to Tier 3 and discard the test, regardless of red or green (references/stacks.md," +
-		" \"Go row, in detail\").\n"
+		" I/O via " + target + where + what + " (references/stacks.md, \"Go row, in detail\").\n"
 	Write(2, []byte(msg))
 	Exit(3)
+}
+
+func tsnIndex(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func tsnLastIndex(s, sub string) int {
+	for i := len(s) - len(sub); i >= 0; i-- {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}
+
+func tsnAtoi(s string) int {
+	n := 0
+	for i := 0; i < len(s) && s[i] >= '0' && s[i] <= '9'; i++ {
+		n = n*10 + int(s[i]-'0')
+	}
+	return n
 }
 
 func tsnHook(group, target string) { TSNHook(group, target) }
@@ -897,16 +1059,49 @@ def _not_armed(why):
 
 
 def classify(code, out, overlay_dir):
-    """The exit status for one `go test` run, from its code and its output."""
+    """The exit status for one `go test -v` run, from its code and its output.
+
+    GREEN needs positive evidence: a `--- PASS:` line and no `--- SKIP:` one.
+    It used to be "exit 0 and no `no tests to run`", and review found two more
+    ways for `go test` to exit 0 having proved nothing -- a package with no
+    `_test.go` files (`? pkg [no test files]`) and a test that calls `t.Skip`.
+    Both read as GREEN, and a pinned test that skips itself would have been
+    kept. Requiring the PASS line also stops a `./...` run whose other package
+    printed `[no tests to run]` from reading as NO TEST.
+    """
     if "IOGuardViolation" in out:
         return EXIT_TRIP
     if overlay_dir and (overlay_dir in out or "zz_tsn_" in out) and code != 0:
         return EXIT_NOT_ARMED
     if "[build failed]" in out or "[setup failed]" in out:
         return EXIT_NO_BUILD
-    if code == 0 and ("[no tests to run]" in out or "no tests to run" in out):
+    if code != 0:
+        return EXIT_RED
+    if "--- SKIP:" in out or "--- PASS:" not in out:
         return EXIT_NO_TEST
-    return EXIT_GREEN if code == 0 else EXIT_RED
+    return EXIT_GREEN
+
+
+def _strip_count(args):
+    """`args` without any `-count` -- both `-count=N` and the split `-count N`."""
+    out, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in ("-count", "--count"):
+            skip = True
+            continue
+        if a.startswith(("-count=", "--count=")):
+            continue
+        out.append(a)
+    return out
+
+
+def _main_modules(go, env):
+    """The module path(s) under test, for telling the repo's code from a dependency's."""
+    code, out, _err = _go(go, ["list", "-m", "-f", "{{.Path}}"], env, cwd=os.getcwd())
+    return [line.strip() for line in out.splitlines() if line.strip()] if code == 0 else []
 
 
 _OUTCOME = {
@@ -916,7 +1111,8 @@ _OUTCOME = {
                     "toolchain; nothing was proved",
     EXIT_TRIP: "GUARD TRIP (exit 3): the unit reached real I/O -- the CLASSIFICATION is "
                "wrong: reclassify it to Tier 3 and discard the test, red or green",
-    EXIT_NO_TEST: "NO TEST (exit 4): -run matched no test; a zero-test run is not GREEN",
+    EXIT_NO_TEST: "NO TEST (exit 4): nothing was proved -- -run matched no test, the "
+                  "package has no test files, or the test skipped itself",
     EXIT_NO_BUILD: "NO BUILD (exit 5): the package did not build; a compile error is not RED",
 }
 
@@ -941,7 +1137,8 @@ def main(argv=None):
     if info.get("GOOS") not in SUPPORTED_GOOS:
         return _not_armed("GOOS=%s; this guard is proved on %s only"
                           % (info.get("GOOS"), " and ".join(SUPPORTED_GOOS)))
-    argv = [a for a in argv if not (a == "-count" or a.startswith("-count="))]
+    argv = _strip_count(argv)
+    modules = _main_modules(go, env)
     tmp = tempfile.mkdtemp(prefix="tsn-go-overlay-")
     try:
         try:
@@ -952,11 +1149,17 @@ def main(argv=None):
         run_env = dict(env, GOPROXY="off",
                        TEST_SAFETY_NET_GO_BLOCKED=",".join(sorted(blocked)),
                        TEST_SAFETY_NET_GO_STDIN="1" if tier == 1 else "0",
-                       TEST_SAFETY_NET_GO_TIER=str(tier))
+                       TEST_SAFETY_NET_GO_TIER=str(tier),
+                       TEST_SAFETY_NET_GO_MODULES=",".join(modules))
         # -count=1 is LOAD-BEARING. The engine reads its configuration through
         # runtime_envs(), which go test's result cache cannot see, so without it
         # a pass recorded at one tier would be replayed as `(cached)` at another.
-        proc = subprocess.Popen([go, "test", "-overlay", overlay, "-count=1", *argv],
+        # -vet=off: `go vet` on Go 1.22 and 1.23 does not honour an overlay's
+        # ADDED files and failed every run there ("vet: open .../zz_tsn_hook.go:
+        # no such file"). Vet is a lint, not part of a proof. -v: `classify`
+        # needs the `--- PASS:` / `--- SKIP:` lines to call a run GREEN.
+        proc = subprocess.Popen([go, "test", "-overlay", overlay, "-count=1", "-vet=off",
+                                 "-v", *argv],
                                 env=run_env, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         captured = []

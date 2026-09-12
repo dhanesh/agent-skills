@@ -55,13 +55,36 @@ UNITS = r'''package fx
 import (
 	"bufio"
 	"database/sql"
+	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"text/template"
 	"time"
 )
+
+// A goroutine started with `go <stdlib call>` runs a stack with NO repo frame
+// on it: the compiler's wrapper closure is hidden from runtime.Callers.
+func Serve() { go http.ListenAndServe("127.0.0.1:0", nil) }
+
+func ClearAll() { go os.Clearenv() }
+
+// Forty nested templates put the unit's frame far outside a fixed 64-frame walk.
+func DeepEnv() string {
+	t := template.New("t0").Funcs(template.FuncMap{"env": os.Getenv})
+	src := `{{define "t40"}}{{env "HOME"}}{{end}}`
+	for i := 39; i >= 0; i-- {
+		src += fmt.Sprintf(`{{define "t%d"}}{{template "t%d"}}{{end}}`, i, i+1)
+	}
+	template.Must(t.Parse(src))
+	var b strings.Builder
+	_ = t.ExecuteTemplate(&b, "t0", nil)
+	return b.String()
+}
 
 func Add(a, b int) int { return a + b }
 
@@ -144,6 +167,13 @@ func TestTempDir(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The goroutine has to get as far as its first call before the test returns;
+// time.Sleep is not hooked (it has no Go body), so waiting touches nothing.
+func TestServe(t *testing.T)    { Serve(); time.Sleep(300 * time.Millisecond) }
+func TestClearAll(t *testing.T) { ClearAll(); time.Sleep(300 * time.Millisecond) }
+func TestDeepEnv(t *testing.T)  { DeepEnv() }
+func TestSkips(t *testing.T)    { t.Skip("a skipped test proves nothing") }
 
 func TestOnlyTempDir(t *testing.T) { _ = t.TempDir() }
 func TestOnlySetenv(t *testing.T)  { t.Setenv("TSN_FIXTURE", "1") }
@@ -395,6 +425,32 @@ class TestUncatchable(FixtureModule):
         self.assertEqual(code, 0, out[-600:])
 
 
+class TestNoRepoFrameOnTheStack(FixtureModule):
+    """Stacks the provenance walk cannot see the unit on, which it used to EXEMPT.
+
+    Each was a GREEN tier-1 proof over real I/O, shown by review: a goroutine
+    started with `go <stdlib func>` (its wrapper closure is hidden from
+    runtime.Callers, so the stack is all stdlib and its bottom looks like the
+    runtime's own work), and a stack deeper than the walk's fixed buffer,
+    whose cut-off tail read as "end of stack".
+    """
+
+    def test_go_on_a_stdlib_server_trips(self):
+        code, out = self.guard(1, None, "TestServe")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "network")
+
+    def test_go_on_a_stdlib_env_mutation_trips(self):
+        code, out = self.guard(1, None, "TestClearAll")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+    def test_a_stack_deeper_than_any_fixed_buffer_still_trips(self):
+        code, out = self.guard(1, None, "TestDeepEnv")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertEqual(label(out), "environment")
+
+
 class TestImportTime(unittest.TestCase):
     def test_init_io_trips_and_is_attributed_to_init(self):
         _need_go()
@@ -456,6 +512,26 @@ class TestExitContract(FixtureModule):
         code, out = self.guard(1, None, "TestNoSuchTest")
         self.assertEqual(code, 4, out[-600:])
 
+    def test_a_skipped_test_is_4_not_green(self):
+        # A pinned test that skips itself asserted nothing; exit 0 would let
+        # the proof loop keep it.
+        code, out = self.guard(1, None, "TestSkips")
+        self.assertEqual(code, 4, out[-600:])
+
+    def test_a_package_with_no_test_files_is_4_not_green(self):
+        mod = tempfile.mkdtemp(prefix="tsn-go-notests-")
+        self.addCleanup(shutil.rmtree, mod, ignore_errors=True)
+        write(mod, "go.mod", GO_MOD)
+        write(mod, "x.go", "package fx\n\nfunc X() int { return 1 }\n")
+        code, out = run_guard(mod, 1, None, "-run", "^TestX$", "./")
+        self.assertEqual(code, 4, out[-600:])
+
+    def test_a_split_count_flag_is_stripped_whole(self):
+        # `-count 3` used to lose only the flag, leaving `3` as a package
+        # argument and a NO BUILD for a test that was fine.
+        code, out = self.guard(1, None, "TestClean", "-count", "3")
+        self.assertEqual(code, 0, out[-600:])
+
     def test_a_caller_supplied_overlay_is_refused_with_2(self):
         code, out = run_guard(self.mod, 1, None, "-overlay", "/tmp/x.json",
                               "-run", "^TestClean$", "./")
@@ -499,6 +575,32 @@ class TestThirdParty(unittest.TestCase):
         code, out = run_guard(os.path.join(work, "app"), 1, None, "-run", "^TestSize$", "./")
         self.assertEqual(code, 3, out[-600:])
         self.assertEqual(label(out), "filesystem")
+
+    def test_a_dependencys_import_time_io_names_the_dependency(self):
+        # The whole binary runs guarded, so a dependency whose package-level
+        # initializer reads the environment trips EVERY tier-1 unit in any
+        # package importing it. That is the right verdict -- nothing in the
+        # package can be proved at tier 1 -- but it is not a verdict on the
+        # unit, and a message saying "reclassify the unit" sends the agent to
+        # the wrong place.
+        _need_go()
+        work = tempfile.mkdtemp(prefix="tsn-go-depinit-")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        write(work, "dep/go.mod", "module example.com/dep\n\ngo 1.22\n")
+        write(work, "dep/dep.go",
+              'package dep\n\nimport "os"\n\nvar home = os.Getenv("HOME")\n\n'
+              'func Hello() string { return "hi" }\n')
+        write(work, "app/go.mod",
+              "module example.com/app\n\ngo 1.22\n\nrequire example.com/dep v0.0.0\n\n"
+              "replace example.com/dep => ../dep\n")
+        write(work, "app/app.go",
+              'package app\n\nimport "example.com/dep"\n\nfunc Greet() string { return dep.Hello() }\n')
+        write(work, "app/app_test.go",
+              'package app\n\nimport "testing"\n\nfunc TestGreet(t *testing.T) { Greet() }\n')
+        code, out = run_guard(os.path.join(work, "app"), 1, None, "-run", "^TestGreet$", "./")
+        self.assertEqual(code, 3, out[-600:])
+        self.assertIn("dependency", out)
+        self.assertIn("example.com/dep", out)
 
 
 # ── 8. Pure-Python halves: the env contract, the tables, the injector ────

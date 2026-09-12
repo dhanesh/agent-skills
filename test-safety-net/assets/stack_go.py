@@ -225,24 +225,80 @@ _ID = r"[A-Za-z0-9_]"
 
 
 def name_pattern(name: str):
-    r"""`name` as a whole identifier -- and, for a method, WITH its type.
+    r"""`name` as a whole identifier -- or, for a method, as a CALL ON ITS TYPE.
 
     A plain name is bounded the way Go bounds an identifier (ASCII; a Unicode
     identifier reads as uncovered, the safe direction).
 
-    A method unit is named `T.M`, and matching `M` alone would be an
-    over-credit machine: `buf.String()`, `w.Write(`, `c.Close()` appear in
-    nearly every Go test file, so a same-directory test calling
-    `bytes.Buffer.String` would cover every `T.String` in the package. The
-    pattern therefore requires BOTH the type as a whole word AND a call of
-    `.M(`. Anchored at `\A` so a failed search costs one scan rather than one
-    per starting position.
+    A method unit is named `T.M`, and it gets `_MethodPattern`, which answers
+    the same `.search(text)` the core asks of every pattern. It is the ONLY
+    thing the core consults for a package whose name is not ambiguous, which
+    is why the whole method rule lives here.
     """
     if "." in name:
         recv, meth = name.split(".", 1)
-        return re.compile(r"(?s)\A(?=.*(?<!%s)%s(?!%s))(?=.*\.\s*%s\s*(?:\[[^\]\n]*\])?\s*\()"
-                          % (_ID, re.escape(recv), _ID, re.escape(meth)))
+        return _MethodPattern(recv, meth)
     return re.compile(r"(?<!%s)%s(?!%s)" % (_ID, re.escape(name), _ID))
+
+
+class _MethodPattern:
+    """`T.M` is exercised in a file only where `.M(` is called on a VALUE of `T`.
+
+    Two looser rules came before this and both over-credited:
+
+      * `.M(` anywhere -- `buf.String()`, `w.Write(`, `c.Close()` are in nearly
+        every Go test file, so a test of `bytes.Buffer` covered every
+        `T.String` in the package;
+      * `T` named anywhere AND `.M(` called anywhere -- which review broke with
+        `var pe *ParseError; errors.As(err, &pe)` beside
+        `errors.New("x").Error()`: the type is named, `.Error()` is called,
+        and `ParseError.Error` never runs.
+
+    So a call counts when its receiver is bound to `T` in the same file -- by a
+    composite literal (`x := &T{...}`), a constructor (`x := NewT...(`, the Go
+    idiom), `new(T)`, `var x T`, or a parameter (`x *T,` / `x T)`) -- or is a
+    literal or constructor call itself (`(&T{...}).M(`, `NewT(...).M(`). The
+    type may be package-qualified (`billing.T`), which is how a black-box
+    `<pkg>_test` file writes it. This reads text, not types, so a value that
+    reaches the test some other way (a field, a factory with another name)
+    reads as uncovered: a redundant test at worst, never a hidden gap.
+    """
+
+    def __init__(self, recv, meth):
+        R, M = re.escape(recv), re.escape(meth)
+        q = r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)?"
+        ident = r"([A-Za-z_][A-Za-z0-9_]*)"
+        also = r"(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)?"      # `x, err := NewT(...)`
+        self.pattern = "%s.%s" % (recv, meth)
+        self._call = r"\s*\.\s*%s\s*%s\s*\(" % (M, _TYPE_ARGS)
+        self._binders = [re.compile(p) for p in (
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*&?\s*%s%s\s*\{" % (ident, also, q, R),
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*%sNew%s[A-Za-z0-9_]*\s*\(" % (ident, also, q, R),
+            r"(?<![A-Za-z0-9_.])%s%s\s*:?=\s*new\s*\(\s*%s%s\s*\)" % (ident, also, q, R),
+            r"(?<![A-Za-z0-9_])var\s+%s\s+\*?\s*%s%s(?![A-Za-z0-9_])" % (ident, q, R),
+            r"(?<![A-Za-z0-9_.])%s\s+\*?\s*%s%s\s*[,)]" % (ident, q, R),
+        )]
+        self._direct = [re.compile(p) for p in (
+            r"(?<![A-Za-z0-9_])%s%s\s*\{[^{}]*\}\s*\)?%s" % (q, R, self._call),
+            r"(?<![A-Za-z0-9_])%sNew%s[A-Za-z0-9_]*\s*\([^()]*\)%s" % (q, R, self._call),
+        )]
+
+    def search(self, text, *_args):
+        code = strip_noncode(text)
+        if not re.search(self._call, code):
+            return None
+        for rx in self._direct:
+            m = rx.search(code)
+            if m:
+                return m
+        names = set()
+        for rx in self._binders:
+            names.update(rx.findall(code))
+        for name in sorted(names):
+            m = re.search(r"(?<![A-Za-z0-9_.])%s%s" % (re.escape(name), self._call), code)
+            if m:
+                return m
+        return None
 
 
 def path_pattern(rel: str):
@@ -464,20 +520,16 @@ def reached_through_module(module: str, name: str, text: str, *,
     not evidence the unit ran. Type arguments are allowed between the name
     and its `(`, since `b.Map[int](xs)` is a call.
 
-    A method unit `T.M` is reached when the text names `T` as a whole word and
-    calls `.M(` -- receivers are values, and this reader does no type
-    inference, so requiring the type is what stops `buf.String()` from
-    crediting `Report.String`.
+    A method unit `T.M` is reached when `.M(` is called on a value bound to
+    `T` -- `_MethodPattern`, the same rule the core applies everywhere else,
+    so the two routes cannot disagree about what a method call is.
     """
     aliases, names = module_bindings(module, text, src_rel=src_rel, ref_rel=ref_rel)
     if not aliases and not names:
         return False
     code = strip_noncode(text)
     if "." in name:
-        recv, meth = name.split(".", 1)
-        if not re.search(r"(?<!%s)%s(?!%s)" % (_ID, re.escape(recv), _ID), code):
-            return False
-        return bool(re.search(r"\.\s*%s\s*%s\s*\(" % (re.escape(meth), _TYPE_ARGS), code))
+        return bool(name_pattern(name).search(text))
     esc = re.escape(name)
     if "*" in names and re.search(r"(?<![A-Za-z0-9_.])%s\s*%s\s*\(" % (esc, _TYPE_ARGS), code):
         return True
@@ -966,7 +1018,13 @@ UNCONTROLLABLE = {
                    "ListenUnix", "ListenUnixgram", "LookupAddr", "LookupCNAME", "LookupHost",
                    "LookupIP", "LookupMX", "LookupNS", "LookupPort", "LookupSRV", "LookupTXT",
                    "Dialer", "Resolver", "ListenConfig"))
-               + ("net/http.Get", "net/http.Head", "net/http.Post", "net/http.PostForm",
+               # `Server` and `Transport` are TYPES a unit holds values of, and
+               # `go s.ListenAndServe()` on one was scored Tier 1 while the
+               # unit really bound a port: neither a method on a value nor the
+               # type was a marker. The type is the only name a text reader can
+               # see there, so it is the marker.
+               + ("net/http.Server", "net/http.Transport",
+                  "net/http.Get", "net/http.Head", "net/http.Post", "net/http.PostForm",
                   "net/http.DefaultClient", "net/http.Client", "net/http.ListenAndServe",
                   "net/http.ListenAndServeTLS", "net/http.Serve", "net/http.ServeTLS",
                   "net/rpc", "net/smtp", "crypto/tls.Dial", "crypto/tls.DialWithDialer",
