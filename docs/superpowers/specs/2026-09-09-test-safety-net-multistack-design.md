@@ -205,3 +205,69 @@ Four findings that a plan would not have predicted:
    `--unshare-net` additionally failed loopback setup in that environment
    (`RTM_NEWADDR: No child processes`), so network denial on Linux is **not yet proven**
    and must be verified on a real runner before it is claimed.
+
+---
+
+## Amended 2026-09-12 — for Go, D2 is replaced by an overlay guard (owner decision)
+
+The sandbox spike above shows D2 is buildable, but at four costs, and none of them goes
+away:
+
+- **No trip signal of its own.** A denial prints exactly like an assertion failure, so
+  every proof needs two runs read as a pair.
+- **Linux is unproven where it matters.** `bwrap` needs user namespaces that containers
+  deny, and network denial there was never demonstrated.
+- **Per-platform profiles.** macOS and Linux each need their own profile, and those
+  profiles disagree unless tuned against each other.
+- **Four groups a sandbox cannot see.** Clock, environment, randomness and terminal input
+  are not syscalls it can deny. A Go tier 1 proof would therefore be weaker than python's
+  or node's in exactly the groups that make a characterization test flaky.
+
+A second mechanism was spiked on go 1.26.7/darwin and adopted instead: **`go test -overlay`
+over the standard library**. The overlay file map replaces source files in the build
+without touching them on disk — GOROOT's included — and adds new files to existing
+packages. Every proof run:
+
+1. generates hook files from the installed GOROOT;
+2. injects a one-line hook at the top of each I/O primitive: `syscall`,
+   `internal/syscall/unix`, `time`, `math/rand`, `crypto/internal/sysrand`,
+   `database/sql`, and the `net`/`net/http` entry points;
+3. adds a decision engine to `syscall`.
+
+The engine walks `runtime.Callers` with the rule `io_guard.js` settled on:
+- stdlib frames are transparent;
+- the generated `_testmain.go` runner exempts the call;
+- the first other frame is attributable;
+- reaching the end of the stack exempts it.
+
+Spike results, each against a real `go test`:
+
+| probe | result |
+|---|---|
+| pure unit, tier 1 (testing's own `time.Now` and printing) | PASS, exit 0 |
+| `time.Now` in the unit | `IOGuardViolation: clock … from calc.Now`, exit 1 → wrapper 3 |
+| `os.Getenv` in the unit | trips `environment` |
+| the same, wrapped in `recover()` | still trips: `syscall.Exit(3)` is not a panic |
+| the same, on a goroutine the unit started | trips, attributed to the unit's function |
+| `os.Getenv` in the package's `init` | trips at import, attributed to `calc.init` |
+| `-trimpath` | unchanged: provenance reads the frame's package path, not its file |
+| cold build (fresh `GOCACHE`), warm build, moved overlay dir | 5s, 0s, 0s — the cache keys on content |
+
+What this buys over D2:
+- **The three-outcome contract holds with no differential.** A trip has its own signal.
+- **Per-group tiers.** The groups are python's and node's, so tier 2 can permit
+  `filesystem` while blocking `network`.
+- **Every platform Go runs on,** with no namespaces or profiles.
+
+What it costs, stated in the plan and the shipped docs:
+- **Anything that bypasses `syscall` is unseen** — raw syscalls, `golang.org/x/sys/unix`,
+  cgo, assembly. The filter declines the raw and cgo shapes statically.
+- **Some stdlib work is exempt.** When the stdlib does I/O on a goroutine it started
+  itself, with no repo frame on it, the call passes; `net/http`'s entry points are hooked
+  for that reason.
+- **Hook targets are located by text in each Go release's sources.** A missing required
+  target makes the guard refuse to run, never run unguarded.
+
+The OS sandbox remains the answer to evaluate for **Rust**, whose `std` ships prebuilt
+and cannot be overlaid. The Go plan is
+`docs/superpowers/plans/2026-09-12-test-safety-net-go.md`.
