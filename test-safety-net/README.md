@@ -133,7 +133,7 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
   the naming, lexing and import-grammar answers JS gives, and node's own I/O marker
   tables and triage.
 - `assets/stack_go.py` — the Go stack: heuristic and `go/ast` discovery of exported functions
-  and methods, package-scoped naming and coverage, the 272-name `syscall` table both layers share,
+  and methods, package-scoped naming and coverage, the 275-name `syscall` table both layers share,
   and Go's I/O marker tables and triage.
 - `assets/stack_common.py` — the file helpers and the manifest-evidence rule the
   ranker and every stack share.

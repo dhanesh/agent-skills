@@ -1096,16 +1096,23 @@ def _names(spec: str):
 # applies it to decide which `syscall` functions get a hook. ONE COPY, used by
 # both layers, so the two cannot disagree about what a syscall is.
 #
-# Captured 2026-09-12 from `GOOS=darwin|linux go doc -all syscall` on go
-# 1.26.7 (272 names), and pinned by a DERIVED test in `test_stack_go.py` that
-# re-reads the installed toolchain and fails on any name missing here.
+# Captured 2026-09-12 from `go doc -all syscall` on go 1.26.7 for EVERY darwin
+# and linux port in `go tool dist list` (275 names), and pinned by a DERIVED
+# test in `test_stack_go.py` that re-reads the installed toolchain the same
+# way and fails on any name missing here. Every port, not the host's: the
+# first capture read only GOOS, inherited an arm64 host's GOARCH, and missed
+# the three names linux/amd64 exports -- which is what CI's runners are.
 #
 #   fd     an operation on a descriptor that is already open. The OPEN was the
 #          I/O and is classified; the read/write/close that follow are not,
 #          or printing to stdout would be filesystem I/O.
 #   stdin  `Read`, which the guard fires on only for fd 0.
 #   pure   no system state at all -- conversions and parsers.
-#   raw    an unclassifiable raw syscall: statically declined (Tier 4).
+#   raw    an unclassifiable raw syscall: statically declined (Tier 4). Also
+#          `Ioperm`/`Iopl` (x86, mips and ppc linux): they grant the process
+#          raw I/O-port access, and the port I/O that follows is `in`/`out`
+#          instructions no hook can see -- residual 1's shape, so the filter
+#          declines it rather than scoring the harmless-looking grant.
 SYSCALL_GROUPS = {}
 for _group, _spec in (
         ("filesystem", "Access Acct Chdir Chflags Chmod Chown Chroot Creat Exchangedata "
@@ -1115,7 +1122,7 @@ for _group, _spec in (
                        "Lchown Link Listxattr Lstat Mkdir Mkdirat Mkfifo Mknod Mknodat Mount "
                        "Open Openat Pathconf PivotRoot ReadDirent Readlink Removexattr Rename "
                        "Renameat Revoke Rmdir Setxattr Stat Statfs Symlink Sync Truncate "
-                       "Undelete Unlink Unlinkat Unmount Utime Utimes UtimesNano"),
+                       "Undelete Unlink Unlinkat Unmount Ustat Utime Utimes UtimesNano"),
         ("network", "Accept Accept4 AttachLsf Bind BindToDevice BpfBuflen BpfDatalink "
                     "BpfHeadercmpl BpfInterface BpfStats BpfTimeout CheckBpfVersion Connect "
                     "DetachLsf FlushBpf Getpeername Getsockname GetsockoptByte "
@@ -1151,8 +1158,8 @@ for _group, _spec in (
                  "ParseSocketControlMessage ParseUnixCredentials ParseUnixRights "
                  "SlicePtrFromStrings StringBytePtr StringByteSlice StringSlicePtr "
                  "TimespecToNsec TimevalToNsec UnixCredentials UnixRights"),
-        ("raw", "AllThreadsSyscall AllThreadsSyscall6 RawSyscall RawSyscall6 Syscall Syscall6 "
-                "Syscall9")):
+        ("raw", "AllThreadsSyscall AllThreadsSyscall6 Ioperm Iopl RawSyscall RawSyscall6 "
+                "Syscall Syscall6 Syscall9")):
     for _n in _names(_spec):
         SYSCALL_GROUPS[_n] = _group
 del _group, _spec, _n

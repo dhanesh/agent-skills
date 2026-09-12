@@ -333,7 +333,7 @@ measured) and every later run is warm.
 
 | group | hooked |
 |---|---|
-| filesystem | every `syscall` function the 272-name `SYSCALL_GROUPS` table classifies as filesystem (`Open`, `Stat`, `Mkdir`, `Unlink`, `Rename`, `Getdents`, ...), and `internal/syscall/unix`'s `*at` family |
+| filesystem | every `syscall` function the 275-name `SYSCALL_GROUPS` table classifies as filesystem (`Open`, `Stat`, `Mkdir`, `Unlink`, `Rename`, `Getdents`, ...), and `internal/syscall/unix`'s `*at` family |
 | network | `syscall.Socket`/`Connect`/`Bind`/`Listen`/`Sendto`/`Recvfrom` and the rest of the table's network names; `internal/syscall/unix`'s resolver (`Getaddrinfo`, `ResNsearch`); the `net` `Dial*`/`Listen*`/`Lookup*` functions and `Dialer`/`Resolver`/`ListenConfig` methods; `net/http.Get`/`Post`/`Client.Do`/`Transport.RoundTrip`/`ListenAndServe*`; `crypto/tls.Dial`/`Listen` |
 | subprocess | `syscall.ForkExec`/`StartProcess`/`Exec`/`Kill`/`Wait4`, `internal/syscall/unix.PidFDOpen` |
 | environment | `syscall.Getenv`/`Environ`/`Setenv`/`Unsetenv`, the process-identity family (`Getpid`, `Getuid`, ...), `Sysctl`/`Uname` |

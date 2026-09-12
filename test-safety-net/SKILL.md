@@ -320,7 +320,7 @@ than none, because it makes the invariant look enforced when it is not.
    so read them before you read one.
 
    The go guard hooks the lowest layer Go itself has: every classified function of package
-   `syscall` — the same 272-name table the filter reads — `internal/syscall/unix`'s `*at` and
+   `syscall` — the same 275-name table the filter reads — `internal/syscall/unix`'s `*at` and
    resolver families, and the clock, randomness, database and network entry points whose group
    decides a call made beneath them. It decides each call by call provenance (`runtime.Callers`),
    as the node guard does; its decision rule, patch table and residuals are in

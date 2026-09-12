@@ -691,10 +691,19 @@ class TestSyscallTableIsDerived(unittest.TestCase):
             raise unittest.SkipTest("no `go` on PATH: the syscall table is NOT "
                                     "checked against a real toolchain here")
         import subprocess
+        # EVERY darwin/linux port the toolchain knows, not the host's GOARCH:
+        # reading GOOS alone passed on arm64 hosts and failed on CI's amd64
+        # runners, where `Ioperm`, `Iopl` and `Ustat` exist. What this checks
+        # must not depend on the machine it runs on.
+        env = dict(os.environ, GOTOOLCHAIN="local")
+        ports = subprocess.run([go, "tool", "dist", "list"], env=env, capture_output=True,
+                               text=True, timeout=120).stdout.split()
+        ports = [p.split("/") for p in ports if p.split("/")[0] in ("darwin", "linux")]
+        self.assertIn(["linux", "amd64"], ports)
         names = set()
-        for goos in ("darwin", "linux"):
-            env = dict(os.environ, GOOS=goos, GOTOOLCHAIN="local")
-            out = subprocess.run([go, "doc", "-all", "syscall"], env=env,
+        for goos, goarch in ports:
+            out = subprocess.run([go, "doc", "-all", "syscall"],
+                                 env=dict(env, GOOS=goos, GOARCH=goarch),
                                  capture_output=True, text=True, timeout=120).stdout
             for line in out.splitlines():
                 if line.startswith("func ") and line[5:6].isupper():
