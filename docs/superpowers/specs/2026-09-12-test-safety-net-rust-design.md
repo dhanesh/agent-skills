@@ -1,0 +1,253 @@
+# test-safety-net: the Rust stack
+
+**Status:** design approved section by section by the owner, 2026-09-12. Implementation plan to follow.
+**Supersedes:** for Rust, the multistack spec's D2 (OS sandbox) and its per-stack row. See the amendment appended to
+`docs/superpowers/specs/2026-09-09-test-safety-net-multistack-design.md`.
+
+Rust is the last stack `test-safety-net` declines. This spec adds it. The workflow is the same
+(rank → confirm → write+prove → report), with the same invariants, exit table and group names as
+python, node and go. Everything below is Rust's own answer to the questions every stack answers
+differently.
+
+## Owner decisions, 2026-09-12
+
+| # | Decision | Rejected alternatives |
+|---|---|---|
+| O1 | Prove **1.82, 1.86, 1.90, 1.94, 1.98**: every 4th minor, about 22 months. Versions in between are "expected by bracketing, not proven". A toolchain pinned below 1.82 is ranked, but its proof is declined with the reason. | The literal last 5 minors, 1.94–1.98, cover only about 7 months at Rust's 6-week cadence. |
+| O2 | Tests go in **`tests/` only**. Invariant 1 stays absolute. | Appending `#[cfg(test)]` modules to source, whether always or as an opt-in. |
+| O3 | The runtime guard is **libc interposition**. | Rebuilding std with hooks (`-Zbuild-std`, `RUSTC_BOOTSTRAP`); D2's OS sandbox. |
+| O4 | Proofs build in the repo's **own build dir**, resolved by cargo. | A separate target dir (a cold rebuild of every dependency). |
+
+An evidence audit (`base-in-reality`, requested by the owner) checked all four against fetched primary
+sources, with a three-lens refutation pass. All four held. Three negative findings were overturned in
+refutation:
+- "the 1.82 floor is too new": the guard is unproven below it, and rustup plus a pinned toolchain is the Rust norm;
+- "the `tests/` rationale is misstated": Invariant 1 bans touching source bytes at all;
+- "`main.rs` is reachable by spawning the binary": that is subprocess I/O, which Invariant 2 forbids.
+
+Two findings stood and are designed in below:
+- **A1 (rustix):** see "Preconditions" in the guard section.
+- **A2 (Cargo.lock):** see "Build" in the guard section.
+
+## Evidence the design rests on
+
+Three throwaway spikes and a probe ran on 2026-09-12. None of them ran on amd64; CI's legs are the
+amd64 proof.
+
+- **Spike A (libc interposition, C hook).** Every probed std API trips with exit 3, attributed to the
+  right function: env, fs, metadata, tcp, both clocks, `Command`, stdin, a `catch_unwind` wrapper,
+  a spawned thread. libtest's own reads do not trip. Results were identical on macOS 1.92 and Linux
+  glibc 1.82 and 1.92.
+  - On Linux with default flags, frames do not resolve and **all I/O passed**. The fix is an in-hook
+    reader for the `.symtab` of `/proc/self/exe`.
+  - Stripped and static-musl binaries fail open.
+  - A macOS dylib that uses `__thread` aborts in libSystem's initialiser.
+- **Spike A2 (Rust hook).** A single Rust cdylib, built by plain `rustc`, reached parity with the C hook on
+  1.82, 1.92 and 1.98, with no C compiler or SDK handling. On 1.82, a `panic=abort` cdylib has
+  incomplete unwind tables, so `backtrace()` resolved nothing and **all I/O passed**, until
+  `-C force-unwind-tables=yes` was added.
+- **Spike B (patched std).** Viable, but it rests on `RUSTC_BOOTSTRAP=1` (which the Rust project "strongly
+  discourage[s]") and on cargo's test-only `__CARGO_TESTS_ONLY_SRC_ROOT`. On 1.98 it had a real escape:
+  `env::var` bypassed the hooked `var_os`. Rejected.
+- **`cargo test` single-test table.** Measured identical on 1.82 (Linux) and 1.92:
+  - a pass exits 0;
+  - an assertion failure exits 101;
+  - an `#[ignore]` exits **0**, with `1 ignored`;
+  - a filter that matches nothing exits **0**, with `running 0 tests`;
+  - a compile error exits **101**, with `error[E…]`.
+
+  So the exit code alone lies twice.
+
+## The stack: `assets/stack_rust.py`
+
+It implements the 15-name stack interface in `rank_risk.py`.
+
+- **Crates and targets** come from `cargo metadata --no-deps --offline --format-version 1`: workspace
+  members, `lib`/`bin` targets, and the crate name used in `use` paths. Python 3.10 has no stdlib TOML
+  reader, so asking cargo is also the only stdlib-only option.
+  - **First plan task:** verify this command writes nothing, `Cargo.lock` included. If it does, add `--locked`.
+- **Files.** A crate's files are `src/**/*.rs`. Skip `target/`, `vendor/`, `examples/`, `benches/` and
+  `build.rs`. Test files are `tests/*.rs`. `scope_files(rel)` is `[rel]`, because a module is its file.
+- **Units** are `pub fn` items and `pub` methods of inherent `impl` blocks, reachable from a `tests/`
+  crate through the library root. A unit is reachable when every `mod` from `src/lib.rs` down is
+  `pub mod`, or when the item is re-exported by `pub use`, named or glob. Everything else is ranked
+  and reported, never tested:
+  - private and `pub(crate)` items: *not reachable without modifying source*;
+  - binary-only crates: *binary-only: subprocess, Tier 3*.
+
+  A false "unreachable" only reports. A false "reachable" produces a test that does not compile, and
+  NO BUILD discards it.
+- **Discovery** is heuristic only: regex plus brace matching, with Rust-aware lexing (raw strings
+  `r#"…"#`, nested block comments, lifetimes versus char literals, attributes). There is no precise path:
+  the per-file `rustc -Zunpretty=ast-tree` dump needs `RUSTC_BOOTSTRAP`, and its format shifted between
+  1.82 and 1.92. The report names the reader, as node and go do.
+- **Placement.** One test file per source file, `tests/tsn_<module_path>.rs` (e.g. `src/calc/add.rs` →
+  `tests/tsn_calc_add.rs`), importing through `use <crate>::<path>::<item>;`. Existing files are
+  appended to, never overwritten. An environment-controlled test goes alone in
+  `tests/tsn_<module_path>_env_<n>.rs`; see Tier 2.
+- **Coverage credit** (`already_covered`) counts `tests/*.rs` that reach the unit through its public
+  path or a `use`, and in-file `#[cfg(test)]` modules that reach it through `super::`. A method is
+  credited only through a value bound to its type, the rule Go's review round forced.
+
+## Triage and Tier 2
+
+The group names are the seven every stack uses. Rust's controllable line:
+
+| group | Rust |
+|---|---|
+| filesystem | **controllable**: `tsn_control_temp_dir()` |
+| environment | **controllable**: `tsn_control_set_env(k, v)` |
+| clock | uncontrollable: std has no freeze hook |
+| randomness | uncontrollable: std has no RNG; `rand::thread_rng` cannot be seeded |
+| database, network, subprocess | never auto-Tier-2, as on every stack |
+
+- **Controls.** libtest has no controls, so the generated test file carries two fixed helpers, written by
+  the skill, that the guard recognises by symbol name. This mirrors Go's `testing.(*T).TempDir`/`Setenv`.
+  - `tsn_control_temp_dir()` builds a unique directory under `std::env::temp_dir()`. Its `TMPDIR` read
+    counts as filesystem, as Go's `t.TempDir()` override does.
+  - `tsn_control_set_env(k, v)` sets a variable and restores it on drop. Its body is wrapped in
+    `unsafe {}`: required in edition 2024, a warning in 2021.
+- **One environment test per file.** The environment is process-wide. libtest runs one file's tests on
+  parallel threads, while cargo runs each test file as its own process, one after another. So an
+  environment-controlled test that passes alone could be flaky in the full suite unless it has its own
+  file. Go avoids this because `t.Setenv` refuses to run beside parallel tests; Rust has no equivalent.
+- **A seeded `StdRng::seed_from_u64(1)`** is plain computation, and stays Tier 1.
+
+**Marker tables:**
+
+| group | markers |
+|---|---|
+| filesystem | `std::fs::*`, `File`, `OpenOptions`, the disk-touching `Path` methods (`exists`, `metadata`, `read_dir`, `canonicalize`, …), `tokio::fs`, `async_std::fs` |
+| network | `std::net::*` (including `ToSocketAddrs`, which is DNS), `tokio::net`, `reqwest`, `hyper`, `ureq` |
+| subprocess | `std::process::Command`, `tokio::process` |
+| environment | `std::env::{var, var_os, vars, args, current_dir, set_var, remove_var, temp_dir, home_dir}` |
+| clock | `SystemTime::now`, `Instant::now`, `thread::sleep`, `tokio::time` |
+| randomness | `rand::{thread_rng, random}`, `OsRng`, `getrandom` |
+| database | `sqlx`, `diesel`, `rusqlite`, `postgres` |
+| stdin | `std::io::stdin` (tier 1 only, as on every stack) |
+
+- **Static declines (Tier 4)** cover what no hook can see: `asm!`/`global_asm!`, `libc::syscall(`, and
+  raw-backend `rustix` on Linux when the proof cannot be rebuilt against libc (A1).
+- **FFI is not declined.** C code does its I/O through libc, and the hook sees it.
+- **Lazy statics.** `LazyLock`, `once_cell::Lazy` and `lazy_static!` initialise on first use, inside the
+  unit's call, and are judged there. Rust has no import-time floor like python's and go's.
+
+## The guard: `assets/io_guard_rust.py` and its hook
+
+Its arguments and exit table are Go's:
+
+| exit | meaning |
+|---|---|
+| 0 | GREEN |
+| 1 | RED |
+| 2 | NOT ARMED |
+| 3 | TRIP |
+| 4 | NO TEST |
+| 5 | NO BUILD |
+
+It never runs a proof it cannot guard.
+
+1. **Preconditions.** Any failure exits 2, with the reason.
+   - The OS is darwin or linux.
+   - `rustc -V` run in the repo (so `rust-toolchain.toml` is honoured) is ≥ 1.82. A lower pin is declined (O1).
+   - `Cargo.lock` exists (A2); otherwise decline, and point to `cargo generate-lockfile`.
+   - **A1, rustix:** on Linux, raw-backend `rustix` in `cargo metadata` switches the build to a separate
+     out-of-repo build dir, keyed by workspace, with `--cfg=rustix_use_libc`, so the user's cache is
+     never invalidated. If that build cannot be made, exit 2.
+2. **Build.** `cargo test --locked --no-run --message-format=json [-p <pkg>] --test tsn_<x>` (A2: a plain
+   build was shown to create or rewrite `Cargo.lock`).
+   - The executable path comes from the JSON artifact; the build dir is cargo's own.
+   - A compiler error exits **5**, never 1.
+   - The skill adds no `RUSTFLAGS`, except in A1's separate dir.
+   - Time waiting on cargo's file lock is excluded from the proof timeout.
+3. **Refusals.** Exit 2 for a binary that is static, stripped (no crate symbols) or musl: each makes the hook fail open.
+4. **The hook.** One Rust source file, built by the repo's own `rustc` with
+   `--crate-type cdylib -C panic=abort -C force-unwind-tables=yes`, cached outside the repo and keyed by
+   toolchain and source hash. It is loaded with `DYLD_INSERT_LIBRARIES` (via an `__interpose` section)
+   on macOS, and `LD_PRELOAD` (via `dlsym(RTLD_NEXT)`) on Linux.
+   - **Arm handshake.** The constructor reports that it loaded, and a self-check resolves one known crate
+     frame. Either failing is exit 2; this closes Spike A2's 1.82 fail-open.
+   - **The hook path uses** no TLS (a static atomic plus a pthread key made in a constructor), no
+     allocation, no fmt, no std I/O and no panics. It writes raw, then calls `_exit(3)`.
+   - **`open`/`open64`** are defined with fixed arguments in the ABI's slots, since stable Rust cannot
+     define C-variadic functions: 3 arguments on SysV/AAPCS64, and `mode` as the 9th slot on Apple arm64.
+5. **Intercepted, per group:**
+
+   | group | libc calls |
+   |---|---|
+   | filesystem | open/openat/open64, the stat family and statx, access, mkdir, unlink, rename, opendir |
+   | environment | getenv, setenv, unsetenv |
+   | network | socket, connect, bind, getaddrinfo |
+   | clock | clock_gettime, gettimeofday, mach_absolute_time, clock_gettime_nsec_np |
+   | randomness | getrandom, getentropy, arc4random_buf |
+   | subprocess | posix_spawn(p), fork, execve |
+   | stdin | read on fd 0, at tier 1 |
+
+6. **Decision rule.** Walk `backtrace()`, resolving symbols with `dladdr` on macOS and with the `.symtab`
+   of `/proc/self/exe` on Linux.
+   - Frames in `std`, `core` and `alloc`, and HashMap's seed path, are transparent. Seed-path names are
+     pinned per toolchain: `std::sys::pal::unix::rand` in 1.82, `std::sys::random::linux` in 1.92.
+   - A crate frame must carry Rust's `17h<16hex>E` hash suffix, so a runtime's C++ `_ZN` symbols are
+     never read as crate code.
+   - libtest's own frames (`test::…`) are runner work, and exempt.
+   - `tsn_control_*` frames override the group.
+   - The **first other frame** decides, whether it belongs to the repo's crate, the test crate or a
+     third-party crate, as on go and node. I/O made through `reqwest` is therefore judged.
+   - **A thread with no attributable frame, that is not libtest's, is judged, not exempt.** Go's
+     "no repo frame" exemption let `go <stdlib func>` escape, and `thread::spawn(<std fn>)` has the
+     same shape. So this rule fails closed from the start.
+   - A call is blocked when its group is blocked at the tier.
+7. **Classify** from the result line, never from the exit code alone:
+   - an `IOGuardViolation` line exits 3;
+   - `1 passed` with nothing ignored exits 0;
+   - `1 failed` exits 1;
+   - `running 0 tests`, or an ignored test, exits 4;
+   - `error[E…]` or "could not compile" exits 5.
+
+   The verdict-spoofing residual (repo code sharing stdout) is shared with go.
+
+## Verification
+
+- **`test_stack_rust.py`** covers lexing, reachability (pub-mod chains, named and glob `pub use`,
+  `pub(crate)`), coverage credit, triage per group, the static declines and registration.
+- **`test_io_guard_rust.py`** runs real cargo fixtures through the wrapper:
+  - every group trips at tier 1; each controllable group is permitted at tier 2;
+  - the control helpers;
+  - `catch_unwind`, spawned threads, and `thread::spawn(<std fn>)`;
+  - libtest's own work does not trip;
+  - each refusal: static, stripped, musl, no `Cargo.lock`, a pin below the floor;
+  - the handshake self-check, `--locked` and the rustix path;
+  - every row of the classify table.
+
+  It skips cleanly without cargo.
+- **Mutation discipline, as on go.** Every fix is pinned by a test that turns red when the fix is removed.
+- **Eval checks 45–49** mirror go's 40–44:
+  - 45: detection and discovery;
+  - 46: the report names its reader;
+  - 47 (negative): `target/`, `vendor/`, `tests/`, `examples/`, `benches/`, `build.rs` and unreachable
+    `pub` items are never units;
+  - 48: tiering;
+  - 49: the documented guard command, run verbatim, passes a clean unit and exits 3 on real I/O.
+- **CI.** Five Rust legs in the `versions` job — 1.82, 1.86, 1.90, 1.94, 1.98 — on `ubuntu-latest`,
+  which is **amd64**. The full gate pins 1.98. A macOS leg runs 1.98; whether the macOS runner can link
+  1.82 is checked in CI (this host's macOS 27 SDK cannot). If it cannot, the macOS floor is stated as
+  unproven.
+- **A/B,** under `SINCE_TSN_RUST`:
+  - Rust units are discovered where the baseline finds 0;
+  - tiers are correct;
+  - the guard trips a tier-1 read;
+  - python, node and go rank byte-identically.
+
+## Residuals, stated in the shipped docs
+
+1. Anything bypassing libc is unseen: inline asm, raw syscalls. `rustix` is handled by A1.
+2. Static, stripped and musl binaries are refused rather than guarded.
+3. The seed-path and runner exemptions are names, pinned per toolchain.
+4. Life-before-main crates (`ctor`) are untested. A preloaded library's initialiser normally runs
+   before the executable's constructors, so their I/O is probably seen, but whether it is attributed
+   correctly is unverified. A plan task settles it.
+5. Verdict lines share stdout with repo code, so an `init`-style print can spoof one (as on go).
+6. 1.86 and 1.90 are first run in CI, not in the spikes.
+7. The macOS floor may be Linux-proven only.
+8. Rust's own support policy covers only the latest stable, so the four older legs are this skill's
+   claim, not the Rust project's.

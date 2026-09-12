@@ -311,3 +311,31 @@ A spike on every version found one real defect per stack, all since fixed:
 
 CI's `versions` job now runs every stack's suites on every version, and the `gate`
 check requires it.
+
+## Amended 2026-09-12 — for Rust, D2 is replaced by libc interposition (owner decision)
+
+The Go amendment above named the OS sandbox as "the answer to evaluate for Rust". It was evaluated,
+and not chosen. Three mechanisms were spiked on 2026-09-12:
+
+- **An OS sandbox (D2).** Four costs that don't go away:
+  - no trip signal of its own, so every proof needs two runs;
+  - blind to clock, environment, randomness and stdin;
+  - unproven in Linux containers;
+  - `sandbox-exec` is deprecated.
+- **Rebuilding std with hooks** (`-Zbuild-std` over a patched `rust-src`). It rests on
+  `RUSTC_BOOTSTRAP=1`, which the Rust project strongly discourages, and on a cargo test-only variable.
+  Its hook points moved within the supported range, and on 1.98 it had a real escape.
+- **libc interposition** (a Rust cdylib preloaded under the compiled test binary). Every probed std API
+  tripped and was attributed correctly on 1.82, 1.92 and 1.98.
+
+The owner chose interposition. Owner decisions made the same day:
+- Rust versions 1.82, 1.86, 1.90, 1.94 and 1.98, every 4th minor across about two years;
+- tests in `tests/` only;
+- proofs built in the repo's own cargo build dir.
+
+An evidence audit confirmed all four decisions and added two requirements: `--locked` builds, and a
+libc rebuild for raw-syscall `rustix` on Linux.
+
+The row in "Per-stack facts" above is superseded for Rust. Rust's discovery is heuristic only, as
+this spec always said. Its guard is `assets/io_guard_rust.py`. The full design is
+`docs/superpowers/specs/2026-09-12-test-safety-net-rust-design.md`.
