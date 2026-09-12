@@ -301,23 +301,36 @@ class TestNaming(CalcxCase):
 
     def test_path_pattern_is_the_module_path_bounded_at_both_ends(self):
         p = stack_rust.path_pattern("src/calc/add.rs")
-        self.assertEqual(p.pattern,
-                         r"(?<![A-Za-z0-9_:])(?:crate::|calcx::)?calc::add(?![A-Za-z0-9_])")
+        # Ruling R5 (fix round 1) overrides the brief's optional
+        # `(?:crate::|<crate>::)?` prefix: the crate name is required.
+        self.assertEqual(p.pattern, r"(?<![A-Za-z0-9_:])calcx::calc::add(?![A-Za-z0-9_])")
         self.assertTrue(p.search("use calcx::calc::add::sum;"))
-        self.assertTrue(p.search("crate::calc::add::sum(1)"))
-        self.assertTrue(p.search("calc::add::sum(1)"))
-        # NEGATIVE: another crate's, or a longer, module path.
+        self.assertTrue(p.search("calcx::calc::add::sum(1)"))
+        # NEGATIVE: another crate's, a bare, a `crate::` (in a tests/ file,
+        # the test crate's own), or a different module path.
         self.assertFalse(p.search("use other::calc::add::sum;"))
+        self.assertFalse(p.search("calc::add::sum(1)"))
+        self.assertFalse(p.search("crate::calc::add::sum(1)"))
         self.assertFalse(p.search("use calcx::calc::adder;"))
         self.assertFalse(p.search("use calcx::mycalc::add;"))
         self.assertEqual(stack_rust.path_pattern("src/calc/mod.rs").pattern,
-                         r"(?<![A-Za-z0-9_:])(?:crate::|calcx::)calc(?![A-Za-z0-9_])")
+                         r"(?<![A-Za-z0-9_:])calcx::calc(?![A-Za-z0-9_])")
 
     def test_a_one_segment_path_needs_its_crate_prefix(self):
         # NEGATIVE: `calc` alone is a bare word, not path-qualified evidence.
         p = stack_rust.path_pattern("src/calc.rs")
         self.assertTrue(p.search("calcx::calc::f()"))
         self.assertFalse(p.search("let calc = 1; calc::f()"))
+
+    def test_another_crates_use_group_is_not_this_path(self):
+        # NEGATIVE (fix round 1, ruling R5): with an optional prefix, the bare
+        # tail matched inside another crate's use-group.
+        p = stack_rust.path_pattern("src/calc/add.rs")
+        self.assertFalse(p.search("use otherx::{calc::add};"))
+        # This crate's own group is credited through module_bindings instead.
+        self.assertEqual(stack_rust.module_bindings(
+            "add", "use calcx::{calc::add};\n", src_rel="src/calc/add.rs",
+            ref_rel="tests/it.rs"), (("add",), ()))
 
     def test_a_crate_root_has_no_path(self):
         self.assertIsNone(stack_rust.path_pattern("src/lib.rs"))
@@ -354,9 +367,8 @@ class TestCrateIndex(RustCase):
         self.assertFalse(stack_rust.is_test_path("src/tests/x.rs"))
         self.assertTrue(stack_rust.is_test_for("crates/m/tests/it.rs", "crates/m/src/x.rs"))
         self.assertFalse(stack_rust.is_test_for("tests/it.rs", "crates/m/src/x.rs"))
-        p = stack_rust.path_pattern("src/a/b.rs")
-        self.assertTrue(p.search("crate::a::b::f()"))
-        self.assertFalse(p.search("calcx::a::b::f()"))
+        # Ruling R5: with no crate name there is no path to require.
+        self.assertIsNone(stack_rust.path_pattern("src/a/b.rs"))
         bind = stack_rust.module_bindings
         self.assertEqual(bind("b", "use calcx::a::b;\n", src_rel="src/a/b.rs",
                               ref_rel="tests/it.rs"), ((), ()))
@@ -395,11 +407,14 @@ class TestCrateIndex(RustCase):
         stack_rust.iter_source_files(alpha)
         stack_rust.iter_source_files(beta)
         self.assertEqual(answers(), (
-            "beta", r"(?<![A-Za-z0-9_:])(?:crate::|beta::)?a::b(?![A-Za-z0-9_])",
+            "beta", r"(?<![A-Za-z0-9_:])beta::a::b(?![A-Za-z0-9_])",
             ((), ()), (("b",), ()), False))
         stack_rust.iter_source_files(alpha)
+        # The last `True`: alpha's index holds exactly ONE crate, so its name
+        # may qualify `R` (fix round 1 keeps that; a second crate in the
+        # index removes it -- test_a_second_crates_name_qualifies_nothing).
         self.assertEqual(answers(), (
-            "alpha", r"(?<![A-Za-z0-9_:])(?:crate::|alpha::)?a::b(?![A-Za-z0-9_])",
+            "alpha", r"(?<![A-Za-z0-9_:])alpha::a::b(?![A-Za-z0-9_])",
             (("b",), ()), ((), ()), True))
 
     def test_a_re_walk_sees_a_changed_manifest(self):
@@ -490,6 +505,43 @@ class TestBindingGrammar(CalcxCase):
                 self.assertFalse(self.reached("run", text))
 
 
+    def test_a_method_needs_its_type_imported_not_just_the_module(self):
+        # NEGATIVE (fix round 1, finding 2): binding some OTHER item of the
+        # module does not make a bare `Report` this module's type.
+        text = ("use calcx::calc::helper;\nuse otherx::Report;\n"
+                "#[test]\nfn t() { let r = Report::new(); r.total(); }\n")
+        self.assertFalse(self.reached("Report::total", text, src="src/calc.rs"))
+        # NEGATIVE: an alias of the module admits `alias::Report`, not a bare one.
+        self.assertFalse(self.reached(
+            "Report::total", "use calcx::calc as c;\n#[test]\n"
+            "fn t() { let r = Report::new(); r.total(); }\n", src="src/calc.rs"))
+        # ...while importing the type, a glob, or the module's alias reaches it.
+        for text in ("use calcx::calc::Report;\n#[test]\n"
+                     "fn t() { let r = Report::new(); r.total(); }\n",
+                     "use calcx::calc::*;\n#[test]\n"
+                     "fn t() { let r = Report::new(); r.total(); }\n",
+                     "use calcx::calc as c;\n#[test]\n"
+                     "fn t() { let r = c::Report::new(); r.total(); }\n"):
+            with self.subTest(text=text):
+                self.assertTrue(self.reached("Report::total", text, src="src/calc.rs"))
+
+    def test_the_lib_root_is_not_a_bin_roots_crate(self):
+        # NEGATIVE (fix round 1, finding 3): both roots have module path `[]`,
+        # but `super` in the lib's test module is the LIBRARY, not main.rs.
+        text = "mod tests {\n    use super::*;\n    #[test]\n    fn t() { run(); }\n}\n"
+        self.assertFalse(self.reached("run", text, src="src/main.rs", ref="src/lib.rs"))
+        self.assertFalse(self.reached("run", text, src="src/main.rs", ref="src/bin/tool.rs"))
+        # ...while main.rs's own test module still reaches main.rs.
+        self.assertTrue(self.reached("run", text, src="src/main.rs", ref="src/main.rs"))
+
+    def test_a_renamed_import_credits_only_the_name_it_imported(self):
+        # NEGATIVE (fix round 1, ruling R4): this `run` is `helper`, renamed.
+        self.assertFalse(self.reached("run", "use calcx::a::{helper as run};\n"
+                                             "fn t() { run(); }\n"))
+        # ...and the unit imported under another name is reached by that name.
+        self.assertTrue(self.reached("run", "use calcx::a::{run as go};\nfn t() { go(1); }\n"))
+
+
 # ── Method credit ────────────────────────────────────────────────────────
 
 class TestMethodCredit(CalcxCase):
@@ -547,6 +599,24 @@ class TestMethodCredit(CalcxCase):
         self.assertFalse(self.credits("let _ty = std::any::type_name::<Report>(); buf.total();"))
         self.assertFalse(self.credits("// let r = Report::new(1);\n    r.total();"))
         self.assertFalse(self.credits("let r = Report::new(1); r.totals();"))
+
+
+class TestMethodCreditInAWorkspace(CalcxCase):
+    def test_a_second_crates_name_qualifies_nothing(self):
+        # NEGATIVE (fix round 1, finding 1). With `calcx` and `otherx` both
+        # indexed, `name_pattern` -- given no path -- cannot tell which crate
+        # the unit is in, so no crate name qualifies `Type` at all.
+        write(self.root, "other/Cargo.toml", '[package]\nname = "otherx"\n')
+        write(self.root, "other/src/lib.rs", "")
+        stack_rust.iter_source_files(self.root)
+        p = stack_rust.name_pattern("Report::total", module="calc")
+        for body in ("let r = otherx::Report::new(); r.total();",
+                     "let r = otherx::calc::Report::new(); r.total();",
+                     "let r = calcx::Report::new(); r.total();"):
+            with self.subTest(body=body):
+                self.assertIsNone(p.search("#[test]\nfn t() {\n    %s\n}\n" % body))
+        # The unit's own module still qualifies it.
+        self.assertTrue(p.search("#[test]\nfn t() { let r = calc::Report::new(1); r.total(); }\n"))
 
 
 class TestInterfaceNames(unittest.TestCase):

@@ -42,7 +42,8 @@ When there is no index, or `rel` lies under no indexed crate, the FALLBACK
 derives the crate directory from the path -- the prefix before its first
 `src` or `tests` segment -- and treats the crate NAME as unknown. Every form
 that needs the name then binds or credits nothing: `use <crate>::…`, a
-`<crate>::` qualifier, and `module_of("src/lib.rs")`, which answers `"lib"`.
+`<crate>::` qualifier, `path_pattern`, which returns None, and
+`module_of("src/lib.rs")`, which answers `"lib"`.
 `crate::` and `super::` still work inside the one derived crate. The fallback
 therefore only ever under-credits, which is what the interface requires.
 
@@ -444,31 +445,32 @@ def module_of(rel: str) -> str:
 
 
 def path_pattern(rel: str):
-    r"""`rel`'s module path, bounded at both ends:
-    `(?<![A-Za-z0-9_:])(?:crate::|<crate>::)?calc::add(?![A-Za-z0-9_])`.
+    r"""`rel`'s module path behind its crate's name, bounded at both ends:
+    `(?<![A-Za-z0-9_:])calcx::calc::add(?![A-Za-z0-9_])`.
 
-    The leading lookbehind refuses `other::calc::add`, which is another
-    crate's module of the same shape. The crate prefix is OPTIONAL for a
-    path of two or more segments, and REQUIRED for a one-segment path, where
-    `calc` alone would be a bare word rather than path-qualified evidence
-    (python returns None there for the same reason). With no crate name in
-    the index, only `crate::` is offered.
+    CONTROLLER RULING R5 (fix round 1) overrides the brief's
+    `(?:crate::|<crate>::)?calc::add`. With the prefix optional, the bare
+    tail matched inside ANOTHER crate's use-group (`use otherx::{calc::add};`),
+    and the core takes a path-qualified hit as sufficient on its own
+    (`rank_risk.already_covered`), so that was an over-credit. The crate
+    prefix is now REQUIRED at every segment count, and it is `<crate>::`
+    only: the core reads this pattern against `tests/` files, each a crate of
+    its own, where `crate::calc::add` names the TEST crate's module rather
+    than this one. A use-group of THIS crate (`use calcx::{calc::add}`) is
+    credited through `module_bindings`, not here. Killing tests:
+    `TestNaming.test_another_crates_use_group_is_not_this_path` and
+    `test_path_pattern_is_the_module_path_bounded_at_both_ends`.
 
-    None for a crate root (`src/lib.rs`, a binary root) and for anything
-    outside the library's source -- no qualifier to offer.
+    None when the crate name is unknown (no index: python returns None for a
+    path it cannot qualify, the same way), for a crate root (`src/lib.rs`, a
+    binary root), and for anything outside the library's source.
     """
     mp = _module_path(rel)
-    if not mp or not mp[0]:
-        return None
-    heads = ["crate"]
     name = _crate_name(rel)
-    if name:
-        heads.append(name)
-    prefix = "(?:%s)" % "|".join(re.escape(h) + "::" for h in heads)
-    if len(mp[0]) > 1:
-        prefix += "?"
-    body = "::".join(re.escape(s) for s in mp[0])
-    return re.compile(r"(?<![A-Za-z0-9_:])%s%s(?![A-Za-z0-9_])" % (prefix, body))
+    if not mp or not mp[0] or not mp[1] or not name:
+        return None
+    body = "::".join(re.escape(s) for s in [name] + mp[0])
+    return re.compile(r"(?<![A-Za-z0-9_:])%s(?![A-Za-z0-9_])" % body)
 
 
 _ID = r"[A-Za-z0-9_]"
@@ -483,8 +485,9 @@ def name_pattern(name: str, module: str = None):
 
     A method unit is named `Type::method` and gets `_MethodPattern`, which
     answers the same `.search(text)` the core asks of every pattern. `module`
-    is the unit's module name (`module_of`); it, and the crate names in the
-    current index, are the only qualifiers `Type` may carry.
+    is the unit's module name (`module_of`); it, and the crate name when the
+    current index holds exactly one crate (`_sole_crate_names`), are the
+    only qualifiers `Type` may carry.
     """
     if "::" in name:
         recv, meth = name.rsplit("::", 1)
@@ -492,9 +495,18 @@ def name_pattern(name: str, module: str = None):
     return re.compile(r"(?<!%s)%s(?!%s)" % (_ID, re.escape(name), _ID))
 
 
-def _index_crate_names():
+def _sole_crate_names():
+    """`[name]` when the current index holds exactly ONE crate, else `[]`.
+
+    Fix round 1, finding 1: every indexed name used to qualify `Type`, so
+    with `calcx` and `otherx` indexed, `otherx::Report::new()` credited
+    calcx's `Report::total`. `name_pattern` is given no path and cannot tell
+    which crate the unit is in, so with more than one crate it offers no
+    crate name at all -- under-credit, the direction the spec binds. Killing
+    test: `TestMethodCreditInAWorkspace.test_a_second_crates_name_qualifies_nothing`.
+    """
     crates = _CRATES.get(_CURRENT_ROOT) if _CURRENT_ROOT else None
-    return sorted({c.name for c in crates.values()}) if crates else []
+    return [c.name for c in crates.values()] if crates and len(crates) == 1 else []
 
 
 class _MethodPattern:
@@ -507,29 +519,37 @@ class _MethodPattern:
     `Type::m(`, `(&Type { … }).m(`, `Type::new(…).m(`.
 
     `Type` may be qualified only by the unit's own `module`
-    (`calc::Type`, `calcx::calc::Type`, `crate::calc::Type`) or by a crate
-    name the current index knows (`calcx::Type`, for a re-export). The three
-    shapes go's second review broke are NEGATIVE tests in
-    `TestMethodCredit`: any qualifier accepted (`other::Type`), a longer name
-    binding (`TypeConfig::new`), and a binding carried from one fn into the
-    next. This reads text, not types, so a value that reaches the test some
-    other way reads as uncovered: a redundant test at worst, never a hidden
-    gap.
+    (`calc::Type`, `calcx::calc::Type`, `crate::calc::Type`) or by the crate
+    name when the current index holds exactly one crate (`calcx::Type`, for
+    a re-export; see `_sole_crate_names`). The three shapes go's second
+    review broke are NEGATIVE tests in `TestMethodCredit`: any qualifier
+    accepted (`other::Type`), a longer name binding (`TypeConfig::new`), and
+    a binding carried from one fn into the next. This reads text, not types,
+    so a value that reaches the test some other way reads as uncovered: a
+    redundant test at worst, never a hidden gap.
+
+    `via`, when given, REPLACES those qualifiers with a required one: `Type`
+    must be written through one of these aliases of its module (`c::Type`),
+    never bare. That is `reached_through_module`'s route for a file that
+    imported the module but not the type (fix round 1, finding 2).
 
     Killing test for "accept any qualifier":
     `test_another_crates_type_of_the_same_name_credits_nothing`.
     """
 
-    def __init__(self, recv, meth, module=None):
+    def __init__(self, recv, meth, module=None, via=None):
         R, M = re.escape(recv), re.escape(meth)
-        heads = ["crate"] + [re.escape(n) for n in _index_crate_names()]
-        quals = []
-        if module:
-            quals.append(r"(?:(?:%s)\s*::\s*(?:[A-Za-z_]\w*\s*::\s*)*)?%s\s*::\s*"
-                         % ("|".join(heads), re.escape(module)))
-        if len(heads) > 1:
-            quals.append(r"(?:%s)\s*::\s*" % "|".join(heads[1:]))
-        q = "(?:%s)?" % "|".join(quals) if quals else ""
+        if via:
+            q = r"(?:%s)\s*::\s*" % "|".join(re.escape(a) for a in via)
+        else:
+            heads = ["crate"] + [re.escape(n) for n in _sole_crate_names()]
+            quals = []
+            if module:
+                quals.append(r"(?:(?:%s)\s*::\s*(?:[A-Za-z_]\w*\s*::\s*)*)?%s\s*::\s*"
+                             % ("|".join(heads), re.escape(module)))
+            if len(heads) > 1:
+                quals.append(r"(?:%s)\s*::\s*" % "|".join(heads[1:]))
+            q = "(?:%s)?" % "|".join(quals) if quals else ""
         ident = r"(?:r#)?([A-Za-z_][A-Za-z0-9_]*)"
         ref = r"&?\s*(?:'[A-Za-z_]\w*\s+)?(?:mut\s+)?"
         let = r"(?<![A-Za-z0-9_])let\s+(?:mut\s+)?%s" % ident
@@ -863,14 +883,33 @@ def _inline_mods(code: str):
             for m in _INLINE_MOD.finditer(code)]
 
 
+def _bin_key(rel: str, d: str) -> str:
+    """The binary crate a bin-tree file belongs to: `src/bin/<name>`, or the root file."""
+    parts = _within(rel, d).split("/")
+    if len(parts) > 3 and parts[:2] == ["src", "bin"]:
+        return _join(d, "src/bin/" + parts[2])
+    return rel
+
+
 def _same_crate(src_rel: str, ref_rel: str) -> bool:
     """Is `crate::` in `ref_rel` the crate `src_rel` is compiled into?
 
-    The same crate directory, and `ref_rel` not a `tests/` file: every
-    integration test is a crate of its own, where `crate::` means itself.
+    The same package directory; `ref_rel` not a `tests/` file (every
+    integration test is a crate of its own, where `crate::` means itself);
+    and the same TARGET. Fix round 1, finding 3: the lib root and a bin root
+    both have module path `[]`, so `use super::*;` in `src/lib.rs`'s test
+    module bound every name of `src/main.rs`. A library file and a binary
+    file are now never one crate, and two binary files are one only under
+    the same bin root. Killing test:
+    `TestBindingGrammar.test_the_lib_root_is_not_a_bin_roots_crate`.
     """
     d = _crate_dir(src_rel)
-    return d is not None and d == _crate_dir(ref_rel) and not is_test_path(ref_rel)
+    if d is None or d != _crate_dir(ref_rel) or is_test_path(ref_rel):
+        return False
+    a, b = _module_path(src_rel), _module_path(ref_rel)
+    if a is None or b is None or a[1] != b[1]:
+        return False
+    return a[1] or _bin_key(src_rel, d) == _bin_key(ref_rel, d)
 
 
 def module_bindings(module: str, text: str, *, src_rel: str, ref_rel: str) -> tuple:
@@ -890,18 +929,34 @@ def module_bindings(module: str, text: str, *, src_rel: str, ref_rel: str) -> tu
     resolves to any other module binds nothing: the predicate may
     under-credit, never over-credit. Comments and strings are stripped
     first, so a commented-out `use` binds nothing.
+
+    `names` holds the names BOUND, so `{helper as run}` reports `run`.
+    Which item that name IS stays in `_bindings`' (leaf, bound) pairs, and
+    `reached_through_module` reads those (ruling R4).
+    """
+    aliases, items, glob = _bindings(text, src_rel, ref_rel)
+    names = {bound for _leaf, bound in items} | ({"*"} if glob else set())
+    return tuple(sorted(aliases)), tuple(sorted(names))
+
+
+def _bindings(text: str, src_rel: str, ref_rel: str):
+    """(aliases, {(leaf, bound)}, glob): `module_bindings` before it is flattened.
+
+    `leaf` is the name the module DEFINES and `bound` the name the `use`
+    binds it to -- `{helper as run}` is `("helper", "run")`. Kept apart so a
+    renamed import credits only the item it imported (ruling R4).
     """
     src_rel, ref_rel = _norm(src_rel), _norm(ref_rel)
     target = _module_path(src_rel)
     if target is None:
-        return (), ()
+        return set(), set(), False
     src_mp, in_lib = target
     cname = _crate_name(src_rel) if in_lib else None
     same = _same_crate(src_rel, ref_rel)
     ref_mp = _module_path(ref_rel) if same else None
     code = strip_noncode(text)
     mods = _inline_mods(code) if ref_mp is not None else []
-    aliases, names = set(), set()
+    aliases, items, glob = set(), set(), False
     for m in _USE_KW.finditer(code):
         semi = code.find(";", m.end())
         body = code[m.end():semi if semi >= 0 else len(code)]
@@ -914,7 +969,7 @@ def module_bindings(module: str, text: str, *, src_rel: str, ref_rel: str) -> tu
                 continue
             if binding == "*":
                 if path == src_mp:
-                    names.add("*")
+                    glob = True
                 continue
             if path and path[-1] == "self":
                 path = path[:-1]
@@ -924,8 +979,8 @@ def module_bindings(module: str, text: str, *, src_rel: str, ref_rel: str) -> tu
             if path == src_mp:
                 aliases.add(bound)
             elif path[:-1] == src_mp and path:
-                names.add(bound)
-    return tuple(sorted(aliases)), tuple(sorted(names))
+                items.add((path[-1], bound))
+    return aliases, items, glob
 
 
 def _resolve(segs, cname, same, cur):
@@ -953,25 +1008,44 @@ def reached_through_module(module: str, name: str, text: str, *,
                            src_rel: str, ref_rel: str) -> bool:
     """True when `text` CALLS `name` through a `use` binding of `src_rel`'s module.
 
-    `alias::name(`, or a bare `name(` after a binding of `name` or `*`. The
-    call site is the point, as every other stack ruled: a fn VALUE (`let f =
-    pure;`) and a mention inside a string are not evidence the unit ran. A
-    turbofish is allowed between the name and its `(`.
+    `alias::name(`; or a bare call after a `use` of THAT item -- `name(` for
+    `{name}` or `*`, `go(` for `{name as go}`. The call site is the point,
+    as every other stack ruled: a fn VALUE (`let f = pure;`) and a mention
+    inside a string are not evidence the unit ran. A turbofish is allowed
+    between the name and its `(`.
+
+    CONTROLLER RULING R4 (fix round 1): a bare call credits only when the
+    `use` leaf IS `name` (or the binding is `*`). `{helper as run}` binds
+    the NAME `run` to `helper`, and `run()` then calls `helper`; crediting
+    it to the unit `run` was an over-credit. Killing test:
+    `TestBindingGrammar.test_a_renamed_import_credits_only_the_name_it_imported`.
 
     A method unit `Type::m` is reached when `m` is called on a value bound to
     `Type` -- `_MethodPattern`, the same rule the core applies everywhere
-    else, so the two routes cannot disagree about what a method call is.
+    else. Fix round 1, finding 2: a bare `Type` counts only when the file
+    imported `Type` itself (`{Type}`, `{Type as T}`, or `*`); after only an
+    alias of the module it must be written `alias::Type`. Before, ANY
+    binding of the module unlocked a bare `Type`, so `use calcx::calc::helper;
+    use otherx::Report;` reached calc's `Report::total`. Killing test:
+    `test_a_method_needs_its_type_imported_not_just_the_module`.
     """
-    aliases, names = module_bindings(module, text, src_rel=src_rel, ref_rel=ref_rel)
-    if not aliases and not names:
+    aliases, items, glob = _bindings(text, src_rel, ref_rel)
+    if not aliases and not items and not glob:
         return False
     if "::" in name:
-        return bool(name_pattern(name, module=module).search(text))
+        recv, meth = name.rsplit("::", 1)
+        pats = [_MethodPattern(recv, meth, module)] if glob else []
+        pats += [_MethodPattern(bound, meth, module)
+                 for leaf, bound in sorted(items) if leaf == recv]
+        if aliases:
+            pats.append(_MethodPattern(recv, meth, module, via=sorted(aliases)))
+        return any(p.search(text) for p in pats)
     code = strip_noncode(text)
-    esc = re.escape(name)
-    if ("*" in names or name in names) and re.search(
-            r"(?<![A-Za-z0-9_.:])%s%s\s*\(" % (esc, _TURBOFISH), code):
+    callees = ({name} if glob else set()) | {bound for leaf, bound in items if leaf == name}
+    if any(re.search(r"(?<![A-Za-z0-9_.:])%s%s\s*\(" % (re.escape(c), _TURBOFISH), code)
+           for c in sorted(callees)):
         return True
+    esc = re.escape(name)
     return any(re.search(r"(?<![A-Za-z0-9_.:])%s\s*::\s*%s%s\s*\("
                          % (re.escape(alias), esc, _TURBOFISH), code)
                for alias in aliases)
