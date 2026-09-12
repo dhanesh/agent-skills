@@ -150,6 +150,11 @@ SINCE_TSN_GO_REVIEW = "aa0da61"  # test-safety-net: the go guard's review
 # full-depth walk, NO TEST for a skip or a package with no tests, the
 # dependency-init message, net/http.Server as a marker, and a method credited
 # only through a value of its type.
+SINCE_TSN_GO_REVIEW2 = "63c4fa1"  # test-safety-net: the second review round
+# -- stdlib function values handed to a stdlib invoker judged by what was
+# invoked, the goroutine-creator rule an allowlist, a method's type qualified
+# only by its own package, and the stdlib's own pre-bound references rebound
+# on every Python.
 
 
 def _git_out(*args):
@@ -3360,6 +3365,180 @@ def check_test_safety_net_go(old, new):
             since=SINCE_TSN_GO_REVIEW)
 
 
+# The second review round, measured with the fixtures its pinned tests use.
+_GO_REVIEW2_PROBE = r"""
+import shutil, subprocess
+res = {"foreign_credit": -1, "callback_trips": -1, "prebound_escapes": -1}
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+# 1. Filter: four tests calling a same-named method on something that is NOT
+#    the repo's type. Each credited the repo's method before the fix.
+try:
+    import rank_risk
+    go = getattr(rank_risk, "stack_by_name", lambda _n: None)("go")
+except Exception:
+    go = None
+CASES = [
+    ({"svc/srv.go": "package svc\n\ntype Server struct{}\n\nfunc (s *Server) Close() error { return nil }\n",
+      "svc/srv_test.go": ('package svc\n\nimport (\n\t"net/http"\n\t"net/http/httptest"\n\t"testing"\n)\n\n'
+                          "func TestX(t *testing.T) {\n\tts := httptest.NewServer(http.NotFoundHandler())\n"
+                          "\tdefer ts.Close()\n}\n")},
+     "svc/srv.go::Server.Close"),
+    ({"svc/p.go": ("package svc\n\ntype Parser struct{}\ntype ParserConfig struct{}\n\n"
+                   "func (p *Parser) Parse() int { return 1 }\n"
+                   "func (c *ParserConfig) Parse() int { return 2 }\n"
+                   "func NewParserConfig() *ParserConfig { return &ParserConfig{} }\n"),
+      "svc/p_test.go": ('package svc\n\nimport "testing"\n\n'
+                        "func TestX(t *testing.T) {\n\tc := NewParserConfig()\n\t_ = c.Parse()\n}\n")},
+     "svc/p.go::Parser.Parse"),
+    ({"svc/s.go": ("package svc\n\ntype Store struct{}\ntype Cache struct{}\n\n"
+                   "func (s *Store) Get() int { return 1 }\nfunc (c *Cache) Get() int { return 2 }\n"
+                   "func NewStore() *Store { return &Store{} }\nfunc NewCache() *Cache { return &Cache{} }\n"),
+      "svc/s_test.go": ('package svc\n\nimport "testing"\n\n'
+                        "func TestA(t *testing.T) { s := NewStore(); _ = s }\n"
+                        "func TestB(t *testing.T) { s := NewCache(); _ = s.Get() }\n")},
+     "svc/s.go::Store.Get"),
+    ({"svc/t.go": "package svc\n\ntype T struct{}\n\nfunc (x *T) Run() {}\n",
+      "svc/t_test.go": ('package svc\n\nimport "testing"\n\n'
+                        'func TestX(t *testing.T) { t.Run("a", nil) }\n')},
+     "svc/t.go::T.Run"),
+]
+if go is not None:
+    try:
+        n = 0
+        for files, unit in CASES:
+            root = tree(dict(files, **{"go.mod": "module example.com/m\n\ngo 1.22\n"}))
+            units, _ = go.discover_units(root, precise=False)
+            n += int(unit in rank_risk.already_covered(root, units, go))
+        res["foreign_credit"] = n
+    except Exception:
+        pass
+
+# 2. Guard: five stdlib function values handed to a stdlib invoker.
+guard = os.path.join(sys.path[0], "io_guard_go.py")
+if shutil.which("go"):
+    res["callback_trips"] = 0
+    if os.path.isfile(guard):
+        mod = tree({
+            "go.mod": "module example.com/fx\n\ngo 1.22\n",
+            "fx.go": ('package fx\n\nimport (\n\t"context"\n\t"net/http"\n\t"os"\n'
+                      '\t"runtime"\n\t"time"\n)\n\n'
+                      "func FinalizeListen() {\n\tfunc() {\n"
+                      '\t\ts := &http.Server{Addr: "127.0.0.1:0"}\n'
+                      "\t\truntime.SetFinalizer(s, (*http.Server).ListenAndServe)\n\t}()\n"
+                      "\tfor i := 0; i < 20; i++ {\n\t\truntime.GC()\n"
+                      "\t\ttime.Sleep(20 * time.Millisecond)\n\t}\n}\n\n"
+                      "func CtxAfter() {\n\tctx, cancel := context.WithCancel(context.Background())\n"
+                      "\tcontext.AfterFunc(ctx, os.Clearenv)\n\tcancel()\n"
+                      "\ttime.Sleep(300 * time.Millisecond)\n}\n\n"
+                      "func TimerClear() {\n\ttime.AfterFunc(10*time.Millisecond, os.Clearenv)\n"
+                      "\ttime.Sleep(300 * time.Millisecond)\n}\n"),
+            "fx_test.go": ('package fx\n\nimport (\n\t"os"\n\t"testing"\n)\n\n'
+                           "func TestFinalizeListen(t *testing.T)  { FinalizeListen() }\n"
+                           "func TestCtxAfter(t *testing.T)        { CtxAfter() }\n"
+                           "func TestTimerClear(t *testing.T)      { TimerClear() }\n"
+                           "func TestCleanupClearenv(t *testing.T) { t.Cleanup(os.Clearenv) }\n"
+                           "func TestAllocs(t *testing.T)          { testing.AllocsPerRun(1, os.Clearenv) }\n")})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("TEST_SAFETY_NET")}
+        env.pop("GOFLAGS", None)
+        n = 0
+        # `time.AfterFunc` is itself a clock entry, so its shape is measured
+        # at tier 2 with clock allowed -- the environment write is the trip.
+        for test, tier, allow in (("TestCleanupClearenv", "1", ""), ("TestAllocs", "1", ""),
+                                  ("TestFinalizeListen", "1", ""), ("TestCtxAfter", "1", ""),
+                                  ("TestTimerClear", "2", "clock")):
+            e = dict(env, TEST_SAFETY_NET_TIER=tier)
+            if allow:
+                e["TEST_SAFETY_NET_ALLOW"] = allow
+            r = subprocess.run([sys.executable, guard, "-run", "^%s$" % test, "./"], cwd=mod,
+                               env=e, capture_output=True, text=True, timeout=300,
+                               stdin=subprocess.DEVNULL)
+            n += int(r.returncode == 3 and "IOGuardViolation" in r.stdout + r.stderr)
+        res["callback_trips"] = n
+
+# 3. Python: stdlib references bound at import, called from a unit module.
+try:
+    import io_guard
+    import random, tokenize                      # imported BEFORE arming
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "tsn_prebound_unit.py"), "w") as f:
+        f.write("import random, tokenize\n\n"
+                "def roll():\n    return random.SystemRandom().random()\n\n"
+                "def source(p):\n    with tokenize.open(p) as f:\n        return f.read(1)\n")
+    sys.path.insert(0, d)
+    import tsn_prebound_unit as unit
+    target = tokenize.__file__
+    escapes = 0
+    io_guard.arm(1)
+    try:
+        for call in (unit.roll, lambda: unit.source(target)):
+            try:
+                call()
+                escapes += 1
+            except BaseException as exc:
+                if type(exc).__name__ != "IOGuardViolation":
+                    raise
+    finally:
+        try:
+            io_guard.disarm()
+        except BaseException:
+            pass
+    res["prebound_escapes"] = escapes
+except Exception:
+    pass
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_go_review2(old, new):
+    """The second review round: stdlib function values handed to a stdlib
+    invoker, method credit through another package's type, and the stdlib's
+    own pre-bound references on Python."""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _GO_REVIEW2_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _GO_REVIEW2_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "tests calling a same-named method on a NON-repo type that credit the "
+           "repo's method, of 4 (lower=better)",
+        oldp["foreign_credit"], newp["foreign_credit"],
+        newp["foreign_credit"] == 0 and oldp["foreign_credit"] != 0,
+        "second review: any qualifier was accepted, so `httptest.NewServer` + "
+        "`ts.Close()` covered the repo's `Server.Close`; `NewParserConfig()` bound a "
+        "`Parser`; a binding in one test carried into the next; `t *testing.T` "
+        "bound a repo `T`. -1: the baseline has no Go stack",
+        since=SINCE_TSN_GO_REVIEW2)
+    if newp["callback_trips"] >= 0:       # -1: no `go` here, nothing to measure
+        row(s, "stdlib function values handed to a stdlib invoker that trip the Go "
+               "guard, of 5 (higher=better)",
+            oldp["callback_trips"], newp["callback_trips"],
+            newp["callback_trips"] > oldp["callback_trips"],
+            "second review: t.Cleanup(os.Clearenv), testing.AllocsPerRun, a finalizer "
+            "that listens, context.AfterFunc and time.AfterFunc did real I/O with no "
+            "repo frame on the stack. Invokers are judged by what they invoked; the "
+            "creator rule is an allowlist",
+            since=SINCE_TSN_GO_REVIEW2)
+    row(s, "stdlib pre-bound references escaping an armed tier-1 Python guard, "
+           "of 2 (lower=better)",
+        oldp["prebound_escapes"], newp["prebound_escapes"],
+        0 <= newp["prebound_escapes"] < oldp["prebound_escapes"],
+        "second review: random.SystemRandom() (random._urandom) and tokenize.open "
+        "(tokenize._builtin_open) reached real I/O on every Python; arming now "
+        "rebinds an already-imported stdlib module's function-valued global that "
+        "is a patched original",
+        since=SINCE_TSN_GO_REVIEW2)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -3544,6 +3723,7 @@ def main():
         check_test_safety_net_node_fixround_1(old, REPO)
         check_test_safety_net_node_fixround_2(old, REPO)
         check_test_safety_net_go(old, REPO)
+        check_test_safety_net_go_review2(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
