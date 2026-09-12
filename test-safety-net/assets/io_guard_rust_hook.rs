@@ -27,6 +27,8 @@
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
 use core::ffi::{c_char, c_int, c_uint, c_void, CStr};
+#[cfg(target_os = "linux")]
+use core::ffi::c_long;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 type size_t = usize;
@@ -61,6 +63,35 @@ extern "C" {
     fn pthread_setspecific(key: PthreadKey, v: *const c_void) -> c_int;
 }
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_main_np() -> c_int;
+}
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn getpid() -> c_int;
+    fn syscall(num: c_long, ...) -> c_long;
+}
+
+// Is the calling thread the process's main thread? By IDENTITY, never by
+// frame names (ruling R15b): glibc's TLS-destructor runner leaves no marker
+// frame, and libSystem's own pthread entry symbol is `thread_start`, which a
+// name test would match for every thread. Neither call allocates.
+#[cfg(target_os = "macos")]
+unsafe fn is_main_thread() -> bool {
+    pthread_main_np() != 0
+}
+#[cfg(target_os = "linux")]
+unsafe fn is_main_thread() -> bool {
+    // SYS_gettid: 178 on aarch64, 186 on x86_64 -- the two arches this guard
+    // is built for. The main thread's tid equals the process's pid.
+    #[cfg(target_arch = "aarch64")]
+    const SYS_GETTID: c_long = 178;
+    #[cfg(target_arch = "x86_64")]
+    const SYS_GETTID: c_long = 186;
+    syscall(SYS_GETTID) as c_int == getpid()
+}
+
 static READY: AtomicBool = AtomicBool::new(false);
 static mut KEY: PthreadKey = 0;
 
@@ -68,6 +99,7 @@ static mut KEY: PthreadKey = 0;
 // ARMED is "TSN_BLOCKED is present"; without it every hook returns at once.
 static ARMED: AtomicBool = AtomicBool::new(false);
 static STDIN: AtomicBool = AtomicBool::new(false);
+static DIAG: AtomicBool = AtomicBool::new(false);
 // A TSN_BLOCKED too long to copy blocks EVERY group: fail closed, never open.
 static BLOCK_ALL: AtomicBool = AtomicBool::new(false);
 const BLOCKED_CAP: usize = 512;
@@ -85,13 +117,13 @@ static mut SELF_BASE: *mut c_void = core::ptr::null_mut();
 static TRANSPARENT: &[&[u8]] = &[b"std", b"core", b"alloc", b"panic_unwind", b"backtrace", b"hashbrown", b"std_detect"];
 static RUNNER: &[&[u8]] = &[b"test"];
 static SEED: &[&[u8]] = &[b"hashmap_random_keys"];
-static THREAD_START: &[&[u8]] = &[b"thread_start", b"spawn_unchecked_"];
+static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace"];
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
 #[cfg(target_os = "macos")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"chdir", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 #[cfg(target_os = "linux")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"chdir", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 // @@TSN-TABLES-END@@
 
 /// Copies the value of `name` into `buf`; `None` when unset, else its full
@@ -122,6 +154,8 @@ extern "C" fn tsn_init() {
             TIER_LEN = copy_env(c"TSN_TIER", (&raw mut TIER) as *mut u8, TIER_CAP).map(|n| n.min(TIER_CAP)).unwrap_or(0);
             let s = real_getenv(c"TSN_STDIN".as_ptr());
             STDIN.store(!s.is_null() && CStr::from_ptr(s).to_bytes() == b"1", Ordering::Relaxed);
+            let d = real_getenv(c"TSN_DIAG".as_ptr());
+            DIAG.store(!d.is_null() && CStr::from_ptr(d).to_bytes() == b"1", Ordering::Relaxed);
             // Warm the unwinder (glibc's backtrace dlopens libgcc_s on first
             // use) and read the .symtab now, single-threaded, rather than
             // racing to do either inside the first intercepted call.
@@ -153,6 +187,46 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// The deciding crate of a mangled first path component `seg`. A plain path
+/// component IS the crate (`_ZN`'s first component is `<len>crate`). An impl
+/// component (`_$LT$...$GT$`, from `<T as Trait>::m` or `<T>::m`) is decided
+/// by the crate of the SELF TYPE T (ruling R14): skip the `$LT$`, skip any
+/// reference/pointer markers, and take T's first `..`-separated segment --
+/// before any ` as `, `>`, or T's own generic `<`.
+fn seg_crate(seg: &[u8]) -> &[u8] {
+    let mut i = 0;
+    if seg.first() == Some(&b'_') {
+        i = 1;
+    }
+    if !seg[i..].starts_with(b"$LT$") {
+        return seg; // a plain path component: the crate itself
+    }
+    i += 4;
+    // reference / pointer markers on T: `&` $RF$, `*` $BP$, `mut ` mut$u20$.
+    loop {
+        if seg[i..].starts_with(b"$RF$") || seg[i..].starts_with(b"$BP$") {
+            i += 4;
+        } else if seg[i..].starts_with(b"mut$u20$") {
+            i += 8;
+        } else {
+            break;
+        }
+    }
+    // T's first path segment ends at `..` (segment sep), `$` (a `$u20$as`,
+    // `$GT$`, or `$LT$` on T) or the end.
+    let start = i;
+    while i < seg.len() {
+        if seg[i] == b'$' {
+            break;
+        }
+        if seg[i] == b'.' && i + 1 < seg.len() && seg[i + 1] == b'.' {
+            break;
+        }
+        i += 1;
+    }
+    &seg[start..i]
+}
+
 // 0 transparent, 1 crate code, 2 libtest runner, 3 std seeding its HashMap.
 fn classify(s: &[u8]) -> u8 {
     if SEED.iter().any(|m| contains(s, m)) {
@@ -181,15 +255,12 @@ fn classify(s: &[u8]) -> u8 {
     if len == 0 || i + len > n {
         return 0;
     }
-    let krate = &s[i..i + len];
-    if TRANSPARENT.iter().any(|t| *t == krate) {
+    let krate = seg_crate(&s[i..i + len]);
+    if krate.is_empty() || TRANSPARENT.iter().any(|t| *t == krate) {
         return 0;
     }
     if RUNNER.iter().any(|t| *t == krate) {
         return 2;
-    }
-    if krate.starts_with(b"_$LT$") || krate.starts_with(b"$LT$") {
-        return 0;
     }
     1
 }
@@ -362,6 +433,8 @@ mod symtab {
     }
 }
 
+const CAP: usize = 1024;
+
 unsafe fn decide(what: &'static [u8]) {
     // Each intercept's group comes from the rendered INTERCEPT table, never
     // from a literal beside the hook. A hooked name with no row fails closed.
@@ -369,8 +442,10 @@ unsafe fn decide(what: &'static [u8]) {
         Some(&(_, g)) => g,
         None => cannot(b"an intercept has no group in the rendered table"),
     };
-    let mut pcs = [core::ptr::null_mut::<c_void>(); 128];
-    let n = backtrace(pcs.as_mut_ptr(), 128);
+    // 1024 frames, a stack array, no allocation (ruling R15a). A walk that
+    // fills the buffer without deciding is judged below, not exempted.
+    let mut pcs = [core::ptr::null_mut::<c_void>(); CAP];
+    let n = backtrace(pcs.as_mut_ptr(), CAP as c_int) as usize;
     if n < 3 {
         cannot(b"backtrace() returned fewer than 3 frames");
     }
@@ -382,10 +457,15 @@ unsafe fn decide(what: &'static [u8]) {
     if !symtab::FOUND.load(Ordering::Relaxed) {
         cannot(b"no .symtab in /proc/self/exe");
     }
+    let diag = DIAG.load(Ordering::Relaxed);
+    if diag {
+        out(b"[tsn-diag] via ");
+        out(what);
+        out(if is_main_thread() { b" main-thread\n" } else { b" off-main\n" });
+    }
     let mut resolved = false;
-    let mut thread = false;
     let mut first = true;
-    for &pc in pcs.iter().take(n as usize) {
+    for &pc in pcs.iter().take(n) {
         let mut info = DlInfo::empty();
         let found = dladdr(pc, &mut info) != 0;
         if found && info.dli_fbase == base {
@@ -396,6 +476,9 @@ unsafe fn decide(what: &'static [u8]) {
         if first {
             first = false;
             if found && system_internal(info.dli_fname) {
+                if diag {
+                    out(b"[tsn-diag]   exempt: system-internal image\n");
+                }
                 return;
             }
         }
@@ -414,32 +497,55 @@ unsafe fn decide(what: &'static [u8]) {
             None => continue,
         };
         resolved = true;
+        let c = classify(s);
+        if diag {
+            out(b"[tsn-diag]   [");
+            out(match c { 1 => b"crate", 2 => b"runner", 3 => b"seed ", _ => b"trans" });
+            out(b"] ");
+            out(s);
+            out(b"\n");
+        }
         // A control helper decides, with the group it stands for.
         if let Some(g) = control(s) {
             judge(g, what, s);
             return;
         }
-        match classify(s) {
+        // Ruling R13: libtest calls the test body through
+        // `__rust_begin_short_backtrace`. Reaching it before any crate frame
+        // (a crate frame would have decided and returned already) means an
+        // inlined test body made the call -- the optimized-build hole, where
+        // the body inlines up into call_once and the only named frames are
+        // std/core. This is checked BEFORE the runner exemption because
+        // libtest's own copy of the boundary mangles into the `test` crate
+        // (`_ZN4test28__rust_begin_short_backtrace`), which classify() would
+        // otherwise read as runner work and exempt. libtest's bookkeeping
+        // runs under its OTHER `test::` frames, never under this one.
+        if TEST_BODY_BOUNDARY.iter().any(|m| contains(s, m)) {
+            judge(group, what, b"(test body, inlined)");
+            return;
+        }
+        match c {
             1 => {
                 judge(group, what, s);
                 return;
             }
             2 | 3 => return,
-            _ => {
-                if THREAD_START.iter().any(|m| contains(s, m)) {
-                    thread = true;
-                }
-            }
+            _ => {}
         }
+    }
+    // Ruling R15a: the buffer filled and nothing decided -- a stack too deep
+    // to attribute. Fail closed, as go does past its cap.
+    if n == CAP {
+        judge(group, what, b"(a stack deeper than 1024 frames)");
     }
     if !resolved {
         cannot(b"no frame resolved to a symbol");
     }
-    // The fail-closed thread rule: a spawned thread with no crate frame and
-    // no runner frame is running only std code the unit handed it
-    // (`thread::spawn(std::env::temp_dir)`). Judged, not exempt. A stack with
-    // no Rust thread start at all -- dyld or libSystem before main -- is.
-    if thread {
+    // Ruling R15b: no crate frame on this stack. Off the main thread it is a
+    // spawned thread or a thread-local destructor running std-only code, and
+    // it is JUDGED. On the main thread it is pre-`main` libc/dyld init and
+    // stays exempt.
+    if !is_main_thread() {
         judge(group, what, b"(a thread with no crate frame)");
     }
 }
@@ -547,6 +653,14 @@ mod plat {
     hook!(unlink, my_unlink, I_UNLINK, (p: *const c_char) -> c_int);
     hook!(rename, my_rename, I_RENAME, (a: *const c_char, b: *const c_char) -> c_int);
     hook!(opendir, my_opendir, I_OPENDIR, inode64 = "opendir$INODE64", (p: *const c_char) -> *mut c_void);
+    hook!(readlink, my_readlink, I_READLINK, (p: *const c_char, b: *mut c_char, n: size_t) -> ssize_t);
+    hook!(rmdir, my_rmdir, I_RMDIR, (p: *const c_char) -> c_int);
+    hook!(chmod, my_chmod, I_CHMOD, (p: *const c_char, m: c_uint) -> c_int);
+    hook!(fchmodat, my_fchmodat, I_FCHMODAT, (d: c_int, p: *const c_char, m: c_uint, f: c_int) -> c_int);
+    hook!(symlink, my_symlink, I_SYMLINK, (a: *const c_char, b: *const c_char) -> c_int);
+    hook!(chdir, my_chdir, I_CHDIR, (p: *const c_char) -> c_int);
+    hook!(realpath, my_realpath, I_REALPATH, (p: *const c_char, r: *mut c_char) -> *mut c_char);
+    hook!(getcwd, my_getcwd, I_GETCWD, (b: *mut c_char, n: size_t) -> *mut c_char);
     hook!(setenv, my_setenv, I_SETENV, (n: *const c_char, v: *const c_char, o: c_int) -> c_int);
     hook!(unsetenv, my_unsetenv, I_UNSETENV, (n: *const c_char) -> c_int);
     hook!(socket, my_socket, I_SOCKET, (a: c_int, b: c_int, c: c_int) -> c_int);
@@ -655,6 +769,14 @@ mod plat {
     hook!(unlink, (p: *const c_char) -> c_int);
     hook!(rename, (a: *const c_char, b: *const c_char) -> c_int);
     hook!(opendir, (p: *const c_char) -> *mut c_void);
+    hook!(readlink, (p: *const c_char, b: *mut c_char, n: size_t) -> ssize_t);
+    hook!(rmdir, (p: *const c_char) -> c_int);
+    hook!(chmod, (p: *const c_char, m: c_uint) -> c_int);
+    hook!(fchmodat, (d: c_int, p: *const c_char, m: c_uint, f: c_int) -> c_int);
+    hook!(symlink, (a: *const c_char, b: *const c_char) -> c_int);
+    hook!(chdir, (p: *const c_char) -> c_int);
+    hook!(realpath, (p: *const c_char, r: *mut c_char) -> *mut c_char);
+    hook!(getcwd, (b: *mut c_char, n: size_t) -> *mut c_char);
     hook!(setenv, (n: *const c_char, v: *const c_char, o: c_int) -> c_int);
     hook!(unsetenv, (n: *const c_char) -> c_int);
     hook!(socket, (a: c_int, b: c_int, c: c_int) -> c_int);

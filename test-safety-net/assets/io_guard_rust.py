@@ -36,23 +36,34 @@ without `-C force-unwind-tables=yes` got nothing resolvable from
 
 THE DECISION RULE
 -----------------
-Frames are read innermost first, the hook's own image skipped:
+Frames are read innermost first, the hook's own image skipped, over a 1024-
+frame buffer (ruling R15a: a Drop chain or a recursion deeper than the
+spike's 128 slots used to fall off the end and be exempt):
   * a frame naming a `CONTROL_HELPERS` item decides, with THAT helper's
     group (`tsn_control_temp_dir` reads TMPDIR on its way to the filesystem,
     and is the tier-2 filesystem control);
   * a `SEED_MARKERS` frame is std seeding a HashMap: exempt;
-  * a frame in a `TRANSPARENT_CRATES` crate, a trait-impl frame (`<T as
-    Trait>::f`) or a symbol without Rust's `17h<16 hex>E` hash is passed
-    over -- so a runtime's C++ `_ZN` symbols are never read as crate code;
-  * a `RUNNER_CRATES` frame (libtest) is the runner's own work: exempt;
-  * any other Rust frame -- the repo's crate, the test crate or a
-    third-party crate -- decides with the call's group;
-  * a walk that ends with none of those is a thread with no crate frame. If
-    it passed a `THREAD_START_MARKERS` frame it is a spawned thread running
-    only std code (`thread::spawn(std::env::temp_dir)`) and it is JUDGED,
-    attributed as `(a thread with no crate frame)`. Only a stack with no
-    Rust thread start -- dyld or libSystem initialising before `main` --
-    stays exempt.
+  * a CRATE frame decides with the call's group. "Crate" is the deciding
+    crate of the symbol: a plain path's first segment, and for an impl frame
+    (`<T as Trait>::m`, `<T>::m`) the crate of the SELF TYPE T (ruling R14),
+    so a crate's own trait impl -- a `Drop`, a `Display`, a `Termination` --
+    is judged, not read as transparent the way the raw `$LT$` prefix was.
+    `std`/`core`/`alloc` self types stay transparent;
+  * a `RUNNER_CRATES` frame (libtest) is the runner's own work: exempt.
+    BUT `std::sys::backtrace::__rust_begin_short_backtrace` is the boundary
+    libtest calls the test body through; reaching it before any crate or
+    runner frame means an inlined test body made the call (ruling R13, which
+    closes the optimized-build hole where the body inlines into
+    `call_once`), and it is JUDGED as `(test body, inlined)`;
+  * a symbol without Rust's `17h<16 hex>E` hash, or a transparent-crate
+    frame, is passed over -- so a runtime's C++ `_ZN` symbols are never read
+    as crate code.
+A walk that decides nothing is resolved by thread IDENTITY, not frame names
+(ruling R15b): off the main thread -- `pthread_main_np()` on darwin,
+`gettid() == getpid()` on Linux -- a stack with no crate frame is a spawned
+thread or a thread-local destructor running std-only code, and it is JUDGED.
+On the main thread such a stack is pre-`main` libc/dyld init and stays
+exempt. A buffer that filled without deciding is JUDGED rather than guessed.
 """
 from __future__ import annotations
 
@@ -76,9 +87,12 @@ RUNNER_CRATES = ("test",)
 # std's HashMap seeding, per toolchain: `std::sys::pal::unix::rand` (1.82)
 # and `std::sys::random::linux` (1.92) both name `hashmap_random_keys`.
 SEED_MARKERS = ("hashmap_random_keys",)
-# std's thread entry: `std::sys::..::Thread::new::thread_start` and
-# `std::thread::Builder::spawn_unchecked_`'s closure.
-THREAD_START_MARKERS = ("thread_start", "spawn_unchecked_")
+# The boundary libtest calls the test body through (ruling R13). Reaching it
+# before any crate or runner frame means an inlined test body made the call
+# -- the optimized-build hole, where the body inlines up into call_once and
+# the only named frames are std/core. libtest's own bookkeeping never runs
+# under this frame.
+TEST_BODY_BOUNDARY_MARKERS = ("__rust_begin_short_backtrace",)
 # The `tsn_control_*` helpers SKILL.md prints, and the group each stands for.
 # `TsnControlEnv` is BELT-AND-BRACES, measured (ruling R12): its drop restores
 # the variable with setenv/unsetenv, which are `environment` already, and the
@@ -101,10 +115,19 @@ CONTROL_HELPERS = {"tsn_control_temp_dir": "filesystem",
 # a measured reason like that one: every entry is a hole by construction.
 SYSTEM_INTERNAL_IMAGES = ("libsystem_malloc.dylib",)
 
+# `chdir` is filesystem and `getcwd` is environment (ruling R16). The
+# `set_current_dir`/`current_dir` markers are both environment in
+# stack_rust; `getcwd` mirrors `current_dir`, while `chdir` is the stricter
+# filesystem -- the fail-closed direction for a call that mutates cwd. Task 7
+# records that asymmetry in the partition. `readlink`/`rmdir`/`chmod`/
+# `symlink`/`realpath` are the calls std's read_link / remove_dir /
+# set_permissions / symlink / canonicalize bottom out in; `fchmodat` is
+# where some std versions put set_permissions.
 _FS_SHARED = ("open", "openat", "stat", "lstat", "fstatat", "access", "mkdir", "unlink",
-              "rename", "opendir")
+              "rename", "opendir", "readlink", "rmdir", "chmod", "fchmodat", "symlink",
+              "chdir", "realpath")
 _SUBPROCESS = ("posix_spawn", "posix_spawnp", "fork", "execve")
-_ENV = ("getenv", "setenv", "unsetenv")
+_ENV = ("getenv", "setenv", "unsetenv", "getcwd")
 _NET = ("socket", "connect", "bind", "getaddrinfo")
 
 # platform -> group -> the libc names the hook intercepts for it. The spec's
@@ -114,6 +137,12 @@ _NET = ("socket", "connect", "bind", "getaddrinfo")
 # libSystem, so it cannot be interposed there. This table is rendered into
 # the hook: each intercept looks its GROUP up there, so the hook source names
 # only the functions, and a hooked name missing from the table exits 2.
+#
+# NOT intercepted, and why (Task 7 lists this in NOT_INTERCEPTED): std's
+# `env::vars`/`vars_os` read the `environ` array directly, calling no libc
+# function a hook could sit in, so no intercept can catch them. The filter
+# still marks them Tier 2 (environment), so a vars-reading unit is a Tier 2
+# candidate; at Tier 1 it is unseen by the guard, exactly like go's `os.Args`.
 INTERCEPTS = {
     "darwin": {
         "filesystem": _FS_SHARED,
@@ -166,7 +195,7 @@ def render_tables() -> str:
         "static TRANSPARENT: &[&[u8]] = &[%s];" % _bytes_list(TRANSPARENT_CRATES),
         "static RUNNER: &[&[u8]] = &[%s];" % _bytes_list(RUNNER_CRATES),
         "static SEED: &[&[u8]] = &[%s];" % _bytes_list(SEED_MARKERS),
-        "static THREAD_START: &[&[u8]] = &[%s];" % _bytes_list(THREAD_START_MARKERS),
+        "static TEST_BODY_BOUNDARY: &[&[u8]] = &[%s];" % _bytes_list(TEST_BODY_BOUNDARY_MARKERS),
         "static CONTROL: &[(&[u8], &[u8])] = &[%s];" % _pairs(sorted(CONTROL_HELPERS.items())),
         "static SYSTEM_INTERNAL: &[&[u8]] = &[%s];" % _bytes_list(SYSTEM_INTERNAL_IMAGES),
     ]

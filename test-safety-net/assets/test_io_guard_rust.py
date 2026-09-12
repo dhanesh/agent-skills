@@ -20,14 +20,22 @@ Both build layers skip VISIBLY without `rustc`/`cargo`, so the run reads
 `OK (skipped=N)` rather than failing on a machine without Rust.
 
 Mutation coverage (each killed by the named test):
-* removing the thread rule -> `test_a_thread_running_only_std_code_is_judged`;
+* R13, dropping the `__rust_begin_short_backtrace` boundary check ->
+  `test_an_optimized_build_still_trips_the_body_and_passes_pure`;
+* R14, reading an impl frame's `$LT$` prefix as transparent ->
+  `test_a_crate_trait_impl_is_judged_by_its_self_type`;
+* R15a, removing the frame cap's fail-closed judge ->
+  `test_a_stack_deeper_than_the_cap_fails_closed`;
+* R15b, the thread rule (now thread-identity) ->
+  `test_a_thread_running_only_std_code_is_judged` and
+  `test_a_thread_local_destructor_doing_io_is_judged`;
+* R16, a missing filesystem/environment intercept -> `test_each_new_intercept_trips`;
 * removing `tsn_control_temp_dir` from `CONTROL_HELPERS` ->
   `test_the_temp_dir_control_is_filesystem_alone` (ruling R12: removing
   `TsnControlEnv` instead is an equivalent mutation, measured, and kept as
   belt-and-braces);
 * emptying `SYSTEM_INTERNAL_IMAGES` (ruling R11) -> on darwin
-  `test_the_system_internal_table_is_load_bearing_on_darwin_and_inert_on_linux`
-  and every probe test that passes;
+  `test_the_system_internal_table_is_load_bearing_on_darwin_and_inert_on_linux`;
 * editing a table in Python without re-rendering ->
   `test_the_committed_table_block_is_the_rendered_one`;
 * building without `-C force-unwind-tables=yes` on 1.82 (linux) -> the probe
@@ -109,7 +117,7 @@ class TestTables(unittest.TestCase):
 
     def test_the_block_carries_every_table(self):
         block = io_guard_rust.render_tables()
-        for name in ("TRANSPARENT", "RUNNER", "SEED", "THREAD_START", "CONTROL",
+        for name in ("TRANSPARENT", "RUNNER", "SEED", "TEST_BODY_BOUNDARY", "CONTROL",
                      "SYSTEM_INTERNAL", "INTERCEPT"):
             self.assertRegex(block, r"static %s: " % name)
         for plat, cfg in (("darwin", "macos"), ("linux", "linux")):
@@ -127,7 +135,10 @@ class TestTables(unittest.TestCase):
                           "std_detect"))
         self.assertEqual(io_guard_rust.RUNNER_CRATES, ("test",))
         self.assertEqual(io_guard_rust.SEED_MARKERS, ("hashmap_random_keys",))
-        self.assertEqual(io_guard_rust.THREAD_START_MARKERS, ("thread_start", "spawn_unchecked_"))
+        self.assertEqual(io_guard_rust.TEST_BODY_BOUNDARY_MARKERS,
+                         ("__rust_begin_short_backtrace",))
+        self.assertFalse(hasattr(io_guard_rust, "THREAD_START_MARKERS"),
+                         "THREAD_START_MARKERS was removed for the thread-identity rule (R15b)")
         self.assertEqual(io_guard_rust.CONTROL_HELPERS,
                          {"tsn_control_temp_dir": "filesystem",
                           "tsn_control_set_env": "environment",
@@ -137,8 +148,9 @@ class TestTables(unittest.TestCase):
     def test_intercepts_follow_the_spec_table(self):
         shared = {
             "filesystem": {"open", "openat", "stat", "lstat", "fstatat", "access", "mkdir",
-                           "unlink", "rename", "opendir"},
-            "environment": {"getenv", "setenv", "unsetenv"},
+                           "unlink", "rename", "opendir", "readlink", "rmdir", "chmod",
+                           "fchmodat", "symlink", "chdir", "realpath"},
+            "environment": {"getenv", "setenv", "unsetenv", "getcwd"},
             "network": {"socket", "connect", "bind", "getaddrinfo"},
             "clock": {"clock_gettime", "gettimeofday"},
             "randomness": {"getentropy", "arc4random_buf"},
@@ -367,6 +379,85 @@ PROBE_TESTS = "use probe::*;\n\n" + CONTROL_HELPERS_RS + r'''
     assert_eq!(env_var().as_deref(), Some("v"));
 }
 #[test] fn t_dep_read() { assert!(depx::read() > 0); }
+
+// Ruling R13: the I/O is INLINE in the test body (not via a lib function),
+// so at opt-level >=1 the body inlines into call_once and the only named
+// frame is libtest's `test::__rust_begin_short_backtrace`.
+#[test] fn t_inline_read() {
+    let n: usize = ["/etc/hosts"].iter().map(|p| std::fs::read(p).map(|b| b.len()).unwrap_or(0)).sum();
+    assert!(n < usize::MAX);
+}
+#[test] fn t_inline_env() { let _ = std::env::var("TSN_PROBE_VAR"); }
+
+// Ruling R14: an impl frame is judged by its self type's crate. A crate's
+// own Display, Termination and Drop impls do I/O below a libtest callback
+// or a drop_in_place, where the raw `$LT$` prefix used to read transparent.
+// The I/O is a DIRECT std read inside the impl, so the deciding frame is the
+// impl frame itself (`<Dsp as Display>::fmt`), not a shadowing lib-function
+// crate frame -- that is what exercises R14's self-type rule.
+struct Dsp;
+impl std::fmt::Display for Dsp {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let _ = std::fs::read("/etc/hosts");
+        write!(f, "x")
+    }
+}
+#[test] fn t_display() { let _ = format!("{}", Dsp); }
+struct Rep;
+impl std::process::Termination for Rep {
+    fn report(self) -> std::process::ExitCode {
+        let _ = std::fs::read("/etc/hosts");
+        std::process::ExitCode::SUCCESS
+    }
+}
+#[test] fn t_termination() -> Rep { Rep }
+
+// Ruling R15a: deep stacks. A drop chain and a crate-trait recursion deeper
+// than the spike's 128 slots used to fall off the buffer and be exempt.
+struct Leaf;
+// A DIRECT std read (not the lib `read_file`), so at opt the leaf's Drop
+// inlines into drop_in_place and the 2000-deep chain leaves only transparent
+// frames in the 1024-frame window -- exercising the cap.
+impl Drop for Leaf { fn drop(&mut self) { let _ = std::fs::read("/etc/hosts"); } }
+enum L { Node(Box<L>), End(Leaf) }
+fn chain(n: usize) -> L { let mut l = L::End(Leaf); for _ in 0..n { l = L::Node(Box::new(l)); } l }
+#[test] fn t_deep_drop() { let _l = chain(400); }
+#[test] fn t_deep_drop_2000() { let _l = chain(2000); }
+trait Walk { fn walk(&self, d: usize) -> usize; }
+struct W;
+impl Walk for W {
+    #[inline(never)]
+    fn walk(&self, d: usize) -> usize { if d == 0 { read_file() } else { 1 + self.walk(d - 1) } }
+}
+#[test] fn t_recurse_200() { assert!(W.walk(200) > 0); }
+
+// Ruling R15b / Critical 3: a thread-local destructor doing I/O runs after
+// std's thread_start returns (no marker frame), on a spawned thread and on
+// the test thread.
+struct Tl;
+// A DIRECT std read: at opt the dtor inlines into glibc/libSystem's TLS
+// destructor runner, leaving NO crate frame and NO test-body boundary above
+// it (the dtor runs after the thread closure returned) -- so only the
+// thread-identity rule (R15b) can judge it.
+impl Drop for Tl { fn drop(&mut self) { let _ = std::fs::read("/etc/hosts"); } }
+thread_local!(static TL: Tl = Tl);
+#[test] fn t_tls_dtor() { std::thread::spawn(|| TL.with(|_| ())).join().unwrap(); }
+#[test] fn t_tls_dtor_main() { TL.with(|_| ()); }
+
+// Ruling R16: filesystem/environment calls with no prior intercept.
+#[test] fn t_read_link() { let _ = std::fs::read_link("/etc"); }
+#[test] fn t_remove_dir() { let _ = std::fs::remove_dir("/nonexistent-tsn-probe-dir"); }
+#[test] fn t_set_perms() {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions("/nonexistent-tsn-x", std::fs::Permissions::from_mode(0o644));
+}
+#[test] fn t_set_cwd() { let _ = std::env::set_current_dir("/"); }
+#[test] fn t_cur_dir() { let _ = std::env::current_dir(); }
+#[test] fn t_symlink() { let _ = std::os::unix::fs::symlink("/etc/hosts", "/nonexistent-tsn-dir/x"); }
+#[test] fn t_canon() { let _ = std::fs::canonicalize("/etc/hosts"); }
+// env::vars_os reads `environ` directly: no libc call, so it is NOT
+// intercepted and a vars-reading unit passes even armed (documented).
+#[test] fn t_env_vars() { assert!(std::env::vars_os().count() > 0); }
 '''
 
 
@@ -376,15 +467,24 @@ def _write(path, text):
         f.write(text)
 
 
-def build_probe(root, target_dir):
-    """Write the probe crate under `root`, build its `p` test binary, return its path."""
+def write_probe_crate(root):
+    """Write the probe crate (and its path dependency) under `root`, return the crate dir."""
     crate = os.path.join(root, "probe")
     _write(os.path.join(crate, "Cargo.toml"), PROBE_TOML)
     _write(os.path.join(crate, "src", "lib.rs"), PROBE_LIB)
     _write(os.path.join(crate, "tests", "p.rs"), PROBE_TESTS)
     _write(os.path.join(crate, "depx", "Cargo.toml"), DEPX_TOML)
     _write(os.path.join(crate, "depx", "src", "lib.rs"), DEPX_RS)
+    return crate
+
+
+def build_probe(root, target_dir, crate=None, opt=False):
+    """Build the probe's `p` test binary; return (crate, exe). `opt` builds the
+    test profile at opt-level 1 -- the optimized-build hole (ruling R13)."""
+    crate = crate or write_probe_crate(root)
     env = dict(os.environ, CARGO_TARGET_DIR=target_dir, RUSTUP_AUTO_INSTALL="0")
+    if opt:
+        env["CARGO_PROFILE_TEST_OPT_LEVEL"] = "1"
     proc = subprocess.run(["cargo", "test", "--offline", "--no-run", "--message-format=json",
                            "--test", "p"], cwd=crate, env=env, capture_output=True, text=True,
                           timeout=600)
@@ -412,7 +512,12 @@ class ProbeCase(unittest.TestCase):
         if PLATFORM is None:
             raise unittest.SkipTest("the hook is built for darwin and linux only")
         cls.tmp = tempfile.mkdtemp(prefix="tsn-rust-probe-")
-        cls.crate, cls.exe = build_probe(cls.tmp, os.path.join(cls.tmp, "target"))
+        cls.crate = write_probe_crate(cls.tmp)
+        _, cls.exe = build_probe(cls.tmp, os.path.join(cls.tmp, "target"), crate=cls.crate)
+        # The SAME sources at opt-level 1, where the test body inlines away
+        # (ruling R13). A separate target dir so the two builds never collide.
+        _, cls.exe_opt = build_probe(cls.tmp, os.path.join(cls.tmp, "target-opt"),
+                                     crate=cls.crate, opt=True)
         env = dict(os.environ, TEST_SAFETY_NET_CACHE=os.path.join(cls.tmp, "cache"))
         cls.hook = io_guard_rust.hook_library(cls.crate, env)
         cls.scratch = os.path.join(cls.tmp, "scratch")
@@ -482,16 +587,105 @@ class TestProbe(ProbeCase):
             with self.subTest(test=name):
                 self.assert_trip(name, group)
 
+    def test_each_new_intercept_trips(self):
+        # Ruling R16: every filesystem/environment call that used to have no
+        # intercept. `chdir` is filesystem, `getcwd` is environment.
+        for name, group, call in (("t_read_link", "filesystem", "readlink"),
+                                  ("t_remove_dir", "filesystem", "rmdir"),
+                                  ("t_set_perms", "filesystem", None),
+                                  ("t_set_cwd", "filesystem", "chdir"),
+                                  ("t_cur_dir", "environment", "getcwd"),
+                                  ("t_symlink", "filesystem", "symlink"),
+                                  ("t_canon", "filesystem", None)):
+            with self.subTest(test=name):
+                m = self.assert_trip(name, group)
+                if call is not None:
+                    self.assertEqual(m.group(3), call, m.group(0))
+
+    def test_env_vars_is_not_intercepted_and_passes_even_armed(self):
+        # env::vars_os reads `environ` directly, calling no libc function a
+        # hook can sit in (ruling R16). The filter still marks it Tier 2;
+        # the guard cannot see it, like go's os.Args.
+        self.assert_pass("t_env_vars")
+
+    def test_a_crate_trait_impl_is_judged_by_its_self_type(self):
+        # Ruling R14: Display and Termination impls on a crate type do I/O
+        # below a `$LT$` frame the spike read as transparent.
+        self.assert_trip("t_display", "filesystem")
+        self.assert_trip("t_termination", "filesystem")
+
+    def test_a_thread_local_destructor_doing_io_is_judged(self):
+        # Critical 3 / R15b: the dtor runs after std's thread_start returns,
+        # with no marker frame. At debug the crate impl frame decides; at opt
+        # the dtor inlines away, leaving a stack with no crate frame and no
+        # test-body boundary -- caught only by the thread-identity rule, which
+        # makes this the R15b killer.
+        for exe in (self.exe, self.exe_opt):
+            with self.subTest(exe=os.path.basename(os.path.dirname(exe))):
+                for name in ("t_tls_dtor", "t_tls_dtor_main"):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                             blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 1 candidate "
+                                          r"reached filesystem I/O")
+
+    def test_a_deep_drop_chain_and_a_deep_recursion_trip(self):
+        # Ruling R15a: deeper than the spike's 128-frame buffer.
+        self.assert_trip("t_deep_drop", "filesystem")
+        self.assert_trip("t_recurse_200", "filesystem")
+
+    def test_a_stack_deeper_than_the_cap_fails_closed(self):
+        # Ruling R15a: a 2000-deep inlined drop has >1024 transparent frames
+        # before any crate frame (opt inlines the leaf's Drop), so the buffer
+        # fills and the call is judged by the cap, not exempted.
+        code, out = self.run_exe(["t_deep_drop_2000", "--exact", "--test-threads=1"],
+                                 blocked=_blocked(1), exe=self.exe_opt)
+        self.assertEqual(code, 3, out)
+        m = VIOLATION.search(out)
+        self.assertIsNotNone(m, out)
+        self.assertEqual(m.group(4), "(a stack deeper than 1024 frames)", out)
+
+    def test_an_optimized_build_still_trips_the_body_and_passes_pure(self):
+        # Critical 1: at opt-level >=1 the test body inlines into call_once
+        # under test::__rust_begin_short_backtrace (the `test` crate, which
+        # classify reads as runner). R13 catches it at the boundary.
+        for name, group in (("t_inline_read", "filesystem"), ("t_inline_env", "environment")):
+            with self.subTest(test=name):
+                code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                         blocked=_blocked(1), exe=self.exe_opt)
+                self.assertEqual(code, 3, out)
+                m = VIOLATION.search(out)
+                self.assertEqual((m.group(1), m.group(2)), ("1", group), out)
+                self.assertEqual(m.group(4), "(test body, inlined)", out)
+        # a pure test, and libtest's own teardown, still pass under opt.
+        code, out = self.run_exe(["t_pure", "--exact", "--test-threads=1"],
+                                 blocked=_blocked(1), exe=self.exe_opt)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("IOGuardViolation", out)
+
+    def test_optimized_pure_suite_does_not_trip_on_teardown(self):
+        # MEASURE (ruling R15b): libtest's test-thread teardown -- TLS
+        # destructors and output-capture cleanup after a PURE test returns --
+        # must never trip, with default threads or with one.
+        for args in (["t_pure", "t_hashmap", "t_alloc"],
+                     ["t_pure", "t_hashmap", "t_alloc", "--test-threads=1"]):
+            for exe in (self.exe, self.exe_opt):
+                with self.subTest(exe=os.path.basename(os.path.dirname(exe)), args=args):
+                    code, out = self.run_exe(args, blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, 0, out)
+                    self.assertNotIn("IOGuardViolation", out)
+
     def test_the_attribution_names_the_probe_function(self):
         m = self.assert_trip("t_env", "environment")
         self.assertEqual(m.group(3), "getenv")
         self.assertTrue(m.group(4).startswith("_ZN5probe7env_var"), m.group(0))
 
     def test_a_thread_running_only_std_code_is_judged(self):
-        # `thread::spawn(std::env::temp_dir)`: a THREAD_START frame, no crate
-        # frame, no runner frame. Fail-closed: judged, not exempt.
+        # `thread::spawn(std::env::temp_dir)`: a std-only spawned thread with
+        # no crate frame. Fail-closed by thread identity (R15b): off the main
+        # thread, a no-crate-frame stack is judged, never exempt.
         m = self.assert_trip("t_std_thread", "environment")
-        self.assertEqual(m.group(4), "(a thread with no crate frame)")
+        self.assertIn(m.group(4), ("(a thread with no crate frame)", "(test body, inlined)"))
 
     def test_a_read_in_a_spawned_closure_is_the_closures(self):
         m = self.assert_trip("t_thread", "filesystem")
@@ -535,11 +729,13 @@ class TestProbe(ProbeCase):
         self.assert_trip("t_sysnow", "clock", tier=2, blocked="clock", stdin=False)
 
     def test_without_tsn_blocked_every_test_passes_and_nothing_arms(self):
+        # Every test but t_fail does its I/O freely and passes when the guard
+        # is not armed; nothing prints the handshake.
         code, out = self.run_exe(["--test-threads=1", "--skip", "t_fail"], stdin=False)
         self.assertEqual(code, 0, out)
         self.assertNotIn("IOGuardViolation", out)
         self.assertNotIn("tsn-hook:", out)
-        self.assertRegex(out, r"test result: ok\. 18 passed")
+        self.assertRegex(out, r"test result: ok\. \d+ passed; 0 failed")
 
     def test_a_unit_that_only_allocates_passes_at_tier_one(self):
         # Ruling R11: on darwin the allocator's own `mach_absolute_time` read
