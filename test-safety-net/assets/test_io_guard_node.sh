@@ -472,6 +472,12 @@ case "$OUT" in
 esac
 
 # ── 12. WHO node --test BLAMES for an ASYNC violation ────────────────────
+# `--test-reporter=tap` IS PINNED in 12-14, and only there. These three parse
+# per-test lines, and node 26's DEFAULT reporter is `spec` (`✔ name`) even
+# when stdout is a pipe, so without the pin they found no `ok N - ...` line
+# at all and failed on a guard that was working. The rule they pin -- read
+# the exit status -- does not depend on the format, and every documented
+# command is left on the default reporter on purpose.
 # The rule with no python equivalent, and the reason SKILL.md tells an agent to
 # read `$?` and not the per-test lines. When a violation lands AFTER the test
 # that caused it resolved, `node --test` does not blame that test: it prints
@@ -514,7 +520,7 @@ test("second_test_keeps_process_alive", async () => {
 EOF
 set +e
 OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=clock \
-       node --require "$GUARD" --test test_asyncmisattrib.js 2>&1)"
+       node --require "$GUARD" --test --test-reporter=tap test_asyncmisattrib.js 2>&1)"
 ST=$?
 set -e
 culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - fast_test_slow_violation$' || true)"
@@ -557,7 +563,7 @@ test("second_test_keeps_process_alive", async () => {
 EOF
 set +e
 OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
-       node --require "$GUARD" --test t_detached.js 2>&1)"
+       node --require "$GUARD" --test --test-reporter=tap t_detached.js 2>&1)"
 ST=$?
 set -e
 culprit_ok="$(printf '%s\n' "$OUT" \
@@ -596,7 +602,7 @@ test("innocent_long_running_when_it_lands", async () => {
 EOF
 set +e
 OUT="$(cd "$WORK" && TEST_SAFETY_NET_TIER=1 \
-       node --require "$GUARD" --test t_three.js 2>&1)"
+       node --require "$GUARD" --test --test-reporter=tap t_three.js 2>&1)"
 ST=$?
 set -e
 culprit_ok="$(printf '%s\n' "$OUT" | grep -cE '^ok [0-9]+ - violator$' || true)"
