@@ -68,6 +68,74 @@ jobs:
       - name: Run skill quality gates
         run: make gate
 
+  # test-safety-net supports the LAST FIVE VERSIONS of every language it covers
+  # -- teams on legacy code have the oldest toolchains and the fewest tests --
+  # and a support claim nobody runs is a claim nobody has checked. Each leg runs
+  # that stack's suites on one version. Measured before this job existed: the
+  # python guard missed every pathlib read on 3.10, the node suite parsed a
+  # reporter node 26 no longer defaults to, and the go guard could not run on
+  # 1.22-1.23 at all. ubuntu only: the full gate above already covers macOS on
+  # the pinned versions.
+  versions:
+    name: tsn ${{ matrix.stack }} ${{ matrix.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {stack: python, version: "3.10"}
+          - {stack: python, version: "3.11"}
+          - {stack: python, version: "3.12"}
+          - {stack: python, version: "3.13"}
+          - {stack: python, version: "3.14"}
+          - {stack: node, version: "18"}
+          - {stack: node, version: "20"}
+          - {stack: node, version: "22"}
+          - {stack: node, version: "24"}
+          - {stack: node, version: "26"}
+          - {stack: go, version: "1.22"}
+          - {stack: go, version: "1.23"}
+          - {stack: go, version: "1.24"}
+          - {stack: go, version: "1.25"}
+          - {stack: go, version: "1.26"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: test-safety-net/assets
+    steps:
+      - uses: actions/checkout@v4
+      # The python legs run the guard UNDER the version being proved; every
+      # other leg still needs a python for the ranker and the suites.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.stack == 'python' && matrix.version || '3.12' }}
+      - if: matrix.stack == 'python'
+        run: python -m pip install --quiet pytest
+      - if: matrix.stack == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.version }}
+      - if: matrix.stack == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.version }}
+          cache: false
+      - if: matrix.stack == 'python'
+        run: |
+          python test_rank_risk.py
+          python test_io_guard.py
+      - if: matrix.stack == 'node'
+        run: |
+          python test_stack_node.py
+          sh test_io_guard_node.sh
+      - if: matrix.stack == 'go'
+        run: |
+          python test_stack_go.py
+          python test_io_guard_go.py
+      - name: outcome eval on this version
+        working-directory: test-safety-net
+        run: python eval/run_eval.py
+
   # Branch protection requires a check named exactly `gate`. A matrix job reports
   # one check PER LEG ("gate (ubuntu-latest)", ...) and never the bare name, so
   # adding the matrix silently removed the required context and left every PR
@@ -75,13 +143,14 @@ jobs:
   # that passes only when every leg passed. Keep it if you add another OS.
   gate:
     name: gate
-    needs: matrix-gate
+    needs: [matrix-gate, versions]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every matrix leg to pass
+      - name: Require every matrix leg and every language version to pass
         run: |
-          result="${{ needs.matrix-gate.result }}"
-          echo "matrix result: $result"
-          [ "$result" = "success" ] || exit 1
+          gate="${{ needs.matrix-gate.result }}"
+          versions="${{ needs.versions.result }}"
+          echo "matrix result: $gate  versions result: $versions"
+          [ "$gate" = "success" ] && [ "$versions" = "success" ] || exit 1

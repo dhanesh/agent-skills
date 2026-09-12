@@ -87,9 +87,11 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Three stacks are complete — **Python** (pytest, falling back to `unittest`),
-**node/TypeScript** (node 18+, `node --test`, no dependency added) and **Go** (go 1.26, `go test`,
-darwin and linux, no dependency added). rust is not covered: it is not registered, so the ranker
+churn signal). Three stacks are complete, each on **the last five versions of its language**,
+proved by CI on every one — **Python** 3.10–3.14 (pytest, falling back to `unittest`),
+**node/TypeScript** on the LTS lines 18, 20, 22, 24 and 26 (`node --test`, no dependency added) and
+**Go** 1.22–1.26 (`go test`, darwin and linux, no dependency added). Legacy toolchains are where
+untested code lives, which is why the floor is five versions back and not one. rust is not covered: it is not registered, so the ranker
 says so on stderr and returns an empty plan rather than guessing (see
 [`references/stacks.md`](references/stacks.md)). Node's optional precise discovery drives a
 `typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`

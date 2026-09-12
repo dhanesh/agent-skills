@@ -13,6 +13,21 @@ indistinguishable from the one you're proving.
 | go | exported top-level `func`, and exported methods on exported types (`func (r *T) M(` → unit `T.M`) | `<file>_test.go` beside the source, **in the same package** | `go test` (go 1.26); **no dependency is added** | `python3 "$SKILL_DIR/assets/io_guard_go.py" -run '^<test_name>$' <package>` — `go test -run` under the guard |
 | rust | *not supported — no stack is registered, see below* | — | — | — |
 
+## Supported versions — the last five of each, proved in CI
+
+Teams on legacy code are the ones with the least test coverage and the oldest toolchains, so every
+stack supports **the last five versions of its language**, and CI's `versions` job runs each stack's
+suites on every one of them rather than assuming it:
+
+| stack | versions | what changes across them, and what the skill does about it |
+|---|---|---|
+| python | 3.10, 3.11, 3.12, 3.13, 3.14 | On 3.10 `pathlib` routes every call through `pathlib._NormalAccessor`, whose `open`/`stat`/`listdir`/... are the real functions **bound at import** — the guard patches those too (`io_guard._patch_prebound_stdlib`), or every `Path` read and write escaped it. 3.11 removed the accessor. |
+| node | LTS lines 18, 20, 22, 24, 26 | Node 26's default test reporter is `spec` even when stdout is a pipe; the per-test transcripts quoted in `SKILL.md` are TAP (`--test-reporter=tap`), and the exit-status rule needs neither. `node:inspector/promises` arrived in 20. Running a `.ts` test directly needs 22.6+ (type stripping); older lines pin TypeScript through the repo's built JavaScript. Node 16 has no `node:test` at all, which is why the five lines start at 18. |
+| go | 1.22, 1.23, 1.24, 1.25, 1.26 | `go vet` on 1.22–1.23 ignores an overlay's added files, so the guard runs `-vet=off`. `crypto/internal/sysrand` (1.24+) is hooked where it exists; `crypto/rand`'s entry points are hooked on every version. The clock control, `testing/synctest`, is 1.25+: on 1.22–1.24 a clock unit is a **could not prove**, not a Tier 2 pin. |
+
+A version-specific fact the skill relies on either works on all five or fails closed — the go guard
+exits 2 rather than run with a hook missing — and the matrix is what finds out which.
+
 This version of the skill **writes tests for Python, node/TypeScript and Go repositories**. The
 workflow itself (rank → confirm → write+prove → report) is language-agnostic, and adding a stack is
 a matter of filling in its row here, registering it in `assets/rank_risk.py`, and shipping a
@@ -310,7 +325,9 @@ computation and stays Tier 1. The controllable groups are filesystem (`t.TempDir
 node guards patch theirs. `io_guard_go.py` uses `-overlay` instead — a map that replaces source files
 in the build without touching them on disk, the standard library's included. Every run lists the
 toolchain's own sources, injects one line at the top of each I/O primitive, adds a decision engine
-to package `syscall`, and runs `go test -overlay <map> -count=1` with the tier in the environment.
+to package `syscall`, and runs `go test -overlay <map> -count=1 -vet=off -v` with the tier in the
+environment (`-vet=off` because `go vet` on Go 1.22–1.23 ignores an overlay's added files; `-v`
+because GREEN needs a `--- PASS:` line, and a skipped test or a package with no tests is NO TEST).
 The cache keys on content, so a cold build of the overlaid standard library is paid once (5s
 measured) and every later run is warm.
 
@@ -329,8 +346,13 @@ measured) and every later run is warm.
 `runtime.Callers` from the innermost frame outward. A standard-library frame is transparent, and the
 last one passed is the ENTRY — the function the code under test called. A `testing` frame that is
 not one of its controls means the runner is doing its own work (reporting a failure, timing a test)
-and exempts the call; so does the generated `_testmain.go` runner, and so does reaching the end of
-the stack. The first other frame — the repo's own code, or a third-party module, which is treated
+and exempts the call; so does the generated `_testmain.go` runner. A goroutine whose stack holds no
+repo frame at all is judged by the function that CREATED it (the "created by" line
+`runtime.Stack` appends): exempt when that is the standard library's own or the generated runner's,
+attributable otherwise — which is what makes `go http.ListenAndServe(...)` in a unit trip, since
+the compiler hides a `go` statement's wrapper from `runtime.Callers`. The walk always reads the
+whole stack; a fixed buffer that filled up used to read its cut-off tail as the end and exempt the
+call. The first other frame — the repo's own code, or a third-party module, which is treated
 like the repo — is judged: the call is blocked when the primitive's group OR the entry's is blocked.
 That second half is why `net.Dial`, which reads the clock before it opens a socket, trips as
 `network` rather than `clock`. `testing`'s controls override instead of adding: `t.TempDir()` reads
@@ -351,9 +373,12 @@ ran unguarded is worse than no proof.
 1. **Anything that bypasses package `syscall` is unseen by the guard:** a raw syscall through
    `golang.org/x/sys/unix`, cgo, assembly. The filter declines the raw, cgo and bodyless shapes
    statically; a third-party library doing one of them internally escapes both layers.
-2. **Standard-library work on a goroutine the standard library started**, with no repo frame on
-   it, is exempt. The `net/http` entry points are hooked for exactly the case that matters — the
-   transport dials on its own goroutine — but the class is open.
+2. **Standard-library work on a goroutine the standard library started itself** — whose creator is
+   stdlib and whose stack holds no repo frame — is exempt. A goroutine the unit started is judged by
+   its creator, so `go http.ListenAndServe(...)` trips; what stays open is, for example, the
+   per-connection goroutines a stdlib server spawns. A dependency's import-time I/O trips too, and
+   the message names the dependency rather than blaming the unit: nothing in a package importing it
+   can be proved at that tier.
 3. **Hook targets are found by text in this toolchain's sources.** A release that renames a required
    one makes the guard exit 2; an optional one missing is recorded, not fatal. CI pins go 1.26, and
    the suite ran green on darwin and on linux (`go1.26.8 linux/arm64`).

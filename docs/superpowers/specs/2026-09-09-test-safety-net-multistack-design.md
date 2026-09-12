@@ -271,3 +271,43 @@ What it costs, stated in the plan and the shipped docs:
 The OS sandbox remains the answer to evaluate for **Rust**, whose `std` ships prebuilt
 and cannot be overlaid. The Go plan is
 `docs/superpowers/plans/2026-09-12-test-safety-net-go.md`.
+
+### Corrected by review, same day — "end of stack exempts" was wrong
+
+A code review of the branch proved the decision rule above false in one step. "Reaching
+the end of the stack exempts" assumed an all-stdlib stack means the runtime acting for
+itself, but the compiler hides a `go` statement's wrapper closure from
+`runtime.Callers`, so `go http.ListenAndServe(...)` in a unit ran with no repo frame
+on its stack — and bound a real port under a GREEN tier-1 proof. The rule is now: such
+a goroutine is judged by the function that CREATED it (`runtime.Stack`'s "created by"
+line), exempt only when that creator is the standard library's or the generated
+runner's. The same review found three more exit-0-without-a-proof paths, each fixed
+and each pinned by a test that fails when its fix is removed:
+
+- a fixed 64-frame walk that read a truncated stack as "end of stack";
+- `[no test files]` read as GREEN;
+- a `t.Skip` read as GREEN.
+
+Separately, a method unit's coverage rule over-credited. It now requires the call on a
+value bound to the type.
+
+## Amended 2026-09-12 — every stack supports the last five versions of its language
+
+Owner requirement: teams on legacy code have the least coverage and the oldest
+toolchains, so every stack supports the last five versions of its language.
+
+- **python:** 3.10–3.14.
+- **node:** the LTS lines 18, 20, 22, 24 and 26. The five lines that had already
+  reached LTS on 2026-09-12 would start at 16, but node 16 has no `node:test`, so 26,
+  which enters LTS in October 2026, is counted instead.
+- **go:** 1.22–1.26.
+
+A spike on every version found one real defect per stack, all since fixed:
+
+- python 3.10's `pathlib` accessor escaped the guard;
+- node 26's default reporter broke the misattribution fixtures;
+- node 18 lacks `inspector/promises`;
+- Go 1.22–1.23's `go vet` ignored the overlay.
+
+CI's `versions` job now runs every stack's suites on every version, and the `gate`
+check requires it.

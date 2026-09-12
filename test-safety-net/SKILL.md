@@ -16,9 +16,10 @@ description: >-
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
-  CLI. Writes and proves tests on three stacks — python (pytest, falling back to unittest),
-  node/TypeScript (node 18+, `node --test`) and go (go 1.26, `go test`, on darwin and linux); rust is
-  declined (references/stacks.md). No pip, no npm, no network: node's optional precise discovery
+  CLI. Writes and proves tests on three stacks, each on the last five versions of its language —
+  python 3.10–3.14 (pytest, falling back to unittest), node/TypeScript on the LTS lines 18, 20, 22,
+  24 and 26 (`node --test`) and go 1.22–1.26 (`go test`, on darwin and linux); rust is declined
+  (references/stacks.md). No pip, no npm, no network: node's optional precise discovery
   drives a `typescript` the repo already ships and never downloads one — that runs the analysed
   repo's own compiler in-process, and `--no-precise` declines it — and go's runs this skill's own
   `go/ast` helper under `GOTOOLCHAIN=local`, so no toolchain is ever fetched.
@@ -219,7 +220,9 @@ than none, because it makes the invariant look enforced when it is not.
    enclosing file. Never the test that caused it: that one reports `ok` in every case. All three
    shapes reproduce on **one and the same node build**; what selects between them is when the
    violation lands relative to the tests around it, not the runtime version — so "our node is newer"
-   is not a reason to trust the per-test lines. Reproduced verbatim on node v22.18.0:
+   is not a reason to trust the per-test lines. Reproduced verbatim on node v22.18.0, and on every
+   LTS line from 18 to 26 (these are TAP lines — node 26's default reporter is `spec`, so pass
+   `--test-reporter=tap` to see them in this form; the exit status needs neither):
 
    ```
    ok 1     - violator                              <- the test that violated
@@ -274,7 +277,7 @@ than none, because it makes the invariant look enforced when it is not.
    | 1 | RED — an assertion failed | expected on the deliberately-wrong run |
    | 2 | NOT ARMED — the guard could not arm | fix the environment; nothing was proved |
    | 3 | GUARD TRIP — `IOGuardViolation` | reclassify the unit to Tier 3 and discard the test, red or green |
-   | 4 | NO TEST — `-run` matched nothing | fix the name; a zero-test run is not GREEN |
+   | 4 | NO TEST — nothing was proved | `-run` matched nothing, the package has no test files, or the test skipped itself; fix it — not GREEN |
    | 5 | NO BUILD — the package did not build | fix the test source; a compile error is not RED |
 
    A trip ends the process (`syscall.Exit(3)`), so `recover()` cannot swallow it and a goroutine's
