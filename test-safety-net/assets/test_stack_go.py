@@ -281,6 +281,111 @@ class TestBindingGrammar(unittest.TestCase):
             "Ledger.Post", "package billing\nfunc T(t *testing.T) { q.Post(1) }\n", ref_rel=ref))
 
 
+class TestHeuristicDiscovery(GoCase):
+    """What a test can call by name from outside the package, and nothing else."""
+
+    def units(self):
+        units, mode = stack_go.discover_units(self.root, precise=False)
+        self.assertEqual(mode, "heuristic")
+        return [(u["id"], u["kind"], u["lineno"]) for u in units]
+
+    def test_an_exported_function(self):
+        write(self.root, "pkg/p.go",
+              "package pkg\n\n// Parse parses.\nfunc Parse(s string) int { return 1 }\n")
+        self.assertEqual(self.units(), [("pkg/p.go::Parse", "function", 4)])
+
+    def test_a_generic_function(self):
+        write(self.root, "pkg/p.go",
+              "package pkg\n\nfunc Map[T any, U any](xs []T, f func(T) U) []U { return nil }\n")
+        self.assertEqual(self.units(), [("pkg/p.go::Map", "function", 3)])
+
+    def test_a_multi_line_signature(self):
+        write(self.root, "pkg/p.go",
+              "package pkg\n\nfunc Parse(\n\ts string,\n) (int, error) {\n\treturn 0, nil\n}\n")
+        self.assertEqual(self.units(), [("pkg/p.go::Parse", "function", 3)])
+
+    def test_every_receiver_form_on_an_exported_type(self):
+        write(self.root, "pkg/r.go",
+              "package pkg\n\ntype Report struct{}\ntype Set[K comparable] struct{}\n\n"
+              "func (r Report) Total() int { return 0 }\n"
+              "func (r *Report) Add(n int) {}\n"
+              "func (*Report) Reset() {}\n"
+              "func (s *Set[K]) Put(k K) {}\n")
+        self.assertEqual(self.units(), [
+            ("pkg/r.go::Report.Add", "method", 7),
+            ("pkg/r.go::Report.Reset", "method", 8),
+            ("pkg/r.go::Report.Total", "method", 6),
+            ("pkg/r.go::Set.Put", "method", 9),
+        ])
+
+    def test_an_exported_method_on_an_unexported_type_is_not_a_unit(self):
+        # No importer can name `impl`, so nothing outside the package can call
+        # `Do` on it by name; its behaviour is reached through whatever
+        # exported function returns one, and THAT is the unit.
+        write(self.root, "pkg/i.go",
+              "package pkg\n\ntype impl struct{}\n\nfunc (i *impl) Do() {}\n"
+              "func New() *impl { return &impl{} }\n")
+        self.assertEqual(self.units(), [("pkg/i.go::New", "function", 6)])
+
+    def test_unexported_main_and_init_are_not_units(self):
+        write(self.root, "main.go",
+              "package main\n\nfunc helper() {}\nfunc init() {}\nfunc main() { helper() }\n")
+        self.assertEqual(self.units(), [])
+
+    def test_a_function_type_and_a_function_variable_are_not_units(self):
+        # Neither is a declaration with a body of its own, and Python discovers
+        # no module-level constants either.
+        #
+        # The parameter and result types are EXPORTED on purpose. With
+        # `func(int) error` a reader that has lost both its column-0 anchor and
+        # its shape check reads receiver `int`, name `error` -- and the
+        # lowercase `error` is then dropped by the exported check, so the test
+        # passed for a reason that has nothing to do with either mechanism.
+        # Measured: it stayed green with both removed. `Request`/`Response`
+        # would come back as a phantom `Request.Response` unit instead.
+        write(self.root, "pkg/t.go",
+              "package pkg\n\ntype Request struct{}\ntype Response struct{}\n\n"
+              "type HandlerFunc func(r Request) Response\n\n"
+              "var Handler = func(r Request) Response { return Response{} }\n")
+        self.assertEqual(self.units(), [])
+
+    def test_a_closure_inside_an_exported_function_is_not_a_unit(self):
+        write(self.root, "pkg/o.go",
+              "package pkg\n\nfunc Outer() {\n\tgo func() {\n\t}()\n"
+              "\tf := func(x int) int { return x }\n\t_ = f\n}\n")
+        self.assertEqual(self.units(), [("pkg/o.go::Outer", "function", 3)])
+
+    def test_names_in_comments_and_strings_are_not_units(self):
+        write(self.root, "pkg/c.go",
+              "package pkg\n\n// func Commented() {}\n/*\nfunc Blocked() {}\n*/\n"
+              'var s = "func Quoted() {}"\n'
+              "var r = `\nfunc Raw() {}\n`\n"
+              "func Real() {}\n")
+        self.assertEqual(self.units(), [("pkg/c.go::Real", "function", 11)])
+
+    def test_files_the_go_tool_never_builds_are_not_read(self):
+        for rel in ("pkg/p_test.go", "vendor/v/v.go", "pkg/testdata/t.go",
+                    "_scratch/s.go"):
+            write(self.root, rel, "package x\n\nfunc Exported() {}\n")
+        write(self.root, "pkg/p.go", "package pkg\n\nfunc Kept() {}\n")
+        self.assertEqual(self.units(), [("pkg/p.go::Kept", "function", 3)])
+
+    def test_a_generated_file_is_not_read(self):
+        # Generated code is not what a person edits; the ranker exists to
+        # protect what they edit, which is why `dist/` is skipped for node.
+        write(self.root, "pkg/kind_string.go",
+              "// Code generated by \"stringer -type=Kind\"; DO NOT EDIT.\n\n"
+              "package pkg\n\nfunc (i Kind) String() string { return \"\" }\n")
+        write(self.root, "pkg/kind.go",
+              "package pkg\n\ntype Kind int\n\nfunc Parse(s string) Kind { return 0 }\n")
+        self.assertEqual(self.units(), [("pkg/kind.go::Parse", "function", 5)])
+
+    def test_a_generated_marker_after_the_package_clause_does_not_count(self):
+        write(self.root, "pkg/k.go",
+              "package pkg\n\n// Code generated by hand; DO NOT EDIT.\n\nfunc Kept() {}\n")
+        self.assertEqual(self.units(), [("pkg/k.go::Kept", "function", 5)])
+
+
 class TestInterfaceNames(unittest.TestCase):
     NAMES = ("STACK_NAME", "MANIFESTS", "evidence", "classify_manifest",
              "iter_source_files", "is_test_path", "is_test_for", "scope_files",

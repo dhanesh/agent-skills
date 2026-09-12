@@ -28,6 +28,7 @@ multistack design). Everything here is the FILTER.
 """
 from __future__ import annotations
 
+import bisect
 import functools
 import os
 import re
@@ -478,3 +479,191 @@ def reached_through_module(module: str, name: str, text: str, *,
     return any(re.search(r"(?<![A-Za-z0-9_.])%s\s*\.\s*%s\s*%s\s*\("
                          % (re.escape(alias), esc, _TYPE_ARGS), code)
                for alias in aliases)
+
+
+# ── Discovery ────────────────────────────────────────────────────────────
+
+def discover_units(root: str, precise: bool = True):
+    """Interface entry point: `(units, discovery_path)`.
+
+    The heuristic reader below is the one that always runs; the `go/ast`
+    precise path is an upgrade layered on it, never a dependency, and the
+    label says which one produced the units (multistack design, D1).
+    """
+    return _units_heuristic(root), "heuristic"
+
+
+# Go's own definition of a generated file: this line, before the first
+# non-comment, non-blank text -- which in practice means above the package
+# clause. The same words lower down are an ordinary comment.
+_GENERATED = re.compile(r"^// Code generated .* DO NOT EDIT\.$")
+
+
+def _is_generated(text: str) -> bool:
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("package ") or s == "package":
+            return False
+        if _GENERATED.match(s):
+            return True
+    return False
+
+
+def _units_heuristic(root: str):
+    """Exported top-level functions and methods, in non-test, non-generated files.
+
+    EXPORTED means an uppercase first letter -- Go's own visibility rule, so
+    there is no convention to guess at. A method counts only when its
+    receiver type is exported too: nothing outside the package can name an
+    unexported type, so its methods are reached through whatever exported
+    function hands one out, and that function is the unit.
+
+    Types themselves are not units. A Go type has no constructor body --
+    `NewX` is an ordinary function, and discovered as one -- so a type's
+    behaviour lives in its methods, which are.
+    """
+    units = []
+    for rel in iter_source_files(root):
+        text = read_text(root, rel)
+        if _is_generated(text):
+            continue
+        units.extend(_units_in_text(rel, text))
+    return sorted(units, key=lambda u: u["id"])
+
+
+def _units_in_text(rel: str, text: str):
+    """The units one file's text declares, in file order."""
+    code = strip_noncode(text)
+    depths = _depths(code)
+    starts = _line_starts(code)
+    units, seen = [], set()
+    for name, recv, pos in _func_decls(code, depths):
+        if not _exported(name) or (recv is not None and not _exported(recv)):
+            continue
+        full = "%s.%s" % (recv, name) if recv else name
+        if full in seen:
+            continue
+        seen.add(full)
+        units.append({
+            "id": "%s::%s" % (rel, full),
+            "path": rel,
+            "name": full,
+            "lineno": bisect.bisect_right(starts, pos),
+            "kind": "method" if recv else "function",
+        })
+    return units
+
+
+def _exported(name: str) -> bool:
+    return bool(name) and name[0].isupper()
+
+
+# A declaration starts at column 0. That is gofmt's layout, and gofmt is
+# close enough to universal that a reader built on it misses almost nothing;
+# what it does miss (hand-indented top-level code) is exactly what the
+# precise `go/ast` path exists to catch.
+#
+# WHAT THE ANCHOR DOES NOT DO, measured rather than assumed: it is not what
+# keeps `type HandlerFunc func(int) error` or `var F = func(n int) error {}`
+# out of the units. Unanchored, both still fail `_func_decls`'s SHAPE check
+# -- a function type or literal never has a name followed by `(` after its
+# parameter list -- and the test pinning them stays green. Only removing the
+# anchor AND the shape check together turns it red. So the anchor is
+# belt-and-braces over the shape check (plus fewer candidates to parse),
+# and its one real cost is the indented case above.
+_FUNC_AT = re.compile(r"(?m)^func\b")
+_IDENT_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_IDENT_FULL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _func_decls(code: str, depths):
+    """(name, receiver type or None, position) for each top-level `func`.
+
+    Reads `func Name(`, `func Name[T any](`, and every receiver form --
+    `(r T)`, `(r *T)`, `(*T)`, `(s *Set[K])`. A top-level `func(` with no
+    name is a literal, not a declaration, and is skipped.
+    """
+    out = []
+    n = len(code)
+    for m in _FUNC_AT.finditer(code):
+        pos = m.start()
+        if depths[pos] != 0:
+            continue
+        i = _skip_ws(code, m.end())
+        recv = None
+        if i < n and code[i] == "(":
+            close = _match_bracket(code, depths, i)
+            if close < 0:
+                continue
+            recv = _receiver_type(code[i + 1:close])
+            if recv is None:
+                continue
+            i = _skip_ws(code, close + 1)
+        word = _IDENT_AT.match(code, i)
+        if not word:
+            continue
+        j = _skip_ws(code, word.end())
+        if j < n and code[j] == "[":
+            close = _match_bracket(code, depths, j)
+            if close < 0:
+                continue
+            j = _skip_ws(code, close + 1)
+        if j < n and code[j] == "(":
+            out.append((word.group(0), recv, pos))
+    return out
+
+
+def _receiver_type(inner: str):
+    """`r *Report` -> `Report`; `*Set[K, V]` -> `Set`; None when unreadable.
+
+    Type arguments are cut first, because `Set[K, V]` contains a space that
+    would otherwise split the type from itself.
+    """
+    head = inner.split("[", 1)[0].split()
+    if not head:
+        return None
+    tok = head[-1].lstrip("*")
+    return tok if _IDENT_FULL.match(tok) else None
+
+
+def _depths(code: str):
+    """Bracket depth per index; an opener and its closer both carry the OUTER depth."""
+    d = [0] * (len(code) + 1)
+    cur = 0
+    for i, ch in enumerate(code):
+        if ch in "{([":
+            d[i] = cur
+            cur += 1
+        elif ch in "})]":
+            cur = max(cur - 1, 0)
+            d[i] = cur
+        else:
+            d[i] = cur
+    d[len(code)] = cur
+    return d
+
+
+def _match_bracket(code: str, depths, i: int) -> int:
+    """Index of the bracket closing the one at `i`, or -1."""
+    close = {"{": "}", "(": ")", "[": "]"}[code[i]]
+    d = depths[i]
+    for j in range(i + 1, len(code)):
+        if code[j] == close and depths[j] == d:
+            return j
+    return -1
+
+
+def _skip_ws(code: str, i: int) -> int:
+    n = len(code)
+    while i < n and code[i].isspace():
+        i += 1
+    return i
+
+
+def _line_starts(code: str):
+    starts = [0]
+    i = code.find("\n")
+    while i >= 0:
+        starts.append(i + 1)
+        i = code.find("\n", i + 1)
+    return starts
