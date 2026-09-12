@@ -307,6 +307,18 @@ def is_test_for(test_rel: str, src_rel: str) -> bool:
             == _dir_key(os.path.dirname(src_rel), False))
 
 
+def scope_files(rel: str, all_files) -> list:
+    """Files whose BARE occurrences of a name count as `rel`'s own scope.
+
+    A JS/TS module is its file: a top-level binding is invisible to every
+    other file until it is imported, and an importing file is a REFERENCE
+    file, counted through `_references_module`. So the answer is the file
+    alone, which is what `rank_risk.inbound_refs` hard-coded before this
+    became an interface name.
+    """
+    return [rel]
+
+
 # ── Naming ───────────────────────────────────────────────────────────────
 
 def module_of(rel: str) -> str:
@@ -330,7 +342,7 @@ def module_of(rel: str) -> str:
     return stem
 
 
-def name_pattern(name: str):
+def name_pattern(name: str, module: str = None):
     r"""`name` as a whole identifier, bounded the way JS bounds one.
 
     Not `\b`: `\b` is defined against `[A-Za-z0-9_]`, so it does not know `$`

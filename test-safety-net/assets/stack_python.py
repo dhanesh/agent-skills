@@ -223,6 +223,19 @@ def is_test_for(test_rel: str, src_rel: str) -> bool:
     return os.path.dirname(test_rel) == os.path.dirname(src_rel)
 
 
+def scope_files(rel: str, all_files) -> list:
+    """Files whose BARE occurrences of a name count as `rel`'s own scope.
+
+    A module-level Python name is scoped to the file that defines it, so the
+    answer is that file alone -- exactly what `rank_risk.inbound_refs`
+    hard-coded before this became an interface name. It is the stack's
+    question because the answer is a fact about the language: a Go package is
+    a DIRECTORY, and a caller in a sibling file of the same package is as much
+    "the unit's own file" as the defining one.
+    """
+    return [rel]
+
+
 # ── Naming ───────────────────────────────────────────────────────────────
 
 def module_of(rel: str) -> str:
@@ -237,7 +250,7 @@ def module_of(rel: str) -> str:
     return os.path.splitext(os.path.basename(rel))[0]
 
 
-def name_pattern(name: str):
+def name_pattern(name: str, module: str = None):
     r"""A regex matching `name` as a whole identifier, for either call site.
 
     The core needs this for two questions -- "does this test file mention the

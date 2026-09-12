@@ -1,7 +1,7 @@
 # test-safety-net
 
 Writes real, proven-failing-before-passing tests into a repo that has none, so an agent (or a
-person) can change it without flying blind. Python and node/TypeScript, both end to end. Not a
+person) can change it without flying blind. Python, node/TypeScript and Go, all end to end. Not a
 correctness audit — it pins current behaviour even where it looks wrong, and reports the suspicion
 rather than silently blessing it — and never a coverage-percentage chaser.
 
@@ -41,12 +41,14 @@ every unit rather than assuming it's callable:
 | 3 — needs a seam | no honest boundary without adding code | reported to `clean-code`, never acted on here |
 | 4 — not reachable | global state, import-time work, deep branch soup | a prioritized refactor reason |
 
-Only filesystem, clock, randomness, and environment variables are controlled automatically —
-database and HTTP are declined to Tier 3 by default and are only ever pinned at Tier 2 with a
-recorded justification (an in-memory database, or `mockstar-mock` for HTTP), never silently.
+Only filesystem, clock, randomness, and environment variables are controlled automatically (on
+Go, randomness is not: `rand.Seed` has been a no-op since Go 1.24) — database and HTTP are declined
+to Tier 3 by default and are only ever pinned at Tier 2 with a recorded justification (an in-memory
+database, or `mockstar-mock` for HTTP), never silently.
 
-Static triage is a **filter**, not the enforcement — dynamic dispatch, in Python and in
-JavaScript alike, means source analysis cannot decide what a unit really touches. The invariant
+Static triage is a **filter**, not the enforcement — dynamic dispatch, in Python, JavaScript and
+Go alike (reflection, interface methods, function values), means source analysis cannot decide what
+a unit really touches. The invariant
 "never write a test that performs real I/O" is enforced at runtime instead, by a tier-aware guard
 per stack, loaded on the single-test invocation rather than written into the repo:
 
@@ -62,11 +64,16 @@ per stack, loaded on the single-test invocation rather than written into the rep
   `.js` it loads through `fs.readFileSync`, the block decision is scoped by **call provenance** —
   blocking on the name alone kills a test that touches no filesystem at all, inside the module
   loader.
+- [`assets/io_guard_go.py`](assets/io_guard_go.py) — a wrapper around **`go test -overlay`** that
+  compiles hooks into the standard library for the one proof run, so the whole test binary, every
+  `init()` included, runs guarded. It hooks every classified `syscall` function and the clock,
+  randomness, database and network entry points, decides each call by **call provenance**
+  (`runtime.Callers`), and ends the process on a trip, so `recover()` cannot swallow one.
 
-Both raise their own exception type, so a guard trip (the classification is wrong) is never
+All three raise their own violation, so a guard trip (the classification is wrong) is never
 mistaken for an assertion failure (the captured value is wrong). Full mechanism, coverage table and
 residuals in [`references/triage.md`](references/triage.md) for python and
-[`references/stacks.md`](references/stacks.md) for node — including node's one rule with no Python
+[`references/stacks.md`](references/stacks.md) for node and go — including node's one rule with no Python
 equivalent: when a violation lands after its test resolved, `node --test` blames the wrong entry, so
 **the exit status is the only trustworthy signal on that stack.**
 
@@ -80,11 +87,15 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Two stacks are complete — **Python** (pytest, falling back to `unittest`) and
-**node/TypeScript** (node 18+, `node --test`, no dependency added). go and rust are not covered:
-neither is registered, so the ranker says so on stderr and returns an empty plan rather than
-guessing (see [`references/stacks.md`](references/stacks.md)). Node's optional precise discovery
-drives a `typescript` the repo already ships and never downloads one.
+churn signal). Three stacks are complete, each on **the last five versions of its language**,
+proved by CI on every one — **Python** 3.10–3.14 (pytest, falling back to `unittest`),
+**node/TypeScript** on the LTS lines 18, 20, 22, 24 and 26 (`node --test`, no dependency added) and
+**Go** 1.22–1.26 (`go test`, darwin and linux, no dependency added). Legacy toolchains are where
+untested code lives, which is why the floor is five versions back and not one. rust is not covered: it is not registered, so the ranker
+says so on stderr and returns an empty plan rather than guessing (see
+[`references/stacks.md`](references/stacks.md)). Node's optional precise discovery drives a
+`typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`
+helper and never downloads a toolchain.
 
 ## Usage
 
@@ -111,8 +122,8 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `references/triage.md` — the four-tier triage, boundary controls, and python's runtime guard:
   what it patches, how a trip is signalled, and its seven residuals.
 - `references/stacks.md` — per-stack facts (find units / where tests go / which framework / run one
-  test), and node's half of the guard story: its patch table, its residuals, and the exit-status
-  rule.
+  test), and the node and go halves of the guard story: their patch tables, their residuals, node's
+  exit-status rule and go's `-overlay` mechanism.
 - `references/parameters.md` — `rank_risk.py`'s CLI flags and JSON output shape.
 - `assets/rank_risk.py` — the stack-agnostic ranker: churn, approximate blast radius,
   scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
@@ -121,13 +132,19 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
   units (plus the optional precise path through a `typescript` the repo already ships),
   the naming, lexing and import-grammar answers JS gives, and node's own I/O marker
   tables and triage.
+- `assets/stack_go.py` — the Go stack: heuristic and `go/ast` discovery of exported functions
+  and methods, package-scoped naming and coverage, the 275-name `syscall` table both layers share,
+  and Go's I/O marker tables and triage.
 - `assets/stack_common.py` — the file helpers and the manifest-evidence rule the
   ranker and every stack share.
 - `assets/io_guard.py` — python's tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
 - `assets/io_guard.js` — node's, preloaded with `node --require`; dependency-free CommonJS.
+- `assets/io_guard_go.py` — go's, a stdlib-python wrapper around `go test -overlay`.
 - `assets/test_io_guard_node.sh` — the node guard's shell suite, whose first assertion extracts the
   documented invocation from every document that prints it and runs it verbatim, in both
   directions.
-- `assets/test_rank_risk.py`, `assets/test_io_guard.py`, `assets/test_stack_node.py` —
-  their stdlib test suites.
+- `assets/test_io_guard_go.py` — the go guard's suite, which does the same for its own
+  invocation and proves every group, the tier-2 controls and the exit contract.
+- `assets/test_rank_risk.py`, `assets/test_io_guard.py`, `assets/test_stack_node.py`,
+  `assets/test_stack_go.py` — their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).

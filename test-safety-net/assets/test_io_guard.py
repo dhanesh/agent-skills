@@ -89,6 +89,52 @@ class TestTier1BlocksEverything(GuardCase):
                 exc = self.assertTrips("filesystem", fn)
                 self.assertEqual(exc.target, target)
 
+    def test_every_pathlib_entry_point_trips_on_every_python(self):
+        # Python 3.10's pathlib routes through `_NormalAccessor`, whose
+        # attributes are `io.open`, `os.stat`, `os.listdir`, ... bound AT
+        # IMPORT, so patching the module names left every Path operation
+        # reaching the real primitive. The group, not the label, is asserted:
+        # which primitive a Path method reaches changes between releases
+        # (`iterdir` is `listdir` on 3.10-3.11 and `scandir` after), and the
+        # invariant is that it trips, as filesystem, on every version the
+        # skill supports.
+        io_guard.arm(1)
+        p = pathlib.Path(self.path)
+        cases = (
+            ("read_text", lambda: p.read_text()),
+            ("write_text", lambda: pathlib.Path(self.tmp, "new.txt").write_text("x")),
+            ("exists", lambda: p.exists()),
+            ("stat", lambda: p.stat()),
+            ("iterdir", lambda: list(pathlib.Path(self.tmp).iterdir())),
+            ("mkdir", lambda: pathlib.Path(self.tmp, "sub").mkdir()),
+            ("unlink", lambda: p.unlink()),
+        )
+        for name, fn in cases:
+            with self.subTest(method=name):
+                self.assertTrips("filesystem", fn)
+        io_guard.disarm()
+        self.assertTrue(os.path.exists(self.path), "a blocked unlink must not have run")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "sub")))
+        # And disarm puts the accessor back exactly: pathlib works again.
+        self.assertEqual(pathlib.Path(self.path).read_text(), "real bytes on a real disk\n")
+
+    def test_stdlib_modules_pre_bound_references_are_guarded_too(self):
+        # `pathlib` was one instance of a class: stdlib modules that bind a
+        # patched function under their OWN name at import. `random._urandom`
+        # is `os.urandom`, `tokenize._builtin_open` is `builtins.open`; the
+        # guard patched the originals' home names only, so
+        # `random.SystemRandom()` and `tokenize.open` reached the real ones
+        # on every Python.
+        import random as _random
+        import tokenize as _tokenize
+        io_guard.arm(1)
+        self.assertTrips("randomness", lambda: _random.SystemRandom().random())
+        self.assertTrips("filesystem", lambda: _tokenize.open(self.path).close())
+        io_guard.disarm()
+        self.assertIsInstance(_random.SystemRandom().random(), float)
+        with _tokenize.open(self.path) as fh:
+            self.assertTrue(fh.read())
+
     def test_writing_a_new_file_is_blocked_not_merely_reported(self):
         # The invariant is about SIDE EFFECTS, so prove the file is not there
         # afterwards: an exception raised after the write would be no guard.
@@ -542,6 +588,19 @@ class TestClassValuedPatches(GuardCase):
                 self.assertIsNot(patched, original, "not patched at all")
                 self.assertIsInstance(patched, type)
                 self.assertTrue(issubclass(patched, original))
+
+    def test_an_already_imported_modules_class_valued_global_stays_a_class(self):
+        # Pre-bound STDLIB references are rebound on arming, FUNCTIONS only.
+        # `ssl` does `from socket import socket` and subclasses it; a guarded
+        # function swapped in for that name would make `isinstance(x,
+        # ssl.socket)` a TypeError in a module the unit never touched.
+        # Mutation: rebinding classes too survived the suite until this test.
+        import socket
+        import ssl
+        self.assertIs(ssl.socket, socket.socket)
+        io_guard.arm(1)
+        self.assertIsInstance(ssl.socket, type)
+        self.assertTrue(issubclass(ssl.SSLSocket, ssl.socket))
 
     def test_import_ssl_works_at_both_tiers_while_armed(self):
         # Run out of process: `ssl` is almost certainly already imported in

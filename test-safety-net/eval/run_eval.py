@@ -43,6 +43,13 @@ What it still does NOT cover, said plainly rather than implied away:
     machine. CI pins both toolchains (`.github/workflows/skill-gates.yml` sets
     up python AND node), so the grading there is a pin rather than an accident
     of the runner image; a local `make gate` on a bare machine is not.
+  * The go GUARD is covered CONDITIONALLY too (check 44), in the same shape as
+    34 and 39: with no `go` on PATH it reports NOT GRADED HERE and passes, and
+    `assets/test_io_guard_go.py` skips on the same machine. CI pins go 1.26
+    beside python and node, so there it is graded by pin, not by accident.
+    The go FILTER (checks 40-43) needs no toolchain and is always graded;
+    check 41's `precise` arm expects whichever label the machine can honestly
+    produce.
   * The literal-emission rule (SKILL.md's "one real injection surface") has NO
     EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
     ships in this skill, so there is no code path that could turn a hostile
@@ -128,6 +135,14 @@ _DOC_CMD_NODE_RE = re.compile(
     r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
     r'node\s+--require\s+\S*io_guard\.js\S*\s+.*<path>$')
 
+# The go equivalent: the wrapper, run by python3, ending in the `<package>`
+# placeholder -- and it must carry the tier assignment, or it is a mention of
+# the wrapper (the stacks.md table row) rather than an invocation of it.
+_DOC_CMD_GO_RE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*TEST_SAFETY_NET_TIER=[12]\s+'
+    r'(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+    r'python3\s+\S*io_guard_go\.py\S*\s+.*<package>$')
+
 
 def slice_between(text, start_pat, end_pat):
     """Text from the first match of start_pat up to (excluding) the next
@@ -141,6 +156,28 @@ def slice_between(text, start_pat, end_pat):
         return ""
     m2 = re.search(end_pat, text[m1.end():], re.M)
     return text[m1.start():m1.end() + m2.start()] if m2 else text[m1.start():]
+
+
+def section_outside_fences(text, heading):
+    """The lines from `heading` up to the next `## ` heading OUTSIDE a code fence.
+
+    `slice_between` matches its end pattern anywhere, so a `## ` line inside a
+    fenced example -- the Deliverable template opens with one -- ends the
+    section at the example's first line.
+    """
+    out, inside, fence = [], False, False
+    for line in text.splitlines():
+        if not inside:
+            if line.strip() == heading:
+                inside = True
+                out.append(line)
+            continue
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence and line.startswith("## "):
+            break
+        out.append(line)
+    return "\n".join(out)
 
 
 def all_mentions_negated(text, needle, window=220):
@@ -435,8 +472,18 @@ def main():
             f"RED@{red_i} GREEN@{green_i}",
         )
 
-        # 15. report template carries both a tier and a kind column
-        header_line = next((ln for ln in skill_text.splitlines()
+        # 15. report template carries both a tier and a kind column. READ FROM
+        #     THE DELIVERABLE SECTION, not from the first `| ... unit ... |`
+        #     line anywhere in the file: when the go block landed in step 4,
+        #     its exit table's "reclassify the unit to Tier 3" row became that
+        #     first line, and the check graded the exit table instead of the
+        #     report template. A check any later table can hijack is not
+        #     grading what its name says. FENCE-AWARE, because the template it
+        #     grades is itself a fenced block whose first line is
+        #     `## Test safety net: ...` -- a plain `^## ` end pattern stopped
+        #     there, one line in, and the check failed on a correct file.
+        deliverable = section_outside_fences(skill_text, "## Deliverable")
+        header_line = next((ln for ln in deliverable.splitlines()
                              if ln.strip().startswith("|") and "unit" in ln.lower()), "")
         check(
             "15 SKILL.md's report template carries both a tier and a kind column",
@@ -1219,6 +1266,188 @@ def main():
                if node_present else
                "NOT GRADED HERE: no `node` on PATH; "
                "assets/test_io_guard_node.sh grades it where there is"))
+
+        # =====================================================================
+        # Fixture "gofx": the Go stack, end to end, through the SAME CLI an
+        # agent runs. Checks 40-43 grade the filter half and need no
+        # toolchain; check 44 grades the enforcement half under the command
+        # SKILL.md prints.
+        #
+        # Every one of these is vacuous before the Go stack exists: a Go repo
+        # was claimed by no stack, fell through to the Python fallback, and
+        # reported a clean EMPTY plan -- the silent zero the stack closes.
+        # =====================================================================
+        go_repo = os.path.join(tmp, "gofx")
+        write(go_repo, "go.mod", "module example.com/gofx\n\ngo 1.22\n")
+        write(go_repo, "calc/c.go",
+              'package calc\n\nimport (\n\t"math/rand"\n\t"net"\n\t"os"\n\t"syscall"\n)\n\n'
+              "type Report struct{}\n\n"
+              "func Pure(n int) int { return n * 2 }\n"
+              "func Load(p string) ([]byte, error) { return os.ReadFile(p) }\n"
+              'func Dial() error { _, err := net.Dial("tcp", "x:1"); return err }\n'
+              "func Roll() int { return rand.Intn(6) }\n"
+              "func Raw() { syscall.Syscall(20, 0, 0, 0) }\n"
+              "func (r Report) Total() int { return 0 }\n")
+        # Initialisation I/O floors EVERY unit in its package -- a package is a
+        # directory, and every file's initializers run on import.
+        write(go_repo, "boot/b.go",
+              'package boot\n\nimport "os"\n\nvar mode = os.Getenv("MODE")\n\n'
+              "func Double(n int) int { return n * 2 }\n")
+        write(go_repo, "conn/c.go",
+              'package conn\n\nimport "net"\n\nvar conn, _ = net.Dial("tcp", "db:5432")\n\n'
+              "func Twice(n int) int { return n * 2 }\n")
+        # Exported units the go tool itself never builds into a package. Each
+        # is a perfectly good unit by every syntactic test -- which is why
+        # excluding them has to be asserted rather than assumed.
+        for rel in ("vendor/v/v.go", "testdata/t.go", "_scratch/s.go"):
+            write(go_repo, rel, "package x\n\nfunc Leaked() {}\n")
+        write(go_repo, "calc/c_test.go",
+              'package calc\n\nimport "testing"\n\nfunc TestHelper(t *testing.T) {}\n'
+              "func Fixture() int { return 1 }\n")
+        write(go_repo, "calc/gen.go",
+              "// Code generated by stringer; DO NOT EDIT.\n\npackage calc\n\n"
+              "func Generated() {}\n")
+
+        r_go = run_ranker(go_repo, "--top-n", "50")
+        go_plan = load_json(r_go)
+        go_rows = {}
+        for bucket in ("ranked", "remainder", "not_netted"):
+            for r_ in go_plan.get(bucket, []):
+                go_rows[r_["id"]] = r_
+        go_ids = set(go_rows) | set(go_plan.get("covered", []))
+
+        # 40. detected as go, and BOTH unit shapes found: functions and methods.
+        check("40 a Go module is detected as go and its exported functions AND "
+              "methods are discovered (0 units is what a repo no stack claims "
+              "reports)",
+              r_go.returncode == 0
+              and go_plan.get("stack") == "go"
+              and go_plan.get("units_discovered") == 8
+              and "calc/c.go::Pure" in go_rows
+              and "calc/c.go::Report.Total" in go_rows,
+              "stack=%s units=%s ids=%s" % (go_plan.get("stack"),
+                                            go_plan.get("units_discovered"), sorted(go_rows)))
+
+        # 41. the reader is NAMED, and named correctly, three ways: the default
+        #     run says `precise` exactly where `go` exists; a `go` that FAILS
+        #     declines to `heuristic` with a note and loses no units; and
+        #     --no-precise never asks it at all.
+        fake_bin = os.path.join(tmp, "fakebin")
+        os.makedirs(fake_bin, exist_ok=True)
+        os.chmod(write(fake_bin, "go", "#!/bin/sh\nexit 1\n"), 0o755)
+        r_fake = subprocess.run(
+            [sys.executable, RANKER, go_repo, "--top-n", "50"], capture_output=True,
+            text=True, timeout=120,
+            env=dict(os.environ, PATH=fake_bin + os.pathsep + os.environ.get("PATH", "")))
+        fake_plan = load_json(r_fake)
+        np_plan = load_json(run_ranker(go_repo, "--no-precise", "--top-n", "50"))
+        want_default = "precise" if shutil.which("go") else "heuristic"
+        check("41 the go report names which reader found its units, CORRECTLY: "
+              "`precise` exactly where go runs, `heuristic` with a note when go "
+              "fails, and `heuristic` under --no-precise",
+              go_plan.get("discovery") == want_default
+              and fake_plan.get("discovery") == "heuristic"
+              and fake_plan.get("units_discovered") == 8
+              and "declined" in (r_fake.stderr or "")
+              and np_plan.get("discovery") == "heuristic",
+              "default=%r (want %r) failing-go=%r units=%r note=%r no-precise=%r"
+              % (go_plan.get("discovery"), want_default, fake_plan.get("discovery"),
+                 fake_plan.get("units_discovered"),
+                 (r_fake.stderr or "").strip().splitlines()[-1:], np_plan.get("discovery")))
+
+        # 42. NEGATIVE: what the go tool never builds is never a unit.
+        go_leaked = sorted(i for i in go_ids
+                           if i.startswith(("vendor/", "testdata/", "_scratch/"))
+                           or "_test.go" in i or "gen.go" in i)
+        check("42 NEGATIVE: exported units under vendor/, testdata/, a _-prefixed "
+              "directory, a _test.go file and a generated file are never "
+              "discovered, ranked or netted",
+              not go_leaked and go_plan.get("units_discovered") == 8,
+              "leaked=%s units=%s" % (go_leaked, go_plan.get("units_discovered")))
+
+        # 43. every tier direction at once, including the two PACKAGE floors.
+        want_go_tiers = {
+            "calc/c.go::Pure": 1,          # nothing reachable
+            "calc/c.go::Load": 2,          # filesystem, controllable
+            "calc/c.go::Dial": 3,          # network, uncontrollable
+            "calc/c.go::Roll": 3,          # the global rand source: uncontrollable on go
+            "calc/c.go::Raw": 4,           # a raw syscall: declined statically
+            "boot/b.go::Double": 3,        # an initializer reads the environment
+            "conn/c.go::Twice": 4,         # an initializer dials the network
+        }
+        got_go_tiers = {i: go_rows.get(i, {}).get("tier") for i in want_go_tiers}
+        go_not_netted = {r_["id"] for r_ in go_plan.get("not_netted", [])}
+        check("43 each go unit lands in the tier its markers earn -- randomness is "
+              "uncontrollable, a raw syscall is declined, initialisation I/O floors "
+              "its whole package -- and tiers 3-4 are not_netted",
+              got_go_tiers == want_go_tiers
+              and all(i in go_not_netted for i, t in want_go_tiers.items() if t >= 3),
+              str(got_go_tiers))
+
+        # 44. THE ENFORCEMENT HALF, under the command SKILL.md prints. Two arms,
+        #     for the reason 34 and 39 record: a guard that arms nothing passes
+        #     a clean test too. The negative arm calls `syscall.Socket` itself --
+        #     the hook trips before a socket exists, so nothing is dialled -- and
+        #     `network` is blocked at both tiers, so one fixture serves both
+        #     documented commands.
+        go_present = shutil.which("go") is not None
+        go_fail, go_commands = [], []
+        if go_present:
+            gproof = os.path.join(tmp, "gproof")
+            write(gproof, "go.mod", "module example.com/gproof\n\ngo 1.22\n")
+            write(gproof, "fx.go",
+                  'package fx\n\nimport "syscall"\n\n'
+                  "func Add(a, b int) int { return a + b }\n\n"
+                  "func Sock() bool {\n"
+                  "\tfd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)\n"
+                  "\tif err == nil {\n\t\tsyscall.Close(fd)\n\t}\n\treturn err == nil\n}\n")
+            write(gproof, "fx_test.go",
+                  'package fx\n\nimport "testing"\n\n'
+                  "func TestAdd(t *testing.T) { if Add(2, 3) != 5 { t.Fatal(\"bad\") } }\n"
+                  "func TestSock(t *testing.T) { Sock() }\n")
+            # EVERY printed go guard line must parse as an invocation, not just
+            # one. Matching lines and ignoring the rest let a mangled block
+            # hide: one copy with a broken `<package>` placeholder was simply
+            # never extracted, the other copy still matched, and the check
+            # stayed green over a command an agent would copy and get wrong.
+            # Measured, by mangling exactly one of SKILL.md's two blocks.
+            for label, text in (("SKILL.md", skill_text),
+                                ("references/stacks.md", node_stacks_md)):
+                for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                    joined = re.sub(r"\\\n\s*", " ", block)
+                    for line in joined.splitlines():
+                        line = line.strip()
+                        if _DOC_CMD_GO_RE.match(line):
+                            go_commands.append((label, line))
+                        elif "io_guard_go.py" in line and "TEST_SAFETY_NET_TIER" in line:
+                            go_fail.append("%s prints a go guard line that is not a "
+                                           "runnable invocation: %s" % (label, line))
+            if not any(lbl == "SKILL.md" for lbl, _ in go_commands):
+                go_fail.append("SKILL.md prints no go guard invocation")
+            for label, command in go_commands:
+                env = {k_: v_ for k_, v_ in os.environ.items()
+                       if not k_.startswith("TEST_SAFETY_NET")}
+                env.pop("GOFLAGS", None)
+                env["SKILL_DIR"] = SKILL
+                for test, want in (("TestAdd", 0), ("TestSock", 3)):
+                    cmd = command.replace("<test_name>", test).replace("<package>", "./")
+                    run = subprocess.run(["/bin/sh", "-c", cmd], cwd=gproof, env=env,
+                                         capture_output=True, text=True, timeout=300,
+                                         stdin=subprocess.DEVNULL)
+                    output = run.stdout + run.stderr
+                    ok_ = run.returncode == want and (("IOGuardViolation" in output) == (want == 3))
+                    if not ok_:
+                        go_fail.append("%s [%s]: %s -> exit %s %s"
+                                       % (label, test, cmd, run.returncode,
+                                          output.strip()[-200:]))
+        check("44 NEGATIVE: the DOCUMENTED go guard command, extracted from SKILL.md "
+              "and run verbatim, passes a clean unit AND exits 3 on one that "
+              "reaches a real syscall (so a guard that never arms cannot pass)",
+              not go_fail,
+              "; ".join(go_fail) if go_fail else
+              ("%d command(s), each run twice" % len(go_commands) if go_present else
+               "NOT GRADED HERE: no `go` on PATH; "
+               "assets/test_io_guard_go.py grades it where there is"))
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

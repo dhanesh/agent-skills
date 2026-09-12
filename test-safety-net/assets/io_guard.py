@@ -101,8 +101,13 @@ RESIDUALS, STATED RATHER THAN IMPLIED
 2. A C extension that calls the syscall directly (`numpy.fromfile`,
    `ctypes.CDLL(...)`) bypasses every Python name and is not intercepted.
 3. A reference bound before the guard armed (`from os import stat` executed in
-   an already-imported module) keeps the original. Arming ahead of collection
-   is what makes this rare rather than routine.
+   an already-imported REPO or third-party module) keeps the original. Arming
+   ahead of collection is what makes this rare rather than routine. The
+   standard library's own pre-bound references are NOT this residual: on
+   arming, a function-valued global of an already-imported stdlib module that
+   IS a patched original is rebound too (`random._urandom`,
+   `tokenize._builtin_open`, 3.10's `pathlib._NormalAccessor`), because the
+   second review reached real I/O through exactly those.
 4. `os.environ` reads ARE intercepted (the mapping itself is rebound to a
    guarded subclass), but `len(os.environ)`, `key in os.environ` and
    `os.environb` are not: none of the first two reads a value, and the third is
@@ -692,6 +697,9 @@ def _guarded(group, target, original):
     guard.__name__ = getattr(original, "__name__", "guarded")
     guard.__doc__ = "test-safety-net io_guard wrapper around %s" % target
     guard.__wrapped__ = original
+    # What this wrapper enforces, so a pre-bound reference to the same original
+    # elsewhere in the stdlib can be guarded identically (`_patch_prebound_stdlib`).
+    guard._tsn_group_label = (group, target)
     return guard
 
 
@@ -1045,6 +1053,128 @@ def arm(tier, allow=None):
         real_import = builtins.__import__
         builtins.__import__ = _guarded_import(real_import)
         _undo.append((builtins, "__import__", real_import))
+    _patch_prebound_stdlib()
+
+
+def _patch_prebound_stdlib():
+    """Guard the standard library's OWN pre-bound references to patched names.
+
+    Residual 3 -- "a reference bound before the guard armed keeps the
+    original" -- is a residual for the TARGET REPO'S code. It must never be one
+    for the standard library the filter marks as I/O, and on Python 3.10 it
+    was: `pathlib` routes every filesystem call through
+    `pathlib._NormalAccessor`, whose `open`, `stat`, `listdir`, `scandir`,
+    `mkdir`, `unlink`, `rename`, ... are `io.open`, `os.stat`, ... BOUND AT
+    IMPORT. So `Path.read_text()`, `Path.exists()` and `Path.iterdir()` reached
+    the real primitives while the guard patched only the module names, and on
+    3.10 a tier 1 unit could read and write through `pathlib` under a green
+    proof -- while the filter marks `pathlib` as filesystem I/O. Measured in a
+    `python:3.10-slim` container; Python 3.11 removed the accessor, which is why
+    nothing newer showed it.
+
+    Matched by IDENTITY against the originals this arm already replaced (the
+    undo log), not by a list of names: every group is covered, and the
+    correspondence cannot drift from the patch list. Each is installed as a
+    `staticmethod`, because the guarded wrapper is a Python function and would
+    otherwise bind as a method and receive the accessor as its first argument.
+    On a Python with no accessor this does nothing.
+    """
+    import pathlib
+    accessor = getattr(pathlib, "_NormalAccessor", None)
+    # One original can sit under SEVERAL patched names: on 3.10 `builtins.open`,
+    # `io.open` and `_io.open` are the same object. Keep every label, then pick
+    # the one naming the accessor attribute's own module role -- `io.open` for
+    # `open`, `os.stat` for `stat`, which is also what 3.11+'s pathlib reaches
+    # -- so a trip reads the same on every supported Python.
+    replaced = {}
+    for obj, attr, original in _undo:
+        entry = _patched_label(obj, attr)
+        if entry is not None:
+            replaced.setdefault(id(original), []).append(entry)
+    if accessor is not None:
+        for attr, value in sorted(vars(accessor).items()):
+            entries = replaced.get(id(value))
+            if not entries:
+                continue
+            preferred = ("io.%s" % attr, "os.%s" % attr)
+            group, label = next((e for e in entries if e[1] in preferred), entries[0])
+            setattr(accessor, attr, staticmethod(_guarded(group, label, value)))
+            _undo.append((accessor, attr, value))
+    _patch_prebound_module_globals(replaced)
+
+
+def _compute_stdlib_dirs():
+    # At IMPORT, never while armed: `realpath` is `lstat` calls, and the guard
+    # would trip on its own bookkeeping. Both spellings, since a stdlib reached
+    # through a symlink (a Homebrew or pyenv prefix) records either in
+    # `__file__`.
+    import sysconfig
+    paths = sysconfig.get_paths()
+    dirs = set()
+    for p in {paths.get("stdlib"), paths.get("platstdlib")}:
+        if p:
+            dirs.add(os.path.normpath(p) + os.sep)
+            dirs.add(os.path.realpath(p) + os.sep)
+    return tuple(sorted(dirs))
+
+
+_STDLIB_DIRS = _compute_stdlib_dirs()
+
+
+def _patch_prebound_module_globals(replaced):
+    """Rebind stdlib MODULE GLOBALS that are a patched original, on every Python.
+
+    `pathlib`'s accessor was one instance of a class the second review named:
+    a stdlib module binds a patched function under its OWN name at import --
+    `random._urandom = os.urandom`, `tokenize._builtin_open = open`,
+    `tarfile.bltn_open`, `urllib.request._randombytes`,
+    `ssl.create_connection` -- and calls it by that name. So
+    `random.SystemRandom()`, `tokenize.open` and `linecache.getline` reached
+    the real primitives while the guard was armed.
+
+    Scope, stated: only modules ALREADY IMPORTED when the guard arms (a module
+    imported afterwards binds the guarded function itself), only files under
+    this interpreter's own stdlib directories (a third-party pre-bound
+    reference is residual 3, like the repo's own), and only FUNCTION values.
+    A class-valued one (`ssl.socket`) is never matched, by construction rather
+    than by a check: a class patch is `_guarded_class`'s subclass, which
+    carries no `_tsn_group_label`, so its original never enters `replaced`.
+    That is the right answer -- `ssl` built `SSLSocket` on the original, and
+    a function swapped in under it would break `isinstance` in a module the
+    unit never touched. A test pins it
+    (`test_an_already_imported_modules_class_valued_global_stays_a_class`).
+    """
+    if not _STDLIB_DIRS:
+        return
+    for name, module in sorted(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if not isinstance(path, str) or not os.path.isabs(path) \
+                or module is sys.modules.get(__name__):
+            continue
+        # `normpath` is string algebra; `realpath` here would be the guard's
+        # own `lstat` tripping it.
+        path = os.path.normpath(path)
+        if not path.startswith(_STDLIB_DIRS) or "site-packages" in path:
+            continue
+        try:
+            items = sorted(vars(module).items())
+        except TypeError:                                   # pragma: no cover
+            continue
+        for attr, value in items:
+            if id(value) not in replaced:
+                continue
+            group, label = replaced[id(value)][0]
+            try:
+                setattr(module, attr, _guarded(group, label, value))
+            except (AttributeError, TypeError):             # pragma: no cover
+                continue
+            _undo.append((module, attr, value))
+
+
+def _patched_label(obj, attr):
+    """(group, label) the wrapper now installed at `obj.attr` enforces, or None."""
+    current = getattr(obj, attr, None)
+    return getattr(current, "_tsn_group_label", None)
 
 
 def disarm():

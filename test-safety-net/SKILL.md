@@ -1,29 +1,32 @@
 ---
 name: test-safety-net
 description: >-
-  Author unit tests into a Python or node/TypeScript codebase that has none, so an agent can change
-  it safely. Use when a repo has no meaningful tests, when someone says "I don't trust an agent in
-  this codebase", "add tests before we refactor", or "we need a safety net before this migration" —
-  and equally for a JavaScript/TypeScript repo with no `*.test.js` to its name. Ranks units by blast
+  Author unit tests into a Python, node/TypeScript or Go codebase that has none, so an agent can
+  change it safely. Use when a repo has no meaningful tests, when someone says "I don't trust an
+  agent in this codebase", "add tests before we refactor", or "we need a safety net before this
+  migration" — and equally for a JS/TS repo with no `*.test.js`, or a Go module with no
+  `_test.go`. Ranks units by blast
   radius and churn, then writes characterization tests that pin current behaviour — each one proved
   able to FAIL before it is kept, so the suite is a real change-detector and not green noise. Every
   test declares whether it pins behaviour or asserts a spec; suspected bugs are pinned AND reported,
   never blessed. Untestable code is triaged, not forced: it becomes a ranked seam list for
   clean-code. Never modifies your source and never writes a test that performs real I/O. Not a
-  correctness audit, not a coverage chaser, and not for go or rust. Fills the loop
+  correctness audit, not a coverage chaser, and not for rust. Fills the loop
   verifier-installer installs; clean-code judges what comes out.
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
-  CLI. Writes and proves tests on two stacks — python (pytest, falling back to unittest) and
-  node/TypeScript (node 18+, `node --test`); go and rust are covered by neither and are declined
-  (references/stacks.md). No pip, no npm, no network: node's optional precise discovery drives a
-  `typescript` the repo already ships and never downloads one — that runs the analysed repo's own
-  compiler in-process, and `--no-precise` declines it.
+  CLI. Writes and proves tests on three stacks, each on the last five versions of its language —
+  python 3.10–3.14 (pytest, falling back to unittest), node/TypeScript on the LTS lines 18, 20, 22,
+  24 and 26 (`node --test`) and go 1.22–1.26 (`go test`, on darwin and linux); rust is declined
+  (references/stacks.md). No pip, no npm, no network: node's optional precise discovery
+  drives a `typescript` the repo already ships and never downloads one — that runs the analysed
+  repo's own compiler in-process, and `--no-precise` declines it — and go's runs this skill's own
+  `go/ast` helper under `GOTOOLCHAIN=local`, so no toolchain is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.1.0"
-  tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript"
+  version: "1.2.0"
+  tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go"
 ---
 
 # test-safety-net
@@ -46,23 +49,25 @@ list this skill cannot act on itself (see Tiers 3/4 below). Do not use this to c
 number, to bless current behaviour as correct, or to refactor code to make it testable — that
 inverts the safety property the skill exists to provide (see Invariant 1).
 
-**Locating this skill's helpers (do this first).** Three bundled scripts ship with this skill — the
+**Locating this skill's helpers (do this first).** Four bundled scripts ship with this skill — the
 stack-agnostic ranker (`assets/rank_risk.py`, step 2) and one runtime I/O guard per stack
-(`assets/io_guard.py` for python, `assets/io_guard.js` for node, both step 4). A path written
-relative to this skill will not resolve from the target repo you're working in. Resolve the base
-directory once and reuse it everywhere:
+(`assets/io_guard.py` for python, `assets/io_guard.js` for node, `assets/io_guard_go.py` for go, all
+step 4). A path written relative to this skill will not resolve from the target repo you're working
+in. Resolve the base directory once and reuse it everywhere:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
 # If you don't have it, discover it:
 SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'test-safety-net' 2>/dev/null | head -1)
-test -f "$SKILL_DIR/assets/rank_risk.py" || echo "SKILL_DIR not resolved"
-test -f "$SKILL_DIR/assets/io_guard.py"  || echo "SKILL_DIR not resolved"
-test -f "$SKILL_DIR/assets/io_guard.js"  || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/rank_risk.py"   || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard.py"    || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard.js"    || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard_go.py" || echo "SKILL_DIR not resolved"
 ```
 
-The ranker and the python guard are stdlib-only python3; the node guard is dependency-free
-CommonJS for node 18+. All three are offline. Do not author your own guard: the one that ships is
+The ranker and the python and go guards are stdlib-only python3 — the go guard drives the
+machine's own `go`; the node guard is dependency-free CommonJS for node 18+. All four are offline.
+Do not author your own guard: the one that ships is
 what Invariant 2 is enforced by, and a hand-rolled substitute that patches the wrong layer is worse
 than none, because it makes the invariant look enforced when it is not.
 
@@ -70,12 +75,12 @@ than none, because it makes the invariant look enforced when it is not.
 
 1. **Detect** the stack and — critically — how to run exactly **one** test, not just the suite.
    The ranker detects the stack itself and prints its verdict and the evidence behind it on
-   stderr (`note: stack=python (evidence: python=51, node=17)`); read that line rather than
-   assuming, and pass `--stack` when it is wrong or when it reports a tie. Two stacks are complete
-   end to end — **python** and **node/TypeScript** — because each ships a runtime guard that can
-   prove the no-I/O invariant during step 4. A stack that cannot prove it declines to write rather
-   than writing unproven tests, which is what go and rust do today: neither stack is registered, so
-   the ranker writes `note: no stack claims <repo>` to stderr and returns an empty plan — read that
+   stderr (`note: stack=python (evidence: python=52, node=18, go=0)`); read that line rather than
+   assuming, and pass `--stack` when it is wrong or when it reports a tie. Three stacks are complete
+   end to end — **python**, **node/TypeScript** and **go** — because each ships a runtime guard that
+   can prove the no-I/O invariant during step 4. A stack that cannot prove it declines to write
+   rather than writing unproven tests, which is what rust does today: it is not registered, so the
+   ranker writes `note: no stack claims <repo>` to stderr and returns an empty plan — read that
    line and stop. Consult `references/stacks.md` for the row that applies, and stop plainly, without
    improvising, for anything with no complete row. Single-test invocation is load-bearing: step 4's
    proof is impossible without it.
@@ -90,11 +95,16 @@ than none, because it makes the invariant look enforced when it is not.
    repo with jest configured and no tests yet is the commonest instance of it.
    `references/stacks.md` has the full reasoning.
 
+   **On go, make sure the module's dependencies are already downloaded.** The go guard runs
+   `go test` with `GOPROXY=off` and `GOTOOLCHAIN=local` — a proof run never fetches a module or a
+   toolchain — so on a cold module cache run `go mod download` yourself first. A missing module
+   shows up as exit 5 (the package did not build), never as a verdict about the unit.
+
 2. **Rank** the risk surface:
 
    ```sh
    python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"] \
-     [--stack python|node]
+     [--stack python|node|go]
    ```
 
    Offline, stdlib + git only, deterministic. Read `references/parameters.md` for the full
@@ -103,12 +113,15 @@ than none, because it makes the invariant look enforced when it is not.
    for `clean-code`; `covered` is a flat index of already-tested unit ids, not a fourth bucket — a
    `not_netted` unit can also appear in `covered`. `discovery` says which reader found the units
    (`precise` = a real parser, `heuristic` = a text reader); a node repo reads `heuristic` unless
-   it ships its own `typescript`, and two runs are only comparable when it agrees. **Carry that
+   it ships its own `typescript`, a go repo reads `precise` wherever `go` is on PATH, and two runs
+   are only comparable when it agrees. **Carry that
    value into your report's header**, as the template below does: a run that silently degraded is a
    run whose numbers cannot be compared to the last one's. Node's precise path reaches that repo's
    own `typescript` by `require`ing it, so it EXECUTES code from the tree you are analysing; pass
    `--no-precise` on any repo you were handed rather than wrote, and expect `heuristic` and fewer
-   units in exchange (`references/parameters.md`).
+   units in exchange (`references/parameters.md`). Go's precise path executes none of the analysed
+   repo's code — it is this skill's own `go/ast` helper reading the tree as text — so it is safe to
+   leave on.
 
    Every unit lands in exactly one of the four testability tiers described in full in
    `references/triage.md` — read it before writing anything. In short: Tier 1 (direct) gets a
@@ -207,7 +220,9 @@ than none, because it makes the invariant look enforced when it is not.
    enclosing file. Never the test that caused it: that one reports `ok` in every case. All three
    shapes reproduce on **one and the same node build**; what selects between them is when the
    violation lands relative to the tests around it, not the runtime version — so "our node is newer"
-   is not a reason to trust the per-test lines. Reproduced verbatim on node v22.18.0:
+   is not a reason to trust the per-test lines. Reproduced verbatim on node v22.18.0, and on every
+   LTS line from 18 to 26 (these are TAP lines — node 26's default reporter is `spec`, so pass
+   `--test-reporter=tap` to see them in this form; the exit status needs neither):
 
    ```
    ok 1     - violator                              <- the test that violated
@@ -232,6 +247,47 @@ than none, because it makes the invariant look enforced when it is not.
    one violation. So the rule cannot rot into prose while the behaviour it describes drifts.
    `references/stacks.md` shows all three transcripts and what selects between them.
 
+   On **go** that is `assets/io_guard_go.py`, a wrapper around `go test` that compiles hooks into
+   the standard library for this one run (`go test -overlay`), so the whole test binary — every
+   `init()` included — runs guarded, and likewise nothing is written into the target repo:
+
+   ```sh
+   # Tier 1 candidate — the unit claims to touch nothing, so block everything.
+   TEST_SAFETY_NET_TIER=1 \
+     python3 "$SKILL_DIR/assets/io_guard_go.py" \
+     -run '^<test_name>$' <package>
+
+   # Tier 2 candidate — name EVERY controllable group this test deliberately fakes.
+   TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem,clock \
+     python3 "$SKILL_DIR/assets/io_guard_go.py" \
+     -run '^<test_name>$' <package>
+   ```
+
+   **Copy the whole block.** `<package>` is the package directory (`./internal/billing`), and the
+   `-run` anchors matter for the reason they do on node: the pattern is a substring regex. Tests go
+   in `<file>_test.go` beside the source, **in the same package**, appended to when the file
+   exists and never overwritten. These two blocks are extracted from this file by
+   `assets/test_io_guard_go.py` and run verbatim against a clean unit and a leaking one.
+
+   **On go, the exit status is the whole protocol:**
+
+   | exit | outcome | the proof loop |
+   |---|---|---|
+   | 0 | GREEN — the test ran and passed | keep it, if this was the corrected run |
+   | 1 | RED — an assertion failed | expected on the deliberately-wrong run |
+   | 2 | NOT ARMED — the guard could not arm | fix the environment; nothing was proved |
+   | 3 | GUARD TRIP — `IOGuardViolation` | reclassify the unit to Tier 3 and discard the test, red or green |
+   | 4 | NO TEST — nothing was proved | `-run` matched nothing, the package has no test files, or the test skipped itself; fix it — not GREEN |
+   | 5 | NO BUILD — the package did not build | fix the test source; a compile error is not RED |
+
+   A trip ends the process (`syscall.Exit(3)`), so `recover()` cannot swallow it and a goroutine's
+   trip cannot be charged to another test. `-count=1` is forced: the guard's configuration is
+   invisible to `go test`'s result cache, and a pass cached at one tier would otherwise be replayed
+   at another. **On go, `randomness` is not a controllable group** — `rand.Seed` is a no-op since
+   Go 1.24, so a unit drawing from the global `math/rand` source is Tier 3 and
+   `TEST_SAFETY_NET_ALLOW=randomness` is refused with a note. Go's clock control is
+   `testing/synctest`.
+
    The tier is passed per invocation by environment variable, which is sufficient because the proof
    runs one unit at a time — a single run has a single tier:
    - **Tier 1 candidate:** blocks *everything* — filesystem, clock, randomness, environment,
@@ -241,8 +297,8 @@ than none, because it makes the invariant look enforced when it is not.
    - **Tier 2 candidate:** blocks the uncontrollable groups always, plus every controllable group
      you did *not* name in `TEST_SAFETY_NET_ALLOW`. The boundary this test controls (a temp dir, a
      frozen clock) is the point, not a violation — so name it, and name **all** of it. Omitting the
-     variable falls back to permitting all four controllable groups, which is looser than the test
-     actually needs.
+     variable falls back to permitting every controllable group the stack has — four on python and
+     node, three on go — which is looser than the test actually needs.
 
    The guard patches the **lowest** layer reachable, which for CPython is the `os` primitives, the
    `_io` C module, and the file-object constructors — every name the ranker's marker tables
@@ -262,6 +318,13 @@ than none, because it makes the invariant look enforced when it is not.
    patched class stays a class. Its patch list, its two-layer partition against the filter and its
    seven residuals are in `references/stacks.md`; two of those residuals change what a trip means,
    so read them before you read one.
+
+   The go guard hooks the lowest layer Go itself has: every classified function of package
+   `syscall` — the same 275-name table the filter reads — `internal/syscall/unix`'s `*at` and
+   resolver families, and the clock, randomness, database and network entry points whose group
+   decides a call made beneath them. It decides each call by call provenance (`runtime.Callers`),
+   as the node guard does; its decision rule, patch table and residuals are in
+   `references/stacks.md`.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

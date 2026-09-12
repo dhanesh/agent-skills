@@ -21,6 +21,24 @@ def write(root, rel, text):
     return str(p)
 
 
+class TestScopeFilesInterface(unittest.TestCase):
+    """`scope_files` is the fifteenth interface name: which files' BARE
+    occurrences of a name count as the unit's own scope. Python and node
+    answer the defining file alone -- what `inbound_refs` hard-coded before --
+    so this pins that the widening changed nothing for them."""
+
+    def test_every_registered_stack_answers_its_own_file_at_least(self):
+        for stack in rank_risk.STACKS:
+            got = stack.scope_files("pkg/a.x", ["pkg/a.x", "pkg/b.x", "other/c.x"])
+            self.assertIn("pkg/a.x", got, stack.STACK_NAME)
+
+    def test_python_and_node_scope_is_the_defining_file_alone(self):
+        for stack in (rank_risk.stack_python, rank_risk.stack_node):
+            self.assertEqual(
+                stack.scope_files("pkg/a.x", ["pkg/a.x", "pkg/b.x"]), ["pkg/a.x"],
+                stack.STACK_NAME)
+
+
 class TempRepo(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="tsn-")

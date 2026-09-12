@@ -380,12 +380,14 @@ class TestInterfaceNames(NodeCase):
         # source file.
         self.assertIn("node", [s.STACK_NAME for s in rank_risk.STACKS])
 
-    def test_the_registry_holds_both_stacks(self):
+    def test_the_registry_holds_every_stack(self):
+        # Three since the Go stack registered. This is the one assertion in
+        # this file that a new stack is SUPPOSED to change.
         self.assertEqual(sorted(s.STACK_NAME for s in rank_risk.STACKS),
-                         ["node", "python"])
+                         ["go", "node", "python"])
         for stack in rank_risk.STACKS:
             for attr in ("STACK_NAME", "evidence", "iter_source_files",
-                         "is_test_path", "is_test_for", "module_of",
+                         "is_test_path", "is_test_for", "scope_files", "module_of",
                          "name_pattern", "path_pattern", "IDENTIFIER_RE",
                          "preceding_qualifier", "module_bindings",
                          "reached_through_module", "discover_units", "triage",
@@ -2056,6 +2058,15 @@ FROZEN_BUILTIN_MODULES = (
     "string_decoder sys timers timers/promises tls trace_events tty url util "
     "util/types v8 vm wasi worker_threads zlib").split()
 
+# Frozen names a SUPPORTED node older than the newest does not have yet, with
+# the first major that does. The skill supports node LTS 18/20/22/24/26, and
+# the frozen list is the union a current node carries; checking it against
+# node 18 as if every name were universal failed on `inspector/promises`,
+# which that line never had. A name here is still checked on every node from
+# its major on -- this narrows WHEN a name is required, never WHETHER.
+# Measured against the real `module.builtinModules` of node 18, 20, 22, 24, 26.
+FROZEN_SINCE_MAJOR = {"inspector/promises": 20}
+
 # Every builtin that is NOT in a marker group, each with the reason it performs
 # no I/O in any group this filter tracks. The stdio family is one decision
 # taken five times: `stack_python` marks neither `input()` nor `sys.stdout`, so
@@ -2091,6 +2102,16 @@ ALLOWED_UNMARKED = {
     "vm": "compiles and runs code in-process; performs no I/O of its own",
     "zlib": "compression over buffers in memory",
 }
+
+
+def _live_node_major():
+    """The installed node's major version, or None when it cannot be read."""
+    try:
+        r = subprocess.run(["node", "-p", "process.versions.node.split('.')[0]"],
+                           capture_output=True, text=True, timeout=30)
+        return int(r.stdout.strip()) if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def _live_builtin_modules():
@@ -2157,8 +2178,10 @@ class TestMarkerTableCompleteness(unittest.TestCase):
         live = _live_builtin_modules()
         if live is None:
             self.skipTest("node is not installed")
-        missing = sorted(set(FROZEN_BUILTIN_MODULES)
-                         - {stack_node._canon(m) for m in live})
+        major = _live_node_major()
+        required = {n for n in FROZEN_BUILTIN_MODULES
+                    if major is None or FROZEN_SINCE_MAJOR.get(n, 0) <= major}
+        missing = sorted(required - {stack_node._canon(m) for m in live})
         self.assertEqual(missing, [],
                          "frozen builtins this node no longer has: %s" % missing)
 

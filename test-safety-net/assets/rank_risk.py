@@ -12,7 +12,7 @@ tests, what a unit is, and what tier a unit lands in -- lives behind the stack
 interface and is implemented once per stack (`stack_python.py`, and one module
 per stack added beside it).
 
-THE STACK INTERFACE. A stack module supplies exactly fourteen names. The rule
+THE STACK INTERFACE. A stack module supplies exactly fifteen names. The rule
 that decides membership: if answering the question requires READING A LANGUAGE,
 it belongs to the stack; if it only orchestrates or scores, it stays here.
 
@@ -29,12 +29,18 @@ it belongs to the stack; if it only orchestrates or scores, it stays here.
     is_test_path(rel) -> bool                    is this path a test file?
     is_test_for(test_rel, src_rel) -> bool       is it positioned as a test OF
                                                  that file?
+    scope_files(rel, all_files) -> [rel, ...]    the files whose BARE
+                                                 occurrences count as `rel`'s
+                                                 own scope: `[rel]` for python
+                                                 and node, the whole package
+                                                 directory for Go, where every
+                                                 file shares one scope
 
   naming
     module_of(rel) -> str                        the module identity `rel`
                                                  defines -- the name other
                                                  files use to talk about it
-    name_pattern(name) -> compiled re            `name` as a whole
+    name_pattern(name, module=None) -> re        `name` as a whole
                                                  identifier, bounded the way
                                                  THAT language bounds one
     path_pattern(rel) -> compiled re | None      `rel` written as a module
@@ -118,6 +124,7 @@ _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
     sys.path.insert(0, _ASSETS)
 
+import stack_go                                                     # noqa: E402
 import stack_node                                                   # noqa: E402
 import stack_python                                                 # noqa: E402
 from stack_common import SKIP_DIRS, read_text                       # noqa: E402,F401
@@ -135,7 +142,7 @@ from stack_common import SKIP_DIRS, read_text                       # noqa: E402
 # `matches()` in front of Python therefore reclassified the ranker's own
 # corpus as node, and a stack picked that way discovers the wrong units,
 # triages them with the wrong tables, and reports it all as a clean result.
-STACKS = [stack_node, stack_python]
+STACKS = [stack_go, stack_node, stack_python]
 
 # How close two stacks may be before the answer is "I do not know". Relative,
 # so it scales with the size of the repo rather than firing on every small
@@ -468,14 +475,21 @@ def inbound_refs(root: str, units, stack=None) -> dict:
             ]
         ref_files = module_reffiles_cache[module]
 
-        total = occurrences(own_path, name, module)
+        # The unit's OWN SCOPE, which is the stack's answer (`scope_files`):
+        # the defining file for python and node, the whole package directory
+        # for Go. A scope file is never also a reference file, so a file
+        # cannot be counted twice whichever way the two lists overlap.
+        scope = stack.scope_files(own_path, all_files)
+        total = sum(occurrences(rel, name, module) for rel in scope
+                    if rel in bare_counts)
         lines = file_lines.get(own_path, [])
         lineno = u["lineno"]
         if 1 <= lineno <= len(lines):
             def_bare, def_attr = _name_occurrences(stack, lines[lineno - 1])
             total -= def_bare[name] + def_attr[(module, name)]
         for rel in ref_files:
-            total += occurrences(rel, name, module)
+            if rel not in scope:
+                total += occurrences(rel, name, module)
 
         counts[u["id"]] = total
     return counts
@@ -562,8 +576,11 @@ def already_covered(root: str, units, stack=None) -> dict:
         by_basename[stack.module_of(rel)].append(rel)
     covered = {}
     for u in units:
-        name_pattern = stack.name_pattern(u["name"])
         module = stack.module_of(u["path"])
+        # The unit's module goes with its name: a stack whose unit names need
+        # a qualifier to be read honestly (Go's `T.M` may be spelled
+        # `billing.T` in a black-box test, and never `http.T`) asks for it.
+        name_pattern = stack.name_pattern(u["name"], module=module)
         siblings = by_basename.get(module, ())
         ambiguous = len(siblings) > 1
         qualified = stack.path_pattern(u["path"]) if ambiguous else None

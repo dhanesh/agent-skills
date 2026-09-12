@@ -55,6 +55,13 @@ without adding a seam:
 | randomness | the language's own seed hook |
 | environment variables | monkeypatch/override for the duration of the test |
 
+**On go the controllable set is three, not four.** Randomness sits on the other side of the line:
+`rand.Seed` has been a no-op since Go 1.24, so the global `math/rand` source has no seed hook a test
+can reach, and a unit drawing from it tiers 3 — the seam is an injected `*rand.Rand`. A seeded
+`rand.New(rand.NewSource(1))` is plain computation and stays Tier 1. Go's own controls for the other
+three are `t.TempDir()`, `testing/synctest` (Go 1.25+) and `t.Setenv()`. The group NAMES are the same
+seven on every stack; which side of the line each sits on is the stack's to say.
+
 **Database, HTTP, and subprocess are never auto-Tier-2.** The classifier buckets them as
 uncontrollable and tiers any unit that reaches one at **Tier 3** ("needs a seam") by default —
 even though a database or an HTTP call often does have a real, seam-free boundary control:
