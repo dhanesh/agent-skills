@@ -145,6 +145,11 @@ SINCE_TSN_GO = "6263801"  # test-safety-net: the Go stack -- its files, naming
 # One constant for the campaign: it lands at one merge.
 SINCE_TSN_GO_GUARD = "62aff9d"  # test-safety-net: io_guard_go.py, the Go
 # stack's runtime enforcement through `go test -overlay`.
+SINCE_TSN_GO_REVIEW = "aa0da61"  # test-safety-net: the go guard's review
+# round -- a goroutine with no repo frame judged by its creator, the
+# full-depth walk, NO TEST for a skip or a package with no tests, the
+# dependency-init message, net/http.Server as a marker, and a method credited
+# only through a value of its type.
 
 
 def _git_out(*args):
@@ -3084,7 +3089,8 @@ def check_test_safety_net_node_wired(old, new):
 _GO_PROBE = r"""
 import hashlib, shutil, subprocess
 res = {"units": 0, "tiers_right": 0, "sibling_refs": 0, "buf_string_credit": 0,
-       "py_node_digest": "", "guard_trips": -1}
+       "py_node_digest": "", "guard_trips": -1, "server_tier": 0,
+       "method_overcredit": 0, "goroutine_trip": -1, "skip_not_green": -1}
 try:
     import rank_risk
 except Exception:
@@ -3215,6 +3221,54 @@ if shutil.which("go"):
                            env=env, capture_output=True, text=True, timeout=300,
                            stdin=subprocess.DEVNULL)
         res["guard_trips"] = int(r.returncode == 3 and "IOGuardViolation" in r.stdout + r.stderr)
+
+# 7. The review round, filter half: a server started on a goroutine, and a
+#    method credited by a call on something that is not its type.
+srv = tree({"go.mod": GO_MOD,
+            "svc/srv.go": ('package svc\n\nimport "net/http"\n\n'
+                           "func Start(a string) *http.Server {\n"
+                           "\ts := &http.Server{Addr: a}\n\tgo s.ListenAndServe()\n\treturn s\n}\n")})
+try:
+    plan = rank_risk.rank(srv, "10 years ago", 10)
+    rows = {r["id"]: r for b in ("ranked", "remainder", "not_netted") for r in plan[b]}
+    if plan["stack"] == "go":
+        res["server_tier"] = rows.get("svc/srv.go::Start", {}).get("tier", 0)
+except Exception:
+    pass
+perr = tree({"go.mod": GO_MOD,
+             "svc/perr.go": ("package svc\n\ntype ParseError struct{ Msg string }\n\n"
+                             "func (e *ParseError) Error() string { return e.Msg }\n"),
+             "svc/perr_test.go": ('package svc\n\nimport (\n\t"errors"\n\t"testing"\n)\n\n'
+                                  "func TestAs(t *testing.T) {\n\tvar pe *ParseError\n"
+                                  '\t_ = errors.As(errors.New("x"), &pe)\n'
+                                  '\t_ = errors.New("x").Error()\n}\n')})
+try:
+    if go is not None:
+        units, _ = go.discover_units(perr, precise=False)
+        res["method_overcredit"] = int(
+            "svc/perr.go::ParseError.Error" in rank_risk.already_covered(perr, units, go))
+except Exception:
+    pass
+
+# 8. The review round, guard half: a goroutine the unit starts on a stdlib
+#    function, and a test that skips itself.
+if shutil.which("go"):
+    res["goroutine_trip"] = res["skip_not_green"] = 0
+    if os.path.isfile(guard):
+        mod2 = tree({"go.mod": "module example.com/fx\n\ngo 1.22\n",
+                     "fx.go": 'package fx\n\nimport "os"\n\nfunc ClearAll() { go os.Clearenv() }\n',
+                     "fx_test.go": ('package fx\n\nimport (\n\t"testing"\n\t"time"\n)\n\n'
+                                    "func TestClear(t *testing.T) { ClearAll(); "
+                                    "time.Sleep(300 * time.Millisecond) }\n"
+                                    'func TestSkip(t *testing.T) { t.Skip("x") }\n')})
+        env2 = {k: v for k, v in os.environ.items() if not k.startswith("TEST_SAFETY_NET")}
+        env2.pop("GOFLAGS", None)
+        env2["TEST_SAFETY_NET_TIER"] = "1"
+        for key, test, want in (("goroutine_trip", "TestClear", 3), ("skip_not_green", "TestSkip", 4)):
+            r = subprocess.run([sys.executable, guard, "-run", "^%s$" % test, "./"], cwd=mod2,
+                               env=env2, capture_output=True, text=True, timeout=300,
+                               stdin=subprocess.DEVNULL)
+            res[key] = int(r.returncode == want)
 print(json.dumps(res))
 """
 
@@ -3276,6 +3330,34 @@ def check_test_safety_net_go(old, new):
             "the standard library, exit 3 and an IOGuardViolation naming the "
             "unit. The baseline has no guard to run",
             since=SINCE_TSN_GO_GUARD)
+    row(s, "tier of a Go unit that starts an http.Server on a goroutine (3=right)",
+        oldp["server_tier"], newp["server_tier"],
+        newp["server_tier"] == 3 and oldp["server_tier"] != 3,
+        "review round: `go s.ListenAndServe()` was scored Tier 1 while the unit really "
+        "bound a port -- neither the Server type nor a method on a server value was a "
+        "marker",
+        since=SINCE_TSN_GO_REVIEW)
+    row(s, "a test naming ParseError and calling an unrelated .Error() credits "
+           "ParseError.Error (must stay 0)",
+        oldp["method_overcredit"], newp["method_overcredit"],
+        newp["method_overcredit"] == 0,
+        "review round: a method is credited only through a value bound to its type; "
+        "the type merely named plus `.Error()` on anything used to cover it",
+        kind="guard")
+    if newp["goroutine_trip"] >= 0:       # -1: no `go` here, nothing to measure
+        row(s, "the Go guard trips `go os.Clearenv()` started by the unit "
+               "(higher=better)",
+            oldp["goroutine_trip"], newp["goroutine_trip"],
+            newp["goroutine_trip"] > oldp["goroutine_trip"],
+            "review round: the goroutine's stack is all stdlib, and 'end of stack "
+            "exempts' let it through -- it is now judged by its creator",
+            since=SINCE_TSN_GO_REVIEW)
+        row(s, "a skipped Go test exits NO TEST rather than GREEN (higher=better)",
+            oldp["skip_not_green"], newp["skip_not_green"],
+            newp["skip_not_green"] > oldp["skip_not_green"],
+            "review round: exit 0 without a proof; GREEN now needs a `--- PASS:` line "
+            "and no `--- SKIP:`",
+            since=SINCE_TSN_GO_REVIEW)
 
 
 def self_test():
