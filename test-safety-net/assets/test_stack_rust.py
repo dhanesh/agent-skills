@@ -637,6 +637,350 @@ class TestMethodCreditInAWorkspace(CalcxCase):
         self.assertTrue(p.search("#[test]\nfn t() { let r = calc::Report::new(1); r.total(); }\n"))
 
 
+# ── Discovery ────────────────────────────────────────────────────────────
+
+class DiscoveryCase(RustCase):
+    def discover(self, files, toml=CALCX_TOML):
+        write(self.root, "Cargo.toml", toml)
+        for rel, text in files.items():
+            write(self.root, rel, text)
+        units, label = stack_rust.discover_units(self.root)
+        self.assertEqual(label, "heuristic")
+        return units
+
+    def names(self, files, rel=None):
+        return sorted(u["name"] for u in self.discover(files)
+                      if rel is None or u["path"] == rel)
+
+    def unit(self, rel, name):
+        found = [u for u in stack_rust.discover_units(self.root)[0]
+                 if u["path"] == rel and u["name"] == name]
+        self.assertEqual(len(found), 1, "no single unit %s in %s" % (name, rel))
+        return found[0]
+
+
+class TestHeuristicDiscovery(DiscoveryCase):
+    SHAPES = (
+        "pub mod calc;\n"
+        "pub fn plain(n: u32) -> u32 { n }\n"
+        "pub const fn konst() -> u32 { 1 }\n"
+        "pub async fn fetch() {}\n"
+        "pub unsafe fn danger() {}\n"
+        'pub extern "C" fn ffi(x: i32) -> i32 { x }\n'
+        "pub fn generic<T: Into<String>>(t: T) -> String\n"
+        "where\n"
+        "    T: Clone,\n"
+        "{\n"
+        "    t.into()\n"
+        "}\n"
+        "/// A doc comment.\n"
+        "#[inline]\n"
+        "pub fn multi(\n"
+        "    a: u32,\n"
+        "    b: [u8; 4],\n"
+        ") -> u32 {\n"
+        "    a\n"
+        "}\n"
+        "    pub fn indented() {}\n"
+        "pub(crate) fn crate_only() {}\n"
+    )
+
+    def test_every_fn_shape_is_found(self):
+        self.assertEqual(self.names({"src/lib.rs": self.SHAPES, "src/calc.rs": ""}),
+                         ["crate_only", "danger", "fetch", "ffi", "generic", "indented",
+                          "konst", "multi", "plain"])
+
+    def test_the_unit_record(self):
+        self.discover({"src/lib.rs": self.SHAPES, "src/calc.rs": ""})
+        self.assertEqual(self.unit("src/lib.rs", "plain"), {
+            "id": "src/lib.rs::plain", "path": "src/lib.rs", "name": "plain",
+            "lineno": 2, "kind": "function"})
+        # The line of the `fn` keyword: past the doc comment and attribute,
+        # at the start of a signature that runs over four lines.
+        self.assertEqual(self.unit("src/lib.rs", "multi")["lineno"], 15)
+        self.assertEqual(self.unit("src/lib.rs", "generic")["lineno"], 7)
+
+    def test_a_method_of_an_inherent_impl(self):
+        text = ("pub struct Wrapper<T> { t: T }\n"
+                "impl<T: Clone> Wrapper<T> {\n"
+                "    pub fn new(t: T) -> Self { Wrapper { t } }\n"
+                "    pub fn get(&self) -> &T { &self.t }\n"
+                "    fn private(&self) {}\n"
+                "}\n"
+                "impl crate::Wrapper<u8> where u8: Copy {\n"
+                "    pub fn byte(&self) -> u8 { self.t }\n"
+                "}\n")
+        units = self.discover({"src/lib.rs": text})
+        self.assertEqual(sorted((u["name"], u["kind"], u["lineno"]) for u in units),
+                         [("Wrapper::byte", "method", 8), ("Wrapper::get", "method", 4),
+                          ("Wrapper::new", "method", 3)])
+
+    def test_a_fn_inside_an_inline_mod_is_found(self):
+        text = "pub mod api {\n    pub fn open() {}\n    mod deep {\n        pub fn hid() {}\n    }\n}\n"
+        self.assertEqual(self.names({"src/lib.rs": text}), ["hid", "open"])
+
+    def test_a_private_fn_is_not_a_unit(self):
+        # NEGATIVE: no visibility, and `pub` on something else nearby.
+        text = ("fn private() {}\n"
+                "pub struct S;\n"
+                "const fn also_private() {}\n"
+                "async fn quiet() {}\n"
+                "pub type F = fn(u32) -> u32;\n"
+                "pub static G: fn() = private;\n")
+        self.assertEqual(self.names({"src/lib.rs": text}), [])
+
+    def test_a_cfg_test_module_is_skipped_whole(self):
+        # NEGATIVE. Mutation "drop the #[cfg(test)] skip" is killed here.
+        text = ("pub fn kept() {}\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    pub fn helper() {}\n"
+                "    #[test]\n"
+                "    fn t() { helper(); }\n"
+                "}\n"
+                "#[cfg(test)]\n"
+                "pub mod test_support;\n"
+                "#[cfg(test)]\n"
+                "pub fn test_only() {}\n"
+                "#[cfg(test)]\n"
+                "impl Kept { pub fn test_method(&self) {} }\n"
+                "pub struct Kept;\n")
+        self.assertEqual(self.names({"src/lib.rs": text,
+                                     "src/test_support.rs": "pub fn fixture() {}\n"}),
+                         ["kept"])
+
+    def test_a_fn_named_in_a_string_or_comment_is_not_a_unit(self):
+        # NEGATIVE.
+        text = ('pub const S: &str = "pub fn in_string() {}";\n'
+                "// pub fn in_line_comment() {}\n"
+                "/* pub fn in_block() {} /* nested */ pub fn still_block() {} */\n"
+                'pub const R: &str = r#"pub fn in_raw() { "x" }"#;\n'
+                "/// pub fn in_doc() {}\n"
+                "pub fn real() {}\n")
+        self.assertEqual(self.names({"src/lib.rs": text}), ["real"])
+
+    def test_a_trait_impl_method_is_not_a_unit(self):
+        # NEGATIVE. Mutation "treat `impl Trait for T` as inherent" is killed
+        # here. rustc rejects `pub` in a trait impl (E0449), so a valid one is
+        # hidden by the visibility rule alone; the `pub fn` blocks below
+        # are there so the impl rule, not the visibility rule, is what's tested.
+        text = ("pub struct T;\n"
+                "impl std::fmt::Display for T {\n"
+                "    pub fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }\n"
+                "}\n"
+                "impl<U: Into<u8>> From<U> for T {\n"
+                "    pub fn from(_: U) -> Self { T }\n"
+                "}\n"
+                "impl<F> Run for F where F: for<'a> Fn(&'a u8) {\n"
+                "    pub fn run(&self) {}\n"
+                "}\n"
+                "unsafe impl Send for T {}\n"
+                "pub trait Run { fn run(&self); fn dflt(&self) {} }\n"
+                "impl T where for<'a> &'a u8: Copy {\n"
+                "    pub fn inherent(&self) {}\n"
+                "}\n")
+        self.assertEqual(self.names({"src/lib.rs": text}), ["T::inherent"])
+
+    def test_non_library_files_are_not_scanned(self):
+        # NEGATIVE: examples/, benches/, build.rs, vendor/, target/, tests/.
+        files = {"src/lib.rs": "pub fn kept() {}\n"}
+        for rel in ("examples/demo.rs", "benches/b.rs", "build.rs",
+                    "vendor/v/src/lib.rs", "target/debug/build/x.rs", "tests/it.rs"):
+            files[rel] = "pub fn leaked() {}\n"
+        self.assertEqual([u["id"] for u in self.discover(files)], ["src/lib.rs::kept"])
+
+    def test_precise_is_accepted_and_ignored(self):
+        write(self.root, "Cargo.toml", CALCX_TOML)
+        write(self.root, "src/lib.rs", "pub fn f() {}\n")
+        self.assertEqual(stack_rust.discover_units(self.root, precise=False),
+                         stack_rust.discover_units(self.root, precise=True))
+
+    def test_discovery_marks_its_root_current(self):
+        # Ruling R3: discover_units builds the crate index, so the root-less
+        # functions answer for the root it walked.
+        write(self.root, "Cargo.toml", '[package]\nname = "walked"\n')
+        write(self.root, "src/lib.rs", "")
+        _no_index()
+        stack_rust.discover_units(self.root)
+        self.assertEqual(stack_rust.module_of("src/lib.rs"), "walked")
+
+
+# ── Reachability ─────────────────────────────────────────────────────────
+
+class TestReachability(DiscoveryCase):
+    def reach(self, rel, name):
+        return stack_rust.reachability(self.root, self.unit(rel, name))
+
+    def test_a_pub_mod_chain_is_reachable(self):
+        self.discover({"src/lib.rs": "pub mod a;\n",
+                       "src/a.rs": "pub mod b;\n",
+                       "src/a/b.rs": "pub fn run() {}\n"})
+        self.assertEqual(self.reach("src/a/b.rs", "run"), (True, ""))
+
+    def test_a_private_mod_is_not_reachable(self):
+        # NEGATIVE. Mutation "count a private mod as public" is killed here.
+        self.discover({"src/lib.rs": "pub mod calc;\n",
+                       "src/calc.rs": "mod inner;\npub(crate) mod shared;\n",
+                       "src/calc/inner.rs": "pub fn hidden() {}\n",
+                       "src/calc/shared.rs": "pub fn half() {}\n"})
+        self.assertEqual(self.reach("src/calc/inner.rs", "hidden"),
+                         (False, "module calc::inner is private"))
+        self.assertEqual(self.reach("src/calc/shared.rs", "half"),
+                         (False, "module calc::shared is pub(crate)"))
+
+    def test_a_private_inline_mod_is_not_reachable(self):
+        # NEGATIVE: an inline `mod name { }` is a module like any other.
+        self.discover({"src/lib.rs": "pub mod api { pub fn open() {} }\n"
+                                     "mod hid { pub fn shut() {} }\n"})
+        self.assertEqual(self.reach("src/lib.rs", "open"), (True, ""))
+        self.assertEqual(self.reach("src/lib.rs", "shut"), (False, "module hid is private"))
+
+    def test_a_named_pub_use_reaches_only_what_it_names(self):
+        # Mutation "ignore `pub use`" is killed here and in the glob test.
+        self.discover({"src/lib.rs": "mod inner;\npub use inner::exported;\n",
+                       "src/inner.rs": "pub fn exported() {}\npub fn sibling() {}\n"})
+        self.assertEqual(self.reach("src/inner.rs", "exported"), (True, ""))
+        # NEGATIVE: the sibling it did not name.
+        self.assertEqual(self.reach("src/inner.rs", "sibling"),
+                         (False, "module inner is private"))
+
+    def test_a_glob_pub_use_reaches_every_pub_item(self):
+        self.discover({"src/lib.rs": "mod inner;\npub use self::inner::*;\n",
+                       "src/inner.rs": "pub fn one() {}\npub fn two() {}\n"
+                                       "pub struct W;\nimpl W { pub fn m(&self) {} }\n"
+                                       "pub(crate) fn three() {}\n"})
+        for name in ("one", "two", "W::m"):
+            with self.subTest(name=name):
+                self.assertEqual(self.reach("src/inner.rs", name), (True, ""))
+        # NEGATIVE: a glob re-exports an item no further than its own visibility.
+        self.assertEqual(self.reach("src/inner.rs", "three"), (False, "pub(crate)"))
+
+    def test_pub_use_paths_crate_super_and_relative(self):
+        self.discover({"src/lib.rs": "mod a;\nmod b;\npub mod api;\n",
+                       "src/api.rs": "pub use crate::a::from_crate;\n"
+                                     "pub use super::b::from_super;\n",
+                       "src/a.rs": "pub fn from_crate() {}\npub fn not_named() {}\n",
+                       "src/b.rs": "pub fn from_super() {}\n"})
+        self.assertEqual(self.reach("src/a.rs", "from_crate"), (True, ""))
+        self.assertEqual(self.reach("src/b.rs", "from_super"), (True, ""))
+        self.assertEqual(self.reach("src/a.rs", "not_named"), (False, "module a is private"))
+
+    def test_a_pub_use_in_a_private_module_reaches_nothing(self):
+        # NEGATIVE: the re-export must itself be public.
+        self.discover({"src/lib.rs": "mod outer;\n",
+                       "src/outer.rs": "mod inner;\npub use self::inner::f;\n",
+                       "src/outer/inner.rs": "pub fn f() {}\n"})
+        self.assertEqual(self.reach("src/outer/inner.rs", "f"),
+                         (False, "module outer is private"))
+
+    def test_a_restricted_pub_use_reaches_nothing(self):
+        # NEGATIVE: `pub(crate) use` is not public.
+        self.discover({"src/lib.rs": "mod inner;\npub(crate) use inner::f;\n",
+                       "src/inner.rs": "pub fn f() {}\n"})
+        self.assertEqual(self.reach("src/inner.rs", "f"), (False, "module inner is private"))
+
+    def test_a_re_export_of_a_re_export_is_followed(self):
+        # `a` is private, but the root re-exports the `X` that `a` re-exports.
+        self.discover({"src/lib.rs": "mod a;\npub use a::x;\n",
+                       "src/a.rs": "mod b;\npub use self::b::x;\n",
+                       "src/a/b.rs": "pub fn x() {}\npub fn y() {}\n"})
+        self.assertEqual(self.reach("src/a/b.rs", "x"), (True, ""))
+        # NEGATIVE: the item neither re-export names.
+        self.assertEqual(self.reach("src/a/b.rs", "y"), (False, "module a is private"))
+
+    def test_pub_crate_fn_is_unreachable(self):
+        self.discover({"src/lib.rs": "pub fn open() {}\npub(crate) fn crate_only() {}\n"
+                                     "pub(super) fn up() {}\npub(in crate::x) fn scoped() {}\n"})
+        self.assertEqual(self.reach("src/lib.rs", "crate_only"), (False, "pub(crate)"))
+        self.assertEqual(self.reach("src/lib.rs", "up"), (False, "pub(super)"))
+        self.assertEqual(self.reach("src/lib.rs", "scoped"), (False, "pub(in crate::x)"))
+        self.assertEqual(self.reach("src/lib.rs", "open"), (True, ""))
+
+    def test_a_method_of_a_private_type_is_unreachable(self):
+        self.discover({"src/lib.rs": "struct Hidden;\nimpl Hidden { pub fn m(&self) {} }\n"
+                                     "pub struct Open;\nimpl Open { pub fn m(&self) {}\n"
+                                     "    pub(crate) fn c(&self) {} }\n"})
+        self.assertEqual(self.reach("src/lib.rs", "Hidden::m"), (False, "type Hidden is private"))
+        self.assertEqual(self.reach("src/lib.rs", "Open::m"), (True, ""))
+        self.assertEqual(self.reach("src/lib.rs", "Open::c"), (False, "pub(crate)"))
+
+    def test_a_path_attribute_is_resolved(self):
+        self.discover({"src/lib.rs": '#[path = "x/y.rs"]\npub mod z;\n',
+                       "src/x/y.rs": "pub fn deep() {}\npub mod w;\n",
+                       "src/x/w.rs": "pub fn under() {}\n",
+                       # NEGATIVE: the file cargo's default would have picked.
+                       "src/z.rs": "pub fn decoy() {}\n"})
+        self.assertEqual(self.reach("src/x/y.rs", "deep"), (True, ""))
+        self.assertEqual(self.reach("src/x/w.rs", "under"), (True, ""))
+        self.assertEqual(self.reach("src/z.rs", "decoy")[0], False)
+
+    def test_mod_rs_and_a_lib_path_are_followed(self):
+        self.discover({"lib/root.rs": "pub mod calc;\n",
+                       "lib/calc/mod.rs": "pub mod add;\n",
+                       "lib/calc/add.rs": "pub fn sum() {}\n"},
+                      toml=CALCX_TOML + '\n[lib]\npath = "lib/root.rs"\n'
+                      "[target.'cfg(unix)'.dependencies.foo]\npath = \"../foo\"\n")
+        self.assertEqual(self.reach("lib/calc/add.rs", "sum"), (True, ""))
+
+    def test_main_rs_beside_lib_rs_is_binary_only(self):
+        self.discover({"src/lib.rs": "pub fn lib_fn() {}\n",
+                       "src/main.rs": "mod cli;\npub fn run() {}\nfn main() {}\n",
+                       "src/cli.rs": "pub fn parse() {}\n"})
+        self.assertEqual(self.reach("src/main.rs", "run"), (False, "binary-only"))
+        self.assertEqual(self.reach("src/cli.rs", "parse"), (False, "binary-only"))
+        self.assertEqual(self.reach("src/lib.rs", "lib_fn"), (True, ""))
+
+    def test_a_crate_with_only_main_rs_is_all_binary_only(self):
+        units = self.discover({"src/main.rs": "pub mod cli;\npub fn run() {}\nfn main() {}\n",
+                               "src/cli.rs": "pub fn parse() {}\n"})
+        self.assertEqual(sorted(u["name"] for u in units), ["parse", "run"])
+        for u in units:
+            with self.subTest(unit=u["id"]):
+                self.assertEqual(stack_rust.reachability(self.root, u), (False, "binary-only"))
+
+    def test_every_file_of_a_multi_file_binary_is_binary_only(self):
+        # Carried from Task 2's review: `src/bin/<name>/main.rs` and its
+        # submodules are one binary crate, none of it reachable from tests/.
+        self.discover({"src/lib.rs": "pub fn lib_fn() {}\n",
+                       "src/bin/tool/main.rs": "mod helper;\npub fn go() {}\nfn main() {}\n",
+                       "src/bin/tool/helper.rs": "pub mod more;\npub fn assist() {}\n",
+                       "src/bin/tool/helper/more.rs": "pub fn extra() {}\n",
+                       "src/bin/one.rs": "pub fn single() {}\nfn main() {}\n"})
+        for rel, name in (("src/bin/tool/main.rs", "go"), ("src/bin/tool/helper.rs", "assist"),
+                          ("src/bin/tool/helper/more.rs", "extra"),
+                          ("src/bin/one.rs", "single")):
+            with self.subTest(rel=rel):
+                self.assertEqual(self.reach(rel, name), (False, "binary-only"))
+
+    def test_a_file_no_mod_declares_is_unreachable(self):
+        # NEGATIVE: an orphan file is compiled into nothing.
+        self.discover({"src/lib.rs": "pub fn f() {}\n", "src/orphan.rs": "pub fn lost() {}\n"})
+        reachable, why = self.reach("src/orphan.rs", "lost")
+        self.assertFalse(reachable)
+        self.assertEqual(why, "no mod declares src/orphan.rs")
+
+
+class TestBinaryModulePaths(CalcxCase):
+    """Carried from Task 2's review: only a binary's ROOT has module path []."""
+
+    def test_a_bin_submodule_is_not_a_bin_root(self):
+        write(self.root, "src/bin/tool/main.rs", "mod helper;\nfn main() {}\n")
+        write(self.root, "src/bin/tool/helper.rs", "pub fn run() {}\n")
+        stack_rust.iter_source_files(self.root)
+        self.assertEqual(stack_rust._module_path("src/bin/tool/helper.rs"), (["helper"], False))
+        self.assertEqual(stack_rust._module_path("src/bin/tool/main.rs"), ([], False))
+        # NEGATIVE: `use super::*` in main.rs's own test module binds main.rs,
+        # not helper.rs, whose module path used to be [] as well.
+        text = "mod tests {\n    use super::*;\n    #[test]\n    fn t() { run(); }\n}\n"
+        self.assertEqual(stack_rust.module_bindings(
+            "helper", text, src_rel="src/bin/tool/helper.rs",
+            ref_rel="src/bin/tool/main.rs"), ((), ()))
+        # ...while main.rs naming its submodule's item binds it.
+        self.assertEqual(stack_rust.module_bindings(
+            "helper", "use crate::helper::run;\n", src_rel="src/bin/tool/helper.rs",
+            ref_rel="src/bin/tool/main.rs"), ((), ("run",)))
+
+
 class TestInterfaceNames(unittest.TestCase):
     """The names this task supplies; discovery and triage land in Tasks 3-4."""
 

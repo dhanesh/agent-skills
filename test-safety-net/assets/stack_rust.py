@@ -33,9 +33,10 @@ So the walk records what it saw. `_index(root)` reads every `Cargo.toml`
 under `root` (line by line: `[section]` headers and `key = "value"` lines,
 since python 3.10 has no `tomllib`), keeps the result in `_CRATES` keyed by
 `os.path.realpath(root)`, and marks that root CURRENT (`_CURRENT_ROOT`).
-`iter_source_files(root)` calls it, as will Task 3's `discover_units(root)`,
-and `crate_of(root, rel)` uses it directly. Every root-less function above
-reads the CURRENT index -- the root walked last, which is the root every
+`iter_source_files(root)` and `discover_units(root)` call it, and
+`crate_of(root, rel)` and `reachability(root, unit)` use it directly. Every
+root-less function above reads the CURRENT index -- the root walked last,
+which is the root every
 `rank_risk` pass is working on, because every pass walks before it asks.
 
 When there is no index, or `rel` lies under no indexed crate, the FALLBACK
@@ -52,6 +53,7 @@ may be wrong toward more reported work, never toward less.
 """
 from __future__ import annotations
 
+import bisect
 import collections
 import functools
 import os
@@ -213,7 +215,7 @@ def _index(root: str, refresh: bool = True) -> dict:
 
     `refresh=False` reuses an index already built for this root -- what
     `crate_of` wants when asked about many files in a row. A walk
-    (`iter_source_files`, and Task 3's `discover_units`) always refreshes, so
+    (`iter_source_files`, `discover_units`) always refreshes, so
     an edited `Cargo.toml` is seen by the next pass.
     """
     global _CURRENT_ROOT
@@ -338,7 +340,11 @@ def iter_source_files(root: str, include_tests: bool = False):
     `build.rs` -- code a crate ships beside its library, not in it. `tests/`
     files are yielded only with `include_tests`.
     """
-    crates = _index(root)
+    return _source_files(root, _index(root), include_tests)
+
+
+def _source_files(root: str, crates: dict, include_tests: bool = False):
+    """`iter_source_files` against an index the caller has already built."""
     out = []
     for base, dirs, files in os.walk(root):
         d = os.path.relpath(base, root).replace(os.sep, "/")
@@ -398,17 +404,28 @@ def _roots(rel: str):
 
 
 def _is_bin_root(rel: str, d: str, bins) -> bool:
-    inner = _within(rel, d)
-    return rel in bins or inner == "src/main.rs" or inner.startswith("src/bin/")
+    """A binary's ROOT file: a `[[bin]] path`, `src/main.rs`, `src/bin/<x>.rs`
+    or `src/bin/<x>/main.rs` -- never a submodule under `src/bin/<x>/`."""
+    parts = _within(rel, d).split("/")
+    return (rel in bins or parts == ["src", "main.rs"]
+            or (parts[:2] == ["src", "bin"]
+                and (len(parts) == 3 or (len(parts) == 4 and parts[3] == "main.rs"))))
 
 
 def _module_path(rel: str):
     """(segments, in_lib) of `rel` inside its crate, or None.
 
     `src/calc/add.rs` -> `(["calc", "add"], True)`; `src/calc/mod.rs` ->
-    `(["calc"], True)`; the lib root -> `([], True)`; a binary root (or a
-    file under `src/bin/`) -> `([], False)`. None for anything outside the
-    library's source directory -- `tests/`, a script, a file in no crate.
+    `(["calc"], True)`; the lib root -> `([], True)`; a binary root ->
+    `([], False)`; a submodule of a multi-file binary,
+    `src/bin/tool/helper.rs` -> `(["helper"], False)`. None for anything
+    outside the library's source directory -- `tests/`, a script, a file in
+    no crate.
+
+    Task 3 narrowed the bin rule (carried from Task 2's review): every file
+    under `src/bin/` used to be a root with path `[]`, so `use super::*` in
+    `main.rs`'s test module bound `helper.rs`. Killing test:
+    `TestBinaryModulePaths.test_a_bin_submodule_is_not_a_bin_root`.
     """
     rel = _norm(rel)
     roots = _roots(rel)
@@ -419,6 +436,13 @@ def _module_path(rel: str):
         return [], True
     if _is_bin_root(rel, d, bins):
         return [], False
+    inner = _within(rel, d).split("/")
+    if inner[:2] == ["src", "bin"] and len(inner) > 3:
+        parts = inner[3:]
+        parts[-1] = parts[-1][:-len(".rs")]
+        if parts[-1] == "mod":
+            parts = parts[:-1]
+        return (parts, False) if parts else None
     if is_test_path(rel):
         return None
     base = posixpath.dirname(lib) if lib else _join(d, "src")
@@ -1056,3 +1080,576 @@ def reached_through_module(module: str, name: str, text: str, *,
     return any(re.search(r"(?<![A-Za-z0-9_.:])%s\s*::\s*%s%s\s*\("
                          % (re.escape(alias), esc, _TURBOFISH), code)
                for alias in aliases)
+
+
+# ── Discovery ────────────────────────────────────────────────────────────
+#
+# An ITEM READER over `strip_noncode` output, not a line matcher. A region
+# (a file, an inline `mod { }`, an inherent `impl { }`) is read one item at a
+# time: attributes, visibility, qualifiers, keyword, then the item runs to
+# the first `;` or `{` outside parentheses and brackets -- a `{` opens its
+# body, which is skipped whole unless it is a module or an inherent impl.
+# That is the declaration-position anchor `stack_go._FUNC_AT` gives go: a
+# `fn` counts only where an item may START (never column 0, so an indented
+# method is found), so `fn` in a type (`pub type F = fn(u32);`), in a fn
+# body, in a trait, in a `macro_rules!` body or in an `extern` block is never
+# a unit. Comments and literals are blank before any of this runs.
+
+_WORD_AT = re.compile(r"(?:r#)?[A-Za-z_][A-Za-z0-9_]*")
+_QUALIFIERS = frozenset({"const", "async", "unsafe", "safe", "extern", "default"})
+_PATH_ATTR = re.compile(r'\s*path\s*=\s*"((?:[^"\\\n]|\\.)*)"\s*')
+_IMPL_TOKEN = re.compile(r"->|::|(?:r#)?[A-Za-z_][A-Za-z0-9_]*|\S")
+
+_Head = collections.namedtuple("_Head", "cfg_test inner_test path vis kw kw_pos after")
+_Fn = collections.namedtuple("_Fn", "name recv pos vis chain")
+_ModDecl = collections.namedtuple("_ModDecl", "name vis path chain cfg_test")
+_UseDecl = collections.namedtuple("_UseDecl", "body vis chain")
+_Scan = collections.namedtuple("_Scan", "fns mods uses types inline")
+_Scan.__doc__ = """What one file declares. A `chain` is the inline `mod`s around an
+    item, outermost first, as `((name, vis), ...)`; `vis` is `"pub"`,
+    `"pub(<restriction>)"`, or `""` for private.
+
+    fns     every fn item with a body, at item position: `_Fn`
+    mods    every out-of-line `mod name;`: `_ModDecl`
+    uses    every `use` item outside an impl: `_UseDecl`
+    types   `{(chain names, name): vis}` for struct, enum, union, type
+    inline  the chain of every inline `mod name { }`, itself included
+"""
+
+
+def discover_units(root: str, precise: bool = True):
+    """Interface entry point: `(units, "heuristic")`.
+
+    A unit is a fn item or an inherent-impl method declared `pub` or
+    `pub(<restriction>)`, with a body, in a library or binary source file
+    (`_source_files`; `tests/`, `examples/`, `benches/`, `build.rs`,
+    `target/` and vendored code never are). `#[cfg(test)]` items are skipped
+    whole: an inline test module, a test-only fn or impl, and a file that
+    only a `#[cfg(test)] mod x;` declares.
+
+    UNREACHABLE UNITS ARE STILL UNITS. A `pub(crate)` fn, a `pub fn` in a
+    private module and a binary's fns are ranked and reported; `reachability`
+    says why a `tests/` crate cannot name them, and triage turns that into
+    Tier 3. A private fn is not a unit: nothing outside its module can call
+    it, so the fn that does is the unit.
+
+    `precise` is accepted and ignored: Rust has no precise path (see the
+    spec), so the label is always `heuristic`, as the report must say. The
+    crate index is rebuilt for `root` first and `root` marked current (ruling
+    R3), so every root-less answer that follows is `root`'s.
+
+    A unit's `name` is the fn's name, or `Type::method`; an inline module's
+    name joins its MODULE path (which `reachability` reads), not the unit
+    name. Two units of one name in one file -- the same fn in two inline
+    modules, one method in two impls -- keep the first, as go does.
+    """
+    crates = _index(root)
+    units = []
+    for rel in _source_files(root, crates):
+        if _declared_only_for_test(root, crates, rel):
+            continue
+        units.extend(_units_in_text(rel, read_text(root, rel)))
+    return sorted(units, key=lambda u: u["id"]), "heuristic"
+
+
+def _units_in_text(rel: str, text: str):
+    """The units one file's text declares, in file order."""
+    scan = _scan_file(text)
+    starts = _line_starts(text)
+    units, seen = [], set()
+    for f in scan.fns:
+        if not f.vis:
+            continue
+        name = _fn_name(f)
+        if name in seen:
+            continue
+        seen.add(name)
+        units.append({
+            "id": "%s::%s" % (rel, name),
+            "path": rel,
+            "name": name,
+            "lineno": bisect.bisect_right(starts, f.pos),
+            "kind": "method" if f.recv else "function",
+        })
+    return units
+
+
+def _fn_name(f) -> str:
+    return "%s::%s" % (f.recv, f.name) if f.recv else f.name
+
+
+def _line_starts(text: str):
+    return [0] + [m.end() for m in re.finditer("\n", text)]
+
+
+@functools.lru_cache(maxsize=512)
+def _scan_file(text: str):
+    """The `_Scan` of one file's text (cached; callers must not mutate it)."""
+    code = strip_noncode(text)
+    ks = strip_noncode(text, keep_strings=True)
+    out = _Scan([], [], [], {}, [])
+    _scan(code, ks, 0, len(code), (), None, out)
+    return out
+
+
+def _scan(code, ks, lo, hi, chain, recv, out):
+    """Read the items of `code[lo:hi]` into `out`.
+
+    `chain` is the inline modules around the region; `recv` is the type of
+    the inherent impl whose body this is, else None. `ks` is the same text
+    with literals kept, read only for a `#[path = "…"]` value.
+    """
+    i = lo
+    while True:
+        i = _skip_ws(code, i, hi)
+        if i >= hi:
+            return
+        h = _item_head(code, ks, i, hi)
+        if h is None or h.inner_test:          # `#![cfg(test)]`: the region is test-only
+            return
+        if h.kw == "use":                      # a use tree holds `{`: it ends at `;`
+            j = code.find(";", h.after, hi)
+            j = hi if j < 0 else j
+            if recv is None and not h.cfg_test:
+                out.uses.append(_UseDecl(code[h.after:j], h.vis, chain))
+            i = j + 1
+            continue
+        j = _item_stop(code, h.after, hi)
+        block = None
+        if j < hi and code[j] == "{":
+            end = _brace_end(code, j)
+            block = (j + 1, min(end - 1, hi))
+            nxt = end
+        else:
+            nxt = j + 1
+        if h.kw == "mod" and block is None:
+            if recv is None:                   # a cfg(test) `mod x;` is recorded as one
+                _record_mod_decl(code, h, chain, out)
+        elif not h.cfg_test:
+            _record(code, ks, h, block, j, chain, recv, out)
+        i = nxt
+
+
+def _item_head(code, ks, i, hi):
+    """The `_Head` of the item starting at `i`, or None when it is unreadable.
+
+    Reads outer attributes (`#[cfg(test)]`, `#[path = "…"]`), inner ones
+    (`#![cfg(test)]`), the visibility -- `pub`, or `pub(<…>)` compacted to
+    `pub(crate)`, `pub(in crate::x)` -- and the qualifiers `const`, `async`,
+    `unsafe`, `safe`, `extern "…"` (the ABI string is already blank) and
+    `default`. `kw` is the word that follows them, or None.
+
+    Killing test for "drop the #[cfg(test)] skip":
+    `TestHeuristicDiscovery.test_a_cfg_test_module_is_skipped_whole`.
+    """
+    cfg_test = inner_test = False
+    path = None
+    while i < hi and code[i] == "#":
+        k = _skip_ws(code, i + 1, hi)
+        inner = k < hi and code[k] == "!"
+        if inner:
+            k = _skip_ws(code, k + 1, hi)
+        if k >= hi or code[k] != "[":
+            break
+        close = _close(code, k, hi)
+        if close < 0:
+            return None
+        if re.sub(r"\s+", "", code[k + 1:close]) == "cfg(test)":
+            if inner:
+                inner_test = True
+            else:
+                cfg_test = True
+        m = _PATH_ATTR.fullmatch(ks[k + 1:close])
+        if m and not inner:
+            path = m.group(1)
+        i = _skip_ws(code, close + 1, hi)
+    vis = ""
+    m = _WORD_AT.match(code, i)
+    if m and m.group() == "pub":
+        i = _skip_ws(code, m.end(), hi)
+        if i < hi and code[i] == "(":
+            close = _close(code, i, hi)
+            if close < 0:
+                return None
+            inside = re.sub(r"\s+", " ", code[i + 1:close].strip())
+            vis = "pub(%s)" % re.sub(r"\s*::\s*", "::", inside)
+            i = _skip_ws(code, close + 1, hi)
+        else:
+            vis = "pub"
+        m = _WORD_AT.match(code, i)
+    while m and m.group() in _QUALIFIERS:
+        i = _skip_ws(code, m.end(), hi)
+        m = _WORD_AT.match(code, i)
+    if m:
+        return _Head(cfg_test, inner_test, path, vis, m.group(), m.start(), m.end())
+    return _Head(cfg_test, inner_test, path, vis, None, i, i)
+
+
+def _record(code, ks, h, block, stop, chain, recv, out):
+    """Record one item: a fn, an inline module, an inherent impl, or a type."""
+    kw = h.kw
+    if kw == "fn":
+        name = _WORD_AT.match(code, _skip_ws(code, h.after, stop))
+        if name and block is not None:         # no body: a declaration, not a unit
+            out.fns.append(_Fn(name.group(), recv, h.kw_pos, h.vis, chain))
+        return
+    if recv is not None:
+        return
+    if kw == "mod" and block is not None:
+        name = _WORD_AT.match(code, _skip_ws(code, h.after, stop))
+        if name:
+            sub = chain + ((_bare(name.group()), h.vis),)
+            out.inline.append(sub)
+            _scan(code, ks, block[0], block[1], sub, None, out)
+    elif kw == "impl" and block is not None:
+        recv_type = _inherent_type(code[h.after:stop])
+        if recv_type:
+            _scan(code, ks, block[0], block[1], chain, recv_type, out)
+    elif kw in ("struct", "enum", "union", "type"):
+        name = _WORD_AT.match(code, _skip_ws(code, h.after, stop))
+        if name:
+            out.types.setdefault((_names(chain), name.group()), h.vis)
+
+
+def _record_mod_decl(code, h, chain, out):
+    name = _WORD_AT.match(code, _skip_ws(code, h.after, len(code)))
+    if name:
+        out.mods.append(_ModDecl(_bare(name.group()), h.vis, h.path, chain, h.cfg_test))
+
+
+def _inherent_type(header: str):
+    """The type an `impl` header implements on, or None for a trait impl.
+
+    `header` runs from after `impl` to its `{`. The impl's own generics are
+    skipped; then a `for` outside angle brackets makes it a trait impl
+    (`impl<T> From<T> for W<T>`, `unsafe impl Send for T`). A `for<'a>`
+    inside the generics or after `where` is a higher-ranked bound, not a
+    trait. The type is the last path segment before its generic arguments:
+    `crate::a::Wrapper<T>` -> `Wrapper`. A negative impl, `dyn`, a tuple, a
+    slice or a reference is None. Killing test for "treat `impl Trait for
+    T` as inherent": `TestHeuristicDiscovery.test_a_trait_impl_method_is_not_a_unit`.
+    """
+    toks = _IMPL_TOKEN.findall(header)
+    i, depth = 0, 0
+    if toks and toks[0] == "<":
+        while i < len(toks):
+            depth += {"<": 1, ">": -1}.get(toks[i], 0)
+            i += 1
+            if depth == 0:
+                break
+    name, depth = None, 0
+    for t in toks[i:]:
+        if t == "<":
+            depth += 1
+        elif t == ">":
+            depth -= 1
+        elif depth > 0 or t in ("->", "::"):
+            continue
+        elif t == "where":
+            break
+        elif t in ("for", "!", "(", "[", "&", "*", "dyn"):
+            return None
+        elif _WORD_AT.fullmatch(t):
+            name = t
+    return name
+
+
+def _item_stop(code, i, hi):
+    """Index of the first `;` or `{` at paren/bracket depth 0 from `i`, or `hi`."""
+    depth = 0
+    while i < hi:
+        ch = code[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth <= 0 and ch in ";{":
+            return i
+        i += 1
+    return hi
+
+
+def _close(code, i, hi):
+    """Index of the bracket closing the one at `i` (same kind only), or -1."""
+    o = code[i]
+    c = {"(": ")", "[": "]", "{": "}"}[o]
+    depth = 0
+    for j in range(i, hi):
+        if code[j] == o:
+            depth += 1
+        elif code[j] == c:
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _skip_ws(code, i, hi):
+    while i < hi and code[i].isspace():
+        i += 1
+    return i
+
+
+def _bare(name: str) -> str:
+    """`r#type` -> `type`: the name a module's FILE is spelled with."""
+    return name[2:] if name.startswith("r#") else name
+
+
+def _names(chain) -> tuple:
+    return tuple(n for n, _vis in chain)
+
+
+# ── Reachability: can a `tests/` crate name this unit? ───────────────────
+#
+# THE MODULE TREE. From the crate's lib root, `mod name;` resolves to
+# `name.rs` or `name/mod.rs` in the declaring file's module directory -- its
+# own directory for a crate root, a `mod.rs` or a `#[path]` file, else its
+# directory plus its stem -- with inline `mod`s around the declaration as
+# further directories. `#[path = "…"]` is relative to the declaring file's
+# directory, or, inside inline modules, to that module directory. Each
+# binary root gets the same walk, recording only which files it reached.
+#
+# THE PUBLIC SET. A module is public when it is the crate root, a `pub mod`
+# in a public module, or re-exported from a public module: `pub use m;`
+# (named) or `pub use m::*;` (glob: every `pub` item and `pub mod` of `m`).
+# A named `pub use m::item;` in a public module exports that one item. A
+# `pub use` counts only in a public module, or when the name it binds is
+# itself exported (a re-export chain). `pub(crate) use` never counts. Paths
+# are `crate::…`, `self::…`, `super::…` or relative to the declaring module.
+#
+# The rule is the FILTER's, and it errs one way: a false "unreachable" only
+# reports, and a false "reachable" writes a test that does not compile (NO
+# BUILD). Where this reader is unsure it does not claim reach.
+
+_Tree = collections.namedtuple("_Tree", "lib_files bin_files test_files mods pub_mods exported")
+
+# `{realpath(root): (crate index object, {crate dir: _Tree})}`. A tree is
+# reused only while the index it was built against is the one `_CRATES`
+# holds, so the next walk (`_index` refreshes) rebuilds it.
+_TREES = {}
+
+_MAX_MODULE_DEPTH = 64
+
+
+def reachability(root: str, unit: dict):
+    """(reachable, why) for `unit`: can a `tests/` crate of its package name it?
+
+    `why` is "" when it can. Otherwise, the first of:
+
+      "binary-only"                   the file is compiled only into a binary
+                                      (or the package has no library)
+      "pub(crate)" (or pub(super)…)   the unit's own visibility
+      "type Hidden is private"        a method whose type, declared beside
+                                      its impl, is not `pub`
+      "module calc::inner is private" the first module on the path that is not
+                                      public (or "... is pub(crate)")
+      "no mod declares src/x.rs"      a file the crate never compiles
+      "cfg(test)"                     a file only a `#[cfg(test)] mod` declares
+
+    A file declared more than once is reachable when any declaration is.
+    """
+    rel = _norm(unit["path"])
+    info = crate_of(root, rel)
+    if info is None:
+        return False, "%s is in no crate" % rel
+    tree = _tree(root, info)
+    decls = tree.lib_files.get(rel)
+    if not decls:
+        if (rel in tree.bin_files or info.lib is None
+                or _within(rel, info.dir).startswith("src/bin/")):
+            return False, "binary-only"
+        if rel in tree.test_files:
+            return False, "cfg(test)"
+        return False, "no mod declares %s" % rel
+    text = read_text(root, rel)
+    scan = _scan_file(text)
+    fn = _declaration(scan, text, unit)
+    if fn is None:
+        return False, "no declaration of %s at line %s" % (unit["name"], unit.get("lineno"))
+    if fn.vis != "pub":
+        return False, fn.vis or "private"
+    inner = _names(fn.chain)
+    if fn.recv:
+        type_vis = scan.types.get((inner, fn.recv))
+        if type_vis is not None and type_vis != "pub":
+            return False, "type %s is %s" % (fn.recv, type_vis or "private")
+    item = fn.recv or fn.name
+    why = ""
+    for mp in decls:
+        full = mp + inner
+        if full in tree.pub_mods or (full, item) in tree.exported:
+            return True, ""
+        why = why or _first_closed(tree, full)
+    return False, why
+
+
+def _declaration(scan, text, unit):
+    """The `_Fn` `unit` was discovered from: its name at its line, else its name."""
+    starts = _line_starts(text)
+    named = [f for f in scan.fns if _fn_name(f) == unit["name"]]
+    for f in named:
+        if bisect.bisect_right(starts, f.pos) == unit.get("lineno"):
+            return f
+    return named[0] if named else None
+
+
+def _first_closed(tree, full) -> str:
+    for k in range(1, len(full) + 1):
+        prefix = full[:k]
+        if prefix not in tree.pub_mods:
+            return "module %s is %s" % ("::".join(prefix),
+                                       tree.mods.get(prefix) or "private")
+    return "not exported"
+
+
+def _declared_only_for_test(root, crates, rel) -> bool:
+    """True for a file only a `#[cfg(test)] mod x;` declares."""
+    info = _nearest(crates, rel)
+    if info is None:
+        return False
+    tree = _tree(root, info)
+    return rel in tree.test_files and rel not in tree.lib_files and rel not in tree.bin_files
+
+
+def _tree(root: str, info):
+    real = os.path.realpath(root)
+    crates = _CRATES.get(real)
+    held = _TREES.get(real)
+    if held is None or held[0] is not crates:
+        held = (crates, {})
+        _TREES[real] = held
+    if info.dir not in held[1]:
+        held[1][info.dir] = _build_tree(root, info)
+    return held[1][info.dir]
+
+
+def _build_tree(root: str, info):
+    lib_files, mods, uses, test_files = {}, {(): "pub"}, [], set()
+    if info.lib:
+        _walk(root, info.lib, lib_files, mods, uses, test_files)
+    bin_files = {}
+    for b in info.bins:
+        _walk(root, b, bin_files, {}, [], set())
+    pub_mods, exported = _publish(mods, uses)
+    return _Tree(lib_files, frozenset(bin_files), frozenset(test_files),
+                 mods, pub_mods, exported)
+
+
+# MEASURED 2026-09-13, cargo 1.92.0 (344c4567c 2025-10-21), before relying on
+# it: a file loaded by `#[path = "x/y.rs"] pub mod z;` resolves its own
+# `pub mod w;` to `src/x/w.rs` -- beside it, as a `mod.rs` would -- and with
+# `w.rs` moved to `src/x/y/w.rs` the build fails (E0583, "create file
+# src/x/w.rs"). `mod outer { #[path = "q.rs"] pub mod p; }` in `src/lib.rs`
+# resolves to `src/outer/q.rs`. Hence `child_mod_rs = True` for a `#[path]`
+# target, and the inline chain as directories under the declaring file's.
+def _walk(root, start, files, mods, uses, test_files):
+    """Follow `mod` declarations from the crate root `start`.
+
+    Fills `files` (`{rel: [module path]}`), `mods` (`{module path: vis}`),
+    `uses` (`[(declaring module path, _UseDecl)]`) and `test_files`.
+    """
+    stack, seen = [(start, (), True)], set()
+    while stack:
+        rel, mp, mod_rs = stack.pop()
+        if (rel, mp) in seen or len(mp) > _MAX_MODULE_DEPTH or not _is_file(root, rel):
+            continue
+        seen.add((rel, mp))
+        files.setdefault(rel, []).append(mp)
+        scan = _scan_file(read_text(root, rel))
+        for chain in scan.inline:
+            mods[mp + _names(chain)] = chain[-1][1]
+        for u in scan.uses:
+            uses.append((mp + _names(u.chain), u))
+        here = posixpath.dirname(rel)
+        own = here if mod_rs else posixpath.join(
+            here, posixpath.splitext(posixpath.basename(rel))[0])
+        for m in scan.mods:
+            inner = _names(m.chain)
+            d = posixpath.join(own, *inner) if inner else own
+            if m.path is not None:
+                target, child_mod_rs = _join(d if inner else here, m.path), True
+            else:
+                flat, nested = _join(d, m.name + ".rs"), _join(d, m.name + "/mod.rs")
+                if _is_file(root, flat):
+                    target, child_mod_rs = flat, False
+                elif _is_file(root, nested):
+                    target, child_mod_rs = nested, True
+                else:
+                    continue
+            if m.cfg_test:
+                test_files.add(target)
+                continue
+            child = mp + inner + (m.name,)
+            mods[child] = m.vis
+            stack.append((target, child, child_mod_rs))
+
+
+def _is_file(root: str, rel: str) -> bool:
+    """A file inside `root` -- a `#[path]` never leads the walk out of it."""
+    return (rel != ".." and not rel.startswith("../") and not posixpath.isabs(rel)
+            and os.path.isfile(os.path.join(root, rel)))
+
+
+def _publish(mods: dict, uses):
+    """(public module paths, exported (module path, item)) -- to a fixed point.
+
+    `resolved` holds each unrestricted `pub use` leaf as (declaring module,
+    bound name or None for a glob, target path). A leaf takes effect once its
+    declaring module is public, or once the name it binds is itself exported:
+    `pub use a::X;` at the root makes `a`'s own `pub use self::b::X;` count.
+    A glob's chain is not followed (under-credit). Killing tests: "count a
+    private mod as public" -- `TestReachability.test_a_private_mod_is_not_reachable`;
+    "ignore `pub use`" -- `test_a_named_pub_use_reaches_only_what_it_names`
+    and `test_a_glob_pub_use_reaches_every_pub_item`.
+    """
+    resolved = []
+    for mp, u in uses:
+        if u.vis != "pub":
+            continue
+        for segs, binding in _use_leaves(u.body):
+            path = _use_target(segs, mp)
+            if not path or binding == "_":
+                continue
+            if binding == "*":
+                resolved.append((mp, None, tuple(path)))
+                continue
+            if path[-1] == "self":
+                path = path[:-1]
+            if not path:
+                continue
+            name = binding or path[-1]
+            resolved.append((mp, name, tuple(path)))
+    pub, exported = {()}, set()
+    changed = True
+    while changed:
+        changed = False
+        for m, vis in mods.items():
+            if m and vis == "pub" and m not in pub and m[:-1] in pub:
+                pub.add(m)
+                changed = True
+        for mp, name, target in resolved:
+            if mp not in pub and (name is None or (mp, name) not in exported):
+                continue
+            if name is None or target in mods:
+                if target in mods and target not in pub:
+                    pub.add(target)
+                    changed = True
+            elif (target[:-1], target[-1]) not in exported:
+                exported.add((target[:-1], target[-1]))
+                changed = True
+    return frozenset(pub), frozenset(exported)
+
+
+def _use_target(segs, mp):
+    """A `use` path as a module path of this crate, or None when it leaves it."""
+    if not segs:
+        return None
+    if segs[0] == "crate":
+        return list(segs[1:])
+    path, rest = list(mp), list(segs)
+    while rest and rest[0] in ("self", "super"):
+        if rest.pop(0) == "super":
+            if not path:
+                return None
+            path.pop()
+    return path + rest
