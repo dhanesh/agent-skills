@@ -1,10 +1,102 @@
 #!/usr/bin/env python3
-"""io_guard_rust.py -- the tier-aware runtime I/O guard for test-safety-net, Rust.
+r"""io_guard_rust.py -- the tier-aware runtime I/O guard for test-safety-net, Rust.
 
-This file holds the HOOK half: the name tables, their rendering into
-`io_guard_rust_hook.rs`, and `hook_library`, which builds that source with the
-analysed repo's own `rustc`. The wrapper that builds the test, runs it under
-the hook and classifies the result is added beside it.
+This is the SOLE enforcement of the skill's headline invariant, "never writes
+a test that performs real I/O", on the Rust stack. `stack_rust.py`'s triage is
+a FILTER: trait objects, generics and macros make reachability undecidable
+from source, so the invariant is a RUNTIME property or nothing.
+
+DOCUMENTED COMMAND -- copy the whole block. Run it from the crate root (add
+`-p <package>` for a workspace member). The tier travels by environment
+variable, the contract every guard reads, and nothing is written into the
+target repo -- `Cargo.lock` included:
+
+    TEST_SAFETY_NET_TIER=1 \
+      python3 "$SKILL_DIR/assets/io_guard_rust.py" \
+      --test <test_file_stem> <test_name>
+
+    TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem \
+      python3 "$SKILL_DIR/assets/io_guard_rust.py" \
+      --test <test_file_stem> <test_name>
+
+`<test_file_stem>` names `tests/<test_file_stem>.rs`; `<test_name>` is one
+`#[test]` fn in it. `assets/test_io_guard_rust.py` extracts those two commands
+from this header and from every markdown file in the skill and runs them
+verbatim, in both directions, so what is printed here is what is proved.
+
+THE EXIT STATUS IS THE WHOLE PROTOCOL -- go's table, from guard_env.py
+------------------------------------------------------------------------
+    0  GREEN        the selected test ran and passed
+    1  RED          the selected test ran and failed an assertion, or the
+                    test binary died with no result line (signal, abort)
+    2  NOT ARMED    the guard could not arm or refused to run; NOTHING was
+                    proved
+    3  GUARD TRIP   IOGuardViolation: the CLASSIFICATION is wrong --
+                    reclassify the unit to Tier 3 and discard the test,
+                    whether the run was red or green
+    4  NO TEST      nothing was proved: the name matched no test, the test
+                    is `#[ignore]`d, or the binary printed no verdict
+    5  NO BUILD     the test did not build; a compile error is not RED
+
+libtest's own exit code lies twice (measured on 1.82 and 1.92): an ignored
+test and a name matching nothing both exit 0, and a compile error exits 101
+like a failed assertion. So the verdict is read from the build's JSON and
+the `test result:` line, never from an exit code alone.
+
+HOW A PROOF RUNS -- `main`
+--------------------------
+Every refusal prints its reason and exits 2:
+  1. the tier and allow list, through `guard_env.read_env`;
+  2. the platform is darwin or linux;
+  3. `rustc -V`, run in the repo so a `rust-toolchain.toml` pin is honoured,
+     is at least `MIN_RUST`. `RUSTUP_AUTO_INSTALL=0` on every rustc/cargo
+     call: an uninstalled pin is refused, never downloaded;
+  4. `Cargo.lock` exists at the workspace root. A plain `cargo test` creates
+     or rewrites it, so the proof never runs without one, and builds with
+     `--locked`: a stale lock is refused, left byte-identical;
+  5. an environment-controlled test (one that calls `tsn_control_set_env`)
+     is alone in its file -- the environment is process-wide and libtest
+     runs one file's tests on parallel threads;
+  6. the BUILD PLAN (`build_plan`), decided once: on linux, a `rustix` in
+     `Cargo.lock` gets a separate out-of-repo target dir and
+     `--cfg=rustix_use_libc`, because rustix's linux_raw backend issues
+     syscalls without libc. Otherwise cargo's own target dir and no flags;
+  7. `cargo test --locked --no-run --message-format=json [-p <package>]
+     --test <stem>` (`build_test`), with no timeout: waiting on cargo's lock
+     is not the proof's time. A compile error exits 5;
+  8. the executable is refused when static, musl or stripped
+     (`rust_binary.refusal`): each makes a preloaded hook fail open;
+  9. the hook, built by the repo's own rustc (`hook_library`);
+ 10. `<exe> <test_name> --exact --test-threads=1` under the preload, with
+     stdin closed, core dumps off (an aborting test would otherwise write
+     `<repo>/core` where `ulimit -c` allows it -- measured in the rust
+     images) and a 300s timeout (`run_proof`). NEVER `--nocapture`, and
+     a caller's `RUST_TEST_NOCAPTURE` is dropped: under it the default panic
+     hook reads `RUST_BACKTRACE` outside libtest's frames, and every RED
+     would trip `environment`;
+ 11. `classify`: a violation line wins; then a hook that did not say
+     `tsn-hook: armed`, or said anything else, is NOT ARMED; then libtest's
+     LAST `test result:` line.
+
+RESIDUALS, STATED RATHER THAN IMPLIED
+-------------------------------------
+1. Anything bypassing libc is unseen: inline asm, raw syscalls (getrandom
+   0.2's `SYS_getrandom` on linux among them). The filter declines asm and
+   `libc::syscall` statically; rustix is rebuilt against libc (step 6).
+2. Static, stripped and musl binaries are refused rather than guarded.
+3. The seed-path and runner exemptions are names, pinned per toolchain.
+4. Life-before-main crates (`ctor`) are unverified: their I/O is probably
+   seen, but whether it is attributed correctly is not measured.
+5. Verdict lines share stdout with repo code, so a test can print a spoofed
+   `test result:` line (the LAST one is read, which libtest writes after
+   the test returns) or a spoofed handshake, as on go.
+6. `std::env::vars`/`vars_os` read `environ` directly, `std::env::args`
+   reads what the runtime saved before main, `std::thread::sleep` is an
+   unhooked `nanosleep`, and `std::fs::hard_link` an unhooked `linkat`: a
+   unit doing only those passes tier 1. `NOT_INTERCEPTED` and
+   `PARTIALLY_INTERCEPTED` below carry each, measured; the filter still
+   marks them.
+7. darwin and linux only; x86_64 macOS is unproven.
 
 THE HOOK
 --------
@@ -72,14 +164,30 @@ exempt. A buffer that filled without deciding is JUDGED rather than guessed.
 """
 from __future__ import annotations
 
+import argparse
+import collections
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 _ASSETS = os.path.dirname(os.path.abspath(__file__))
+if _ASSETS not in sys.path:
+    sys.path.insert(0, _ASSETS)
+
+import guard_env                                                    # noqa: E402
+import rust_binary                                                  # noqa: E402
+import stack_rust                                                   # noqa: E402
+from guard_env import (                                             # noqa: E402
+    EXIT_GREEN, EXIT_RED, EXIT_NOT_ARMED, EXIT_TRIP, EXIT_NO_TEST, EXIT_NO_BUILD,
+    OUTCOME as _OUTCOME,
+)
+
 HOOK_SOURCE = os.path.join(_ASSETS, "io_guard_rust_hook.rs")
 
 MIN_RUST = (1, 82)
@@ -307,3 +415,543 @@ def hook_library(repo, env) -> str:
     finally:
         shutil.rmtree(work, ignore_errors=True)
     return dest
+
+
+# ══ THE WRAPPER ═════════════════════════════════════════════════════════
+
+# The groups are the FILTER's, verbatim -- one answer to "what counts as
+# which I/O", owned by `stack_rust.py`. Rust controls two: filesystem
+# (`tsn_control_temp_dir`) and environment (`tsn_control_set_env`).
+GROUPS = stack_rust.GROUPS
+CONTROLLABLE_GROUPS = tuple(sorted(stack_rust.CONTROLLABLE))
+UNCONTROLLABLE_GROUPS = tuple(sorted(stack_rust.UNCONTROLLABLE))
+
+SUPPORTED_PLATFORMS = ("darwin", "linux")
+_PRELOAD = {"darwin": "DYLD_INSERT_LIBRARIES", "linux": "LD_PRELOAD"}
+PROOF_ARGS = ("--exact", "--test-threads=1")    # never --nocapture: see the header, step 10
+PROOF_TIMEOUT = 300
+# Dropped from the proof's environment: another preload, stale hook
+# configuration, and libtest's environment spelling of --nocapture.
+_RUN_SCRUB = ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE")
+
+_PREFIX = "test-safety-net io_guard_rust: "
+_LOCKED = "needs to be updated but --locked was passed"
+
+
+def _why(g):
+    if g == "clock":
+        return "std has no freeze hook"
+    if g == "randomness":
+        return "std has no RNG and rand::thread_rng cannot be seeded"
+    return "no test can control it"
+
+
+# ── The two layers: every filter marker, and what the hook does about it ─
+#
+# `stack_rust.py`'s marker tables are what the FILTER tiers on; these three
+# maps are what this guard does about each marker. `test_io_guard_rust.py`
+# asserts they PARTITION those tables -- every marker in exactly one, with a
+# reason -- and that each FILTER_MARKER_INTERCEPTS row names calls the hook
+# intercepts on BOTH platforms. Everything here was MEASURED under the hook
+# (darwin 1.92, linux 1.82 and 1.92) unless the reason says otherwise.
+
+_OPEN = ("open", "openat", "open64", "openat64")
+_STAT = ("stat", "stat64", "statx")
+_NET = ("socket", "connect", "bind", "getaddrinfo")
+_SPAWN = ("posix_spawn", "posix_spawnp", "fork", "execve")
+
+FILTER_MARKER_INTERCEPTS = {
+    "File::open": _OPEN,
+    "File::create": _OPEN,
+    "OpenOptions": _OPEN,
+    # tokio::fs / async_std::fs run std::fs on a blocking pool whose thread
+    # carries the runtime's crate frames, so the call is judged there.
+    "tokio::fs": _OPEN + _STAT + ("mkdir", "unlink", "rename", "opendir"),
+    "async_std::fs": _OPEN + _STAT + ("mkdir", "unlink", "rename", "opendir"),
+    "Path::canonicalize": ("realpath", "stat"),
+    "Path::exists": _STAT,
+    "Path::is_dir": _STAT,
+    "Path::is_file": _STAT,
+    "Path::metadata": _STAT,
+    "Path::try_exists": _STAT,
+    "Path::symlink_metadata": ("lstat", "lstat64", "statx"),
+    "Path::read_dir": ("opendir",),
+    "Path::read_link": ("readlink",),
+    "std::env::var": ("getenv",),
+    "std::env::var_os": ("getenv",),
+    "std::env::temp_dir": ("getenv",),          # TMPDIR
+    "std::env::home_dir": ("getenv",),          # HOME, before any getpwuid_r fallback
+    "std::env::set_var": ("setenv",),
+    "std::env::remove_var": ("unsetenv",),
+    "std::env::current_dir": ("getcwd",),
+    "std::env::set_current_dir": ("chdir",),    # environment, per ruling R16 as amended
+    "std::net": _NET,
+    "tokio::net": _NET,
+    "reqwest": _NET,
+    "hyper": _NET,                              # through the transport it is handed
+    "ureq": _NET,
+    "std::process::Command": _SPAWN,
+    "tokio::process": _SPAWN,                   # std::process::Command beneath
+    "SystemTime::now": ("clock_gettime", "gettimeofday"),
+    "Instant::now": ("clock_gettime", "mach_absolute_time", "clock_gettime_nsec_np"),
+    "tokio::time": ("clock_gettime", "mach_absolute_time", "clock_gettime_nsec_np"),
+    "chrono::Utc::now": ("clock_gettime", "gettimeofday"),     # SystemTime::now beneath
+    "chrono::Local::now": ("clock_gettime", "gettimeofday"),
+}
+
+_GETRANDOM = ("through the getrandom crate: on darwin it calls getentropy, intercepted; on "
+              "linux getrandom 0.3 (rand 0.9) resolves libc's getrandom by dlsym, which the "
+              "preload answers, but getrandom 0.2 (rand 0.8) issues the raw SYS_getrandom "
+              "syscall, which no libc hook sees -- its /dev/urandom fallback is an open, "
+              "caught as filesystem. Not measured with the crates (no network in the proof)")
+_DATABASE = ("caught only through the socket or file the driver opens, so it trips as network "
+             "or filesystem, never as database; an in-memory SQLite opens neither")
+
+PARTIALLY_INTERCEPTED = {
+    "std::fs": "every std::fs call measured reaches an intercept (open/openat/open64, the stat "
+               "family and statx, mkdir, unlink, rename, opendir, readlink, rmdir, chmod, "
+               "symlink, realpath) EXCEPT fs::hard_link, which is linkat, not intercepted: a "
+               "unit that only hard-links passes tier 1",
+    "std::env::current_exe": "linux reads /proc/self/exe with readlink, intercepted (and "
+                             "reported as filesystem, not environment); darwin asks "
+                             "_NSGetExecutablePath, which is not intercepted",
+    "rand::thread_rng": _GETRANDOM,
+    "rand::random": _GETRANDOM,
+    "rand::rng": _GETRANDOM,
+    "OsRng": _GETRANDOM,
+    "getrandom": _GETRANDOM,
+    "sqlx": _DATABASE,
+    "diesel": _DATABASE,
+    "rusqlite": _DATABASE,
+    "postgres": _DATABASE,
+}
+
+_ENVIRON = ("reads the `environ` array directly, calling no libc function a hook could sit "
+            "in; the filter still marks it Tier 2, like go's os.Args")
+_ARGV = ("reads the argc/argv the runtime saved before main; no call a hook could sit in, "
+         "like go's os.Args")
+
+NOT_INTERCEPTED = {
+    "std::env::vars": _ENVIRON,
+    "std::env::vars_os": _ENVIRON,
+    "std::env::args": _ARGV,
+    "std::env::args_os": _ARGV,
+    "std::thread::sleep": "sleeps with nanosleep without reading a clock, and nanosleep is not "
+                          "intercepted -- go's time.Sleep residual; a unit that only sleeps "
+                          "passes tier 1",
+}
+
+
+# ── Preconditions ────────────────────────────────────────────────────────
+
+def _platform(name=None):
+    name = sys.platform if name is None else name
+    if name == "darwin":
+        return "darwin"
+    if name.startswith("linux"):
+        return "linux"
+    return None
+
+
+def _say(msg):
+    sys.stderr.write(_PREFIX + msg + "\n")
+    sys.stderr.flush()
+
+
+def _not_armed(why):
+    _say("NOT ARMED (exit 2): %s. Nothing was proved; fix it and re-run." % why)
+    return EXIT_NOT_ARMED
+
+
+def _rust_env(env):
+    return dict(env, RUSTUP_AUTO_INSTALL="0")
+
+
+def toolchain_version(repo, env=None):
+    """`(major, minor)` of `rustc -V` run in `repo`, honouring its pin. Raises GuardCannotArm.
+
+    A pinned toolchain that is not installed is its own reason: the proof
+    never installs one (`RUSTUP_AUTO_INSTALL=0`)."""
+    env = _rust_env(os.environ if env is None else env)
+    rustc = shutil.which("rustc", path=env.get("PATH"))
+    if not rustc:
+        raise GuardCannotArm("no `rustc` on PATH")
+    try:
+        proc = subprocess.run([rustc, "-V"], cwd=repo, env=env, capture_output=True, text=True,
+                              timeout=120, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GuardCannotArm("`rustc -V` could not run: %s" % exc) from exc
+    text = proc.stderr + proc.stdout
+    if proc.returncode != 0:
+        if "is not installed" in text:
+            raise GuardCannotArm("the toolchain this repo pins is not installed, and the proof "
+                                 "never installs one: %s" % _first_error(text))
+        raise GuardCannotArm("`rustc -V` failed in %s: %s" % (repo, _first_error(text)))
+    m = re.match(r"rustc (\d+)\.(\d+)", proc.stdout.strip())
+    if not m:
+        raise GuardCannotArm("unrecognised `rustc -V` output: %r" % proc.stdout.strip())
+    return int(m.group(1)), int(m.group(2))
+
+
+def _metadata(repo, env):
+    """`cargo metadata --no-deps` (it never writes Cargo.lock, measured), or None."""
+    cargo = shutil.which("cargo", path=env.get("PATH"))
+    if not cargo:
+        return None
+    try:
+        proc = subprocess.run([cargo, "metadata", "--no-deps", "--offline", "--format-version",
+                               "1"], cwd=repo, env=_rust_env(env), capture_output=True, text=True,
+                              timeout=300, stdin=subprocess.DEVNULL)
+        return json.loads(proc.stdout) if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _test_source(meta, repo, stem, package):
+    """The source file of test target `stem`: from cargo's metadata when it
+    has one (a `-p` run from the workspace root, a `[[test]] path`), else
+    `tests/<stem>.rs` under `repo`."""
+    if meta:
+        here = os.path.realpath(repo)
+        pkgs = meta.get("packages") or []
+        if package:
+            pkgs = [p for p in pkgs if p.get("name") == package]
+        else:
+            own = [p for p in pkgs
+                   if os.path.dirname(os.path.realpath(p.get("manifest_path", ""))) == here]
+            pkgs = own or pkgs
+        for p in pkgs:
+            for t in p.get("targets") or []:
+                if "test" in (t.get("kind") or ()) and t.get("name") == stem and t.get("src_path"):
+                    return t["src_path"]
+    path = os.path.join(repo, "tests", stem + ".rs")
+    return path if os.path.isfile(path) else None
+
+
+_SET_ENV_CALL = re.compile(r"\btsn_control_set_env\s*\(")
+_TEST_ATTR = re.compile(r"#\s*\[\s*test\s*\]")
+
+
+def _env_test_not_alone(path):
+    """True when `path` CALLS `tsn_control_set_env` (its definition is not a
+    call; comments and strings are blanked) and holds more than one test."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            code = stack_rust.strip_noncode(f.read())
+    except OSError:
+        return False
+    calls = [m for m in _SET_ENV_CALL.finditer(code)
+             if not re.search(r"\bfn\s+$", code[:m.start()])]
+    return bool(calls) and len(_TEST_ATTR.findall(code)) > 1
+
+
+# ── The build plan and the build ─────────────────────────────────────────
+
+BuildPlan = collections.namedtuple("BuildPlan", "target_dir cfg reason")
+BuildPlan.__doc__ = """How the proof is built, decided once; build and run never branch on a mode.
+
+    target_dir  CARGO_TARGET_DIR for the build, or None for cargo's own
+    cfg         extra `--cfg` flags, passed as RUSTFLAGS, only with target_dir
+    reason      why the plan is not the normal one ("" when it is)
+"""
+
+BuildResult = collections.namedtuple("BuildResult", "exe compile_error output")
+BuildResult.__doc__ = """One `cargo test --no-run`.
+
+    exe            the test executable cargo reported, or None
+    compile_error  the compiler's error text (or cargo's, with no executable), or None
+    output         everything cargo said, for the reader
+"""
+
+_RUSTIX = re.compile(r'(?m)^name = "rustix"$')
+
+
+def build_plan(repo, platform):
+    """The build plan for `repo` on `platform` (a `sys.platform` value).
+
+    On linux, a `rustix` in `Cargo.lock` gets a separate target dir outside
+    the repo, keyed by the workspace, and `--cfg=rustix_use_libc`: rustix's
+    linux_raw backend issues syscalls with no libc call for the hook to sit
+    in, and the separate dir keeps the user's own build cache valid.
+    Otherwise cargo's own target dir and no flags."""
+    if _platform(platform) == "linux":
+        try:
+            with open(os.path.join(repo, "Cargo.lock"), encoding="utf-8",
+                      errors="replace") as f:
+                locked = f.read()
+        except OSError:
+            locked = ""
+        if _RUSTIX.search(locked):
+            key = hashlib.sha256(os.path.realpath(repo).encode("utf-8")).hexdigest()
+            return BuildPlan(os.path.join(_cache_root(os.environ), "rust-target", key),
+                             ("--cfg=rustix_use_libc",),
+                             "rustix's linux_raw backend bypasses libc")
+    return BuildPlan(None, (), "")
+
+
+def build_test(repo, plan, test_target, package, env):
+    """Build test target `test_target` with `cargo test --locked --no-run`. Never times out.
+
+    `--locked` is load-bearing: a plain build creates or rewrites Cargo.lock
+    (measured), and the proof writes nothing into the repo. Raises
+    GuardCannotArm only when cargo is missing or cannot start."""
+    env = _rust_env(env)
+    cargo = shutil.which("cargo", path=env.get("PATH"))
+    if not cargo:
+        raise GuardCannotArm("no `cargo` on PATH")
+    if plan.target_dir:
+        env["CARGO_TARGET_DIR"] = plan.target_dir
+    if plan.cfg:
+        env["RUSTFLAGS"] = " ".join(plan.cfg)
+        env.pop("CARGO_ENCODED_RUSTFLAGS", None)     # it would outrank RUSTFLAGS
+    cmd = [cargo, "test", "--locked", "--no-run", "--message-format=json"]
+    if package:
+        cmd += ["-p", package]
+    cmd += ["--test", test_target]
+    try:
+        proc = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True,
+                              errors="replace", stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        raise GuardCannotArm("cargo could not run: %s" % exc) from exc
+    exe, errors = None, []
+    for line in proc.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("reason") == "compiler-artifact":
+            if "test" in ((msg.get("target") or {}).get("kind") or ()) and msg.get("executable"):
+                exe = msg["executable"]
+        elif msg.get("reason") == "compiler-message":
+            message = msg.get("message") or {}
+            if message.get("level") == "error":
+                errors.append((message.get("rendered") or message.get("message") or "").rstrip())
+    output = "\n".join(errors + [proc.stderr.rstrip()]).strip()
+    compile_error = None
+    if errors:
+        compile_error = "\n".join(errors)
+    elif proc.returncode != 0 and not exe:
+        compile_error = _first_error(proc.stderr)
+    return BuildResult(None if compile_error else exe, compile_error, output)
+
+
+# ── The run and its verdict ──────────────────────────────────────────────
+
+def _no_core_dump():
+    """In the child, before exec: a crashing test must not dump `core` into
+    the repo (its cwd). Measured in the rust images, whose `ulimit -c` is
+    unlimited and core_pattern is `core`: an abort wrote `<repo>/core`."""
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def run_proof(exe, test_name, tier, allow, hook, env):
+    """`(code, output)` of `exe` running `test_name` alone under the hook.
+
+    The line is exactly `[exe, test_name, "--exact", "--test-threads=1"]`,
+    stdin closed, no core file, combined output teed to stdout, killed after
+    PROOF_TIMEOUT seconds."""
+    blocked = guard_env.blocked_groups(tier, allow, GROUPS, CONTROLLABLE_GROUPS,
+                                       UNCONTROLLABLE_GROUPS)
+    run_env = {k: v for k, v in env.items() if not k.startswith("TSN_") and k not in _RUN_SCRUB}
+    run_env["TSN_BLOCKED"] = ",".join(sorted(blocked))
+    run_env["TSN_TIER"] = str(tier)
+    if tier == 1:
+        run_env["TSN_STDIN"] = "1"
+    run_env[_PRELOAD[_platform() or "linux"]] = hook
+    proc = subprocess.Popen([exe, test_name, *PROOF_ARGS], env=run_env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            errors="replace", preexec_fn=_no_core_dump)
+    fired = []
+
+    def _kill():
+        fired.append(True)
+        proc.kill()
+
+    timer = threading.Timer(PROOF_TIMEOUT, _kill)
+    timer.daemon = True
+    timer.start()
+    captured = []
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            captured.append(line)
+        code = proc.wait()
+    finally:
+        timer.cancel()
+    sys.stdout.flush()
+    if fired:
+        captured.append("\ntsn: the test binary was killed after %ds\n" % PROOF_TIMEOUT)
+    return code, "".join(captured)
+
+
+_VIOLATION = re.compile(r"(?m)^IOGuardViolation: a tier (\S+) candidate reached (\S+) I/O via "
+                        r"(\S+) from (.+)$")
+_HOOK_LINE = re.compile(r"(?m)^tsn-hook: (.*)$")
+_RESULT = re.compile(r"(?m)^test result: \S+\. (\d+) passed; (\d+) failed; (\d+) ignored")
+
+
+def classify(code, output):
+    """The exit status for one proof run, first match wins:
+
+      1. a line starting `IOGuardViolation` -> 3;
+      2. a hook line other than the handshake (`tsn-hook: cannot attribute`,
+         `tsn-hook: libc has no ...`), or no `tsn-hook: armed` line -> 2;
+      3. libtest's LAST `test result:` line: a failure -> 1; exactly one
+         passed and none ignored -> 0; anything else -> 4;
+      4. no result line: a non-zero code -> 1 (signal or abort), else 4.
+    """
+    if re.search(r"(?m)^IOGuardViolation", output):
+        return EXIT_TRIP
+    said = [m.group(1) for m in _HOOK_LINE.finditer(output)]
+    if "armed" not in said or any(s != "armed" for s in said):
+        return EXIT_NOT_ARMED
+    results = _RESULT.findall(output)
+    if results:
+        passed, failed, ignored = (int(n) for n in results[-1])
+        if failed >= 1:
+            return EXIT_RED
+        if passed == 1 and ignored == 0:
+            return EXIT_GREEN
+        return EXIT_NO_TEST
+    return EXIT_RED if code != 0 else EXIT_NO_TEST
+
+
+_ESCAPES = {"SP": "@", "BP": "*", "RF": "&", "LT": "<", "GT": ">", "LP": "(", "RP": ")",
+            "C": ","}
+
+
+def _unescape(seg):
+    if seg.startswith("_$"):
+        seg = seg[1:]
+
+    def one(m):
+        code = m.group(1)
+        if code in _ESCAPES:
+            return _ESCAPES[code]
+        if code.startswith("u"):
+            try:
+                return chr(int(code[1:], 16))
+            except ValueError:
+                pass
+        return m.group(0)
+
+    return re.sub(r"\$([A-Za-z0-9]+)\$", one, seg).replace("..", "::")
+
+
+def demangle(sym):
+    """A legacy-mangled Rust symbol (`_ZN...17h<16 hex>E`, Mach-O's extra `_`
+    allowed) as a path, hash dropped; anything else unchanged."""
+    s = sym[1:] if sym.startswith("__ZN") else sym
+    if not (s.startswith("_ZN") and s.endswith("E")):
+        return sym
+    body, segs, i = s[3:-1], [], 0
+    while i < len(body):
+        j = i
+        while j < len(body) and body[j].isdigit():
+            j += 1
+        if j == i:
+            return sym
+        n = int(body[i:j])
+        if n <= 0 or j + n > len(body):
+            return sym
+        segs.append(body[j:j + n])
+        i = j + n
+    if segs and re.fullmatch(r"h[0-9a-f]{16}", segs[-1]):
+        segs.pop()
+    if not segs:
+        return sym
+    return "::".join(_unescape(seg) for seg in segs)
+
+
+# ── main ─────────────────────────────────────────────────────────────────
+
+def _parse(argv):
+    parser = argparse.ArgumentParser(
+        prog="io_guard_rust.py",
+        description="Run one Rust test under test-safety-net's I/O guard. Run it from the crate "
+                    "root; the tier travels in TEST_SAFETY_NET_TIER.")
+    parser.add_argument("-p", "--package", help="the workspace member that owns the test")
+    parser.add_argument("--test", dest="test_target", required=True, metavar="TEST_FILE_STEM",
+                        help="the test target: tests/<TEST_FILE_STEM>.rs")
+    parser.add_argument("test_name", help="one #[test] fn in that file")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        args = _parse(argv)
+    except SystemExit as exc:                        # usage error -> 2, --help -> 0
+        return exc.code if isinstance(exc.code, int) else EXIT_NOT_ARMED
+    tier, allow, notes = guard_env.read_env(os.environ, CONTROLLABLE_GROUPS,
+                                            UNCONTROLLABLE_GROUPS, "rust", _why)
+    for note in notes:
+        _say("note: " + note)
+    if _platform() is None:
+        return _not_armed("sys.platform=%s; this guard is proved on %s only"
+                          % (sys.platform, " and ".join(SUPPORTED_PLATFORMS)))
+    repo = os.getcwd()
+    env = dict(os.environ)
+    try:
+        version = toolchain_version(repo, env)
+    except GuardCannotArm as exc:
+        return _not_armed(str(exc))
+    if version < MIN_RUST:
+        return _not_armed("rustc %d.%d is below this guard's floor, %d.%d: the hook is unproven "
+                          "there. Pin %d.%d or newer" % (version + MIN_RUST + MIN_RUST))
+    meta = _metadata(repo, env)
+    root = (meta or {}).get("workspace_root") or repo
+    if not os.path.isfile(os.path.join(root, "Cargo.lock")):
+        return _not_armed("no Cargo.lock: run cargo generate-lockfile, then re-run; the proof "
+                          "never writes one")
+    source = _test_source(meta, repo, args.test_target, args.package)
+    if source and _env_test_not_alone(source):
+        return _not_armed("an environment-controlled test must be alone in its file (%s): the "
+                          "environment is process-wide and libtest runs a file's tests on "
+                          "parallel threads" % source)
+    plan = build_plan(root, sys.platform)
+    if plan.reason:
+        _say("build plan: %s; building in %s with %s"
+             % (plan.reason, plan.target_dir, " ".join(plan.cfg)))
+    try:
+        built = build_test(repo, plan, args.test_target, args.package, env)
+    except GuardCannotArm as exc:
+        return _not_armed(str(exc))
+    if _LOCKED in built.output:
+        return _not_armed("Cargo.lock is out of date for this manifest; update it yourself, "
+                          "then re-run")
+    if built.compile_error or not built.exe:
+        sys.stderr.write((built.compile_error or built.output or "cargo reported no test "
+                          "executable") + "\n")
+        _say(_OUTCOME[EXIT_NO_BUILD])
+        return EXIT_NO_BUILD
+    why = rust_binary.refusal(rust_binary.inspect(built.exe))
+    if why:
+        return _not_armed("the test binary %s cannot be guarded -- %s" % (built.exe, why))
+    try:
+        hook = hook_library(repo, env)
+    except GuardCannotArm as exc:
+        return _not_armed(str(exc))
+    code, output = run_proof(built.exe, args.test_name, tier, allow, hook, env)
+    outcome = classify(code, output)
+    if outcome == EXIT_NOT_ARMED:
+        said = [m.group(0) for m in _HOOK_LINE.finditer(output) if m.group(1) != "armed"]
+        return _not_armed("the hook did not arm: " + (said[0] if said else
+                          "no `tsn-hook: armed` handshake, so the hook never loaded into the "
+                          "test binary"))
+    if outcome == EXIT_TRIP:
+        m = _VIOLATION.search(output)
+        if m:
+            _say("the unit reached %s I/O via %s from %s"
+                 % (m.group(2), m.group(3), demangle(m.group(4))))
+    if outcome == EXIT_RED and not _RESULT.search(output):
+        _say("note: the test binary ended without a result line (signal or abort)")
+    _say(_OUTCOME[outcome])
+    return outcome
+
+
+if __name__ == "__main__":
+    sys.exit(main())

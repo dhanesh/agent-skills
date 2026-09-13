@@ -54,10 +54,29 @@ Mutation coverage (each killed by the named test):
   `test_the_committed_table_block_is_the_rendered_one`;
 * building without `-C force-unwind-tables=yes` on 1.82 (linux) -> the probe
   tests read exit 2 (`tsn-hook: cannot attribute`) instead of their verdicts.
+
+The WRAPPER (`main` and its helpers) is tested the same way, through a
+fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
+documented command run verbatim, every group, tier 2, the exit contract, the
+build plan, the refusals, the handshake, the partition, and that nothing is
+written. Mutation coverage:
+* dropping `--locked` ->
+  `TestExitContract.test_a_stale_cargo_lock_is_2_and_left_byte_identical`;
+* reading exit 0 as GREEN without the result line ->
+  `TestExitContract.test_an_ignored_test_is_4`;
+* reading a build failure (cargo's 101) as RED ->
+  `TestExitContract.test_a_private_item_is_no_build`;
+* removing the handshake check from `classify` ->
+  `TestHandshake.test_a_hook_built_without_its_constructor_is_not_armed`;
+* passing on a caller's `RUST_TEST_NOCAPTURE` ->
+  `TestExitContract.test_a_callers_rust_test_nocapture_is_not_passed_on`.
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -977,6 +996,741 @@ class TestProbe(ProbeCase):
         code, out = self.run_test("t_pure", blocked=_blocked(1), exe=stripped)
         self.assertEqual(code, 2, out)
         self.assertRegex(out, r"(?m)^tsn-hook: cannot attribute \(.+\)$")
+
+
+# ── The wrapper: a fixture crate driven through `main` ───────────────────
+
+GUARD = os.path.join(HERE, "io_guard_rust.py")
+SKILL = os.path.dirname(HERE)
+GIT = shutil.which("git")
+RUSTUP = shutil.which("rustup")
+
+FX_TOML = '[package]\nname = "fx"\nversion = "0.1.0"\nedition = "2021"\n'
+FX_LIB = r'''use std::time::{SystemTime, UNIX_EPOCH};
+
+extern "C" { fn getentropy(buf: *mut u8, len: usize) -> i32; }
+
+pub fn pure(n: u32) -> u32 { n * 2 }
+pub fn read_hosts() -> usize { std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0) }
+pub fn var(key: &str) -> Option<String> { std::env::var(key).ok() }
+pub fn listen() -> bool { std::net::TcpListener::bind("127.0.0.1:0").is_ok() }
+pub fn stamp() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+pub fn roll() -> u8 { let mut b = [0u8; 1]; unsafe { getentropy(b.as_mut_ptr(), 1) }; b[0] }
+pub fn run() -> bool { std::process::Command::new("true").status().is_ok() }
+pub fn line() -> String { let mut s = String::new(); let _ = std::io::stdin().read_line(&mut s); s }
+
+#[allow(dead_code)]
+mod private { pub fn hidden() -> u32 { 1 } }
+'''
+# The main test file. It carries the control helpers verbatim -- so it
+# DEFINES `tsn_control_set_env` without calling it, and has a commented-out
+# call: neither may trip the one-environment-test-per-file rule.
+FX_TESTS = "#![allow(dead_code)]\nuse fx::*;\n\n" + CONTROL_HELPERS_RS + r'''
+#[test] fn t_clean() { assert_eq!(pure(2), 4); }
+#[test] fn t_wrong() { assert_eq!(pure(2), 5); }
+#[test] #[ignore] fn t_ignored() { assert_eq!(pure(2), 4); }
+#[test] fn t_fs() { assert!(read_hosts() < usize::MAX); }
+#[test] fn t_env() { let _ = var("HOME"); }
+#[test] fn t_net() { let _ = listen(); }
+#[test] fn t_clock() { let _ = stamp(); }
+#[test] fn t_rand() { let _ = roll(); }
+#[test] fn t_proc() { let _ = run(); }
+#[test] fn t_stdin() { let _ = line(); }
+#[test] fn t_abort() { std::process::abort(); }
+#[test] fn t_tmp_control() {
+    let d = tsn_control_temp_dir();
+    std::fs::write(d.join("x"), b"x").unwrap();
+}
+// tsn_control_set_env("TSN_FX_VAR", "a comment, not a call");
+'''
+ENV_ONE = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
+#[test] fn t_env_alone() {
+    let _g = tsn_control_set_env("TSN_FX_VAR", "v");
+    assert_eq!(fx::var("TSN_FX_VAR").as_deref(), Some("v"));
+}
+'''
+ENV_TWO = ENV_ONE + "#[test] fn t_sibling() { assert_eq!(fx::pure(1), 2); }\n"
+PRIVATE_TESTS = "#[test] fn t_private() { assert_eq!(fx::private::hidden(), 1); }\n"
+CFG_PROBE = ('#[test] fn t_cfg() { assert!(cfg!(tsn_probe_cfg), "built without the plan\'s cfg"); '
+             '}\n')
+
+# What a caller's environment must not leak into a fixture run.
+_SCRUB = ("CARGO_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "LD_PRELOAD",
+          "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE", "RUSTUP_TOOLCHAIN")
+
+
+def _cargo_env(**extra):
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("TEST_SAFETY_NET", "TSN_")) and k not in _SCRUB}
+    env["RUSTUP_AUTO_INSTALL"] = "0"
+    env.update(extra)
+    return env
+
+
+def _git(crate, *args):
+    return subprocess.run(["git", "-c", "user.name=tsn", "-c", "user.email=tsn@example.invalid",
+                           "-c", "commit.gpgsign=false", *args], cwd=crate,
+                          capture_output=True, text=True, check=True).stdout
+
+
+def write_fx_crate(root):
+    """The fixture crate, its committed `Cargo.lock` and (with git) one commit."""
+    crate = os.path.join(root, "fx")
+    for rel, text in (("Cargo.toml", FX_TOML), ("src/lib.rs", FX_LIB), ("tests/fx.rs", FX_TESTS),
+                      ("tests/env_one.rs", ENV_ONE), ("tests/env_two.rs", ENV_TWO),
+                      ("tests/private.rs", PRIVATE_TESTS), ("tests/cfg_probe.rs", CFG_PROBE),
+                      (".gitignore", "target/\n")):
+        _write(os.path.join(crate, rel), text)
+    subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=_cargo_env(),
+                   capture_output=True, check=True)
+    if GIT:
+        _git(crate, "init", "-q")
+        _git(crate, "add", "-A")
+        _git(crate, "commit", "-qm", "fx")
+    return crate
+
+
+def copy_fx_source(crate, dest_root):
+    """A fresh copy of the fixture's SOURCE (no target/, no .git) to mutate."""
+    dest = os.path.join(dest_root, "fx")
+    shutil.copytree(crate, dest, ignore=shutil.ignore_patterns("target", ".git"))
+    return dest
+
+
+_SHARED = {}
+
+
+def shared_fx():
+    """One fixture crate, hook cache and TMPDIR for every wrapper class."""
+    if not _SHARED:
+        tmp = tempfile.mkdtemp(prefix="tsn-rust-guard-")
+        crate = write_fx_crate(tmp)
+        with open(os.path.join(crate, "Cargo.lock"), "rb") as f:
+            lock = f.read()
+        scratch = os.path.join(tmp, "scratch")
+        os.makedirs(scratch)
+        _SHARED.update(tmp=tmp, crate=crate, lock=lock, cache=os.path.join(tmp, "cache"),
+                       scratch=scratch)
+    return _SHARED
+
+
+def tearDownModule():
+    if _SHARED:
+        shutil.rmtree(_SHARED["tmp"], ignore_errors=True)
+
+
+def _guard_env(**extra):
+    fx = shared_fx()
+    env = _cargo_env(TEST_SAFETY_NET_CACHE=fx["cache"], TMPDIR=fx["scratch"])
+    env.pop("RUSTUP_AUTO_INSTALL")
+    env.update(extra)
+    return env
+
+
+def run_guard(cwd, tier, allow, *args, **extra_env):
+    """(exit code, combined output) for one wrapper run, as a subprocess."""
+    env = _guard_env(**extra_env)
+    if tier is not None:
+        env["TEST_SAFETY_NET_TIER"] = str(tier)
+    if allow is not None:
+        env["TEST_SAFETY_NET_ALLOW"] = allow
+    proc = subprocess.run([sys.executable, GUARD, *args], cwd=cwd, env=env, capture_output=True,
+                          text=True, timeout=900, stdin=subprocess.DEVNULL)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def main_in(cwd, env, argv):
+    """(exit code, combined output) for `main(argv)` IN THIS PROCESS -- the seam
+    a test uses to stub one step (`build_test`, `hook_library`)."""
+    out = io.StringIO()
+    old = os.getcwd()
+    os.chdir(cwd)
+    try:
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(out):
+            code = io_guard_rust.main(argv)
+    finally:
+        os.chdir(old)
+    return code, out.getvalue()
+
+
+_LABEL = re.compile(r"reached (\w+) I/O")
+
+
+def label(out):
+    m = _LABEL.search(out)
+    return m.group(1) if m else None
+
+
+class WrapperCase(unittest.TestCase):
+    """Shares the fixture crate; skips visibly without cargo."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not CARGO or not RUSTC:
+            raise unittest.SkipTest("no `cargo`/`rustc` on PATH: io_guard_rust.py's wrapper is "
+                                    "NOT exercised on this machine.")
+        if PLATFORM is None:
+            raise unittest.SkipTest("the guard runs on darwin and linux only")
+        cls.fx = shared_fx()
+        cls.crate = cls.fx["crate"]
+
+    def guard(self, tier, allow, test_name, stem="fx", cwd=None, **env):
+        return run_guard(cwd or self.crate, tier, allow, "--test", stem, test_name, **env)
+
+    def scratch_copy(self):
+        root = tempfile.mkdtemp(prefix="tsn-rust-guard-copy-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        return copy_fx_source(self.crate, root)
+
+
+# ── 1. The documented command, extracted and run verbatim ────────────────
+
+def extract_commands():
+    """Every `TEST_SAFETY_NET_TIER=N ... python3 ... io_guard_rust.py ...` line the
+    skill prints -- in the guard's own header and in every markdown file --
+    with comment leaders stripped and backslash continuations joined (go's
+    extractor, retargeted)."""
+    sources = [GUARD]
+    for base in (SKILL, os.path.join(SKILL, "references")):
+        sources += [os.path.join(base, n) for n in sorted(os.listdir(base)) if n.endswith(".md")]
+    out = []
+    for path in sources:
+        with open(path, encoding="utf-8") as f:
+            lines = [re.sub(r"^\s*(?:#\s?|\*\s?)?", "", line.rstrip("\n")).strip()
+                     for line in f]
+        joined, buf = [], ""
+        for line in lines:
+            if line.endswith("\\"):
+                buf += line[:-1].strip() + " "
+            else:
+                joined.append(buf + line)
+                buf = ""
+        for line in joined:
+            if re.match(r"^TEST_SAFETY_NET_TIER=[12] .*python3 .*io_guard_rust\.py", line):
+                out.append((os.path.relpath(path, SKILL), re.sub(r"\s+", " ", line)))
+    return sorted(set(out))
+
+
+class TestTheDocumentedCommand(WrapperCase):
+    def test_the_header_documents_both_tiers(self):
+        tiers = {re.match(r"TEST_SAFETY_NET_TIER=(\d)", cmd).group(1)
+                 for where, cmd in extract_commands() if where == "assets/io_guard_rust.py"}
+        self.assertEqual(tiers, {"1", "2"})
+
+    def test_every_documented_command_passes_clean_and_trips_on_real_io(self):
+        commands = extract_commands()
+        self.assertTrue(commands, "no documented io_guard_rust.py invocation found")
+        failures = []
+        for where, command in commands:
+            for test, want in (("t_clean", 0), ("t_env", 3)):
+                cmd = (command.replace("<test_file_stem>", "fx").replace("<test_name>", test)
+                       .replace("<package>", "fx"))
+                proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=self.crate,
+                                      env=_guard_env(SKILL_DIR=SKILL), capture_output=True,
+                                      text=True, timeout=900, stdin=subprocess.DEVNULL)
+                if proc.returncode != want:
+                    failures.append("%s: %s -> exit %d (want %d): %s"
+                                    % (where, cmd, proc.returncode, want,
+                                       (proc.stdout + proc.stderr).strip()[-400:]))
+        self.assertEqual(failures, [])
+
+
+# ── 2. Every group trips at tier 1, in its OWN group ─────────────────────
+
+class TestEveryGroupTrips(WrapperCase):
+    def test_a_clean_unit_passes_at_tier_1(self):
+        code, out = self.guard(1, None, "t_clean")
+        self.assertEqual(code, 0, out[-800:])
+        self.assertRegex(out, r"(?m)^tsn-hook: armed$")
+        self.assertIn("GREEN (exit 0)", out)
+
+    def test_each_group_trips_and_is_named(self):
+        for test, group in (("t_fs", "filesystem"), ("t_env", "environment"),
+                            ("t_net", "network"), ("t_clock", "clock"),
+                            ("t_rand", "randomness"), ("t_proc", "subprocess"),
+                            ("t_stdin", "stdin")):
+            with self.subTest(test=test):
+                code, out = self.guard(1, None, test)
+                self.assertEqual(code, 3, out[-800:])
+                self.assertEqual(label(out), group, out[-800:])
+                self.assertIn("GUARD TRIP (exit 3)", out)
+
+    def test_the_trip_names_the_function_demangled(self):
+        code, out = self.guard(1, None, "t_fs")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertIn("from fx::read_hosts", out)
+
+
+# ── 3. Tier 2: the controls and the allow list ───────────────────────────
+
+class TestTierTwo(WrapperCase):
+    def test_the_temp_dir_control_passes_with_filesystem_allowed(self):
+        code, out = self.guard(2, "filesystem", "t_tmp_control")
+        self.assertEqual(code, 0, out[-800:])
+
+    def test_the_same_test_trips_filesystem_with_only_clock_named(self):
+        code, out = self.guard(2, "clock", "t_tmp_control")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "filesystem")
+        self.assertIn("names clock, which is not controllable on rust (std has no freeze hook)",
+                      out)
+
+    def test_randomness_cannot_be_allowed_on_rust(self):
+        code, out = self.guard(2, "randomness", "t_rand")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "randomness")
+        self.assertIn("rand::thread_rng cannot be seeded", out)
+
+    def test_a_lone_environment_test_is_the_environment_control(self):
+        code, out = self.guard(2, "environment", "t_env_alone", stem="env_one")
+        self.assertEqual(code, 0, out[-800:])
+        code, out = self.guard(2, "filesystem", "t_env_alone", stem="env_one")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "environment")
+
+
+# ── 4. The exit contract ─────────────────────────────────────────────────
+
+class TestExitContract(WrapperCase):
+    def test_an_assertion_failure_is_1(self):
+        code, out = self.guard(1, None, "t_wrong")
+        self.assertEqual(code, 1, out[-800:])
+        self.assertNotIn("IOGuardViolation", out)
+
+    def test_a_callers_rust_test_nocapture_is_not_passed_on(self):
+        # libtest reads RUST_TEST_NOCAPTURE as --nocapture, under which the
+        # default panic hook's getenv(RUST_BACKTRACE) trips environment.
+        code, out = self.guard(1, None, "t_wrong", RUST_TEST_NOCAPTURE="1")
+        self.assertEqual(code, 1, out[-800:])
+        self.assertNotIn("IOGuardViolation", out)
+
+    def test_a_name_that_matches_no_test_is_4(self):
+        code, out = self.guard(1, None, "t_no_such_test")
+        self.assertEqual(code, 4, out[-800:])
+
+    def test_an_ignored_test_is_4(self):
+        # libtest exits 0 with `1 ignored`: the exit code alone would say GREEN.
+        code, out = self.guard(1, None, "t_ignored")
+        self.assertEqual(code, 4, out[-800:])
+
+    def test_an_abort_with_no_result_line_is_1_with_a_note(self):
+        code, out = self.guard(1, None, "t_abort")
+        self.assertEqual(code, 1, out[-800:])
+        self.assertIn("the test binary ended without a result line (signal or abort)", out)
+
+    def test_a_private_item_is_no_build(self):
+        # A compile error is cargo's 101 -- the same code as a failed
+        # assertion. It must read NO BUILD, never RED.
+        code, out = self.guard(1, None, "t_private", stem="private")
+        self.assertEqual(code, 5, out[-800:])
+        self.assertIn("E0603", out)
+
+    def test_a_missing_cargo_lock_is_2_and_none_is_written(self):
+        crate = self.scratch_copy()
+        os.remove(os.path.join(crate, "Cargo.lock"))
+        code, out = self.guard(1, None, "t_clean", cwd=crate)
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("no Cargo.lock: run cargo generate-lockfile, then re-run; the proof never "
+                      "writes one", out)
+        self.assertFalse(os.path.exists(os.path.join(crate, "Cargo.lock")))
+
+    def test_a_stale_cargo_lock_is_2_and_left_byte_identical(self):
+        crate = self.scratch_copy()
+        _write(os.path.join(crate, "depx", "Cargo.toml"), DEPX_TOML)
+        _write(os.path.join(crate, "depx", "src", "lib.rs"), DEPX_RS)
+        with open(os.path.join(crate, "Cargo.toml"), "a", encoding="utf-8") as f:
+            f.write('\n[dependencies]\ndepx = { path = "depx" }\n')
+        lock = os.path.join(crate, "Cargo.lock")
+        with open(lock, "rb") as f:
+            before = f.read()
+        code, out = self.guard(1, None, "t_clean", cwd=crate)
+        with open(lock, "rb") as f:
+            self.assertEqual(f.read(), before, "the proof rewrote Cargo.lock")
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("Cargo.lock is out of date for this manifest; update it yourself, then "
+                      "re-run", out)
+
+    def test_a_toolchain_pinned_below_the_floor_is_2(self):
+        if not RUSTUP:
+            self.skipTest("no rustup: a rust-toolchain.toml pin is not honoured here")
+        crate = self.scratch_copy()
+        _write(os.path.join(crate, "rust-toolchain.toml"), '[toolchain]\nchannel = "1.81"\n')
+        code, out = self.guard(1, None, "t_clean", cwd=crate)
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("1.81", out)
+        self.assertRegex(out, r"is not installed|below this guard's floor")
+
+    def test_a_rustc_below_the_floor_has_its_own_reason(self):
+        bin_dir = tempfile.mkdtemp(prefix="tsn-fake-rustc-")
+        self.addCleanup(shutil.rmtree, bin_dir, ignore_errors=True)
+        fake = os.path.join(bin_dir, "rustc")
+        _write(fake, '#!/bin/sh\necho "rustc 1.81.0 (eeb90cda1 2024-09-04)"\n')
+        os.chmod(fake, 0o755)
+        code, out = self.guard(1, None, "t_clean",
+                               PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("rustc 1.81 is below this guard's floor, 1.82", out)
+        self.assertNotIn("is not installed", out)
+
+    def test_an_environment_controlled_test_with_a_sibling_is_2(self):
+        code, out = self.guard(2, "environment", "t_env_alone", stem="env_two")
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("an environment-controlled test must be alone in its file", out)
+
+    def test_an_unsupported_platform_is_2(self):
+        with mock.patch.object(sys, "platform", "freebsd14"):
+            code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                                ["--test", "fx", "t_clean"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("freebsd14", out)
+
+
+# ── 5. The build plan and the build ──────────────────────────────────────
+
+def _lock_with(*names):
+    text = "# This file is automatically @generated by Cargo.\nversion = 4\n"
+    for n in names:
+        text += '\n[[package]]\nname = "%s"\nversion = "0.38.44"\n' % n
+    return text
+
+
+class TestBuildPlan(unittest.TestCase):
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="tsn-rust-plan-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.cache = os.path.join(self.repo, "cache")
+
+    def plan(self, platform, *names):
+        _write(os.path.join(self.repo, "Cargo.lock"), _lock_with(*names))
+        with mock.patch.dict(os.environ, {"TEST_SAFETY_NET_CACHE": self.cache}):
+            return io_guard_rust.build_plan(self.repo, platform)
+
+    def test_linux_with_rustix_builds_apart_with_the_libc_cfg(self):
+        key = hashlib.sha256(os.path.realpath(self.repo).encode("utf-8")).hexdigest()
+        self.assertEqual(self.plan("linux", "fx", "rustix"),
+                         io_guard_rust.BuildPlan(os.path.join(self.cache, "rust-target", key),
+                                                 ("--cfg=rustix_use_libc",),
+                                                 "rustix's linux_raw backend bypasses libc"))
+
+    def test_darwin_with_rustix_is_normal(self):
+        self.assertEqual(self.plan("darwin", "fx", "rustix"), io_guard_rust.BuildPlan(None, (), ""))
+
+    def test_linux_without_rustix_is_normal(self):
+        self.assertEqual(self.plan("linux", "fx", "rustix-openpty"),
+                         io_guard_rust.BuildPlan(None, (), ""))
+
+
+class TestBuildTest(WrapperCase):
+    def test_the_plans_target_dir_and_cfg_reach_the_build(self):
+        target = tempfile.mkdtemp(prefix="tsn-rust-plan-target-")
+        self.addCleanup(shutil.rmtree, target, ignore_errors=True)
+        plan = io_guard_rust.BuildPlan(target, ("--cfg=tsn_probe_cfg",), "probe")
+        # A caller's CARGO_ENCODED_RUSTFLAGS would outrank RUSTFLAGS: dropped.
+        result = io_guard_rust.build_test(self.crate, plan, "cfg_probe", None,
+                                          _cargo_env(CARGO_ENCODED_RUSTFLAGS=""))
+        self.assertIsNone(result.compile_error, result.output)
+        self.assertTrue(result.exe.startswith(os.path.join(os.path.realpath(target), ""))
+                        or result.exe.startswith(os.path.join(target, "")), result.exe)
+        proc = subprocess.run([result.exe, "t_cfg", "--exact"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_the_normal_plan_adds_no_flags(self):
+        result = io_guard_rust.build_test(self.crate, io_guard_rust.BuildPlan(None, (), ""),
+                                          "cfg_probe", None, _cargo_env())
+        self.assertIsNone(result.compile_error, result.output)
+        self.assertTrue(result.exe.startswith(os.path.join(os.path.realpath(self.crate),
+                                                           "target", "")), result.exe)
+        proc = subprocess.run([result.exe, "t_cfg", "--exact"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 101, proc.stdout)
+
+    def test_a_compile_error_is_reported_not_raised(self):
+        result = io_guard_rust.build_test(self.crate, io_guard_rust.BuildPlan(None, (), ""),
+                                          "private", None, _cargo_env())
+        self.assertIsNone(result.exe)
+        self.assertIn("E0603", result.compile_error)
+
+
+# ── 6. Refusals: binaries the hook would fail open on ────────────────────
+
+class TestRefusals(WrapperCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        result = io_guard_rust.build_test(cls.crate, io_guard_rust.BuildPlan(None, (), ""), "fx",
+                                          None, _cargo_env())
+        if not result.exe:
+            raise AssertionError("the fixture did not build: %s" % result.output)
+        cls.exe = result.exe
+
+    def seam(self, exe, test="t_clean"):
+        stub = io_guard_rust.BuildResult(exe, None, "")
+        with mock.patch.object(io_guard_rust, "build_test", return_value=stub):
+            return main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                           ["--test", "fx", test])
+
+    def test_a_stripped_test_binary_is_refused_with_2(self):
+        if not shutil.which("strip"):
+            self.skipTest("no `strip` on PATH")
+        tmp = tempfile.mkdtemp(prefix="tsn-rust-strip-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        stripped = os.path.join(tmp, "fx-stripped")
+        shutil.copy(self.exe, stripped)
+        subprocess.run(["strip", stripped], check=True, capture_output=True)
+        code, out = self.seam(stripped)
+        self.assertEqual(code, 2, out)
+        self.assertIn("stripped: no crate symbols, so no call can be attributed", out)
+        self.assertNotIn("tsn-hook: armed", out, "a refused binary must never be run")
+
+    def test_the_same_seam_runs_the_unstripped_binary(self):
+        code, out = self.seam(self.exe)
+        self.assertEqual(code, 0, out)
+
+
+# ── 7. The handshake, classify and run_proof ─────────────────────────────
+
+_CTOR = re.compile(r'#\[cfg\(target_os = "(?:macos|linux)"\)\]\n#\[used\]\n'
+                   r'#\[link_section = "[^"]+"\]\nstatic INIT: extern "C" fn\(\) = tsn_init;\n')
+
+
+class TestHandshake(WrapperCase):
+    def test_a_hook_built_without_its_constructor_is_not_armed(self):
+        source, n = _CTOR.subn("", io_guard_rust.render_hook())
+        self.assertEqual(n, 2, "the constructor statics moved; update _CTOR")
+        env = _guard_env(TEST_SAFETY_NET_TIER="1")
+        with mock.patch.object(io_guard_rust, "render_hook", return_value=source):
+            dead = io_guard_rust.hook_library(self.crate, env)
+        with mock.patch.object(io_guard_rust, "hook_library", return_value=dead):
+            code, out = main_in(self.crate, env, ["--test", "fx", "t_fs"])
+        # Unarmed, the read passes and libtest says `1 passed`: only the
+        # missing handshake stops that reading as GREEN.
+        self.assertIn("1 passed", out)
+        self.assertEqual(code, 2, out)
+        self.assertIn("tsn-hook: armed", out)      # the reason names the missing line
+
+    def test_the_real_hook_through_the_same_seam_trips(self):
+        code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                            ["--test", "fx", "t_fs"])
+        self.assertEqual(code, 3, out)
+
+
+_OK = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out\n"
+_ARMED = "tsn-hook: armed\n"
+
+
+class TestClassify(unittest.TestCase):
+    def c(self, code, *lines):
+        return io_guard_rust.classify(code, "".join(lines))
+
+    def test_a_violation_wins_over_everything(self):
+        v = "test t ... \nIOGuardViolation: a tier 1 candidate reached clock I/O via x from y\n"
+        self.assertEqual(self.c(3, _ARMED, v), 3)
+        self.assertEqual(self.c(0, v, _OK), 3)                   # no handshake either
+        self.assertEqual(self.c(2, _ARMED, "tsn-hook: cannot attribute (why)\n", v), 3)
+
+    def test_the_hook_refusing_to_guess_is_not_armed(self):
+        self.assertEqual(self.c(2, _ARMED, "\ntsn-hook: cannot attribute (why)\n", _OK), 2)
+        self.assertEqual(self.c(2, _ARMED, "\ntsn-hook: libc has no statx\n"), 2)
+
+    def test_no_handshake_is_not_armed(self):
+        self.assertEqual(self.c(0, _OK), 2)
+        self.assertEqual(self.c(0, "x" + _ARMED, _OK), 2)       # not a line of its own
+
+    def test_the_result_line_decides(self):
+        self.assertEqual(self.c(0, _ARMED, _OK), 0)
+        self.assertEqual(self.c(101, _ARMED, "test result: FAILED. 0 passed; 1 failed; 0 ignored;"
+                                             " 0 measured; 0 filtered out\n"), 1)
+        self.assertEqual(self.c(0, _ARMED, "test result: ok. 0 passed; 0 failed; 1 ignored; "
+                                           "0 measured; 0 filtered out\n"), 4)
+        self.assertEqual(self.c(0, _ARMED, "test result: ok. 0 passed; 0 failed; 0 ignored; "
+                                           "0 measured; 12 filtered out\n"), 4)
+        self.assertEqual(self.c(0, _ARMED, "test result: ok. 2 passed; 0 failed; 0 ignored; "
+                                           "0 measured; 0 filtered out\n"), 4)
+
+    def test_the_last_result_line_is_libtests(self):
+        spoof = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
+        self.assertEqual(self.c(101, _ARMED, spoof, "test result: FAILED. 0 passed; 1 failed; "
+                                                    "0 ignored; 0 measured; 0 filtered out\n"), 1)
+
+    def test_no_result_line(self):
+        self.assertEqual(self.c(-6, _ARMED, "test t_abort ... "), 1)
+        self.assertEqual(self.c(0, _ARMED), 4)
+
+
+def _mangle(*segments):
+    """A legacy-mangled symbol, built here so no literal hash sits in the file."""
+    body = "".join("%d%s" % (len(s), s) for s in segments + ("h" + "0123456789abcdef",))
+    return "_ZN" + body + "E"
+
+
+class TestDemangle(unittest.TestCase):
+    def test_a_plain_path(self):
+        self.assertEqual(io_guard_rust.demangle(_mangle("fx", "read_hosts")), "fx::read_hosts")
+
+    def test_an_impl_frame_and_its_escapes(self):
+        sym = _mangle("_$LT$p..Dsp$u20$as$u20$core..fmt..Display$GT$", "fmt")
+        self.assertEqual(io_guard_rust.demangle(sym), "<p::Dsp as core::fmt::Display>::fmt")
+        sym = _mangle("p", "t_thread", "_$u7b$$u7b$closure$u7d$$u7d$")
+        self.assertEqual(io_guard_rust.demangle(sym), "p::t_thread::{{closure}}")
+        sym = _mangle("core", "ptr", "drop_in_place$LT$$LP$u32$C$$RF$mut$u20$p..Pd$RP$$GT$")
+        self.assertEqual(io_guard_rust.demangle(sym),
+                         "core::ptr::drop_in_place<(u32,&mut p::Pd)>")
+
+    def test_the_macho_underscore(self):
+        self.assertEqual(io_guard_rust.demangle("_" + _mangle("fx", "var")), "fx::var")
+
+    def test_anything_else_is_returned_unchanged(self):
+        for s in ("(test body, inlined)", "(a thread with no crate frame)", "_ZN3fx", "main"):
+            self.assertEqual(io_guard_rust.demangle(s), s)
+
+
+class _FakeProc:
+    calls = []
+
+    def __init__(self, argv, **kw):
+        type(self).calls.append((list(argv), kw))
+        self.stdout = iter([_ARMED, _OK])
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class TestRunProof(unittest.TestCase):
+    def run_proof(self, tier, allow, env):
+        _FakeProc.calls = []
+        with mock.patch.object(io_guard_rust.subprocess, "Popen", _FakeProc), \
+                contextlib.redirect_stdout(io.StringIO()):
+            code, out = io_guard_rust.run_proof("/x/fx-test", "t_clean", tier, allow,
+                                                "/c/libtsn_hook.so", env)
+        self.assertEqual((code, out), (0, _ARMED + _OK))
+        self.assertEqual(len(_FakeProc.calls), 1)
+        return _FakeProc.calls[0]
+
+    def test_the_run_line_is_exact_and_never_nocapture(self):
+        argv, kw = self.run_proof(1, None, {"PATH": "/bin"})
+        self.assertEqual(argv, ["/x/fx-test", "t_clean", "--exact", "--test-threads=1"])
+        self.assertNotIn("--nocapture", argv)
+        self.assertEqual(kw.get("stdin"), subprocess.DEVNULL)
+
+    def test_tier_1_blocks_everything_and_reads_stdin(self):
+        argv, kw = self.run_proof(1, None, {"PATH": "/bin", "RUST_TEST_NOCAPTURE": "1",
+                                            "LD_PRELOAD": "/evil.so",
+                                            "DYLD_INSERT_LIBRARIES": "/evil.dylib"})
+        env = kw["env"]
+        self.assertEqual(env["TSN_BLOCKED"], ",".join(sorted(stack_rust.GROUPS)))
+        self.assertEqual(env["TSN_TIER"], "1")
+        self.assertEqual(env["TSN_STDIN"], "1")
+        self.assertEqual(env[PRELOAD], "/c/libtsn_hook.so")
+        self.assertNotIn("RUST_TEST_NOCAPTURE", env)
+        other = {"darwin": "LD_PRELOAD", "linux": "DYLD_INSERT_LIBRARIES"}[PLATFORM]
+        self.assertNotIn(other, env)
+
+    def test_tier_2_blocks_what_is_not_allowed_and_leaves_stdin(self):
+        argv, kw = self.run_proof(2, ["filesystem"], {"PATH": "/bin", "TSN_STDIN": "1",
+                                                      "TSN_BLOCKED": ""})
+        env = kw["env"]
+        self.assertEqual(env["TSN_BLOCKED"],
+                         ",".join(sorted(set(stack_rust.GROUPS) - {"filesystem"})))
+        self.assertEqual(env["TSN_TIER"], "2")
+        self.assertNotIn("TSN_STDIN", env)
+
+
+# ── 8. The two layers agree; the group tables are the filter's ───────────
+
+class TestTheTwoLayersAgree(unittest.TestCase):
+    def test_every_filter_marker_is_accounted_for_exactly_once(self):
+        markers = {m for table in (stack_rust.CONTROLLABLE, stack_rust.UNCONTROLLABLE)
+                   for ms in table.values() for m in ms}
+        maps = (io_guard_rust.FILTER_MARKER_INTERCEPTS, io_guard_rust.PARTIALLY_INTERCEPTED,
+                io_guard_rust.NOT_INTERCEPTED)
+        problems = []
+        for m in sorted(markers):
+            homes = [i for i, table in enumerate(maps) if m in table]
+            if len(homes) != 1:
+                problems.append("%s in %d tables" % (m, len(homes)))
+                continue
+            reason = maps[homes[0]][m]
+            # FILTER_MARKER_INTERCEPTS' reason is the tuple of libc calls that
+            # catch the marker; the other two carry a sentence.
+            parts = reason if homes[0] == 0 else (reason,)
+            if not parts or not all(isinstance(p, str) and p.strip() for p in parts):
+                problems.append("%s has no reason" % m)
+        extra = set().union(*maps) - markers
+        self.assertEqual(problems, [])
+        self.assertEqual(extra, set(), "partition rows for markers the filter does not have")
+
+    def test_an_intercepted_marker_names_calls_the_hook_has_on_both_platforms(self):
+        # FULLY intercepted means caught on darwin AND linux; a marker caught
+        # on one belongs in PARTIALLY_INTERCEPTED with that reason.
+        problems = []
+        for m, names in sorted(io_guard_rust.FILTER_MARKER_INTERCEPTS.items()):
+            self.assertIsInstance(names, tuple, m)
+            everywhere = set()
+            for plat, table in io_guard_rust.INTERCEPTS.items():
+                hooked = {n for ns in table.values() for n in ns}
+                everywhere |= hooked
+                if not set(names) & hooked:
+                    problems.append("%s: nothing in %s is hooked on %s" % (m, names, plat))
+            if set(names) - everywhere:
+                problems.append("%s names unhooked %s" % (m, sorted(set(names) - everywhere)))
+        self.assertEqual(problems, [])
+
+    def test_the_measured_residuals_are_where_the_measurement_put_them(self):
+        for m in ("std::env::vars", "std::env::vars_os", "std::env::args", "std::env::args_os",
+                  "std::thread::sleep"):
+            self.assertIn(m, io_guard_rust.NOT_INTERCEPTED)
+        self.assertIn("environ", io_guard_rust.NOT_INTERCEPTED["std::env::vars"])
+        self.assertIn("nanosleep", io_guard_rust.NOT_INTERCEPTED["std::thread::sleep"])
+        for m in ("std::fs", "std::env::current_exe", "rusqlite", "rand::thread_rng"):
+            self.assertIn(m, io_guard_rust.PARTIALLY_INTERCEPTED)
+        self.assertEqual(io_guard_rust.FILTER_MARKER_INTERCEPTS["std::env::set_current_dir"],
+                         ("chdir",))
+        self.assertEqual(io_guard_rust.FILTER_MARKER_INTERCEPTS["std::env::current_dir"],
+                         ("getcwd",))
+
+
+class TestGroupTables(unittest.TestCase):
+    def test_the_guard_uses_the_filters_groups_verbatim(self):
+        self.assertEqual(io_guard_rust.GROUPS, stack_rust.GROUPS)
+        self.assertEqual(io_guard_rust.CONTROLLABLE_GROUPS, ("environment", "filesystem"))
+        self.assertEqual(io_guard_rust.UNCONTROLLABLE_GROUPS,
+                         tuple(sorted(stack_rust.UNCONTROLLABLE)))
+
+    def test_the_uncontrollable_reasons(self):
+        why = io_guard_rust._why
+        self.assertEqual(why("clock"), "std has no freeze hook")
+        self.assertEqual(why("randomness"), "std has no RNG and rand::thread_rng cannot be seeded")
+        self.assertEqual(why("network"), "no test can control it")
+
+
+# ── 9. Nothing is written ────────────────────────────────────────────────
+
+class TestNothingWritten(WrapperCase):
+    def test_a_green_run_leaves_only_the_ignored_target_dir(self):
+        if not GIT:
+            self.skipTest("no git: the fixture is not a repository here")
+        code, out = self.guard(1, None, "t_clean")
+        self.assertEqual(code, 0, out[-800:])
+        self.assertEqual(_git(self.crate, "status", "--porcelain"), "")
+        self.assertEqual(_git(self.crate, "status", "--porcelain", "--ignored"), "!! target/\n")
+        with open(os.path.join(self.crate, "Cargo.lock"), "rb") as f:
+            self.assertEqual(f.read(), self.fx["lock"])
+
+    def test_a_crashing_test_dumps_no_core_into_the_repo(self):
+        # Measured in the rust images (ulimit -c unlimited, core_pattern
+        # `core`): an aborting test wrote `<crate>/core`. On darwin cores go
+        # to /cores and are off by default, so this is linux's killer.
+        if not GIT:
+            self.skipTest("no git: the fixture is not a repository here")
+        code, out = self.guard(1, None, "t_abort")
+        self.assertEqual(code, 1, out[-800:])
+        self.assertEqual(_git(self.crate, "status", "--porcelain"), "")
 
 
 if __name__ == "__main__":
