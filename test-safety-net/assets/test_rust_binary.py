@@ -16,6 +16,14 @@ Mutation coverage: making `refusal` ignore `crate_symbols` is killed by
 `test_a_stripped_dynamic_binary_is_refused` (ELF) and
 `test_a_stripped_dynamic_binary_is_refused` (Mach-O) below, and by
 `TestRealBinaries.test_a_stripped_copy_is_refused_as_stripped`.
+
+Ruling R26 (rustc 1.98 mangles v0 by default, std and libtest included):
+* counting legacy symbols alone ->
+  `TestV0Binaries.test_an_elf_with_only_v0_crate_symbols_is_not_refused` (and
+  the Mach-O twin), and on a 1.98 toolchain
+  `TestRealBinaries.test_a_freshly_built_test_binary_is_not_refused`;
+* measuring a back-reference from the symbol's first byte ->
+  `TestV0Parser.test_a_back_reference_resolves_from_just_after_the_prefix`.
 """
 from __future__ import annotations
 
@@ -260,6 +268,233 @@ class TestMangledCrate(unittest.TestCase):
     def test_macho_strips_the_extra_leading_underscore(self):
         self.assertEqual(rust_binary._macho_crate("_" + CRATE_SYMBOL), "calcx")
         self.assertIsNone(rust_binary._macho_crate(CRATE_SYMBOL))   # only one underscore
+
+
+# ── v0 mangling (ruling R26: rustc 1.98's default) ───────────────────────
+#
+# Real rustc 1.98 symbols (darwin `nm`, the Mach-O underscore dropped), each
+# crate's disambiguator replaced by a readable one of the SAME length -- 11
+# base-62 characters, as rustc's are -- so every back-reference `B<n>_`,
+# an offset measured from just after `_R`, still lands where rustc put it.
+# A disambiguator is a u64: the leading `0` keeps each readable one inside
+# it, as a real one is (`stdxxxxxxxx` would overflow and rightly not parse).
+_V0_DIS = {name: "Cs" + ("0" + name + "x" * 11)[:11] + "_"
+           for name in ("std", "core", "alloc", "test", "p", "calcx")}
+
+
+def v0(template):
+    return template.format(**_V0_DIS)
+
+
+V0 = {
+    # plain paths; the instantiating-crate suffix (`B3_`, `{p}1p`) never decides
+    "crate_fn": v0("_RNv{p}1p20tsn_control_temp_dir"),
+    "calcx_fn": v0("_RNv{calcx}5calcx4pure"),
+    "std_fn": v0("_RNvNt{std}3std2io5stdin"),
+    "closure": v0("_RNCNv{p}1p8t_thread0B3_"),
+    "vendor_suffix": v0("_RNvNtNt{std}3std2io5stdio19OUTPUT_CAPTURE_USED.0"),
+    # impls: the SELF TYPE decides (R14), reached here through a back-reference
+    "inherent_backref": v0("_RNvMs1_{p}1pNtB5_3Dsp3inh"),
+    "trait_impl_backref": v0("_RNvXs3_{p}1pNtB5_13TsnControlEnv"
+                             "NtNtNt{core}4core3ops4drop4Drop4drop"),
+    "blanket_dsp": v0("_RNCNvXs2_{p}1pNtB7_3DspNtB7_7Blanket1b0B7_"),
+    # R18: a primitive or the placeholder names no crate
+    "blanket_u8": v0("_RNCNvXs2_{p}1phNtB7_7Blanket1b0B7_"),
+    "blanket_slice": v0("_RNCNvXs2_{p}1pRShNtB7_7Blanket1b0B7_"),
+    "blanket_placeholder": v0("_RNvX{p}1ppNtB2_7Blanket1b"),
+    # provided trait methods (`Y`): the self type, else the trait
+    "provided_std": v0("_RINvYNtNtNt{std}3std4hash6random11RandomState"
+                       "NtNt{core}4core4hash11BuildHasher8hash_oneRlE{p}1p"),
+    "provided_crate_self": v0("_RNvYNt{p}1p2PdNtNt{core}4core3fmt5Write9write_fmt"),
+    "provided_crate_trait": v0("_RNvYhNt{p}1p2Ob1o"),
+    # libtest's body-side boundaries (R13, R17a) and std's look-alike
+    "begin_short_backtrace": v0("_RINv{test}4test28___rust_begin_short_backtrace"
+                                "INtNt{core}4core6result6ResultuNtNt{alloc}5alloc6string"
+                                "6StringEFEBQ_EB2_"),
+    "assert_test_result": v0("_RINv{test}4test18assert_test_resultNt{p}1p3RepEBH_"),
+    "std_begin_short_backtrace": v0("_RINvNtNt{std}3std3sys9backtrace"
+                                    "28___rust_begin_short_backtraceFEuuE{p}1p"),
+    "libtest_fn": v0("_RNv{test}4test16test_main_static"),
+    # drop glue (R17b): the first non-transparent crate anywhere in T
+    "drop_vec": v0("_RINvNt{core}4core3ptr9drop_glueINtNtB4_6option6OptionINtNt{alloc}5alloc3vec"
+                   "3VecNt{p}1p2PdEEEB1w_"),
+    "drop_tuple": v0("_RINvNt{core}4core3ptr9drop_glueINtNtB4_6option6OptionTmNt{p}1p2PdEEEB11_"),
+    "drop_array": v0("_RINvNt{core}4core3ptr9drop_glueANt{p}1p2Pdj1_EBE_"),
+    "drop_dyn": v0("_RINvNt{core}4core3ptr9drop_glueINtNtB4_6option6OptionINtNt{alloc}5alloc5boxed"
+                   "3BoxDNt{p}1p2ObEL_EEEB1z_"),
+    "drop_std": v0("_RINvNt{core}4core3ptr9drop_glueINtNtB4_6option6OptionINtNtNt{std}3std6thread"
+                   "11join_handle10JoinHandleuEEE{test}4test"),
+    "drop_std_linux": v0("_RINvNt{core}4core3ptr9drop_glueINtNt{alloc}5alloc3vec3VecNtNtNtNt{std}"
+                         "3std4sync4mpmc5waker5EntryEE{test}4test"),
+    "drop_runner_type": v0("_RINvNt{core}4core3ptr9drop_glueINtNtB4_6result6ResultNtNt{test}4test"
+                           "5event13CompletedTestNtNtNt{std}3std4sync4mpsc16RecvTimeoutErrorEEB11_"),
+    "drop_control": v0("_RINvNt{core}4core3ptr9drop_glueNt{p}1p13TsnControlEnvEBD_"),
+    # Rc/Arc's deferred drop (R17b extended)
+    "drop_slow_std": v0("_RNvMsn_Nt{alloc}5alloc4syncINtB5_3ArcINtNtNt{std}3std6thread9lifecycle"
+                        "6PacketuEE9drop_slow{test}4test"),
+    "drop_slow_crate": v0("_RNvMs6_Nt{alloc}5alloc2rcINtB5_2RcNt{p}1p2PdE9drop_slowBF_"),
+    # std seeding its HashMap
+    "seed": v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys"),
+}
+
+
+def _nest(depth):
+    """drop glue of `depth` nested 1-tuples around a crate type: `((((p::Pd,),),),)`."""
+    return v0("_RINvNt{core}4core3ptr9drop_glue" + "T" * depth + "Nt{p}1p2Pd" + "E" * depth + "E")
+
+
+# Malformed or not v0 at all: each must parse to None, never raise.
+V0_MALFORMED = {
+    "empty": "",
+    "prefix_only": "_R",
+    "macho_prefix_only": "__R",
+    "cut_path": "_RNv",
+    "length_overrun": v0("_RNv{p}1p99f"),
+    "forward_backref": v0("_RNvB9_1f"),
+    "self_backref": v0("_RNvB1_1f"),
+    "bad_namespace": v0("_RN1{p}1p1f"),
+    "trailing_junk": v0("_RNv{p}1p1f!!"),
+    "unknown_type": v0("_RINvNt{core}4core3ptr9drop_glueqE"),
+    "too_deep": _nest(80),
+    "legacy": CRATE_SYMBOL,
+    "cxx": "_ZN3foo3barEv",
+}
+_TRANSPARENT = frozenset({"std", "core", "alloc", "test"})
+
+
+class TestV0Parser(unittest.TestCase):
+    """`v0_facts` / `v0_demangle`: the v0 grammar, from the official spec."""
+
+    def facts(self, name, skip=_TRANSPARENT):
+        f = rust_binary.v0_facts(V0[name], skip)
+        self.assertIsNotNone(f, name)
+        return f
+
+    def test_the_crate_root_is_read_through_the_path(self):
+        for name, crate in (("crate_fn", "p"), ("calcx_fn", "calcx"), ("std_fn", "std"),
+                            ("closure", "p"), ("vendor_suffix", "std"), ("libtest_fn", "test"),
+                            ("seed", "std")):
+            with self.subTest(sym=name):
+                self.assertEqual(self.facts(name).krate, crate)
+
+    def test_a_back_reference_resolves_from_just_after_the_prefix(self):
+        # MUTATION: measuring `B<n>_` from the symbol's first byte (`_R`
+        # included) misreads all three and is killed here.
+        for name in ("inherent_backref", "trait_impl_backref", "blanket_dsp"):
+            with self.subTest(sym=name):
+                self.assertEqual(self.facts(name).krate, "p")
+        self.assertEqual(rust_binary.v0_demangle(V0["inherent_backref"]), "<p::Dsp>::inh")
+
+    def test_an_impl_is_decided_by_its_self_type_not_the_trait_or_the_impl_path(self):
+        self.assertEqual(self.facts("trait_impl_backref").krate, "p")
+        self.assertEqual(self.facts("drop_slow_crate").krate, "p")        # Rc<p::Pd>
+        self.assertEqual(self.facts("drop_slow_std").krate, "")           # Arc<std Packet<()>>
+
+    def test_a_primitive_or_the_placeholder_names_no_crate(self):
+        # R18: `<u8 as p::Blanket>` is not crate p's, though the impl lives in p.
+        for name in ("blanket_u8", "blanket_slice", "blanket_placeholder"):
+            with self.subTest(sym=name):
+                self.assertEqual(self.facts(name).krate, "")
+
+    def test_a_provided_method_is_its_self_types_else_its_traits(self):
+        self.assertEqual(self.facts("provided_std").krate, "core")
+        self.assertEqual(self.facts("provided_crate_self").krate, "p")
+        self.assertEqual(self.facts("provided_crate_trait").krate, "p")
+
+    def test_drop_glue_is_searched_through_every_generic(self):
+        for name in ("drop_vec", "drop_tuple", "drop_array", "drop_dyn", "drop_control"):
+            with self.subTest(sym=name):
+                f = self.facts(name)
+                self.assertEqual((f.krate, f.drop_crate), ("core", "p"))
+        for name in ("drop_std", "drop_std_linux", "drop_runner_type"):
+            with self.subTest(sym=name):
+                self.assertIsNone(self.facts(name).drop_crate)
+
+    def test_identifiers_are_decoded_past_their_length_and_separator(self):
+        f = self.facts("begin_short_backtrace")
+        self.assertEqual(f.krate, "test")
+        self.assertIn("__rust_begin_short_backtrace", f.main_idents)
+        self.assertIn("drop_slow", self.facts("drop_slow_std").main_idents)
+        self.assertIn("TsnControlEnv", self.facts("drop_control").idents)
+        self.assertIn("hashmap_random_keys", self.facts("seed").idents)
+        # a generic argument's identifiers are not the main path's
+        self.assertNotIn("Rep", self.facts("assert_test_result").main_idents)
+
+    def test_the_macho_spelling_reads_the_same(self):
+        for name, sym in V0.items():
+            with self.subTest(sym=name):
+                self.assertEqual(rust_binary.v0_facts("_" + sym, _TRANSPARENT),
+                                 rust_binary.v0_facts(sym, _TRANSPARENT))
+
+    def test_malformed_and_truncated_symbols_are_none_and_never_raise(self):
+        for name, sym in V0_MALFORMED.items():
+            with self.subTest(sym=name):
+                self.assertIsNone(rust_binary.v0_facts(sym, _TRANSPARENT))
+                self.assertIsNone(rust_binary.v0_demangle(sym))
+        for name, sym in V0.items():
+            for cut in range(len(sym)):
+                rust_binary.v0_facts(sym[:cut], _TRANSPARENT)       # must not raise
+                rust_binary.v0_demangle(sym[:cut])
+
+    def test_nesting_inside_the_depth_cap_reads_and_past_it_is_none(self):
+        self.assertEqual(rust_binary.v0_facts(_nest(30), _TRANSPARENT).drop_crate, "p")
+        self.assertIsNone(rust_binary.v0_facts(_nest(80), _TRANSPARENT))
+
+    def test_demangle(self):
+        for name, want in (
+                ("crate_fn", "p::tsn_control_temp_dir"),
+                ("closure", "p::t_thread::{closure#0}"),
+                ("trait_impl_backref", "<p::TsnControlEnv as core::ops::drop::Drop>::drop"),
+                ("blanket_u8", "<u8 as p::Blanket>::b::{closure#0}"),
+                ("drop_vec", "core::ptr::drop_glue<core::option::Option<alloc::vec::Vec<p::Pd>>>"),
+                ("drop_tuple", "core::ptr::drop_glue<core::option::Option<(u32, p::Pd)>>"),
+                ("drop_array", "core::ptr::drop_glue<[p::Pd; 1]>"),
+                ("drop_dyn", "core::ptr::drop_glue<core::option::Option<alloc::boxed::Box<dyn "
+                             "p::Ob>>>"),
+                ("drop_slow_crate", "<alloc::rc::Rc<p::Pd>>::drop_slow"),
+                ("vendor_suffix", "std::io::stdio::OUTPUT_CAPTURE_USED")):
+            with self.subTest(sym=name):
+                self.assertEqual(rust_binary.v0_demangle(V0[name]), want)
+                self.assertEqual(rust_binary.v0_demangle("_" + V0[name]), want)
+
+
+class TestV0Binaries(BinaryCase):
+    """R26: a 1.98 test binary carries only v0 symbols; it must still count."""
+
+    CRATE = [V0["crate_fn"], V0["inherent_backref"], V0["closure"]]
+    STD = [V0["std_fn"], V0["seed"], V0["libtest_fn"], V0["drop_std"], V0["vendor_suffix"],
+           V0["blanket_u8"]]
+
+    def test_an_elf_with_only_v0_crate_symbols_is_not_refused(self):
+        # MUTATION: counting legacy symbols alone reads this 0 ("stripped").
+        facts = self.facts(elf(interp="/lib64/ld-linux-aarch64.so.1", symbols=self.CRATE + self.STD))
+        self.assertEqual(facts.crate_symbols, 3)
+        self.assertIsNone(rust_binary.refusal(facts))
+
+    def test_an_elf_with_only_v0_std_symbols_is_stripped(self):
+        facts = self.facts(elf(interp="/lib64/ld-linux-aarch64.so.1", symbols=self.STD))
+        self.assertEqual(facts.crate_symbols, 0)
+        self.assertEqual(rust_binary.refusal(facts),
+                         "stripped: no crate symbols, so no call can be attributed")
+
+    def test_a_macho_with_only_v0_crate_symbols_is_not_refused(self):
+        facts = self.facts(macho(symbols=["_" + s for s in self.CRATE + self.STD]))
+        self.assertEqual(facts.crate_symbols, 3)
+        self.assertIsNone(rust_binary.refusal(facts))
+
+    def test_a_macho_with_only_v0_std_symbols_is_stripped(self):
+        facts = self.facts(macho(symbols=["_" + s for s in self.STD]))
+        self.assertEqual(facts.crate_symbols, 0)
+        self.assertEqual(rust_binary.refusal(facts),
+                         "stripped: no crate symbols, so no call can be attributed")
+
+    def test_symbol_names_lists_the_table_and_never_raises(self):
+        syms = [CRATE_SYMBOL, V0["crate_fn"]]
+        self.assertEqual(rust_binary.symbol_names(self.write(elf(interp="/x", symbols=syms))),
+                         syms)
+        self.assertEqual(rust_binary.symbol_names(self.write(macho(symbols=syms))), syms)
+        self.assertEqual(rust_binary.symbol_names(self.write(b"\x7fELF")), [])
+        self.assertEqual(rust_binary.symbol_names(os.path.join(self.root, "absent")), [])
 
 
 # ── Real binaries: cargo, then strip ─────────────────────────────────────

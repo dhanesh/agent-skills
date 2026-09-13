@@ -186,6 +186,14 @@ fn out(b: &[u8]) {
     unsafe { write(2, b.as_ptr() as *const c_void, b.len()) };
 }
 
+// @@TSN-CLASSIFY-BEGIN@@
+// The frame classifier: pure functions of a symbol name and the rendered
+// tables -- no libc, no TLS, no allocation, no fmt, no panics. The test
+// suite compiles this region ALONE (test_io_guard_rust.TestClassifier) and
+// feeds it real symbol names, so every rule below is proven on any
+// toolchain. A frame's symbol is decided PER SYMBOL (ruling R26): v0
+// (`_R…`, Mach-O `__R…`) by `mod v0`, anything else by the legacy rules.
+
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -254,13 +262,28 @@ fn seg_crate(seg: &[u8]) -> &[u8] {
     first_crate(&inner[..end]).unwrap_or(&[])
 }
 
-/// The deciding crate of a legacy-mangled Rust symbol, or `None` when `s` is
-/// not one (no `17h<16 hex>E` hash: a C or C++ symbol). A
-/// `core::ptr::drop_in_place<T>` frame is decided by the first non-transparent
-/// crate anywhere in T (ruling R17b amended): libtest dropping a crate's
-/// panic payload -- plain or wrapped in a std container -- runs that crate's
-/// Drop.
+/// The bytes after a v0 symbol's `_R` (Mach-O: `__R`), or `None` when `s` is
+/// not spelled as one.
+fn v0_body(s: &[u8]) -> Option<&[u8]> {
+    if s.starts_with(b"__R") {
+        Some(&s[3..])
+    } else if s.starts_with(b"_R") {
+        Some(&s[2..])
+    } else {
+        None
+    }
+}
+
+/// The deciding crate of a Rust symbol, or `None` when `s` is not one this
+/// hook can read. v0: `mod v0`. Legacy: `None` without the `17h<16 hex>E`
+/// hash (a C or C++ symbol). A `core::ptr::drop_in_place<T>` frame is decided
+/// by the first non-transparent crate anywhere in T (ruling R17b amended):
+/// libtest dropping a crate's panic payload -- plain or wrapped in a std
+/// container -- runs that crate's Drop.
 fn crate_of(s: &[u8]) -> Option<&[u8]> {
+    if let Some(body) = v0_body(s) {
+        return v0::facts(body).map(|f| f.deciding());
+    }
     let n = s.len();
     if n < 20 || s[n - 1] != b'E' || &s[n - 20..n - 17] != b"17h" {
         return None;
@@ -310,11 +333,22 @@ fn crate_of(s: &[u8]) -> Option<&[u8]> {
 }
 
 // 0 transparent, 1 crate code, 2 libtest runner, 3 std seeding its HashMap.
+// A v0 symbol that cannot be read is transparent, never exempt.
 fn classify(s: &[u8]) -> u8 {
-    if SEED.iter().any(|m| contains(s, m)) {
-        return 3;
-    }
-    match crate_of(s) {
+    let krate = match v0_body(s) {
+        Some(body) => match v0::facts(body) {
+            None => return 0,
+            Some(f) if f.seed => return 3,
+            Some(f) => Some(f.deciding()),
+        },
+        None => {
+            if SEED.iter().any(|m| contains(s, m)) {
+                return 3;
+            }
+            crate_of(s)
+        }
+    };
+    match krate {
         None => 0,
         Some(k) if transparent(k) => 0,
         Some(k) if RUNNER.iter().any(|t| *t == k) => 2,
@@ -324,8 +358,15 @@ fn classify(s: &[u8]) -> u8 {
 
 /// A body-side boundary (rulings R13, R17a): a TEST_BODY_BOUNDARY frame in
 /// libtest's own `test` crate. std's `__rust_begin_short_backtrace` (thread
-/// spawn, lang_start) is not one.
+/// spawn, lang_start) is not one. v0: a DECODED identifier of the main path
+/// (`28___rust_begin_short_backtrace` is `__rust_begin_short_backtrace`).
 fn test_boundary(s: &[u8]) -> bool {
+    if let Some(body) = v0_body(s) {
+        return match v0::facts(body) {
+            Some(f) => runner(f.deciding()) && f.boundary,
+            None => false,
+        };
+    }
     match crate_of(s) {
         Some(k) if RUNNER.iter().any(|t| *t == k) => TEST_BODY_BOUNDARY.iter().any(|m| contains(s, m)),
         _ => false,
@@ -365,8 +406,567 @@ fn names(s: &[u8], name: &[u8]) -> bool {
 }
 
 fn control(s: &[u8]) -> Option<&'static [u8]> {
+    if let Some(body) = v0_body(s) {
+        return v0::facts(body).and_then(|f| CONTROL.get(f.control)).map(|&(_, group)| group);
+    }
     CONTROL.iter().find(|(name, _)| names(s, name)).map(|&(_, group)| group)
 }
+
+// ── v0 symbol mangling (ruling R26) ──────────────────────────────────────
+//
+// rustc 1.98 mangles with v0 by default, and std, core, alloc and libtest
+// ship precompiled with it, so on 1.98 every frame is v0; on older
+// toolchains every frame is legacy unless the crate opted in. Grammar: the
+// official "Symbol grammar summary" of
+// https://doc.rust-lang.org/rustc/symbol-mangling/v0.html, plus what
+// rustc-demangle (the reference parser) also accepts: a type's `w` prefix,
+// `W <type> <pattern>`, and the extended `const` forms. Back-references
+// `B <base-62>` are offsets "starting from just after the `_R` prefix"
+// (spec, "Backref"); only an EARLIER position is followed.
+//
+// Every classification rule the legacy reader applies holds here:
+//   * a path's crate is its root `C [s<base-62>_] <len> [_] <ident>`;
+//   * an impl (`M <impl-path> <type>`, `X <impl-path> <type> <trait>`) is
+//     decided by its SELF TYPE (R14): the first crate in it that is neither
+//     transparent nor the runner, or none (R18: a primitive such as `h`
+//     (u8), the placeholder `p`, a std type); never the impl's own path and
+//     never the trait. A provided method (`Y <type> <trait>`) is its self
+//     type's, else its trait's -- the legacy name of the item is the trait's;
+//   * `core::ptr::drop_glue<T>` / `drop_in_place<T>` is decided by the first
+//     crate anywhere in T -- generics, tuples, arrays, slices, `dyn` (R17b);
+//   * a main-path identifier containing `drop_slow` is Rc/Arc's deferred
+//     drop, a boundary (R17b extended); a TEST_BODY_BOUNDARY one, in the
+//     `test` crate, is libtest's call into the test (R13, R17a);
+//   * SEED and CONTROL match DECODED identifiers anywhere in the symbol.
+// The instantiating-crate suffix never decides. Malformed, truncated, or
+// nested past MAX_DEPTH (or MAX_STEPS nodes): `None`, read as transparent.
+// rust_binary.py's `v0_facts` is the independent Python twin of this reader.
+mod v0 {
+    use super::{contains, runner, transparent, CONTROL, SEED, TEST_BODY_BOUNDARY};
+
+    /// Recursion past this reads the symbol transparent: a fixed, small stack.
+    /// `N` chains are read iteratively; only generics and types nest.
+    const MAX_DEPTH: u32 = 64;
+    /// Nodes parsed, back-references re-read included: past it, transparent.
+    const MAX_STEPS: u32 = 10_000;
+
+    pub struct Facts<'a> {
+        /// The main path's deciding crate; empty when it names none.
+        pub krate: &'a [u8],
+        pub boundary: bool,
+        pub drop_slow: bool,
+        pub drop_crate: Option<&'a [u8]>,
+        /// Index of the first-listed CONTROL helper named anywhere, else usize::MAX.
+        pub control: usize,
+        pub seed: bool,
+    }
+
+    impl<'a> Facts<'a> {
+        /// The crate the frame is judged by, the drop rules applied (R17b).
+        pub fn deciding(&self) -> &'a [u8] {
+            let mut k = self.krate;
+            if transparent(k) {
+                if let Some(d) = self.drop_crate {
+                    k = d;
+                }
+                if transparent(k) && self.drop_slow {
+                    k = b"drop_slow";
+                }
+            }
+            k
+        }
+    }
+
+    struct P<'a> {
+        s: &'a [u8],
+        pos: usize,
+        depth: u32,
+        steps: u32,
+        search: bool,
+        found: Option<&'a [u8]>,
+        last: &'a [u8],
+        boundary: bool,
+        drop_slow: bool,
+        drop_crate: Option<&'a [u8]>,
+        control: usize,
+        seed: bool,
+    }
+
+    /// The facts of the v0 symbol whose bytes after `_R` are `body`, or `None`.
+    pub fn facts(body: &[u8]) -> Option<Facts<'_>> {
+        let mut p = P {
+            s: body,
+            pos: 0,
+            depth: 0,
+            steps: 0,
+            search: false,
+            found: None,
+            last: &[],
+            boundary: false,
+            drop_slow: false,
+            drop_crate: None,
+            control: usize::MAX,
+            seed: false,
+        };
+        if p.peek()?.is_ascii_digit() {
+            p.decimal()?; // the encoding version: never emitted today
+        }
+        let krate = p.path_main()?;
+        match p.peek() {
+            None | Some(b'.') | Some(b'$') => {}
+            Some(_) => {
+                p.path_any()?; // the instantiating crate
+                if !matches!(p.peek(), None | Some(b'.') | Some(b'$')) {
+                    return None;
+                }
+            }
+        }
+        Some(Facts {
+            krate,
+            boundary: p.boundary,
+            drop_slow: p.drop_slow,
+            drop_crate: p.drop_crate,
+            control: p.control,
+            seed: p.seed,
+        })
+    }
+
+    impl<'a> P<'a> {
+        fn peek(&self) -> Option<u8> {
+            self.s.get(self.pos).copied()
+        }
+
+        fn next(&mut self) -> Option<u8> {
+            let c = self.peek()?;
+            self.pos += 1;
+            Some(c)
+        }
+
+        fn eat(&mut self, c: u8) -> bool {
+            if self.peek() == Some(c) {
+                self.pos += 1;
+                true
+            } else {
+                false
+            }
+        }
+
+        fn enter(&mut self) -> Option<()> {
+            self.depth += 1;
+            self.steps += 1;
+            if self.depth > MAX_DEPTH || self.steps > MAX_STEPS {
+                None
+            } else {
+                Some(())
+            }
+        }
+
+        fn leave(&mut self) {
+            self.depth = self.depth.saturating_sub(1);
+        }
+
+        /// `decimal-number`: `0`, or a non-zero digit and any digits.
+        fn decimal(&mut self) -> Option<u64> {
+            let c = self.next()?;
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            let mut v = (c - b'0') as u64;
+            if v == 0 {
+                return Some(0);
+            }
+            while let Some(d) = self.peek() {
+                if !d.is_ascii_digit() {
+                    break;
+                }
+                self.pos += 1;
+                v = v.checked_mul(10)?.checked_add((d - b'0') as u64)?;
+            }
+            Some(v)
+        }
+
+        /// `base-62-number`: `_` is 0, else digits then `_`, plus one.
+        fn base62(&mut self) -> Option<u64> {
+            if self.eat(b'_') {
+                return Some(0);
+            }
+            let mut v: u64 = 0;
+            loop {
+                let c = self.next()?;
+                let d = match c {
+                    b'0'..=b'9' => c - b'0',
+                    b'a'..=b'z' => c - b'a' + 10,
+                    b'A'..=b'Z' => c - b'A' + 36,
+                    b'_' => return v.checked_add(1),
+                    _ => return None,
+                };
+                v = v.checked_mul(62)?.checked_add(d as u64)?;
+            }
+        }
+
+        /// `undisambiguated-identifier`: [`u`] <len> [`_`] <bytes>. The `_`
+        /// separates a length from bytes that begin with a digit or `_`
+        /// (spec, "Identifier"). Every identifier is checked against the
+        /// CONTROL and SEED tables here, wherever it sits.
+        fn undis(&mut self) -> Option<&'a [u8]> {
+            self.eat(b'u');
+            let n = usize::try_from(self.decimal()?).ok()?;
+            self.eat(b'_');
+            let s = self.s;
+            let id = s.get(self.pos..self.pos.checked_add(n)?)?;
+            self.pos += n;
+            if let Some(i) = CONTROL.iter().position(|&(name, _)| name == id) {
+                if i < self.control {
+                    self.control = i;
+                }
+            }
+            if SEED.iter().any(|m| contains(id, m)) {
+                self.seed = true;
+            }
+            Some(id)
+        }
+
+        /// `identifier`: an optional `s<base-62>` disambiguator, then the name.
+        fn ident(&mut self) -> Option<&'a [u8]> {
+            if self.eat(b's') {
+                self.base62()?;
+            }
+            self.undis()
+        }
+
+        /// After a consumed `B`: (target, resume). The target must lie
+        /// strictly before the `B`, so every walk terminates.
+        fn backref(&mut self) -> Option<(usize, usize)> {
+            let at = self.pos.checked_sub(1)?;
+            let t = usize::try_from(self.base62()?).ok()?;
+            if t >= at {
+                return None;
+            }
+            Some((t, self.pos))
+        }
+
+        /// A run of `N<namespace>`: the identifiers that follow the inner path.
+        fn nest(&mut self) -> Option<usize> {
+            let mut k = 0usize;
+            while self.peek() == Some(b'N') {
+                self.pos += 1;
+                if !self.next()?.is_ascii_alphabetic() {
+                    return None;
+                }
+                k += 1;
+            }
+            Some(k)
+        }
+
+        /// One type (or generic argument) with the crate search on: the first
+        /// crate root in it that is neither transparent nor the runner.
+        fn searching(&mut self, arg: bool) -> Option<Option<&'a [u8]>> {
+            let (search, found) = (self.search, self.found);
+            self.search = true;
+            self.found = None;
+            let ok = if arg { self.generic_arg() } else { self.type_any() };
+            let hit = self.found;
+            self.search = search;
+            self.found = found;
+            ok?;
+            Some(hit)
+        }
+
+        /// The MAIN path: returns its deciding crate, and notes its own
+        /// identifiers (boundary, drop_slow) and drop glue's payload crate.
+        fn path_main(&mut self) -> Option<&'a [u8]> {
+            self.enter()?;
+            let nest = self.nest()?;
+            let krate: &'a [u8] = match self.next()? {
+                b'C' => {
+                    let id = self.ident()?;
+                    self.last = &[];
+                    id
+                }
+                b'M' => {
+                    self.impl_path()?;
+                    self.last = &[];
+                    self.searching(false)?.unwrap_or(&[])
+                }
+                b'X' => {
+                    self.impl_path()?;
+                    let own = self.searching(false)?.unwrap_or(&[]);
+                    self.path_any()?;
+                    self.last = &[];
+                    own
+                }
+                b'Y' => {
+                    let own = self.searching(false)?.unwrap_or(&[]);
+                    let trait_crate = self.path_main()?;
+                    if own.is_empty() {
+                        trait_crate
+                    } else {
+                        own
+                    }
+                }
+                b'I' => {
+                    let krate = self.path_main()?;
+                    let drop = self.last == &b"drop_glue"[..] || self.last == &b"drop_in_place"[..];
+                    while !self.eat(b'E') {
+                        if drop {
+                            let hit = self.searching(true)?;
+                            if self.drop_crate.is_none() {
+                                self.drop_crate = hit;
+                            }
+                        } else {
+                            self.generic_arg()?;
+                        }
+                    }
+                    krate
+                }
+                b'B' => {
+                    let (t, back) = self.backref()?;
+                    self.pos = t;
+                    let krate = self.path_main()?;
+                    self.pos = back;
+                    krate
+                }
+                _ => return None,
+            };
+            for _ in 0..nest {
+                let id = self.ident()?;
+                if TEST_BODY_BOUNDARY.iter().any(|m| contains(id, m)) {
+                    self.boundary = true;
+                }
+                if contains(id, b"drop_slow") {
+                    self.drop_slow = true;
+                }
+                self.last = id;
+            }
+            self.leave();
+            Some(krate)
+        }
+
+        /// Any other path: read through; in search mode its crate roots count.
+        fn path_any(&mut self) -> Option<()> {
+            self.enter()?;
+            let nest = self.nest()?;
+            match self.next()? {
+                b'C' => {
+                    let id = self.ident()?;
+                    if self.search && self.found.is_none() && !transparent(id) && !runner(id) {
+                        self.found = Some(id);
+                    }
+                }
+                b'M' => {
+                    self.impl_path()?;
+                    self.type_any()?;
+                }
+                b'X' => {
+                    self.impl_path()?;
+                    self.type_any()?;
+                    self.path_any()?;
+                }
+                b'Y' => {
+                    self.type_any()?;
+                    self.path_any()?;
+                }
+                b'I' => {
+                    self.path_any()?;
+                    while !self.eat(b'E') {
+                        self.generic_arg()?;
+                    }
+                }
+                b'B' => {
+                    let (t, back) = self.backref()?;
+                    self.pos = t;
+                    self.path_any()?;
+                    self.pos = back;
+                }
+                _ => return None,
+            }
+            for _ in 0..nest {
+                self.ident()?;
+            }
+            self.leave();
+            Some(())
+        }
+
+        fn impl_path(&mut self) -> Option<()> {
+            if self.eat(b's') {
+                self.base62()?;
+            }
+            self.path_any()
+        }
+
+        fn generic_arg(&mut self) -> Option<()> {
+            if self.eat(b'L') {
+                self.base62()?;
+                return Some(());
+            }
+            if self.eat(b'K') {
+                return self.const_any();
+            }
+            self.type_any()
+        }
+
+        fn type_any(&mut self) -> Option<()> {
+            self.eat(b'w');
+            let tag = self.next()?;
+            // basic types (a primitive, or the placeholder `p`) name no crate
+            if matches!(tag, b'a'..=b'f' | b'h'..=b'j' | b'l'..=b'p' | b's'..=b'v' | b'x'..=b'z') {
+                return Some(());
+            }
+            self.enter()?;
+            match tag {
+                b'R' | b'Q' => {
+                    if self.eat(b'L') {
+                        self.base62()?;
+                    }
+                    self.type_any()?;
+                }
+                b'P' | b'O' | b'S' => self.type_any()?,
+                b'A' => {
+                    self.type_any()?;
+                    self.const_any()?;
+                }
+                b'T' => {
+                    while !self.eat(b'E') {
+                        self.type_any()?;
+                    }
+                }
+                b'F' => {
+                    if self.eat(b'G') {
+                        self.base62()?;
+                    }
+                    self.eat(b'U');
+                    if self.eat(b'K') && !self.eat(b'C') {
+                        self.undis()?;
+                    }
+                    while !self.eat(b'E') {
+                        self.type_any()?;
+                    }
+                    self.type_any()?;
+                }
+                b'D' => {
+                    if self.eat(b'G') {
+                        self.base62()?;
+                    }
+                    while !self.eat(b'E') {
+                        self.path_any()?;
+                        while self.eat(b'p') {
+                            self.undis()?;
+                            if self.eat(b'K') {
+                                self.const_any()?;
+                            } else {
+                                self.type_any()?;
+                            }
+                        }
+                    }
+                    if !self.eat(b'L') {
+                        return None;
+                    }
+                    self.base62()?;
+                }
+                b'W' => {
+                    self.type_any()?;
+                    self.pattern()?;
+                }
+                b'B' => {
+                    let (t, back) = self.backref()?;
+                    self.pos = t;
+                    self.type_any()?;
+                    self.pos = back;
+                }
+                b'C' | b'N' | b'M' | b'X' | b'Y' | b'I' => {
+                    self.pos -= 1;
+                    self.path_any()?;
+                }
+                _ => return None,
+            }
+            self.leave();
+            Some(())
+        }
+
+        fn const_any(&mut self) -> Option<()> {
+            let tag = self.next()?;
+            self.enter()?;
+            match tag {
+                b'p' => {}
+                b'h' | b't' | b'm' | b'y' | b'o' | b'j' | b'b' | b'c' | b'e' => self.hex()?,
+                b'a' | b's' | b'l' | b'x' | b'n' | b'i' => {
+                    self.eat(b'n');
+                    self.hex()?;
+                }
+                b'R' | b'Q' => {
+                    if tag == b'R' && self.eat(b'e') {
+                        self.hex()?;
+                    } else {
+                        self.const_any()?;
+                    }
+                }
+                b'A' | b'T' => {
+                    while !self.eat(b'E') {
+                        self.const_any()?;
+                    }
+                }
+                b'V' => {
+                    self.path_any()?;
+                    match self.next()? {
+                        b'U' => {}
+                        b'T' => {
+                            while !self.eat(b'E') {
+                                self.const_any()?;
+                            }
+                        }
+                        b'S' => {
+                            while !self.eat(b'E') {
+                                self.ident()?;
+                                self.const_any()?;
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                b'B' => {
+                    let (t, back) = self.backref()?;
+                    self.pos = t;
+                    self.const_any()?;
+                    self.pos = back;
+                }
+                _ => return None,
+            }
+            self.leave();
+            Some(())
+        }
+
+        fn hex(&mut self) -> Option<()> {
+            loop {
+                match self.next()? {
+                    b'_' => return Some(()),
+                    b'0'..=b'9' | b'a'..=b'f' => {}
+                    _ => return None,
+                }
+            }
+        }
+
+        fn pattern(&mut self) -> Option<()> {
+            match self.next()? {
+                b'R' => {
+                    self.const_any()?;
+                    self.const_any()?;
+                }
+                b'N' => {}
+                b'O' => {
+                    self.enter()?;
+                    self.pattern()?;
+                    while !self.eat(b'E') {
+                        self.pattern()?;
+                    }
+                    self.leave();
+                }
+                _ => return None,
+            }
+            Some(())
+        }
+    }
+}
+// @@TSN-CLASSIFY-END@@
 
 /// Ruling R11: is `fname` (dladdr's `dli_fname`) an image in SYSTEM_INTERNAL,
 /// by basename? Allocator bookkeeping is not I/O a unit chose: macOS 27's

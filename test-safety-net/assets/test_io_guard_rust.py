@@ -55,6 +55,42 @@ Mutation coverage (each killed by the named test):
 * building without `-C force-unwind-tables=yes` on 1.82 (linux) -> the probe
   tests read exit 2 (`tsn-hook: cannot attribute`) instead of their verdicts.
 
+Ruling R26 -- v0 mangling, rustc 1.98's default, decided PER SYMBOL. The
+hook's classifier is compiled alone (`TestClassifier`) and fed real 1.98
+symbol names, so each v0 rule is killed on ANY toolchain; `TestProbeV0Crate`
+reruns every probe case with the crate mangled v0 over a legacy std, and on
+1.98 every probe case is all-v0 already:
+Each was run (2026-09-13); "live" names the probe tests that also kill it on
+a 1.98 toolchain:
+* a back-reference resolved from the wrong base ->
+  `TestClassifier.test_a_crate_reached_through_a_back_reference_is_a_crate`;
+* the v0 boundary identifier never matched ->
+  `TestClassifier.test_the_v0_boundary_is_the_decoded_identifier_in_the_test_crate`;
+  live: `test_a_termination_report_inlined_into_libtest_is_judged` (R17a's
+  `assert_test_result`). R13's `__rust_begin_short_backtrace` is no longer
+  what catches `t_inline_*` under v0: the std generic the body inlined into
+  keeps the test's closure in its self type, and R14 decides there first;
+* an impl read transparent instead of by its self type ->
+  `TestClassifier.test_an_impl_is_judged_by_its_self_type`; live:
+  `test_a_crate_trait_impl_is_judged_by_its_self_type`;
+* drop glue's generics never searched ->
+  `TestClassifier.test_drop_glue_is_decided_by_the_first_crate_anywhere_in_t`;
+  live: `test_a_crate_drop_payload_in_a_std_container_is_judged`,
+  `test_a_panic_payload_dropped_by_libtest_is_judged`,
+  `test_an_all_uppercase_crate_name_is_a_crate`;
+* a primitive or placeholder read as a crate ->
+  `TestClassifier.test_a_primitive_or_placeholder_names_no_crate`; live:
+  `test_a_blanket_impl_over_a_generic_names_no_crate`,
+  `test_a_stack_deeper_than_the_cap_fails_closed`;
+* the hook's and `rust_binary`'s parsers diverging (their depth caps, say) ->
+  `TestClassifier.test_the_hook_and_rust_binary_agree_on_every_fixture_and_prefix`,
+  and on real symbols `..._agree_on_a_real_binary`.
+Ruling R27 -- cargo 1.94+ words a stale lock differently, and its help line
+names `--offline`: matching the offline note first ->
+`TestLockedWording.test_a_stale_lock_is_its_own_refusal_in_every_cargos_wording`
+(and `TestExitContract.test_a_stale_cargo_lock_is_2_and_left_byte_identical`
+on 1.94/1.98).
+
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
 documented command run verbatim, every group, tier 2, the exit contract, the
@@ -110,6 +146,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -130,6 +167,7 @@ def _load(name):
 
 io_guard_rust = _load("io_guard_rust")
 import guard_env                                                    # noqa: E402
+import rust_binary                                                  # noqa: E402
 import stack_rust                                                   # noqa: E402
 
 HOOK_SRC = os.path.join(HERE, "io_guard_rust_hook.rs")
@@ -375,16 +413,98 @@ class TestHookLibrary(unittest.TestCase):
             have = {line.split()[-1] for line in proc.stdout.splitlines()
                     if len(line.split()) >= 3 and line.split()[1] in ("T", "W")}
         else:
-            tool = shutil.which("dyld_info") or shutil.which("xcrun")
-            if not tool:
-                self.skipTest("no dyld_info: the __interpose entries cannot be listed")
-            cmd = [tool, "-fixups", self.lib] if tool.endswith("dyld_info") \
-                else [tool, "dyld_info", "-fixups", self.lib]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            have = {m.group(1) for m in re.finditer(r"__interpose\s+\S+\s+bind\s+\S+?/_(\w+)",
-                                                    proc.stdout)}
+            have = _macho_interpose_binds(self.lib)
+            if have is None:
+                tool = shutil.which("dyld_info") or shutil.which("xcrun")
+                if not tool:
+                    self.skipTest("no dyld_info: the __interpose entries cannot be listed")
+                cmd = [tool, "-fixups", self.lib] if tool.endswith("dyld_info") \
+                    else [tool, "dyld_info", "-fixups", self.lib]
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                have = {m.group(1) for m in re.finditer(
+                    r"__interpose\s+\S+\s+bind\s+\S+?/_(\w+)", proc.stdout)}
         self.assertEqual(want - have, set(), "intercepts missing from the built library")
+
+
+def _leb(data, i, signed=False):
+    value = shift = 0
+    while True:
+        byte = data[i]
+        i += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            if signed and byte & 0x40:
+                value -= 1 << shift
+            return value, i
+
+
+def _macho_interpose_binds(path):
+    """The symbols bound into `__DATA,__interpose` of the Mach-O dylib at
+    `path`, read from its classic bind opcodes -- what dyld itself executes
+    -- or None when it has none to read (chained fixups, threaded binds).
+
+    Not `dyld_info -fixups`: on macOS 27 (the /usr/bin and the Xcode copy
+    alike) it was MEASURED misnaming two slots of a correct hook -- `_execv`
+    shown as `_execve` and `_execvp` as `_exit`, each the next import
+    alphabetically -- while these opcodes, and an `execv`/`execvp` made
+    under the hook, bound and tripped as themselves."""
+    with open(path, "rb") as f:
+        d = f.read()
+    ncmds = struct.unpack_from("<I", d, 16)[0]
+    off, segs, interpose, bind = 32, [], None, None
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", d, off)
+        if cmd == 0x19:                                           # LC_SEGMENT_64
+            segs.append(struct.unpack_from("<Q", d, off + 24)[0])
+            for k in range(struct.unpack_from("<I", d, off + 64)[0]):
+                s = off + 72 + 80 * k                             # section_64
+                if d[s:s + 16].rstrip(b"\0") == b"__interpose":
+                    addr, sz = struct.unpack_from("<QQ", d, s + 32)
+                    interpose = (addr, addr + sz)
+        elif cmd in (0x22, 0x80000022):                           # LC_DYLD_INFO(_ONLY)
+            bind = struct.unpack_from("<II", d, off + 16)         # bind_off, bind_size
+        off += size
+    if interpose is None or not bind or not bind[1]:
+        return None
+    i, end, sym, addr, bound = bind[0], bind[0] + bind[1], None, 0, {}
+    while i < end:
+        op, imm = d[i] & 0xF0, d[i] & 0x0F
+        i += 1
+        if op in (0x00, 0x10, 0x30, 0x50):      # DONE, dylib ordinal/special, type
+            continue
+        if op == 0x20:                          # SET_DYLIB_ORDINAL_ULEB
+            _, i = _leb(d, i)
+        elif op == 0x40:                        # SET_SYMBOL_TRAILING_FLAGS_IMM
+            e = d.index(b"\0", i)
+            sym, i = d[i:e].decode("utf-8", "replace"), e + 1
+        elif op == 0x60:                        # SET_ADDEND_SLEB
+            _, i = _leb(d, i, signed=True)
+        elif op == 0x70:                        # SET_SEGMENT_AND_OFFSET_ULEB
+            o, i = _leb(d, i)
+            if imm >= len(segs):
+                return None
+            addr = segs[imm] + o
+        elif op == 0x80:                        # ADD_ADDR_ULEB
+            o, i = _leb(d, i)
+            addr = (addr + o) % (1 << 64)
+        elif op == 0x90:                        # DO_BIND
+            bound[addr], addr = sym, addr + 8
+        elif op == 0xA0:                        # DO_BIND_ADD_ADDR_ULEB
+            o, i = _leb(d, i)
+            bound[addr], addr = sym, (addr + 8 + o) % (1 << 64)
+        elif op == 0xB0:                        # DO_BIND_ADD_ADDR_IMM_SCALED
+            bound[addr], addr = sym, addr + 8 + imm * 8
+        elif op == 0xC0:                        # DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+            count, i = _leb(d, i)
+            skip, i = _leb(d, i)
+            for _ in range(count):
+                bound[addr], addr = sym, addr + 8 + skip
+        else:                                   # threaded binds and anything newer
+            return None
+    return {s[1:] for a, s in bound.items()
+            if interpose[0] <= a < interpose[1] and s and s.startswith("_")}
 
 
 # ── cargo: the probe crate under the preload ─────────────────────────────
@@ -667,13 +787,17 @@ def write_probe_crate(root):
     return crate
 
 
-def build_probe(root, target_dir, crate=None, opt=False, test="p"):
+def build_probe(root, target_dir, crate=None, opt=False, test="p", rustflags=None):
     """Build the probe's `test` target; return (crate, exe). `opt` builds the
-    test profile at opt-level 1 -- the optimized-build hole (ruling R13)."""
+    test profile at opt-level 1 -- the optimized-build hole (ruling R13).
+    `rustflags` is the FIXTURE's only (the wrapper never sets RUSTFLAGS)."""
     crate = crate or write_probe_crate(root)
     env = dict(os.environ, CARGO_TARGET_DIR=target_dir, RUSTUP_AUTO_INSTALL="0")
     if opt:
         env["CARGO_PROFILE_TEST_OPT_LEVEL"] = "1"
+    if rustflags:
+        env["RUSTFLAGS"] = rustflags
+        env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     proc = subprocess.run(["cargo", "test", "--offline", "--no-run", "--message-format=json",
                            "--test", test], cwd=crate, env=env, capture_output=True, text=True,
                           timeout=600)
@@ -693,6 +817,10 @@ def build_probe(root, target_dir, crate=None, opt=False, test="p"):
 class ProbeCase(unittest.TestCase):
     """Builds the probe and the hook once per class; `run` executes one test."""
 
+    # The probe's own RUSTFLAGS (a subclass reruns every case with its crate
+    # mangled another way); None builds exactly as a user's `cargo test` does.
+    RUSTFLAGS = None
+
     @classmethod
     def setUpClass(cls):
         if not CARGO or not RUSTC:
@@ -702,19 +830,26 @@ class ProbeCase(unittest.TestCase):
             raise unittest.SkipTest("the hook is built for darwin and linux only")
         cls.tmp = tempfile.mkdtemp(prefix="tsn-rust-probe-")
         cls.crate = write_probe_crate(cls.tmp)
-        _, cls.exe = build_probe(cls.tmp, os.path.join(cls.tmp, "target"), crate=cls.crate)
+        flags = cls.RUSTFLAGS
+        _, cls.exe = build_probe(cls.tmp, os.path.join(cls.tmp, "target"), crate=cls.crate,
+                                 rustflags=flags)
+        cls.check_build()
         # The SAME sources at opt-level 1, where the test body inlines away
         # (ruling R13). A separate target dir so the two builds never collide.
         _, cls.exe_opt = build_probe(cls.tmp, os.path.join(cls.tmp, "target-opt"),
-                                     crate=cls.crate, opt=True)
+                                     crate=cls.crate, opt=True, rustflags=flags)
         # The all-uppercase-crate target (`tests/ABC.rs` -> crate `ABC`),
         # optimized so the payload Drop inlines into libtest's drop path.
         _, cls.exe_upper = build_probe(cls.tmp, os.path.join(cls.tmp, "target-opt"),
-                                       crate=cls.crate, opt=True, test="ABC")
+                                       crate=cls.crate, opt=True, test="ABC", rustflags=flags)
         env = dict(os.environ, TEST_SAFETY_NET_CACHE=os.path.join(cls.tmp, "cache"))
         cls.hook = io_guard_rust.hook_library(cls.crate, env)
         cls.scratch = os.path.join(cls.tmp, "scratch")
         os.makedirs(cls.scratch)
+
+    @classmethod
+    def check_build(cls):
+        """A subclass's chance to refuse the build it got (skip, never fail)."""
 
     @classmethod
     def tearDownClass(cls):
@@ -809,9 +944,9 @@ class TestProbe(ProbeCase):
         # its caller and the report read at libtest's assert_test_result
         # boundary (R17a), both still exit 3 -- only the label tells.
         m = self.assert_trip("t_display", "filesystem")
-        self.assertIn("p..Dsp", m.group(4), m.group(0))
+        self.assertIn("p::Dsp", io_guard_rust.demangle(m.group(4)), m.group(0))
         m = self.assert_trip("t_termination", "filesystem")
-        self.assertIn("p..Rep", m.group(4), m.group(0))
+        self.assertIn("p::Rep", io_guard_rust.demangle(m.group(4)), m.group(0))
 
     def test_a_thread_local_destructor_doing_io_is_judged(self):
         # Critical 3 / R15b: the dtor runs after std's thread_start returns,
@@ -854,7 +989,13 @@ class TestProbe(ProbeCase):
     def test_an_optimized_build_still_trips_the_body_and_passes_pure(self):
         # Critical 1: at opt-level >=1 the test body inlines into call_once
         # under test::__rust_begin_short_backtrace (the `test` crate, which
-        # classify reads as runner). R13 catches it at the boundary.
+        # classify reads as runner). R13 catches it at the boundary. Under v0
+        # (R26) the std generic the body inlined into keeps its CONCRETE self
+        # type -- `<p::t_inline_env::{closure#0} as FnOnce<()>>::call_once`,
+        # `<Map<Iter<&str>, p::t_inline_read::{closure#0}> as Iterator>::fold`
+        # -- so R14 judges it one frame earlier, by the test's own closure;
+        # legacy spells those self types `F`, names no crate, and reaches the
+        # boundary. Either way the attribution is the test's.
         for name, group in (("t_inline_read", "filesystem"), ("t_inline_env", "environment")):
             with self.subTest(test=name):
                 code, out = self.run_exe([name, "--exact", "--test-threads=1"],
@@ -862,7 +1003,10 @@ class TestProbe(ProbeCase):
                 self.assertEqual(code, 3, out)
                 m = VIOLATION.search(out)
                 self.assertEqual((m.group(1), m.group(2)), ("1", group), out)
-                self.assertEqual(m.group(4), "(test body, inlined)", out)
+                who = m.group(4)
+                self.assertTrue(who == "(test body, inlined)" or (
+                    who.startswith(("_R", "__R"))
+                    and "p::%s::{closure" % name in io_guard_rust.demangle(who)), out)
         # a pure test, and libtest's own teardown, still pass under opt.
         code, out = self.run_exe(["t_pure", "--exact", "--test-threads=1"],
                                  blocked=_blocked(1), exe=self.exe_opt)
@@ -944,7 +1088,7 @@ class TestProbe(ProbeCase):
         # Item 1: `<T as p::Blanket>::b` must not be read as a crate named
         # "T"; the call is judged at its caller, the test function.
         m = self.assert_trip("t_blanket", "filesystem")
-        self.assertTrue(m.group(4).startswith("_ZN1p9t_blanket"), m.group(0))
+        self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith("p::t_blanket"), m.group(0))
 
     def test_optimized_pure_suite_does_not_trip_on_teardown(self):
         # MEASURE (ruling R15b): libtest's test-thread teardown -- TLS
@@ -961,7 +1105,8 @@ class TestProbe(ProbeCase):
     def test_the_attribution_names_the_probe_function(self):
         m = self.assert_trip("t_env", "environment")
         self.assertEqual(m.group(3), "getenv")
-        self.assertTrue(m.group(4).startswith("_ZN5probe7env_var"), m.group(0))
+        self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith("probe::env_var"),
+                        m.group(0))
 
     def test_a_thread_running_only_std_code_is_judged(self):
         # `thread::spawn(std::env::temp_dir)`: a std-only spawned thread with
@@ -974,7 +1119,7 @@ class TestProbe(ProbeCase):
 
     def test_a_read_in_a_spawned_closure_is_the_closures(self):
         m = self.assert_trip("t_thread", "filesystem")
-        self.assertTrue(m.group(4).startswith("_ZN1p8t_thread"), m.group(0))
+        self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith("p::t_thread"), m.group(0))
 
     def test_the_violation_starts_its_own_line(self):
         # libtest prints `test t_fs ... ` with no newline before the test runs.
@@ -1006,7 +1151,7 @@ class TestProbe(ProbeCase):
 
     def test_a_dependency_read_is_attributed_to_the_dependency(self):
         m = self.assert_trip("t_dep_read", "filesystem")
-        self.assertTrue(m.group(4).startswith("_ZN4depx4read"), m.group(0))
+        self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith("depx::read"), m.group(0))
 
     def test_only_a_blocked_group_trips(self):
         # clock blocked, filesystem not: a file read passes.
@@ -1031,10 +1176,10 @@ class TestProbe(ProbeCase):
         self.assert_pass("t_alloc_thread")
 
     def test_the_allocator_exemption_does_not_swallow_a_clock_read(self):
-        for name, fn in (("t_sysnow", "_ZN5probe6sysnow"), ("t_instant", "_ZN5probe7instant")):
+        for name, fn in (("t_sysnow", "probe::sysnow"), ("t_instant", "probe::instant")):
             with self.subTest(test=name):
                 m = self.assert_trip(name, "clock")
-                self.assertTrue(m.group(4).startswith(fn), m.group(0))
+                self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith(fn), m.group(0))
 
     def test_the_system_internal_table_is_load_bearing_on_darwin_and_inert_on_linux(self):
         # The same probe under a hook rendered with SYSTEM_INTERNAL_IMAGES
@@ -1085,6 +1230,250 @@ class TestProbe(ProbeCase):
         code, out = self.run_test("t_pure", blocked=_blocked(1), exe=stripped)
         self.assertEqual(code, 2, out)
         self.assertRegex(out, r"(?m)^tsn-hook: cannot attribute \(.+\)$")
+
+
+class TestProbeV0Crate(TestProbe):
+    """Every TestProbe case again, the probe crate (and depx) mangled v0 over a
+    std and libtest that are still legacy -- ruling R26's PER-SYMBOL decision
+    in one live binary. Its drop glue, `assert_test_result<T>` and impl frames
+    are the crate's own instantiations, so they are v0 too.
+
+    On a toolchain whose std is already v0 (1.98) the plain TestProbe run IS
+    all-v0, and forcing legacy needs `-Z unstable-options`: this class then
+    skips visibly."""
+
+    RUSTFLAGS = "-C symbol-mangling-version=v0"
+
+    @classmethod
+    def check_build(cls):
+        with open(cls.exe, "rb") as f:
+            data = f.read()
+        if b"_ZN4test" not in data:
+            shutil.rmtree(cls.tmp, ignore_errors=True)
+            raise unittest.SkipTest("libtest is already v0 on this toolchain: TestProbe is the "
+                                    "all-v0 run, and there is no legacy std to mix with")
+        if b"_RNvCs" not in data:
+            raise AssertionError("RUSTFLAGS did not make the probe crate v0")
+
+
+# ── rustc: the frame classifier alone, on symbol names (ruling R26) ──────
+
+CLASSIFY_BEGIN, CLASSIFY_END = "// @@TSN-CLASSIFY-BEGIN@@", "// @@TSN-CLASSIFY-END@@"
+_HARNESS_MAIN = r'''
+fn main() {
+    use std::io::BufRead;
+    for line in std::io::stdin().lock().lines() {
+        let line = line.expect("stdin");
+        let s = line.as_bytes();
+        let krate = match crate_of(s) {
+            None => "None".to_string(),
+            Some(k) => format!("={}", String::from_utf8_lossy(k)),
+        };
+        let group = control(s).map(|g| String::from_utf8_lossy(g).into_owned());
+        println!("{}\t{}\t{}\t{}", classify(s), test_boundary(s) as u8,
+                 group.unwrap_or_else(|| "-".to_string()), krate);
+    }
+}
+'''
+
+
+def classifier_source():
+    """The hook's rendered tables and its classifier region, VERBATIM, driven
+    from stdin: the code the hook runs on each frame, on symbol names."""
+    text = io_guard_rust.render_hook()
+    tables = text[text.index(BEGIN):text.index(END) + len(END)]
+    region = text[text.index(CLASSIFY_BEGIN):text.index(CLASSIFY_END) + len(CLASSIFY_END)]
+    return ("#![allow(dead_code, non_upper_case_globals)]\nuse core::ffi::c_int;\n"
+            + tables + "\n" + region + "\n" + _HARNESS_MAIN)
+
+
+_RB_TESTS = _load("test_rust_binary")         # the v0 fixtures: real 1.98 symbols
+V0, V0_MALFORMED, NEST = _RB_TESTS.V0, _RB_TESTS.V0_MALFORMED, _RB_TESTS._nest
+_SKIP = frozenset(io_guard_rust.TRANSPARENT_CRATES) | frozenset(io_guard_rust.RUNNER_CRATES)
+
+
+def mirror(sym):
+    """What the hook's classifier must answer for v0 `sym`, derived from
+    rust_binary's INDEPENDENT parser: (class, boundary, control group, crate)."""
+    t = io_guard_rust
+    f = rust_binary.v0_facts(sym, _SKIP)
+    if f is None:
+        return ("0", "0", "-", "None")
+
+    def transparent(k):
+        return k == "" or k in t.TRANSPARENT_CRATES
+
+    k = f.krate
+    if transparent(k) and f.drop_crate:
+        k = f.drop_crate
+    if transparent(k) and any("drop_slow" in i for i in f.main_idents):
+        k = "drop_slow"
+    if any(m in i for i in f.idents for m in t.SEED_MARKERS):
+        cls = 3
+    else:
+        cls = 0 if transparent(k) else (2 if k in t.RUNNER_CRATES else 1)
+    boundary = k in t.RUNNER_CRATES and any(m in i for i in f.main_idents
+                                            for m in t.TEST_BODY_BOUNDARY_MARKERS)
+    group = next((g for n, g in sorted(t.CONTROL_HELPERS.items()) if n in f.idents), "-")
+    return (str(cls), str(int(boundary)), group, "=" + k)
+
+
+class TestClassifier(unittest.TestCase):
+    """The hook's frame classifier, compiled alone and fed symbol names (R26).
+
+    Each answer is (classify, test_boundary, control, crate_of): classify 0
+    transparent, 1 crate, 2 libtest runner, 3 std seeding; crate `=` names
+    no crate, `None` is not a Rust symbol the hook can read."""
+
+    WANT = {
+        "crate_fn": ("1", "0", "filesystem", "=p"),
+        "calcx_fn": ("1", "0", "-", "=calcx"),
+        "std_fn": ("0", "0", "-", "=std"),
+        "closure": ("1", "0", "-", "=p"),
+        "vendor_suffix": ("0", "0", "-", "=std"),
+        "inherent_backref": ("1", "0", "-", "=p"),
+        "trait_impl_backref": ("1", "0", "environment", "=p"),
+        "blanket_dsp": ("1", "0", "-", "=p"),
+        "blanket_u8": ("0", "0", "-", "="),
+        "blanket_slice": ("0", "0", "-", "="),
+        "blanket_placeholder": ("0", "0", "-", "="),
+        "provided_std": ("0", "0", "-", "=core"),
+        "provided_crate_self": ("1", "0", "-", "=p"),
+        "provided_crate_trait": ("1", "0", "-", "=p"),
+        "begin_short_backtrace": ("2", "1", "-", "=test"),
+        "assert_test_result": ("2", "1", "-", "=test"),
+        "std_begin_short_backtrace": ("0", "0", "-", "=std"),
+        "libtest_fn": ("2", "0", "-", "=test"),
+        "drop_vec": ("1", "0", "-", "=p"),
+        "drop_tuple": ("1", "0", "-", "=p"),
+        "drop_array": ("1", "0", "-", "=p"),
+        "drop_dyn": ("1", "0", "-", "=p"),
+        "drop_std": ("0", "0", "-", "=core"),
+        "drop_std_linux": ("0", "0", "-", "=core"),
+        "drop_runner_type": ("0", "0", "-", "=core"),
+        "drop_control": ("1", "0", "environment", "=p"),
+        "drop_slow_std": ("1", "0", "-", "=drop_slow"),
+        "drop_slow_crate": ("1", "0", "-", "=p"),
+        "seed": ("3", "0", "-", "=std"),
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        if not RUSTC:
+            raise unittest.SkipTest("no `rustc` on PATH: the hook's classifier is NOT "
+                                    "exercised on this machine.")
+        cls.tmp = tempfile.mkdtemp(prefix="tsn-rust-classify-")
+        src = os.path.join(cls.tmp, "classify.rs")
+        _write(src, classifier_source())
+        cls.bin = os.path.join(cls.tmp, "classify")
+        proc = subprocess.run([RUSTC, "--edition", "2021", "-O", "-o", cls.bin, src],
+                              capture_output=True, text=True, timeout=600,
+                              stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            raise AssertionError("the classifier harness did not build:\n" + proc.stderr)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def answer(self, syms):
+        proc = subprocess.run([self.bin], input="".join(s + "\n" for s in syms),
+                              capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, "the classifier crashed: " + proc.stderr[-800:])
+        lines = proc.stdout.splitlines()
+        self.assertEqual(len(lines), len(syms))
+        return [tuple(line.split("\t")) for line in lines]
+
+    def check(self, names):
+        syms = [V0[n] for n in names] + ["_" + V0[n] for n in names]     # ELF and Mach-O
+        for i, (sym, have) in enumerate(zip(syms, self.answer(syms))):
+            with self.subTest(sym=sym):
+                self.assertEqual(have, self.WANT[names[i % len(names)]])
+
+    def test_every_v0_fixture_classifies_as_the_rulings_say(self):
+        self.check(list(self.WANT))
+
+    def test_a_crate_reached_through_a_back_reference_is_a_crate(self):
+        self.check(["inherent_backref", "trait_impl_backref", "blanket_dsp", "closure"])
+
+    def test_the_v0_boundary_is_the_decoded_identifier_in_the_test_crate(self):
+        # R13/R17a: `28___rust_begin_short_backtrace` decodes past its `_`
+        # separator; std's own copy of the name is no boundary.
+        self.check(["begin_short_backtrace", "assert_test_result", "std_begin_short_backtrace",
+                    "libtest_fn"])
+
+    def test_an_impl_is_judged_by_its_self_type(self):
+        # R14: the self type decides, never the impl's own path or the trait.
+        self.check(["trait_impl_backref", "blanket_dsp", "drop_slow_crate",
+                    "provided_crate_self", "provided_crate_trait", "provided_std"])
+
+    def test_drop_glue_is_decided_by_the_first_crate_anywhere_in_t(self):
+        # R17b: through Option/Vec, a tuple, an array and a dyn; a std-only
+        # or libtest-only T stays transparent, and drop_slow is a boundary.
+        self.check(["drop_vec", "drop_tuple", "drop_array", "drop_dyn", "drop_std",
+                    "drop_std_linux", "drop_runner_type", "drop_slow_std"])
+
+    def test_a_primitive_or_placeholder_names_no_crate(self):
+        # R18: `<u8 as p::Blanket>` is transparent although the impl is in p.
+        self.check(["blanket_u8", "blanket_slice", "blanket_placeholder"])
+
+    def test_the_name_tables_match_decoded_identifiers(self):
+        self.check(["crate_fn", "trait_impl_backref", "drop_control", "seed"])
+
+    def test_the_legacy_rules_are_unchanged(self):
+        cases = [(_mangle("probe", "env_var"), ("1", "0", "-", "=probe")),
+                 (_mangle("test", "test_main_static"), ("2", "0", "-", "=test")),
+                 (_mangle("test", "__rust_begin_short_backtrace"), ("2", "1", "-", "=test")),
+                 (_mangle("p", "tsn_control_temp_dir"), ("1", "0", "filesystem", "=p")),
+                 (_mangle("std", "sys", "random", "hashmap_random_keys"),
+                  ("3", "0", "-", "=std")),
+                 ("_" + _mangle("p", "Leaf"), ("1", "0", "-", "=p")),
+                 ("_ZN3foo3barEv", ("0", "0", "-", "None")),
+                 ("main", ("0", "0", "-", "None"))]
+        got = self.answer([s for s, _ in cases])
+        for (sym, want), have in zip(cases, got):
+            with self.subTest(sym=sym):
+                self.assertEqual(have, want)
+
+    def test_malformed_truncated_and_too_deep_are_transparent(self):
+        # Constraint 7: a malformed v0 symbol is transparent, never a crash;
+        # past the parser's depth cap it is transparent too.
+        bad = [s for n, s in V0_MALFORMED.items() if n not in ("legacy", "cxx")]
+        for sym, have in zip(bad, self.answer(bad)):
+            with self.subTest(sym=sym):
+                self.assertEqual(have, ("0", "0", "-", "None"))
+        self.assertEqual(self.answer([NEST(30)]), [("1", "0", "-", "=p")])
+
+    def test_the_hook_and_rust_binary_agree_on_every_fixture_and_prefix(self):
+        syms = []
+        for sym in V0.values():
+            syms += [sym[:cut] for cut in range(len(sym) + 1)]
+            syms.append("_" + sym)
+        syms += list(V0_MALFORMED.values()) + [NEST(n) for n in (1, 30, 63, 64, 65, 80)]
+        for sym, have in zip(syms, self.answer(syms)):
+            if sym.startswith(("_R", "__R")):
+                self.assertEqual(have, mirror(sym), sym)
+
+    def test_the_hook_and_rust_binary_agree_on_a_real_binary(self):
+        # Every v0 symbol of a real test binary: the probe crate built v0 (on
+        # 1.98 std and libtest are v0 too). rust_binary must parse EVERY one
+        # -- a gap in its grammar would show here -- and the hook must answer
+        # exactly what rust_binary's reading implies.
+        if not CARGO:
+            self.skipTest("no `cargo` on PATH")
+        root = tempfile.mkdtemp(prefix="tsn-rust-classify-real-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        _, exe = build_probe(root, os.path.join(root, "target"),
+                             rustflags="-C symbol-mangling-version=v0")
+        syms = [s for s in rust_binary.symbol_names(exe) if s.startswith(("_R", "__R"))]
+        self.assertGreater(len(syms), 200, "too few v0 symbols to mean anything")
+        unread = [s for s in syms if rust_binary.v0_facts(s, _SKIP) is None]
+        self.assertEqual(unread, [], "rust_binary cannot read these real symbols")
+        disagree = [(s, have, mirror(s)) for s, have in zip(syms, self.answer(syms))
+                    if have != mirror(s)]
+        self.assertEqual(disagree, [])
+        classes = {mirror(s)[0] for s in syms}
+        self.assertLessEqual({"0", "1"}, classes)
 
 
 # ── The wrapper: a fixture crate driven through `main` ───────────────────
@@ -1837,8 +2226,59 @@ class TestDemangle(unittest.TestCase):
         self.assertEqual(io_guard_rust.demangle("_" + _mangle("fx", "var")), "fx::var")
 
     def test_anything_else_is_returned_unchanged(self):
-        for s in ("(test body, inlined)", "(a thread with no crate frame)", "_ZN3fx", "main"):
+        for s in ("(test body, inlined)", "(a thread with no crate frame)", "_ZN3fx", "main",
+                  "_RNv", "__R"):
             self.assertEqual(io_guard_rust.demangle(s), s)
+
+    def test_a_v0_symbol_is_demangled_too(self):
+        # Ruling R26: on rustc 1.98 the trip label is a v0 name.
+        self.assertEqual(io_guard_rust.demangle(V0["crate_fn"]), "p::tsn_control_temp_dir")
+        self.assertEqual(io_guard_rust.demangle("_" + V0["trait_impl_backref"]),
+                         "<p::TsnControlEnv as core::ops::drop::Drop>::drop")
+
+
+class TestLockedWording(unittest.TestCase):
+    """Ruling R27: cargo's stale-lock refusal in every proven cargo's words.
+
+    Both wordings ALSO name `--offline` (their help line), so the lock is
+    checked BEFORE ruling R24's offline match. MUTATION: matching the offline
+    note first, or 1.92's "needs to be updated" phrase alone, sends a
+    1.94/1.98 stale lock to the not-cached remedy -- killed here."""
+
+    # Measured: cargo 1.92.0 on darwin; rust:1.94 and rust:1.98 (identical).
+    LOCK_192 = ("error: the lock file /w/fx/Cargo.lock needs to be updated but --locked was "
+                "passed to prevent this\nIf you want to try to generate the lock file without "
+                "accessing the network, remove the --locked flag and use --offline instead.\n")
+    LOCK_194 = ("error: cannot update the lock file /w/fx/Cargo.lock because --locked was passed "
+                "to prevent this\nhelp: to generate the lock file without accessing the "
+                "network, remove the --locked flag and use --offline instead.\n")
+    OFFLINE = ("error: no matching package named `itoa` found\nlocation searched: `crates-io` "
+               "index\nrequired by package `fx v0.1.0 (/w/fx)`\nAs a reminder, you're using "
+               "offline mode (--offline) which can sometimes cause surprising resolution "
+               "failures, if this error is too confusing you may wish to retry without "
+               "`--offline`.\n")
+
+    def build(self, stderr):
+        done = subprocess.CompletedProcess([], 101, stdout="", stderr=stderr)
+        with mock.patch.object(io_guard_rust.shutil, "which", return_value="/usr/bin/cargo"), \
+                mock.patch.object(io_guard_rust.subprocess, "run", return_value=done):
+            return io_guard_rust.build_test("/w/fx", io_guard_rust.BuildPlan(None, (), ""), "fx",
+                                            None, {"PATH": "/usr/bin"})
+
+    def test_a_stale_lock_is_its_own_refusal_in_every_cargos_wording(self):
+        for cargo, stderr in (("1.92", self.LOCK_192), ("1.94/1.98", self.LOCK_194)):
+            with self.subTest(cargo=cargo):
+                with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+                    self.build(stderr)
+                self.assertIn("Cargo.lock is out of date for this manifest; update it yourself, "
+                              "then re-run", str(ctx.exception))
+                self.assertNotIn("cargo fetch", str(ctx.exception))
+
+    def test_a_dependency_missing_offline_is_still_the_cache_refusal(self):
+        with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+            self.build(self.OFFLINE)
+        self.assertIn("run `cargo fetch`", str(ctx.exception))
+        self.assertNotIn("Cargo.lock is out of date", str(ctx.exception))
 
 
 class _FakeProc:

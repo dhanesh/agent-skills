@@ -56,7 +56,8 @@ Every refusal prints its reason and exits 2:
      call: an uninstalled pin is refused, never downloaded;
   4. `Cargo.lock` exists at the workspace root. A plain `cargo test` creates
      or rewrites it, so the proof never runs without one, and builds with
-     `--locked`: a stale lock is refused, left byte-identical;
+     `--locked`: a stale lock is refused, left byte-identical (ruling R27:
+     read in every proven cargo's wording, before the offline note);
   5. an environment-controlled test (one that calls `tsn_control_set_env`)
      is alone in its file -- the environment is process-wide and libtest
      runs one file's tests on parallel threads;
@@ -197,6 +198,15 @@ spike's 128 slots used to fall off the end and be exempt):
   * a symbol without Rust's `17h<16 hex>E` hash, or a transparent-crate
     frame, is passed over -- so a runtime's C++ `_ZN` symbols are never read
     as crate code.
+Each frame's symbol is read in ITS OWN mangling (ruling R26): legacy
+`_ZN...17h<hash>E`, or v0 `_R...` -- rustc 1.98's default, in which std, core,
+alloc and libtest ship precompiled. Every rule above holds for v0 names too:
+the crate is the path's root crate, an impl frame's is its self type's (a
+primitive or placeholder names none), drop glue (`core::ptr::drop_glue<T>`)
+is decided by the first crate anywhere in T, and the boundary, seed, control
+and `drop_slow` names match DECODED identifiers. A v0 symbol that cannot be
+read -- malformed, truncated, nested too deep -- is passed over like any
+transparent frame.
 A walk that decides nothing is resolved by thread IDENTITY, not frame names
 (ruling R15b): off the main thread -- `pthread_main_np()` on darwin,
 `gettid() == getpid()` on Linux -- a stack with no crate frame is a spawned
@@ -500,7 +510,13 @@ PROOF_TIMEOUT = 300
 _RUN_SCRUB = ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE")
 
 _PREFIX = "test-safety-net io_guard_rust: "
-_LOCKED = "needs to be updated but --locked was passed"
+# Ruling R27: the phrase every proven cargo's stale-lock refusal shares.
+# cargo 1.92: "the lock file <path> needs to be updated but --locked was
+# passed to prevent this"; 1.94 and 1.98: "cannot update the lock file <path>
+# because --locked was passed to prevent this". All three add a help line
+# naming `--offline`, so this is matched BEFORE ruling R24's offline match.
+_LOCKED = "--locked was passed"
+_STALE_LOCK = "Cargo.lock is out of date for this manifest; update it yourself, then re-run"
 
 
 def _why(g):
@@ -695,8 +711,10 @@ def _test_sources(meta, repo, stem, package):
     return [path] if os.path.isfile(path) else []
 
 
-# libtest's own code, legacy-mangled: its entry point and its console
-# runner. A `harness = false` target links neither (ruling R22(c)).
+# libtest's own code: its entry point and its console runner. The bytes are
+# the same in both manglings -- legacy `_ZN4test16test_main_static17h…E`, v0
+# `_RNvCs…_4test16test_main_static`. A `harness = false` target links neither
+# (ruling R22(c)).
 _LIBTEST_SYMBOLS = (b"4test16test_main_static", b"4test7console")
 
 
@@ -825,12 +843,15 @@ def build_test(repo, plan, test_target, package, env):
             message = msg.get("message") or {}
             if message.get("level") == "error":
                 errors.append((message.get("rendered") or message.get("message") or "").rstrip())
+    # Ruling R27: a stale lock is its own refusal, decided FIRST -- every
+    # proven cargo's wording of it also names `--offline` in its help line,
+    # which the R24 match below would otherwise read as "not cached".
+    if proc.returncode != 0 and _LOCKED in proc.stderr:
+        raise GuardCannotArm(_STALE_LOCK)
     # Ruling R24: cargo failed before compiling anything, and its stderr names
     # offline mode -- a dependency the local cache does not hold. NOT ARMED,
-    # never NO BUILD: the test source was never read. A stale lock keeps its
-    # own message (main checks _LOCKED).
-    if (proc.returncode != 0 and not exes and not errors and _LOCKED not in proc.stderr
-            and _OFFLINE.search(proc.stderr)):
+    # never NO BUILD: the test source was never read.
+    if proc.returncode != 0 and not exes and not errors and _OFFLINE.search(proc.stderr):
         raise GuardCannotArm("%s (cargo: %s)" % (_NOT_CACHED, _first_error(proc.stderr)))
     if len(exes) > 1:
         # Ruling R20: a workspace root with no -p builds EVERY member's
@@ -1022,8 +1043,11 @@ def _unescape(seg):
 
 
 def demangle(sym):
-    """A legacy-mangled Rust symbol (`_ZN...17h<16 hex>E`, Mach-O's extra `_`
-    allowed) as a path, hash dropped; anything else unchanged."""
+    """A Rust symbol as a path: legacy (`_ZN...17h<16 hex>E`, hash dropped) or
+    v0 (`_R...`, ruling R26: crate disambiguators and the instantiating crate
+    dropped), Mach-O's extra `_` allowed either way; anything else unchanged."""
+    if sym.startswith(("_R", "__R")):
+        return rust_binary.v0_demangle(sym) or sym
     s = sym[1:] if sym.startswith("__ZN") else sym
     if not (s.startswith("_ZN") and s.endswith("E")):
         return sym
@@ -1107,9 +1131,6 @@ def main(argv=None):
         built = build_test(repo, plan, args.test_target, args.package, env)
     except GuardCannotArm as exc:
         return _not_armed(str(exc))
-    if _LOCKED in built.output:
-        return _not_armed("Cargo.lock is out of date for this manifest; update it yourself, "
-                          "then re-run")
     if built.compile_error or not built.exe:
         sys.stderr.write((built.compile_error or built.output or "cargo reported no test "
                           "executable") + "\n")

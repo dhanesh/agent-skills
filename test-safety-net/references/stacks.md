@@ -606,10 +606,15 @@ of `/proc/self/exe` on Linux.
     own `Drop` or `Display` impl is judged;
   - for `core::ptr::drop_in_place<T>`, the first crate path in `T` that is not transparent;
   - a generic parameter or a primitive is a bare segment that names no crate.
+- Each frame is read in its own mangling: legacy `_ZN…17h<hash>E`, or v0 `_R…`, which is rustc
+  1.98's default and the mangling its std and libtest ship in. The same rules hold for both. In v0,
+  an impl's self type decides, a primitive or placeholder names no crate, and `core::ptr::drop_glue<T>`
+  is decided like `drop_in_place<T>`.
 - These frames are passed over:
   - frames in `std`, `core`, `alloc`, `panic_unwind`, `backtrace`, `hashbrown` and `std_detect`;
-  - any symbol without Rust's `17h<16 hex>E` hash suffix, so a runtime's C++ `_ZN` symbols are never
-    read as crate code.
+  - any legacy symbol without Rust's `17h<16 hex>E` hash suffix, so a runtime's C++ `_ZN` symbols
+    are never read as crate code;
+  - a v0 symbol the hook cannot read (malformed, truncated, or nested too deep).
 - A libtest (`test`) frame is the runner's own work, and exempt. The exception is a
   `test::__rust_begin_short_backtrace` or `test::assert_test_result` frame reached before any crate
   frame. That means the test body was inlined into libtest's generic, and the call is judged as
