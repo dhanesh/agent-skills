@@ -184,9 +184,11 @@ spike's 128 slots used to fall off the end and be exempt):
   * a frame naming a `CONTROL_HELPERS` item decides, with THAT helper's
     group (`tsn_control_temp_dir` reads TMPDIR on its way to the filesystem,
     and is the tier-2 filesystem control). "Naming" is legacy's scope in
-    both manglings (ruling R28): the frame's own path, an impl's self type,
-    or drop glue's payload -- never a generic argument of an ordinary std
-    fn, so `std::fs::read::<TsnControlEnv>` is std's read, not the control;
+    both manglings (ruling R28): the frame's own path, an impl's self type
+    by ITS OWN path (ruling R34: `<Result<&str, TsnControlEnv>>::map` is
+    std's, not the control), or drop glue's payload -- never a generic
+    argument of an ordinary std fn, so `std::fs::read::<TsnControlEnv>` is
+    std's read, not the control;
   * std's own seeding frame (`std::sys::random::hashmap_random_keys`: a
     `SEED_MARKERS` name in the path of a `SEED_CRATE` symbol) is std seeding
     a HashMap: exempt. A crate fn, type or test that merely carries the name
@@ -562,6 +564,9 @@ def _reserved_refusal(names):
             % (", ".join("`%s`" % b for b in bad), bad[0], bad[0]))
 
 
+_LINKED_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "test"})
+
+
 def _path_source(package_id):
     """A cargo package id of a local (path) package: `path+file:///…#0.1.0`
     (cargo 1.77+), or `name 0.1.0 (path+file:///…)` before it."""
@@ -885,8 +890,13 @@ def build_test(repo, plan, test_target, package, env):
         if not isinstance(msg, dict):
             continue
         if msg.get("reason") == "compiler-artifact":
-            if _path_source(str(msg.get("package_id") or "")):
-                local.append(str((msg.get("target") or {}).get("name") or ""))
+            target = msg.get("target") or {}
+            # Ruling R35: only crates linked INTO the test binary can be
+            # misread by name -- a lib-like target or the test itself, never a
+            # bin, an example or a bench.
+            if _path_source(str(msg.get("package_id") or "")) and \
+                    set(target.get("kind") or ()) & _LINKED_KINDS:
+                local.append(str(target.get("name") or ""))
             if "test" in ((msg.get("target") or {}).get("kind") or ()) and msg.get("executable"):
                 if msg["executable"] not in exes:
                     exes.append(msg["executable"])

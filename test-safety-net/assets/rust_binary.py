@@ -168,8 +168,9 @@ V0Facts.__doc__ = """What the frame classifier reads from one v0 symbol.
     drop_crate   for `core::ptr::drop_glue<T>` / `drop_in_place<T>`: the first
                  crate not in `skip` anywhere in T, else None
     control_idents  the identifiers in CONTROL's scope, which is legacy's
-                 (ruling R28): the main path's, an M/X impl's self type's and
-                 drop glue's payload's -- never an ordinary fn's generic
+                 (ruling R28): the main path's, an M/X impl's self type's OWN
+                 path's (R34: not its generic arguments) and drop glue's
+                 payload's -- never an ordinary fn's generic
                  arguments, never a `Y` self type's. SEED's scope is
                  `main_idents` of a symbol whose `krate` is std.
 """
@@ -490,6 +491,28 @@ def _v0_idents(node):
             yield from _v0_idents(part)
 
 
+def _v0_own_idents(node):
+    """An M/X self type's OWN path identifiers (ruling R34): its crate root and
+    `N` chain, followed through an `I` node's inner path -- never its generic
+    arguments, never anything behind `&`, `*`, a tuple, an array, a slice, a
+    fn pointer or a `dyn`, never a nested impl. Legacy prints an impl's
+    declared generics (`Result<T, E>`), so only the type's own path can name
+    a control helper there."""
+    out = []
+    while True:
+        tag = node[0]
+        if tag == "N":
+            out.extend(seg[2][1] for seg in node[2])
+            node = node[1]
+        elif tag == "I":
+            node = node[1]
+        elif tag == "C":
+            out.append(node[1][1])
+            return out
+        else:
+            return out
+
+
 def _v0_crates(node):
     """Every crate root in `node`, in the order the symbol spells them."""
     if isinstance(node, list):
@@ -524,7 +547,7 @@ def _v0_decide(node, skip, st):
         return krate
     if tag in ("M", "X"):
         st["last"] = ""
-        st["control"].extend(_v0_idents(node[2]))
+        st["control"].extend(_v0_own_idents(node[2]))
         return _v0_first_crate(node[2], skip) or ""
     if tag == "Y":
         own = _v0_first_crate(node[1], skip)

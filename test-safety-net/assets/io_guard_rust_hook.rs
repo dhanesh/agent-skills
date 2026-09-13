@@ -490,7 +490,9 @@ fn control(s: &[u8]) -> Option<&'static [u8]> {
 //   * the name tables match DECODED identifiers in LEGACY's scope exactly
 //     (ruling R28): SEED only in the main path of a symbol whose crate is
 //     SEED_CRATE (std); CONTROL only in the main path, an impl's (`M`/`X`)
-//     self type, or drop glue's payload. Never an ordinary fn's generic
+//     self type by ITS OWN path (R34: never its generic arguments --
+//     legacy prints `Result<T, E>`, not `Result<&str, p::TsnControlEnv>`),
+//     or drop glue's payload. Never an ordinary fn's generic
 //     arguments -- legacy never spells them, and `std::fs::read::<p::
 //     TsnControlEnv>` is std's read, not the control -- and never a
 //     provided method's (`Y`) self type.
@@ -505,6 +507,14 @@ mod v0 {
     const MAX_DEPTH: u32 = 64;
     /// Nodes parsed, back-references re-read included: past it, transparent.
     const MAX_STEPS: u32 = 10_000;
+    /// CONTROL's scope while a type is read (rulings R28, R34): off; an M/X
+    /// self type's OWN path (its crate root and `N` chain, through an `I`
+    /// node's inner path -- never its generic arguments, never behind `&`,
+    /// `*`, a tuple, array, slice, fn pointer or `dyn`, never a nested impl);
+    /// or all of it (drop glue's payload, as legacy's `drop_in_place<T>`).
+    const SCAN_OFF: u8 = 0;
+    const SCAN_OWN: u8 = 1;
+    const SCAN_FULL: u8 = 2;
 
     pub struct Facts<'a> {
         /// The main path's deciding crate; empty when it names none.
@@ -542,8 +552,10 @@ mod v0 {
         steps: u32,
         search: bool,
         found: Option<&'a [u8]>,
-        /// Inside an M/X self type or a drop-glue payload: CONTROL's scope.
-        scan: bool,
+        /// CONTROL's scope while reading a type: SCAN_OFF, SCAN_OWN (an M/X
+        /// self type's OWN path: crate root and `N` chain, R34) or SCAN_FULL
+        /// (drop glue's payload, legacy's `drop_in_place<T>` text).
+        scan: u8,
         last: &'a [u8],
         boundary: bool,
         drop_slow: bool,
@@ -562,7 +574,7 @@ mod v0 {
             steps: 0,
             search: false,
             found: None,
-            scan: false,
+            scan: SCAN_OFF,
             last: &[],
             boundary: false,
             drop_slow: false,
@@ -677,7 +689,7 @@ mod v0 {
             let s = self.s;
             let id = s.get(self.pos..self.pos.checked_add(n)?)?;
             self.pos += n;
-            if self.scan {
+            if self.scan != SCAN_OFF {
                 self.note_control(id);
             }
             Some(id)
@@ -730,7 +742,7 @@ mod v0 {
         /// One type (or generic argument) with the crate search on: the first
         /// crate root in it that is neither transparent nor the runner. With
         /// `scan`, its identifiers are in CONTROL's scope (R28).
-        fn searching(&mut self, arg: bool, scan: bool) -> Option<Option<&'a [u8]>> {
+        fn searching(&mut self, arg: bool, scan: u8) -> Option<Option<&'a [u8]>> {
             let (search, found, scanning) = (self.search, self.found, self.scan);
             self.search = true;
             self.found = None;
@@ -758,17 +770,17 @@ mod v0 {
                 b'M' => {
                     self.impl_path()?;
                     self.last = &[];
-                    self.searching(false, true)?.unwrap_or(&[])
+                    self.searching(false, SCAN_OWN)?.unwrap_or(&[])
                 }
                 b'X' => {
                     self.impl_path()?;
-                    let own = self.searching(false, true)?.unwrap_or(&[]);
+                    let own = self.searching(false, SCAN_OWN)?.unwrap_or(&[]);
                     self.path_any()?;
                     self.last = &[];
                     own
                 }
                 b'Y' => {
-                    let own = self.searching(false, false)?.unwrap_or(&[]);
+                    let own = self.searching(false, SCAN_OFF)?.unwrap_or(&[]);
                     let trait_crate = self.path_main()?;
                     if own.is_empty() {
                         trait_crate
@@ -781,7 +793,7 @@ mod v0 {
                     let drop = self.last == &b"drop_glue"[..] || self.last == &b"drop_in_place"[..];
                     while !self.eat(b'E') {
                         if drop {
-                            let hit = self.searching(true, true)?;
+                            let hit = self.searching(true, SCAN_FULL)?;
                             if self.drop_crate.is_none() {
                                 self.drop_crate = hit;
                             }
@@ -830,23 +842,31 @@ mod v0 {
                     }
                 }
                 b'M' => {
+                    let scan = self.own_off();
                     self.impl_path()?;
                     self.type_any()?;
+                    self.scan = scan;
                 }
                 b'X' => {
+                    let scan = self.own_off();
                     self.impl_path()?;
                     self.type_any()?;
                     self.path_any()?;
+                    self.scan = scan;
                 }
                 b'Y' => {
+                    let scan = self.own_off();
                     self.type_any()?;
                     self.path_any()?;
+                    self.scan = scan;
                 }
                 b'I' => {
                     self.path_any()?;
+                    let scan = self.own_off();
                     while !self.eat(b'E') {
                         self.generic_arg()?;
                     }
+                    self.scan = scan;
                 }
                 b'B' => {
                     let (t, back) = self.backref()?;
@@ -870,6 +890,17 @@ mod v0 {
             self.path_any()
         }
 
+        /// Leaving an M/X self type's OWN path (R34): a generic argument, a
+        /// type constructor or a nested impl is read with CONTROL off. Returns
+        /// the scope to restore.
+        fn own_off(&mut self) -> u8 {
+            let scan = self.scan;
+            if scan == SCAN_OWN {
+                self.scan = SCAN_OFF;
+            }
+            scan
+        }
+
         fn generic_arg(&mut self) -> Option<()> {
             if self.eat(b'L') {
                 self.base62()?;
@@ -889,6 +920,14 @@ mod v0 {
                 return Some(());
             }
             self.enter()?;
+            // A path (or a back-reference to one) keeps the scope; any type
+            // constructor -- `&`, `*`, tuple, array, slice, fn, `dyn` -- leaves
+            // an M/X self type's own path (R34).
+            let scan = if matches!(tag, b'B' | b'C' | b'N' | b'M' | b'X' | b'Y' | b'I') {
+                self.scan
+            } else {
+                self.own_off()
+            };
             match tag {
                 b'R' | b'Q' => {
                     if self.eat(b'L') {
@@ -955,6 +994,7 @@ mod v0 {
                 }
                 _ => return None,
             }
+            self.scan = scan;
             self.leave();
             Some(())
         }

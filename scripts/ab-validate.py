@@ -3787,6 +3787,14 @@ CASES = [
     (v0("_RNv{p}1p32f_hashmap_random_keys_named_test"), False, False),
     (v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys"), True, False),
     (v0("_RINvNt{core}4core3ptr9drop_glueNt{p}1p13TsnControlEnvE{p}1p"), False, True),
+    # R34: a std type's CONCRETE generic argument in an M/X self type -- legacy
+    # prints `core::result::Result<T,E>::map`, `Receiver<T>::recv_timeout` --
+    # is not the control; the helper's OWN inherent impl still is.
+    (v0("_RINvMNt{core}4core6resultINtNt{core}4core6result6ResultReNt{p}1p13TsnControlEnvE"
+        "3mapppE{p}1p"), False, False),
+    (v0("_RNvMNtNt{std}3std4sync4mpscINtNtNt{std}3std4sync4mpsc8ReceiverNt{p}1p"
+        "13TsnControlEnvE12recv_timeout"), False, False),
+    (v0("_RNvMs0_{p}1pNtB5_13TsnControlEnv7restore"), False, True),
 ]
 try:
     for sym, want_seed, want_control in CASES:
@@ -3883,7 +3891,7 @@ def check_test_safety_net_rust_v0(old, new):
     newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_V0_PROBE)
     if _errored(oldp, newp):
         return
-    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 6 (higher=better)",
+    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 9 (higher=better)",
         oldp["scope"], newp["scope"], newp["scope"] > oldp["scope"],
         "std::fs::read::<p::hashmap_random_keys> and ::<p::TsnControlEnv> are std's read "
         "(legacy spells them _ZN3std2fs4read); a Y self type and a crate fn named like the "

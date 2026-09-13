@@ -599,8 +599,10 @@ own image, over a 1024-frame buffer. It resolves symbols with `dladdr` on macOS 
 of `/proc/self/exe` on Linux.
 
 - A `CONTROL_HELPERS` frame decides, with that helper's group. The helper must be named by the
-  frame's own path, an impl's self type, or drop glue's payload. A helper type passed to a std
-  function as a generic argument (`std::fs::read::<TsnControlEnv>`) is std's call, not the control.
+  frame's own path, an impl's self type (by that type's own path), or drop glue's payload. A helper
+  type used only as a generic argument is std's work, not the control. That covers a std function's
+  generic (`std::fs::read::<TsnControlEnv>`) and a std type's generic
+  (`<Result<&str, TsnControlEnv>>::map`).
 - `hashmap_random_keys` in std's own frame (std seeding a HashMap) is exempt. A crate function, type
   or test that merely carries the name is not.
 - A **crate frame** decides with the call's group. Its crate is decided in one of four ways:
@@ -693,6 +695,11 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    - recovering the hook's sentinel, or patching its statics;
    - a `harness = false` binary that embeds libtest's symbol names;
    - life-before-main code printing a handshake under a hook the loader silently skipped.
+
+   One forgery is refused rather than passed. A build script that prints
+   `cargo::error=…--locked was passed…` produces a line cargo shows as its own `error:`. The proof
+   then exits 2 with the stale-lock remedy, not 5 (NO BUILD). That is deliberate, and it is never
+   GREEN.
 
 ## Python row, in detail
 

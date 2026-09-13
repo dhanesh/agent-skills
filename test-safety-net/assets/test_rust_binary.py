@@ -352,6 +352,21 @@ V0 = {
     "provided_control_self": v0("_RNvYNt{p}1p13TsnControlEnvNtNt{core}4core3fmt5Write"
                                 "9write_fmt"),
     "crate_fn_seed_name": v0("_RNv{p}1p32f_hashmap_random_keys_named_test"),
+    # Ruling R34: a control helper only as a CONCRETE generic argument of an
+    # M/X self type, or behind `&`. Legacy prints the impl's declared
+    # generics -- `core::result::Result<T,E>::map`, `std::sync::mpsc::
+    # Receiver<T>::recv_timeout`, `<alloc::vec::into_iter::IntoIter<T,A> as
+    # Iterator>::fold`, `<&T as Debug>::fmt` -- so none is the control.
+    "mx_result_map": v0("_RINvMNt{core}4core6resultINtNt{core}4core6result6ResultReNt{p}1p"
+                        "13TsnControlEnvE3mapppE{p}1p"),
+    "mx_receiver": v0("_RNvMNtNt{std}3std4sync4mpscINtNtNt{std}3std4sync4mpsc8ReceiverNt{p}1p"
+                      "13TsnControlEnvE12recv_timeout"),
+    "mx_iter_x": v0("_RNvXNt{alloc}5alloc3vecINtNtNt{alloc}5alloc3vec9into_iter8IntoIterINtNt"
+                    "{core}4core6result6ResultReNt{p}1p13TsnControlEnvEENtNtNt{core}4core4iter"
+                    "6traits8Iterator4fold"),
+    "mx_ref_self": v0("_RNvXs_{p}1pRNtB4_13TsnControlEnvNtNt{core}4core3fmt5Debug3fmt"),
+    # ... while the helper's OWN impl still is (legacy `p::TsnControlEnv::restore`).
+    "inherent_control": v0("_RNvMs0_{p}1pNtB5_13TsnControlEnv7restore"),
 }
 
 # Ruling R29: 1,200 `N` levels, as an `#[export_name]` may spell them. The
@@ -444,14 +459,18 @@ class TestV0Parser(unittest.TestCase):
     def test_the_name_tables_keep_legacy_scope(self):
         # Ruling R28. CONTROL: the main path, an M/X self type, drop glue's
         # payload -- and nothing else. SEED: the main path of a std symbol.
+        # R34: an M/X self type counts by its OWN path only.
         for name, ident in (("crate_fn", "tsn_control_temp_dir"),
                             ("trait_impl_backref", "TsnControlEnv"),
+                            ("inherent_control", "TsnControlEnv"),
                             ("drop_control", "TsnControlEnv")):
             with self.subTest(sym=name):
                 self.assertIn(ident, self.facts(name).control_idents)
-        for name in ("std_read_control_type", "provided_control_self"):
+        for name in ("std_read_control_type", "provided_control_self", "mx_result_map",
+                     "mx_receiver", "mx_iter_x", "mx_ref_self"):
             with self.subTest(sym=name):
                 self.assertNotIn("TsnControlEnv", self.facts(name).control_idents)
+        self.assertEqual(self.facts("mx_result_map").krate, "p")     # R14 still decides
         seed = self.facts("seed")
         self.assertEqual(seed.krate, "std")
         self.assertIn("hashmap_random_keys", seed.main_idents)

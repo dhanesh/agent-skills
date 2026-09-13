@@ -107,6 +107,13 @@ Fix round 1 (rulings R28-R32), each run:
   and, live, `TestExitContract.test_a_path_dependency_named_backtrace_is_refused`;
 * R32, `--locked was passed` matched anywhere in stderr ->
   `TestLockedWording.test_a_build_scripts_own_words_are_not_cargos`.
+Fix round 2 (rulings R34, R35), each run:
+* R34, CONTROL scanning an M/X self type's generic arguments again ->
+  `TestClassifier.test_the_name_tables_keep_legacy_scope` (the `mx_*`
+  fixtures) and, live on 1.98 and in TestProbeV0Crate,
+  `test_a_control_type_only_as_a_std_generic_argument_is_judged`;
+* R35, a bin/example/bench target counted as a linked crate ->
+  `TestReservedTargets.test_a_bin_example_or_bench_so_named_is_not_refused`.
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -794,6 +801,19 @@ impl AsRef<std::path::Path> for TsnControlEnv {
 #[test] fn t_control_lookalike() {
     let _ = std::fs::read(TsnControlEnv { key: "TSN_PROBE_UNSET".to_string(), old: None });
 }
+
+// Ruling R34: std's OWN methods on a std type whose generic argument is the
+// helper -- `<Result<&str, p::TsnControlEnv>>::map`, `<Receiver<p::
+// TsnControlEnv>>::recv_timeout` -- are std's work, not the control. (Not
+// `t_…`: libtest filters by substring.)
+#[test] fn mx_result_map_read() {
+    let r: Result<&str, TsnControlEnv> = Ok("/etc/hosts");
+    if let Ok(v) = r.map(std::fs::read) { assert!(v.is_ok()); }
+}
+#[test] fn mx_recv_timeout_clock() {
+    let (_tx, rx) = std::sync::mpsc::channel::<TsnControlEnv>();
+    assert!(rx.recv_timeout(std::time::Duration::from_millis(1)).is_err());
+}
 '''
 
 
@@ -1153,6 +1173,29 @@ class TestProbe(ProbeCase):
                 self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
                                       r"filesystem I/O")
 
+    def test_a_control_type_only_as_a_std_generic_argument_is_judged(self):
+        # Ruling R34: under v0 an M/X self type is CONCRETE, so the helper
+        # appears inside `<Result<&str, p::TsnControlEnv>>::map` and
+        # `<Receiver<p::TsnControlEnv>>::recv_timeout`; legacy prints `T`/`E`
+        # there. At tier 2 with environment allowed each read is the test's
+        # filesystem or clock I/O -- not the environment control, which read
+        # both GREEN. MUTATION: scanning the self type's generic arguments
+        # again passes both on 1.98 and in TestProbeV0Crate. The honest
+        # control run -- the helper's own set/restore -- stays 0.
+        for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
+            with self.subTest(build=label):
+                for name, group in (("mx_result_map_read", "filesystem"),
+                                    ("mx_recv_timeout_clock", "clock")):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"], tier=2,
+                                             blocked=_blocked(2, ["environment"]), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
+                                          r"%s I/O" % group)
+                code, out = self.run_exe(["t_env_control", "--exact", "--test-threads=1"],
+                                         tier=2, blocked=_blocked(2, ["environment"]), exe=exe)
+                self.assertEqual(code, 0, out)
+                self.assertNotIn("IOGuardViolation", out)
+
     def test_optimized_pure_suite_does_not_trip_on_teardown(self):
         # MEASURE (ruling R15b): libtest's test-thread teardown -- TLS
         # destructors and output-capture cleanup after a PURE test returns --
@@ -1430,6 +1473,15 @@ class TestClassifier(unittest.TestCase):
         "std_read_control_type": ("0", "0", "-", "=std"),
         "provided_control_self": ("1", "0", "-", "=p"),
         "crate_fn_seed_name": ("1", "0", "-", "=p"),
+        # Ruling R34, written from LEGACY: `core::result::Result<T,E>::map`,
+        # `Receiver<T>::recv_timeout`, `<IntoIter<T,A> as Iterator>::fold`,
+        # `<&T as Debug>::fmt` -- the concrete helper is the crate's frame
+        # (R14), never the control; the helper's own inherent impl still is.
+        "mx_result_map": ("1", "0", "-", "=p"),
+        "mx_receiver": ("1", "0", "-", "=p"),
+        "mx_iter_x": ("1", "0", "-", "=p"),
+        "mx_ref_self": ("1", "0", "-", "=p"),
+        "inherent_control": ("1", "0", "environment", "=p"),
     }
 
     @classmethod
@@ -1498,8 +1550,12 @@ class TestClassifier(unittest.TestCase):
     def test_the_name_tables_keep_legacy_scope(self):
         # Ruling R28: a std fn's generic argument named like the seed or a
         # control helper, a `Y` self type, a crate fn named like the seed.
+        # R34: an M/X self type's CONCRETE generic argument, or `&` to the
+        # helper, is not the control; the helper's own impls still are.
         self.check(["std_read_seed_type", "std_read_control_type", "provided_control_self",
-                    "crate_fn_seed_name", "seed", "drop_control", "trait_impl_backref"])
+                    "crate_fn_seed_name", "seed", "drop_control", "trait_impl_backref",
+                    "mx_result_map", "mx_receiver", "mx_iter_x", "mx_ref_self",
+                    "inherent_control"])
 
     def test_a_deep_nested_path_reads_as_the_hook_reads_it(self):
         # Ruling R29: 1,200 `N` levels. The hook reads the chain iteratively;
@@ -2477,6 +2533,20 @@ class TestReservedTargets(unittest.TestCase):
         result = self.build(("registry+https://github.com/rust-lang/crates.io-index"
                              "#hashbrown@0.15.2", "hashbrown", ["lib"], None), self.FX)
         self.assertEqual(result.exe, "/w/target/debug/deps/fx-1")
+
+    def test_a_bin_example_or_bench_so_named_is_not_refused(self):
+        # Ruling R35: only a crate LINKED into the test binary can be misread
+        # by name. A [[bin]], example or bench named `backtrace` never is.
+        # MUTATION: counting every path-source target -- killed here.
+        for kind in (["bin"], ["example"], ["bench"]):
+            with self.subTest(kind=kind):
+                result = self.build(("path+file:///w/fx#0.1.0", "backtrace", kind,
+                                     "/w/target/debug/backtrace"), self.FX)
+                self.assertEqual(result.exe, "/w/target/debug/deps/fx-1")
+        for kind in (["lib"], ["rlib"], ["proc-macro"], ["cdylib"], ["test"]):
+            with self.subTest(kind=kind):
+                with self.assertRaises(io_guard_rust.GuardCannotArm):
+                    self.build(("path+file:///w/fx#0.1.0", "backtrace", kind, None), self.FX)
 
 
 class _FakeProc:
