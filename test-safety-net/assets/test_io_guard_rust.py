@@ -26,6 +26,12 @@ Mutation coverage (each killed by the named test):
   `test_a_termination_report_inlined_into_libtest_is_judged`;
 * R17b, not deciding `drop_in_place<T>` by T's crate ->
   `test_a_panic_payload_dropped_by_libtest_is_judged`;
+* R17b amended, not searching a container's full type / not treating
+  `drop_slow` as a drop boundary ->
+  `test_a_crate_drop_payload_in_a_std_container_is_judged`;
+* R18, the old uppercase-generic heuristic ->
+  `test_an_all_uppercase_crate_name_is_a_crate` and
+  `test_a_blanket_impl_over_a_generic_names_no_crate`;
 * fix-round-2 item 1, reading a generic parameter `T` as a crate ->
   `test_a_blanket_impl_over_a_generic_names_no_crate`;
 * fix-round-2 item 2, matching std's `__rust_begin_short_backtrace` as a
@@ -505,6 +511,27 @@ impl<T> Blanket for T {
 }
 #[test] fn t_blanket() { assert!(7u8.b() < usize::MAX); }
 
+// Ruling R17b amended: a crate Drop payload wrapped in a std container. At
+// opt the payload crate is reached only inside the container's drop glue
+// (`drop_in_place<alloc..vec..Vec<p::Pd>>`), or -- for Rc/Arc -- erased into
+// a shared `drop_slow`. Every one must trip.
+#[test] #[should_panic] fn t_pay_vec() { std::panic::panic_any(vec![Pd]); }
+#[test] #[should_panic] fn t_pay_vec3() { std::panic::panic_any(vec![Pd, Pd, Pd]); }
+#[test] #[should_panic] fn t_pay_box() { std::panic::panic_any(Box::new(Pd)); }
+#[test] #[should_panic] fn t_pay_option() { std::panic::panic_any(Some(Pd)); }
+#[test] #[should_panic] fn t_pay_array() { std::panic::panic_any([Pd]); }
+#[test] #[should_panic] fn t_pay_arc() { std::panic::panic_any(std::sync::Arc::new(Pd)); }
+#[test] #[should_panic] fn t_pay_mutex() { std::panic::panic_any(std::sync::Mutex::new(Pd)); }
+#[test] #[should_panic] fn t_pay_tuple() { std::panic::panic_any((0u32, Pd)); }
+// R18: a Box<dyn Trait> of a crate type is judged by the crate, not by "dyn".
+trait Ob: Send {}
+impl Ob for Pd {}
+#[test] #[should_panic] fn t_pay_boxdyn() { let b: Box<dyn Ob> = Box::new(Pd); std::panic::panic_any(b); }
+// Pure container payloads keep their natural verdict (drop frees memory only).
+#[test] #[should_panic] fn t_pay_vec_pure() { std::panic::panic_any(vec![1u8]); }
+#[test] #[should_panic] fn t_pay_box_pure() { std::panic::panic_any(Box::new(String::from("s"))); }
+#[test] #[should_panic] fn t_pay_option_pure() { std::panic::panic_any(Some(0u32)); }
+
 // Ruling R15a's cap: a 2000-deep recursion through a blanket impl over `T`.
 // Every frame is `<T as p::Deep>::deep` -- a generic self type, which names
 // no crate -- so the 1024-frame window holds no crate frame and only the cap
@@ -527,26 +554,39 @@ def _write(path, text):
         f.write(text)
 
 
+# A SECOND test target whose crate name is all-uppercase (`tests/ABC.rs` ->
+# crate `ABC`). Task 7's `tests/<stem>.rs` stem is free-form, so this is
+# reachable; R18's structural rule must still see `ABC..P` as a real crate.
+UPPER_TESTS = r'''#![allow(non_snake_case)]
+struct P;
+impl Drop for P { fn drop(&mut self) { let _ = std::fs::read("/etc/hosts"); } }
+#[test] #[should_panic] fn u_payload_sp() { std::panic::panic_any(P); }
+#[test] fn u_drop() { let _p = P; }
+#[test] fn u_pure() {}
+'''
+
+
 def write_probe_crate(root):
     """Write the probe crate (and its path dependency) under `root`, return the crate dir."""
     crate = os.path.join(root, "probe")
     _write(os.path.join(crate, "Cargo.toml"), PROBE_TOML)
     _write(os.path.join(crate, "src", "lib.rs"), PROBE_LIB)
     _write(os.path.join(crate, "tests", "p.rs"), PROBE_TESTS)
+    _write(os.path.join(crate, "tests", "ABC.rs"), UPPER_TESTS)
     _write(os.path.join(crate, "depx", "Cargo.toml"), DEPX_TOML)
     _write(os.path.join(crate, "depx", "src", "lib.rs"), DEPX_RS)
     return crate
 
 
-def build_probe(root, target_dir, crate=None, opt=False):
-    """Build the probe's `p` test binary; return (crate, exe). `opt` builds the
+def build_probe(root, target_dir, crate=None, opt=False, test="p"):
+    """Build the probe's `test` target; return (crate, exe). `opt` builds the
     test profile at opt-level 1 -- the optimized-build hole (ruling R13)."""
     crate = crate or write_probe_crate(root)
     env = dict(os.environ, CARGO_TARGET_DIR=target_dir, RUSTUP_AUTO_INSTALL="0")
     if opt:
         env["CARGO_PROFILE_TEST_OPT_LEVEL"] = "1"
     proc = subprocess.run(["cargo", "test", "--offline", "--no-run", "--message-format=json",
-                           "--test", "p"], cwd=crate, env=env, capture_output=True, text=True,
+                           "--test", test], cwd=crate, env=env, capture_output=True, text=True,
                           timeout=600)
     if proc.returncode != 0:
         raise AssertionError("cargo test --no-run failed:\n%s" % proc.stderr)
@@ -556,9 +596,9 @@ def build_probe(root, target_dir, crate=None, opt=False):
         except ValueError:
             continue
         if msg.get("reason") == "compiler-artifact" and msg.get("executable") \
-                and (msg.get("target") or {}).get("name") == "p":
+                and (msg.get("target") or {}).get("name") == test:
             return crate, msg["executable"]
-    raise AssertionError("cargo reported no executable for the probe's `p` test")
+    raise AssertionError("cargo reported no executable for the probe's `%s` test" % test)
 
 
 class ProbeCase(unittest.TestCase):
@@ -578,6 +618,10 @@ class ProbeCase(unittest.TestCase):
         # (ruling R13). A separate target dir so the two builds never collide.
         _, cls.exe_opt = build_probe(cls.tmp, os.path.join(cls.tmp, "target-opt"),
                                      crate=cls.crate, opt=True)
+        # The all-uppercase-crate target (`tests/ABC.rs` -> crate `ABC`),
+        # optimized so the payload Drop inlines into libtest's drop path.
+        _, cls.exe_upper = build_probe(cls.tmp, os.path.join(cls.tmp, "target-opt"),
+                                       crate=cls.crate, opt=True, test="ABC")
         env = dict(os.environ, TEST_SAFETY_NET_CACHE=os.path.join(cls.tmp, "cache"))
         cls.hook = io_guard_rust.hook_library(cls.crate, env)
         cls.scratch = os.path.join(cls.tmp, "scratch")
@@ -768,6 +812,44 @@ class TestProbe(ProbeCase):
                                          blocked=_blocked(1), exe=exe)
                 self.assertEqual(code, 0, out)
                 self.assertNotIn("IOGuardViolation", out)
+
+    def test_a_crate_drop_payload_in_a_std_container_is_judged(self):
+        # Ruling R17b amended: the crate Drop is reached only inside the
+        # container's drop glue (vec/box/option/array/mutex/tuple) or, for
+        # Rc/Arc, a shared `drop_slow` with the payload crate erased. Every
+        # one must trip in debug, opt1 and release.
+        names = ("t_pay_vec", "t_pay_vec3", "t_pay_box", "t_pay_option", "t_pay_array",
+                 "t_pay_arc", "t_pay_mutex", "t_pay_tuple", "t_pay_boxdyn")
+        for exe in (self.exe, self.exe_opt):
+            for name in names:
+                with self.subTest(exe=os.path.basename(os.path.dirname(exe)), test=name):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                             blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    m = VIOLATION.search(out)
+                    self.assertIsNotNone(m, out)
+                    self.assertEqual(m.group(2), "filesystem", out)
+
+    def test_a_pure_container_payload_keeps_its_verdict(self):
+        for exe in (self.exe, self.exe_opt):
+            for name in ("t_pay_vec_pure", "t_pay_box_pure", "t_pay_option_pure"):
+                with self.subTest(exe=os.path.basename(os.path.dirname(exe)), test=name):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                             blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, 0, out)
+                    self.assertNotIn("IOGuardViolation", out)
+
+    def test_an_all_uppercase_crate_name_is_a_crate(self):
+        # Ruling R18: the structural rule reads `ABC..P` as crate `ABC`, where
+        # the old uppercase heuristic read `ABC` as a generic and failed open.
+        for name, want in (("u_payload_sp", 3), ("u_drop", 3), ("u_pure", 0)):
+            with self.subTest(test=name):
+                code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                         blocked=_blocked(1), exe=self.exe_upper)
+                self.assertEqual(code, want, out)
+                if want == 3:
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 1 candidate "
+                                          r"reached filesystem")
 
     def test_a_blanket_impl_over_a_generic_names_no_crate(self):
         # Item 1: `<T as p::Blanket>::b` must not be read as a crate named

@@ -195,102 +195,65 @@ fn transparent(k: &[u8]) -> bool {
     k.is_empty() || TRANSPARENT.iter().any(|t| *t == k)
 }
 
-/// A generic type parameter (`T`, `R`, `F`, `K`...): all ASCII uppercase
-/// letters. It names no crate, so a blanket impl over it is transparent.
-fn generic_param(seg: &[u8]) -> bool {
-    !seg.is_empty() && seg.iter().all(|c| c.is_ascii_uppercase())
+fn runner(k: &[u8]) -> bool {
+    RUNNER.iter().any(|t| *t == k)
 }
 
-/// Bytes of the markers that can lead a mangled type: `&` $RF$, `*` $BP$,
-/// `mut ` mut$u20$, `const ` const$u20$, a space $u20$.
-fn skip_markers(t: &[u8]) -> usize {
+/// The first non-transparent, non-runner CRATE named in mangled text `t`, or
+/// `None` (rulings R17b amended, R18). A crate always prints as a path
+/// `crate..Type`: a segment that is the START of a `..`-joined path (the byte
+/// before it is not part of a `..`) and is itself immediately followed by
+/// `..`. A bare segment -- a generic parameter `T`, a primitive `u32`,
+/// `dyn`, `const` -- is never followed by `..`, so it names no crate and is
+/// skipped. This finds the payload crate wherever it sits: a generic
+/// argument (`alloc..vec..Vec$LT$a2..P$GT$` -> `a2`), a slice or array
+/// element (`$u5b$a2..P...`), a tuple element (`$LP$u32$C$$u20$a2..P$RP$`),
+/// or behind a `Box$LT$dyn$u20$a2..Tr$GT$`. Transparent and runner crate
+/// paths are stepped over so neither a std container nor a `test::` type
+/// exempts.
+fn first_crate(t: &[u8]) -> Option<&[u8]> {
     let mut i = 0;
-    loop {
-        let r = &t[i..];
-        if r.starts_with(b"$RF$") || r.starts_with(b"$BP$") {
-            i += 4;
-        } else if r.starts_with(b"mut$u20$") {
-            i += 8;
-        } else if r.starts_with(b"const$u20$") {
-            i += 10;
-        } else if r.starts_with(b"$u20$") {
-            i += 5;
+    while i + 1 < t.len() {
+        if t[i] == b'.' && t[i + 1] == b'.' {
+            let mut start = i;
+            while start > 0 && (t[start - 1].is_ascii_alphanumeric() || t[start - 1] == b'_') {
+                start -= 1;
+            }
+            let path_start = start == 0 || t[start - 1] != b'.';
+            let seg = &t[start..i];
+            if path_start && !seg.is_empty() && !transparent(seg) && !runner(seg) {
+                return Some(seg);
+            }
+            i += 2;
         } else {
-            return i;
+            i += 1;
         }
     }
-}
-
-/// The deciding crate of the mangled TYPE starting at `t`, or `None` when it
-/// names no deciding crate: an empty segment, a generic parameter, or a
-/// tuple none of whose elements lies in a non-transparent crate. A tuple
-/// `(A, B)` mangles `$LP$A$C$$u20$B$RP$`; its first element in a
-/// non-transparent crate decides (ruling R17b). Otherwise the crate is the
-/// type path's first `..`-separated segment, ending at `..`, `$` (` as `,
-/// `>`, or the type's own generic `<`) or the end.
-fn type_crate(t: &[u8]) -> Option<&[u8]> {
-    let mut i = skip_markers(t);
-    if t[i..].starts_with(b"$LP$") {
-        i += 4;
-        let mut depth = 0usize;
-        let mut elem = true;
-        while i < t.len() {
-            if elem {
-                elem = false;
-                if let Some(k) = type_crate(&t[i..]) {
-                    if !transparent(k) {
-                        return Some(k);
-                    }
-                }
-            }
-            let r = &t[i..];
-            if r.starts_with(b"$LT$") || r.starts_with(b"$LP$") {
-                depth += 1;
-                i += 4;
-            } else if r.starts_with(b"$GT$") || r.starts_with(b"$RP$") {
-                if depth == 0 {
-                    return None; // the tuple closed with no deciding element
-                }
-                depth -= 1;
-                i += 4;
-            } else if depth == 0 && r.starts_with(b"$C$") {
-                i += 3;
-                elem = true;
-            } else {
-                i += 1;
-            }
-        }
-        return None;
-    }
-    let start = i;
-    while i < t.len() && t[i] != b'$' && !(t[i] == b'.' && i + 1 < t.len() && t[i + 1] == b'.') {
-        i += 1;
-    }
-    let seg = &t[start..i];
-    if seg.is_empty() || generic_param(seg) {
-        None
-    } else {
-        Some(seg)
-    }
+    None
 }
 
 /// The deciding crate of a mangled first path component `seg`. A plain path
 /// component IS the crate (`_ZN`'s first component is `<len>crate`). An impl
 /// component (`_$LT$...$GT$`, from `<T as Trait>::m` or `<T>::m`) is decided
-/// by the crate of the SELF TYPE T (ruling R14); a generic-parameter T names
-/// no crate and reads as transparent.
+/// by the SELF TYPE's crate (ruling R14), searched up to the ` as Trait`
+/// boundary so the trait's crate is never picked -- a blanket `impl<T>` over
+/// a bare `T` thus names no crate and reads transparent (ruling R18).
 fn seg_crate(seg: &[u8]) -> &[u8] {
     let i = if seg.first() == Some(&b'_') { 1 } else { 0 };
     if !seg[i..].starts_with(b"$LT$") {
         return seg; // a plain path component: the crate itself
     }
-    type_crate(&seg[i + 4..]).unwrap_or(&[])
+    let inner = &seg[i + 4..];
+    let end = find(inner, b"$u20$as$u20$").unwrap_or(inner.len());
+    first_crate(&inner[..end]).unwrap_or(&[])
 }
 
 /// The deciding crate of a legacy-mangled Rust symbol, or `None` when `s` is
 /// not one (no `17h<16 hex>E` hash: a C or C++ symbol). A
-/// `core::ptr::drop_in_place<T>` frame is decided by T's crate (ruling
-/// R17b): libtest dropping a crate's panic payload runs that crate's Drop.
+/// `core::ptr::drop_in_place<T>` frame is decided by the first non-transparent
+/// crate anywhere in T (ruling R17b amended): libtest dropping a crate's
+/// panic payload -- plain or wrapped in a std container -- runs that crate's
+/// Drop.
 fn crate_of(s: &[u8]) -> Option<&[u8]> {
     let n = s.len();
     if n < 20 || s[n - 1] != b'E' || &s[n - 20..n - 17] != b"17h" {
@@ -319,8 +282,21 @@ fn crate_of(s: &[u8]) -> Option<&[u8]> {
     if transparent(krate) {
         const DIP: &[u8] = b"drop_in_place$LT$";
         if let Some(p) = find(s, DIP) {
-            if let Some(k) = type_crate(&s[p + DIP.len()..]) {
+            if let Some(k) = first_crate(&s[p + DIP.len()..]) {
                 krate = k;
+            }
+        }
+        // Rc/Arc's DEFERRED drop (ruling R17b amended, extended). At opt the
+        // compiler shares one `Arc$LT$T$C$A$GT$..drop_slow` across every T and
+        // inlines the payload's own Drop into it, so the payload crate is
+        // erased from the stack -- `Arc::new(P)` then escaped. `drop_slow` is
+        // std's refcount-zero destructor path and nothing else; treat it as a
+        // drop boundary. It can only trip when the dropped value's destructor
+        // makes a blocked call -- a pure refcounted drop merely frees memory
+        // (its allocator clock read is R11-exempt), so no pure test trips.
+        if transparent(krate) {
+            if let Some(p) = find(s, b"drop_slow") {
+                krate = &s[p..p + 9];
             }
         }
     }
