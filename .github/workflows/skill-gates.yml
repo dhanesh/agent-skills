@@ -3,8 +3,7 @@ name: skill-gates
 on:
   pull_request:
   push:
-    # THROWAWAY (Task 10): run on this branch's pushes until its PR exists.
-    branches: [main, feat/test-safety-net-rust]
+    branches: [main]
 
 permissions:
   contents: read
