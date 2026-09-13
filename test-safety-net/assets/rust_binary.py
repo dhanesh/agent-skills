@@ -165,8 +165,10 @@ V0Facts.__doc__ = """What the frame classifier reads from one v0 symbol.
                  trait's root crate
     main_idents  the main path's own identifiers, innermost-parent first (not
                  generic arguments', not an impl's self type's)
-    drop_crate   for `core::ptr::drop_glue<T>` / `drop_in_place<T>`: the first
-                 crate not in `skip` anywhere in T, else None
+    drop_crate   for `core::ptr::drop_glue<T>` / `drop_in_place<T>` -- the main
+                 path's root crate `core`, never a crate's own fn so named
+                 (ruling R39) -- the first crate not in `skip` anywhere in
+                 T, else None
     control_idents  the identifiers in CONTROL's scope, which is legacy's
                  (ruling R28): the main path's, an inherent (`M`) or `Drop`
                  (`X`) impl's self type's OWN path's (R34: not its generic
@@ -525,6 +527,15 @@ def _v0_plain_path(node):
     return [node[1][1]] + tail if node[0] == "C" else None
 
 
+def _v0_root(node):
+    """The root crate of main path `node` -- its `C` identifier, read through
+    `N` chains and an `I` node's inner path -- or None under an impl
+    (`M`/`X`/`Y`), as the hook's `root` (ruling R39)."""
+    while node[0] in ("N", "I"):
+        node = node[1]
+    return node[1][1] if node[0] == "C" else None
+
+
 def _v0_crates(node):
     """Every crate root in `node`, in the order the symbol spells them."""
     if isinstance(node, list):
@@ -575,7 +586,9 @@ def _v0_decide(node, skip, st):
         return own or trait
     if tag == "I":
         krate = _v0_decide(node[1], skip, st)
-        if st["last"] in _V0_DROP_GLUE:
+        # Ruling R39: only CORE's drop glue -- a crate's own fn named
+        # drop_in_place is printed by legacy without generic arguments.
+        if st["last"] in _V0_DROP_GLUE and _v0_root(node[1]) == "core":
             for arg in node[2]:
                 st["control"].extend(_v0_idents(arg))
             if st["drop"] is None:

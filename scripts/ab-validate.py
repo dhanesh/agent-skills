@@ -3787,6 +3787,11 @@ CASES = [
     (v0("_RNv{p}1p32f_hashmap_random_keys_named_test"), False, False),
     (v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys"), True, False),
     (v0("_RINvNt{core}4core3ptr9drop_glueNt{p}1p13TsnControlEnvE{p}1p"), False, True),
+    # R39: only CORE's drop glue lends its payload a control name. A crate's
+    # own fn named drop_in_place / drop_glue (legacy `_ZN1p13drop_in_place17h
+    # ...E`, no generic arguments) is the crate's frame, not the control.
+    (v0("_RINv{p}1p13drop_in_placeNt{p}1p13TsnControlEnvE{p}1p"), False, False),
+    (v0("_RINv{p}1p9drop_glueRNt{p}1p13TsnControlEnvE{p}1p"), False, False),
     # R34: a std type's CONCRETE generic argument in an M/X self type -- legacy
     # prints `core::result::Result<T,E>::map`, `Receiver<T>::recv_timeout` --
     # is not the control; the helper's OWN inherent impl still is.
@@ -3898,7 +3903,7 @@ def check_test_safety_net_rust_v0(old, new):
     newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_V0_PROBE)
     if _errored(oldp, newp):
         return
-    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 12 (higher=better)",
+    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 14 (higher=better)",
         oldp["scope"], newp["scope"], newp["scope"] > oldp["scope"],
         "std::fs::read::<p::hashmap_random_keys> and ::<p::TsnControlEnv> are std's read "
         "(legacy spells them _ZN3std2fs4read); a Y self type and a crate fn named like the "

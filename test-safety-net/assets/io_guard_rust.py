@@ -188,9 +188,10 @@ spike's 128 slots used to fall off the end and be exempt):
     impl's self type by ITS OWN path (ruling R34: `<Result<&str,
     TsnControlEnv>>::map` is std's, not the control; ruling R37: no other
     trait impl, since v0 prints a blanket `impl<T> Tr for T` at the helper
-    type), or drop glue's payload -- never a generic
-    argument of an ordinary std fn, so `std::fs::read::<TsnControlEnv>` is
-    std's read, not the control;
+    type), or the payload of CORE's drop glue (ruling R39: a crate's own fn
+    merely named `drop_in_place`/`drop_glue` is not drop glue) -- never a
+    generic argument of an ordinary std fn, so `std::fs::read::<
+    TsnControlEnv>` is std's read, not the control;
   * std's own seeding frame (`std::sys::random::hashmap_random_keys`: a
     `SEED_MARKERS` name in the path of a `SEED_CRATE` symbol) is std seeding
     a HashMap: exempt. A crate fn, type or test that merely carries the name

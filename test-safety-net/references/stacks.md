@@ -599,8 +599,10 @@ own image, over a 1024-frame buffer. It resolves symbols with `dladdr` on macOS 
 of `/proc/self/exe` on Linux.
 
 - A `CONTROL_HELPERS` frame decides, with that helper's group. The helper must be named by the
-  frame's own path, by an inherent or `Drop` impl's self type (by that type's own path), or by drop
-  glue's payload. No other trait impl counts, because under v0 a blanket `impl<T> Tr for T` is
+  frame's own path, by an inherent or `Drop` impl's self type (by that type's own path), or by the
+  payload of core's own drop glue (`core::ptr::drop_in_place`/`drop_glue`). A crate's own function
+  or method merely named `drop_in_place` or `drop_glue` is not drop glue: legacy prints it without
+  its generic arguments. No other trait impl counts, because under v0 a blanket `impl<T> Tr for T` is
   printed with the helper as its self type. A helper
   type used only as a generic argument is std's work, not the control. That covers a std function's
   generic (`std::fs::read::<TsnControlEnv>`) and a std type's generic
@@ -702,6 +704,13 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    `cargo::error=…--locked was passed…` produces a line cargo shows as its own `error:`. The proof
    then exits 2 with the stale-lock remedy, not 5 (NO BUILD). That is deliberate, and it is never
    GREEN.
+10. **An optimized generic `Drop` can borrow the helper's name.** Take a crate's generic
+    `impl<T> Drop for W<T>` whose `drop` does I/O, dropping a `W<TsnControlEnv>`. At opt-level 1
+    or more, that `drop` inlines into `core::ptr::drop_in_place<W<TsnControlEnv>>`. That frame's
+    payload names the helper, so the call is regrouped as the control's. It happens under both
+    manglings. The wrapper's default debug build keeps the `Drop` its own frame and judges it, and
+    so does `#[inline(never)]` on the `drop`. A `[profile.dev]`/`[profile.test]` opt-level of 1 or
+    more with this shape can read GREEN.
 
 ## Python row, in detail
 

@@ -484,6 +484,8 @@ fn control(s: &[u8]) -> Option<&'static [u8]> {
 //     type's, else its trait's -- the legacy name of the item is the trait's;
 //   * `core::ptr::drop_glue<T>` / `drop_in_place<T>` is decided by the first
 //     crate anywhere in T -- generics, tuples, arrays, slices, `dyn` (R17b);
+//     only under the root crate `core` (R39): a crate's own fn or method so
+//     named is its own frame, as legacy prints it without generic arguments;
 //   * a main-path identifier containing `drop_slow` is Rc/Arc's deferred
 //     drop, a boundary (R17b extended); a TEST_BODY_BOUNDARY one, in the
 //     `test` crate, is libtest's call into the test (R13, R17a);
@@ -558,6 +560,9 @@ mod v0 {
         /// (drop glue's payload, legacy's `drop_in_place<T>` text).
         scan: u8,
         last: &'a [u8],
+        /// The main path's root crate as `path_main` last read it: its `C`
+        /// identifier, or empty under an impl (`M`/`X`/`Y`) (ruling R39).
+        root: &'a [u8],
         boundary: bool,
         drop_slow: bool,
         drop_crate: Option<&'a [u8]>,
@@ -577,6 +582,7 @@ mod v0 {
             found: None,
             scan: SCAN_OFF,
             last: &[],
+            root: &[],
             boundary: false,
             drop_slow: false,
             drop_crate: None,
@@ -766,11 +772,13 @@ mod v0 {
                 b'C' => {
                     let id = self.ident()?;
                     self.last = &[];
+                    self.root = id;
                     id
                 }
                 b'M' => {
                     self.impl_path()?;
                     self.last = &[];
+                    self.root = &[];
                     self.searching(false, SCAN_OWN)?.unwrap_or(&[])
                 }
                 b'X' => {
@@ -791,11 +799,13 @@ mod v0 {
                         self.pos = end;
                     }
                     self.last = &[];
+                    self.root = &[];
                     own
                 }
                 b'Y' => {
                     let own = self.searching(false, SCAN_OFF)?.unwrap_or(&[]);
                     let trait_crate = self.path_main()?;
+                    self.root = &[];
                     if own.is_empty() {
                         trait_crate
                     } else {
@@ -804,7 +814,13 @@ mod v0 {
                 }
                 b'I' => {
                     let krate = self.path_main()?;
-                    let drop = self.last == &b"drop_glue"[..] || self.last == &b"drop_in_place"[..];
+                    // Ruling R39: only CORE's drop glue lends its payload a
+                    // control name. Legacy looks drop_in_place up only under
+                    // a transparent root (crate_of) and prints a crate's own
+                    // fn so named without generic arguments, so
+                    // `r3::drop_in_place::<TsnControlEnv>` is r3's frame.
+                    let drop = self.root == &b"core"[..]
+                        && (self.last == &b"drop_glue"[..] || self.last == &b"drop_in_place"[..]);
                     while !self.eat(b'E') {
                         if drop {
                             let hit = self.searching(true, SCAN_FULL)?;

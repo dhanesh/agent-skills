@@ -431,7 +431,7 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and nine residuals are in `references/stacks.md`. Read residuals 1 and 9 before you trust a
+   and ten residuals are in `references/stacks.md`. Read residuals 1 and 9 before you trust a
    GREEN: anything that bypasses libc is unseen whatever its intent (a dependency's raw syscall
    included), and deliberate verdict forgery by the code under test is outside the threat model.
 

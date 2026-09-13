@@ -377,6 +377,21 @@ V0 = {
     "drop_x_trait_backref": v0("_RNvXNt{core}4core3opsNt{p}1p13TsnControlEnvNtNtB2_4drop"
                                "4Drop4drop"),
     "drop_lookalike_x": v0("_RNvX{p}1pNt{p}1p13TsnControlEnvNtNt{p}1p4drop4Drop4drop"),
+    # Ruling R39: only CORE's drop glue lends its payload a control name. A
+    # crate's own fn -- or generic method -- NAMED drop_in_place / drop_glue
+    # is printed by legacy without its generic arguments (`_ZN1p13drop_in_
+    # place17h…E`, `p::Slot<T>::drop_in_place`, `_ZN1p4core3ptr13drop_in_
+    # place17h…E`): the crate's own frame, no control, no payload search.
+    "userfn_drop_in_place": v0("_RINv{p}1p13drop_in_placeNt{p}1p13TsnControlEnvE{p}1p"),
+    "userfn_drop_glue": v0("_RINv{p}1p9drop_glueRNt{p}1p13TsnControlEnvE{p}1p"),
+    "method_drop_in_place": v0("_RINvM{p}1pINt{p}1p4SlothE13drop_in_place"
+                               "Nt{p}1p13TsnControlEnvE{p}1p"),
+    "nested_core_drop_in_place": v0("_RINvNtNt{p}1p4core3ptr13drop_in_place"
+                                    "Nt{p}1p13TsnControlEnvE{p}1p"),
+    # ... while core's own still does, under either name (legacy `_ZN4core3ptr
+    # 85drop_in_place$LT$p..TsnControlEnv$GT$17h…E`).
+    "drop_in_place_control": v0("_RINvNt{core}4core3ptr13drop_in_place"
+                                "Nt{p}1p13TsnControlEnvE{p}1p"),
 }
 
 # Ruling R29: 1,200 `N` levels, as an `#[export_name]` may spell them. The
@@ -448,7 +463,8 @@ class TestV0Parser(unittest.TestCase):
         self.assertEqual(self.facts("provided_crate_trait").krate, "p")
 
     def test_drop_glue_is_searched_through_every_generic(self):
-        for name in ("drop_vec", "drop_tuple", "drop_array", "drop_dyn", "drop_control"):
+        for name in ("drop_vec", "drop_tuple", "drop_array", "drop_dyn", "drop_control",
+                     "drop_in_place_control"):
             with self.subTest(sym=name):
                 f = self.facts(name)
                 self.assertEqual((f.krate, f.drop_crate), ("core", "p"))
@@ -474,9 +490,18 @@ class TestV0Parser(unittest.TestCase):
                             ("trait_impl_backref", "TsnControlEnv"),
                             ("inherent_control", "TsnControlEnv"),
                             ("drop_x_trait_backref", "TsnControlEnv"),
-                            ("drop_control", "TsnControlEnv")):
+                            ("drop_control", "TsnControlEnv"),
+                            ("drop_in_place_control", "TsnControlEnv")):
             with self.subTest(sym=name):
                 self.assertIn(ident, self.facts(name).control_idents)
+        # R39: a crate's own fn or method NAMED like core's drop glue is no
+        # drop glue -- no control name from its generic arguments, no payload.
+        for name in ("userfn_drop_in_place", "userfn_drop_glue", "method_drop_in_place",
+                     "nested_core_drop_in_place"):
+            with self.subTest(sym=name):
+                f = self.facts(name)
+                self.assertNotIn("TsnControlEnv", f.control_idents)
+                self.assertEqual((f.krate, f.drop_crate), ("p", None))
         for name in ("std_read_control_type", "provided_control_self", "mx_result_map",
                      "mx_receiver", "mx_iter_x", "mx_ref_self", "blanket_x_control",
                      "drop_lookalike_x"):

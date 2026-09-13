@@ -122,6 +122,14 @@ Fix round 3 (rulings R37, R38), each run:
 * R38, a shipped helper without `#[inline(never)]` ->
   `test_every_honest_control_path_still_passes_at_tier_2` (the temp-dir
   control at opt1).
+Fix round 4 (ruling R39), run:
+* R39, the drop-payload rule firing on ANY fn whose last identifier is
+  drop_in_place/drop_glue, not only under core's root ->
+  `TestClassifier.test_only_cores_drop_glue_lends_its_payload_a_control_name`
+  (legacy-derived fixtures) and, live on 1.98,
+  `test_a_crate_fn_named_like_cores_drop_glue_is_judged` and -- where 1.98
+  is the DEFAULT toolchain, since the wrapper runs scrub RUSTUP_TOOLCHAIN --
+  `TestTierTwo.test_a_crate_fn_named_like_cores_drop_glue_is_not_the_control`.
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -593,6 +601,18 @@ impl<F: Fn(&str, &str) -> R, R> ViaFn for F {
     #[inline(never)]
     fn via_fn(&self) -> usize { std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0) }
 }
+
+// Ruling R39: a crate's OWN fns named like core's drop glue (legacy
+// `probe::drop_in_place`, no generic arguments) -- v0 prints the helper type
+// they are instantiated with, which is still not drop glue's payload.
+#[inline(never)]
+pub fn drop_in_place<T>(t: T) -> usize {
+    let n = std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0);
+    drop(t);
+    n
+}
+#[inline(never)]
+pub fn drop_glue<T>(_t: &T) -> bool { std::process::Command::new("true").status().is_ok() }
 '''
 # The control helpers: Task 8's canonical text, verbatim (ruling R2).
 CONTROL_HELPERS_RS = r'''#[inline(never)]
@@ -866,6 +886,21 @@ impl TsnControlEnv {
 }
 #[test] fn h_env_inherent() { let mut g = tsn_control_set_env("TSN_R37_KEY", "1"); g.restore(); }
 #[test] fn h_env_tuple_glue() { let _t = (tsn_control_set_env("TSN_R37_KEY", "1"), 7u8); }
+// Ruling R39: core's drop glue over every std container of the helper is
+// still the control ...
+#[test] fn h_env_vec_glue() { let _v = vec![tsn_control_set_env("TSN_R39_KEY", "1")]; }
+#[test] fn h_env_option_glue() { let _o = Some(tsn_control_set_env("TSN_R39_KEY", "1")); }
+#[test] fn h_env_box_glue() { let _b = Box::new(tsn_control_set_env("TSN_R39_KEY", "1")); }
+#[test] fn h_env_arc_glue() { let _a = std::sync::Arc::new(tsn_control_set_env("TSN_R39_KEY", "1")); }
+#[test] fn h_env_rc_glue() { let _r = std::rc::Rc::new(tsn_control_set_env("TSN_R39_KEY", "1")); }
+// ... while a crate fn merely NAMED drop_in_place / drop_glue is not.
+#[test] fn b_userfn_dip_fs() {
+    assert!(probe::drop_in_place(tsn_control_set_env("TSN_R39_KEY", "1")) > 0);
+}
+#[test] fn b_userfn_glue_spawn() {
+    let g = tsn_control_set_env("TSN_R39_KEY", "1");
+    assert!(probe::drop_glue(&g));
+}
 '''
 
 
@@ -1268,6 +1303,23 @@ class TestProbe(ProbeCase):
                     self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
                                           r"%s I/O" % group)
 
+    def test_a_crate_fn_named_like_cores_drop_glue_is_judged(self):
+        # Ruling R39: `probe::drop_in_place::<p::TsnControlEnv>` and
+        # `probe::drop_glue::<p::TsnControlEnv>` under v0 are the crate's own
+        # fns, not core's drop glue -- legacy prints them without generic
+        # arguments and judges them. At tier 2 with environment allowed each
+        # is the test's filesystem or subprocess I/O. MUTATION: firing the
+        # drop-payload rule on the last identifier alone passes both (1.98).
+        for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
+            with self.subTest(build=label):
+                for name, group in (("b_userfn_dip_fs", "filesystem"),
+                                    ("b_userfn_glue_spawn", "subprocess")):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"], tier=2,
+                                             blocked=_blocked(2, ["environment"]), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
+                                          r"%s I/O" % group)
+
     def test_every_honest_control_path_still_passes_at_tier_2(self):
         # Rulings R37 and R38: the shipped control paths -- tsn_control_set_env
         # and `<TsnControlEnv as Drop>::drop` (t_env_control), an inherent
@@ -1275,10 +1327,16 @@ class TestProbe(ProbeCase):
         # tsn_control_temp_dir -- each pass with their group allowed, at debug
         # AND opt1. At opt-level >= 1 an inlinable helper vanished into the
         # test body and the honest temp-dir run tripped; `#[inline(never)]`
-        # (R38) keeps each its own frame.
+        # (R38) keeps each its own frame. R39: core's drop glue with the
+        # helper in a tuple, Vec, Option, Box, Arc or Rc stays the control.
         for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
             for name, allow in (("t_env_control", "environment"), ("h_env_inherent", "environment"),
                                 ("h_env_tuple_glue", "environment"),
+                                ("h_env_vec_glue", "environment"),
+                                ("h_env_option_glue", "environment"),
+                                ("h_env_box_glue", "environment"),
+                                ("h_env_arc_glue", "environment"),
+                                ("h_env_rc_glue", "environment"),
                                 ("t_tmp_control", "filesystem")):
                 with self.subTest(build=label, test=name):
                     code, out = self.run_exe([name, "--exact", "--test-threads=1"], tier=2,
@@ -1579,6 +1637,15 @@ class TestClassifier(unittest.TestCase):
         "fnitem_x_control": ("1", "0", "-", "=p"),
         "drop_x_trait_backref": ("1", "0", "environment", "=p"),
         "drop_lookalike_x": ("1", "0", "-", "=p"),
+        # Ruling R39, written from LEGACY: `_ZN1p13drop_in_place17h…E`,
+        # `_ZN1p9drop_glue17h…E`, `p::Slot<T>::drop_in_place`, `_ZN1p4core3ptr
+        # 13drop_in_place17h…E` -- a crate's own fn so named is its frame, with
+        # no generic arguments to name a control; core's own still lends one.
+        "userfn_drop_in_place": ("1", "0", "-", "=p"),
+        "userfn_drop_glue": ("1", "0", "-", "=p"),
+        "method_drop_in_place": ("1", "0", "-", "=p"),
+        "nested_core_drop_in_place": ("1", "0", "-", "=p"),
+        "drop_in_place_control": ("1", "0", "environment", "=p"),
     }
 
     @classmethod
@@ -1654,6 +1721,20 @@ class TestClassifier(unittest.TestCase):
                     "mx_result_map", "mx_receiver", "mx_iter_x", "mx_ref_self",
                     "inherent_control", "blanket_x_control", "fnitem_x_control",
                     "drop_x_trait_backref", "drop_lookalike_x"])
+
+    def test_only_cores_drop_glue_lends_its_payload_a_control_name(self):
+        # Ruling R39: the drop-payload rule keys on the main path's ROOT crate
+        # being core, as legacy's drop_in_place lookup keys on a transparent
+        # root. A crate fn, a crate module named `core`, or a generic method
+        # named drop_in_place/drop_glue is judged; core's glue, under either
+        # name, is still the control. MUTATION: firing on the last identifier
+        # alone again fails all four negatives (and the oracle agrees).
+        names = ["userfn_drop_in_place", "userfn_drop_glue", "method_drop_in_place",
+                 "nested_core_drop_in_place", "drop_in_place_control", "drop_control"]
+        self.check(names)
+        for name in names:
+            with self.subTest(oracle=name):
+                self.assertEqual(mirror(V0[name]), self.WANT[name])
 
     def test_a_deep_nested_path_reads_as_the_hook_reads_it(self):
         # Ruling R29: 1,200 `N` levels. The hook reads the chain iteratively;
@@ -1786,6 +1867,18 @@ const TRUE: &[u8] = b"/usr/bin/true\0";
 pub fn exec_v() { let a = [TRUE.as_ptr() as *const i8, std::ptr::null()]; unsafe { execv(TRUE.as_ptr() as *const i8, a.as_ptr()); } }
 pub fn exec_l() { unsafe { execl(TRUE.as_ptr() as *const i8, TRUE.as_ptr() as *const i8, std::ptr::null::<i8>()); } }
 pub fn quick(code: i32) -> ! { unsafe { quick_exit(code) } }
+
+// Ruling R39: crate fns merely NAMED like core's drop glue. The I/O is DIRECT
+// in each body, so the deciding frame is the lookalike itself (a call to
+// `read_hosts`/`run` would be its own crate frame and decide first).
+#[inline(never)]
+pub fn drop_in_place<T>(t: T) -> usize {
+    let n = std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0);
+    drop(t);
+    n
+}
+#[inline(never)]
+pub fn drop_glue<T>(_t: &T) -> bool { std::process::Command::new("true").status().is_ok() }
 '''
 # The main test file. It carries the control helpers verbatim -- so it
 # DEFINES `tsn_control_set_env` without calling it, and has a commented-out
@@ -1848,6 +1941,17 @@ ENV_ONE = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
 }
 '''
 ENV_TWO = ENV_ONE + "#[test] fn t_sibling() { assert_eq!(fx::pure(1), 2); }\n"
+# Ruling R39: the helper handed to a crate fn named like core's drop glue --
+# each alone in its file (the one-environment-test-per-file rule).
+B_DIP = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
+#[test] fn b_userfn_dip_fs() { assert!(fx::drop_in_place(tsn_control_set_env("TSN_FX_VAR", "v")) > 0); }
+'''
+B_GLUE = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
+#[test] fn b_userfn_glue_spawn() {
+    let g = tsn_control_set_env("TSN_FX_VAR", "v");
+    assert!(fx::drop_glue(&g));
+}
+'''
 PRIVATE_TESTS = "#[test] fn t_private() { assert_eq!(fx::private::hidden(), 1); }\n"
 CFG_PROBE = ('#[test] fn t_cfg() { assert!(cfg!(tsn_probe_cfg), "built without the plan\'s cfg"); '
              '}\n')
@@ -1876,6 +1980,7 @@ def write_fx_crate(root):
     crate = os.path.join(root, "fx")
     for rel, text in (("Cargo.toml", FX_TOML), ("src/lib.rs", FX_LIB), ("tests/fx.rs", FX_TESTS),
                       ("tests/env_one.rs", ENV_ONE), ("tests/env_two.rs", ENV_TWO),
+                      ("tests/b_dip.rs", B_DIP), ("tests/b_glue.rs", B_GLUE),
                       ("tests/private.rs", PRIVATE_TESTS), ("tests/cfg_probe.rs", CFG_PROBE),
                       ("tests/hf_forged.rs", HF_FORGED), ("tests/hf_norun.rs", HF_NORUN),
                       ("tests/hf_honest.rs", HF_HONEST),
@@ -2091,6 +2196,19 @@ class TestTierTwo(WrapperCase):
         code, out = self.guard(2, "filesystem", "t_env_alone", stem="env_one")
         self.assertEqual(code, 3, out[-800:])
         self.assertEqual(label(out), "environment")
+
+    def test_a_crate_fn_named_like_cores_drop_glue_is_not_the_control(self):
+        # Ruling R39, through the wrapper: `fx::drop_in_place::<TsnControlEnv>`
+        # and `fx::drop_glue::<TsnControlEnv>` are the crate's fns. With
+        # environment allowed their filesystem / subprocess I/O trips (it read
+        # GREEN on 1.98, where v0 printed the helper as their generic).
+        for stem, test, group in (("b_dip", "b_userfn_dip_fs", "filesystem"),
+                                  ("b_glue", "b_userfn_glue_spawn", "subprocess")):
+            with self.subTest(test=test):
+                code, out = self.guard(2, "environment", test, stem=stem)
+                self.assertEqual(code, 3, out[-800:])
+                self.assertEqual(label(out), group, out[-800:])
+                self.assertIn("GUARD TRIP (exit 3)", out)
 
 
 # ── 4. The exit contract ─────────────────────────────────────────────────
