@@ -72,7 +72,7 @@ per stack, loaded on the single-test invocation rather than written into the rep
   randomness, database and network entry points, decides each call by **call provenance**
   (`runtime.Callers`), and ends the process on a trip, so `recover()` cannot swallow one.
 - [`assets/io_guard_rust.py`](assets/io_guard_rust.py) — a wrapper that builds the test with
-  **`cargo test --locked --no-run`**, then runs the compiled binary under a **preloaded hook
+  **`cargo test --locked --offline --no-run`**, then runs the compiled binary under a **preloaded hook
   library** (`assets/io_guard_rust_hook.rs`, built by the repo's own `rustc`) that intercepts libc
   and attributes each call to the Rust function that made it, walking `backtrace()`. A trip ends
   the process with `_exit(3)`, so no `catch_unwind` can swallow one. It refuses (exit 2) the
@@ -95,7 +95,7 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Four stacks are complete, each proved by CI on every version it claims —
+churn signal). Four stacks are complete, each run by CI on every version it claims —
 **Python** 3.10–3.14 (pytest, falling back to `unittest`), **node/TypeScript** on the LTS lines 18,
 20, 22, 24 and 26 (`node --test`, no dependency added), **Go** 1.22–1.26 (`go test`, darwin and
 linux, no dependency added) and **Rust** 1.82, 1.86, 1.90, 1.94 and 1.98 (`cargo test`, darwin and
@@ -105,8 +105,9 @@ toolchains are where untested code lives, which is why the floor is five version
 stable. A repo no stack claims gets a note on stderr and an empty plan rather than a guess (see
 [`references/stacks.md`](references/stacks.md)). Node's optional precise discovery drives a
 `typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`
-helper and never downloads a toolchain; Rust's guard needs a `Cargo.lock` and refuses a toolchain
-pin that is not installed rather than downloading it.
+helper and never downloads a toolchain; Rust's guard needs a `Cargo.lock`, refuses a toolchain
+pin that is not installed rather than downloading it, and builds `--offline`, so a dependency must
+already be in the cargo cache.
 
 ## Usage
 
@@ -157,7 +158,7 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `assets/io_guard.js` — node's, preloaded with `node --require`; dependency-free CommonJS.
 - `assets/io_guard_go.py` — go's, a stdlib-python wrapper around `go test -overlay`.
 - `assets/io_guard_rust.py` — rust's, a stdlib-python wrapper that builds with
-  `cargo test --locked --no-run`, owns the hook's name tables and classifies the run.
+  `cargo test --locked --offline --no-run`, owns the hook's name tables and classifies the run.
 - `assets/io_guard_rust_hook.rs` — the hook's source, a cdylib the repo's own `rustc` builds and
   the wrapper preloads under the test binary.
 - `assets/rust_binary.py` — pure ELF/Mach-O inspection: refuses static, stripped and musl

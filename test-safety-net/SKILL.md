@@ -18,12 +18,12 @@ compatibility: >-
   CLI. Writes and proves tests on four stacks — python 3.10–3.14 (pytest, falling back to
   unittest), node/TypeScript on the LTS lines 18, 20, 22, 24 and 26 (`node --test`), go 1.22–1.26
   (`go test`, on darwin and linux) and rust 1.82–1.98 (`cargo test`, on darwin and linux; 1.82,
-  1.86, 1.90, 1.94 and 1.98 proven in CI, the minors between expected by bracketing, not proven)
-  (references/stacks.md). No pip, no npm, and no toolchain is ever fetched: node's optional precise
-  discovery drives a `typescript` the repo already ships — that runs the analysed repo's own
-  compiler in-process, and `--no-precise` declines it — go's runs this skill's own `go/ast` helper
-  under `GOTOOLCHAIN=local`, and the rust guard runs rustup with `RUSTUP_AUTO_INSTALL=0`. The rust
-  guard's `cargo test --locked` build is the one step that may download crates, on a cold cache.
+  1.86, 1.90, 1.94 and 1.98 run by CI's `versions` legs, the minors between expected by
+  bracketing, not proven) (references/stacks.md). No pip, no npm, no network: node's optional
+  precise discovery drives a `typescript` the repo already ships and never downloads one — that
+  runs the analysed repo's own compiler in-process, and `--no-precise` declines it — go's runs this
+  skill's own `go/ast` helper under `GOTOOLCHAIN=local`, and the rust guard builds `--offline`
+  under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
   version: "1.3.0"
@@ -70,9 +70,9 @@ test -f "$SKILL_DIR/assets/io_guard_rust.py" || echo "SKILL_DIR not resolved"
 
 The ranker and the python, go and rust guards are stdlib-only python3 — the go guard drives the
 machine's own `go`, the rust guard the machine's own `cargo` and `rustc`; the node guard is
-dependency-free CommonJS for node 18+. The ranker is offline and no guard ever downloads a
-toolchain; the rust guard's `cargo` build is the one step that can reach the network, for
-dependencies not yet in the cargo cache (step 1).
+dependency-free CommonJS for node 18+. All five are offline: no guard ever downloads a toolchain,
+and the rust guard builds `--offline`, so a dependency missing from the cargo cache is refused
+(step 1), never fetched.
 Do not author your own guard: the one that ships is
 what Invariant 2 is enforced by, and a hand-rolled substitute that patches the wrong layer is worse
 than none, because it makes the invariant look enforced when it is not.
@@ -105,14 +105,15 @@ than none, because it makes the invariant look enforced when it is not.
    toolchain — so on a cold module cache run `go mod download` yourself first. A missing module
    shows up as exit 5 (the package did not build), never as a verdict about the unit.
 
-   **On rust, check the lockfile and the toolchain before you plan to write.** The rust guard
-   builds with `cargo test --locked` and runs every `rustc` and `cargo` call with
-   `RUSTUP_AUTO_INSTALL=0`, so it never writes `Cargo.lock` and never downloads a toolchain. Every
-   proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale one, or with a
-   `rust-toolchain.toml` pin below 1.82 or not installed. The remedy for a missing lockfile is
-   `cargo generate-lockfile`. It writes a file into the user's tree, which this skill never does on
-   its own, so ask first. `--locked` pins the dependency versions but does not stop cargo fetching
-   them on a cold cache: run `cargo fetch --locked` first if the proof must not touch the network.
+   **On rust, check the lockfile, the toolchain and the cargo cache before you plan to write.**
+   The rust guard builds with `cargo test --locked --offline` and runs every `rustc` and `cargo`
+   call with `RUSTUP_AUTO_INSTALL=0`, so it never writes `Cargo.lock` and never downloads a
+   toolchain or a crate. Every proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale
+   one, with a `rust-toolchain.toml` pin below 1.82 or not installed, or with a dependency not in
+   the local cargo cache. The remedy for a missing lockfile is `cargo generate-lockfile`. It writes
+   a file into the user's tree, which this skill never does on its own, so ask first. The remedy
+   for an uncached dependency is `cargo fetch` (or building the tests once), then re-run: the proof
+   never downloads anything.
 
 2. **Rank** the risk surface:
 
@@ -305,8 +306,8 @@ than none, because it makes the invariant look enforced when it is not.
    `testing/synctest`.
 
    On **rust** that is `assets/io_guard_rust.py`. It builds the test with `cargo test --locked
-   --no-run`, then runs the compiled binary under a preloaded hook library that intercepts libc and
-   attributes each call to the function that made it:
+   --offline --no-run`, then runs the compiled binary under a preloaded hook library that
+   intercepts libc and attributes each call to the function that made it:
 
    ```sh
    # Tier 1 candidate — the unit claims to touch nothing, so block everything.
@@ -372,7 +373,9 @@ than none, because it makes the invariant look enforced when it is not.
      does not link libtest's harness (`harness = false`). The 300 s timeout. libtest exits 0 for the
      first two, which is why the guard reads its result lines rather than its exit code.
    - A compile error is exit 5, never RED; cargo exits 101 for both.
-   - Rust has five extra ways to reach exit 2 (NOT ARMED), beyond step 1's lockfile and toolchain:
+   - Rust has six extra ways to reach exit 2 (NOT ARMED), beyond step 1's lockfile and toolchain:
+     - a dependency not in the local cargo cache (run `cargo fetch`, or build the tests once; the
+       proof never downloads anything);
      - a static, stripped or musl test binary;
      - a hook that failed to load, or that could not attribute a call;
      - an environment-controlled test that is not alone in its file;
@@ -423,8 +426,9 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and nine residuals are in `references/stacks.md`. Read residual 1's threat model before you
-   trust a GREEN: the guard defends against accidental I/O, not deliberate forgery.
+   and nine residuals are in `references/stacks.md`. Read residuals 1 and 9 before you trust a
+   GREEN: anything that bypasses libc is unseen whatever its intent (a dependency's raw syscall
+   included), and deliberate verdict forgery by the code under test is outside the threat model.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

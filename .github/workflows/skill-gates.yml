@@ -84,7 +84,7 @@ jobs:
   # longer defaults to, and the go guard could not run on 1.22-1.23 at all.
   # ubuntu only: the full gate above already covers macOS on the pinned
   # versions. ubuntu-latest is amd64, so the rust legs are also the rust
-  # guard's only amd64 proof: its hook was developed on arm64.
+  # guard's only amd64 runs: its hook was developed on arm64.
   versions:
     name: tsn ${{ matrix.stack }} ${{ matrix.version }}
     strategy:

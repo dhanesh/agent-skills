@@ -64,9 +64,12 @@ Every refusal prints its reason and exits 2:
      `Cargo.lock` gets a separate out-of-repo target dir and
      `--cfg=rustix_use_libc`, because rustix's linux_raw backend issues
      syscalls without libc. Otherwise cargo's own target dir and no flags;
-  7. `cargo test --locked --no-run --message-format=json [-p <package>]
-     --test <stem>` (`build_test`), with no timeout: waiting on cargo's lock
-     is not the proof's time. A compile error exits 5;
+  7. `cargo test --locked --offline --no-run --message-format=json
+     [-p <package>] --test <stem>` (`build_test`), with no timeout: waiting
+     on cargo's lock is not the proof's time. `--offline` (ruling R24): the
+     proof never downloads anything, as go's `GOPROXY=off` never does, so a
+     dependency missing from the local cargo cache exits 2 with the remedy
+     `cargo fetch`. A compile error exits 5;
   8. the executable is refused when static, musl or stripped
      (`rust_binary.refusal`): each makes a preloaded hook fail open. One
      that does not link libtest's harness (`harness = false`) is NO TEST:
@@ -769,12 +772,25 @@ def build_plan(repo, platform):
     return BuildPlan(None, (), "")
 
 
+# Ruling R24: cargo's own words when `--offline` cannot resolve a dependency.
+# Measured on 1.82 and 1.98 with an empty CARGO_HOME: `error: no matching
+# package named `itoa` found`, then a note naming offline mode / `--offline`.
+# Matched on cargo's stderr only, never on rendered compiler diagnostics.
+_OFFLINE = re.compile(r"offline mode|--offline")
+_NOT_CACHED = ("a dependency is not in the local cargo cache; run `cargo fetch` (or build the "
+               "tests once), then re-run. The proof never downloads anything")
+
+
 def build_test(repo, plan, test_target, package, env):
-    """Build test target `test_target` with `cargo test --locked --no-run`. Never times out.
+    """Build test target `test_target` with `cargo test --locked --offline --no-run`. Never
+    times out.
 
     `--locked` is load-bearing: a plain build creates or rewrites Cargo.lock
-    (measured), and the proof writes nothing into the repo. Raises
-    GuardCannotArm only when cargo is missing or cannot start."""
+    (measured), and the proof writes nothing into the repo. So is `--offline`
+    (ruling R24): the proof never downloads anything, as go's `GOPROXY=off`
+    never does, so a dependency missing from the local cargo cache is NOT
+    ARMED. Raises GuardCannotArm when cargo is missing or cannot start, or
+    cannot resolve a dependency offline."""
     env = _rust_env(env)
     cargo = shutil.which("cargo", path=env.get("PATH"))
     if not cargo:
@@ -784,7 +800,7 @@ def build_test(repo, plan, test_target, package, env):
     if plan.cfg:
         env["RUSTFLAGS"] = " ".join(plan.cfg)
         env.pop("CARGO_ENCODED_RUSTFLAGS", None)     # it would outrank RUSTFLAGS
-    cmd = [cargo, "test", "--locked", "--no-run", "--message-format=json"]
+    cmd = [cargo, "test", "--locked", "--offline", "--no-run", "--message-format=json"]
     if package:
         cmd += ["-p", package]
     cmd += ["--test", test_target]
@@ -809,6 +825,13 @@ def build_test(repo, plan, test_target, package, env):
             message = msg.get("message") or {}
             if message.get("level") == "error":
                 errors.append((message.get("rendered") or message.get("message") or "").rstrip())
+    # Ruling R24: cargo failed before compiling anything, and its stderr names
+    # offline mode -- a dependency the local cache does not hold. NOT ARMED,
+    # never NO BUILD: the test source was never read. A stale lock keeps its
+    # own message (main checks _LOCKED).
+    if (proc.returncode != 0 and not exes and not errors and _LOCKED not in proc.stderr
+            and _OFFLINE.search(proc.stderr)):
+        raise GuardCannotArm("%s (cargo: %s)" % (_NOT_CACHED, _first_error(proc.stderr)))
     if len(exes) > 1:
         # Ruling R20: a workspace root with no -p builds EVERY member's
         # `tests/<stem>.rs`; keeping one would run a file nobody inspected.
