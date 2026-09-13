@@ -663,7 +663,12 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    reach an intercept, and neither does a transitive crate that makes one internally. getrandom
    0.2's `SYS_getrandom` on linux (under rand 0.8) is ACCIDENTAL I/O the guard misses. The filter
    declines asm and `libc::syscall` in the repo's own code statically, and rustix is rebuilt against
-   libc; a dependency's raw syscall escapes both layers.
+   libc; a dependency's raw syscall escapes both layers. The rustix rebuild was measured end to
+   end on `rust:1.92` aarch64 with tempfile 3.27 and rustix 1.1.4. A test calling
+   `rustix::fs::rename` exits 3 with it (`via rename from rustix::backend::fs::syscalls::rename`,
+   and the file is not renamed). Without it, the same test exits 0 and the file really is renamed.
+   A `NamedTempFile::new()` + `persist()` test cannot show the difference: it trips earlier, on
+   `tempfile::env::temp_dir`'s `getenv`, with the rebuild or without it.
 2. **Static, stripped and musl binaries are refused, not guarded.** Each makes a preload fail open,
    so each exits 2.
 3. **Name-based matching.** Several things are matched by name, and pinned per toolchain: the runner,
@@ -683,9 +688,15 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
 6. **Fat LTO.** Fat LTO in `[profile.dev]` or `[profile.test]` makes honest failing tests read 3 or
    4 instead of 1: the inlined panic hook's `getenv` and libtest's own exit land in the harness
    `main`. This fails closed. Units in such repos are declined, never falsely passed.
-7. **Life-before-main crates (`ctor`) are untested.** A preloaded library's initialiser normally
-   runs before the executable's constructors, so their I/O is probably seen. Whether it is
-   attributed correctly is not measured.
+7. **Closed: life-before-main crates (`ctor`) are seen and attributed.** The preloaded hook's
+   initialiser runs before the executable's constructors, so a constructor's I/O is judged by its
+   own crate frame, like any other. Measured with the real `ctor` 1.0.13 (`#[ctor::ctor(unsafe)]`
+   reading `HOME`, and one reading `/etc/hosts`): exit 3 on darwin 1.92 (legacy) and 1.98 (v0),
+   and on linux 1.94 aarch64, with the trip naming `<crate>::<crate>::__ctor_private_inner` and
+   `tsn-hook: armed` printed before it every time. `test_io_guard_rust.py`'s
+   `TestLifeBeforeMain` pins the mechanism with no dependency: the `#[used]` fn pointer `ctor`
+   expands to, in `.init_array` on linux and `__DATA,__mod_init_func` on darwin. Not measured: a
+   constructor making an uncontrollable-group call, or x86_64.
 8. **Platforms.** darwin and linux only. The macOS floor (1.82) may be Linux-proven only. x86_64
    macOS is unproven; amd64 Linux is run by CI's `versions` legs, not by this skill's own
    development, which ran on arm64.

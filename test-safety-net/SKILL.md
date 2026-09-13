@@ -431,9 +431,11 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and ten residuals are in `references/stacks.md`. Read residuals 1 and 9 before you trust a
-   GREEN: anything that bypasses libc is unseen whatever its intent (a dependency's raw syscall
-   included), and deliberate verdict forgery by the code under test is outside the threat model.
+   and ten residuals (one of them, 7, now closed) are in `references/stacks.md`. Read residuals
+   1, 9 and 10 before you trust a GREEN: anything that bypasses libc is unseen whatever its intent
+   (a dependency's raw syscall included), deliberate verdict forgery by the code under test is
+   outside the threat model, and at opt-level 1 or more a crate's generic `Drop` holding the
+   control helper can read GREEN.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

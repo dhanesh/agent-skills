@@ -54,7 +54,9 @@ Every refusal prints its reason and exits 2:
      not a transparent or runner crate's (ruling R30: `tests/test.rs` is
      crate `test`, read as libtest's own runner, so its I/O would go unjudged;
      the remedy is to rename the target). A workspace or path-dependency
-     crate so named, seen in cargo's build messages, is refused the same way;
+     crate so named, seen in cargo's build messages, is refused the same way,
+     and the remedy names that offender and its kind: a test file to rename,
+     or a [lib] `name` to change in the Cargo.toml that declares it;
   3. `rustc -V`, run in the repo so a `rust-toolchain.toml` pin is honoured,
      is at least `MIN_RUST`. `RUSTUP_AUTO_INSTALL=0` on every rustc/cargo
      call: an uninstalled pin is refused, never downloaded;
@@ -106,8 +108,11 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    are the transparent crates. A test target or path-source crate named like
    one is refused (ruling R30), but a crates.io dependency named `backtrace`
    or `hashbrown` is read as std's own.
-4. Life-before-main crates (`ctor`) are unverified: their I/O is probably
-   seen, but whether it is attributed correctly is not measured.
+4. CLOSED -- life-before-main crates (`ctor`): the preloaded hook arms
+   before the executable's constructors run, and a constructor's I/O is
+   judged by its own crate frame (ruling R33; real ctor 1.0.13 measured
+   exit 3 on darwin 1.92/1.98 and linux 1.94 aarch64, pinned dependency-free
+   by `TestLifeBeforeMain`).
 5. THE THREAT MODEL. The guard defends against ACCIDENTAL I/O, and against
    ACCIDENTAL verdict corruption, by the code under test. Verdict lines
    share stdout with that code (go's residual 7 is the same), so DELIBERATE
@@ -555,16 +560,50 @@ def _stale_lock(stderr):
 _RESERVED_CRATES = frozenset(TRANSPARENT_CRATES) | frozenset(RUNNER_CRATES)
 
 
-def _reserved_refusal(names):
-    """The NOT ARMED reason when a crate in `names` (cargo target names; a
-    `-` becomes `_` in the crate name) is a transparent or runner crate's, or None."""
-    bad = sorted({n.replace("-", "_") for n in names if n} & _RESERVED_CRATES)
+def _reserved_refusal(targets):
+    """The NOT ARMED reason when a target in `targets` is named like a
+    transparent or runner crate, or None. Each target is (name, kind, where):
+    cargo's target name (a `-` becomes `_` in the crate name), its kind
+    (`test`, or a lib-like kind), and the file that declares it, relative to
+    the repo -- the test's source, or a lib's Cargo.toml. The remedy names
+    THAT offender: a test file is renamed, a lib gets another [lib] name."""
+    bad = sorted({t for t in targets if t[0] and t[0].replace("-", "_") in _RESERVED_CRATES})
     if not bad:
         return None
-    return ("crate %s shares its name with one of Rust's own crates, which the guard reads "
-            "BY NAME as std's or libtest's work, so its I/O would never be judged. Rename it "
-            "(e.g. tests/%s.rs -> tests/%s_io.rs), then re-run"
-            % (", ".join("`%s`" % b for b in bad), bad[0], bad[0]))
+    fixes = []
+    for name, kind, where in bad:
+        if kind == "test":
+            src = where or "tests/%s.rs" % name
+            stem = os.path.splitext(os.path.basename(src))[0]
+            fixes.append("crate `%s` is the integration test %s: rename that file (e.g. to "
+                         "%s)" % (name.replace("-", "_"), src,
+                                  os.path.join(os.path.dirname(src), stem + "_io.rs")))
+        else:
+            fixes.append("crate `%s` is the `%s` target declared in %s: give it another `name` "
+                         "under [lib] there, or rename that package"
+                         % (name.replace("-", "_"), kind, where or "its Cargo.toml"))
+    return ("%s shares its name with one of Rust's own crates, which the guard reads BY NAME as "
+            "std's or libtest's work, so its I/O would never be judged. Rename it -- %s; then "
+            "re-run" % (", ".join("`%s`" % t[0].replace("-", "_") for t in bad), "; ".join(fixes)))
+
+
+_PATH_SOURCE_DIR = re.compile(r"path\+file://([^#)]+)")
+
+
+def _offender(target, msg, repo):
+    """(name, kind, where) for `_reserved_refusal` from a compiler-artifact
+    message: `where` is the test's source for a test target, else the
+    declaring Cargo.toml -- cargo's `manifest_path`, or the package id's path."""
+    kinds = [k for k in (target.get("kind") or ()) if k in _LINKED_KINDS]
+    kind = "test" if "test" in kinds else (kinds[0] if kinds else "lib")
+    where = target.get("src_path") if kind == "test" else msg.get("manifest_path")
+    if not where and kind != "test":
+        m = _PATH_SOURCE_DIR.search(str(msg.get("package_id") or ""))
+        where = os.path.join(m.group(1), "Cargo.toml") if m else None
+    if where and os.path.isabs(where):
+        rel = os.path.relpath(where, repo)
+        where = where if rel.startswith("..") else rel
+    return (str(target.get("name") or ""), kind, where)
 
 
 _LINKED_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "test"})
@@ -899,7 +938,7 @@ def build_test(repo, plan, test_target, package, env):
             # bin, an example or a bench.
             if _path_source(str(msg.get("package_id") or "")) and \
                     set(target.get("kind") or ()) & _LINKED_KINDS:
-                local.append(str(target.get("name") or ""))
+                local.append(_offender(target, msg, repo))
             if "test" in ((msg.get("target") or {}).get("kind") or ()) and msg.get("executable"):
                 if msg["executable"] not in exes:
                     exes.append(msg["executable"])
@@ -1169,7 +1208,7 @@ def main(argv=None):
     if _platform() is None:
         return _not_armed("sys.platform=%s; this guard is proved on %s only"
                           % (sys.platform, " and ".join(SUPPORTED_PLATFORMS)))
-    why = _reserved_refusal([args.test_target])
+    why = _reserved_refusal([(args.test_target, "test", "tests/%s.rs" % args.test_target)])
     if why:
         return _not_armed(why)
     repo = os.getcwd()

@@ -130,6 +130,14 @@ Fix round 4 (ruling R39), run:
   `test_a_crate_fn_named_like_cores_drop_glue_is_judged` and -- where 1.98
   is the DEFAULT toolchain, since the wrapper runs scrub RUSTUP_TOOLCHAIN --
   `TestTierTwo.test_a_crate_fn_named_like_cores_drop_glue_is_not_the_control`.
+Task 10, run:
+* residual 4 (ruling R33), a constructor's I/O unseen or misattributed ->
+  `TestLifeBeforeMain` (the `#[used]` init-array entry `ctor` expands to:
+  env and fs trip, named to the crate, after `tsn-hook: armed`; a pure one
+  is GREEN);
+* the R30 remedy naming `tests/<stem>.rs` for a [lib] or dependency ->
+  `TestReservedTargets.test_the_remedy_names_the_offender_and_its_kind`
+  and, live, `TestExitContract.test_a_path_dependency_named_backtrace_is_refused`.
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -2170,6 +2178,51 @@ class TestEveryGroupTrips(WrapperCase):
         self.assertIn("from fx::read_hosts", out)
 
 
+# ── 2b. Life-before-main: a constructor's I/O is the crate's (residual 4) ─
+
+# Ruling R33: what `#[ctor::ctor]` expands to, with no dependency -- a
+# `#[used]` fn pointer in the loader's initializer array. The real ctor 1.0.13
+# was measured the same (exit 3 on darwin 1.92/1.98 and linux 1.94 aarch64,
+# `tsn-hook: armed` first); this pins the mechanism, not the macro.
+EARLY_RS = r'''#[used]
+#[cfg_attr(target_os = "linux", link_section = ".init_array")]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+static TSN_EARLY: extern "C" fn() = tsn_early;
+
+extern "C" fn tsn_early() { %s }
+
+#[test]
+fn t_noop() {}
+'''
+
+
+class TestLifeBeforeMain(WrapperCase):
+    def test_a_constructor_doing_io_trips_and_is_named_after_the_hook_arms(self):
+        # The preloaded hook's initialiser runs before the executable's, so a
+        # constructor's I/O is seen, and decided by its own crate frame.
+        crate = self.scratch_copy()
+        for stem, body, group in (("early", 'let _ = std::env::var("HOME");', "environment"),
+                                  ("early_fs", 'let _ = std::fs::read("/etc/hosts");',
+                                   "filesystem")):
+            with self.subTest(stem=stem):
+                _write(os.path.join(crate, "tests", stem + ".rs"), EARLY_RS % body)
+                code, out = self.guard(1, None, "t_noop", stem=stem, cwd=crate)
+                self.assertEqual(code, 3, out[-800:])
+                self.assertEqual(label(out), group, out[-800:])
+                self.assertIn("from %s::tsn_early" % stem, out)
+                self.assertLess(out.index("tsn-hook: armed"), out.index("IOGuardViolation"),
+                                out[-800:])
+
+    def test_a_constructor_doing_no_io_is_green(self):
+        # The negative: the initializer entry itself trips nothing.
+        crate = self.scratch_copy()
+        _write(os.path.join(crate, "tests", "early_pure.rs"),
+               EARLY_RS % "std::hint::black_box(1u32);")
+        code, out = self.guard(1, None, "t_noop", stem="early_pure", cwd=crate)
+        self.assertEqual(code, 0, out[-800:])
+        self.assertIn("GREEN (exit 0)", out)
+
+
 # ── 3. Tier 2: the controls and the allow list ───────────────────────────
 
 class TestTierTwo(WrapperCase):
@@ -2302,6 +2355,9 @@ class TestExitContract(WrapperCase):
         self.assertEqual(code, 2, out[-800:])
         self.assertIn("`backtrace`", out)
         self.assertIn("Rename it", out)
+        # The remedy names the dependency's own manifest, not a test file.
+        self.assertIn("`lib` target declared in backtrace/Cargo.toml", out)
+        self.assertNotIn("tests/backtrace.rs", out)
         self.assertNotIn("tsn-hook: armed", out)
 
     def test_a_dependency_missing_from_the_cargo_cache_is_2_and_nothing_is_fetched(self):
@@ -2717,6 +2773,9 @@ class TestReservedTargets(unittest.TestCase):
                 code, out = main_in(tmp, env, ["--test", stem, "t_io"])
                 self.assertEqual(code, 2, out)
                 self.assertIn("Rename it", out)
+                # The remedy names the offending file, spelled as the user did.
+                self.assertIn("integration test tests/%s.rs" % stem, out)
+                self.assertNotIn("[lib]", out)
         code, out = main_in(tmp, env, ["--test", "test_io", "t_io"])
         self.assertEqual(code, 2, out)                   # refused later: no rustc on PATH
         self.assertNotIn("Rename it", out)
@@ -2724,10 +2783,19 @@ class TestReservedTargets(unittest.TestCase):
     FX = ("path+file:///w/fx#0.1.0", "fx", ["test"], "/w/target/debug/deps/fx-1")
 
     def build(self, *artifacts):
-        stdout = "".join(json.dumps({"reason": "compiler-artifact", "package_id": pid,
-                                     "target": {"name": name, "kind": kind},
-                                     "executable": exe}) + "\n"
-                         for pid, name, kind, exe in artifacts)
+        """Each artifact is (package_id, name, kind, executable[, extra]):
+        `extra` holds cargo's other fields -- `manifest_path`, `src_path`."""
+        def msg(pid, name, kind, exe, extra=None):
+            extra = extra or {}
+            target = {"name": name, "kind": kind}
+            if "src_path" in extra:
+                target["src_path"] = extra["src_path"]
+            m = {"reason": "compiler-artifact", "package_id": pid, "target": target,
+                 "executable": exe}
+            if "manifest_path" in extra:
+                m["manifest_path"] = extra["manifest_path"]
+            return json.dumps(m) + "\n"
+        stdout = "".join(msg(*a) for a in artifacts)
         done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
         with mock.patch.object(io_guard_rust.shutil, "which", return_value="/usr/bin/cargo"), \
                 mock.patch.object(io_guard_rust.subprocess, "run", return_value=done):
@@ -2743,6 +2811,47 @@ class TestReservedTargets(unittest.TestCase):
                     self.build((pid, "backtrace", ["lib"], None), self.FX)
                 self.assertIn("`backtrace`", str(ctx.exception))
                 self.assertIn("Rename it", str(ctx.exception))
+
+    def test_the_remedy_names_the_offender_and_its_kind(self):
+        # A [lib] or dependency offender is not a tests/<stem>.rs: the remedy
+        # names ITS kind and the file that declares it, relative to the repo.
+        # MUTATION: the old remedy said "tests/backtrace.rs" for all -- killed.
+        cases = (
+            # a path dependency, no manifest_path: the package id's path
+            (("path+file:///w/fx/backtrace#0.1.0", "backtrace", ["lib"], None),
+             "`lib` target declared in backtrace/Cargo.toml"),
+            # cargo's own manifest_path wins; a proc-macro is named as one
+            (("path+file:///w/fx/m#std@0.1.0", "std", ["proc-macro"], None,
+              {"manifest_path": "/w/fx/m/Cargo.toml"}),
+             "`proc-macro` target declared in m/Cargo.toml"),
+            # this package's own [lib] renamed `core`
+            (("path+file:///w/fx#0.1.0", "core", ["rlib"], None,
+              {"manifest_path": "/w/fx/Cargo.toml"}),
+             "`rlib` target declared in Cargo.toml"),
+            # another member's integration test: its own source file
+            (("path+file:///w/fx/m#0.1.0", "test", ["test"], "/w/target/debug/deps/test-2",
+              {"src_path": "/w/fx/m/tests/test.rs"}),
+             "integration test m/tests/test.rs: rename that file (e.g. to m/tests/test_io.rs)"),
+        )
+        for artifact, want in cases:
+            with self.subTest(want=want):
+                with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+                    self.build(artifact, self.FX)
+                why = str(ctx.exception)
+                self.assertIn(want, why)
+                self.assertIn("Rename it", why)
+                if artifact[2] != ["test"]:
+                    self.assertIn("under [lib] there", why)
+                    self.assertNotIn("tests/%s.rs" % artifact[1], why)
+
+    def test_every_offender_is_named(self):
+        with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+            self.build(("path+file:///w/fx/a#std@0.1.0", "std", ["lib"], None),
+                       ("path+file:///w/fx/b#test@0.1.0", "test", ["lib"], None), self.FX)
+        why = str(ctx.exception)
+        self.assertIn("`std`, `test` shares", why)
+        self.assertIn("a/Cargo.toml", why)
+        self.assertIn("b/Cargo.toml", why)
 
     def test_a_registry_crate_so_named_is_the_stated_residual(self):
         # Residual 3: a crates.io `hashbrown` is not the user's to rename.

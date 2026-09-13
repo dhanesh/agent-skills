@@ -325,7 +325,10 @@ Classifying output stays in each stack's guard, because it reads a different tes
 3. The seed-path and runner exemptions are names, pinned per toolchain.
 4. Life-before-main crates (`ctor`) are untested. A preloaded library's initialiser normally runs
    before the executable's constructors, so their I/O is probably seen, but whether it is attributed
-   correctly is unverified. A plan task settles it.
+   correctly is unverified. A plan task settles it. **Closed in Task 10 (R33):** the real `ctor`
+   1.0.13 trips with exit 3 on darwin 1.92/1.98 and on linux 1.94 aarch64, attributed to the
+   crate's own constructor symbol, and `tsn-hook: armed` is printed before the trip. A test pins
+   the mechanism without vendoring `ctor`: the `#[used]` init-array fn pointer it expands to.
 5. Verdict lines share stdout with repo code, so an `init`-style print can spoof one (as on go).
 6. 1.86 and 1.90 are first run in CI, not in the spikes.
 7. The macOS floor may be Linux-proven only.
