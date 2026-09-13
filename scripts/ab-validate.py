@@ -161,6 +161,11 @@ SINCE_TSN_RUST = "9a4af77"  # test-safety-net: stack_rust.py -- Rust files,
 SINCE_TSN_RUST_GUARD = "241de95"  # test-safety-net: io_guard_rust.py -- the
 # Rust proof, guarded, with the Go exit table: cargo test --locked --offline
 # --no-run, then the compiled binary under a preloaded interposition hook.
+SINCE_TSN_RUST_V0 = "a3e32f7"  # test-safety-net: the Rust guard reads rustc
+# 1.98's v0 mangling, fix round 1 -- the SEED/CONTROL name tables keep
+# legacy's scope under v0 (R28), a bounded Python v0 reader (R29), targets
+# named like std's or libtest's crates refused (R30), cargo 1.94's --locked
+# wording read as a stale lock (R27, R32).
 
 
 def _git_out(*args):
@@ -3751,6 +3756,167 @@ def check_test_safety_net_rust(old, new):
         kind="guard")
 
 
+# Every measurement here is toolchain-independent: rust_binary's v0 reader
+# (the hook's twin, held equal to it by TestClassifier), and the wrapper with
+# its cargo call mocked or refused before any rustc is asked. The baseline
+# (the merge base with main) has no Rust stack, so each reads 0 there.
+_RUST_V0_PROBE = r"""
+import struct, subprocess
+from unittest import mock
+res = {"scope": 0, "deep": 0, "stem": 0, "v0_image": 0, "locked": 0}
+assets = sys.path[0]
+DIS = {n: "Cs" + ("0" + n + "x" * 11)[:11] + "_" for n in ("std", "core", "p")}
+
+
+def v0(template):
+    return template.format(**DIS)
+
+
+try:
+    import rust_binary as rb
+except Exception:
+    rb = None
+
+# 1. R28: (symbol, std seeding?, control helper named in scope?) -- the first
+# four are OUTSIDE the tables' legacy scope (legacy spells the std ones
+# `_ZN3std2fs4read17h...E`: std's read, neither seeding nor a control).
+CASES = [
+    (v0("_RINvNt{std}3std2fs4readNt{p}1p19hashmap_random_keysE{p}1p"), False, False),
+    (v0("_RINvNt{std}3std2fs4readNt{p}1p13TsnControlEnvE{p}1p"), False, False),
+    (v0("_RNvYNt{p}1p13TsnControlEnvNtNt{core}4core3fmt5Write9write_fmt"), False, False),
+    (v0("_RNv{p}1p32f_hashmap_random_keys_named_test"), False, False),
+    (v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys"), True, False),
+    (v0("_RINvNt{core}4core3ptr9drop_glueNt{p}1p13TsnControlEnvE{p}1p"), False, True),
+]
+try:
+    for sym, want_seed, want_control in CASES:
+        f = rb.v0_facts(sym, frozenset({"std", "core", "alloc", "test"}))
+        seed = f.krate == "std" and any("hashmap_random_keys" in i for i in f.main_idents)
+        control = "TsnControlEnv" in f.control_idents
+        res["scope"] += int(seed == want_seed and control == want_control)
+except Exception:
+    res["scope"] = 0
+
+# 2. R29: a 1,200-level `N` chain, as an #[export_name] may spell it.
+try:
+    f = rb.v0_facts("_R" + "Nv" * 1200 + "C1a" + "1f" * 1200, frozenset())
+    res["deep"] = int(f is not None and f.krate == "a" and len(f.main_idents) == 1200)
+except Exception:
+    res["deep"] = 0
+
+# 3. R30: `--test test` is crate `test`, the runner's name. Refused before any
+# rustc is asked (none is on this PATH). -1 where the guard runs nowhere.
+guard = os.path.join(assets, "io_guard_rust.py")
+if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    if os.path.isfile(guard):
+        tmp = tempfile.mkdtemp()
+        env = {"PATH": os.path.join(tmp, "no-bin"), "HOME": tmp, "TEST_SAFETY_NET_TIER": "1"}
+        r = subprocess.run([sys.executable, guard, "--test", "test", "t_io"], cwd=tmp, env=env,
+                           capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        res["stem"] = int(r.returncode == 2 and "Rename it" in r.stdout + r.stderr)
+else:
+    res["stem"] = -1
+
+
+# 4. R26: an ELF whose only crate symbols are v0 (a 1.98 test binary).
+def elf(interp, symbols):
+    interp_b = interp.encode() + b"\0"
+    off = 64 + 56
+    interp_off, off = off, off + len(interp_b)
+    strtab = b"\0" + b"".join(s.encode() + b"\0" for s in symbols)
+    str_off, off = off, off + len(strtab)
+    syms, pos = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0), 1
+    for s in symbols:
+        syms += struct.pack("<IBBHQQ", pos, 0x12, 0, 1, 0x1000, 16)
+        pos += len(s) + 1
+    sym_off, off = off, off + len(syms)
+    shstr = b"\0.symtab\0.strtab\0.shstrtab\0"
+    shstr_off, off = off, off + len(shstr)
+    sh = [struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+          struct.pack("<IIQQQQIIQQ", 1, 2, 0, 0, sym_off, len(syms), 2, 1, 8, 24),
+          struct.pack("<IIQQQQIIQQ", 9, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0),
+          struct.pack("<IIQQQQIIQQ", 17, 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0)]
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8
+    ehdr = ident + struct.pack("<HHIQQQIHHHHHH", 2, 0xB7, 1, 0, 64, off, 0, 64, 56, 1, 64,
+                               len(sh), len(sh) - 1)
+    phdr = struct.pack("<IIQQQQQQ", 3, 4, interp_off, 0, 0, len(interp_b), len(interp_b), 1)
+    return ehdr + phdr + interp_b + strtab + syms + shstr + b"".join(sh)
+
+
+try:
+    path = os.path.join(tempfile.mkdtemp(), "exe")
+    with open(path, "wb") as fh:
+        fh.write(elf("/lib64/ld-linux-aarch64.so.1",
+                     [v0("_RNv{p}1p20tsn_control_temp_dir"),
+                      v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys")]))
+    res["v0_image"] = int(rb.refusal(rb.inspect(path)) is None)
+except Exception:
+    res["v0_image"] = 0
+
+# 5. R27/R32: cargo 1.94's (and 1.98's) own words for a stale lock, whose
+# help line also names --offline.
+try:
+    import io_guard_rust as G
+    stderr = ("error: cannot update the lock file /w/fx/Cargo.lock because --locked was "
+              "passed to prevent this\nhelp: to generate the lock file without accessing "
+              "the network, remove the --locked flag and use --offline instead.\n")
+    done = subprocess.CompletedProcess([], 101, stdout="", stderr=stderr)
+    with mock.patch.object(G.shutil, "which", return_value="/usr/bin/cargo"), \
+            mock.patch.object(G.subprocess, "run", return_value=done):
+        try:
+            G.build_test("/w/fx", G.BuildPlan(None, (), ""), "fx", None, {"PATH": "/usr/bin"})
+        except G.GuardCannotArm as exc:
+            res["locked"] = int("Cargo.lock is out of date" in str(exc)
+                                and "cargo fetch" not in str(exc))
+except Exception:
+    res["locked"] = 0
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_rust_v0(old, new):
+    """Does the Rust guard read rustc 1.98's v0 mangling exactly as it reads
+    legacy -- the name tables in legacy's scope, a reader that cannot crash,
+    runner-named targets refused, cargo 1.94's stale-lock words understood?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _RUST_V0_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_V0_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 6 (higher=better)",
+        oldp["scope"], newp["scope"], newp["scope"] > oldp["scope"],
+        "std::fs::read::<p::hashmap_random_keys> and ::<p::TsnControlEnv> are std's read "
+        "(legacy spells them _ZN3std2fs4read); a Y self type and a crate fn named like the "
+        "seed are the crate's own; std's seeding frame and drop glue's TsnControlEnv payload "
+        "still count. The review found the first two GREEN on 1.98 through the wrapper",
+        since=SINCE_TSN_RUST_V0)
+    row(s, "a 1,200-level v0 path read without raising (1=yes)",
+        oldp["deep"], newp["deep"], newp["deep"] > oldp["deep"],
+        "an #[export_name] symbol this deep raised RecursionError in rust_binary, and the "
+        "wrapper exited 1 -- read as RED; the Python reader now walks an N chain "
+        "iteratively, as the hook does",
+        since=SINCE_TSN_RUST_V0)
+    if newp["stem"] >= 0:
+        row(s, "a --test target named `test` is refused NOT ARMED with a rename remedy "
+               "(1=yes)",
+            oldp["stem"], newp["stem"], newp["stem"] > oldp["stem"],
+            "tests/test.rs compiles to crate `test`, which the classifier reads BY NAME as "
+            "libtest's own work: its real I/O passed GREEN in both manglings",
+            since=SINCE_TSN_RUST_V0)
+    row(s, "an image whose only crate symbols are v0 is not refused as stripped (1=yes)",
+        oldp["v0_image"], newp["v0_image"], newp["v0_image"] > oldp["v0_image"],
+        "rustc 1.98 mangles v0 by default, std and libtest included; a legacy-only count "
+        "refused every 1.98 test binary as `stripped`",
+        since=SINCE_TSN_RUST_V0)
+    row(s, "cargo 1.94's --locked refusal gets the stale-lock remedy, not the offline one "
+           "(1=yes)",
+        oldp["locked"], newp["locked"], newp["locked"] > oldp["locked"],
+        "cargo 1.94/1.98 say `cannot update the lock file ... because --locked was passed`, "
+        "and their help line names --offline: matched on cargo's own error: line, before "
+        "the offline note",
+        since=SINCE_TSN_RUST_V0)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -3937,6 +4103,7 @@ def main():
         check_test_safety_net_go(old, REPO)
         check_test_safety_net_go_review2(old, REPO)
         check_test_safety_net_rust(old, REPO)
+        check_test_safety_net_rust_v0(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
