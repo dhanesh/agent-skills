@@ -121,6 +121,7 @@ static mut SELF_BASE: *mut c_void = core::ptr::null_mut();
 static TRANSPARENT: &[&[u8]] = &[b"std", b"core", b"alloc", b"panic_unwind", b"backtrace", b"hashbrown", b"std_detect"];
 static RUNNER: &[&[u8]] = &[b"test"];
 static SEED: &[&[u8]] = &[b"hashmap_random_keys"];
+static SEED_CRATE: &[u8] = b"std";
 static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace", b"assert_test_result"];
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
@@ -332,6 +333,55 @@ fn crate_of(s: &[u8]) -> Option<&[u8]> {
     Some(krate)
 }
 
+/// Ruling R28: std seeding its HashMap, and nothing else. A legacy Rust
+/// symbol whose FIRST path segment is SEED_CRATE and one of whose later
+/// plain segments names a SEED marker (`_ZN3std3sys6random19hashmap_random_
+/// keys17h…E`). A crate fn or test that merely contains the name, and an
+/// impl segment's type text (`_$LT$…$GT$`), are not std's seeding.
+fn legacy_seed(s: &[u8]) -> bool {
+    let n = s.len();
+    if n < 20 || s[n - 1] != b'E' || &s[n - 20..n - 17] != b"17h" {
+        return false;
+    }
+    if !s[n - 17..n - 1].iter().all(|c| c.is_ascii_hexdigit()) {
+        return false;
+    }
+    let mut i = 0;
+    while i < n && s[i] == b'_' {
+        i += 1;
+    }
+    if i + 1 >= n || s[i] != b'Z' || s[i + 1] != b'N' {
+        return false;
+    }
+    i += 2;
+    let end = n - 20; // where the `17h<hash>` segment begins
+    let mut first = true;
+    while i < end {
+        let start = i;
+        let mut len = 0usize;
+        while i < end && s[i].is_ascii_digit() {
+            len = len.saturating_mul(10).saturating_add((s[i] - b'0') as usize);
+            i += 1;
+        }
+        if i == start || len == 0 || len > end - i {
+            return false;
+        }
+        let seg = &s[i..i + len];
+        i += len;
+        if first {
+            if seg != SEED_CRATE {
+                return false;
+            }
+            first = false;
+        } else if !seg.starts_with(b"_$") && !seg.starts_with(b"$")
+            && SEED.iter().any(|m| contains(seg, m))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 // 0 transparent, 1 crate code, 2 libtest runner, 3 std seeding its HashMap.
 // A v0 symbol that cannot be read is transparent, never exempt.
 fn classify(s: &[u8]) -> u8 {
@@ -342,7 +392,7 @@ fn classify(s: &[u8]) -> u8 {
             Some(f) => Some(f.deciding()),
         },
         None => {
-            if SEED.iter().any(|m| contains(s, m)) {
+            if legacy_seed(s) {
                 return 3;
             }
             crate_of(s)
@@ -437,12 +487,18 @@ fn control(s: &[u8]) -> Option<&'static [u8]> {
 //   * a main-path identifier containing `drop_slow` is Rc/Arc's deferred
 //     drop, a boundary (R17b extended); a TEST_BODY_BOUNDARY one, in the
 //     `test` crate, is libtest's call into the test (R13, R17a);
-//   * SEED and CONTROL match DECODED identifiers anywhere in the symbol.
+//   * the name tables match DECODED identifiers in LEGACY's scope exactly
+//     (ruling R28): SEED only in the main path of a symbol whose crate is
+//     SEED_CRATE (std); CONTROL only in the main path, an impl's (`M`/`X`)
+//     self type, or drop glue's payload. Never an ordinary fn's generic
+//     arguments -- legacy never spells them, and `std::fs::read::<p::
+//     TsnControlEnv>` is std's read, not the control -- and never a
+//     provided method's (`Y`) self type.
 // The instantiating-crate suffix never decides. Malformed, truncated, or
 // nested past MAX_DEPTH (or MAX_STEPS nodes): `None`, read as transparent.
 // rust_binary.py's `v0_facts` is the independent Python twin of this reader.
 mod v0 {
-    use super::{contains, runner, transparent, CONTROL, SEED, TEST_BODY_BOUNDARY};
+    use super::{contains, runner, transparent, CONTROL, SEED, SEED_CRATE, TEST_BODY_BOUNDARY};
 
     /// Recursion past this reads the symbol transparent: a fixed, small stack.
     /// `N` chains are read iteratively; only generics and types nest.
@@ -456,8 +512,10 @@ mod v0 {
         pub boundary: bool,
         pub drop_slow: bool,
         pub drop_crate: Option<&'a [u8]>,
-        /// Index of the first-listed CONTROL helper named anywhere, else usize::MAX.
+        /// Index of the first-listed CONTROL helper named in CONTROL's scope
+        /// (R28), else usize::MAX.
         pub control: usize,
+        /// std's own frame, its main path naming a SEED marker (R28).
         pub seed: bool,
     }
 
@@ -484,11 +542,14 @@ mod v0 {
         steps: u32,
         search: bool,
         found: Option<&'a [u8]>,
+        /// Inside an M/X self type or a drop-glue payload: CONTROL's scope.
+        scan: bool,
         last: &'a [u8],
         boundary: bool,
         drop_slow: bool,
         drop_crate: Option<&'a [u8]>,
         control: usize,
+        /// A main-path identifier names a SEED marker (std's crate is checked last).
         seed: bool,
     }
 
@@ -501,6 +562,7 @@ mod v0 {
             steps: 0,
             search: false,
             found: None,
+            scan: false,
             last: &[],
             boundary: false,
             drop_slow: false,
@@ -527,7 +589,7 @@ mod v0 {
             drop_slow: p.drop_slow,
             drop_crate: p.drop_crate,
             control: p.control,
-            seed: p.seed,
+            seed: p.seed && krate == SEED_CRATE,
         })
     }
 
@@ -606,8 +668,8 @@ mod v0 {
 
         /// `undisambiguated-identifier`: [`u`] <len> [`_`] <bytes>. The `_`
         /// separates a length from bytes that begin with a digit or `_`
-        /// (spec, "Identifier"). Every identifier is checked against the
-        /// CONTROL and SEED tables here, wherever it sits.
+        /// (spec, "Identifier"). Inside an M/X self type or a drop-glue
+        /// payload (`scan`) it is checked against CONTROL (ruling R28).
         fn undis(&mut self) -> Option<&'a [u8]> {
             self.eat(b'u');
             let n = usize::try_from(self.decimal()?).ok()?;
@@ -615,15 +677,22 @@ mod v0 {
             let s = self.s;
             let id = s.get(self.pos..self.pos.checked_add(n)?)?;
             self.pos += n;
+            if self.scan {
+                self.note_control(id);
+            }
+            Some(id)
+        }
+
+        /// CONTROL's scope is legacy's (ruling R28): the main path's own
+        /// identifiers (path_main), an M/X self type and drop glue's payload
+        /// (`scan`). Never an ordinary fn's generic arguments, never a `Y`
+        /// self type.
+        fn note_control(&mut self, id: &[u8]) {
             if let Some(i) = CONTROL.iter().position(|&(name, _)| name == id) {
                 if i < self.control {
                     self.control = i;
                 }
             }
-            if SEED.iter().any(|m| contains(id, m)) {
-                self.seed = true;
-            }
-            Some(id)
         }
 
         /// `identifier`: an optional `s<base-62>` disambiguator, then the name.
@@ -659,15 +728,18 @@ mod v0 {
         }
 
         /// One type (or generic argument) with the crate search on: the first
-        /// crate root in it that is neither transparent nor the runner.
-        fn searching(&mut self, arg: bool) -> Option<Option<&'a [u8]>> {
-            let (search, found) = (self.search, self.found);
+        /// crate root in it that is neither transparent nor the runner. With
+        /// `scan`, its identifiers are in CONTROL's scope (R28).
+        fn searching(&mut self, arg: bool, scan: bool) -> Option<Option<&'a [u8]>> {
+            let (search, found, scanning) = (self.search, self.found, self.scan);
             self.search = true;
             self.found = None;
+            self.scan = scan;
             let ok = if arg { self.generic_arg() } else { self.type_any() };
             let hit = self.found;
             self.search = search;
             self.found = found;
+            self.scan = scanning;
             ok?;
             Some(hit)
         }
@@ -686,17 +758,17 @@ mod v0 {
                 b'M' => {
                     self.impl_path()?;
                     self.last = &[];
-                    self.searching(false)?.unwrap_or(&[])
+                    self.searching(false, true)?.unwrap_or(&[])
                 }
                 b'X' => {
                     self.impl_path()?;
-                    let own = self.searching(false)?.unwrap_or(&[]);
+                    let own = self.searching(false, true)?.unwrap_or(&[]);
                     self.path_any()?;
                     self.last = &[];
                     own
                 }
                 b'Y' => {
-                    let own = self.searching(false)?.unwrap_or(&[]);
+                    let own = self.searching(false, false)?.unwrap_or(&[]);
                     let trait_crate = self.path_main()?;
                     if own.is_empty() {
                         trait_crate
@@ -709,7 +781,7 @@ mod v0 {
                     let drop = self.last == &b"drop_glue"[..] || self.last == &b"drop_in_place"[..];
                     while !self.eat(b'E') {
                         if drop {
-                            let hit = self.searching(true)?;
+                            let hit = self.searching(true, true)?;
                             if self.drop_crate.is_none() {
                                 self.drop_crate = hit;
                             }
@@ -730,6 +802,10 @@ mod v0 {
             };
             for _ in 0..nest {
                 let id = self.ident()?;
+                self.note_control(id);
+                if SEED.iter().any(|m| contains(id, m)) {
+                    self.seed = true;
+                }
                 if TEST_BODY_BOUNDARY.iter().any(|m| contains(id, m)) {
                     self.boundary = true;
                 }

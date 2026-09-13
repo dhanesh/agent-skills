@@ -155,7 +155,7 @@ _V0_DIGITS = "0123456789"
 _V0_HEX = "0123456789abcdef"
 _V0_DROP_GLUE = ("drop_glue", "drop_in_place")
 
-V0Facts = collections.namedtuple("V0Facts", "krate main_idents drop_crate idents")
+V0Facts = collections.namedtuple("V0Facts", "krate main_idents drop_crate control_idents")
 V0Facts.__doc__ = """What the frame classifier reads from one v0 symbol.
 
     krate        the deciding crate: a path's root crate; an impl's (`M`/`X`)
@@ -167,7 +167,11 @@ V0Facts.__doc__ = """What the frame classifier reads from one v0 symbol.
                  generic arguments', not an impl's self type's)
     drop_crate   for `core::ptr::drop_glue<T>` / `drop_in_place<T>`: the first
                  crate not in `skip` anywhere in T, else None
-    idents       every identifier anywhere in the symbol
+    control_idents  the identifiers in CONTROL's scope, which is legacy's
+                 (ruling R28): the main path's, an M/X impl's self type's and
+                 drop glue's payload's -- never an ordinary fn's generic
+                 arguments, never a `Y` self type's. SEED's scope is
+                 `main_idents` of a symbol whose `krate` is std.
 """
 
 
@@ -178,11 +182,14 @@ class _V0Error(Exception):
 class _V0Parser:
     """Recursive descent over one v0 symbol body (the bytes after `_R`), into
     tuples whose FIRST element is always a tag string -- the grammar letter,
-    or "id" (name, dis), "impl", "dyntrait", "bind", "field" -- so a walk
-    over the tree can never mistake data for a node."""
+    or "id" (name, dis), "seg", "impl", "dyntrait", "bind", "field" -- so a
+    walk over the tree can never mistake data for a node. An `N` chain is ONE
+    flat node, ("N", inner, [("seg", ns, ident), ...]), read and walked
+    iteratively as the hook reads it (ruling R29): a 1,200-level path must
+    not cost 1,200 Python frames."""
 
     def __init__(self, s):
-        self.s, self.pos, self.depth, self.steps, self.idents = s, 0, 0, 0, []
+        self.s, self.pos, self.depth, self.steps = s, 0, 0, 0
 
     def peek(self):
         return self.s[self.pos] if self.pos < len(self.s) else None
@@ -253,7 +260,6 @@ class _V0Parser:
             raise _V0Error()
         name = self.s[self.pos:end]
         self.pos = end
-        self.idents.append(name)
         return name
 
     def ident(self):
@@ -302,8 +308,8 @@ class _V0Parser:
             node = self.backref(self.path)
         else:
             raise _V0Error()
-        for ns in reversed(nss):           # `N a N b <inner> id_b id_a`
-            node = ("N", ns, node, self.ident())
+        if nss:                            # `N a N b <inner> id_b id_a`
+            node = ("N", node, [("seg", ns, self.ident()) for ns in reversed(nss)])
         self.leave()
         return node
 
@@ -444,8 +450,8 @@ class _V0Parser:
 
 
 def _v0_parse(sym):
-    """(main path, instantiating crate or None, every identifier) of a v0
-    symbol -- `_R`, or Mach-O's `__R` -- or None."""
+    """(main path, instantiating crate or None) of a v0 symbol -- `_R`, or
+    Mach-O's `__R` -- or None."""
     if sym.startswith("__R"):
         body = sym[3:]
     elif sym.startswith("_R"):
@@ -461,9 +467,27 @@ def _v0_parse(sym):
             inst = p.path()
             if p.peek() not in (None, ".", "$"):
                 return None
-    except _V0Error:
+    except Exception:                      # noqa: BLE001 -- R29: unreadable, never a crash
         return None
-    return main, inst, p.idents
+    return main, inst
+
+
+def _v0_idents(node):
+    """Every identifier in `node`, in the order the symbol spells them."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _v0_idents(item)
+    elif isinstance(node, tuple) and node:
+        tag = node[0]
+        if tag == "id":
+            yield node[1]
+            return
+        if tag == "bind":
+            yield node[1]
+        elif tag == "F" and node[1] not in (None, "C"):
+            yield node[1]                  # an ABI read as an identifier
+        for part in node[1:]:
+            yield from _v0_idents(part)
 
 
 def _v0_crates(node):
@@ -485,19 +509,22 @@ def _v0_first_crate(node, skip):
 
 def _v0_decide(node, skip, st):
     """The deciding crate of the main path `node`; notes its own identifiers,
-    the last one read, and drop glue's payload crate in `st`."""
+    the last one read, drop glue's payload crate, and CONTROL's scope (R28)
+    in `st`."""
     tag = node[0]
     if tag == "C":
         st["last"] = ""
         return node[1][1]
     if tag == "N":
-        krate = _v0_decide(node[2], skip, st)
-        name = node[3][1]
-        st["main"].append(name)
-        st["last"] = name
+        krate = _v0_decide(node[1], skip, st)
+        for _seg, _ns, ident in node[2]:
+            st["main"].append(ident[1])
+            st["control"].append(ident[1])
+            st["last"] = ident[1]
         return krate
     if tag in ("M", "X"):
         st["last"] = ""
+        st["control"].extend(_v0_idents(node[2]))
         return _v0_first_crate(node[2], skip) or ""
     if tag == "Y":
         own = _v0_first_crate(node[1], skip)
@@ -505,9 +532,12 @@ def _v0_decide(node, skip, st):
         return own or trait
     if tag == "I":
         krate = _v0_decide(node[1], skip, st)
-        if st["last"] in _V0_DROP_GLUE and st["drop"] is None:
-            st["drop"] = next((c for c in (_v0_first_crate(a, skip) for a in node[2]) if c),
-                              None)
+        if st["last"] in _V0_DROP_GLUE:
+            for arg in node[2]:
+                st["control"].extend(_v0_idents(arg))
+            if st["drop"] is None:
+                st["drop"] = next((c for c in (_v0_first_crate(a, skip) for a in node[2])
+                                   if c), None)
         return krate
     raise _V0Error()
 
@@ -515,17 +545,16 @@ def _v0_decide(node, skip, st):
 def v0_facts(sym, skip):
     """The `V0Facts` of v0 symbol `sym`, or None when it is not one this
     reader can read. `skip` names the crates a self-type or drop-glue search
-    steps over. Never raises."""
-    parsed = _v0_parse(sym)
-    if parsed is None:
-        return None
-    main, _inst, idents = parsed
-    st = {"main": [], "last": "", "drop": None}
+    steps over. Never raises: anything that goes wrong is "unreadable" (R29)."""
     try:
-        krate = _v0_decide(main, skip, st)
-    except _V0Error:
+        parsed = _v0_parse(sym)
+        if parsed is None:
+            return None
+        st = {"main": [], "last": "", "drop": None, "control": []}
+        krate = _v0_decide(parsed[0], skip, st)
+        return V0Facts(krate, tuple(st["main"]), st["drop"], tuple(st["control"]))
+    except Exception:                      # noqa: BLE001
         return None
-    return V0Facts(krate, tuple(st["main"]), st["drop"], tuple(idents))
 
 
 def _v0_print(n):
@@ -533,11 +562,14 @@ def _v0_print(n):
     if tag == "C":
         return n[1][1]
     if tag == "N":
-        parent, (_, name, dis) = _v0_print(n[2]), n[3]
-        if n[1] in string.ascii_uppercase:
-            label = {"C": "closure", "S": "shim"}.get(n[1], n[1])
-            return "%s::{%s%s#%d}" % (parent, label, ":" + name if name else "", dis)
-        return parent + "::" + name if name else parent
+        out = _v0_print(n[1])
+        for _seg, ns, (_, name, dis) in n[2]:
+            if ns in string.ascii_uppercase:
+                label = {"C": "closure", "S": "shim"}.get(ns, ns)
+                out = "%s::{%s%s#%d}" % (out, label, ":" + name if name else "", dis)
+            elif name:
+                out = out + "::" + name
+        return out
     if tag == "M":
         return "<%s>" % _v0_print(n[2])
     if tag == "X":
@@ -617,12 +649,10 @@ def v0_demangle(sym):
     """The main path of v0 symbol `sym` as Rust prints a path -- crate
     disambiguators, the instantiating crate and any suffix dropped -- or None
     when it is not one. Never raises."""
-    parsed = _v0_parse(sym)
-    if parsed is None:
-        return None
     try:
-        return _v0_print(parsed[0])
-    except (KeyError, IndexError, TypeError, ValueError):
+        parsed = _v0_parse(sym)
+        return None if parsed is None else _v0_print(parsed[0])
+    except Exception:                      # noqa: BLE001 -- R29: unreadable, never a crash
         return None
 
 

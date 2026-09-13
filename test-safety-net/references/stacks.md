@@ -598,8 +598,11 @@ writes the violation line to fd 2 and calls `_exit(3)`.
 own image, over a 1024-frame buffer. It resolves symbols with `dladdr` on macOS and with the `.symtab`
 of `/proc/self/exe` on Linux.
 
-- A `CONTROL_HELPERS` frame decides, with that helper's group.
-- `hashmap_random_keys` (std seeding a HashMap) is exempt.
+- A `CONTROL_HELPERS` frame decides, with that helper's group. The helper must be named by the
+  frame's own path, an impl's self type, or drop glue's payload. A helper type passed to a std
+  function as a generic argument (`std::fs::read::<TsnControlEnv>`) is std's call, not the control.
+- `hashmap_random_keys` in std's own frame (std seeding a HashMap) is exempt. A crate function, type
+  or test that merely carries the name is not.
 - A **crate frame** decides with the call's group. Its crate is decided in one of four ways:
   - a plain path's first segment;
   - for an impl frame (`<T as Trait>::m`, `<T>::m`), the crate of the self type `T`, so a crate's

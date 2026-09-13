@@ -90,6 +90,23 @@ names `--offline`: matching the offline note first ->
 `TestLockedWording.test_a_stale_lock_is_its_own_refusal_in_every_cargos_wording`
 (and `TestExitContract.test_a_stale_cargo_lock_is_2_and_left_byte_identical`
 on 1.94/1.98).
+Fix round 1 (rulings R28-R32), each run:
+* R28, v0's any-identifier SEED/CONTROL scan restored ->
+  `TestClassifier.test_the_name_tables_keep_legacy_scope` (negative fixtures
+  from legacy's spelling) and, live on 1.98 and in TestProbeV0Crate,
+  `test_a_seed_or_control_name_outside_its_legacy_scope_is_judged`;
+* R28, legacy's raw-substring SEED match restored -> the same live test
+  (`r28_named_hashmap_random_keys`, every toolchain) and
+  `TestClassifier.test_the_legacy_rules_are_unchanged`;
+* R29, rust_binary costing a frame (or a depth step) per `N` level ->
+  `TestClassifier.test_a_deep_nested_path_reads_as_the_hook_reads_it`;
+* R30, no `--test` stem check ->
+  `TestReservedTargets.test_a_test_stem_named_like_a_std_or_runner_crate_is_refused`
+  and, live, `TestExitContract.test_a_target_named_like_the_runner_or_std_is_refused`;
+  no artifact check -> `TestReservedTargets.test_a_path_crate_named_like_std_or_the_runner_is_refused`
+  and, live, `TestExitContract.test_a_path_dependency_named_backtrace_is_refused`;
+* R32, `--locked was passed` matched anywhere in stderr ->
+  `TestLockedWording.test_a_build_scripts_own_words_are_not_cargos`.
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -218,8 +235,9 @@ class TestTables(unittest.TestCase):
     def test_the_block_carries_every_table(self):
         block = io_guard_rust.render_tables()
         self.assertIn("static EARLY_EXIT_STATUS: c_int = 125;", block)
-        for name in ("TRANSPARENT", "RUNNER", "SEED", "TEST_BODY_BOUNDARY", "CONTROL",
-                     "SYSTEM_INTERNAL", "INTERCEPT", "EARLY_EXIT_STATUS"):
+        self.assertIn('static SEED_CRATE: &[u8] = b"std";', block)
+        for name in ("TRANSPARENT", "RUNNER", "SEED", "SEED_CRATE", "TEST_BODY_BOUNDARY",
+                     "CONTROL", "SYSTEM_INTERNAL", "INTERCEPT", "EARLY_EXIT_STATUS"):
             self.assertRegex(block, r"static %s: " % name)
         for plat, cfg in (("darwin", "macos"), ("linux", "linux")):
             for group, names in io_guard_rust.INTERCEPTS[plat].items():
@@ -236,6 +254,7 @@ class TestTables(unittest.TestCase):
                           "std_detect"))
         self.assertEqual(io_guard_rust.RUNNER_CRATES, ("test",))
         self.assertEqual(io_guard_rust.SEED_MARKERS, ("hashmap_random_keys",))
+        self.assertEqual(io_guard_rust.SEED_CRATE, "std")
         self.assertEqual(io_guard_rust.TEST_BODY_BOUNDARY_MARKERS,
                          ("__rust_begin_short_backtrace", "assert_test_result"))
         self.assertFalse(hasattr(io_guard_rust, "THREAD_START_MARKERS"),
@@ -754,6 +773,27 @@ impl<T> Deep for T {
 // Ruling R19: an exit made by the test body; at opt the body inlines under
 // libtest's `__rust_begin_short_backtrace`, the body boundary.
 #[test] fn t_exit() { std::process::exit(0); }
+
+// Ruling R28: names OUTSIDE the tables' legacy scope. std reached through a
+// crate type named like std's seed function (`std::fs::read::<p::
+// hashmap_random_keys>` under v0), a test whose own name carries it, and the
+// TsnControlEnv helper handed to std as a path: none is std seeding, none is
+// the control -- each read is the test's own.
+#[allow(non_camel_case_types)]
+struct hashmap_random_keys;
+impl AsRef<std::path::Path> for hashmap_random_keys {
+    fn as_ref(&self) -> &std::path::Path { std::path::Path::new("/etc/hosts") }
+}
+#[test] fn t_seed_lookalike() { let _ = std::fs::read(hashmap_random_keys); }
+// (Not `t_…`: libtest filters by substring, and other probe runs name
+// `t_hashmap`.)
+#[test] fn r28_named_hashmap_random_keys() { let _ = std::fs::read("/etc/hosts"); }
+impl AsRef<std::path::Path> for TsnControlEnv {
+    fn as_ref(&self) -> &std::path::Path { std::path::Path::new("/etc/hosts") }
+}
+#[test] fn t_control_lookalike() {
+    let _ = std::fs::read(TsnControlEnv { key: "TSN_PROBE_UNSET".to_string(), old: None });
+}
 '''
 
 
@@ -1090,6 +1130,29 @@ class TestProbe(ProbeCase):
         m = self.assert_trip("t_blanket", "filesystem")
         self.assertTrue(io_guard_rust.demangle(m.group(4)).startswith("p::t_blanket"), m.group(0))
 
+    def test_a_seed_or_control_name_outside_its_legacy_scope_is_judged(self):
+        # Ruling R28: `std::fs::read::<p::hashmap_random_keys>` is std's read,
+        # not std seeding; a test NAMED like the seed is the test's; and
+        # `std::fs::read::<p::TsnControlEnv>` at tier 2, environment allowed,
+        # is a filesystem read, not the environment control. Legacy judged
+        # the first and the third all along. MUTATION: restoring v0's
+        # any-identifier scan passes t_seed_lookalike and t_control_lookalike
+        # on 1.98 and in TestProbeV0Crate; restoring legacy's raw-substring
+        # seed match passes r28_named_hashmap_random_keys (debug).
+        for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
+            with self.subTest(build=label):
+                for name in ("t_seed_lookalike", "r28_named_hashmap_random_keys"):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                             blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 1 candidate reached "
+                                          r"filesystem I/O")
+                code, out = self.run_exe(["t_control_lookalike", "--exact", "--test-threads=1"],
+                                         tier=2, blocked=_blocked(2, ["environment"]), exe=exe)
+                self.assertEqual(code, 3, out)
+                self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
+                                      r"filesystem I/O")
+
     def test_optimized_pure_suite_does_not_trip_on_teardown(self):
         # MEASURE (ruling R15b): libtest's test-thread teardown -- TLS
         # destructors and output-capture cleanup after a PURE test returns --
@@ -1289,6 +1352,7 @@ def classifier_source():
 
 _RB_TESTS = _load("test_rust_binary")         # the v0 fixtures: real 1.98 symbols
 V0, V0_MALFORMED, NEST = _RB_TESTS.V0, _RB_TESTS.V0_MALFORMED, _RB_TESTS._nest
+V0_DEEP = _RB_TESTS.V0_DEEP
 _SKIP = frozenset(io_guard_rust.TRANSPARENT_CRATES) | frozenset(io_guard_rust.RUNNER_CRATES)
 
 
@@ -1308,13 +1372,16 @@ def mirror(sym):
         k = f.drop_crate
     if transparent(k) and any("drop_slow" in i for i in f.main_idents):
         k = "drop_slow"
-    if any(m in i for i in f.idents for m in t.SEED_MARKERS):
+    # Ruling R28, legacy's scope: SEED in the main path of a std symbol;
+    # CONTROL in the main path, an M/X self type or drop glue's payload.
+    if f.krate == t.SEED_CRATE and any(m in i for i in f.main_idents for m in t.SEED_MARKERS):
         cls = 3
     else:
         cls = 0 if transparent(k) else (2 if k in t.RUNNER_CRATES else 1)
     boundary = k in t.RUNNER_CRATES and any(m in i for i in f.main_idents
                                             for m in t.TEST_BODY_BOUNDARY_MARKERS)
-    group = next((g for n, g in sorted(t.CONTROL_HELPERS.items()) if n in f.idents), "-")
+    group = next((g for n, g in sorted(t.CONTROL_HELPERS.items()) if n in f.control_idents),
+                 "-")
     return (str(cls), str(int(boundary)), group, "=" + k)
 
 
@@ -1355,6 +1422,14 @@ class TestClassifier(unittest.TestCase):
         "drop_slow_std": ("1", "0", "-", "=drop_slow"),
         "drop_slow_crate": ("1", "0", "-", "=p"),
         "seed": ("3", "0", "-", "=std"),
+        # Ruling R28, written from LEGACY: it spells the first two
+        # `_ZN3std2fs4read17h…E` (no generic arguments), i.e. std's read,
+        # transparent -- neither seeding nor a control. A `Y` self type and a
+        # crate fn carrying the seed's name are the crate's own frames.
+        "std_read_seed_type": ("0", "0", "-", "=std"),
+        "std_read_control_type": ("0", "0", "-", "=std"),
+        "provided_control_self": ("1", "0", "-", "=p"),
+        "crate_fn_seed_name": ("1", "0", "-", "=p"),
     }
 
     @classmethod
@@ -1420,6 +1495,19 @@ class TestClassifier(unittest.TestCase):
     def test_the_name_tables_match_decoded_identifiers(self):
         self.check(["crate_fn", "trait_impl_backref", "drop_control", "seed"])
 
+    def test_the_name_tables_keep_legacy_scope(self):
+        # Ruling R28: a std fn's generic argument named like the seed or a
+        # control helper, a `Y` self type, a crate fn named like the seed.
+        self.check(["std_read_seed_type", "std_read_control_type", "provided_control_self",
+                    "crate_fn_seed_name", "seed", "drop_control", "trait_impl_backref"])
+
+    def test_a_deep_nested_path_reads_as_the_hook_reads_it(self):
+        # Ruling R29: 1,200 `N` levels. The hook reads the chain iteratively;
+        # rust_binary must too, and answer the same, never raise.
+        have = self.answer([V0_DEEP, "_" + V0_DEEP])
+        self.assertEqual(have, [("1", "0", "-", "=a")] * 2)
+        self.assertEqual([mirror(V0_DEEP), mirror("_" + V0_DEEP)], have)
+
     def test_the_legacy_rules_are_unchanged(self):
         cases = [(_mangle("probe", "env_var"), ("1", "0", "-", "=probe")),
                  (_mangle("test", "test_main_static"), ("2", "0", "-", "=test")),
@@ -1427,6 +1515,15 @@ class TestClassifier(unittest.TestCase):
                  (_mangle("p", "tsn_control_temp_dir"), ("1", "0", "filesystem", "=p")),
                  (_mangle("std", "sys", "random", "hashmap_random_keys"),
                   ("3", "0", "-", "=std")),
+                 ("_" + _mangle("std", "sys", "random", "hashmap_random_keys"),
+                  ("3", "0", "-", "=std")),
+                 # Ruling R28: only std's OWN path seeds -- not a crate fn or
+                 # test merely named like it, not an impl segment's text.
+                 (_mangle("v", "f_hashmap_random_keys_named_test"), ("1", "0", "-", "=v")),
+                 (_mangle("p", "hashmap_random_keys"), ("1", "0", "-", "=p")),
+                 (_mangle("std", "_$LT$impl$u20$hashmap_random_keys$GT$", "f"),
+                  ("0", "0", "-", "=std")),
+                 (_mangle("std", "fs", "read"), ("0", "0", "-", "=std")),
                  ("_" + _mangle("p", "Leaf"), ("1", "0", "-", "=p")),
                  ("_ZN3foo3barEv", ("0", "0", "-", "None")),
                  ("main", ("0", "0", "-", "None"))]
@@ -1449,7 +1546,9 @@ class TestClassifier(unittest.TestCase):
         for sym in V0.values():
             syms += [sym[:cut] for cut in range(len(sym) + 1)]
             syms.append("_" + sym)
-        syms += list(V0_MALFORMED.values()) + [NEST(n) for n in (1, 30, 63, 64, 65, 80)]
+        syms += list(V0_MALFORMED.values()) + [NEST(n) for n in (1, 30, 60, 61, 62, 63, 64, 65,
+                                                                 80)]
+        syms += [V0_DEEP, "_" + V0_DEEP]
         for sym, have in zip(syms, self.answer(syms)):
             if sym.startswith(("_R", "__R")):
                 self.assertEqual(have, mirror(sym), sym)
@@ -1901,6 +2000,38 @@ class TestExitContract(WrapperCase):
         self.assertIn("Cargo.lock is out of date for this manifest; update it yourself, then "
                       "re-run", out)
 
+    def test_a_target_named_like_the_runner_or_std_is_refused(self):
+        # Ruling R30: `tests/test.rs` compiles to crate `test`, read BY NAME
+        # as libtest's own work -- its real read passed GREEN in both
+        # manglings. Refused before anything builds or runs.
+        crate = self.scratch_copy()
+        _write(os.path.join(crate, "tests", "test.rs"),
+               '#[test] fn t_io() { assert!(std::fs::read("/etc/hosts").is_ok()); }\n')
+        code, out = self.guard(1, None, "t_io", stem="test", cwd=crate)
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("`test`", out)
+        self.assertIn("Rename it", out)
+        self.assertNotIn("tsn-hook: armed", out)
+
+    def test_a_path_dependency_named_backtrace_is_refused(self):
+        # Ruling R30: a path-source crate named like a transparent crate is
+        # read as std's own, so its I/O would pass. Seen in cargo's artifacts.
+        crate = self.scratch_copy()
+        _write(os.path.join(crate, "backtrace", "Cargo.toml"),
+               '[package]\nname = "backtrace"\nversion = "0.1.0"\nedition = "2021"\n')
+        _write(os.path.join(crate, "backtrace", "src", "lib.rs"),
+               'pub fn read() -> usize { std::fs::read("/etc/hosts").map(|b| b.len())'
+               '.unwrap_or(0) }\n')
+        with open(os.path.join(crate, "Cargo.toml"), "a", encoding="utf-8") as f:
+            f.write('\n[dependencies]\nbacktrace = { path = "backtrace" }\n')
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=_cargo_env(),
+                       capture_output=True, check=True)
+        code, out = self.guard(1, None, "t_clean", cwd=crate)
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("`backtrace`", out)
+        self.assertIn("Rename it", out)
+        self.assertNotIn("tsn-hook: armed", out)
+
     def test_a_dependency_missing_from_the_cargo_cache_is_2_and_nothing_is_fetched(self):
         # Ruling R24: the proof builds `--offline`, as go's builds GOPROXY=off,
         # so a crates.io dependency absent from the cargo cache is NOT ARMED --
@@ -2279,6 +2410,73 @@ class TestLockedWording(unittest.TestCase):
             self.build(self.OFFLINE)
         self.assertIn("run `cargo fetch`", str(ctx.exception))
         self.assertNotIn("Cargo.lock is out of date", str(ctx.exception))
+
+    # A build script's own stderr as cargo relays it: indented under
+    # `--- stderr`. Its words are not cargo's (ruling R32).
+    BUILD_SCRIPT = ("error: failed to run custom build command for `fx v0.1.0 (/w/fx)`\n\n"
+                    "Caused by:\n  process didn't exit successfully: `/w/t/debug/build/fx-1/"
+                    "build-script-build` (exit status: 1)\n  --- stderr\n  error: cannot update "
+                    "the lock file /w/x/Cargo.lock because --locked was passed to prevent this\n")
+
+    def test_a_build_scripts_own_words_are_not_cargos(self):
+        # Ruling R32. MUTATION: matching `--locked was passed` anywhere in
+        # stderr reads this build failure as a stale lock -- killed here.
+        try:
+            result = self.build(self.BUILD_SCRIPT)
+        except io_guard_rust.GuardCannotArm as exc:
+            self.fail("a build script's output was read as cargo's own: %s" % exc)
+        self.assertIsNotNone(result.compile_error)
+
+
+class TestReservedTargets(unittest.TestCase):
+    """Ruling R30 without a toolchain: the guard's classifier keys on crate
+    names, so a crate named like std's or libtest's own is refused, never
+    guarded."""
+
+    def test_a_test_stem_named_like_a_std_or_runner_crate_is_refused(self):
+        # Before rustc is even asked: PATH holds none here.
+        if PLATFORM is None:
+            self.skipTest("the guard runs on darwin and linux only")
+        tmp = tempfile.mkdtemp(prefix="tsn-rust-reserved-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        env = {"PATH": os.path.join(tmp, "no-bin"), "HOME": tmp, "TEST_SAFETY_NET_TIER": "1"}
+        for stem in ("test", "std", "core", "alloc", "hashbrown", "std-detect", "panic_unwind"):
+            with self.subTest(stem=stem):
+                code, out = main_in(tmp, env, ["--test", stem, "t_io"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("Rename it", out)
+        code, out = main_in(tmp, env, ["--test", "test_io", "t_io"])
+        self.assertEqual(code, 2, out)                   # refused later: no rustc on PATH
+        self.assertNotIn("Rename it", out)
+
+    FX = ("path+file:///w/fx#0.1.0", "fx", ["test"], "/w/target/debug/deps/fx-1")
+
+    def build(self, *artifacts):
+        stdout = "".join(json.dumps({"reason": "compiler-artifact", "package_id": pid,
+                                     "target": {"name": name, "kind": kind},
+                                     "executable": exe}) + "\n"
+                         for pid, name, kind, exe in artifacts)
+        done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with mock.patch.object(io_guard_rust.shutil, "which", return_value="/usr/bin/cargo"), \
+                mock.patch.object(io_guard_rust.subprocess, "run", return_value=done):
+            return io_guard_rust.build_test("/w/fx", io_guard_rust.BuildPlan(None, (), ""), "fx",
+                                            None, {"PATH": "/usr/bin"})
+
+    def test_a_path_crate_named_like_std_or_the_runner_is_refused(self):
+        # cargo 1.77+ and older package-id spellings of a path package.
+        for pid in ("path+file:///w/fx/backtrace#0.1.0",
+                    "backtrace 0.1.0 (path+file:///w/fx/backtrace)"):
+            with self.subTest(package_id=pid):
+                with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+                    self.build((pid, "backtrace", ["lib"], None), self.FX)
+                self.assertIn("`backtrace`", str(ctx.exception))
+                self.assertIn("Rename it", str(ctx.exception))
+
+    def test_a_registry_crate_so_named_is_the_stated_residual(self):
+        # Residual 3: a crates.io `hashbrown` is not the user's to rename.
+        result = self.build(("registry+https://github.com/rust-lang/crates.io-index"
+                             "#hashbrown@0.15.2", "hashbrown", ["lib"], None), self.FX)
+        self.assertEqual(result.exe, "/w/target/debug/deps/fx-1")
 
 
 class _FakeProc:

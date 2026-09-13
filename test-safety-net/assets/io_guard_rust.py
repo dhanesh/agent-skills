@@ -50,7 +50,11 @@ HOW A PROOF RUNS -- `main`
 --------------------------
 Every refusal prints its reason and exits 2:
   1. the tier and allow list, through `guard_env.read_env`;
-  2. the platform is darwin or linux;
+  2. the platform is darwin or linux, and the `--test` target's crate name is
+     not a transparent or runner crate's (ruling R30: `tests/test.rs` is
+     crate `test`, read as libtest's own runner, so its I/O would go unjudged;
+     the remedy is to rename the target). A workspace or path-dependency
+     crate so named, seen in cargo's build messages, is refused the same way;
   3. `rustc -V`, run in the repo so a `rust-toolchain.toml` pin is honoured,
      is at least `MIN_RUST`. `RUSTUP_AUTO_INSTALL=0` on every rustc/cargo
      call: an uninstalled pin is refused, never downloaded;
@@ -98,7 +102,10 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    0.2's `SYS_getrandom` on linux among them). The filter declines asm and
    `libc::syscall` statically; rustix is rebuilt against libc (step 6).
 2. Static, stripped and musl binaries are refused rather than guarded.
-3. The seed-path and runner exemptions are names, pinned per toolchain.
+3. The seed-path and runner exemptions are names, pinned per toolchain; so
+   are the transparent crates. A test target or path-source crate named like
+   one is refused (ruling R30), but a crates.io dependency named `backtrace`
+   or `hashbrown` is read as std's own.
 4. Life-before-main crates (`ctor`) are unverified: their I/O is probably
    seen, but whether it is attributed correctly is not measured.
 5. THE THREAT MODEL. The guard defends against ACCIDENTAL I/O, and against
@@ -176,8 +183,14 @@ frame buffer (ruling R15a: a Drop chain or a recursion deeper than the
 spike's 128 slots used to fall off the end and be exempt):
   * a frame naming a `CONTROL_HELPERS` item decides, with THAT helper's
     group (`tsn_control_temp_dir` reads TMPDIR on its way to the filesystem,
-    and is the tier-2 filesystem control);
-  * a `SEED_MARKERS` frame is std seeding a HashMap: exempt;
+    and is the tier-2 filesystem control). "Naming" is legacy's scope in
+    both manglings (ruling R28): the frame's own path, an impl's self type,
+    or drop glue's payload -- never a generic argument of an ordinary std
+    fn, so `std::fs::read::<TsnControlEnv>` is std's read, not the control;
+  * std's own seeding frame (`std::sys::random::hashmap_random_keys`: a
+    `SEED_MARKERS` name in the path of a `SEED_CRATE` symbol) is std seeding
+    a HashMap: exempt. A crate fn, type or test that merely carries the name
+    is not (ruling R28);
   * a CRATE frame decides with the call's group. "Crate" is the deciding
     crate of the symbol: a plain path's first segment, and for an impl frame
     (`<T as Trait>::m`, `<T>::m`) the crate of the SELF TYPE T (ruling R14),
@@ -204,9 +217,9 @@ alloc and libtest ship precompiled. Every rule above holds for v0 names too:
 the crate is the path's root crate, an impl frame's is its self type's (a
 primitive or placeholder names none), drop glue (`core::ptr::drop_glue<T>`)
 is decided by the first crate anywhere in T, and the boundary, seed, control
-and `drop_slow` names match DECODED identifiers. A v0 symbol that cannot be
-read -- malformed, truncated, nested too deep -- is passed over like any
-transparent frame.
+and `drop_slow` names match DECODED identifiers, in exactly the scope legacy
+gives them (ruling R28). A v0 symbol that cannot be read -- malformed,
+truncated, nested too deep -- is passed over like any transparent frame.
 A walk that decides nothing is resolved by thread IDENTITY, not frame names
 (ruling R15b): off the main thread -- `pthread_main_np()` on darwin,
 `gettid() == getpid()` on Linux -- a stack with no crate frame is a spawned
@@ -262,7 +275,11 @@ TRANSPARENT_CRATES = ("std", "core", "alloc", "panic_unwind", "backtrace", "hash
 RUNNER_CRATES = ("test",)
 # std's HashMap seeding, per toolchain: `std::sys::pal::unix::rand` (1.82)
 # and `std::sys::random::linux` (1.92) both name `hashmap_random_keys`.
+# Ruling R28: a SEED marker counts only in the OWN path of a symbol whose
+# crate is SEED_CRATE -- std's seeding function, never a crate fn, type or
+# test that merely carries the name (in either mangling).
 SEED_MARKERS = ("hashmap_random_keys",)
+SEED_CRATE = "std"
 # The BODY-SIDE boundaries libtest reaches the test through, matched ONLY in
 # frames of the `test` crate (std's own `std::sys::backtrace::
 # __rust_begin_short_backtrace` on the thread-spawn path and lang_start does
@@ -387,6 +404,7 @@ def render_tables() -> str:
         "static TRANSPARENT: &[&[u8]] = &[%s];" % _bytes_list(TRANSPARENT_CRATES),
         "static RUNNER: &[&[u8]] = &[%s];" % _bytes_list(RUNNER_CRATES),
         "static SEED: &[&[u8]] = &[%s];" % _bytes_list(SEED_MARKERS),
+        'static SEED_CRATE: &[u8] = b"%s";' % SEED_CRATE,
         "static TEST_BODY_BOUNDARY: &[&[u8]] = &[%s];" % _bytes_list(TEST_BODY_BOUNDARY_MARKERS),
         "static CONTROL: &[(&[u8], &[u8])] = &[%s];" % _pairs(sorted(CONTROL_HELPERS.items())),
         "static SYSTEM_INTERNAL: &[&[u8]] = &[%s];" % _bytes_list(SYSTEM_INTERNAL_IMAGES),
@@ -514,9 +532,40 @@ _PREFIX = "test-safety-net io_guard_rust: "
 # cargo 1.92: "the lock file <path> needs to be updated but --locked was
 # passed to prevent this"; 1.94 and 1.98: "cannot update the lock file <path>
 # because --locked was passed to prevent this". All three add a help line
-# naming `--offline`, so this is matched BEFORE ruling R24's offline match.
+# naming `--offline`, so this is matched BEFORE ruling R24's offline match --
+# and only on cargo's OWN `error:` lines (ruling R32), never on a build
+# script's output, which cargo relays indented.
 _LOCKED = "--locked was passed"
 _STALE_LOCK = "Cargo.lock is out of date for this manifest; update it yourself, then re-run"
+
+
+def _stale_lock(stderr):
+    return any(line.startswith("error:") and _LOCKED in line for line in stderr.splitlines())
+
+
+# Ruling R30: the classifier keys on CRATE NAMES, so a user crate named like
+# a transparent or runner crate is indistinguishable from std or libtest:
+# `tests/test.rs` compiles to crate `test`, whose frames read as the runner's
+# own work and are exempt. Such a target cannot be proven until renamed.
+_RESERVED_CRATES = frozenset(TRANSPARENT_CRATES) | frozenset(RUNNER_CRATES)
+
+
+def _reserved_refusal(names):
+    """The NOT ARMED reason when a crate in `names` (cargo target names; a
+    `-` becomes `_` in the crate name) is a transparent or runner crate's, or None."""
+    bad = sorted({n.replace("-", "_") for n in names if n} & _RESERVED_CRATES)
+    if not bad:
+        return None
+    return ("crate %s shares its name with one of Rust's own crates, which the guard reads "
+            "BY NAME as std's or libtest's work, so its I/O would never be judged. Rename it "
+            "(e.g. tests/%s.rs -> tests/%s_io.rs), then re-run"
+            % (", ".join("`%s`" % b for b in bad), bad[0], bad[0]))
+
+
+def _path_source(package_id):
+    """A cargo package id of a local (path) package: `path+file:///…#0.1.0`
+    (cargo 1.77+), or `name 0.1.0 (path+file:///…)` before it."""
+    return package_id.startswith("path+file:") or "(path+file:" in package_id
 
 
 def _why(g):
@@ -827,7 +876,7 @@ def build_test(repo, plan, test_target, package, env):
                               errors="replace", stdin=subprocess.DEVNULL)
     except OSError as exc:
         raise GuardCannotArm("cargo could not run: %s" % exc) from exc
-    exes, errors = [], []
+    exes, errors, local = [], [], []
     for line in proc.stdout.splitlines():
         try:
             msg = json.loads(line)
@@ -836,6 +885,8 @@ def build_test(repo, plan, test_target, package, env):
         if not isinstance(msg, dict):
             continue
         if msg.get("reason") == "compiler-artifact":
+            if _path_source(str(msg.get("package_id") or "")):
+                local.append(str((msg.get("target") or {}).get("name") or ""))
             if "test" in ((msg.get("target") or {}).get("kind") or ()) and msg.get("executable"):
                 if msg["executable"] not in exes:
                     exes.append(msg["executable"])
@@ -846,13 +897,18 @@ def build_test(repo, plan, test_target, package, env):
     # Ruling R27: a stale lock is its own refusal, decided FIRST -- every
     # proven cargo's wording of it also names `--offline` in its help line,
     # which the R24 match below would otherwise read as "not cached".
-    if proc.returncode != 0 and _LOCKED in proc.stderr:
+    if proc.returncode != 0 and _stale_lock(proc.stderr):
         raise GuardCannotArm(_STALE_LOCK)
     # Ruling R24: cargo failed before compiling anything, and its stderr names
     # offline mode -- a dependency the local cache does not hold. NOT ARMED,
     # never NO BUILD: the test source was never read.
     if proc.returncode != 0 and not exes and not errors and _OFFLINE.search(proc.stderr):
         raise GuardCannotArm("%s (cargo: %s)" % (_NOT_CACHED, _first_error(proc.stderr)))
+    # Ruling R30: a workspace member or path dependency named like a
+    # transparent or runner crate would be read as std's or libtest's work.
+    why = _reserved_refusal(local)
+    if why:
+        raise GuardCannotArm(why)
     if len(exes) > 1:
         # Ruling R20: a workspace root with no -p builds EVERY member's
         # `tests/<stem>.rs`; keeping one would run a file nobody inspected.
@@ -1100,6 +1156,9 @@ def main(argv=None):
     if _platform() is None:
         return _not_armed("sys.platform=%s; this guard is proved on %s only"
                           % (sys.platform, " and ".join(SUPPORTED_PLATFORMS)))
+    why = _reserved_refusal([args.test_target])
+    if why:
+        return _not_armed(why)
     repo = os.getcwd()
     env = dict(os.environ)
     try:

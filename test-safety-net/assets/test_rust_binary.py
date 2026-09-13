@@ -24,6 +24,12 @@ Ruling R26 (rustc 1.98 mangles v0 by default, std and libtest included):
   `TestRealBinaries.test_a_freshly_built_test_binary_is_not_refused`;
 * measuring a back-reference from the symbol's first byte ->
   `TestV0Parser.test_a_back_reference_resolves_from_just_after_the_prefix`.
+
+Ruling R28 (the name tables keep legacy scope) and R29 (a bounded reader):
+* collecting every identifier into `control_idents`, or reading SEED off a
+  non-std symbol -> `TestV0Parser.test_the_name_tables_keep_legacy_scope`;
+* an `N` chain costing one Python frame (or one depth step) per level ->
+  `TestV0Parser.test_a_deep_nested_path_reads_without_recursion`.
 """
 from __future__ import annotations
 
@@ -335,7 +341,22 @@ V0 = {
     "drop_slow_crate": v0("_RNvMs6_Nt{alloc}5alloc2rcINtB5_2RcNt{p}1p2PdE9drop_slowBF_"),
     # std seeding its HashMap
     "seed": v0("_RNvNtNt{std}3std3sys6random19hashmap_random_keys"),
+    # Ruling R28: names OUTSIDE the tables' legacy scope. Legacy spells the
+    # first two `_ZN3std2fs4read17h…E` -- no generic arguments at all -- so
+    # they are std's read, transparent: never std seeding, never a control.
+    # A provided method's (`Y`) self type, and a crate fn that merely carries
+    # the seed's name (`_ZN1p32f_hashmap_random_keys_named_test17h…E`), are
+    # not in scope either.
+    "std_read_seed_type": v0("_RINvNt{std}3std2fs4readNt{p}1p19hashmap_random_keysE{p}1p"),
+    "std_read_control_type": v0("_RINvNt{std}3std2fs4readNt{p}1p13TsnControlEnvE{p}1p"),
+    "provided_control_self": v0("_RNvYNt{p}1p13TsnControlEnvNtNt{core}4core3fmt5Write"
+                                "9write_fmt"),
+    "crate_fn_seed_name": v0("_RNv{p}1p32f_hashmap_random_keys_named_test"),
 }
+
+# Ruling R29: 1,200 `N` levels, as an `#[export_name]` may spell them. The
+# hook reads an `N` chain iteratively; the Python twin must too.
+V0_DEEP = "_R" + "Nv" * 1200 + "C1a" + "1f" * 1200
 
 
 def _nest(depth):
@@ -415,10 +436,46 @@ class TestV0Parser(unittest.TestCase):
         self.assertEqual(f.krate, "test")
         self.assertIn("__rust_begin_short_backtrace", f.main_idents)
         self.assertIn("drop_slow", self.facts("drop_slow_std").main_idents)
-        self.assertIn("TsnControlEnv", self.facts("drop_control").idents)
-        self.assertIn("hashmap_random_keys", self.facts("seed").idents)
+        self.assertIn("TsnControlEnv", self.facts("drop_control").control_idents)
+        self.assertIn("hashmap_random_keys", self.facts("seed").main_idents)
         # a generic argument's identifiers are not the main path's
         self.assertNotIn("Rep", self.facts("assert_test_result").main_idents)
+
+    def test_the_name_tables_keep_legacy_scope(self):
+        # Ruling R28. CONTROL: the main path, an M/X self type, drop glue's
+        # payload -- and nothing else. SEED: the main path of a std symbol.
+        for name, ident in (("crate_fn", "tsn_control_temp_dir"),
+                            ("trait_impl_backref", "TsnControlEnv"),
+                            ("drop_control", "TsnControlEnv")):
+            with self.subTest(sym=name):
+                self.assertIn(ident, self.facts(name).control_idents)
+        for name in ("std_read_control_type", "provided_control_self"):
+            with self.subTest(sym=name):
+                self.assertNotIn("TsnControlEnv", self.facts(name).control_idents)
+        seed = self.facts("seed")
+        self.assertEqual(seed.krate, "std")
+        self.assertIn("hashmap_random_keys", seed.main_idents)
+        lookalike = self.facts("std_read_seed_type")
+        self.assertEqual(lookalike.krate, "std")
+        self.assertNotIn("hashmap_random_keys", lookalike.main_idents)
+        self.assertNotIn("hashmap_random_keys", lookalike.control_idents)
+        named = self.facts("crate_fn_seed_name")
+        self.assertEqual(named.krate, "p")                 # its OWN crate: not std's seeding
+
+    def test_a_deep_nested_path_reads_without_recursion(self):
+        # Ruling R29: this used to raise RecursionError, and the wrapper --
+        # which counts crate symbols with it -- exited 1, read as RED.
+        for sym in (V0_DEEP, "_" + V0_DEEP):
+            with self.subTest(macho=sym.startswith("__")):
+                f = rust_binary.v0_facts(sym, _TRANSPARENT)
+                self.assertIsNotNone(f)
+                self.assertEqual((f.krate, len(f.main_idents)), ("a", 1200))
+                self.assertTrue(rust_binary.v0_demangle(sym).startswith("a::f::f::f"))
+        path = os.path.join(tempfile.mkdtemp(prefix="tsn-rust-deep-"), "exe")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), ignore_errors=True)
+        with open(path, "wb") as f:
+            f.write(elf(interp="/lib64/ld-linux-aarch64.so.1", symbols=[V0_DEEP]))
+        self.assertEqual(rust_binary.inspect(path).crate_symbols, 1)
 
     def test_the_macho_spelling_reads_the_same(self):
         for name, sym in V0.items():
