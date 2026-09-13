@@ -158,30 +158,6 @@ jobs:
         working-directory: test-safety-net
         run: python eval/run_eval.py
 
-  # THROWAWAY (Task 10 step 3): does the rust guard's 1.82 floor link and pass
-  # on macOS? Reverted after one read; kept as a leg only if it passed.
-  tsn-rust-macos-floor:
-    name: tsn rust 1.82 (macos-latest)
-    runs-on: macos-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: test-safety-net/assets
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: rustup toolchain install 1.82 --profile minimal && rustup default 1.82
-      - run: uname -m && sw_vers && xcrun --show-sdk-version && rustc -vV && cargo -V
-      - run: |
-          python test_stack_rust.py
-          python test_rust_binary.py
-          python test_io_guard_rust.py
-      - name: outcome eval on this version
-        working-directory: test-safety-net
-        run: python eval/run_eval.py
-
   # Branch protection requires a check named exactly `gate`. A matrix job reports
   # one check PER LEG ("gate (ubuntu-latest)", ...) and never the bare name, so
   # adding the matrix silently removed the required context and left every PR
