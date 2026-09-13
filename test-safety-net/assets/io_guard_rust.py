@@ -35,7 +35,9 @@ THE EXIT STATUS IS THE WHOLE PROTOCOL -- go's table, from guard_env.py
                     reclassify the unit to Tier 3 and discard the test,
                     whether the run was red or green
     4  NO TEST      nothing was proved: the name matched no test, the test
-                    is `#[ignore]`d, or the binary printed no verdict
+                    is `#[ignore]`d, the test process exited before libtest
+                    reported, the proof was killed at its timeout, or the
+                    binary printed no verdict of its own
     5  NO BUILD     the test did not build; a compile error is not RED
 
 libtest's own exit code lies twice (measured on 1.82 and 1.92): an ignored
@@ -74,9 +76,12 @@ Every refusal prints its reason and exits 2:
      a caller's `RUST_TEST_NOCAPTURE` is dropped: under it the default panic
      hook reads `RUST_BACKTRACE` outside libtest's frames, and every RED
      would trip `environment`;
- 11. `classify`: a violation line wins; then a hook that did not say
-     `tsn-hook: armed`, or said anything else, is NOT ARMED; then libtest's
-     LAST `test result:` line.
+ 11. `classify`, first match wins: a violation line -> 3; the loader
+     skipping the preload, no `tsn-hook: armed` line BEFORE libtest's
+     `running N test`, or any other hook line but an early exit -> 2; an
+     early exit (the hook saw the test call libc `exit`) or a timeout -> 4;
+     then libtest's LAST `test result:` line, where GREEN also needs exit
+     code 0 and libtest's own `test <name> ... ok` line before it.
 
 RESIDUALS, STATED RATHER THAN IMPLIED
 -------------------------------------
@@ -87,9 +92,16 @@ RESIDUALS, STATED RATHER THAN IMPLIED
 3. The seed-path and runner exemptions are names, pinned per toolchain.
 4. Life-before-main crates (`ctor`) are unverified: their I/O is probably
    seen, but whether it is attributed correctly is not measured.
-5. Verdict lines share stdout with repo code, so a test can print a spoofed
-   `test result:` line (the LAST one is read, which libtest writes after
-   the test returns) or a spoofed handshake, as on go.
+5. Verdict lines share stdout with repo code, so a test can print forged
+   ones. What is caught: forged status and result lines followed by
+   `process::exit` -- the hook reports the exit (ruling R19): 4; followed
+   by an abort or a signal -- a pass needs exit code 0: 4; a forged
+   handshake -- it lands after `running N test`: 2. What REMAINS: a test
+   that prints both forged lines and then ends the process WITHOUT libc
+   `exit` -- `_exit`/`_Exit`, which the hook must never hook, or a raw exit
+   syscall -- with status 0 reads GREEN. So does life-before-main code (a
+   `ctor`) printing a forged handshake under a hook the loader skipped
+   without a word.
 6. `std::env::vars`/`vars_os` read `environ` directly, `std::env::args`
    reads what the runtime saved before main, `std::thread::sleep` is an
    unhooked `nanosleep`, and `std::fs::hard_link` an unhooked `linkat`: a
@@ -119,6 +131,14 @@ Its environment contract:
   * `TSN_STDIN=1` -- set at tier 1: a read of fd 0 trips only then.
 
 Its handshake: when armed, the constructor writes `tsn-hook: armed` to fd 2.
+It reports one more thing (ruling R19): libc `exit` reached with a crate
+frame responsible -- the test ending the process before libtest can print
+its verdict -- writes `tsn-hook: early exit (<symbol>)` and then exits for
+real. libtest's own exits (101 after a failure, the normal end after main
+returns) have no crate frame and stay silent. `exit` has its own pseudo-
+group, `process-exit`, which is never blocked: it reports, it never trips.
+`_exit`/`_Exit` are not hooked: the hook's own `_exit(3)`/`_exit(2)` must
+never recurse.
 At every decision it refuses to guess (ruling R1): a frame walk of fewer than
 3 frames, a walk that resolves no symbol at all, or -- on Linux -- no
 `.symtab` in `/proc/self/exe` writes `tsn-hook: cannot attribute (<why>)`
@@ -175,6 +195,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+
+try:
+    import resource
+except ImportError:          # not a darwin/linux Python; main refuses the platform
+    resource = None
 
 _ASSETS = os.path.dirname(os.path.abspath(__file__))
 if _ASSETS not in sys.path:
@@ -261,6 +286,9 @@ _NET = ("socket", "connect", "bind", "getaddrinfo")
 # function a hook could sit in, so no intercept can catch them. The filter
 # still marks them Tier 2 (environment), so a vars-reading unit is a Tier 2
 # candidate; at Tier 1 it is unseen by the guard, exactly like go's `os.Args`.
+#
+# `process-exit` is NOT an I/O group (ruling R19): `exit` is reported as an
+# early exit, never judged, and no TSN_BLOCKED ever names it.
 INTERCEPTS = {
     "darwin": {
         "filesystem": _FS_SHARED,
@@ -271,6 +299,7 @@ INTERCEPTS = {
         "randomness": ("getentropy", "arc4random_buf"),
         "subprocess": _SUBPROCESS,
         "stdin": ("read",),
+        "process-exit": ("exit",),
     },
     "linux": {
         "filesystem": _FS_SHARED + ("open64", "openat64", "stat64", "lstat64", "fstatat64",
@@ -281,6 +310,7 @@ INTERCEPTS = {
         "randomness": ("getrandom", "getentropy", "arc4random_buf"),
         "subprocess": _SUBPROCESS,
         "stdin": ("read",),
+        "process-exit": ("exit",),
     },
 }
 
@@ -607,10 +637,11 @@ def _metadata(repo, env):
         return None
 
 
-def _test_source(meta, repo, stem, package):
-    """The source file of test target `stem`: from cargo's metadata when it
-    has one (a `-p` run from the workspace root, a `[[test]] path`), else
-    `tests/<stem>.rs` under `repo`."""
+def _test_sources(meta, repo, stem, package):
+    """The source files of test target `stem` that this run can build: from
+    cargo's metadata when it has them (a `-p` run from the workspace root, a
+    `[[test]] path`), else `tests/<stem>.rs` under `repo`. More than one, with
+    no `-p`, is a workspace root whose members share the stem (ruling R20)."""
     if meta:
         here = os.path.realpath(repo)
         pkgs = meta.get("packages") or []
@@ -620,12 +651,13 @@ def _test_source(meta, repo, stem, package):
             own = [p for p in pkgs
                    if os.path.dirname(os.path.realpath(p.get("manifest_path", ""))) == here]
             pkgs = own or pkgs
-        for p in pkgs:
-            for t in p.get("targets") or []:
-                if "test" in (t.get("kind") or ()) and t.get("name") == stem and t.get("src_path"):
-                    return t["src_path"]
+        found = [t["src_path"] for p in pkgs for t in (p.get("targets") or [])
+                 if "test" in (t.get("kind") or ()) and t.get("name") == stem
+                 and t.get("src_path")]
+        if found:
+            return found
     path = os.path.join(repo, "tests", stem + ".rs")
-    return path if os.path.isfile(path) else None
+    return [path] if os.path.isfile(path) else []
 
 
 _SET_ENV_CALL = re.compile(r"\btsn_control_set_env\s*\(")
@@ -713,7 +745,7 @@ def build_test(repo, plan, test_target, package, env):
                               errors="replace", stdin=subprocess.DEVNULL)
     except OSError as exc:
         raise GuardCannotArm("cargo could not run: %s" % exc) from exc
-    exe, errors = None, []
+    exes, errors = [], []
     for line in proc.stdout.splitlines():
         try:
             msg = json.loads(line)
@@ -723,11 +755,18 @@ def build_test(repo, plan, test_target, package, env):
             continue
         if msg.get("reason") == "compiler-artifact":
             if "test" in ((msg.get("target") or {}).get("kind") or ()) and msg.get("executable"):
-                exe = msg["executable"]
+                if msg["executable"] not in exes:
+                    exes.append(msg["executable"])
         elif msg.get("reason") == "compiler-message":
             message = msg.get("message") or {}
             if message.get("level") == "error":
                 errors.append((message.get("rendered") or message.get("message") or "").rstrip())
+    if len(exes) > 1:
+        # Ruling R20: a workspace root with no -p builds EVERY member's
+        # `tests/<stem>.rs`; keeping one would run a file nobody inspected.
+        raise GuardCannotArm("more than one package has tests/%s.rs; name the package with -p"
+                             % test_target)
+    exe = exes[0] if exes else None
     output = "\n".join(errors + [proc.stderr.rstrip()]).strip()
     compile_error = None
     if errors:
@@ -743,8 +782,8 @@ def _no_core_dump():
     """In the child, before exec: a crashing test must not dump `core` into
     the repo (its cwd). Measured in the rust images, whose `ulimit -c` is
     unlimited and core_pattern is `core`: an abort wrote `<repo>/core`."""
-    import resource
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if resource is not None:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def run_proof(exe, test_name, tier, allow, hook, env):
@@ -783,7 +822,7 @@ def run_proof(exe, test_name, tier, allow, hook, env):
         timer.cancel()
     sys.stdout.flush()
     if fired:
-        captured.append("\ntsn: the test binary was killed after %ds\n" % PROOF_TIMEOUT)
+        captured.append("\ntsn-proof: killed after %ds: nothing was proved\n" % PROOF_TIMEOUT)
     return code, "".join(captured)
 
 
@@ -793,30 +832,90 @@ _HOOK_LINE = re.compile(r"(?m)^tsn-hook: (.*)$")
 _RESULT = re.compile(r"(?m)^test result: \S+\. (\d+) passed; (\d+) failed; (\d+) ignored")
 
 
-def classify(code, output):
+_PRELOAD_SKIPPED = re.compile(r"(?m)^.*(?:cannot be preloaded|inserted dylib .* could not be "
+                              r"loaded).*$")
+_RUNNING_LINE = re.compile(r"(?m)^running \d+ tests?$")
+_KILLED = re.compile(r"(?m)^tsn-proof: (killed after \d+s: nothing was proved)$")
+_EARLY = "early exit"
+
+
+def _reported_ok(output, test_name, end):
+    """Did libtest report `test <name> ... ok` before offset `end`? Its
+    announcement `test <name> ... ` starts a line (`- should panic`
+    allowed), and an `ok` ends a line after it -- the same line, or a later
+    one when the test wrote raw stderr in between (measured: a test's own
+    stderr lands between the two halves)."""
+    name = re.escape(test_name) if test_name else r"\S+"
+    starts = list(re.finditer(r"(?m)^test %s(?: - should panic)? \.\.\. " % name, output[:end]))
+    if not starts:
+        return False
+    return re.search(r"(?m)(?:\.\.\. |^)ok$", output[starts[-1].start():end]) is not None
+
+
+def _verdict(code, output, test_name=None):
+    """`(exit status, note or None)` for one proof run; `classify` is its status."""
+    if re.search(r"(?m)^IOGuardViolation", output):
+        return EXIT_TRIP, None
+    skipped = _PRELOAD_SKIPPED.search(output)
+    if skipped:
+        return EXIT_NOT_ARMED, "the loader did not load the hook: " + skipped.group(0).strip()
+    said = list(_HOOK_LINE.finditer(output))
+    other = [m for m in said if m.group(1) != "armed" and not m.group(1).startswith(_EARLY)]
+    if other:
+        return EXIT_NOT_ARMED, "the hook did not arm: " + other[0].group(0)
+    armed = [m for m in said if m.group(1) == "armed"]
+    if not armed:
+        return EXIT_NOT_ARMED, ("no `tsn-hook: armed` handshake, so the hook never loaded into "
+                                "the test binary")
+    running = _RUNNING_LINE.search(output)
+    if running and armed[0].start() > running.start():
+        return EXIT_NOT_ARMED, ("the only `tsn-hook: armed` line came after libtest started: the "
+                                "hook's constructor, which writes first, never ran")
+    early = [m for m in said if m.group(1).startswith(_EARLY)]
+    if early:
+        sym = re.match(r"early exit \((.*)\)$", early[0].group(1))
+        return EXIT_NO_TEST, ("the test process exited before libtest reported; nothing was "
+                              "proved (exit from %s)" % demangle(sym.group(1) if sym else "?"))
+    killed = _KILLED.search(output)
+    if killed:
+        return EXIT_NO_TEST, killed.group(1)
+    results = list(_RESULT.finditer(output))
+    if results:
+        last = results[-1]
+        passed, failed, ignored = (int(n) for n in last.groups())
+        if failed >= 1:
+            return EXIT_RED, None
+        if passed == 1 and ignored == 0:
+            if code != 0:
+                return EXIT_NO_TEST, ("libtest's result line says a pass but the process exited "
+                                      "%s; nothing was proved" % code)
+            if not _reported_ok(output, test_name, last.start()):
+                return EXIT_NO_TEST, ("libtest's own `test %s ... ok` line is missing before its "
+                                      "result line; nothing was proved" % (test_name or "<name>"))
+            return EXIT_GREEN, None
+        return EXIT_NO_TEST, None
+    if code != 0:
+        return EXIT_RED, "the test binary ended without a result line (signal or abort)"
+    return EXIT_NO_TEST, None
+
+
+def classify(code, output, test_name=None):
     """The exit status for one proof run, first match wins:
 
       1. a line starting `IOGuardViolation` -> 3;
-      2. a hook line other than the handshake (`tsn-hook: cannot attribute`,
-         `tsn-hook: libc has no ...`), or no `tsn-hook: armed` line -> 2;
-      3. libtest's LAST `test result:` line: a failure -> 1; exactly one
-         passed and none ignored -> 0; anything else -> 4;
-      4. no result line: a non-zero code -> 1 (signal or abort), else 4.
+      2. the loader skipping the preload (glibc's `cannot be preloaded`,
+         dyld's `inserted dylib ... could not be loaded`), a hook line other
+         than the handshake or an early exit (`cannot attribute`, `libc has
+         no ...`), no `tsn-hook: armed` line, or one only AFTER libtest's
+         `running N test` (ruling R21) -> 2;
+      3. `tsn-hook: early exit` -- the test called libc `exit` (ruling R19)
+         -- or the proof's own timeout marker -> 4;
+      4. libtest's LAST `test result:` line: a failure -> 1; exactly one
+         passed and none ignored -> 0 only with exit code 0 AND libtest's own
+         `test <test_name> ... ok` line before it, else 4; anything else -> 4;
+      5. no result line: a non-zero code -> 1 (signal or abort), else 4.
     """
-    if re.search(r"(?m)^IOGuardViolation", output):
-        return EXIT_TRIP
-    said = [m.group(1) for m in _HOOK_LINE.finditer(output)]
-    if "armed" not in said or any(s != "armed" for s in said):
-        return EXIT_NOT_ARMED
-    results = _RESULT.findall(output)
-    if results:
-        passed, failed, ignored = (int(n) for n in results[-1])
-        if failed >= 1:
-            return EXIT_RED
-        if passed == 1 and ignored == 0:
-            return EXIT_GREEN
-        return EXIT_NO_TEST
-    return EXIT_RED if code != 0 else EXIT_NO_TEST
+    return _verdict(code, output, test_name)[0]
 
 
 _ESCAPES = {"SP": "@", "BP": "*", "RF": "&", "LT": "<", "GT": ">", "LP": "(", "RP": ")",
@@ -886,6 +985,9 @@ def main(argv=None):
         args = _parse(argv)
     except SystemExit as exc:                        # usage error -> 2, --help -> 0
         return exc.code if isinstance(exc.code, int) else EXIT_NOT_ARMED
+    if args.test_name.startswith("-"):
+        return _not_armed("a test name cannot begin with '-': libtest would read %r as a flag "
+                          "and run the whole binary" % args.test_name)
     tier, allow, notes = guard_env.read_env(os.environ, CONTROLLABLE_GROUPS,
                                             UNCONTROLLABLE_GROUPS, "rust", _why)
     for note in notes:
@@ -907,11 +1009,15 @@ def main(argv=None):
     if not os.path.isfile(os.path.join(root, "Cargo.lock")):
         return _not_armed("no Cargo.lock: run cargo generate-lockfile, then re-run; the proof "
                           "never writes one")
-    source = _test_source(meta, repo, args.test_target, args.package)
-    if source and _env_test_not_alone(source):
-        return _not_armed("an environment-controlled test must be alone in its file (%s): the "
-                          "environment is process-wide and libtest runs a file's tests on "
-                          "parallel threads" % source)
+    sources = _test_sources(meta, repo, args.test_target, args.package)
+    if not args.package and len(sources) > 1:
+        return _not_armed("more than one package has tests/%s.rs; name the package with -p"
+                          % args.test_target)
+    for source in sources:
+        if _env_test_not_alone(source):
+            return _not_armed("an environment-controlled test must be alone in its file (%s): "
+                              "the environment is process-wide and libtest runs a file's tests "
+                              "on parallel threads" % source)
     plan = build_plan(root, sys.platform)
     if plan.reason:
         _say("build plan: %s; building in %s with %s"
@@ -936,19 +1042,16 @@ def main(argv=None):
     except GuardCannotArm as exc:
         return _not_armed(str(exc))
     code, output = run_proof(built.exe, args.test_name, tier, allow, hook, env)
-    outcome = classify(code, output)
+    outcome, note = _verdict(code, output, args.test_name)
     if outcome == EXIT_NOT_ARMED:
-        said = [m.group(0) for m in _HOOK_LINE.finditer(output) if m.group(1) != "armed"]
-        return _not_armed("the hook did not arm: " + (said[0] if said else
-                          "no `tsn-hook: armed` handshake, so the hook never loaded into the "
-                          "test binary"))
+        return _not_armed(note)
     if outcome == EXIT_TRIP:
         m = _VIOLATION.search(output)
         if m:
             _say("the unit reached %s I/O via %s from %s"
                  % (m.group(2), m.group(3), demangle(m.group(4))))
-    if outcome == EXIT_RED and not _RESULT.search(output):
-        _say("note: the test binary ended without a result line (signal or abort)")
+    if note:
+        _say("note: " + note)
     _say(_OUTCOME[outcome])
     return outcome
 

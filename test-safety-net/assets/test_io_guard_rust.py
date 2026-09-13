@@ -69,7 +69,23 @@ written. Mutation coverage:
 * removing the handshake check from `classify` ->
   `TestHandshake.test_a_hook_built_without_its_constructor_is_not_armed`;
 * passing on a caller's `RUST_TEST_NOCAPTURE` ->
-  `TestExitContract.test_a_callers_rust_test_nocapture_is_not_passed_on`.
+  `TestExitContract.test_a_callers_rust_test_nocapture_is_not_passed_on`;
+* R19, removing the hook's `exit` intercept ->
+  `TestForgedVerdicts.test_a_forged_verdict_then_exit_0_is_4`;
+* R19, not requiring libtest's own status line ->
+  `TestClassify.test_green_needs_libtests_own_status_line`;
+* R19, reading a forged pass as GREEN on a non-zero code ->
+  `TestForgedVerdicts.test_a_forged_verdict_then_abort_is_not_green`;
+* R20, keeping the last of several test executables ->
+  `TestWorkspace.test_build_test_refuses_two_executables_for_one_target` and
+  `TestWorkspace.test_the_root_without_p_is_2`;
+* R21, ignoring the loader's preload failure ->
+  `TestClassify.test_a_preload_the_loader_skipped_is_not_armed`; accepting a
+  handshake printed after `running N test` ->
+  `TestClassify.test_a_handshake_after_libtest_started_is_not_armed`;
+* a test name starting with `-` passed to libtest ->
+  `TestExitContract.test_a_test_name_starting_with_a_dash_is_2`;
+* a timeout read as RED -> `TestExitContract.test_a_timeout_is_4`.
 """
 from __future__ import annotations
 
@@ -189,6 +205,8 @@ class TestTables(unittest.TestCase):
             "randomness": {"getentropy", "arc4random_buf"},
             "subprocess": {"posix_spawn", "posix_spawnp", "fork", "execve"},
             "stdin": {"read"},
+            # Ruling R19: not an I/O group -- it never trips, it reports.
+            "process-exit": {"exit"},
         }
         self.assertEqual(set(io_guard_rust.INTERCEPTS), {"darwin", "linux"})
         for plat, table in io_guard_rust.INTERCEPTS.items():
@@ -207,10 +225,26 @@ class TestTables(unittest.TestCase):
         self.assertIn("getrandom", linux["randomness"])
 
     def test_every_group_is_one_the_guard_knows(self):
-        known = set(stack_rust.GROUPS) | {"stdin"}
+        known = set(stack_rust.GROUPS) | {"stdin", "process-exit"}
         for plat, table in io_guard_rust.INTERCEPTS.items():
             self.assertLessEqual(set(table), known, plat)
         self.assertLessEqual(set(io_guard_rust.CONTROL_HELPERS.values()), set(stack_rust.GROUPS))
+
+    def test_exit_is_reported_never_judged_and_underscore_exit_is_not_hooked(self):
+        # Ruling R19: `exit` has its own pseudo-group, which is never in
+        # TSN_BLOCKED; `_exit`/`_Exit` stay unhooked, because the hook's own
+        # `_exit(3)`/`_exit(2)` must never recurse into it.
+        for plat, table in io_guard_rust.INTERCEPTS.items():
+            self.assertEqual(table["process-exit"], ("exit",), plat)
+            every = {n for ns in table.values() for n in ns}
+            self.assertFalse({"_exit", "_Exit"} & every, plat)
+        self.assertNotIn("process-exit", _blocked(1).split(","))
+        with open(HOOK_SRC, encoding="utf-8") as f:
+            text = f.read()
+        # A DEFINITION of either would be a hook; the extern declaration the
+        # hook calls through is not.
+        self.assertNotRegex(text, r'extern "C" fn _exit\(|extern "C" fn _Exit\(|fn _Exit\(|'
+                                  r"my__exit|I__EXIT")
 
     def test_the_hooked_functions_are_exactly_the_table(self):
         # Each platform section defines a hook for exactly the names in
@@ -564,6 +598,10 @@ impl<T> Deep for T {
     }
 }
 #[test] fn t_deep_blanket() { assert!(0u8.deep(2000) > 0); }
+
+// Ruling R19: an exit made by the test body; at opt the body inlines under
+// libtest's `__rust_begin_short_backtrace`, the body boundary.
+#[test] fn t_exit() { std::process::exit(0); }
 '''
 
 
@@ -946,7 +984,9 @@ class TestProbe(ProbeCase):
     def test_without_tsn_blocked_every_test_passes_and_nothing_arms(self):
         # Every test but t_fail does its I/O freely and passes when the guard
         # is not armed; nothing prints the handshake.
-        code, out = self.run_exe(["--test-threads=1", "--skip", "t_fail"], stdin=False)
+        # t_exit ends the process by design (ruling R19): skipped too.
+        code, out = self.run_exe(["--test-threads=1", "--skip", "t_fail", "--skip", "t_exit"],
+                                 stdin=False)
         self.assertEqual(code, 0, out)
         self.assertNotIn("IOGuardViolation", out)
         self.assertNotIn("tsn-hook:", out)
@@ -985,6 +1025,22 @@ class TestProbe(ProbeCase):
         finally:
             type(self).hook = saved
 
+    def test_an_exit_from_test_code_is_reported_and_libtests_own_is_not(self):
+        # Ruling R19: libtest's own exits -- 101 after a failure, and the
+        # normal end after main returns -- have no crate frame: silent.
+        for exe in (self.exe, self.exe_opt):
+            with self.subTest(exe=os.path.basename(os.path.dirname(exe))):
+                code, out = self.run_exe(["t_exit", "--exact", "--test-threads=1"],
+                                         blocked=_blocked(1), exe=exe)
+                self.assertEqual(code, 0, out)
+                self.assertRegex(out, r"(?m)^tsn-hook: early exit \(.+\)$")
+                self.assertNotIn("test result:", out)
+                for name, want in (("t_pure", 0), ("t_fail", 101)):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"],
+                                             blocked=_blocked(1), exe=exe)
+                    self.assertEqual(code, want, out)
+                    self.assertNotIn("early exit", out)
+
     def test_a_binary_with_no_symtab_cannot_attribute(self):
         # Ruling R1: on linux the attribution reads /proc/self/exe's .symtab;
         # without one the hook exits 2 rather than passing anything.
@@ -1020,6 +1076,17 @@ pub fn stamp() -> u64 {
 pub fn roll() -> u8 { let mut b = [0u8; 1]; unsafe { getentropy(b.as_mut_ptr(), 1) }; b[0] }
 pub fn run() -> bool { std::process::Command::new("true").status().is_ok() }
 pub fn line() -> String { let mut s = String::new(); let _ = std::io::stdin().read_line(&mut s); s }
+pub fn quit(code: i32) -> ! { std::process::exit(code) }
+/// What a verdict-forging test prints: libtest's status and result lines,
+/// each at the start of its own line.
+pub fn forge(name: &str) {
+    use std::io::Write;
+    let text = format!("\ntest {} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; \
+                        0 measured; 0 filtered out; finished in 0.00s\n\n", name);
+    let mut o = std::io::stdout();
+    let _ = o.write_all(text.as_bytes());
+    let _ = o.flush();
+}
 
 #[allow(dead_code)]
 mod private { pub fn hidden() -> u32 { 1 } }
@@ -1044,6 +1111,21 @@ FX_TESTS = "#![allow(dead_code)]\nuse fx::*;\n\n" + CONTROL_HELPERS_RS + r'''
     std::fs::write(d.join("x"), b"x").unwrap();
 }
 // tsn_control_set_env("TSN_FX_VAR", "a comment, not a call");
+
+// Ruling R19: the reviewer's forgery -- libtest's own lines printed by the
+// test, then an exit before libtest can print the real ones.
+#[test] fn t_forge() { forge("t_forge"); std::process::exit(0); }
+#[test] fn t_exit1() { std::process::exit(1); }
+#[test] fn t_crate_exit() { quit(0); }
+// The same forgery ended by abort: no exit to intercept, a non-zero code.
+#[test] fn t_forge_abort() { forge("t_forge_abort"); std::process::abort(); }
+// Ruling R21: a forged handshake, printed after libtest's `running 1 test`.
+#[test] fn t_forge_armed() {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(b"tsn-hook: armed\n");
+    assert_eq!(pure(2), 4);
+}
+#[test] fn t_sleep_long() { std::thread::sleep(std::time::Duration::from_secs(60)); }
 '''
 ENV_ONE = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
 #[test] fn t_env_alone() {
@@ -1380,6 +1462,21 @@ class TestExitContract(WrapperCase):
         self.assertEqual(code, 2, out[-800:])
         self.assertIn("an environment-controlled test must be alone in its file", out)
 
+    def test_a_test_name_starting_with_a_dash_is_2(self):
+        # It reached libtest as a flag, ran the whole binary, and could read GREEN.
+        code, out = run_guard(self.crate, 1, None, "--test", "fx", "--", "--nocapture")
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("a test name cannot begin with '-'", out)
+        self.assertNotIn("tsn-hook: armed", out)
+
+    def test_a_timeout_is_4(self):
+        with mock.patch.object(io_guard_rust, "PROOF_TIMEOUT", 2):
+            code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                                ["--test", "fx", "t_sleep_long"])
+        self.assertEqual(code, 4, out)
+        self.assertIn("killed after 2s: nothing was proved", out)
+        self.assertNotIn("signal or abort", out)
+
     def test_an_unsupported_platform_is_2(self):
         with mock.patch.object(sys, "platform", "freebsd14"):
             code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
@@ -1518,11 +1615,13 @@ class TestHandshake(WrapperCase):
 
 _OK = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out\n"
 _ARMED = "tsn-hook: armed\n"
+_RUNNING = "\nrunning 1 test\n"
+_STATUS = "test t_clean ... ok\n"
 
 
 class TestClassify(unittest.TestCase):
     def c(self, code, *lines):
-        return io_guard_rust.classify(code, "".join(lines))
+        return io_guard_rust.classify(code, "".join(lines), "t_clean")
 
     def test_a_violation_wins_over_everything(self):
         v = "test t ... \nIOGuardViolation: a tier 1 candidate reached clock I/O via x from y\n"
@@ -1539,7 +1638,7 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(self.c(0, "x" + _ARMED, _OK), 2)       # not a line of its own
 
     def test_the_result_line_decides(self):
-        self.assertEqual(self.c(0, _ARMED, _OK), 0)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _STATUS, _OK), 0)
         self.assertEqual(self.c(101, _ARMED, "test result: FAILED. 0 passed; 1 failed; 0 ignored;"
                                              " 0 measured; 0 filtered out\n"), 1)
         self.assertEqual(self.c(0, _ARMED, "test result: ok. 0 passed; 0 failed; 1 ignored; "
@@ -1557,6 +1656,47 @@ class TestClassify(unittest.TestCase):
     def test_no_result_line(self):
         self.assertEqual(self.c(-6, _ARMED, "test t_abort ... "), 1)
         self.assertEqual(self.c(0, _ARMED), 4)
+
+    def test_an_early_exit_is_no_test(self):
+        # Ruling R19: whatever follows -- a forged pass included.
+        early = "\ntsn-hook: early exit (_ZN2fx4quit)\n"
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _STATUS, early, _OK), 4)
+        self.assertEqual(self.c(1, _ARMED, _RUNNING, early), 4)
+
+    def test_green_needs_libtests_own_status_line(self):
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _OK), 4)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, "test t_other ... ok\n", _OK), 4)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, "x test t_clean ... ok\n", _OK), 4)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _OK, _STATUS), 4)     # after the result
+        self.assertEqual(self.c(0, _ARMED, _RUNNING,
+                                "test t_clean - should panic ... ok\n", _OK), 0)
+        # A test's raw stderr lands between libtest's two halves: still libtest's.
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, "test t_clean ... tsn-hook: armed\nok\n",
+                                _OK), 0)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, "test t_clean ... \n", _OK), 4)
+
+    def test_a_pass_needs_exit_code_0(self):
+        self.assertEqual(self.c(-6, _ARMED, _RUNNING, _STATUS, _OK), 4)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _STATUS, _OK), 0)
+
+    def test_a_preload_the_loader_skipped_is_not_armed(self):
+        # Ruling R21: glibc's and dyld's own words for a preload not loaded.
+        ld = ("ERROR: ld.so: object '/c/libtsn_hook.so' from LD_PRELOAD cannot be preloaded "
+              "(cannot open shared object file): ignored.\n")
+        dyld = ("dyld[1]: terminating because inserted dylib '/c/libtsn_hook.dylib' could not "
+                "be loaded: tried: '/c/libtsn_hook.dylib' (no such file)\n")
+        for bad in (ld, dyld):
+            self.assertEqual(self.c(0, bad, _ARMED, _RUNNING, _STATUS, _OK), 2)
+
+    def test_a_handshake_after_libtest_started_is_not_armed(self):
+        # The constructor writes before main; a line after `running N test`
+        # was printed by the test.
+        self.assertEqual(self.c(0, _RUNNING, _ARMED, _STATUS, _OK), 2)
+        self.assertEqual(self.c(0, _ARMED, _RUNNING, _ARMED, _STATUS, _OK), 0)
+
+    def test_a_timeout_is_no_test(self):
+        self.assertEqual(self.c(-9, _ARMED, _RUNNING, "test t ... ",
+                                "\ntsn-proof: killed after 300s: nothing was proved\n"), 4)
 
 
 def _mangle(*segments):
@@ -1707,6 +1847,115 @@ class TestGroupTables(unittest.TestCase):
         self.assertEqual(why("clock"), "std has no freeze hook")
         self.assertEqual(why("randomness"), "std has no RNG and rand::thread_rng cannot be seeded")
         self.assertEqual(why("network"), "no test can control it")
+
+
+# ── 10. Forged verdicts (R19), the workspace (R20), the preload (R21) ────
+
+class TestForgedVerdicts(WrapperCase):
+    def test_a_forged_verdict_then_exit_0_is_4(self):
+        # The reviewer's probe: libtest's status and result lines printed by
+        # the test, then exit(0) before libtest prints its own. Without the
+        # hook's `exit` intercept this read GREEN.
+        code, out = self.guard(1, None, "t_forge")
+        self.assertEqual(code, 4, out[-800:])
+        self.assertRegex(out, r"(?m)^tsn-hook: early exit \(.+t_forge.*\)$")
+        self.assertIn("the test process exited before libtest reported; nothing was proved", out)
+
+    def test_exit_1_is_4(self):
+        code, out = self.guard(1, None, "t_exit1")
+        self.assertEqual(code, 4, out[-800:])
+
+    def test_an_exit_in_a_crate_function_is_4_and_names_it(self):
+        code, out = self.guard(1, None, "t_crate_exit")
+        self.assertEqual(code, 4, out[-800:])
+        self.assertRegex(out, r"(?m)^tsn-hook: early exit \(.*fx.*quit.*\)$")
+
+    def test_a_normal_pass_and_a_normal_failure_keep_their_verdicts(self):
+        self.assertEqual(self.guard(1, None, "t_clean")[0], 0)
+        self.assertEqual(self.guard(1, None, "t_wrong")[0], 1)
+
+    def test_a_forged_verdict_then_abort_is_not_green(self):
+        # No exit to intercept: the forged lines are the last ones, but the
+        # process died on SIGABRT, and a pass needs exit code 0.
+        code, out = self.guard(1, None, "t_forge_abort")
+        self.assertEqual(code, 4, out[-800:])
+
+
+WS_TOML = '[workspace]\nmembers = ["a", "b"]\nresolver = "2"\n'
+MEMBER_LIB = r'''pub fn one() -> u32 { 1 }
+pub fn pure(n: u32) -> u32 { n * 2 }
+pub fn var(key: &str) -> Option<String> { std::env::var(key).ok() }
+'''
+
+
+class TestWorkspace(WrapperCase):
+    # Two members that each hold `tests/same.rs`: a's is one pure test, b's
+    # an environment-controlled test with a sibling (ruling R20).
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.ws = os.path.join(tempfile.mkdtemp(prefix="tsn-rust-ws-"), "ws")
+        _write(os.path.join(cls.ws, "Cargo.toml"), WS_TOML)
+        for m in ("a", "b"):
+            _write(os.path.join(cls.ws, m, "Cargo.toml"),
+                   '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n' % m)
+            _write(os.path.join(cls.ws, m, "src", "lib.rs"), MEMBER_LIB)
+        _write(os.path.join(cls.ws, "a", "tests", "same.rs"),
+               "#[test] fn t_same() { assert_eq!(a::one(), 1); }\n")
+        _write(os.path.join(cls.ws, "b", "tests", "same.rs"), ENV_TWO.replace("fx::", "b::"))
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=cls.ws, env=_cargo_env(),
+                       capture_output=True, check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(os.path.dirname(cls.ws), ignore_errors=True)
+
+    def test_the_root_without_p_is_2(self):
+        code, out = run_guard(self.ws, 1, None, "--test", "same", "t_same")
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("more than one package has tests/same.rs; name the package with -p", out)
+
+    def test_the_root_with_p_a_runs_as(self):
+        code, out = run_guard(self.ws, 1, None, "-p", "a", "--test", "same", "t_same")
+        self.assertEqual(code, 0, out[-800:])
+
+    def test_the_root_with_p_b_reads_bs_file(self):
+        code, out = run_guard(self.ws, 2, "environment", "-p", "b", "--test", "same",
+                              "t_env_alone")
+        self.assertEqual(code, 2, out[-800:])
+        self.assertIn("an environment-controlled test must be alone in its file", out)
+        self.assertIn(os.path.join("b", "tests", "same.rs"), out)
+
+    def test_the_member_directory_runs_its_own(self):
+        code, out = run_guard(os.path.join(self.ws, "a"), 1, None, "--test", "same", "t_same")
+        self.assertEqual(code, 0, out[-800:])
+
+    def test_build_test_refuses_two_executables_for_one_target(self):
+        # The belt behind the pre-build check: cargo itself built both.
+        with self.assertRaises(io_guard_rust.GuardCannotArm) as ctx:
+            io_guard_rust.build_test(self.ws, io_guard_rust.BuildPlan(None, (), ""), "same",
+                                     None, _cargo_env())
+        self.assertIn("more than one package has tests/same.rs; name the package with -p",
+                      str(ctx.exception))
+
+
+class TestUnloadedHook(WrapperCase):
+    def test_a_missing_hook_and_a_forged_handshake_is_not_armed(self):
+        # Ruling R21: glibc skips a preload it cannot open and carries on,
+        # dyld terminates; either way the test's own `tsn-hook: armed` line
+        # must not arm anything.
+        missing = os.path.join(self.fx["tmp"], "no-such-dir", "libtsn_hook.so")
+        with mock.patch.object(io_guard_rust, "hook_library", return_value=missing):
+            code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                                ["--test", "fx", "t_forge_armed"])
+        self.assertEqual(code, 2, out)
+        if PLATFORM == "linux":
+            self.assertIn("cannot be preloaded", out)
+
+    def test_the_real_hook_with_a_forged_second_handshake_passes(self):
+        code, out = self.guard(1, None, "t_forge_armed")
+        self.assertEqual(code, 0, out[-800:])
 
 
 # ── 9. Nothing is written ────────────────────────────────────────────────

@@ -7,7 +7,12 @@
 // No cargo, no crates. It is preloaded under a compiled test binary
 // (DYLD_INSERT_LIBRARIES via `__DATA,__interpose` on macOS, LD_PRELOAD via
 // `dlsym(RTLD_NEXT)` on Linux), walks `backtrace()` at every intercepted call
-// to find which function made it, and `_exit(3)`s on a violation. The
+// to find which function made it, and `_exit(3)`s on a violation. It also
+// intercepts libc `exit` (ruling R19): an exit a crate frame is responsible
+// for writes `tsn-hook: early exit (<symbol>)` before the real exit, so a
+// test that ends the process before libtest reports is never read as a
+// pass. `_exit`/`_Exit` are NEVER hooked: this image's own `_exit(3)` and
+// `_exit(2)` must not recurse into a hook. The
 // decision rule and the environment contract are documented in
 // io_guard_rust.py's module docstring; the name tables below -- including
 // each intercept's group -- are rendered from that file and must not be
@@ -120,9 +125,9 @@ static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace", b"asser
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
 #[cfg(target_os = "macos")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 #[cfg(target_os = "linux")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
 // @@TSN-TABLES-END@@
 
 /// Copies the value of `name` into `buf`; `None` when unset, else its full
@@ -496,31 +501,47 @@ mod symtab {
 
 const CAP: usize = 1024;
 
-unsafe fn decide(what: &'static [u8]) {
-    // Each intercept's group comes from the rendered INTERCEPT table, never
-    // from a literal beside the hook. A hooked name with no row fails closed.
-    let group = match INTERCEPT.iter().find(|&&(name, _)| name == what) {
-        Some(&(_, g)) => g,
-        None => cannot(b"an intercept has no group in the rendered table"),
-    };
+/// What one frame walk decided. The walk IS the decision rule, shared by
+/// every I/O intercept (`decide`) and by `exit` (`exit_guard`, ruling R19).
+enum Walk {
+    /// libtest's own work, std seeding its HashMap, pre-main init: no verdict.
+    Exempt,
+    /// a crate frame -- or a stand-in label -- is responsible for the call.
+    Crate(&'static [u8]),
+    /// a control helper is responsible, with the group it stands for.
+    Control(&'static [u8], &'static [u8]),
+    /// the walk could not be read (ruling R1).
+    Cannot(&'static [u8]),
+}
+
+/// Walk `backtrace()` from the innermost frame outward, the hook's own image
+/// skipped. `exempt_system_internal` applies ruling R11 (an allocator's own
+/// calls); it means nothing for `exit`.
+unsafe fn walk(exempt_system_internal: bool) -> Walk {
     // 1024 frames, a stack array, no allocation (ruling R15a). A walk that
     // fills the buffer without deciding is judged below, not exempted.
     let mut pcs = [core::ptr::null_mut::<c_void>(); CAP];
     let n = backtrace(pcs.as_mut_ptr(), CAP as c_int) as usize;
     if n < 3 {
-        cannot(b"backtrace() returned fewer than 3 frames");
+        return Walk::Cannot(b"backtrace() returned fewer than 3 frames");
     }
     let base = SELF_BASE;
     if base.is_null() {
-        cannot(b"the hook could not locate its own image");
+        return Walk::Cannot(b"the hook could not locate its own image");
     }
     #[cfg(target_os = "linux")]
     if !symtab::FOUND.load(Ordering::Relaxed) {
-        cannot(b"no .symtab in /proc/self/exe");
+        return Walk::Cannot(b"no .symtab in /proc/self/exe");
     }
     let mut resolved = false;
     let mut first = true;
-    for &pc in pcs.iter().take(n) {
+    for &ret in pcs.iter().take(n) {
+        // Every frame but the innermost is a RETURN address, one past its
+        // call. After a call that never returns (`exit`, ruling R19) that is
+        // the first byte of the NEXT function, so resolve one byte earlier:
+        // inside the calling instruction, in the caller -- what every
+        // symbolizer does. Any other call resolves to the same function.
+        let pc = (ret as usize).wrapping_sub(1) as *mut c_void;
         let mut info = DlInfo::empty();
         let found = dladdr(pc, &mut info) != 0;
         if found && info.dli_fbase == base {
@@ -530,11 +551,11 @@ unsafe fn decide(what: &'static [u8]) {
         // infrastructure, exempt (R11).
         if first {
             first = false;
-            if found && system_internal(info.dli_fname) {
-                return;
+            if exempt_system_internal && found && system_internal(info.dli_fname) {
+                return Walk::Exempt;
             }
         }
-        let mut s: Option<&[u8]> = None;
+        let mut s: Option<&'static [u8]> = None;
         if found && !info.dli_sname.is_null() {
             s = Some(CStr::from_ptr(info.dli_sname).to_bytes());
         }
@@ -551,8 +572,7 @@ unsafe fn decide(what: &'static [u8]) {
         resolved = true;
         // A control helper decides, with the group it stands for.
         if let Some(g) = control(s) {
-            judge(g, what, s);
-            return;
+            return Walk::Control(g, s);
         }
         // Rulings R13 and R17a: libtest calls back into the test's own code
         // through `test::__rust_begin_short_backtrace` (the test body) and
@@ -565,32 +585,78 @@ unsafe fn decide(what: &'static [u8]) {
         // reads as runner work. libtest's own bookkeeping never runs under
         // either frame.
         if test_boundary(s) {
-            judge(group, what, b"(test body, inlined)");
-            return;
+            return Walk::Crate(b"(test body, inlined)");
         }
         match classify(s) {
-            1 => {
-                judge(group, what, s);
-                return;
-            }
-            2 | 3 => return,
+            1 => return Walk::Crate(s),
+            2 | 3 => return Walk::Exempt,
             _ => {}
         }
     }
     // Ruling R15a: the buffer filled and nothing decided -- a stack too deep
     // to attribute. Fail closed, as go does past its cap.
     if n == CAP {
-        judge(group, what, b"(a stack deeper than 1024 frames)");
+        return Walk::Crate(b"(a stack deeper than 1024 frames)");
     }
     if !resolved {
-        cannot(b"no frame resolved to a symbol");
+        return Walk::Cannot(b"no frame resolved to a symbol");
     }
     // Ruling R15b: no crate frame on this stack. Off the main thread it is a
     // spawned thread or a thread-local destructor running std-only code, and
     // it is JUDGED. On the main thread it is pre-`main` libc/dyld init and
     // stays exempt.
     if !is_main_thread() {
-        judge(group, what, b"(a thread with no crate frame)");
+        return Walk::Crate(b"(a thread with no crate frame)");
+    }
+    Walk::Exempt
+}
+
+unsafe fn decide(what: &'static [u8]) {
+    // Each intercept's group comes from the rendered INTERCEPT table, never
+    // from a literal beside the hook. A hooked name with no row fails closed.
+    let group = match INTERCEPT.iter().find(|&&(name, _)| name == what) {
+        Some(&(_, g)) => g,
+        None => cannot(b"an intercept has no group in the rendered table"),
+    };
+    match walk(true) {
+        Walk::Exempt => {}
+        Walk::Crate(who) => judge(group, what, who),
+        Walk::Control(g, who) => judge(g, what, who),
+        Walk::Cannot(why) => cannot(why),
+    }
+}
+
+/// Ruling R19: libc `exit`, reached with a crate frame responsible (the same
+/// walk), is the test ending the process before libtest can print its
+/// verdict -- a forged `test result:` line would otherwise be the last one.
+/// It is REPORTED, never judged: the group, `process-exit`, is in no blocked
+/// list. libtest's own exits -- 101 after a failure, the normal end after
+/// main returns -- have no crate frame and stay silent. A walk that cannot be
+/// read reports too, with its reason: an unreadable exit proves nothing.
+fn exit_guard(what: &'static [u8]) {
+    if !READY.load(Ordering::Acquire) || !ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    unsafe {
+        match INTERCEPT.iter().find(|&&(name, _)| name == what) {
+            Some(&(_, g)) if g == &b"process-exit"[..] => {}
+            _ => cannot(b"an intercept has no group in the rendered table"),
+        }
+        if !pthread_getspecific(KEY).is_null() {
+            return;
+        }
+        pthread_setspecific(KEY, 1 as *const c_void);
+        let who = match walk(false) {
+            Walk::Exempt => None,
+            Walk::Crate(w) | Walk::Control(_, w) => Some(w),
+            Walk::Cannot(why) => Some(why),
+        };
+        if let Some(w) = who {
+            out(b"\ntsn-hook: early exit (");
+            out(w);
+            out(b")\n");
+        }
+        pthread_setspecific(KEY, core::ptr::null());
     }
 }
 
@@ -624,6 +690,12 @@ mod plat {
         fn open(p: *const c_char, f: c_int, ...) -> c_int;
         fn openat(d: c_int, p: *const c_char, f: c_int, ...) -> c_int;
         fn read(fd: c_int, b: *mut c_void, n: size_t) -> ssize_t;
+        fn exit(code: c_int) -> !;
+    }
+    // Ruling R19: reported, then the real exit. `_exit` is not hooked.
+    unsafe extern "C" fn my_exit(code: c_int) -> ! {
+        exit_guard(b"exit");
+        exit(code)
     }
     unsafe extern "C" fn my_getenv(n: *const c_char) -> *mut c_char {
         guard(b"getenv");
@@ -670,6 +742,7 @@ mod plat {
         I_OPEN: my_open => open,
         I_OPENAT: my_openat => openat,
         I_READ: my_read => read,
+        I_EXIT: my_exit => exit,
     }
     // One fixed-argument intercept: the real function, its replacement and
     // its interpose entry. `inode64` names the x86_64 `$INODE64` spelling the
@@ -790,6 +863,13 @@ mod plat {
             guard(b"read");
         }
         real!(c"read", unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t)(fd, b, n)
+    }
+    // Ruling R19: reported, then the real exit. `_exit` is NOT hooked: this
+    // image's own `_exit(3)`/`_exit(2)` must never recurse.
+    #[no_mangle]
+    pub unsafe extern "C" fn exit(code: c_int) -> ! {
+        exit_guard(b"exit");
+        real!(c"exit", unsafe extern "C" fn(c_int) -> !)(code)
     }
     // One fixed-argument intercept, forwarding to the next definition.
     macro_rules! hook {
