@@ -83,11 +83,13 @@ jobs:
   # on one version. Measured before this job existed: the python guard missed
   # every pathlib read on 3.10, the node suite parsed a reporter node 26 no
   # longer defaults to, and the go guard could not run on 1.22-1.23 at all.
-  # ubuntu only: the full gate above already covers macOS on the pinned
+  # ubuntu, bar one leg: the full gate above already covers macOS on the pinned
   # versions. ubuntu-latest is amd64, so the rust legs are also the rust
-  # guard's only amd64 runs: its hook was developed on arm64.
+  # guard's only amd64 runs: its hook was developed on arm64. The one macOS
+  # leg is the rust floor, 1.82, whose darwin link and hook are otherwise
+  # never run (the gate above pins 1.98).
   versions:
-    name: tsn ${{ matrix.stack }} ${{ matrix.version }}
+    name: tsn ${{ matrix.stack }} ${{ matrix.version }}${{ matrix.os && format(' ({0})', matrix.os) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -112,8 +114,9 @@ jobs:
           - {stack: rust, version: "1.90"}
           - {stack: rust, version: "1.94"}
           - {stack: rust, version: "1.98"}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+          - {stack: rust, version: "1.82", os: macos-latest}
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: test-safety-net/assets
