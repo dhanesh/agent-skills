@@ -36,7 +36,8 @@ THE EXIT STATUS IS THE WHOLE PROTOCOL -- go's table, from guard_env.py
                     whether the run was red or green
     4  NO TEST      nothing was proved: the name matched no test, the test
                     is `#[ignore]`d, the test process exited before libtest
-                    reported, the proof was killed at its timeout, or the
+                    reported, the proof was killed at its timeout, the target
+                    is `harness = false` (no libtest run to observe), or the
                     binary printed no verdict of its own
     5  NO BUILD     the test did not build; a compile error is not RED
 
@@ -67,7 +68,9 @@ Every refusal prints its reason and exits 2:
      --test <stem>` (`build_test`), with no timeout: waiting on cargo's lock
      is not the proof's time. A compile error exits 5;
   8. the executable is refused when static, musl or stripped
-     (`rust_binary.refusal`): each makes a preloaded hook fail open;
+     (`rust_binary.refusal`): each makes a preloaded hook fail open. One
+     that does not link libtest's harness (`harness = false`) is NO TEST:
+     there is no libtest run to observe (ruling R22(c));
   9. the hook, built by the repo's own rustc (`hook_library`);
  10. `<exe> <test_name> --exact --test-threads=1` under the preload, with
      stdin closed, core dumps off (an aborting test would otherwise write
@@ -79,7 +82,9 @@ Every refusal prints its reason and exits 2:
  11. `classify`, first match wins: a violation line -> 3; the loader
      skipping the preload, no `tsn-hook: armed` line BEFORE libtest's
      `running N test`, or any other hook line but an early exit -> 2; an
-     early exit (the hook saw the test call libc `exit`) or a timeout -> 4;
+     early exit (the hook saw the test call libc `exit`/`quick_exit`), exit
+     status 125 (the status the hook then substitutes), a timeout, or no
+     `running N test` line -> 4;
      then libtest's LAST `test result:` line, where GREEN also needs exit
      code 0 and libtest's own `test <name> ... ok` line before it.
 
@@ -92,16 +97,27 @@ RESIDUALS, STATED RATHER THAN IMPLIED
 3. The seed-path and runner exemptions are names, pinned per toolchain.
 4. Life-before-main crates (`ctor`) are unverified: their I/O is probably
    seen, but whether it is attributed correctly is not measured.
-5. Verdict lines share stdout with repo code, so a test can print forged
-   ones. What is caught: forged status and result lines followed by
-   `process::exit` -- the hook reports the exit (ruling R19): 4; followed
-   by an abort or a signal -- a pass needs exit code 0: 4; a forged
-   handshake -- it lands after `running N test`: 2. What REMAINS: a test
-   that prints both forged lines and then ends the process WITHOUT libc
-   `exit` -- `_exit`/`_Exit`, which the hook must never hook, or a raw exit
-   syscall -- with status 0 reads GREEN. So does life-before-main code (a
-   `ctor`) printing a forged handshake under a hook the loader skipped
-   without a word.
+5. THE THREAT MODEL. The guard defends against ACCIDENTAL I/O, and against
+   ACCIDENTAL verdict corruption, by the code under test. Verdict lines
+   share stdout with that code (go's residual 7 is the same), so DELIBERATE
+   forgery by it still passes.
+   CLOSED -- forged status and result lines followed by:
+     * `exit` or `quick_exit`: the hook rewrites an exit crate code made to
+       status 125, which reads 4 even with fd 2 closed (rulings R19, R22(a));
+     * an abort or a signal: a pass needs exit status 0 (R19);
+     * any `exec*`: execve, execv, execvp, execvpe, execl, execlp and
+       fexecve (where the platform has them) trip as subprocess (R22(d));
+     * silencing the hook by filling pthread keys: both re-entrancy gates
+       compare a private sentinel's ADDRESS (R22(b));
+   and a forged handshake (it lands after `running N test`: 2, R21), a
+   `harness = false` target (it links no libtest harness, and a run with no
+   `running N test` line reads 4: R22(c)).
+   REMAINING, by design: forged lines followed by `libc::_exit`/`_Exit` or
+   `syscall(SYS_exit)` -- never hooked, since the hook's own `_exit` must not
+   recurse; code that recovers the sentinel's address or patches the hook's
+   statics; a `harness = false` binary that embeds libtest's symbol names;
+   and life-before-main code printing a handshake under a hook the loader
+   skipped without a word.
 6. `std::env::vars`/`vars_os` read `environ` directly, `std::env::args`
    reads what the runtime saved before main, `std::thread::sleep` is an
    unhooked `nanosleep`, and `std::fs::hard_link` an unhooked `linkat`: a
@@ -131,10 +147,13 @@ Its environment contract:
   * `TSN_STDIN=1` -- set at tier 1: a read of fd 0 trips only then.
 
 Its handshake: when armed, the constructor writes `tsn-hook: armed` to fd 2.
-It reports one more thing (ruling R19): libc `exit` reached with a crate
-frame responsible -- the test ending the process before libtest can print
-its verdict -- writes `tsn-hook: early exit (<symbol>)` and then exits for
-real. libtest's own exits (101 after a failure, the normal end after main
+It reports one more thing (ruling R19): libc `exit` or `quick_exit` reached
+with a crate frame responsible -- the test ending the process before libtest
+can print its verdict -- writes `tsn-hook: early exit (<symbol>)` and then
+exits for real, with EARLY_EXIT_STATUS (125) in place of the test's code
+(ruling R22(a)). Its re-entrancy gates -- this one and every I/O intercept's
+-- mark "inside the hook" with the ADDRESS of a private static, so a test
+that fills every pthread key cannot silence it (R22(b)). libtest's own exits (101 after a failure, the normal end after main
 returns) have no crate frame and stay silent. `exit` has its own pseudo-
 group, `process-exit`, which is never blocked: it reports, it never trips.
 `_exit`/`_Exit` are not hooked: the hook's own `_exit(3)`/`_exit(2)` must
@@ -217,6 +236,12 @@ HOOK_SOURCE = os.path.join(_ASSETS, "io_guard_rust_hook.rs")
 
 MIN_RUST = (1, 82)
 
+# Ruling R22(a): the status the hook substitutes for an `exit`/`quick_exit` a
+# crate frame made -- the test ending the process before libtest reports.
+# Rendered into the hook; `classify` reads it as NO TEST, so the verdict
+# survives a test that closed fd 2 before the early-exit line was written.
+EARLY_EXIT_STATUS = 125
+
 # ── The name tables: rendered into the hook, and the ONLY place they live ─
 
 TRANSPARENT_CRATES = ("std", "core", "alloc", "panic_unwind", "backtrace", "hashbrown",
@@ -287,8 +312,9 @@ _NET = ("socket", "connect", "bind", "getaddrinfo")
 # still marks them Tier 2 (environment), so a vars-reading unit is a Tier 2
 # candidate; at Tier 1 it is unseen by the guard, exactly like go's `os.Args`.
 #
-# `process-exit` is NOT an I/O group (ruling R19): `exit` is reported as an
-# early exit, never judged, and no TSN_BLOCKED ever names it.
+# `process-exit` is NOT an I/O group (ruling R19): `exit` and `quick_exit`
+# are reported as an early exit and end the process with EARLY_EXIT_STATUS
+# (R22(a)), never judged, and no TSN_BLOCKED ever names the group.
 INTERCEPTS = {
     "darwin": {
         "filesystem": _FS_SHARED,
@@ -297,9 +323,11 @@ INTERCEPTS = {
         "clock": ("clock_gettime", "gettimeofday", "mach_absolute_time",
                   "clock_gettime_nsec_np"),
         "randomness": ("getentropy", "arc4random_buf"),
-        "subprocess": _SUBPROCESS,
+        # Ruling R22(d): every exec entry point. libSystem has no execvpe or
+        # fexecve.
+        "subprocess": _SUBPROCESS + ("execv", "execvp", "execl", "execlp"),
         "stdin": ("read",),
-        "process-exit": ("exit",),
+        "process-exit": ("exit", "quick_exit"),
     },
     "linux": {
         "filesystem": _FS_SHARED + ("open64", "openat64", "stat64", "lstat64", "fstatat64",
@@ -308,9 +336,12 @@ INTERCEPTS = {
         "network": _NET,
         "clock": ("clock_gettime", "gettimeofday"),
         "randomness": ("getrandom", "getentropy", "arc4random_buf"),
-        "subprocess": _SUBPROCESS,
+        # glibc's exec family calls its internal __execve, never the hooked
+        # execve, so each entry point is hooked itself (ruling R22(d)).
+        "subprocess": _SUBPROCESS + ("execv", "execvp", "execvpe", "execl", "execlp",
+                                     "fexecve"),
         "stdin": ("read",),
-        "process-exit": ("exit",),
+        "process-exit": ("exit", "quick_exit"),
     },
 }
 
@@ -346,6 +377,7 @@ def render_tables() -> str:
         "static TEST_BODY_BOUNDARY: &[&[u8]] = &[%s];" % _bytes_list(TEST_BODY_BOUNDARY_MARKERS),
         "static CONTROL: &[(&[u8], &[u8])] = &[%s];" % _pairs(sorted(CONTROL_HELPERS.items())),
         "static SYSTEM_INTERNAL: &[&[u8]] = &[%s];" % _bytes_list(SYSTEM_INTERNAL_IMAGES),
+        "static EARLY_EXIT_STATUS: c_int = %d;" % EARLY_EXIT_STATUS,
     ]
     for plat in sorted(INTERCEPTS):
         pairs = [(name, group) for group in sorted(INTERCEPTS[plat])
@@ -660,6 +692,22 @@ def _test_sources(meta, repo, stem, package):
     return [path] if os.path.isfile(path) else []
 
 
+# libtest's own code, legacy-mangled: its entry point and its console
+# runner. A `harness = false` target links neither (ruling R22(c)).
+_LIBTEST_SYMBOLS = (b"4test16test_main_static", b"4test7console")
+
+
+def _links_libtest(exe):
+    """Does the test executable carry libtest's harness? Its verdict lines are
+    only libtest's when it does; a `harness = false` target prints its own."""
+    try:
+        with open(exe, "rb") as f:
+            data = f.read()
+    except OSError:
+        return False
+    return any(s in data for s in _LIBTEST_SYMBOLS)
+
+
 _SET_ENV_CALL = re.compile(r"\btsn_control_set_env\s*\(")
 _TEST_ATTR = re.compile(r"#\s*\[\s*test\s*\]")
 
@@ -876,9 +924,16 @@ def _verdict(code, output, test_name=None):
         sym = re.match(r"early exit \((.*)\)$", early[0].group(1))
         return EXIT_NO_TEST, ("the test process exited before libtest reported; nothing was "
                               "proved (exit from %s)" % demangle(sym.group(1) if sym else "?"))
+    if code == EARLY_EXIT_STATUS:
+        return EXIT_NO_TEST, ("the test process exited before libtest reported; nothing was "
+                              "proved (exit status %d, the hook's early-exit status)"
+                              % EARLY_EXIT_STATUS)
     killed = _KILLED.search(output)
     if killed:
         return EXIT_NO_TEST, killed.group(1)
+    if not running:
+        return EXIT_NO_TEST, ("no libtest run was observed (no `running N test` line); nothing "
+                              "was proved")
     results = list(_RESULT.finditer(output))
     if results:
         last = results[-1]
@@ -908,8 +963,11 @@ def classify(code, output, test_name=None):
          than the handshake or an early exit (`cannot attribute`, `libc has
          no ...`), no `tsn-hook: armed` line, or one only AFTER libtest's
          `running N test` (ruling R21) -> 2;
-      3. `tsn-hook: early exit` -- the test called libc `exit` (ruling R19)
-         -- or the proof's own timeout marker -> 4;
+      3. `tsn-hook: early exit` -- the test called libc `exit` or
+         `quick_exit` (ruling R19) -- or exit status EARLY_EXIT_STATUS, the
+         status the hook substitutes then, whether or not the line reached
+         fd 2 (R22(a)), or the proof's own timeout marker, or no libtest
+         `running N test` line at all (R22(c)) -> 4;
       4. libtest's LAST `test result:` line: a failure -> 1; exactly one
          passed and none ignored -> 0 only with exit code 0 AND libtest's own
          `test <test_name> ... ok` line before it, else 4; anything else -> 4;
@@ -1037,6 +1095,12 @@ def main(argv=None):
     why = rust_binary.refusal(rust_binary.inspect(built.exe))
     if why:
         return _not_armed("the test binary %s cannot be guarded -- %s" % (built.exe, why))
+    if not _links_libtest(built.exe):
+        _say("note: %s does not link libtest's harness (a `harness = false` target): no libtest "
+             "run can be observed, and its verdict lines are its own; nothing was proved"
+             % built.exe)
+        _say(_OUTCOME[EXIT_NO_TEST])
+        return EXIT_NO_TEST
     try:
         hook = hook_library(repo, env)
     except GuardCannotArm as exc:

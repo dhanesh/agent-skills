@@ -124,10 +124,11 @@ static SEED: &[&[u8]] = &[b"hashmap_random_keys"];
 static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace", b"assert_test_result"];
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
+static EARLY_EXIT_STATUS: c_int = 125;
 #[cfg(target_os = "macos")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"quick_exit", b"process-exit"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess"), (b"execv", b"subprocess"), (b"execvp", b"subprocess"), (b"execl", b"subprocess"), (b"execlp", b"subprocess")];
 #[cfg(target_os = "linux")]
-static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess")];
+static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"open64", b"filesystem"), (b"openat64", b"filesystem"), (b"stat64", b"filesystem"), (b"lstat64", b"filesystem"), (b"fstatat64", b"filesystem"), (b"statx", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"quick_exit", b"process-exit"), (b"getrandom", b"randomness"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess"), (b"execv", b"subprocess"), (b"execvp", b"subprocess"), (b"execvpe", b"subprocess"), (b"execl", b"subprocess"), (b"execlp", b"subprocess"), (b"fexecve", b"subprocess")];
 // @@TSN-TABLES-END@@
 
 /// Copies the value of `name` into `buf`; `None` when unset, else its full
@@ -626,26 +627,46 @@ unsafe fn decide(what: &'static [u8]) {
     }
 }
 
-/// Ruling R19: libc `exit`, reached with a crate frame responsible (the same
-/// walk), is the test ending the process before libtest can print its
-/// verdict -- a forged `test result:` line would otherwise be the last one.
-/// It is REPORTED, never judged: the group, `process-exit`, is in no blocked
-/// list. libtest's own exits -- 101 after a failure, the normal end after
-/// main returns -- have no crate frame and stay silent. A walk that cannot be
-/// read reports too, with its reason: an unreadable exit proves nothing.
-fn exit_guard(what: &'static [u8]) {
+/// Ruling R22(b): the re-entrancy mark is the ADDRESS of this private
+/// static, never merely "non-null". A test that filled every pthread key
+/// with a value made each gate believe it was already inside the hook, and
+/// every call passed -- real I/O included.
+static SENTINEL: u8 = 0x5A;
+
+unsafe fn in_hook() -> bool {
+    pthread_getspecific(KEY) as *const u8 == &SENTINEL as *const u8
+}
+
+unsafe fn enter_hook() {
+    pthread_setspecific(KEY, &SENTINEL as *const u8 as *const c_void);
+}
+
+unsafe fn leave_hook() {
+    pthread_setspecific(KEY, core::ptr::null());
+}
+
+/// Ruling R19: libc `exit` or `quick_exit`, reached with a crate frame
+/// responsible (the same walk), is the test ending the process before
+/// libtest can print its verdict. It is REPORTED, never judged: the group,
+/// `process-exit`, is in no blocked list. libtest's own exits -- 101 after a
+/// failure, the normal end after main returns -- have no crate frame and
+/// stay silent. A walk that cannot be read reports too, with its reason.
+/// Returns true when the exit is the test's own: the caller then exits with
+/// EARLY_EXIT_STATUS, not the test's code (ruling R22(a)), so the verdict
+/// survives a closed fd 2.
+fn exit_guard(what: &'static [u8]) -> bool {
     if !READY.load(Ordering::Acquire) || !ARMED.load(Ordering::Acquire) {
-        return;
+        return false;
     }
     unsafe {
         match INTERCEPT.iter().find(|&&(name, _)| name == what) {
             Some(&(_, g)) if g == &b"process-exit"[..] => {}
             _ => cannot(b"an intercept has no group in the rendered table"),
         }
-        if !pthread_getspecific(KEY).is_null() {
-            return;
+        if in_hook() {
+            return false;
         }
-        pthread_setspecific(KEY, 1 as *const c_void);
+        enter_hook();
         let who = match walk(false) {
             Walk::Exempt => None,
             Walk::Crate(w) | Walk::Control(_, w) => Some(w),
@@ -656,7 +677,8 @@ fn exit_guard(what: &'static [u8]) {
             out(w);
             out(b")\n");
         }
-        pthread_setspecific(KEY, core::ptr::null());
+        leave_hook();
+        who.is_some()
     }
 }
 
@@ -665,13 +687,34 @@ fn guard(what: &'static [u8]) {
         return;
     }
     unsafe {
-        if !pthread_getspecific(KEY).is_null() {
+        if in_hook() {
             return;
         }
-        pthread_setspecific(KEY, 1 as *const c_void);
+        enter_hook();
         decide(what);
-        pthread_setspecific(KEY, core::ptr::null());
+        leave_hook();
     }
+}
+
+/// The real exec functions' shape, for the C-variadic `execl`/`execlp`.
+type ExecV = unsafe extern "C" fn(*const c_char, *const *const c_char) -> c_int;
+/// How many argument slots a variadic exec replacement reads.
+const EXEC_SLOTS: usize = 32;
+
+/// Rebuild a C-variadic exec argument list (`arg0, ..., NULL`) read from
+/// fixed parameter slots and hand it to the NON-variadic real function.
+/// Reached only when the call was not judged (the hook unarmed, or an
+/// exempt caller): armed, `subprocess` is blocked at every tier.
+unsafe fn forward_list(p: *const c_char, slots: &[*const c_char; EXEC_SLOTS], f: ExecV) -> c_int {
+    let mut argv = [core::ptr::null::<c_char>(); EXEC_SLOTS + 1];
+    for (i, &s) in slots.iter().enumerate() {
+        argv[i] = s;
+        if s.is_null() {
+            return f(p, argv.as_ptr());
+        }
+    }
+    out(b"\ntsn-hook: an exec argument list longer than the hook reads\n");
+    _exit(2)
 }
 
 // ---------------- macOS: __DATA,__interpose ----------------
@@ -691,11 +734,19 @@ mod plat {
         fn openat(d: c_int, p: *const c_char, f: c_int, ...) -> c_int;
         fn read(fd: c_int, b: *mut c_void, n: size_t) -> ssize_t;
         fn exit(code: c_int) -> !;
+        fn quick_exit(code: c_int) -> !;
+        fn execl(p: *const c_char, a0: *const c_char, ...) -> c_int;
+        fn execlp(f: *const c_char, a0: *const c_char, ...) -> c_int;
     }
-    // Ruling R19: reported, then the real exit. `_exit` is not hooked.
+    // Rulings R19, R22(a): reported, then the real exit -- with the reserved
+    // status when crate code made it. `_exit` is not hooked.
     unsafe extern "C" fn my_exit(code: c_int) -> ! {
-        exit_guard(b"exit");
-        exit(code)
+        let early = exit_guard(b"exit");
+        exit(if early { EARLY_EXIT_STATUS } else { code })
+    }
+    unsafe extern "C" fn my_quick_exit(code: c_int) -> ! {
+        let early = exit_guard(b"quick_exit");
+        quick_exit(if early { EARLY_EXIT_STATUS } else { code })
     }
     unsafe extern "C" fn my_getenv(n: *const c_char) -> *mut c_char {
         guard(b"getenv");
@@ -743,6 +794,9 @@ mod plat {
         I_OPENAT: my_openat => openat,
         I_READ: my_read => read,
         I_EXIT: my_exit => exit,
+        I_QUICK_EXIT: my_quick_exit => quick_exit,
+        I_EXECL: my_execl => execl,
+        I_EXECLP: my_execlp => execlp,
     }
     // One fixed-argument intercept: the real function, its replacement and
     // its interpose entry. `inode64` names the x86_64 `$INODE64` spelling the
@@ -794,6 +848,36 @@ mod plat {
     hook!(posix_spawnp, my_posix_spawnp, I_POSIX_SPAWNP, (p: *mut c_int, f: *const c_char, fa: *const c_void, at: *const c_void, av: *const *const c_char, ev: *const *const c_char) -> c_int);
     hook!(fork, my_fork, I_FORK, () -> c_int);
     hook!(execve, my_execve, I_EXECVE, (p: *const c_char, av: *const *const c_char, ev: *const *const c_char) -> c_int);
+    // Ruling R22(d): every exec entry point, not only execve. libSystem has
+    // no execvpe or fexecve.
+    hook!(execv, my_execv, I_EXECV, (p: *const c_char, av: *const *const c_char) -> c_int);
+    hook!(execvp, my_execvp, I_EXECVP, (f: *const c_char, av: *const *const c_char) -> c_int);
+    // execl/execlp are C-variadic, which stable Rust cannot define. Apple
+    // arm64 passes EVERY variadic argument on the stack: a fixed definition
+    // reads the first from its 9th parameter slot (the my_open trick), so
+    // `arg0` is x1 and the rest follow from the first stack slot. x86_64
+    // passes them like fixed arguments. The list is read up to its NULL and
+    // handed to the real, non-variadic execv/execvp.
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn my_execl(p: *const c_char, a0: *const c_char, _r2: u64, _r3: u64, _r4: u64, _r5: u64, _r6: u64, _r7: u64, v0: *const c_char, v1: *const c_char, v2: *const c_char, v3: *const c_char, v4: *const c_char, v5: *const c_char, v6: *const c_char, v7: *const c_char, v8: *const c_char, v9: *const c_char, v10: *const c_char, v11: *const c_char, v12: *const c_char, v13: *const c_char, v14: *const c_char, v15: *const c_char, v16: *const c_char, v17: *const c_char, v18: *const c_char, v19: *const c_char, v20: *const c_char, v21: *const c_char, v22: *const c_char, v23: *const c_char, v24: *const c_char, v25: *const c_char, v26: *const c_char, v27: *const c_char, v28: *const c_char, v29: *const c_char, v30: *const c_char) -> c_int {
+        guard(b"execl");
+        forward_list(p, &[a0, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30], execv)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "C" fn my_execl(p: *const c_char, a0: *const c_char, a1: *const c_char, a2: *const c_char, a3: *const c_char, a4: *const c_char, a5: *const c_char, a6: *const c_char, a7: *const c_char, a8: *const c_char, a9: *const c_char, a10: *const c_char, a11: *const c_char, a12: *const c_char, a13: *const c_char, a14: *const c_char, a15: *const c_char, a16: *const c_char, a17: *const c_char, a18: *const c_char, a19: *const c_char, a20: *const c_char, a21: *const c_char, a22: *const c_char, a23: *const c_char, a24: *const c_char, a25: *const c_char, a26: *const c_char, a27: *const c_char, a28: *const c_char, a29: *const c_char, a30: *const c_char, a31: *const c_char) -> c_int {
+        guard(b"execl");
+        forward_list(p, &[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31], execv)
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe extern "C" fn my_execlp(p: *const c_char, a0: *const c_char, _r2: u64, _r3: u64, _r4: u64, _r5: u64, _r6: u64, _r7: u64, v0: *const c_char, v1: *const c_char, v2: *const c_char, v3: *const c_char, v4: *const c_char, v5: *const c_char, v6: *const c_char, v7: *const c_char, v8: *const c_char, v9: *const c_char, v10: *const c_char, v11: *const c_char, v12: *const c_char, v13: *const c_char, v14: *const c_char, v15: *const c_char, v16: *const c_char, v17: *const c_char, v18: *const c_char, v19: *const c_char, v20: *const c_char, v21: *const c_char, v22: *const c_char, v23: *const c_char, v24: *const c_char, v25: *const c_char, v26: *const c_char, v27: *const c_char, v28: *const c_char, v29: *const c_char, v30: *const c_char) -> c_int {
+        guard(b"execlp");
+        forward_list(p, &[a0, v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30], execvp)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe extern "C" fn my_execlp(p: *const c_char, a0: *const c_char, a1: *const c_char, a2: *const c_char, a3: *const c_char, a4: *const c_char, a5: *const c_char, a6: *const c_char, a7: *const c_char, a8: *const c_char, a9: *const c_char, a10: *const c_char, a11: *const c_char, a12: *const c_char, a13: *const c_char, a14: *const c_char, a15: *const c_char, a16: *const c_char, a17: *const c_char, a18: *const c_char, a19: *const c_char, a20: *const c_char, a21: *const c_char, a22: *const c_char, a23: *const c_char, a24: *const c_char, a25: *const c_char, a26: *const c_char, a27: *const c_char, a28: *const c_char, a29: *const c_char, a30: *const c_char, a31: *const c_char) -> c_int {
+        guard(b"execlp");
+        forward_list(p, &[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31], execvp)
+    }
 }
 #[cfg(target_os = "macos")]
 unsafe fn real_getenv(n: *const c_char) -> *mut c_char {
@@ -868,8 +952,13 @@ mod plat {
     // image's own `_exit(3)`/`_exit(2)` must never recurse.
     #[no_mangle]
     pub unsafe extern "C" fn exit(code: c_int) -> ! {
-        exit_guard(b"exit");
-        real!(c"exit", unsafe extern "C" fn(c_int) -> !)(code)
+        let early = exit_guard(b"exit");
+        real!(c"exit", unsafe extern "C" fn(c_int) -> !)(if early { EARLY_EXIT_STATUS } else { code })
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn quick_exit(code: c_int) -> ! {
+        let early = exit_guard(b"quick_exit");
+        real!(c"quick_exit", unsafe extern "C" fn(c_int) -> !)(if early { EARLY_EXIT_STATUS } else { code })
     }
     // One fixed-argument intercept, forwarding to the next definition.
     macro_rules! hook {
@@ -916,6 +1005,28 @@ mod plat {
     hook!(posix_spawnp, (p: *mut c_int, f: *const c_char, fa: *const c_void, at: *const c_void, av: *const *const c_char, ev: *const *const c_char) -> c_int);
     hook!(fork, () -> c_int);
     hook!(execve, (p: *const c_char, av: *const *const c_char, ev: *const *const c_char) -> c_int);
+    // Ruling R22(d): glibc's exec family calls its internal __execve, never
+    // the exported (hooked) execve, so each entry point is hooked itself.
+    hook!(execv, (p: *const c_char, av: *const *const c_char) -> c_int);
+    hook!(execvp, (f: *const c_char, av: *const *const c_char) -> c_int);
+    hook!(execvpe, (f: *const c_char, av: *const *const c_char, ev: *const *const c_char) -> c_int);
+    hook!(fexecve, (fd: c_int, av: *const *const c_char, ev: *const *const c_char) -> c_int);
+    // execl/execlp are C-variadic, which stable Rust cannot define. On SysV
+    // x86_64 and AAPCS64-on-Linux a variadic argument sits exactly where a
+    // fixed one in that position would, so EXEC_SLOTS fixed parameters see
+    // the list in order. Slots past the caller's last argument read registers
+    // or the caller's own frame, never unmapped memory, and nothing past the
+    // NULL is used. The real execv/execvp are not variadic.
+    #[no_mangle]
+    pub unsafe extern "C" fn execl(p: *const c_char, a0: *const c_char, a1: *const c_char, a2: *const c_char, a3: *const c_char, a4: *const c_char, a5: *const c_char, a6: *const c_char, a7: *const c_char, a8: *const c_char, a9: *const c_char, a10: *const c_char, a11: *const c_char, a12: *const c_char, a13: *const c_char, a14: *const c_char, a15: *const c_char, a16: *const c_char, a17: *const c_char, a18: *const c_char, a19: *const c_char, a20: *const c_char, a21: *const c_char, a22: *const c_char, a23: *const c_char, a24: *const c_char, a25: *const c_char, a26: *const c_char, a27: *const c_char, a28: *const c_char, a29: *const c_char, a30: *const c_char, a31: *const c_char) -> c_int {
+        guard(b"execl");
+        forward_list(p, &[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31], real!(c"execv", ExecV))
+    }
+    #[no_mangle]
+    pub unsafe extern "C" fn execlp(p: *const c_char, a0: *const c_char, a1: *const c_char, a2: *const c_char, a3: *const c_char, a4: *const c_char, a5: *const c_char, a6: *const c_char, a7: *const c_char, a8: *const c_char, a9: *const c_char, a10: *const c_char, a11: *const c_char, a12: *const c_char, a13: *const c_char, a14: *const c_char, a15: *const c_char, a16: *const c_char, a17: *const c_char, a18: *const c_char, a19: *const c_char, a20: *const c_char, a21: *const c_char, a22: *const c_char, a23: *const c_char, a24: *const c_char, a25: *const c_char, a26: *const c_char, a27: *const c_char, a28: *const c_char, a29: *const c_char, a30: *const c_char, a31: *const c_char) -> c_int {
+        guard(b"execlp");
+        forward_list(p, &[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31], real!(c"execvp", ExecV))
+    }
 }
 #[cfg(target_os = "linux")]
 unsafe fn real_getenv(n: *const c_char) -> *mut c_char {

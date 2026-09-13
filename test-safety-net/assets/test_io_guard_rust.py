@@ -85,7 +85,20 @@ written. Mutation coverage:
   `TestClassify.test_a_handshake_after_libtest_started_is_not_armed`;
 * a test name starting with `-` passed to libtest ->
   `TestExitContract.test_a_test_name_starting_with_a_dash_is_2`;
-* a timeout read as RED -> `TestExitContract.test_a_timeout_is_4`.
+* a timeout read as RED -> `TestExitContract.test_a_timeout_is_4`;
+* R22(a), forwarding the test's own exit code ->
+  `TestHostileEndings.test_closing_stderr_then_exit_is_4_by_the_reserved_status`;
+  not reading status 125 as NO TEST ->
+  `TestClassify.test_the_reserved_status_is_no_test_with_or_without_the_line`;
+* R22(b), a non-null re-entrancy gate ->
+  `TestHostileEndings.test_filling_every_pthread_key_then_reading_a_file_trips`
+  and `..._then_exit_is_4`;
+* R22(c), no libtest-harness check ->
+  `TestHostileEndings.test_a_harness_false_target_is_4_forged_or_honest`; no
+  `running N test` rule -> `TestClassify.test_no_libtest_run_is_no_test`;
+* R22(d), an unhooked exec entry point or quick_exit (linux) ->
+  `TestHostileEndings.test_command_exec_trips_subprocess_at_its_own_entry`,
+  `..._execv_and_execl_...`, `test_quick_exit_is_4`.
 """
 from __future__ import annotations
 
@@ -166,8 +179,9 @@ class TestTables(unittest.TestCase):
 
     def test_the_block_carries_every_table(self):
         block = io_guard_rust.render_tables()
+        self.assertIn("static EARLY_EXIT_STATUS: c_int = 125;", block)
         for name in ("TRANSPARENT", "RUNNER", "SEED", "TEST_BODY_BOUNDARY", "CONTROL",
-                     "SYSTEM_INTERNAL", "INTERCEPT"):
+                     "SYSTEM_INTERNAL", "INTERCEPT", "EARLY_EXIT_STATUS"):
             self.assertRegex(block, r"static %s: " % name)
         for plat, cfg in (("darwin", "macos"), ("linux", "linux")):
             for group, names in io_guard_rust.INTERCEPTS[plat].items():
@@ -193,6 +207,7 @@ class TestTables(unittest.TestCase):
                           "tsn_control_set_env": "environment",
                           "TsnControlEnv": "environment"})
         self.assertEqual(io_guard_rust.SYSTEM_INTERNAL_IMAGES, ("libsystem_malloc.dylib",))
+        self.assertEqual(io_guard_rust.EARLY_EXIT_STATUS, 125)
 
     def test_intercepts_follow_the_spec_table(self):
         shared = {
@@ -235,7 +250,7 @@ class TestTables(unittest.TestCase):
         # TSN_BLOCKED; `_exit`/`_Exit` stay unhooked, because the hook's own
         # `_exit(3)`/`_exit(2)` must never recurse into it.
         for plat, table in io_guard_rust.INTERCEPTS.items():
-            self.assertEqual(table["process-exit"], ("exit",), plat)
+            self.assertEqual(table["process-exit"], ("exit", "quick_exit"), plat)
             every = {n for ns in table.values() for n in ns}
             self.assertFalse({"_exit", "_Exit"} & every, plat)
         self.assertNotIn("process-exit", _blocked(1).split(","))
@@ -245,6 +260,23 @@ class TestTables(unittest.TestCase):
         # hook calls through is not.
         self.assertNotRegex(text, r'extern "C" fn _exit\(|extern "C" fn _Exit\(|fn _Exit\(|'
                                   r"my__exit|I__EXIT")
+
+    def test_every_exec_entry_point_is_subprocess_where_the_platform_has_it(self):
+        # Ruling R22(d): glibc's exec family calls its internal __execve.
+        want = {"darwin": {"execve", "execv", "execvp", "execl", "execlp"},
+                "linux": {"execve", "execv", "execvp", "execvpe", "execl", "execlp", "fexecve"}}
+        for plat, names in want.items():
+            sub = set(io_guard_rust.INTERCEPTS[plat]["subprocess"])
+            self.assertLessEqual(names, sub, plat)
+            self.assertFalse({"execvpe", "fexecve"} & sub if plat == "darwin" else set(), plat)
+
+    def test_both_gates_compare_the_sentinel_address_not_non_null(self):
+        # Ruling R22(b): filling every pthread key used to silence both gates.
+        with open(HOOK_SRC, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("pthread_getspecific(KEY).is_null()", text)
+        self.assertIn("pthread_getspecific(KEY) as *const u8 == &SENTINEL as *const u8", text)
+        self.assertEqual(text.count("if in_hook() {"), 2)
 
     def test_the_hooked_functions_are_exactly_the_table(self):
         # Each platform section defines a hook for exactly the names in
@@ -1032,7 +1064,8 @@ class TestProbe(ProbeCase):
             with self.subTest(exe=os.path.basename(os.path.dirname(exe))):
                 code, out = self.run_exe(["t_exit", "--exact", "--test-threads=1"],
                                          blocked=_blocked(1), exe=exe)
-                self.assertEqual(code, 0, out)
+                # Ruling R22(a): the test's exit(0) becomes the reserved status.
+                self.assertEqual(code, io_guard_rust.EARLY_EXIT_STATUS, out)
                 self.assertRegex(out, r"(?m)^tsn-hook: early exit \(.+\)$")
                 self.assertNotIn("test result:", out)
                 for name, want in (("t_pure", 0), ("t_fail", 101)):
@@ -1061,7 +1094,10 @@ SKILL = os.path.dirname(HERE)
 GIT = shutil.which("git")
 RUSTUP = shutil.which("rustup")
 
-FX_TOML = '[package]\nname = "fx"\nversion = "0.1.0"\nedition = "2021"\n'
+FX_TOML = ('[package]\nname = "fx"\nversion = "0.1.0"\nedition = "2021"\n'
+           # Ruling R22(c): three `harness = false` targets -- no libtest.
+           + "".join('\n[[test]]\nname = "%s"\npath = "tests/%s.rs"\nharness = false\n' % (n, n)
+                     for n in ("hf_forged", "hf_norun", "hf_honest")))
 FX_LIB = r'''use std::time::{SystemTime, UNIX_EPOCH};
 
 extern "C" { fn getentropy(buf: *mut u8, len: usize) -> i32; }
@@ -1090,6 +1126,24 @@ pub fn forge(name: &str) {
 
 #[allow(dead_code)]
 mod private { pub fn hidden() -> u32 { 1 } }
+
+// Ruling R22: the endings the re-review found.
+#[cfg(target_os = "linux")] pub type Key = u32;
+#[cfg(target_os = "macos")] pub type Key = u64;
+extern "C" {
+    fn close(fd: i32) -> i32;
+    fn pthread_setspecific(k: Key, v: *const u8) -> i32;
+    fn execv(p: *const i8, a: *const *const i8) -> i32;
+    fn execl(p: *const i8, a0: *const i8, ...) -> i32;
+    fn quick_exit(code: i32) -> !;
+}
+pub fn close_stderr() { unsafe { close(2); } }
+pub fn set_all_keys() { for k in 0..512 { unsafe { pthread_setspecific(k as Key, 1 as *const u8); } } }
+pub fn clear_all_keys() { for k in 0..512 { unsafe { pthread_setspecific(k as Key, std::ptr::null()); } } }
+const TRUE: &[u8] = b"/usr/bin/true\0";
+pub fn exec_v() { let a = [TRUE.as_ptr() as *const i8, std::ptr::null()]; unsafe { execv(TRUE.as_ptr() as *const i8, a.as_ptr()); } }
+pub fn exec_l() { unsafe { execl(TRUE.as_ptr() as *const i8, TRUE.as_ptr() as *const i8, std::ptr::null::<i8>()); } }
+pub fn quick(code: i32) -> ! { unsafe { quick_exit(code) } }
 '''
 # The main test file. It carries the control helpers verbatim -- so it
 # DEFINES `tsn_control_set_env` without calling it, and has a commented-out
@@ -1126,7 +1180,25 @@ FX_TESTS = "#![allow(dead_code)]\nuse fx::*;\n\n" + CONTROL_HELPERS_RS + r'''
     assert_eq!(pure(2), 4);
 }
 #[test] fn t_sleep_long() { std::thread::sleep(std::time::Duration::from_secs(60)); }
+
+// Ruling R22: forged lines, then each ending the re-review found.
+#[test] fn t_close2_exit() { forge("t_close2_exit"); close_stderr(); std::process::exit(0); }
+#[test] fn t_keys_exit() { forge("t_keys_exit"); set_all_keys(); std::process::exit(0); }
+#[test] fn t_keys_io() { set_all_keys(); let n = read_hosts(); clear_all_keys(); assert!(n > 0); }
+#[test] fn t_cmd_exec() {
+    use std::os::unix::process::CommandExt;
+    forge("t_cmd_exec");
+    let _ = std::process::Command::new("true").exec();
+}
+#[test] fn t_execv() { forge("t_execv"); exec_v(); }
+#[test] fn t_execl() { forge("t_execl"); exec_l(); }
+#[test] fn t_quick_exit() { forge("t_quick_exit"); quick(0); }
 '''
+HF_LINES = ("test t_hf ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+            "0 filtered out; finished in 0.00s\\n")
+HF_FORGED = 'fn main() { println!("\\nrunning 1 test\\n%s"); }\n' % HF_LINES
+HF_NORUN = 'fn main() { println!("%s"); }\n' % HF_LINES
+HF_HONEST = "fn main() { assert_eq!(2 + 2, 4); }\n"
 ENV_ONE = "#![allow(dead_code)]\n" + CONTROL_HELPERS_RS + r'''
 #[test] fn t_env_alone() {
     let _g = tsn_control_set_env("TSN_FX_VAR", "v");
@@ -1163,6 +1235,8 @@ def write_fx_crate(root):
     for rel, text in (("Cargo.toml", FX_TOML), ("src/lib.rs", FX_LIB), ("tests/fx.rs", FX_TESTS),
                       ("tests/env_one.rs", ENV_ONE), ("tests/env_two.rs", ENV_TWO),
                       ("tests/private.rs", PRIVATE_TESTS), ("tests/cfg_probe.rs", CFG_PROBE),
+                      ("tests/hf_forged.rs", HF_FORGED), ("tests/hf_norun.rs", HF_NORUN),
+                      ("tests/hf_honest.rs", HF_HONEST),
                       (".gitignore", "target/\n")):
         _write(os.path.join(crate, rel), text)
     subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=_cargo_env(),
@@ -1339,6 +1413,9 @@ class TestEveryGroupTrips(WrapperCase):
                 self.assertEqual(code, 3, out[-800:])
                 self.assertEqual(label(out), group, out[-800:])
                 self.assertIn("GUARD TRIP (exit 3)", out)
+                if test == "t_proc":
+                    # Ruling R22(d): std's Command::spawn trips exactly as before.
+                    self.assertIn("via posix_spawnp ", out)
 
     def test_the_trip_names_the_function_demangled(self):
         code, out = self.guard(1, None, "t_fs")
@@ -1639,8 +1716,8 @@ class TestClassify(unittest.TestCase):
 
     def test_the_result_line_decides(self):
         self.assertEqual(self.c(0, _ARMED, _RUNNING, _STATUS, _OK), 0)
-        self.assertEqual(self.c(101, _ARMED, "test result: FAILED. 0 passed; 1 failed; 0 ignored;"
-                                             " 0 measured; 0 filtered out\n"), 1)
+        self.assertEqual(self.c(101, _ARMED, _RUNNING, "test result: FAILED. 0 passed; 1 failed; "
+                                                       "0 ignored; 0 measured; 0 filtered out\n"), 1)
         self.assertEqual(self.c(0, _ARMED, "test result: ok. 0 passed; 0 failed; 1 ignored; "
                                            "0 measured; 0 filtered out\n"), 4)
         self.assertEqual(self.c(0, _ARMED, "test result: ok. 0 passed; 0 failed; 0 ignored; "
@@ -1650,12 +1727,23 @@ class TestClassify(unittest.TestCase):
 
     def test_the_last_result_line_is_libtests(self):
         spoof = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n"
-        self.assertEqual(self.c(101, _ARMED, spoof, "test result: FAILED. 0 passed; 1 failed; "
-                                                    "0 ignored; 0 measured; 0 filtered out\n"), 1)
+        self.assertEqual(self.c(101, _ARMED, _RUNNING, spoof,
+                                "test result: FAILED. 0 passed; 1 failed; "
+                                "0 ignored; 0 measured; 0 filtered out\n"), 1)
 
     def test_no_result_line(self):
-        self.assertEqual(self.c(-6, _ARMED, "test t_abort ... "), 1)
+        self.assertEqual(self.c(-6, _ARMED, _RUNNING, "test t_abort ... "), 1)
         self.assertEqual(self.c(0, _ARMED), 4)
+
+    def test_the_reserved_status_is_no_test_with_or_without_the_line(self):
+        # Ruling R22(a): fd 2 closed, so no early-exit line -- the status says it.
+        self.assertEqual(self.c(125, _ARMED, _RUNNING), 4)
+        self.assertEqual(self.c(125, _ARMED, _RUNNING, _STATUS, _OK), 4)
+
+    def test_no_libtest_run_is_no_test(self):
+        # Ruling R22(c): a `harness = false` binary printing libtest's lines.
+        self.assertEqual(self.c(0, _ARMED, _STATUS, _OK), 4)
+        self.assertEqual(self.c(101, _ARMED), 4)
 
     def test_an_early_exit_is_no_test(self):
         # Ruling R19: whatever follows -- a forged pass included.
@@ -1956,6 +2044,58 @@ class TestUnloadedHook(WrapperCase):
     def test_the_real_hook_with_a_forged_second_handshake_passes(self):
         code, out = self.guard(1, None, "t_forge_armed")
         self.assertEqual(code, 0, out[-800:])
+
+
+class TestHostileEndings(WrapperCase):
+    # Ruling R22: forged status and result lines first, then each ending the
+    # re-review found reading GREEN.
+
+    def test_closing_stderr_then_exit_is_4_by_the_reserved_status(self):
+        code, out = self.guard(1, None, "t_close2_exit")
+        self.assertEqual(code, 4, out[-800:])
+        self.assertIn("exit status 125, the hook's early-exit status", out)
+        self.assertNotIn("tsn-hook: early exit", out)       # fd 2 was closed
+
+    def test_filling_every_pthread_key_then_exit_is_4(self):
+        code, out = self.guard(1, None, "t_keys_exit")
+        self.assertEqual(code, 4, out[-800:])
+
+    def test_filling_every_pthread_key_then_reading_a_file_trips(self):
+        code, out = self.guard(1, None, "t_keys_io")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "filesystem")
+
+    def test_command_exec_trips_subprocess_at_its_own_entry(self):
+        code, out = self.guard(1, None, "t_cmd_exec")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "subprocess")
+        self.assertIn("via execvp", out)
+
+    def test_execv_and_execl_trip_subprocess_at_their_own_entries(self):
+        for test, call in (("t_execv", "execv"), ("t_execl", "execl")):
+            with self.subTest(test=test):
+                code, out = self.guard(1, None, test)
+                self.assertEqual(code, 3, out[-800:])
+                self.assertIn("reached subprocess I/O via %s " % call, out)
+
+    def test_quick_exit_is_4(self):
+        code, out = self.guard(1, None, "t_quick_exit")
+        self.assertEqual(code, 4, out[-800:])
+        # The innermost crate frame is the lib fn that called quick_exit.
+        self.assertRegex(out, r"(?m)^tsn-hook: early exit \(.*fx.*quick.*\)$")
+
+    def test_a_harness_false_target_is_4_forged_or_honest(self):
+        for stem in ("hf_forged", "hf_norun", "hf_honest"):
+            with self.subTest(stem=stem):
+                code, out = self.guard(1, None, "t_hf", stem=stem)
+                self.assertEqual(code, 4, out[-800:])
+                self.assertIn("does not link libtest's harness", out)
+
+    def test_libtest_targets_link_the_harness(self):
+        # The positive control for the check above.
+        result = io_guard_rust.build_test(self.crate, io_guard_rust.BuildPlan(None, (), ""), "fx",
+                                          None, _cargo_env())
+        self.assertTrue(io_guard_rust._links_libtest(result.exe), result.exe)
 
 
 # ── 9. Nothing is written ────────────────────────────────────────────────
