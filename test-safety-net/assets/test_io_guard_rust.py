@@ -138,6 +138,16 @@ Task 10, run:
 * the R30 remedy naming `tests/<stem>.rs` for a [lib] or dependency ->
   `TestReservedTargets.test_the_remedy_names_the_offender_and_its_kind`
   and, live, `TestExitContract.test_a_path_dependency_named_backtrace_is_refused`.
+Residual 11 (ruling R42: the crates' own unmangled fns are crate frames),
+each run on darwin 1.92:
+* the hook's list lookup never matching ->
+  `TestUnmangledExports.test_an_atexit_callback_reading_a_file_trips_and_is_named`
+  and `..._init_array_callback_reading_the_environment_trips` (both 0, not 3);
+* the executable-image check dropped ->
+  `TestProbe.test_a_listed_name_outside_the_executables_image_is_no_crate_frame`
+  (libtest's own clock read trips, 3);
+* a listed MANGLED name looked up ->
+  `TestExportedLookup.test_a_mangled_name_is_never_looked_up_even_if_listed`.
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -266,6 +276,7 @@ class TestTables(unittest.TestCase):
     def test_the_block_carries_every_table(self):
         block = io_guard_rust.render_tables()
         self.assertIn("static EARLY_EXIT_STATUS: c_int = 125;", block)
+        self.assertIn("const EXPORTS_CAP: usize = %d;" % io_guard_rust.EXPORTS_CAP, block)
         self.assertIn('static SEED_CRATE: &[u8] = b"std";', block)
         for name in ("TRANSPARENT", "RUNNER", "SEED", "SEED_CRATE", "TEST_BODY_BOUNDARY",
                      "CONTROL", "SYSTEM_INTERNAL", "INTERCEPT", "EARLY_EXIT_STATUS"):
@@ -296,6 +307,7 @@ class TestTables(unittest.TestCase):
                           "TsnControlEnv": "environment"})
         self.assertEqual(io_guard_rust.SYSTEM_INTERNAL_IMAGES, ("libsystem_malloc.dylib",))
         self.assertEqual(io_guard_rust.EARLY_EXIT_STATUS, 125)
+        self.assertEqual(io_guard_rust.EXPORTS_CAP, 1 << 20)
 
     def test_intercepts_follow_the_spec_table(self):
         shared = {
@@ -1010,11 +1022,12 @@ class ProbeCase(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def run_exe(self, args, blocked=None, tier=1, stdin=None, exe=None):
+    def run_exe(self, args, blocked=None, tier=1, stdin=None, exe=None, extra=None):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("TSN_") and k not in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
                                                          "RUST_BACKTRACE")}
         env.update({PRELOAD: self.hook, "TMPDIR": self.scratch})
+        env.update(extra or {})
         if blocked is not None:
             env["TSN_BLOCKED"] = blocked
             env["TSN_TIER"] = str(tier)
@@ -1050,6 +1063,48 @@ class TestProbe(ProbeCase):
     def test_a_pure_test_passes_and_the_hook_says_it_armed(self):
         out = self.assert_pass("t_pure")
         self.assertRegex(out, r"(?m)^tsn-hook: armed$")
+
+    def exports_file(self, text):
+        path = os.path.join(self.scratch, "exports-%d.txt" % len(text))
+        with open(path, "wb") as f:
+            f.write(text)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_an_export_list_that_cannot_be_read_or_fit_is_not_armed(self):
+        # Ruling R42: a list the hook cannot hold whole is `cannot attribute`
+        # (exit 2) before anything runs -- never a shorter list, never none.
+        for path, why in (("/nonexistent/tsn-exports.txt", "could not be opened"),
+                          (self.exports_file(b"x" * (io_guard_rust.EXPORTS_CAP + 1)),
+                           "larger than the hook reads")):
+            with self.subTest(why=why):
+                code, out = self.run_test("t_pure", blocked=_blocked(1),
+                                          extra={"TSN_EXPORTS": path})
+                self.assertEqual(code, 2, out)
+                self.assertIn("tsn-hook: cannot attribute (", out)
+                self.assertIn(why, out)
+                self.assertNotIn("tsn-hook: armed", out)
+        # Exactly at the cap still arms.
+        code, out = self.run_test("t_pure", blocked=_blocked(1), extra={
+            "TSN_EXPORTS": self.exports_file(b"x" * (io_guard_rust.EXPORTS_CAP - 1) + b"\n")})
+        self.assertEqual(code, 0, out[-800:])
+
+    def test_a_listed_name_outside_the_executables_image_is_no_crate_frame(self):
+        # Ruling R42: only a frame IN the executable can be a crate's
+        # unmangled fn. The loader's and libc's own frames under every
+        # main-thread call -- and libtest's own clock reads -- carry these
+        # names; listed, they must change nothing. MUTATION: dropping the
+        # image check trips libtest's own `clock_gettime_nsec_np` (exit 3),
+        # measured on darwin 1.92.
+        names = [b"start", b"dyld-internal", b"__cxa_finalize_ranges", b"exit",
+                 b"clock_gettime", b"clock_gettime_nsec_np", b"__libc_start_call_main",
+                 b"__libc_start_main", b"__libc_start_main_impl"]
+        path = self.exports_file(b"".join(n + b"\t" + n + b" (listed)\n" for n in names))
+        for test in ("t_pure", "t_hashmap"):
+            with self.subTest(test=test):
+                code, out = self.run_test(test, blocked=_blocked(1), extra={"TSN_EXPORTS": path})
+                self.assertEqual(code, 0, out[-800:])
+                self.assertNotIn("(listed)", out)
 
     def test_the_hashmap_seed_is_exempt(self):
         self.assert_pass("t_hashmap")
@@ -1818,6 +1873,88 @@ class TestClassifier(unittest.TestCase):
         self.assertLessEqual({"0", "1"}, classes)
 
 
+_EXPORTED_MAIN = r'''
+fn main() {
+    use std::io::BufRead;
+    let list = std::fs::read(std::env::args().nth(1).expect("list path")).expect("list");
+    for line in std::io::stdin().lock().lines() {
+        let line = line.expect("stdin");
+        match exported(&list, line.as_bytes()) {
+            Some(who) => println!("{}", String::from_utf8_lossy(who)),
+            None => println!("-"),
+        }
+    }
+}
+'''
+
+
+_LISTED_LEGACY = "_ZN2ax5inner17h" + "f" * 16 + "E"   # built, so no literal reads as a secret
+
+
+class TestExportedLookup(unittest.TestCase):
+    """Ruling R42: the hook's list lookup, compiled alone from its classifier
+    region and fed names, as TestClassifier feeds classify()."""
+
+    LIST = (b"ax_flush\tax_flush (unmangled fn of crate ax)\n"
+            + _LISTED_LEGACY.encode() + b"\tlisted legacy\n"
+            b"_RNvCs1234_2ax5inner\tlisted v0\n"
+            b"no_label\n"
+            b"last_line\tlast (no newline)")
+
+    @classmethod
+    def setUpClass(cls):
+        if not RUSTC:
+            raise unittest.SkipTest("no `rustc` on PATH: the hook's list lookup is NOT "
+                                    "exercised on this machine.")
+        cls.tmp = tempfile.mkdtemp(prefix="tsn-rust-exported-")
+        text = io_guard_rust.render_hook()
+        tables = text[text.index(BEGIN):text.index(END) + len(END)]
+        region = text[text.index(CLASSIFY_BEGIN):text.index(CLASSIFY_END) + len(CLASSIFY_END)]
+        src = os.path.join(cls.tmp, "exported.rs")
+        _write(src, "#![allow(dead_code, non_upper_case_globals)]\nuse core::ffi::c_int;\n"
+               + tables + "\n" + region + "\n" + _EXPORTED_MAIN)
+        cls.bin = os.path.join(cls.tmp, "exported")
+        proc = subprocess.run([RUSTC, "--edition", "2021", "-O", "-o", cls.bin, src],
+                              capture_output=True, text=True, timeout=600,
+                              stdin=subprocess.DEVNULL)
+        if proc.returncode != 0:
+            raise AssertionError("the lookup harness did not build:\n" + proc.stderr)
+        cls.lists = {}
+        for name, data in (("full", cls.LIST), ("empty", b"")):
+            path = os.path.join(cls.tmp, name)
+            with open(path, "wb") as f:
+                f.write(data)
+            cls.lists[name] = path
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def answer(self, names, which="full"):
+        proc = subprocess.run([self.bin, self.lists[which]], input="".join(n + "\n" for n in names),
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-800:])
+        return proc.stdout.splitlines()
+
+    def test_an_exact_name_is_found_with_its_label(self):
+        self.assertEqual(self.answer(["ax_flush", "no_label", "last_line"]),
+                         ["ax_flush (unmangled fn of crate ax)", "no_label", "last (no newline)"])
+
+    def test_a_prefix_suffix_or_empty_name_is_not(self):
+        self.assertEqual(self.answer(["ax_flus", "ax_flush_x", "_ax_flush", "", "main"]),
+                         ["-"] * 5)
+
+    def test_a_mangled_name_is_never_looked_up_even_if_listed(self):
+        # A std or crate frame the classifier read as transparent must stay
+        # transparent: the list holds unmangled names only.
+        self.assertEqual(self.answer([_LISTED_LEGACY, "_" + _LISTED_LEGACY,
+                                      "_RNvCs1234_2ax5inner", "__RNvCs1234_2ax5inner"]),
+                         ["-"] * 4)
+
+    def test_an_empty_list_finds_nothing(self):
+        self.assertEqual(self.answer(["ax_flush", "no_label"], which="empty"), ["-", "-"])
+
+
 # ── The wrapper: a fixture crate driven through `main` ───────────────────
 
 GUARD = os.path.join(HERE, "io_guard_rust.py")
@@ -1875,6 +2012,15 @@ const TRUE: &[u8] = b"/usr/bin/true\0";
 pub fn exec_v() { let a = [TRUE.as_ptr() as *const i8, std::ptr::null()]; unsafe { execv(TRUE.as_ptr() as *const i8, a.as_ptr()); } }
 pub fn exec_l() { unsafe { execl(TRUE.as_ptr() as *const i8, TRUE.as_ptr() as *const i8, std::ptr::null::<i8>()); } }
 pub fn quick(code: i32) -> ! { unsafe { quick_exit(code) } }
+
+// Ruling R42 (residual 11): the crate's own unmangled fns. `fx_exit_read` is
+// an `atexit` callback that reads a file after libtest has reported -- it
+// carries a plain C symbol and only libc calls it; the other two are pure.
+extern "C" { fn atexit(f: extern "C" fn()) -> i32; }
+#[no_mangle] pub extern "C" fn fx_exit_read() { let _ = std::fs::read("/etc/hosts"); }
+pub fn register_exit_read() { unsafe { atexit(fx_exit_read); } }
+#[no_mangle] pub extern "C" fn fx_pure_export(x: u32) -> u32 { x.wrapping_mul(3) }
+#[export_name = "fx_named_export"] pub extern "C" fn fx_named(x: u32) -> u32 { x + 1 }
 
 // Ruling R39: crate fns merely NAMED like core's drop glue. The I/O is DIRECT
 // in each body, so the deciding frame is the lookalike itself (a call to
@@ -1936,6 +2082,12 @@ FX_TESTS = "#![allow(dead_code)]\nuse fx::*;\n\n" + CONTROL_HELPERS_RS + r'''
 #[test] fn t_execv() { forge("t_execv"); exec_v(); }
 #[test] fn t_execl() { forge("t_execl"); exec_l(); }
 #[test] fn t_quick_exit() { forge("t_quick_exit"); quick(0); }
+
+// Ruling R42: an unmangled callback's I/O, a pure call to an exported fn, and
+// an honest failure in a crate that exports them.
+#[test] fn t_atexit_unmangled() { register_exit_read(); }
+#[test] fn t_exported_pure() { assert_eq!(fx_pure_export(2), 6); assert_eq!(fx_named(1), 2); }
+#[test] fn t_exported_wrong() { assert_eq!(fx_pure_export(2), 7); }
 '''
 HF_LINES = ("test t_hf ... ok\\n\\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
             "0 filtered out; finished in 0.00s\\n")
@@ -2221,6 +2373,98 @@ class TestLifeBeforeMain(WrapperCase):
         code, out = self.guard(1, None, "t_noop", stem="early_pure", cwd=crate)
         self.assertEqual(code, 0, out[-800:])
         self.assertIn("GREEN (exit 0)", out)
+
+
+# ── 2c. A crate's unmangled fns are crate frames (residual 11, R42) ──────
+
+# The `ctor` shape again, its target a `#[no_mangle]` fn in the LIBRARY: the
+# list is built from the rlibs cargo links, never from tests/.
+INIT_EXPORT_RS = r'''
+#[used]
+#[cfg_attr(target_os = "linux", link_section = ".init_array")]
+#[cfg_attr(target_os = "macos", link_section = "__DATA,__mod_init_func")]
+static FX_EARLY: extern "C" fn() = fx_early_env;
+#[no_mangle] pub extern "C" fn fx_early_env() { let _ = std::env::var("HOME"); }
+'''
+EXPORTS_WANT = [("fx_exit_read", "fx"), ("fx_named_export", "fx"), ("fx_pure_export", "fx")]
+
+
+class TestUnmangledExports(WrapperCase):
+    """Residual 11, closed: a `#[no_mangle]`/`#[export_name]` fn only C calls
+    on the main thread named no crate, and its I/O read GREEN (ruling R41).
+    The wrapper now lists the crates' own unmangled fns and the hook judges
+    them as crate frames (R42). MUTATION: `exported()` never matching -> the
+    two trips below read 0 (measured)."""
+
+    def exports_dir(self):
+        return os.path.join(self.fx["cache"], "rust-exports")
+
+    def test_an_atexit_callback_reading_a_file_trips_and_is_named(self):
+        code, out = self.guard(1, None, "t_atexit_unmangled")
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "filesystem", out[-800:])
+        self.assertIn("from fx_exit_read (unmangled fn of crate fx)", out)
+        self.assertIn("GUARD TRIP (exit 3)", out)
+        # libtest had already reported: the trip is what decides.
+        self.assertIn("test result: ok. 1 passed", out)
+
+    def test_an_init_array_callback_reading_the_environment_trips(self):
+        crate = self.scratch_copy()
+        with open(os.path.join(crate, "src", "lib.rs"), "a", encoding="utf-8") as f:
+            f.write(INIT_EXPORT_RS)
+        _write(os.path.join(crate, "tests", "early_nm.rs"),
+               "#[test] fn t_noop() { assert_eq!(fx::pure(1), 2); }\n")
+        code, out = self.guard(1, None, "t_noop", stem="early_nm", cwd=crate)
+        self.assertEqual(code, 3, out[-800:])
+        self.assertEqual(label(out), "environment", out[-800:])
+        self.assertIn("from fx_early_env (unmangled fn of crate fx)", out)
+        self.assertLess(out.index("tsn-hook: armed"), out.index("IOGuardViolation"), out[-800:])
+
+    def test_a_pure_exported_fn_called_from_the_test_is_green(self):
+        code, out = self.guard(1, None, "t_exported_pure")
+        self.assertEqual(code, 0, out[-800:])
+        self.assertIn("GREEN (exit 0)", out)
+
+    def test_an_honest_failure_in_an_exporting_crate_is_red_not_a_trip(self):
+        for test in ("t_exported_wrong", "t_wrong"):
+            with self.subTest(test=test):
+                code, out = self.guard(1, None, test)
+                self.assertEqual(code, 1, out[-800:])
+                self.assertNotIn("IOGuardViolation", out)
+
+    def test_the_list_is_the_crates_own_unmangled_fns_and_is_removed(self):
+        built = io_guard_rust.build_test(self.crate, io_guard_rust.BuildPlan(None, (), ""), "fx",
+                                         None, _cargo_env())
+        self.assertTrue(any(c == "fx" for c, _ in built.rlibs), built.rlibs)
+        self.assertEqual(io_guard_rust.export_list(built.rlibs), EXPORTS_WANT)
+        text = io_guard_rust.export_text(EXPORTS_WANT)
+        self.assertEqual(text.splitlines()[0],
+                         "fx_exit_read\tfx_exit_read (unmangled fn of crate fx)")
+        code, out = self.guard(1, None, "t_clean")
+        self.assertEqual(code, 0, out[-800:])
+        self.assertEqual(os.listdir(self.exports_dir()), [], "the list file outlived the run")
+
+    def test_a_list_that_cannot_be_built_is_not_armed(self):
+        why = ("/t/libfx.rlib, member fx.rcgu.o: LLVM bitcode, not machine code "
+               "(linker-plugin LTO)")
+        with mock.patch.object(io_guard_rust.rust_binary, "rlib_exports",
+                               side_effect=rust_binary.ExportListError(why)):
+            code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                                ["--test", "fx", "t_clean"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("NOT ARMED (exit 2)", out)
+        self.assertIn("linker-plugin-lto", out)
+        self.assertIn("fx.rcgu.o", out)
+        self.assertNotIn("running 1 test", out)
+
+    def test_a_name_the_list_cannot_carry_or_a_list_past_the_cap_is_refused(self):
+        with mock.patch.object(io_guard_rust.rust_binary, "rlib_exports",
+                               return_value=["bad\tname"]):
+            with self.assertRaises(io_guard_rust.GuardCannotArm):
+                io_guard_rust.export_list([("fx", "/t/libfx.rlib")])
+        big = [("f%07d" % i, "fx") for i in range(io_guard_rust.EXPORTS_CAP // 40)]
+        with self.assertRaisesRegex(io_guard_rust.GuardCannotArm, "more than the hook's"):
+            io_guard_rust.export_text(big)
 
 
 # ── 3. Tier 2: the controls and the allow list ───────────────────────────
@@ -2927,6 +3171,18 @@ class TestRunProof(unittest.TestCase):
                          ",".join(sorted(set(stack_rust.GROUPS) - {"filesystem"})))
         self.assertEqual(env["TSN_TIER"], "2")
         self.assertNotIn("TSN_STDIN", env)
+
+    def test_the_export_list_travels_as_tsn_exports_and_a_callers_is_dropped(self):
+        # Ruling R42: only the wrapper names the list; a caller's is scrubbed.
+        _argv, kw = self.run_proof(1, None, {"PATH": "/bin", "TSN_EXPORTS": "/evil.txt"})
+        self.assertNotIn("TSN_EXPORTS", kw["env"])
+        _FakeProc.calls = []
+        with mock.patch.object(io_guard_rust.subprocess, "Popen", _FakeProc), \
+                contextlib.redirect_stdout(io.StringIO()):
+            io_guard_rust.run_proof("/x/fx-test", "t_clean", 1, None, "/c/libtsn_hook.so",
+                                    {"PATH": "/bin", "TSN_EXPORTS": "/evil.txt"},
+                                    exports="/c/exports.txt")
+        self.assertEqual(_FakeProc.calls[0][1]["env"]["TSN_EXPORTS"], "/c/exports.txt")
 
 
 # ── 8. The two layers agree; the group tables are the filter's ───────────

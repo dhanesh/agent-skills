@@ -30,6 +30,17 @@ Ruling R28 (the name tables keep legacy scope) and R29 (a bounded reader):
   non-std symbol -> `TestV0Parser.test_the_name_tables_keep_legacy_scope`;
 * an `N` chain costing one Python frame (or one depth step) per level ->
   `TestV0Parser.test_a_deep_nested_path_reads_without_recursion`.
+
+Ruling R42 (residual 11: the crate-export list), each run:
+* reading every member, not only `*.rcgu.o` ->
+  `TestRlibExports.test_a_gnu_rlib_lists_its_rcgu_members_unmangled_text_alone`
+  and `..._native_member_is_never_read_even_as_bitcode`;
+* keeping data symbols, or dropping the mangled filter ->
+  `TestObjectExports.test_elf_keeps_defined_global_and_weak_text_only` and
+  `TestRlibExports.test_an_rlib_with_no_unmangled_fn_is_an_empty_list`;
+* reading bitcode as "no symbols" instead of refusing ->
+  `TestRlibExports.test_a_bitcode_rcgu_member_refuses_and_names_the_rlib_and_member`
+  and, on real rustc output, `TestRealRlibs.test_a_linker_plugin_lto_rlib_is_refused`.
 """
 from __future__ import annotations
 
@@ -691,6 +702,282 @@ class TestRealBinaries(unittest.TestCase):
         self.assertEqual(facts.crate_symbols, 0)
         self.assertEqual(rust_binary.refusal(facts),
                          "stripped: no crate symbols, so no call can be attributed")
+
+
+# ── Ruling R42: the crate-export list, on synthetic archives and objects ──
+#
+# Each builder writes only what the reader looks at. ELF sections: 1 .text
+# (executable), 2 .data; Mach-O sections: 1 __TEXT,__text (instructions),
+# 2 __DATA,__data.
+
+_GLOBAL, _WEAK, _LOCAL = 1, 2, 0
+_FUNC, _OBJECT, _NOTYPE = 2, 1, 0
+
+
+def elf_rel(symbols, e_type=1, klass=2):
+    """An ELF64 LE object; `symbols` are (name, bind, type, shndx)."""
+    strtab, offs = b"\0", []
+    for name, *_ in symbols:
+        offs.append(len(strtab))
+        strtab += name.encode() + b"\0"
+    syms = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
+    for (_name, bind, kind, shndx), o in zip(symbols, offs):
+        syms += struct.pack("<IBBHQQ", o, (bind << 4) | kind, 0, shndx, 0, 4)
+    text, data = b"\x1f\x20\x03\xd5" * 4, b"\0" * 8
+    shstr = b"\0.text\0.data\0.symtab\0.strtab\0.shstrtab\0"
+    blobs, off, at = [text, data, syms, strtab, shstr], 64, []
+    for b in blobs:
+        at.append(off)
+        off += len(b)
+    body = b"".join(blobs)
+    pad = (-off) % 8
+    shoff = off + pad
+    sh = [struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+          struct.pack("<IIQQQQIIQQ", 1, 1, 6, 0, at[0], len(text), 0, 0, 4, 0),
+          struct.pack("<IIQQQQIIQQ", 7, 1, 3, 0, at[1], len(data), 0, 0, 8, 0),
+          struct.pack("<IIQQQQIIQQ", 13, 2, 0, 0, at[2], len(syms), 4, 1, 8, 24),
+          struct.pack("<IIQQQQIIQQ", 21, 3, 0, 0, at[3], len(strtab), 0, 0, 1, 0),
+          struct.pack("<IIQQQQIIQQ", 29, 3, 0, 0, at[4], len(shstr), 0, 0, 1, 0)]
+    ident = b"\x7fELF" + bytes([klass, 1, 1, 0]) + b"\0" * 8
+    ehdr = ident + struct.pack("<HHIQQQIHHHHHH", e_type, 0xB7, 1, 0, 0, shoff, 0, 64, 0, 0, 64,
+                               len(sh), len(sh) - 1)
+    return ehdr + body + b"\0" * pad + b"".join(sh)
+
+
+_N_EXT, _N_SECT, _N_UNDF, _N_STAB_FUN = 0x01, 0x0E, 0x00, 0x24
+
+
+def macho_obj(symbols, filetype=1):
+    """A Mach-O 64 object; `symbols` are (name, n_type, n_sect)."""
+    seg = struct.pack("<II16sQQQQiiII", 0x19, 72 + 2 * 80, b"", 0, 0, 0, 0, 7, 7, 2, 0)
+    seg += struct.pack("<16s16sQQIIIIIIII", b"__text", b"__TEXT", 0, 16, 0, 2, 0, 0,
+                       0x80000400, 0, 0, 0)
+    seg += struct.pack("<16s16sQQIIIIIIII", b"__data", b"__DATA", 16, 8, 0, 3, 0, 0, 0, 0, 0, 0)
+    strtab, offs = b"\0", []
+    for name, *_ in symbols:
+        offs.append(len(strtab))
+        strtab += name.encode() + b"\0"
+    nlist = b"".join(struct.pack("<IBBHQ", o, n_type, n_sect, 0, 0)
+                     for (_n, n_type, n_sect), o in zip(symbols, offs))
+    head = 32 + len(seg) + 24
+    symoff, stroff = head, head + len(nlist)
+    symtab = struct.pack("<IIIIII", 0x2, 24, symoff, len(symbols), stroff, len(strtab))
+    hdr = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, filetype, 2, len(seg) + 24, 0, 0)
+    return hdr + seg + symtab + nlist + strtab
+
+
+def _ar_header(name_field, size):
+    return (name_field.ljust(16) + "0".ljust(12) + "0".ljust(6) + "0".ljust(6) + "644".ljust(8)
+            + str(size).ljust(10)).encode("latin-1") + b"`\n"
+
+
+def _ar_member(name_field, body):
+    return _ar_header(name_field, len(body)) + body + (b"\n" if len(body) % 2 else b"")
+
+
+def gnu_ar(members):
+    """A GNU archive: a `/` symbol table, a `//` long-name table for names
+    that do not fit `name/` in 16 bytes, then each member."""
+    longnames, fields = b"", []
+    for name, _body in members:
+        if len(name) + 1 <= 16:
+            fields.append(name + "/")
+        else:
+            fields.append("/%d" % len(longnames))
+            longnames += name.encode() + b"/\n"
+    out = b"!<arch>\n" + _ar_member("/", b"\0\0\0\0")
+    if longnames:
+        out += _ar_member("//", longnames)
+    for field, (_name, body) in zip(fields, members):
+        out += _ar_member(field, body)
+    return out
+
+
+def bsd_ar(members):
+    """A BSD (darwin) archive: `#1/<len>` names leading each member's data,
+    and a `__.SYMDEF SORTED` table first."""
+    out = b"!<arch>\n"
+    for name, body in [("__.SYMDEF SORTED", b"\0" * 8)] + list(members):
+        raw = name.encode()
+        raw += b"\0" * ((-len(raw)) % 8)
+        out += _ar_member("#1/%d" % len(raw), raw + body)
+    return out
+
+
+LONG_RCGU = "ax-555212d5d7847123.8ahtpu3q62ny3yoa6vxew9po5.1dgocu1.rcgu.o"
+LEGACY = "_ZN2ax5inner17h" + "f" * 16 + "E"     # built, so no literal reads as a secret
+V0_SYM = "_RNvCs1234abcd_2ax5inner"
+
+
+def elf_rcgu():
+    return elf_rel([("ax_flush", _GLOBAL, _FUNC, 1), ("ax_weak", _WEAK, _FUNC, 1),
+                    ("ax_local", _LOCAL, _FUNC, 1), ("ax_asm_label", _GLOBAL, _NOTYPE, 1),
+                    ("AX_DATA", _GLOBAL, _OBJECT, 2),
+                    ("DW.ref.rust_eh_personality", _WEAK, _OBJECT, 2),
+                    ("ax_data_label", _GLOBAL, _NOTYPE, 2), ("memcpy", _GLOBAL, _NOTYPE, 0),
+                    (LEGACY, _GLOBAL, _FUNC, 1), (V0_SYM, _GLOBAL, _FUNC, 1)])
+
+
+def macho_rcgu():
+    return macho_obj([("_ax_flush", _N_SECT | _N_EXT, 1), ("_ax_local", _N_SECT, 1),
+                      ("_AX_DATA", _N_SECT | _N_EXT, 2), ("_memcpy", _N_UNDF | _N_EXT, 0),
+                      ("_ax_stab", _N_STAB_FUN, 1), ("_" + LEGACY, _N_SECT | _N_EXT, 1),
+                      ("_" + V0_SYM, _N_SECT | _N_EXT, 1)])
+
+
+def native_member():
+    """A build script's C, bundled into the rlib: never an rcgu member."""
+    return elf_rel([("sqlite3_open", _GLOBAL, _FUNC, 1), ("ZSTD_compress", _GLOBAL, _FUNC, 1)])
+
+
+class TestArchive(unittest.TestCase):
+    def test_gnu_members_come_back_in_order_with_their_tables_consumed(self):
+        members = [("lib.rmeta", b"meta!"), ("lib.rmeta-link", b"link"), (LONG_RCGU, b"obj"),
+                   ("c877a2978823c39d-sqlite3.o", b"native")]
+        self.assertEqual(rust_binary.ar_members(gnu_ar(members)), members)
+
+    def test_bsd_members_come_back_with_their_long_names_and_no_symdef(self):
+        members = [("lib.rmeta", b"meta!"), (LONG_RCGU, b"object"), ("x.o", b"odd")]
+        self.assertEqual(rust_binary.ar_members(bsd_ar(members)), members)
+
+    def test_every_symbol_table_spelling_is_consumed(self):
+        for table in ("/", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64"):
+            with self.subTest(table=table):
+                if table.startswith("/"):
+                    data = b"!<arch>\n" + _ar_member(table, b"\0\0\0\0")
+                else:
+                    raw = table.encode() + b"\0" * ((-len(table)) % 8)
+                    data = b"!<arch>\n" + _ar_member("#1/%d" % len(raw), raw)
+                self.assertEqual(rust_binary.ar_members(data + _ar_member("a.o/", b"x")),
+                                 [("a.o", b"x")])
+
+    def test_a_thin_archive_and_a_non_archive_are_refused(self):
+        for data in (b"!<thin>\n" + _ar_member("a.o/", b"x"), b"\x7fELF", b""):
+            with self.subTest(data=data[:8]):
+                with self.assertRaises(rust_binary.ExportListError):
+                    rust_binary.ar_members(data)
+
+    def test_a_long_name_with_no_table_is_refused(self):
+        with self.assertRaises(rust_binary.ExportListError):
+            rust_binary.ar_members(b"!<arch>\n" + _ar_member("/0", b"x"))
+
+    def test_every_truncation_is_refused_never_crashes(self):
+        # A prefix either still reads as whole members or raises
+        # ExportListError: nothing else may escape the reader.
+        for data in (gnu_ar([(LONG_RCGU, elf_rcgu())]), bsd_ar([(LONG_RCGU, macho_rcgu())])):
+            for cut in range(len(data)):
+                try:
+                    rust_binary.ar_members(data[:cut])
+                except rust_binary.ExportListError:
+                    pass
+
+
+class TestObjectExports(unittest.TestCase):
+    def test_elf_keeps_defined_global_and_weak_text_only(self):
+        # Defined FUNCs (global or weak) and an untyped label in .text count;
+        # a local, a data object, a label in .data and an undefined import
+        # do not. Mangling is the rlib reader's filter, not this one's.
+        self.assertEqual(rust_binary.object_exports(elf_rcgu()),
+                         ["ax_flush", "ax_weak", "ax_asm_label", LEGACY, V0_SYM])
+
+    def test_macho_keeps_external_section_text_and_drops_the_underscore(self):
+        self.assertEqual(rust_binary.object_exports(macho_rcgu()), ["ax_flush", LEGACY, V0_SYM])
+
+    def test_llvm_bitcode_is_refused(self):
+        for magic in (b"BC\xc0\xde", b"\xde\xc0\x17\x0b"):
+            with self.subTest(magic=magic):
+                with self.assertRaisesRegex(rust_binary.ExportListError, "bitcode"):
+                    rust_binary.object_exports(magic + b"\0" * 64)
+
+    def test_anything_but_a_64_bit_relocatable_object_is_refused(self):
+        for data in (elf_rel([], e_type=2), elf_rel([], klass=1), macho_obj([], filetype=2),
+                     b"\xca\xfe\xba\xbe" + b"\0" * 60, b"", b"\x7fELF"):
+            with self.subTest(data=data[:8]):
+                with self.assertRaises(rust_binary.ExportListError):
+                    rust_binary.object_exports(data)
+
+    def test_every_truncation_is_refused_never_crashes(self):
+        for data in (elf_rcgu(), macho_rcgu()):
+            for cut in range(len(data)):
+                try:
+                    rust_binary.object_exports(data[:cut])
+                except rust_binary.ExportListError:
+                    pass
+
+
+class TestRlibExports(BinaryCase):
+    def test_a_gnu_rlib_lists_its_rcgu_members_unmangled_text_alone(self):
+        path = self.write(gnu_ar([("lib.rmeta", b"meta"), ("lib.rmeta-link", b"l"),
+                                  (LONG_RCGU, elf_rcgu()),
+                                  ("c877a2978823c39d-sqlite3.o", native_member())]))
+        self.assertEqual(rust_binary.rlib_exports(path), ["ax_asm_label", "ax_flush", "ax_weak"])
+
+    def test_a_bsd_rlib_lists_its_rcgu_members_unmangled_text_alone(self):
+        path = self.write(bsd_ar([("lib.rmeta", b"meta"), (LONG_RCGU, macho_rcgu()),
+                                  ("44ff4c55aa9e5133-zstd.o", native_member())]))
+        self.assertEqual(rust_binary.rlib_exports(path), ["ax_flush"])
+
+    def test_a_native_member_is_never_read_even_as_bitcode(self):
+        # Bundled C is not the crate's code, whatever it is compiled to.
+        path = self.write(gnu_ar([("abc-zlib.o", b"BC\xc0\xde" + b"\0" * 32),
+                                  ("abc-sqlite3.o", native_member())]))
+        self.assertEqual(rust_binary.rlib_exports(path), [])
+
+    def test_a_bitcode_rcgu_member_refuses_and_names_the_rlib_and_member(self):
+        path = self.write(gnu_ar([(LONG_RCGU, b"BC\xc0\xde" + b"\0" * 32)]))
+        with self.assertRaises(rust_binary.ExportListError) as ctx:
+            rust_binary.rlib_exports(path)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn(LONG_RCGU, str(ctx.exception))
+        self.assertIn("bitcode", str(ctx.exception))
+
+    def test_an_rlib_with_no_unmangled_fn_is_an_empty_list(self):
+        only_mangled = elf_rel([(LEGACY, _GLOBAL, _FUNC, 1), (V0_SYM, _GLOBAL, _FUNC, 1)])
+        path = self.write(gnu_ar([("lib.rmeta", b"m"), (LONG_RCGU, only_mangled)]))
+        self.assertEqual(rust_binary.rlib_exports(path), [])
+
+    def test_an_unreadable_or_malformed_rlib_refuses(self):
+        with self.assertRaises(rust_binary.ExportListError):
+            rust_binary.rlib_exports(os.path.join(self.root, "missing.rlib"))
+        with self.assertRaises(rust_binary.ExportListError):
+            rust_binary.rlib_exports(self.write(gnu_ar([(LONG_RCGU, b"not an object")])))
+
+
+RUSTC = shutil.which("rustc")
+_RLIB_SRC = r'''#[no_mangle] pub extern "C" fn rr_export(x: u32) -> u32 { x + 1 }
+#[export_name = "rr_named"] pub extern "C" fn named(x: u32) -> u32 { x + 2 }
+pub fn mangled(x: u32) -> u32 { x + 3 }
+#[no_mangle] pub static RR_DATA: u32 = 7;
+'''
+
+
+class TestRealRlibs(unittest.TestCase):
+    """rustc's own rlibs: BSD archives of Mach-O objects on darwin, GNU
+    archives of ELF objects on linux. Skips visibly without rustc."""
+
+    def setUp(self):
+        if not RUSTC:
+            self.skipTest("no `rustc` on PATH: real rlibs are NOT read on this machine.")
+        self.tmp = tempfile.mkdtemp(prefix="tsn-rlib-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        with open(os.path.join(self.tmp, "rr.rs"), "w", encoding="utf-8") as f:
+            f.write(_RLIB_SRC)
+
+    def rlib(self, *flags):
+        out = os.path.join(self.tmp, "librr%d.rlib" % len(flags))
+        proc = subprocess.run([RUSTC, "--edition", "2021", "--crate-type", "rlib", "--crate-name",
+                               "rr", *flags, "-o", out, os.path.join(self.tmp, "rr.rs")],
+                              capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            raise AssertionError("rustc failed:\n" + proc.stderr)
+        return out
+
+    def test_an_rlib_lists_its_no_mangle_and_export_name_fns_only(self):
+        self.assertEqual(rust_binary.rlib_exports(self.rlib()), ["rr_export", "rr_named"])
+
+    def test_a_linker_plugin_lto_rlib_is_refused(self):
+        with self.assertRaisesRegex(rust_binary.ExportListError, "bitcode"):
+            rust_binary.rlib_exports(self.rlib("-C", "linker-plugin-lto"))
 
 
 if __name__ == "__main__":

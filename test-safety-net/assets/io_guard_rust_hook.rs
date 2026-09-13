@@ -115,6 +115,15 @@ static mut TIER_LEN: usize = 0;
 // The hook's own image: its frames are skipped by address, not by count, so
 // inlining can never hand the attribution to the hook itself.
 static mut SELF_BASE: *mut c_void = core::ptr::null_mut();
+// Ruling R42: the crate's own unmangled fns. The wrapper writes them, one
+// `<name>\t<label>\n` line each, to a file outside the repo and names it in
+// TSN_EXPORTS; the constructor copies it here ONCE, before arming. A list
+// that cannot be read, or does not fit, is `cannot attribute` (exit 2).
+// MAIN_BASE is the executable's own image: only a frame there can be one.
+static mut EXPORTS: [u8; EXPORTS_CAP] = [0; EXPORTS_CAP];
+static mut EXPORTS_LEN: usize = 0;
+static mut MAIN_BASE: *mut c_void = core::ptr::null_mut();
+const EXPORTS_PATH_CAP: usize = 4096;
 
 // @@TSN-TABLES-BEGIN@@
 // Rendered by io_guard_rust.py render_tables(); edit the Python tables, not this block.
@@ -126,6 +135,7 @@ static TEST_BODY_BOUNDARY: &[&[u8]] = &[b"__rust_begin_short_backtrace", b"asser
 static CONTROL: &[(&[u8], &[u8])] = &[(b"TsnControlEnv", b"environment"), (b"tsn_control_set_env", b"environment"), (b"tsn_control_temp_dir", b"filesystem")];
 static SYSTEM_INTERNAL: &[&[u8]] = &[b"libsystem_malloc.dylib"];
 static EARLY_EXIT_STATUS: c_int = 125;
+const EXPORTS_CAP: usize = 1048576;
 #[cfg(target_os = "macos")]
 static INTERCEPT: &[(&[u8], &[u8])] = &[(b"clock_gettime", b"clock"), (b"gettimeofday", b"clock"), (b"mach_absolute_time", b"clock"), (b"clock_gettime_nsec_np", b"clock"), (b"getenv", b"environment"), (b"setenv", b"environment"), (b"unsetenv", b"environment"), (b"getcwd", b"environment"), (b"chdir", b"environment"), (b"open", b"filesystem"), (b"openat", b"filesystem"), (b"stat", b"filesystem"), (b"lstat", b"filesystem"), (b"fstatat", b"filesystem"), (b"access", b"filesystem"), (b"mkdir", b"filesystem"), (b"unlink", b"filesystem"), (b"rename", b"filesystem"), (b"opendir", b"filesystem"), (b"readlink", b"filesystem"), (b"rmdir", b"filesystem"), (b"chmod", b"filesystem"), (b"fchmodat", b"filesystem"), (b"symlink", b"filesystem"), (b"realpath", b"filesystem"), (b"socket", b"network"), (b"connect", b"network"), (b"bind", b"network"), (b"getaddrinfo", b"network"), (b"exit", b"process-exit"), (b"quick_exit", b"process-exit"), (b"getentropy", b"randomness"), (b"arc4random_buf", b"randomness"), (b"read", b"stdin"), (b"posix_spawn", b"subprocess"), (b"posix_spawnp", b"subprocess"), (b"fork", b"subprocess"), (b"execve", b"subprocess"), (b"execv", b"subprocess"), (b"execvp", b"subprocess"), (b"execl", b"subprocess"), (b"execlp", b"subprocess")];
 #[cfg(target_os = "linux")]
@@ -160,6 +170,9 @@ extern "C" fn tsn_init() {
             TIER_LEN = copy_env(c"TSN_TIER", (&raw mut TIER) as *mut u8, TIER_CAP).map(|n| n.min(TIER_CAP)).unwrap_or(0);
             let s = real_getenv(c"TSN_STDIN".as_ptr());
             STDIN.store(!s.is_null() && CStr::from_ptr(s).to_bytes() == b"1", Ordering::Relaxed);
+            if let Err(why) = load_exports() {
+                cannot(why);
+            }
             // Warm the unwinder (glibc's backtrace dlopens libgcc_s on first
             // use) and read the .symtab now, single-threaded, rather than
             // racing to do either inside the first intercepted call.
@@ -172,6 +185,73 @@ extern "C" fn tsn_init() {
         }
     }
     READY.store(true, Ordering::Release);
+}
+
+/// Ruling R42: copy the file TSN_EXPORTS names into EXPORTS, once, in the
+/// constructor (single-threaded, unarmed, so no intercept judges these
+/// reads). Unset: no list, and nothing changes. Anything else that goes
+/// wrong -- a path too long, a file that will not open or read, a list
+/// larger than EXPORTS_CAP, an executable image that cannot be located --
+/// is a reason, and the caller writes `cannot attribute` and exits 2.
+unsafe fn load_exports() -> Result<(), &'static [u8]> {
+    let mut path = [0u8; EXPORTS_PATH_CAP + 1];
+    let n = match copy_env(c"TSN_EXPORTS", path.as_mut_ptr(), EXPORTS_PATH_CAP) {
+        None => return Ok(()),
+        Some(n) => n,
+    };
+    if n == 0 || n > EXPORTS_PATH_CAP {
+        return Err(b"the crate-export list's path (TSN_EXPORTS) is empty or too long");
+    }
+    path[n] = 0;
+    EXPORTS_LEN = plat::read_file(path.as_ptr() as *const c_char, (&raw mut EXPORTS) as *mut u8,
+                                  EXPORTS_CAP)?;
+    if EXPORTS_LEN > 0 {
+        MAIN_BASE = main_base();
+        if MAIN_BASE.is_null() {
+            return Err(b"the executable's own image could not be located");
+        }
+    }
+    Ok(())
+}
+
+/// The executable's own image, as `dladdr` reports it in `dli_fbase`. On
+/// darwin, the ONE loaded image whose Mach-O header says MH_EXECUTE --
+/// measured: inside an inserted library's initializer, dyld's image 0 is not
+/// the executable, so the index cannot be trusted. On linux, the image
+/// holding the program headers the kernel handed the loader (AT_PHDR).
+#[cfg(target_os = "macos")]
+unsafe fn main_base() -> *mut c_void {
+    extern "C" {
+        fn _dyld_image_count() -> u32;
+        fn _dyld_get_image_header(i: u32) -> *const c_void;
+    }
+    const MH_EXECUTE: u32 = 2;
+    let mut found: *mut c_void = core::ptr::null_mut();
+    let count = _dyld_image_count().min(65_536);
+    for i in 0..count {
+        let h = _dyld_get_image_header(i);
+        // mach_header_64: magic, cputype, cpusubtype, then filetype at +12.
+        if !h.is_null() && core::ptr::read_unaligned((h as *const u8).add(12) as *const u32) == MH_EXECUTE {
+            if !found.is_null() {
+                return core::ptr::null_mut(); // two executables: cannot say which
+            }
+            found = h as *mut c_void;
+        }
+    }
+    found
+}
+#[cfg(target_os = "linux")]
+unsafe fn main_base() -> *mut c_void {
+    extern "C" {
+        fn getauxval(t: core::ffi::c_ulong) -> core::ffi::c_ulong;
+    }
+    const AT_PHDR: core::ffi::c_ulong = 3;
+    let phdr = getauxval(AT_PHDR);
+    let mut info = DlInfo::empty();
+    if phdr == 0 || dladdr(phdr as *const c_void, &mut info) == 0 {
+        return core::ptr::null_mut();
+    }
+    info.dli_fbase
 }
 
 #[cfg(target_os = "macos")]
@@ -453,6 +533,28 @@ fn names(s: &[u8], name: &[u8]) -> bool {
         i += 1;
     }
     false
+}
+
+/// Ruling R42: the label of `s` when it is one of the crate's own unmangled
+/// fns in `list` (the wrapper's `<name>\t<label>\n` lines), else `None`. A
+/// Rust-mangled name (legacy `_ZN`, v0 `_R`, Mach-O's extra `_` allowed) is
+/// never on the list and is not looked up. The walk is bounded by the list:
+/// each step moves past one line.
+fn exported<'a>(list: &'a [u8], s: &[u8]) -> Option<&'a [u8]> {
+    if s.is_empty() || s.starts_with(b"_ZN") || s.starts_with(b"__ZN") || v0_body(s).is_some() {
+        return None;
+    }
+    let mut rest = list;
+    while !rest.is_empty() {
+        let end = rest.iter().position(|&c| c == b'\n').unwrap_or(rest.len());
+        let line = &rest[..end];
+        let tab = line.iter().position(|&c| c == b'\t').unwrap_or(line.len());
+        if &line[..tab] == s {
+            return Some(if tab < line.len() { &line[tab + 1..] } else { line });
+        }
+        rest = if end < rest.len() { &rest[end + 1..] } else { &[] };
+    }
+    None
 }
 
 fn control(s: &[u8]) -> Option<&'static [u8]> {
@@ -1216,6 +1318,38 @@ fn cannot(why: &[u8]) -> ! {
     unsafe { _exit(2) }
 }
 
+type ReadFn = unsafe extern "C" fn(c_int, *mut c_void, size_t) -> ssize_t;
+
+/// Ruling R42: read `fd` to its end into `buf[..cap]` with the REAL `read`
+/// (`rd`): the byte count, or a reason. Each pass ends or moves at least one
+/// byte and the passes are capped, so the loop is bounded; a byte past `cap`
+/// is an overflow, never a silent truncation.
+unsafe fn fill(fd: c_int, buf: *mut u8, cap: usize, rd: ReadFn) -> Result<usize, &'static [u8]> {
+    const UNREADABLE: &[u8] = b"the crate-export list (TSN_EXPORTS) could not be read";
+    let mut len = 0usize;
+    let mut passes = 0usize;
+    while passes <= cap + 1 {
+        passes += 1;
+        if len >= cap {
+            let mut one = [0u8; 1];
+            return match rd(fd, one.as_mut_ptr() as *mut c_void, 1) {
+                0 => Ok(len),
+                n if n > 0 => Err(b"the crate-export list is larger than the hook reads"),
+                _ => Err(UNREADABLE),
+            };
+        }
+        let n = rd(fd, buf.add(len) as *mut c_void, cap - len);
+        if n < 0 {
+            return Err(UNREADABLE);
+        }
+        if n == 0 {
+            return Ok(len);
+        }
+        len += (n as usize).min(cap - len);
+    }
+    Err(UNREADABLE)
+}
+
 #[cfg(target_os = "linux")]
 mod symtab {
     use super::*;
@@ -1351,10 +1485,14 @@ unsafe fn walk(exempt_system_internal: bool) -> Walk {
         if found && !info.dli_sname.is_null() {
             s = Some(CStr::from_ptr(info.dli_sname).to_bytes());
         }
+        // Ruling R42: is this frame in the executable's own image?
+        #[cfg_attr(target_os = "macos", allow(unused_mut))]
+        let mut in_main = found && !MAIN_BASE.is_null() && info.dli_fbase == MAIN_BASE;
         #[cfg(target_os = "linux")]
         if s.map(|x| classify(x) == 0 && !x.ends_with(b"E")).unwrap_or(true) {
             if let Some(t) = symtab::lookup(pc) {
                 s = Some(t);
+                in_main = true; // the .symtab read is /proc/self/exe's own
             }
         }
         let s = match s {
@@ -1383,6 +1521,18 @@ unsafe fn walk(exempt_system_internal: bool) -> Walk {
             1 => return Walk::Crate(s),
             2 | 3 => return Walk::Exempt,
             _ => {}
+        }
+        // Ruling R42: a `#[no_mangle]`/`#[export_name]` fn carries a plain C
+        // symbol that names no crate. One the wrapper listed as the crate's
+        // own (an rcgu member of a cargo-built rlib), in the executable's
+        // image, IS a crate frame, judged like any other -- an `atexit` or
+        // `.init_array` callback no longer reads as pre-`main` init.
+        if in_main && EXPORTS_LEN > 0 {
+            let list = core::slice::from_raw_parts((&raw const EXPORTS) as *const u8,
+                                                   EXPORTS_LEN.min(EXPORTS_CAP));
+            if let Some(who) = exported(list, s) {
+                return Walk::Crate(who);
+            }
         }
     }
     // Ruling R15a: the buffer filled and nothing decided -- a stack too deep
@@ -1528,6 +1678,17 @@ mod plat {
         fn quick_exit(code: c_int) -> !;
         fn execl(p: *const c_char, a0: *const c_char, ...) -> c_int;
         fn execlp(f: *const c_char, a0: *const c_char, ...) -> c_int;
+        fn close(fd: c_int) -> c_int;
+    }
+    /// Ruling R42: the crate-export list, read with the real open/read.
+    pub unsafe fn read_file(p: *const c_char, buf: *mut u8, cap: size_t) -> Result<usize, &'static [u8]> {
+        let fd = open(p, 0);
+        if fd < 0 {
+            return Err(b"the crate-export list (TSN_EXPORTS) could not be opened");
+        }
+        let got = fill(fd, buf, cap, read);
+        close(fd);
+        got
     }
     // Rulings R19, R22(a): reported, then the real exit -- with the reserved
     // status when crate code made it. `_exit` is not hooked.
@@ -1681,6 +1842,7 @@ mod plat {
     use super::*;
     extern "C" {
         fn dlsym(h: *mut c_void, s: *const c_char) -> *mut c_void;
+        fn close(fd: c_int) -> c_int;
     }
     const RTLD_NEXT: *mut c_void = -1isize as *mut c_void;
     // A libc without the function (arc4random_buf before glibc 2.36) cannot
@@ -1704,6 +1866,16 @@ mod plat {
     }
     pub unsafe fn real_getenv(n: *const c_char) -> *mut c_char {
         real!(c"getenv", unsafe extern "C" fn(*const c_char) -> *mut c_char)(n)
+    }
+    /// Ruling R42: the crate-export list, read with the real open/read.
+    pub unsafe fn read_file(p: *const c_char, buf: *mut u8, cap: size_t) -> Result<usize, &'static [u8]> {
+        let fd = real!(c"open", unsafe extern "C" fn(*const c_char, c_int, ...) -> c_int)(p, 0);
+        if fd < 0 {
+            return Err(b"the crate-export list (TSN_EXPORTS) could not be opened");
+        }
+        let got = fill(fd, buf, cap, real!(c"read", ReadFn));
+        close(fd);
+        got
     }
     #[no_mangle]
     pub unsafe extern "C" fn getenv(n: *const c_char) -> *mut c_char {

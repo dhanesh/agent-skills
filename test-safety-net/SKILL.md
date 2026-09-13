@@ -378,10 +378,13 @@ than none, because it makes the invariant look enforced when it is not.
      does not link libtest's harness (`harness = false`). The 300 s timeout. libtest exits 0 for the
      first two, which is why the guard reads its result lines rather than its exit code.
    - A compile error is exit 5, never RED; cargo exits 101 for both.
-   - Rust has nine extra ways to reach exit 2 (NOT ARMED), beyond step 1's lockfile and toolchain:
+   - Rust has ten extra ways to reach exit 2 (NOT ARMED), beyond step 1's lockfile and toolchain:
      - a dependency not in the local cargo cache (run `cargo fetch`, or build the tests once; the
        proof never downloads anything);
      - a static, stripped or musl test binary;
+     - a list of the crates' own unmangled fns that cannot be built or does not fit the hook: a
+       cargo-built rlib whose codegen objects are LLVM bitcode (`-C linker-plugin-lto`), so build
+       without that flag;
      - a hook that failed to load, or that could not attribute a call;
      - an environment-controlled test that is not alone in its file;
      - several packages and no `-p`;
@@ -435,13 +438,15 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and eleven residuals (one of them, 7, now closed) are in `references/stacks.md`. Read residuals
-   1, 9, 10 and 11 before you trust a GREEN: anything that bypasses libc is unseen whatever its
-   intent (a dependency's raw syscall included), deliberate verdict forgery by the code under test
-   is outside the threat model, at opt-level 1 or more a crate's generic `Drop` holding the control
-   helper can read GREEN, and an unmangled `#[no_mangle]`/`#[export_name]` callback invoked only
-   from C or std frames on the main thread (an `atexit` handler, a signal handler) names no crate
-   and reads GREEN too.
+   and eleven residuals (two of them, 7 and 11, now closed) are in `references/stacks.md`. Read
+   residuals 1, 9, 10 and 11 before you trust a GREEN: anything that bypasses libc is unseen
+   whatever its intent (a dependency's raw syscall included), deliberate verdict forgery by the code
+   under test is outside the threat model, and at opt-level 1 or more a crate's generic `Drop`
+   holding the control helper can read GREEN. Residual 11 is closed only for the crates' own code:
+   a `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
+   (an `atexit` handler, a signal handler) is now judged as a crate frame, but one defined in a
+   build script's bundled C, or in any object cargo did not build into an rlib, still names no
+   crate and reads GREEN.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

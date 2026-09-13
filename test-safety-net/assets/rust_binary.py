@@ -892,6 +892,222 @@ def symbol_names(path) -> list:
     return []
 
 
+# ── The crate-export list (ruling R42) ───────────────────────────────────
+#
+# A `#[no_mangle]`/`#[export_name]` fn carries a plain C symbol, so the hook
+# cannot read a crate from its name. The wrapper hands the hook a list of
+# them instead: the defined, global (or weak), unmangled TEXT symbols of the
+# rustc codegen objects (`*.rcgu.o` members) of every rlib cargo reports for
+# the build -- the crate under test and its dependencies, never the sysroot.
+# Bundled native members (a build script's C: zstd, sqlite, zlib, ring) are
+# NOT rcgu members and are never read: std or libtest calling into that C
+# must stay transparent. A member this cannot read -- LLVM bitcode under
+# linker-plugin LTO, an unknown object format, a truncated archive -- is an
+# ExportListError, and the proof refuses to run rather than guess.
+
+class ExportListError(Exception):
+    """An rlib whose crate exports cannot be read: nothing may be proved."""
+
+
+_AR_MAGIC = b"!<arch>\n"
+_AR_HDR = 60
+_AR_SYMTABS = frozenset({"/", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64",
+                         "__.SYMDEF_64 SORTED"})
+_RCGU = ".rcgu.o"
+_BITCODE = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")   # raw LLVM bitcode, and its wrapper
+
+
+def ar_members(data: bytes) -> list:
+    """[(name, bytes)] of a GNU or BSD `ar` archive, in order, its symbol
+    table (`/`, `/SYM64/`, `__.SYMDEF*`) and GNU long-name table (`//`)
+    consumed rather than returned. GNU names end in `/` or are `/<offset>`
+    into the long-name table; BSD names are `#1/<len>`, the name leading the
+    member's data. Raises ExportListError on anything else."""
+    if data[:8] == b"!<thin>\n":
+        raise ExportListError("a thin archive, whose members live outside it")
+    if data[:8] != _AR_MAGIC:
+        raise ExportListError("not an ar archive")
+    members, longnames, off = [], None, 8
+    while off < len(data):
+        if data[off:off + 1] == b"\n":          # stray alignment padding
+            off += 1
+            continue
+        hdr = data[off:off + _AR_HDR]
+        if len(hdr) < _AR_HDR or hdr[58:60] != b"`\n":
+            raise ExportListError("a truncated or malformed archive member header")
+        raw = hdr[:16].decode("latin-1").rstrip(" ")
+        size_text = hdr[48:58].decode("latin-1").strip()
+        if not size_text.isdigit():
+            raise ExportListError("an archive member with no decimal size")
+        size = int(size_text)
+        start = off + _AR_HDR
+        body = data[start:start + size]
+        if len(body) < size:
+            raise ExportListError("an archive member that runs past the end of the file")
+        off = start + size + (size & 1)
+        if raw.startswith("#1/"):
+            if not raw[3:].isdigit() or int(raw[3:]) > size:
+                raise ExportListError("a BSD long member name with a bad length")
+            n = int(raw[3:])
+            name, body = body[:n].split(b"\0", 1)[0].decode("utf-8", "replace"), body[n:]
+        elif raw == "//":
+            longnames = body
+            continue
+        elif raw in _AR_SYMTABS:                # `/`, `/SYM64/`: before `/` is stripped
+            continue
+        elif raw.startswith("/") and raw[1:].isdigit():
+            at = int(raw[1:])
+            if longnames is None or at >= len(longnames):
+                raise ExportListError("a GNU long member name with no long-name table entry")
+            end = longnames.find(b"\n", at)
+            text = longnames[at:end if end >= 0 else len(longnames)]
+            name = text.decode("utf-8", "replace").rstrip("/")
+        else:
+            name = raw[:-1] if raw.endswith("/") and raw != "/" else raw
+        if name in _AR_SYMTABS:
+            continue
+        members.append((name, body))
+    return members
+
+
+def _is_rust_mangled(name: str) -> bool:
+    """Legacy `_ZN...` or v0 `_R...`, as the hook's frame names spell them."""
+    return name.startswith(("_ZN", "_R"))
+
+
+_ET_REL = 1
+_SHT_SYMTAB_SHNDX = 18
+_SHF_EXECINSTR = 0x4
+_SHN_LORESERVE, _SHN_XINDEX = 0xFF00, 0xFFFF
+_STB_GLOBAL, _STB_WEAK, _STB_GNU_UNIQUE = 1, 2, 10
+_STT_NOTYPE, _STT_FUNC, _STT_GNU_IFUNC = 0, 2, 10
+
+
+def _elf_rel_exports(data: bytes) -> list:
+    """The defined global/weak TEXT symbol names of an ELF64 LE relocatable
+    object: a FUNC (or IFUNC), or an untyped label (`global_asm!`) in an
+    executable section. Raises _Truncated or ExportListError."""
+    if data[4] != 2 or data[5] != 1:
+        raise ExportListError("an ELF object that is not 64-bit little-endian")
+    (e_type, _machine, _version, _entry, _phoff, e_shoff, _flags, _ehsize, _phentsize,
+     _phnum, e_shentsize, e_shnum, _shstrndx) = _unpack(_ELF_EHDR_REST, data, 16)
+    if e_type != _ET_REL:
+        raise ExportListError("an ELF codegen member that is not a relocatable object")
+    shdrs = [_unpack(_ELF_SHDR, data, e_shoff + i * e_shentsize) for i in range(e_shnum)]
+    symtab = next((i for i, s in enumerate(shdrs) if s[1] == _SHT_SYMTAB), None)
+    if symtab is None:
+        return []
+    _n, _t, _f, _a, sym_off, sym_size, str_link, _i, _al, _ent = shdrs[symtab]
+    if str_link >= len(shdrs):
+        raise _Truncated()
+    strtab = data[shdrs[str_link][4]:shdrs[str_link][4] + shdrs[str_link][5]]
+    xindex = next((s for s in shdrs if s[1] == _SHT_SYMTAB_SHNDX and s[6] == symtab), None)
+    entsize = struct.calcsize(_ELF_SYM)
+    names = []
+    for i in range(1, sym_size // entsize):
+        st_name, info, _other, shndx, _value, _size = \
+            _unpack(_ELF_SYM, data, sym_off + i * entsize)
+        if shndx == _SHN_XINDEX and xindex is not None:
+            (shndx,) = _unpack("<I", data, xindex[4] + i * 4)
+        elif shndx == 0 or shndx >= _SHN_LORESERVE:
+            continue                            # undefined, absolute or common
+        if info >> 4 not in (_STB_GLOBAL, _STB_WEAK, _STB_GNU_UNIQUE) or shndx >= len(shdrs):
+            continue
+        kind = info & 0xF
+        text = kind in (_STT_FUNC, _STT_GNU_IFUNC) or (
+            kind == _STT_NOTYPE and shdrs[shndx][2] & _SHF_EXECINSTR)
+        name = _cstr(strtab, st_name)
+        if text and name:
+            names.append(name)
+    return names
+
+
+_MH_OBJECT = 1
+_LC_SEGMENT_64 = 0x19
+_MACHO_SECTION_64 = "<16s16sQQIIIIIIII"
+_N_STAB, _N_TYPE, _N_SECT, _N_EXT = 0xE0, 0x0E, 0x0E, 0x01
+_S_ATTR_INSTRUCTIONS = 0x80000000 | 0x00000400   # pure / some instructions
+
+
+def _macho_obj_exports(data: bytes) -> list:
+    """The defined external TEXT symbol names of a Mach-O 64 object
+    (`N_SECT|N_EXT` in an instruction section), with Mach-O's leading `_`
+    dropped -- the name `dladdr` gives the hook. Raises _Truncated or
+    ExportListError."""
+    _magic, _cpu, _sub, filetype, ncmds, _size, _flags, _res = _unpack(_MACHO_HDR, data, 0)
+    if filetype != _MH_OBJECT:
+        raise ExportListError("a Mach-O codegen member that is not an object file (MH_OBJECT)")
+    sect_flags, symtab, off = [], None, struct.calcsize(_MACHO_HDR)
+    for _ in range(ncmds):
+        cmd, cmdsize = _unpack(_MACHO_LC_HEAD, data, off)
+        if cmdsize < struct.calcsize(_MACHO_LC_HEAD) or off + cmdsize > len(data):
+            raise _Truncated()
+        if cmd == _LC_SEGMENT_64:
+            (nsects,) = _unpack("<I", data, off + 64)
+            for k in range(nsects):
+                sect = _unpack(_MACHO_SECTION_64, data, off + 72 + k * 80)
+                sect_flags.append(sect[8])
+        elif cmd == _LC_SYMTAB:
+            symtab = _unpack(_MACHO_SYMTAB_LC, data, off)[2:]
+        off += cmdsize
+    if symtab is None:
+        return []
+    symoff, nsyms, stroff, strsize = symtab
+    strtab = data[stroff:stroff + strsize]
+    entsize = struct.calcsize(_MACHO_NLIST)
+    names = []
+    for i in range(nsyms):
+        n_strx, n_type, n_sect, _desc, _value = _unpack(_MACHO_NLIST, data, symoff + i * entsize)
+        if n_type & _N_STAB or n_type & _N_TYPE != _N_SECT or not n_type & _N_EXT:
+            continue
+        if not 1 <= n_sect <= len(sect_flags) or not sect_flags[n_sect - 1] & _S_ATTR_INSTRUCTIONS:
+            continue
+        name = _cstr(strtab, n_strx)
+        if name.startswith("_"):
+            names.append(name[1:])
+    return names
+
+
+def object_exports(data: bytes) -> list:
+    """The defined global TEXT symbol names of one relocatable object (ELF64
+    LE or Mach-O 64), in the hook's spelling. Raises ExportListError for LLVM
+    bitcode (linker-plugin LTO) and any other format it cannot read."""
+    if data[:4] in _BITCODE:
+        raise ExportListError("LLVM bitcode, not machine code (linker-plugin LTO)")
+    try:
+        if data[:4] == b"\x7fELF":
+            return _elf_rel_exports(data)
+        if len(data) >= 4 and struct.unpack_from("<I", data, 0)[0] == _MACHO_MAGIC_64:
+            return _macho_obj_exports(data)
+    except (_Truncated, struct.error, IndexError) as exc:
+        raise ExportListError("a truncated or malformed object") from exc
+    raise ExportListError("not a 64-bit ELF or Mach-O object")
+
+
+def rlib_exports(path) -> list:
+    """The sorted unmangled crate fns rlib `path` defines: the defined global
+    TEXT symbols of its `*.rcgu.o` members that are neither legacy (`_ZN`)
+    nor v0 (`_R`) mangled. Its metadata and bundled native members are never
+    read. Raises ExportListError naming the rlib and the member."""
+    data = _read(path)
+    if data is None:
+        raise ExportListError("%s cannot be read" % path)
+    try:
+        members = ar_members(data)
+    except ExportListError as exc:
+        raise ExportListError("%s: %s" % (path, exc)) from exc
+    names = set()
+    for name, body in members:
+        if not name.endswith(_RCGU):
+            continue
+        try:
+            found = object_exports(body)
+        except ExportListError as exc:
+            raise ExportListError("%s, member %s: %s" % (path, name, exc)) from exc
+        names.update(n for n in found if not _is_rust_mangled(n))
+    return sorted(names)
+
+
 def refusal(facts: BinaryFacts) -> str | None:
     """The reason a preloaded hook would fail open on `facts`, or None.
 

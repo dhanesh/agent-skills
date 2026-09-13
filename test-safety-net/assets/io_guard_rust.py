@@ -81,7 +81,14 @@ Every refusal prints its reason and exits 2:
      (`rust_binary.refusal`): each makes a preloaded hook fail open. One
      that does not link libtest's harness (`harness = false`) is NO TEST:
      there is no libtest run to observe (ruling R22(c));
-  9. the hook, built by the repo's own rustc (`hook_library`);
+  9. the list of the crates' own unmangled fns (ruling R42, `export_list`):
+     the defined global TEXT symbols, neither `_ZN` nor `_R` mangled, of the
+     `*.rcgu.o` members of every rlib cargo's build messages name -- never a
+     bundled C member, never the sysroot. An rlib or member it cannot read
+     (LLVM bitcode under `-C linker-plugin-lto`) exits 2 with that remedy;
+     an empty list is the common case. Then the hook, built by the repo's
+     own rustc (`hook_library`), and the list written OUTSIDE the repo
+     (`<cache>/rust-exports/`) for the hook to read, removed after the run;
  10. `<exe> <test_name> --exact --test-threads=1` under the preload, with
      stdin closed, core dumps off (an aborting test would otherwise write
      `<repo>/core` where `ulimit -c` allows it -- measured in the rust
@@ -141,16 +148,17 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    `PARTIALLY_INTERCEPTED` below carry each, measured; the filter still
    marks them.
 7. darwin and linux only; x86_64 macOS is unproven.
-8. An unmangled `#[no_mangle]`/`#[export_name]` fn reached only from a C or
-   std frame on the main thread (an `atexit` handler, a signal handler, an
-   `.init_array` entry) carries a plain C symbol: the walk finds no crate
-   frame beneath it, and the main-thread branch of the thread-identity rule
-   (below) reads that as pre-`main` init and exempts it -- its I/O reads
-   GREEN (ruling R41; measured on darwin 1.92, `scratchpad/final-review/ax/`:
-   a `#[no_mangle]` `atexit` handler wrote a file and exited 0, the same
-   handler mangled exited 3). Follow-up, not shipped: treat an unmangled
-   symbol inside the executable's own image as a crate frame, minus std's
-   own C-ABI exports.
+8. CLOSED -- an unmangled `#[no_mangle]`/`#[export_name]` fn reached only
+   from a C or std frame on the main thread (an `atexit` handler, a signal
+   handler, an `.init_array` entry) named no crate, and its I/O read GREEN
+   (ruling R41; darwin 1.92, `scratchpad/final-review/ax/`: the `atexit`
+   handler wrote a file and exited 0). The wrapper now lists the crates'
+   own unmangled fns (step 9) and the hook judges a listed frame in the
+   executable's image as a crate frame (ruling R42): the same handler exits
+   3 on darwin 1.92/1.98 and linux 1.82/1.94/1.98, pinned by
+   `TestUnmangledExports`. REMAINING: an unmangled fn from a non-rcgu member
+   (a build script's bundled C) or from an object cargo did not build into
+   an rlib (a `cc`-built `.a`, a `global_asm!` in tests/) is still unseen.
 
 THE HOOK
 --------
@@ -170,7 +178,12 @@ Its environment contract:
     it is present, and reads it once, in its constructor, with the real
     `getenv`;
   * `TSN_TIER`    -- the tier, for the message;
-  * `TSN_STDIN=1` -- set at tier 1: a read of fd 0 trips only then.
+  * `TSN_STDIN=1` -- set at tier 1: a read of fd 0 trips only then;
+  * `TSN_EXPORTS` -- the path of the crates' unmangled-fn list, one
+    `<name>\t<label>` line each (ruling R42). The constructor copies it into
+    a fixed `EXPORTS_CAP` buffer once, before arming; a file that will not
+    open or read, or does not fit, is `cannot attribute` (exit 2). Unset,
+    there is no list.
 
 Its handshake: when armed, the constructor writes `tsn-hook: armed` to fd 2.
 It reports one more thing (ruling R19): libc `exit` or `quick_exit` reached
@@ -230,7 +243,11 @@ spike's 128 slots used to fall off the end and be exempt):
     `__rust_begin_short_backtrace` (thread spawn, lang_start) does not count;
   * a symbol without Rust's `17h<16 hex>E` hash, or a transparent-crate
     frame, is passed over -- so a runtime's C++ `_ZN` symbols are never read
-    as crate code.
+    as crate code -- UNLESS it is an unmangled name on the TSN_EXPORTS list
+    and the frame lies in the executable's own image (ruling R42): that is
+    a crate's `#[no_mangle]`/`#[export_name]` fn, a CRATE frame, and it
+    decides with the call's group, named `<fn> (unmangled fn of crate <c>)`.
+    A listed name in a shared library's frame is still passed over.
 Each frame's symbol is read in ITS OWN mangling (ruling R26): legacy
 `_ZN...17h<hash>E`, or v0 `_R...` -- rustc 1.98's default, in which std, core,
 alloc and libtest ship precompiled. Every rule above holds for v0 names too:
@@ -341,6 +358,10 @@ CONTROL_HELPERS = {"tsn_control_temp_dir": "filesystem",
 # through the PLT, so on linux the table is inert. Adding an image here needs
 # a measured reason like that one: every entry is a hole by construction.
 SYSTEM_INTERNAL_IMAGES = ("libsystem_malloc.dylib",)
+# Ruling R42: the most bytes of crate-export list (`<name>\t<label>\n` per
+# unmangled crate fn) the hook copies into its static buffer. A list past it
+# is refused before the run, and the hook refuses one too (exit 2 either way).
+EXPORTS_CAP = 1 << 20
 
 # `chdir` and `getcwd` are ENVIRONMENT (ruling R16 as amended): they mirror
 # the `set_current_dir` and `current_dir` markers, which stack_rust puts in
@@ -437,6 +458,7 @@ def render_tables() -> str:
         "static CONTROL: &[(&[u8], &[u8])] = &[%s];" % _pairs(sorted(CONTROL_HELPERS.items())),
         "static SYSTEM_INTERNAL: &[&[u8]] = &[%s];" % _bytes_list(SYSTEM_INTERNAL_IMAGES),
         "static EARLY_EXIT_STATUS: c_int = %d;" % EARLY_EXIT_STATUS,
+        "const EXPORTS_CAP: usize = %d;" % EXPORTS_CAP,
     ]
     for plat in sorted(INTERCEPTS):
         pairs = [(name, group) for group in sorted(INTERCEPTS[plat])
@@ -870,12 +892,16 @@ BuildPlan.__doc__ = """How the proof is built, decided once; build and run never
     reason      why the plan is not the normal one ("" when it is)
 """
 
-BuildResult = collections.namedtuple("BuildResult", "exe compile_error output")
+BuildResult = collections.namedtuple("BuildResult", "exe compile_error output rlibs",
+                                     defaults=((),))
 BuildResult.__doc__ = """One `cargo test --no-run`.
 
     exe            the test executable cargo reported, or None
     compile_error  the compiler's error text (or cargo's, with no executable), or None
     output         everything cargo said, for the reader
+    rlibs          (crate, path) of every `.rlib` cargo's compiler-artifact
+                   messages name -- the crate under test and its
+                   dependencies, never the sysroot (ruling R42)
 """
 
 _RUSTIX = re.compile(r'(?m)^name = "rustix"$')
@@ -941,7 +967,7 @@ def build_test(repo, plan, test_target, package, env):
                               errors="replace", stdin=subprocess.DEVNULL)
     except OSError as exc:
         raise GuardCannotArm("cargo could not run: %s" % exc) from exc
-    exes, errors, local = [], [], []
+    exes, errors, local, rlibs = [], [], [], []
     for line in proc.stdout.splitlines():
         try:
             msg = json.loads(line)
@@ -951,6 +977,12 @@ def build_test(repo, plan, test_target, package, env):
             continue
         if msg.get("reason") == "compiler-artifact":
             target = msg.get("target") or {}
+            # Ruling R42: every rlib this build linked from, for the list of
+            # the crates' own unmangled fns.
+            for path in msg.get("filenames") or ():
+                if isinstance(path, str) and path.endswith(".rlib") \
+                        and (str(target.get("name") or ""), path) not in rlibs:
+                    rlibs.append((str(target.get("name") or ""), path))
             # Ruling R35: only crates linked INTO the test binary can be
             # misread by name -- a lib-like target or the test itself, never a
             # bin, an example or a bench.
@@ -991,7 +1023,65 @@ def build_test(repo, plan, test_target, package, env):
         compile_error = "\n".join(errors)
     elif proc.returncode != 0 and not exe:
         compile_error = _first_error(proc.stderr)
-    return BuildResult(None if compile_error else exe, compile_error, output)
+    return BuildResult(None if compile_error else exe, compile_error, output, tuple(rlibs))
+
+
+# ── The crate-export list (ruling R42) ───────────────────────────────────
+
+_EXPORTS_UNREADABLE = ("the list of the crates' own unmangled fns could not be built (%s). The "
+                       "hook reads a `#[no_mangle]`/`#[export_name]` fn as a crate frame only "
+                       "from that list, and each cargo-built rlib's codegen objects must be "
+                       "machine code for it: build without `-C linker-plugin-lto` (or any flag "
+                       "that makes rustc emit LLVM bitcode), then re-run")
+
+
+def export_list(rlibs):
+    """[(name, crate)] of every unmangled fn the rcgu members of `rlibs`
+    ((crate, path) pairs, from `BuildResult.rlibs`) define, sorted by name;
+    a name defined twice keeps its first crate. Empty is the common case.
+    Raises GuardCannotArm when an rlib cannot be read, or a name cannot be
+    carried in the hook's `<name>\\t<label>\\n` lines."""
+    found = {}
+    for crate, path in rlibs:
+        try:
+            names = rust_binary.rlib_exports(path)
+        except rust_binary.ExportListError as exc:
+            raise GuardCannotArm(_EXPORTS_UNREADABLE % exc) from exc
+        for name in names:
+            if any(c in name for c in "\t\n\r"):
+                raise GuardCannotArm(_EXPORTS_UNREADABLE
+                                     % ("%s exports %r, a name the hook cannot carry"
+                                        % (path, name)))
+            found.setdefault(name, crate.replace("-", "_"))
+    return sorted(found.items())
+
+
+def export_text(entries):
+    """The hook's list: one `<name>\\t<label>\\n` line per (name, crate). The
+    label is what a trip names: the fn, and the crate it came from."""
+    text = "".join("%s\t%s (unmangled fn of crate %s)\n" % (name, name, crate)
+                   for name, crate in entries)
+    if len(text.encode("utf-8")) > EXPORTS_CAP:
+        raise GuardCannotArm("the list of the crates' own unmangled fns is %d bytes, more than "
+                             "the hook's %d; nothing was run"
+                             % (len(text.encode("utf-8")), EXPORTS_CAP))
+    return text
+
+
+def write_exports(text, env):
+    """Write the list to a fresh file in `<cache>/rust-exports/`, never the
+    repo, and return its path; the caller removes it after the run. Raises
+    GuardCannotArm when it cannot be written."""
+    where = os.path.join(_cache_root(env), "rust-exports")
+    try:
+        os.makedirs(where, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix="exports-", suffix=".txt", dir=where)
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode("utf-8"))
+    except OSError as exc:
+        raise GuardCannotArm("the crate-export list could not be written under %s: %s"
+                             % (where, exc)) from exc
+    return path
 
 
 # ── The run and its verdict ──────────────────────────────────────────────
@@ -1004,12 +1094,13 @@ def _no_core_dump():
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
-def run_proof(exe, test_name, tier, allow, hook, env):
+def run_proof(exe, test_name, tier, allow, hook, env, exports=None):
     """`(code, output)` of `exe` running `test_name` alone under the hook.
 
     The line is exactly `[exe, test_name, "--exact", "--test-threads=1"]`,
     stdin closed, no core file, combined output teed to stdout, killed after
-    PROOF_TIMEOUT seconds."""
+    PROOF_TIMEOUT seconds. `exports` is the crate-export list's path, handed
+    to the hook as TSN_EXPORTS (ruling R42)."""
     blocked = guard_env.blocked_groups(tier, allow, GROUPS, CONTROLLABLE_GROUPS,
                                        UNCONTROLLABLE_GROUPS)
     run_env = {k: v for k, v in env.items() if not k.startswith("TSN_") and k not in _RUN_SCRUB}
@@ -1017,6 +1108,8 @@ def run_proof(exe, test_name, tier, allow, hook, env):
     run_env["TSN_TIER"] = str(tier)
     if tier == 1:
         run_env["TSN_STDIN"] = "1"
+    if exports:
+        run_env["TSN_EXPORTS"] = exports
     run_env[_PRELOAD[_platform() or "linux"]] = hook
     proc = subprocess.Popen([exe, test_name, *PROOF_ARGS], env=run_env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -1275,10 +1368,19 @@ def main(argv=None):
         _say(_RUST_NO_TEST)
         return EXIT_NO_TEST
     try:
+        exports = export_text(export_list(built.rlibs))
         hook = hook_library(repo, env)
+        exports_path = write_exports(exports, env)
     except GuardCannotArm as exc:
         return _not_armed(str(exc))
-    code, output = run_proof(built.exe, args.test_name, tier, allow, hook, env)
+    try:
+        code, output = run_proof(built.exe, args.test_name, tier, allow, hook, env,
+                                 exports=exports_path)
+    finally:
+        try:
+            os.unlink(exports_path)
+        except OSError:
+            pass
     outcome, note = _verdict(code, output, args.test_name)
     if outcome == EXIT_NOT_ARMED:
         return _not_armed(note)
