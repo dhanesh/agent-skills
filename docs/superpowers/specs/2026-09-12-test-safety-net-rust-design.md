@@ -331,3 +331,28 @@ Classifying output stays in each stack's guard, because it reads a different tes
 7. The macOS floor may be Linux-proven only.
 8. Rust's own support policy covers only the latest stable, so the four older legs are this skill's
    claim, not the Rust project's.
+
+## Amended during implementation, 2026-09-13
+
+Controller rulings made while the plan ran changed these decisions. The shipped documents
+(`SKILL.md`, `references/stacks.md`) state the result; the rulings and their reasons are in the
+plan's progress ledger. One line each, what changed and why:
+
+- **Crates are read from `Cargo.toml` text, never from `cargo metadata`.** A line reader (headers, `key = "value"`, multi-line values, R6) keeps the ranker free of cargo, so it ranks on a machine with none; only the guard runs cargo.
+- **The triage reach is crate-wide (R9).** A same-file reach under-marked cross-file I/O; the reach now follows `crate::`/`super::`/`self::`/`use crate::…` paths and re-exports transitively, as go's is package-wide, because an uncertain tier goes up.
+- **The marker tables are extended (R10).** `rand::rng` under randomness; `chrono::Utc::now`/`Local::now` under clock; `std::env::args_os`/`vars_os`/`current_exe`/`set_current_dir` under environment, because mainstream I/O read Tier 1 under the original tables.
+- **`std::io::stdin` is guard-only, not a marker.** The hook blocks a read of fd 0 at tier 1, the rule every stack shares, because the failure mode is a hang that yields no verdict.
+- **Unreachable units are units, tiered 3 — not "never units".** A `pub(crate)` item, a `pub` item behind a private module and a binary's fns are ranked and reported with `not reachable from tests/ without modifying source (<why>)` or `binary-only: …`, never tested, so the seam list sees them. Eval check 47 changes with it: such units must be in `not_netted`, not absent.
+- **The import is in the triage reason (R7).** `stack_rust.public_path` gives the shortest public path, and every reachable Tier 1/2 reason ends ``; import as `use <public_path>;` ``, so the agent writes an import that compiles rather than guessing one.
+- **One allocator image is exempt (R11).** `SYSTEM_INTERNAL_IMAGES = ("libsystem_malloc.dylib",)`: macOS's allocator reads `mach_absolute_time` building a thread cache, and without the exemption every darwin test tripped `clock`.
+- **libtest's test-body boundaries are judged (R13, R17a).** Reaching `test::__rust_begin_short_backtrace` or `test::assert_test_result` before any crate frame is judged `(test body, inlined)`, because at opt-level ≥ 1 the test body or its `Termination::report` inlines into libtest's generic and read as runner work.
+- **Impl, `drop_in_place` and bare-segment frames are classified by crate (R14, R17b, R18).** `<T as Trait>::m` is decided by T's crate, `drop_in_place<T>` by the first non-transparent crate path in T, and a generic parameter or primitive is a bare segment naming no crate, so a crate's own `Drop`/`Display` impls are judged rather than passed over.
+- **Thread identity and a 1024-frame cap (R15).** A walk that decides nothing is judged off the main thread and exempt on it (thread identity, not frame names), and a full 1024-frame buffer is judged, because a deep Drop chain fell off the 128-slot end and was exempt.
+- **Intercepts are added (R16).** `readlink`, `rmdir`, `chmod`/`fchmodat`, `symlink`, `realpath` (filesystem), `getcwd` and `chdir` (environment, matching the `current_dir`/`set_current_dir` markers), and the `*64`/`*at` variants std calls, because the original table missed calls std bottoms out in.
+- **Exit handling and status 125 (R19, R22).** The hook intercepts `exit`/`quick_exit`; one a crate frame makes is reported as an early exit and ends the process with status 125, read as NO TEST. GREEN also needs libtest's own `test <name> ... ok` line, a `harness = false` binary is NO TEST, and every `exec*` entry point trips as subprocess, so a test that ends the process after printing result lines cannot read GREEN.
+- **The threat model is explicit (R22(e)).** The guard defends against accidental I/O and accidental verdict corruption; deliberate forgery by the code under test (`_exit`/`SYS_exit` after forged lines, patching the hook's statics) cannot be defended from inside the process, and is a stated residual, like go's residual 7.
+- **The fat-LTO residual (R23).** Fat LTO in `[profile.dev]`/`[profile.test]` inlines the panic hook's `getenv` and libtest's exit into the harness `main`, so honest failures read 3 or 4. It fails closed (never a false GREEN) and is stated rather than fixed; the candidate fix, exempting rustc's generated harness `main`, goes to the final review.
+- **The arm handshake is two-part (R1), and two more refusals exist (R20, R21).** `tsn-hook: armed`, plus `tsn-hook: cannot attribute` (exit 2) on an unresolvable walk or a missing Linux `.symtab`, because executable symbols are not in `.dynsym` and a by-name self-check could not work. Several packages with `tests/<stem>.rs` and no `-p`, a preload the loader skipped, or a handshake after `running N test` also exit 2.
+- **The rustix build plan reads `Cargo.lock`.** Any `rustix` in the lockfile selects the separate target dir and `--cfg=rustix_use_libc` on Linux, so the plan needs no `cargo metadata` call.
+
+The shipped residuals are nine, not the eight above: `references/stacks.md` merges and extends them.

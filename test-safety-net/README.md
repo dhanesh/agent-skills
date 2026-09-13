@@ -1,7 +1,7 @@
 # test-safety-net
 
 Writes real, proven-failing-before-passing tests into a repo that has none, so an agent (or a
-person) can change it without flying blind. Python, node/TypeScript and Go, all end to end. Not a
+person) can change it without flying blind. Python, node/TypeScript, Go and Rust, all end to end. Not a
 correctness audit — it pins current behaviour even where it looks wrong, and reports the suspicion
 rather than silently blessing it — and never a coverage-percentage chaser.
 
@@ -42,7 +42,9 @@ every unit rather than assuming it's callable:
 | 4 — not reachable | global state, import-time work, deep branch soup | a prioritized refactor reason |
 
 Only filesystem, clock, randomness, and environment variables are controlled automatically (on
-Go, randomness is not: `rand.Seed` has been a no-op since Go 1.24) — database and HTTP are declined
+Go, randomness is not: `rand.Seed` has been a no-op since Go 1.24; on Rust only filesystem and
+environment are, through two helpers the test file carries, because std has no clock freeze and no
+RNG) — database and HTTP are declined
 to Tier 3 by default and are only ever pinned at Tier 2 with a recorded justification (an in-memory
 database, or `mockstar-mock` for HTTP), never silently.
 
@@ -69,11 +71,17 @@ per stack, loaded on the single-test invocation rather than written into the rep
   `init()` included, runs guarded. It hooks every classified `syscall` function and the clock,
   randomness, database and network entry points, decides each call by **call provenance**
   (`runtime.Callers`), and ends the process on a trip, so `recover()` cannot swallow one.
+- [`assets/io_guard_rust.py`](assets/io_guard_rust.py) — a wrapper that builds the test with
+  **`cargo test --locked --no-run`**, then runs the compiled binary under a **preloaded hook
+  library** (`assets/io_guard_rust_hook.rs`, built by the repo's own `rustc`) that intercepts libc
+  and attributes each call to the Rust function that made it, walking `backtrace()`. A trip ends
+  the process with `_exit(3)`, so no `catch_unwind` can swallow one. It refuses (exit 2) the
+  static, stripped and musl binaries a preload cannot guard, and never downloads a toolchain.
 
-All three raise their own violation, so a guard trip (the classification is wrong) is never
+All four raise their own violation, so a guard trip (the classification is wrong) is never
 mistaken for an assertion failure (the captured value is wrong). Full mechanism, coverage table and
 residuals in [`references/triage.md`](references/triage.md) for python and
-[`references/stacks.md`](references/stacks.md) for node and go — including node's one rule with no Python
+[`references/stacks.md`](references/stacks.md) for node, go and rust — including node's one rule with no Python
 equivalent: when a violation lands after its test resolved, `node --test` blames the wrong entry, so
 **the exit status is the only trustworthy signal on that stack.**
 
@@ -87,15 +95,18 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Three stacks are complete, each on **the last five versions of its language**,
-proved by CI on every one — **Python** 3.10–3.14 (pytest, falling back to `unittest`),
-**node/TypeScript** on the LTS lines 18, 20, 22, 24 and 26 (`node --test`, no dependency added) and
-**Go** 1.22–1.26 (`go test`, darwin and linux, no dependency added). Legacy toolchains are where
-untested code lives, which is why the floor is five versions back and not one. rust is not covered: it is not registered, so the ranker
-says so on stderr and returns an empty plan rather than guessing (see
+churn signal). Four stacks are complete, each proved by CI on every version it claims —
+**Python** 3.10–3.14 (pytest, falling back to `unittest`), **node/TypeScript** on the LTS lines 18,
+20, 22, 24 and 26 (`node --test`, no dependency added), **Go** 1.22–1.26 (`go test`, darwin and
+linux, no dependency added) and **Rust** 1.82, 1.86, 1.90, 1.94 and 1.98 (`cargo test`, darwin and
+linux, no dependency added; the minors in between are expected by bracketing, not proven). Legacy
+toolchains are where untested code lives, which is why the floor is five versions back and not one
+— for Rust, every 4th minor across about two years, since Rust itself supports only the latest
+stable. A repo no stack claims gets a note on stderr and an empty plan rather than a guess (see
 [`references/stacks.md`](references/stacks.md)). Node's optional precise discovery drives a
 `typescript` the repo already ships and never downloads one; Go's runs this skill's own `go/ast`
-helper and never downloads a toolchain.
+helper and never downloads a toolchain; Rust's guard needs a `Cargo.lock` and refuses a toolchain
+pin that is not installed rather than downloading it.
 
 ## Usage
 
@@ -122,8 +133,8 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `references/triage.md` — the four-tier triage, boundary controls, and python's runtime guard:
   what it patches, how a trip is signalled, and its seven residuals.
 - `references/stacks.md` — per-stack facts (find units / where tests go / which framework / run one
-  test), and the node and go halves of the guard story: their patch tables, their residuals, node's
-  exit-status rule and go's `-overlay` mechanism.
+  test), and the node, go and rust halves of the guard story: their patch tables, their residuals,
+  node's exit-status rule, go's `-overlay` mechanism and rust's libc interposition.
 - `references/parameters.md` — `rank_risk.py`'s CLI flags and JSON output shape.
 - `assets/rank_risk.py` — the stack-agnostic ranker: churn, approximate blast radius,
   scoring, the CLI and the JSON shape, plus the stack registry everything else hangs off.
@@ -135,16 +146,32 @@ every suspected bug (pinned, not blessed), everything it couldn't prove, and the
 - `assets/stack_go.py` — the Go stack: heuristic and `go/ast` discovery of exported functions
   and methods, package-scoped naming and coverage, the 275-name `syscall` table both layers share,
   and Go's I/O marker tables and triage.
+- `assets/stack_rust.py` — the Rust stack: heuristic discovery of `pub` fns and inherent-impl
+  methods, crates read from `Cargo.toml` text, `tests/`-reachability and the public path a test
+  imports, Rust's I/O marker tables and crate-wide triage.
 - `assets/stack_common.py` — the file helpers and the manifest-evidence rule the
   ranker and every stack share.
+- `assets/guard_env.py` — the tier/allow contract and the six-row exit table the go and rust
+  guards share.
 - `assets/io_guard.py` — python's tier-aware runtime I/O guard, loaded as a pytest plugin via `-p`.
 - `assets/io_guard.js` — node's, preloaded with `node --require`; dependency-free CommonJS.
 - `assets/io_guard_go.py` — go's, a stdlib-python wrapper around `go test -overlay`.
+- `assets/io_guard_rust.py` — rust's, a stdlib-python wrapper that builds with
+  `cargo test --locked --no-run`, owns the hook's name tables and classifies the run.
+- `assets/io_guard_rust_hook.rs` — the hook's source, a cdylib the repo's own `rustc` builds and
+  the wrapper preloads under the test binary.
+- `assets/rust_binary.py` — pure ELF/Mach-O inspection: refuses static, stripped and musl
+  binaries, where a preloaded hook would fail open.
 - `assets/test_io_guard_node.sh` — the node guard's shell suite, whose first assertion extracts the
   documented invocation from every document that prints it and runs it verbatim, in both
   directions.
 - `assets/test_io_guard_go.py` — the go guard's suite, which does the same for its own
   invocation and proves every group, the tier-2 controls and the exit contract.
+- `assets/test_io_guard_rust.py` — the rust guard's suite, which extracts the documented
+  invocation from the guard's header and every markdown file in the skill and runs it verbatim, and
+  proves every group, the control helpers, each refusal and the exit contract against real cargo
+  fixtures (it skips without cargo).
 - `assets/test_rank_risk.py`, `assets/test_io_guard.py`, `assets/test_stack_node.py`,
-  `assets/test_stack_go.py` — their stdlib test suites.
+  `assets/test_stack_go.py`, `assets/test_stack_rust.py`, `assets/test_rust_binary.py`,
+  `assets/test_guard_env.py` — their stdlib test suites.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's `docs/eval-standard.md`).

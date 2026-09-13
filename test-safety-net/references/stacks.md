@@ -11,7 +11,7 @@ indistinguishable from the one you're proving.
 | python | module-level `def` / `class` | `tests/` or `test_*.py` beside the source | pytest, falling back to `unittest` | `pytest path/to/test_file.py::test_name` (or `pytest path/to/test_file.py::TestClass::test_name`); unittest fallback: `python3 -m unittest module.Class.test_name` |
 | node | top-level `export`ed function/class (`export function`, `export default`, `export const f = …`, `export class`, `export { f }`, `module.exports`/`exports.f`) | `<name>.test.js` beside the source, `__tests__/<name>.test.js` beside it, or a mirrored `test/<dir>/<name>.test.js` — whichever the repo already uses | node's built-in runner, `node --test` (node 18+); **no dependency is added** | `node --test --test-name-pattern '^<test_name>$' <path>` |
 | go | exported top-level `func`, and exported methods on exported types (`func (r *T) M(` → unit `T.M`) | `<file>_test.go` beside the source, **in the same package** | `go test` (go 1.22–1.26, see Supported versions); **no dependency is added** | `python3 "$SKILL_DIR/assets/io_guard_go.py" -run '^<test_name>$' <package>` — `go test -run` under the guard |
-| rust | *not supported — no stack is registered, see below* | — | — | — |
+| rust | `pub` fns with a body, and `pub` methods of inherent `impl` blocks (unit `Type::method`), in a crate's library or binary source — tested only when a `tests/` crate can name them (see "Rust row, in detail") | `tests/tsn_<module_path>.rs` (`src/calc/add.rs` → `tests/tsn_calc_add.rs`), appended to and never overwritten; an environment-controlled test alone in `tests/tsn_<module_path>_env_<n>.rs` | libtest, through `cargo test` (rust 1.82–1.98, see Supported versions); **no dependency is added** | `python3 "$SKILL_DIR/assets/io_guard_rust.py" [-p <package>] --test <test_file_stem> <test_name>`, from the crate or workspace root — `cargo test --locked --no-run`, then the binary's `<test_name> --exact` under the guard |
 
 ## Supported versions — the last five of each, proved in CI
 
@@ -25,16 +25,19 @@ suites on every one of them rather than assuming it:
 | node | LTS lines 18, 20, 22, 24, 26 | Node 26's default test reporter is `spec` even when stdout is a pipe; the per-test transcripts quoted in `SKILL.md` are TAP (`--test-reporter=tap`), and the exit-status rule needs neither. `node:inspector/promises` arrived in 20. Running a `.ts` test directly needs 22.6+ (type stripping); older lines pin TypeScript through the repo's built JavaScript. Node 16 has no `node:test` at all, which is why the five lines start at 18. |
 | go | 1.22, 1.23, 1.24, 1.25, 1.26 | `go vet` on 1.22–1.23 ignores an overlay's added files, so the guard runs `-vet=off`. `crypto/internal/sysrand` (1.24+) is hooked where it exists; `crypto/rand`'s entry points are hooked on every version. The clock control, `testing/synctest`, is 1.25+: on 1.22–1.24 a clock unit is a **could not prove**, not a Tier 2 pin. |
 
-A version-specific fact the skill relies on either works on all five or fails closed — the go guard
-exits 2 rather than run with a hook missing — and the matrix is what finds out which.
+| rust | 1.82, 1.86, 1.90, 1.94, 1.98 | Every 4th minor, about 22 months (owner decision O1): the literal last five minors would span about 7 months at Rust's 6-week cadence. A minor in between is **expected by bracketing, not proven**, and 1.86 and 1.90 were first run in CI, not in the spikes. The Rust project supports only the latest stable release, so the four older legs are this skill's own claim, not the Rust project's. 1.82 is the floor: a `panic=abort` cdylib built by 1.82 has incomplete unwind tables, so the hook is built with `-C force-unwind-tables=yes` and refuses to decide on a walk it cannot resolve. A toolchain pinned below 1.82 is ranked, and its proof exits 2. std's HashMap seed path moved (`std::sys::pal::unix::rand` in 1.82, `std::sys::random::linux` in 1.92); both name `hashmap_random_keys`, the one seed name the hook exempts. `std::env::set_var` is `unsafe` from edition 2024 and a warning in 2021, which is why the helpers wrap it in `unsafe {}` under `#[allow(unused_unsafe)]`. CI's legs run on `ubuntu-latest`, which is amd64: they are the only amd64 proof the rust guard has. |
 
-This version of the skill **writes tests for Python, node/TypeScript and Go repositories**. The
+A version-specific fact the skill relies on either works on all five or fails closed — the go guard
+exits 2 rather than run with a hook missing, and the rust guard exits 2 rather than guess at a frame
+it cannot attribute — and the matrix is what finds out which.
+
+This version of the skill **writes tests for Python, node/TypeScript, Go and Rust repositories**. The
 workflow itself (rank → confirm → write+prove → report) is language-agnostic, and adding a stack is
 a matter of filling in its row here, registering it in `assets/rank_risk.py`, and shipping a
 runtime guard that can prove the no-I/O invariant — it should never require reopening the workflow.
 
-Do not improvise support for rust by guessing at conventions. It is not registered, so the ranker
-writes `note: no stack claims <repo> (evidence: go=0, node=0, python=0)` to **stderr** and returns an
+Every language named in this file is registered, so a repo none of them claims gets
+`note: no stack claims <repo> (evidence: go=0, node=0, python=0, rust=0)` on **stderr** and an
 empty plan with `units_discovered: 0`; the `stack` key still reads `"python"`, which is the default
 and not a verdict, so read the stderr note rather than the key. Say plainly that this version does
 not cover the repo, and stop rather than proceeding on assumptions.
@@ -418,6 +421,269 @@ Those lines come from the test binary's stdout, which the repo's own code shares
    safe: the candidate is declined. The GREEN direction is not defended. In a probe, an `init` that
    printed `--- PASS: TestNobody` turned a `-run` matching no test from 4 into 0. It takes repo code
    impersonating the test runner.
+
+## Rust row, in detail
+
+`assets/rank_risk.py` covers Rust end to end — detect → discover → triage → rank — and
+`assets/io_guard_rust.py` proves each test. Detection weighs `Cargo.toml` like every other manifest:
+one with a `[package]` or `[workspace]` table declares the stack. One holding only `[profile.*]` is
+tooling and scales nothing.
+
+**Crates are read from `Cargo.toml` text, never from `cargo metadata`.** Python 3.10 has no stdlib
+TOML reader, so the stack reads each `Cargo.toml` line by line: `[section]` headers and
+`key = "value"` lines, with a multi-line value followed until its brackets balance. A crate's `use`
+name is `[lib] name`, else `[package] name` with `-` → `_`. The ranker never runs cargo, so it works
+on a machine with none.
+
+**One reader, and the report says so.** Discovery is heuristic only. It is regex plus brace matching
+over Rust-aware lexing: nested block comments, raw strings (`r#"…"#`), a `'` that is a char literal
+in `'a'` but a lifetime in `&'a str`, and attributes. There is no precise path. The per-file
+`rustc -Zunpretty=ast-tree` dump needs `RUSTC_BOOTSTRAP`, and its format moved between 1.82 and 1.92.
+So every rust report says `discovery: "heuristic"`, and `--no-precise` changes nothing.
+
+**What a unit is.** A `pub` (or `pub(<restriction>)`) fn with a body, and such a method of an
+inherent `impl`, named `Type::method`, in a crate's library or binary source. These are never units:
+`tests/`, `examples/`, `benches/`, `build.rs`, `target/`, vendored code, and every `#[cfg(test)]`
+item, including any file reached only at or below a `#[cfg(test)] mod`. A private fn is not a unit:
+the fn that calls it is.
+
+**Reachability decides whether a unit can be tested at all.** Each `tests/*.rs` file is a crate of
+its own, and it reaches the library only through public paths. A unit is reachable when every `mod`
+from `src/lib.rs` down to its file is `pub mod`, or when a `pub use` re-exports it, named or glob. A
+method is reachable through its type, which must itself be public. Every other unit is still ranked,
+then tiered 3 with one of two reasons:
+
+- `not reachable from tests/ without modifying source (<why>)`. The `<why>` is one of: a
+  `pub(crate)` item, a private module on the path, a private type, a type declared elsewhere whose
+  visibility cannot be resolved, a file no `mod` declares, or a file reached only under
+  `#[cfg(test)]`.
+- `binary-only: reachable only by spawning the binary (subprocess)`. The file compiles only into a
+  binary, or the package has no library.
+
+Both are **reported, never tested**. Invariant 1 rules out the `#[cfg(test)]` module a Rust developer
+would add, and spawning the binary is subprocess I/O. A false "unreachable" only reports. A false
+"reachable" produces a test that does not compile, and NO BUILD (exit 5) discards it.
+
+**The import is in the triage reason.** Every reachable unit at Tier 1 or 2 has a `tier_reason`
+ending ``; import as `use <public_path>;` ``. That is the shortest public path, crate name
+included. A shorter `pub use` re-export wins, and a method's path is its type's
+(`use calcx::calc::Report;`). Write exactly that `use` line in the test.
+
+**Triage follows the reach crate-wide** (as go's is package-wide). It reads every use through the
+file's `use` bindings, then follows each call or static reference that resolves into the same crate:
+`crate::`, `super::`, `self::`, a `use crate::…` binding, a `pub use` re-export or a glob. It follows
+them into their files, transitively, with a visited set. It also takes the initialiser of every
+`static` the reach names. A `LazyLock`, `once_cell::Lazy` or `lazy_static!` initialises on first use,
+inside the unit's call, so Rust has no import-time floor like python's and go's.
+
+The reach does not follow a method on a value whose type the reader cannot see (beyond the one-owner
+rule), a fn value or trait object, a macro's expansion, another crate's code, or a binary's own
+modules. The guard is the backstop there.
+
+Two shapes are declined statically at Tier 4, because neither layer can see what they do: inline
+assembly (`asm!`, `global_asm!`, `naked_asm!`) and a raw syscall (`libc::syscall`). FFI is not
+declined: C does its I/O through libc, which the guard hooks.
+
+| group | side | markers |
+|---|---|---|
+| filesystem | controllable | `std::fs`, `File::open`, `File::create`, `OpenOptions`, `tokio::fs`, `async_std::fs`, `Path::{canonicalize, exists, is_dir, is_file, metadata, read_dir, read_link, symlink_metadata, try_exists}` |
+| environment | controllable | `std::env::{var, var_os, vars, args, current_dir, set_var, remove_var, temp_dir, home_dir}`, and `args_os`, `vars_os`, `current_exe`, `set_current_dir` |
+| clock | uncontrollable | `SystemTime::now`, `Instant::now`, `std::thread::sleep`, `tokio::time`, `chrono::Utc::now`, `chrono::Local::now` |
+| randomness | uncontrollable | `rand::thread_rng`, `rand::random`, `rand::rng`, `OsRng`, `getrandom` |
+| network | uncontrollable | `std::net`, `tokio::net`, `reqwest`, `hyper`, `ureq` |
+| subprocess | uncontrollable | `std::process::Command`, `tokio::process` |
+| database | uncontrollable | `sqlx`, `diesel`, `rusqlite`, `postgres` |
+| *(not a marker)* | — | `std::io::stdin` is **guard-only**: the hook blocks a read of fd 0 at tier 1, as on every stack |
+
+**The controls.** libtest has no temp-dir or environment fixture, so the test file carries the
+helpers `SKILL.md` step 4 prints, copied verbatim. The guard recognises them by symbol name
+(`CONTROL_HELPERS`), as go's does `t.TempDir` and `t.Setenv`:
+
+- `tsn_control_temp_dir()` makes a unique directory under `std::env::temp_dir()`. Its `TMPDIR` read
+  counts as filesystem, so a tier-2 filesystem test allows `filesystem` alone.
+- `tsn_control_set_env(k, v)` sets a variable and returns a `TsnControlEnv` that restores it on drop.
+- **An environment-controlled test goes alone in `tests/tsn_<module_path>_env_<n>.rs`.** The
+  environment is process-wide, and libtest runs one file's tests on parallel threads (cargo runs the
+  files one after another). So a test that passes alone could flake beside a sibling. Go avoids this
+  because `t.Setenv` refuses to run beside parallel tests; Rust has no equivalent. The guard refuses
+  (exit 2) any file that calls `tsn_control_set_env` and holds more than one `#[test]`.
+- **Clock and randomness are uncontrollable.** std has no clock freeze, and `rand::thread_rng` cannot
+  be seeded, so `TEST_SAFETY_NET_ALLOW=clock` is refused with a note. A seeded
+  `StdRng::seed_from_u64(1)` names no marker and stays Tier 1.
+
+### The rust guard: libc interposition
+
+`cargo test` compiles a test binary, and std reaches every I/O primitive through libc. So the guard
+preloads a hook library under the compiled binary and intercepts libc itself. Every refusal prints
+its reason and exits 2:
+
+1. It reads the tier and allow list (`guard_env.read_env`). A test name beginning with `-` is
+   refused, because libtest would read it as a flag and run the whole binary.
+2. The platform must be darwin or linux.
+3. `rustc -V`, run in the repo so a `rust-toolchain.toml` pin is honoured, must be at least 1.82
+   (`MIN_RUST`). Every `rustc` and `cargo` call runs with `RUSTUP_AUTO_INSTALL=0`, so an uninstalled
+   pin is refused, never downloaded.
+4. `Cargo.lock` must exist at the workspace root, because a plain `cargo test` creates or rewrites
+   it. Without one, the guard exits 2 and names the remedy, `cargo generate-lockfile`. The build runs
+   `--locked`, so a stale lockfile is refused and left byte-identical.
+5. More than one package with `tests/<stem>.rs` and no `-p` exits 2; name the package. An
+   environment-controlled test that is not alone in its file exits 2.
+6. The build plan (below) is decided once.
+7. `cargo test --locked --no-run --message-format=json [-p <package>] --test <stem>` builds the test,
+   with no timeout: time spent waiting on cargo's lock is not the proof's time. A compile error exits
+   5, never RED.
+8. The executable is refused when it is static, musl or stripped (`assets/rust_binary.py`): each makes
+   a preloaded hook fail open. One that does not link libtest's harness (`harness = false`) exits 4,
+   because there is no libtest run to observe.
+9. The repo's own `rustc` builds the hook (`--crate-type cdylib -C panic=abort -C
+   force-unwind-tables=yes`). It is cached outside the repo, under
+   `~/.cache/test-safety-net/rust-hook/` (or `$TEST_SAFETY_NET_CACHE`), keyed by the rendered
+   source, the toolchain and the flags.
+10. `<exe> <test_name> --exact --test-threads=1` runs under the preload, with stdin closed, core dumps
+    off and a 300 s timeout. **The guard never passes `--nocapture`**, and it drops a caller's
+    `RUST_TEST_NOCAPTURE`. Under either, the default panic hook reads `RUST_BACKTRACE` outside
+    libtest's frames, and every RED would trip `environment`.
+11. Classification, first match wins:
+    - a violation line reads 3;
+    - the loader skipping the preload, no `tsn-hook: armed` line before libtest's `running N test`,
+      or any other hook line except an early exit reads 2;
+    - an early exit, exit status 125, the timeout, or no `running N test` line reads 4;
+    - otherwise libtest's last `test result:` line decides. GREEN also needs exit code 0 and
+      libtest's own `test <name> ... ok` line.
+
+Proofs build in cargo's own target dir (owner decision O4), so a warm build cache is reused. Beyond
+that, nothing is written into the repo, `Cargo.lock` included.
+
+**libtest's exit code lies twice** (measured on 1.82 and 1.92). An `#[ignore]`d test and a name
+matching nothing both exit 0, and a compile error exits 101 like a failed assertion. So the verdict
+comes from the build's JSON and the `test result:` line, and the exit table is go's:
+
+| exit | outcome | how rust gets there |
+|---|---|---|
+| 0 | GREEN | exit 0, a `test result:` line, and libtest's own `test <name> ... ok` line before it |
+| 1 | RED | an assertion failed, or the binary died with no result line (a signal, an abort) |
+| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a static, stripped or musl binary; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; not darwin or linux |
+| 3 | GUARD TRIP | `IOGuardViolation: a tier <N> candidate reached <group> I/O via <call> from <symbol>` |
+| 4 | NO TEST | one of: an `#[ignore]` test, or a name matching no test; the test process exiting early, because the hook forces status 125 when a crate frame calls `exit` or `quick_exit` (so a unit that calls `process::exit` cannot be proven in-process); a `harness = false` target; the 300 s timeout |
+| 5 | NO BUILD | the test did not compile |
+
+**The hook** is `assets/io_guard_rust_hook.rs`, a cdylib. On macOS it loads through
+`DYLD_INSERT_LIBRARIES` and an `__interpose` section; on Linux through `LD_PRELOAD` and
+`dlsym(RTLD_NEXT)`. It arms only when `TSN_BLOCKED` is set, and then writes `tsn-hook: armed` to
+fd 2. At every decision it refuses to guess: in any of these cases it writes
+`tsn-hook: cannot attribute (<why>)` and exits 2:
+
+- a frame walk of fewer than 3 frames;
+- a walk that resolves no symbol;
+- on Linux, no `.symtab` in `/proc/self/exe`.
+
+That closes the 1.82 fail-open, where a hook built without unwind tables resolved nothing and passed
+everything. The hook's name tables live in `io_guard_rust.py` and are rendered into the source
+before compiling. So the filter/guard agreement test reads the same tables the hook enforces. A trip
+writes the violation line to fd 2 and calls `_exit(3)`.
+
+| group | intercepted libc calls |
+|---|---|
+| filesystem | `open`, `openat`, `stat`, `lstat`, `fstatat`, `access`, `mkdir`, `unlink`, `rename`, `opendir`, `readlink`, `rmdir`, `chmod`, `fchmodat`, `symlink`, `realpath`; linux adds glibc's `open64`, `openat64`, `stat64`, `lstat64`, `fstatat64` and `statx` |
+| environment | `getenv`, `setenv`, `unsetenv`, `getcwd`, `chdir`. The last two mirror the `current_dir` and `set_current_dir` markers |
+| network | `socket`, `connect`, `bind`, `getaddrinfo` |
+| clock | `clock_gettime`, `gettimeofday`; darwin adds `mach_absolute_time` and `clock_gettime_nsec_np` |
+| randomness | `getentropy`, `arc4random_buf`; linux adds `getrandom` (libSystem has none) |
+| subprocess | `posix_spawn`, `posix_spawnp`, `fork`, `execve`, `execv`, `execvp`, `execl`, `execlp`; linux adds `execvpe` and `fexecve` |
+| *(not a group)* stdin | `read` on fd 0, **tier 1 only**, as on every stack |
+| *(not a group)* process-exit | `exit`, `quick_exit`. These never trip. When a crate frame calls one, the hook writes `tsn-hook: early exit (<symbol>)` and ends the process with status 125, which reads as NO TEST. `_exit`/`_Exit` are not hooked, because the hook's own `_exit` must not recurse |
+
+**The decision rule.** The hook walks `backtrace()` from the innermost frame outward, skipping its
+own image, over a 1024-frame buffer. It resolves symbols with `dladdr` on macOS and with the `.symtab`
+of `/proc/self/exe` on Linux.
+
+- A `CONTROL_HELPERS` frame decides, with that helper's group.
+- `hashmap_random_keys` (std seeding a HashMap) is exempt.
+- A **crate frame** decides with the call's group. Its crate is decided in one of four ways:
+  - a plain path's first segment;
+  - for an impl frame (`<T as Trait>::m`, `<T>::m`), the crate of the self type `T`, so a crate's
+    own `Drop` or `Display` impl is judged;
+  - for `core::ptr::drop_in_place<T>`, the first crate path in `T` that is not transparent;
+  - a generic parameter or a primitive is a bare segment that names no crate.
+- These frames are passed over:
+  - frames in `std`, `core`, `alloc`, `panic_unwind`, `backtrace`, `hashbrown` and `std_detect`;
+  - any symbol without Rust's `17h<16 hex>E` hash suffix, so a runtime's C++ `_ZN` symbols are never
+    read as crate code.
+- A libtest (`test`) frame is the runner's own work, and exempt. The exception is a
+  `test::__rust_begin_short_backtrace` or `test::assert_test_result` frame reached before any crate
+  frame. That means the test body was inlined into libtest's generic, and the call is judged as
+  `(test body, inlined)`.
+- An intercepted call whose nearest frame outside the hook lies in `libsystem_malloc.dylib`
+  (`SYSTEM_INTERNAL_IMAGES`) is exempt. macOS's allocator reads `mach_absolute_time` while it builds
+  a thread cache; glibc's malloc calls nothing intercepted.
+- A walk that decides nothing is resolved by **thread identity**, not frame names. Off the main
+  thread (`pthread_main_np()` on darwin, `gettid() == getpid()` on linux), it is judged. On the main
+  thread it is pre-`main` initialisation, and exempt. A full buffer that decided nothing is judged.
+
+A call is blocked when its group is blocked at the tier.
+
+**Filter/guard agreement.** Three maps in `io_guard_rust.py` say what the hook does about each filter
+marker: `FILTER_MARKER_INTERCEPTS`, `PARTIALLY_INTERCEPTED` and `NOT_INTERCEPTED`.
+`assets/test_io_guard_rust.py` asserts they partition `stack_rust`'s marker tables exactly. So a
+marker added with no intercept and no recorded reason fails the gate. The partial and missing rows
+are the residuals below.
+
+### The build plan
+
+On Linux, a `rustix` in `Cargo.lock` changes the plan. rustix's `linux_raw` backend issues syscalls
+with no libc call for the hook to sit in. So the build moves to a separate target dir outside the
+repo (`<cache>/rust-target/<sha256 of the workspace path>`), with `--cfg=rustix_use_libc` passed
+through `RUSTFLAGS`.
+The separate dir keeps the user's own build cache valid. Otherwise the plan is cargo's own target
+dir (honouring `CARGO_TARGET_DIR` and `build.target-dir`) and no flags. `build_plan` decides once;
+build and run never branch on a mode.
+
+`--locked` pins the dependency versions but does not stop cargo fetching them on a cold cache: the
+build is not run offline, unlike go's `GOPROXY=off`.
+
+### Rust residuals — read these before you read a trip
+
+1. **Deliberate forgery is not defended.** Anything bypassing libc is unseen: inline asm, raw
+   syscalls. Examples are getrandom 0.2's `SYS_getrandom` on linux, and a third-party crate doing
+   either internally. The filter declines asm and `libc::syscall` statically, and rustix is rebuilt
+   against libc.
+
+   Nor can code under test that deliberately forges a verdict be stopped from inside the process:
+   - `libc::_exit` or `syscall(SYS_exit)` after printing forged result lines;
+   - recovering the hook's sentinel, or patching its statics;
+   - a `harness = false` binary that embeds libtest's symbol names;
+   - life-before-main code printing a handshake under a hook the loader silently skipped.
+
+   The guard defends against ACCIDENTAL I/O and ACCIDENTAL verdict corruption. Forged result lines
+   followed by `exit`, `quick_exit`, an abort, a signal or any `exec*` are closed (status 125, a
+   pass needing exit 0, subprocess trips). This is the same class as go's residual 7.
+2. **Static, stripped and musl binaries are refused, not guarded.** Each makes a preload fail open,
+   so each exits 2.
+3. **Name-based matching.** Several things are matched by name, and pinned per toolchain: the runner,
+   seed and boundary exemptions (`test::__rust_begin_short_backtrace`, `test::assert_test_result`,
+   `hashmap_random_keys`, `drop_slow`) and `SYSTEM_INTERNAL_IMAGES` (darwin's
+   `libsystem_malloc.dylib`, whose allocator reads the clock). A toolchain that renames one moves
+   the line, which is why CI runs every supported minor.
+4. **Some reads no hook can see.** `std::env::vars()`/`vars_os()` read `environ` directly; the
+   filter marks them Tier 2. Likewise, `std::env::args`/`args_os` read what the runtime saved
+   before `main`, `std::thread::sleep` is an unhooked `nanosleep`, `std::fs::hard_link` is an
+   unhooked `linkat`, and `std::env::current_exe` on darwin asks `_NSGetExecutablePath`. A unit
+   doing only those passes tier 1; the filter still marks each, and `NOT_INTERCEPTED` and
+   `PARTIALLY_INTERCEPTED` record why.
+5. **HashMap seeding is real entropy.** `RandomState` draws it through the seed exemption, so a unit
+   whose output depends on HashMap iteration order passes the guard. Pin sorted output, never
+   iteration order.
+6. **Fat LTO.** Fat LTO in `[profile.dev]` or `[profile.test]` makes honest failing tests read 3 or
+   4 instead of 1: the inlined panic hook's `getenv` and libtest's own exit land in the harness
+   `main`. This fails closed. Units in such repos are declined, never falsely passed.
+7. **Life-before-main crates (`ctor`) are untested.** A preloaded library's initialiser normally
+   runs before the executable's constructors, so their I/O is probably seen. Whether it is
+   attributed correctly is not measured.
+8. **Platforms.** darwin and linux only. The macOS floor (1.82) may be Linux-proven only. x86_64
+   macOS is unproven; amd64 Linux is proven by CI's `versions` legs, not by this skill's own
+   development, which ran on arm64.
+9. **Verdict lines share stdout with repo code.** An `init`-style print can spoof one, as on go.
+   Residual 1's threat model bounds this.
 
 ## Python row, in detail
 
