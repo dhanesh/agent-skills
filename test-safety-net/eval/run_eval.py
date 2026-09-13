@@ -50,6 +50,13 @@ What it still does NOT cover, said plainly rather than implied away:
     The go FILTER (checks 40-43) needs no toolchain and is always graded;
     check 41's `precise` arm expects whichever label the machine can honestly
     produce.
+  * The rust GUARD is covered CONDITIONALLY too (check 49), in the same shape
+    as 34, 39 and 44: with no `cargo`/`rustc` on PATH it reports NOT GRADED
+    HERE and passes, and `assets/test_io_guard_rust.py` skips on the same
+    machine. CI pins rust beside python, node and go, so there it is graded by
+    pin, not by accident. The rust FILTER (checks 45-48) needs no toolchain
+    and is always graded -- rust has no precise path at all (`discovery` is
+    always `heuristic`), unlike go's two-reader split.
   * The literal-emission rule (SKILL.md's "one real injection surface") has NO
     EXECUTABLE COVERAGE, and for a real reason: no captured-output emitter
     ships in this skill, so there is no code path that could turn a hostile
@@ -142,6 +149,15 @@ _DOC_CMD_GO_RE = re.compile(
     r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*TEST_SAFETY_NET_TIER=[12]\s+'
     r'(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
     r'python3\s+\S*io_guard_go\.py\S*\s+.*<package>$')
+
+# The rust equivalent: the wrapper, run by python3, carrying the tier
+# assignment and ending in the `<test_name>` placeholder -- the second half of
+# `--test <test_file_stem> <test_name>` -- or it is a mention of the wrapper
+# (the stacks.md table row, which prints no TIER=) rather than an invocation.
+_DOC_CMD_RUST_RE = re.compile(
+    r'^(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*TEST_SAFETY_NET_TIER=[12]\s+'
+    r'(?:[A-Za-z_][A-Za-z_0-9]*=(?:"[^"]*"|\S*)\s+)*'
+    r'python3\s+\S*io_guard_rust\.py\S*\s+.*<test_name>$')
 
 
 def slice_between(text, start_pat, end_pat):
@@ -1448,6 +1464,254 @@ def main():
               ("%d command(s), each run twice" % len(go_commands) if go_present else
                "NOT GRADED HERE: no `go` on PATH; "
                "assets/test_io_guard_go.py grades it where there is"))
+
+        # =====================================================================
+        # Fixture "rustfx": the Rust stack, end to end, through the SAME CLI an
+        # agent runs. Checks 45-48 grade the filter half and need no
+        # toolchain; check 49 grades the enforcement half under the command
+        # SKILL.md prints. Rust has no precise path at all (unlike go's
+        # two-reader split), so `discovery` is always `heuristic`.
+        #
+        # Every one of these is vacuous before the Rust stack exists: a Rust
+        # crate was claimed by no stack, fell through to the Python fallback,
+        # and reported a clean EMPTY plan -- the silent zero the stack closes.
+        # =====================================================================
+        rust_repo = os.path.join(tmp, "rustfx")
+        write(rust_repo, "Cargo.toml",
+              '[package]\nname = "calcx"\nversion = "0.1.0"\nedition = "2021"\n')
+        write(rust_repo, "src/lib.rs",
+              "pub mod calc;\npub mod io;\nmod inner;\npub use inner::exported;\n")
+        write(rust_repo, "src/calc.rs",
+              "pub fn pure(n: i32) -> i32 { n * 2 }\n\n"
+              "pub struct Report { pub value: i32 }\n\n"
+              "impl Report {\n    pub fn total(&self) -> i32 { self.value }\n}\n\n"
+              "pub(crate) fn crate_only() -> i32 { 1 }\n")
+        write(rust_repo, "src/io.rs",
+              "use std::env;\nuse std::fs;\nuse std::net::TcpStream;\n"
+              "use std::time::SystemTime;\n\n"
+              "pub fn load(p: &str) -> std::io::Result<String> { fs::read_to_string(p) }\n\n"
+              'pub fn home() -> Option<String> { env::var("HOME").ok() }\n\n'
+              'pub fn dial() -> bool { TcpStream::connect("127.0.0.1:0").is_ok() }\n\n'
+              "pub fn now() -> SystemTime { SystemTime::now() }\n\n"
+              'pub fn raw() { unsafe { std::arch::asm!("nop"); } }\n')
+        write(rust_repo, "src/inner.rs",
+              "pub fn exported(n: i32) -> i32 { n + 1 }\n\npub fn hidden() -> i32 { 2 }\n")
+        write(rust_repo, "src/main.rs",
+              'pub fn run() -> i32 { 3 }\n\nfn main() { println!("{}", run()); }\n')
+        # NEGATIVE files: a vendored crate, cargo's own build output, a crate's
+        # examples/benches/build script and an integration-test crate -- each a
+        # syntactically perfect `pub fn`, and none of them a unit.
+        for rel in ("vendor/v/src/lib.rs", "target/debug/build/x.rs", "examples/e.rs",
+                    "benches/b.rs", "build.rs", "tests/t.rs"):
+            write(rust_repo, rel, "pub fn leaked() {}\n")
+        if shutil.which("cargo"):
+            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=rust_repo,
+                           env=dict(os.environ, RUSTUP_AUTO_INSTALL="0"),
+                           capture_output=True, timeout=60)
+        else:
+            # No cargo to ask: written literally, as `cargo generate-lockfile`
+            # would for a crate with no dependencies (measured on cargo 1.92 --
+            # the version differs, harmlessly, since nothing here ever reads
+            # this lock through cargo).
+            write(rust_repo, "Cargo.lock",
+                  "# This file is automatically @generated by Cargo.\n"
+                  "# It is not intended for manual editing.\n"
+                  "version = 3\n\n"
+                  "[[package]]\n"
+                  'name = "calcx"\n'
+                  'version = "0.1.0"\n')
+
+        r_rust = run_ranker(rust_repo, "--top-n", "50")
+        rust_plan = load_json(r_rust)
+        rust_rows = {}
+        for bucket in ("ranked", "remainder", "not_netted"):
+            for r_ in rust_plan.get(bucket, []):
+                rust_rows[r_["id"]] = r_
+        rust_ids = set(rust_rows) | set(rust_plan.get("covered", []))
+        rust_ranked_ids = {r_["id"] for r_ in rust_plan.get("ranked", [])}
+        rust_not_netted = {r_["id"] for r_ in rust_plan.get("not_netted", [])}
+
+        # 45. detected as rust, and every unit shape found: a plain fn, an
+        #     inherent method, and a re-export through a private module.
+        #     MUTATION (measured 2026-09-13): disabling `stack_rust.py`'s
+        #     `if not f.vis: continue` filter let the private `fn main` count
+        #     as a unit -- units=12 with `src/main.rs::main` in the ids -- and
+        #     this check (and 47, which also asserts units_discovered) went red.
+        check("45 a Rust crate is detected as rust and its units are discovered "
+              "-- plain fns AND inherent methods (0 units is what a repo no "
+              "stack claims reports)",
+              r_rust.returncode == 0
+              and rust_plan.get("stack") == "rust"
+              and rust_plan.get("units_discovered") == 11
+              and "src/calc.rs::pure" in rust_rows
+              and "src/calc.rs::Report::total" in rust_rows,
+              "stack=%s units=%s ids=%s" % (rust_plan.get("stack"),
+                                            rust_plan.get("units_discovered"),
+                                            sorted(rust_rows)))
+
+        # 46. THIS CHECK USED TO BE A TAUTOLOGY, the same way go's 36 was
+        #     before it named a wrong label: `discovery` naming ANY
+        #     in-vocabulary string is not the property that matters. Rust has
+        #     no second reader at all, so both arms -- the default run and
+        #     --no-precise -- must read `heuristic`, and the documents must
+        #     say there is only one reader to expect, not just that
+        #     `heuristic` is A value it can take.
+        #     MUTATION (measured 2026-09-13): making `discover_units` LIE and
+        #     return "precise" instead of "heuristic" turned both `default=` and
+        #     `no-precise=` to 'precise' in the failure detail, and this check
+        #     went red.
+        np_rust_plan = load_json(run_ranker(rust_repo, "--no-precise", "--top-n", "50"))
+        check("46 the rust report names its ONE reader correctly: `heuristic` "
+              "by default AND under --no-precise, with no second reader to "
+              "decline to (unlike go and node, which have one to name)",
+              rust_plan.get("discovery") == "heuristic"
+              and np_rust_plan.get("discovery") == "heuristic"
+              and "one reader" in node_stacks_md.lower(),
+              "default=%r no-precise=%r" % (rust_plan.get("discovery"),
+                                            np_rust_plan.get("discovery")))
+
+        # 47. NEGATIVE: what cargo never builds into the library or a binary is
+        #     never a unit; AND three real units that ARE discovered still
+        #     never reach `ranked` -- a `tests/` crate cannot name any of
+        #     them, so writing a test for one would be writing dead code.
+        #     MUTATION (measured 2026-09-13): dropping "examples" from
+        #     `_CRATE_ROOT_SKIP_DIRS` leaked `examples/e.rs::leaked` into
+        #     `rust_leaked`, and this check went red. Separately, changing
+        #     `rank_risk`'s `not_netted` cut from `tier >= 3` to `tier > 3`
+        #     dropped every tier-3 unit out of ranked/remainder/not_netted
+        #     entirely -- `unreachable=` read `(False, False, False)` for all
+        #     three -- and this check went red too.
+        rust_leaked = sorted(i for i in rust_ids
+                             if i.startswith(("vendor/", "target/", "examples/",
+                                              "benches/", "tests/", "build.rs")))
+        unreachable_units = ("src/inner.rs::hidden", "src/calc.rs::crate_only",
+                             "src/main.rs::run")
+        check("47 NEGATIVE: a vendored crate, cargo's build output, examples/, "
+              "benches/, build.rs and a tests/ crate are never discovered, "
+              "ranked or netted; AND a pub(crate) fn, a pub fn in a private "
+              "module and a binary-only fn are units but stay in not_netted, "
+              "never ranked for writing",
+              not rust_leaked and rust_plan.get("units_discovered") == 11
+              and all(i in rust_rows for i in unreachable_units)
+              and all(i in rust_not_netted for i in unreachable_units)
+              and not any(i in rust_ranked_ids for i in unreachable_units),
+              "leaked=%s units=%s unreachable=%s"
+              % (rust_leaked, rust_plan.get("units_discovered"),
+                 {i: (i in rust_rows, i in rust_not_netted, i in rust_ranked_ids)
+                  for i in unreachable_units}))
+
+        # 48. every tier direction at once: pure/method/re-export, controllable
+        #     filesystem/environment, uncontrollable network/clock, a
+        #     pub(crate) fn AND a pub fn behind a private module (both
+        #     unreachable from tests/ without touching source), a binary-only
+        #     fn (reachable only by spawning the binary), and a declined
+        #     inline asm! that neither layer can see into.
+        #     MUTATION (measured 2026-09-13): moving "environment" from
+        #     `CONTROLLABLE` to `UNCONTROLLABLE` in `stack_rust.py` turned
+        #     `src/io.rs::home` from tier 2 to tier 3 in the printed dict, and
+        #     this check went red.
+        want_rust_tiers = {
+            "src/calc.rs::pure": 1,          # nothing reachable
+            "src/calc.rs::Report::total": 1,  # nothing reachable
+            "src/inner.rs::exported": 1,      # re-exported at the crate root
+            "src/io.rs::load": 2,             # filesystem, controllable
+            "src/io.rs::home": 2,             # environment, controllable
+            "src/io.rs::dial": 3,             # network, uncontrollable
+            "src/io.rs::now": 3,              # clock, uncontrollable
+            "src/calc.rs::crate_only": 3,     # pub(crate): unreachable
+            "src/inner.rs::hidden": 3,        # pub in a private module: unreachable
+            "src/main.rs::run": 3,            # binary-only: unreachable
+            "src/io.rs::raw": 4,              # inline asm!: declined
+        }
+        got_rust_tiers = {i: rust_rows.get(i, {}).get("tier") for i in want_rust_tiers}
+        check("48 each rust unit lands in the tier its markers AND its "
+              "reachability earn -- and every tier 3-or-above unit is "
+              "not_netted",
+              got_rust_tiers == want_rust_tiers
+              and all(i in rust_not_netted for i, t in want_rust_tiers.items() if t >= 3),
+              str(got_rust_tiers))
+
+        # 49. THE ENFORCEMENT HALF, under the command SKILL.md prints. Two
+        #     lines -- TIER=1 and TIER=2 ALLOW=filesystem -- for the reason 34,
+        #     39 and 44 all record: a guard that arms nothing passes a clean
+        #     test too. The negative arm reads `std::env::var("HOME")`, which
+        #     is the `environment` group -- blocked at tier 1 AND still not
+        #     named in the tier-2 command's `ALLOW=filesystem`, so one fixture
+        #     serves both documented lines.
+        #     MUTATION (measured 2026-09-13, go's check-44 precedent): deleting
+        #     the `TEST_SAFETY_NET_TIER=1` line entirely still passed (the
+        #     surviving TIER=2 line covers both test targets on its own), but
+        #     mangling the SURVIVING line's `<test_name>` placeholder to a bare
+        #     `test_name` was caught: it no longer matched `_DOC_CMD_RUST_RE`
+        #     but still mentioned `io_guard_rust.py`/`TEST_SAFETY_NET_TIER`, so
+        #     the "not a runnable invocation" branch fired and this check went
+        #     red -- exactly the mangled-twin failure mode go's check 44 guards.
+        rust_present = shutil.which("cargo") is not None and shutil.which("rustc") is not None
+        rust_fail, rust_commands = [], []
+        if rust_present:
+            rproof = os.path.join(tmp, "rproof")
+            write(rproof, "Cargo.toml",
+                  '[package]\nname = "calcx"\nversion = "0.1.0"\nedition = "2021"\n')
+            write(rproof, "src/lib.rs", "pub mod calc;\npub mod io;\n")
+            write(rproof, "src/calc.rs", "pub fn pure(n: i32) -> i32 { n * 2 }\n")
+            write(rproof, "src/io.rs",
+                  'pub fn home() -> Option<String> { std::env::var("HOME").ok() }\n')
+            write(rproof, "tests/tsn_guard.rs",
+                  "use calcx::calc::pure;\nuse calcx::io::home;\n\n"
+                  "#[test]\nfn clean() { assert_eq!(pure(2), 4); }\n\n"
+                  "#[test]\nfn uses_home() { let _ = home(); }\n")
+            subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=rproof,
+                           env=dict(os.environ, RUSTUP_AUTO_INSTALL="0"),
+                           capture_output=True, timeout=60)
+            # EVERY printed rust guard line must parse as an invocation, not
+            # just one -- go's check 44 precedent, for the same reason: a
+            # mangled block with a broken `<test_name>` placeholder must not
+            # hide behind its still-matching twin.
+            for label, text in (("SKILL.md", skill_text),
+                                ("references/stacks.md", node_stacks_md)):
+                for block in re.findall(r"```sh\n(.*?)```", text, re.S):
+                    joined = re.sub(r"\\\n\s*", " ", block)
+                    for line in joined.splitlines():
+                        line = line.strip()
+                        if _DOC_CMD_RUST_RE.match(line):
+                            rust_commands.append((label, line))
+                        elif "io_guard_rust.py" in line and "TEST_SAFETY_NET_TIER" in line:
+                            rust_fail.append("%s prints a rust guard line that is not a "
+                                             "runnable invocation: %s" % (label, line))
+            if not any(lbl == "SKILL.md" for lbl, _ in rust_commands):
+                rust_fail.append("SKILL.md prints no rust guard invocation")
+            for label, command in rust_commands:
+                env = {k_: v_ for k_, v_ in os.environ.items()
+                       if not k_.startswith("TEST_SAFETY_NET")}
+                for k_ in ("CARGO_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                          "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE",
+                          "RUSTUP_TOOLCHAIN"):
+                    env.pop(k_, None)
+                env["SKILL_DIR"] = SKILL
+                env["RUSTUP_AUTO_INSTALL"] = "0"
+                env["TEST_SAFETY_NET_CACHE"] = os.path.join(tmp, "rustcache")
+                for test, want in (("clean", 0), ("uses_home", 3)):
+                    cmd = command.replace("<test_file_stem>", "tsn_guard")
+                    cmd = cmd.replace("<test_name>", test)
+                    run = subprocess.run(["/bin/sh", "-c", cmd], cwd=rproof, env=env,
+                                         capture_output=True, text=True, timeout=120,
+                                         stdin=subprocess.DEVNULL)
+                    output = run.stdout + run.stderr
+                    ok_ = run.returncode == want and (("IOGuardViolation" in output) == (want == 3))
+                    if not ok_:
+                        rust_fail.append("%s [%s]: %s -> exit %s %s"
+                                         % (label, test, cmd, run.returncode,
+                                            output.strip()[-200:]))
+        check("49 NEGATIVE: the DOCUMENTED rust guard command, extracted from "
+              "SKILL.md and references/stacks.md and run verbatim, passes a "
+              "clean unit AND exits 3 on one that reads the environment, "
+              "blocked at tier 1 and not named in the tier-2 command's ALLOW "
+              "(so a guard that never arms cannot pass)",
+              not rust_fail,
+              "; ".join(rust_fail) if rust_fail else
+              ("%d command(s), each run twice" % len(rust_commands) if rust_present else
+               "NOT GRADED HERE: no `cargo`/`rustc` on PATH; "
+               "assets/test_io_guard_rust.py grades it where there is"))
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

@@ -155,6 +155,12 @@ SINCE_TSN_GO_REVIEW2 = "63c4fa1"  # test-safety-net: the second review round
 # invoked, the goroutine-creator rule an allowlist, a method's type qualified
 # only by its own package, and the stdlib's own pre-bound references rebound
 # on every Python.
+SINCE_TSN_RUST = "9a4af77"  # test-safety-net: stack_rust.py -- Rust files,
+# naming, lexing and import grammar (the first commit in which it exists),
+# then heuristic discovery, crate-wide reachability and package-scoped triage.
+SINCE_TSN_RUST_GUARD = "241de95"  # test-safety-net: io_guard_rust.py -- the
+# Rust proof, guarded, with the Go exit table: cargo test --locked --offline
+# --no-run, then the compiled binary under a preloaded interposition hook.
 
 
 def _git_out(*args):
@@ -3539,6 +3545,214 @@ def check_test_safety_net_go_review2(old, new):
         since=SINCE_TSN_GO_REVIEW2)
 
 
+# ── test-safety-net: the Rust stack ─────────────────────────────────────────
+#
+# Every value reads as its "cannot answer" form against a baseline with no
+# Rust stack -- which is what the merge-base baseline is. That is the
+# behaviour being fixed: a Rust crate handed to the ranker was claimed by no
+# stack, fell through to the Python fallback, discovered nothing and reported
+# a clean empty plan.
+
+_RUST_CARGO_TOML = '[package]\nname = "calcx"\nversion = "0.1.0"\nedition = "2021"\n'
+
+# The eval's own fixture (checks 45-48): 11 real units across every tier, and
+# six NEGATIVE files that must never contribute one.
+_RUST_FIXTURE = {
+    "Cargo.toml": _RUST_CARGO_TOML,
+    "src/lib.rs": "pub mod calc;\npub mod io;\nmod inner;\npub use inner::exported;\n",
+    "src/calc.rs": (
+        "pub fn pure(n: i32) -> i32 { n * 2 }\n\n"
+        "pub struct Report { pub value: i32 }\n\n"
+        "impl Report {\n    pub fn total(&self) -> i32 { self.value }\n}\n\n"
+        "pub(crate) fn crate_only() -> i32 { 1 }\n"),
+    "src/io.rs": (
+        "use std::env;\nuse std::fs;\nuse std::net::TcpStream;\nuse std::time::SystemTime;\n\n"
+        "pub fn load(p: &str) -> std::io::Result<String> { fs::read_to_string(p) }\n\n"
+        'pub fn home() -> Option<String> { env::var("HOME").ok() }\n\n'
+        'pub fn dial() -> bool { TcpStream::connect("127.0.0.1:0").is_ok() }\n\n'
+        "pub fn now() -> SystemTime { SystemTime::now() }\n\n"
+        'pub fn raw() { unsafe { std::arch::asm!("nop"); } }\n'),
+    "src/inner.rs": "pub fn exported(n: i32) -> i32 { n + 1 }\n\npub fn hidden() -> i32 { 2 }\n",
+    "src/main.rs": 'pub fn run() -> i32 { 3 }\n\nfn main() { println!("{}", run()); }\n',
+    "vendor/v/src/lib.rs": "pub fn leaked() {}\n",
+    "target/debug/build/x.rs": "pub fn leaked() {}\n",
+    "examples/e.rs": "pub fn leaked() {}\n",
+    "benches/b.rs": "pub fn leaked() {}\n",
+    "build.rs": "pub fn leaked() {}\n",
+    "tests/t.rs": "pub fn leaked() {}\n",
+}
+_RUST_WANT_TIERS = {
+    "src/calc.rs::pure": 1, "src/calc.rs::Report::total": 1,
+    "src/inner.rs::exported": 1, "src/io.rs::load": 2, "src/io.rs::home": 2,
+    "src/io.rs::dial": 3, "src/io.rs::now": 3, "src/calc.rs::crate_only": 3,
+    "src/inner.rs::hidden": 3, "src/main.rs::run": 3, "src/io.rs::raw": 4,
+}
+
+_RUST_PROBE = r"""
+import hashlib, shutil, subprocess
+res = {"units": 0, "tiers_right": 0, "guard_trips": -1, "stale_lock_stable": -1,
+       "pnG_digest": ""}
+try:
+    import rank_risk
+except Exception:
+    print(json.dumps(res))
+    raise SystemExit(0)
+
+
+def tree(files):
+    root = tempfile.mkdtemp()
+    for rel, text in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+    return root
+
+
+CARGO_TOML = %(cargo_toml)r
+FIXTURE = %(fixture)r
+WANT = %(want)r
+
+# 1 & 2. The eval's own fixture, ranked in full, through the real CLI path.
+try:
+    root = tree(FIXTURE)
+    plan = rank_risk.rank(root, "10 years ago", 50)
+    if plan["stack"] == "rust":
+        res["units"] = plan["units_discovered"]
+        rows = {r["id"]: r for b in ("ranked", "remainder", "not_netted") for r in plan[b]}
+        res["tiers_right"] = sum(1 for k, t in WANT.items() if rows.get(k, {}).get("tier") == t)
+except Exception:
+    pass
+
+# 3 & 4. The guard, through its wrapper: a tier-1 candidate that reads the
+# environment, then a manifest change with no re-lock (the audit's A2).
+guard = os.path.join(sys.path[0], "io_guard_rust.py")
+if shutil.which("cargo") and shutil.which("rustc"):
+    res["guard_trips"] = 0
+    res["stale_lock_stable"] = 0
+    if os.path.isfile(guard):
+        crate = tree({
+            "Cargo.toml": CARGO_TOML,
+            "src/lib.rs": "pub mod calc;\npub mod io;\n",
+            "src/calc.rs": "pub fn pure(n: i32) -> i32 { n * 2 }\n",
+            "src/io.rs": 'pub fn home() -> Option<String> { std::env::var("HOME").ok() }\n',
+            "tests/tsn_guard.rs": (
+                "use calcx::calc::pure;\nuse calcx::io::home;\n\n"
+                "#[test]\nfn clean() { assert_eq!(pure(2), 4); }\n\n"
+                "#[test]\nfn uses_home() { let _ = home(); }\n"),
+        })
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("TEST_SAFETY_NET")
+               and k not in ("CARGO_TARGET_DIR", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                             "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE",
+                             "RUSTUP_TOOLCHAIN")}
+        env["RUSTUP_AUTO_INSTALL"] = "0"
+        cache = os.path.join(root, "..", "rust-ab-cache")
+        os.makedirs(cache, exist_ok=True)
+        env["TEST_SAFETY_NET_CACHE"] = cache
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=env,
+                       capture_output=True)
+        genv = dict(env, TEST_SAFETY_NET_TIER="1")
+        r = subprocess.run([sys.executable, guard, "--test", "tsn_guard", "uses_home"],
+                           cwd=crate, env=genv, capture_output=True, text=True, timeout=180,
+                           stdin=subprocess.DEVNULL)
+        res["guard_trips"] = int(r.returncode == 3 and "IOGuardViolation" in r.stdout + r.stderr)
+
+        lockp = os.path.join(crate, "Cargo.lock")
+        with open(lockp, "rb") as f:
+            before = f.read()
+        # A local path dependency, added AFTER the lock was generated: the
+        # manifest now names a package the lock has never resolved, exactly
+        # `test_a_stale_cargo_lock_is_2_and_left_byte_identical`'s fixture.
+        os.makedirs(os.path.join(crate, "depx", "src"), exist_ok=True)
+        with open(os.path.join(crate, "depx", "Cargo.toml"), "w") as f:
+            f.write('[package]\nname = "depx"\nversion = "0.1.0"\nedition = "2021"\n')
+        with open(os.path.join(crate, "depx", "src", "lib.rs"), "w") as f:
+            f.write("pub fn read() -> usize { 0 }\n")
+        with open(os.path.join(crate, "Cargo.toml"), "a") as f:
+            f.write('\n[dependencies]\ndepx = { path = "depx" }\n')
+        r2 = subprocess.run([sys.executable, guard, "--test", "tsn_guard", "clean"],
+                            cwd=crate, env=genv, capture_output=True, text=True, timeout=180,
+                            stdin=subprocess.DEVNULL)
+        with open(lockp, "rb") as f:
+            after = f.read()
+        res["stale_lock_stable"] = int(after == before and r2.returncode == 2)
+
+# 5. python, node and go rank a fixed trio of repos byte-identically.
+py = tree({"srv/a.py": "def parse(s):\n    return s\n\ndef use():\n    return parse('x')\n"})
+nd = tree({"package.json": '{"name": "d", "main": "src/a.js"}\n',
+          "src/a.js": "export function parse(s) { return s; }\n"})
+gomod = tree({"go.mod": "module example.com/m\n\ngo 1.22\n",
+             "pkg/a.go": "package pkg\n\nfunc Parse(s string) int { return len(s) }\n"})
+try:
+    blobs = []
+    for r_, name in ((py, "python"), (nd, "node"), (gomod, "go")):
+        plan = rank_risk.rank(r_, "10 years ago", 50, rank_risk.stack_by_name(name))
+        plan.pop("root", None)
+        blobs.append(json.dumps(plan, sort_keys=True))
+    res["pnG_digest"] = hashlib.sha256("\n".join(blobs).encode()).hexdigest()[:16]
+except Exception as exc:
+    res["pnG_digest"] = "ERROR " + type(exc).__name__
+print(json.dumps(res))
+""" % {"cargo_toml": _RUST_CARGO_TOML, "fixture": _RUST_FIXTURE, "want": _RUST_WANT_TIERS}
+
+
+def check_test_safety_net_rust(old, new):
+    """Is a Rust crate ranked and tiered honestly, does the guard enforce its
+    Tier-1 candidates through cargo, and did adding a fourth stack leave
+    python, node and go exactly as they were?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _RUST_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "Rust units discovered from the eval fixture (higher=better)",
+        oldp["units"], newp["units"], newp["units"] > oldp["units"],
+        "11 units: pure fns, an inherent method, a re-export through a private "
+        "module, controllable filesystem/environment I/O, uncontrollable "
+        "network/clock I/O, a pub(crate) fn, a binary-only fn and a declined "
+        "inline asm! -- vendor/, target/, examples/, benches/, build.rs and "
+        "tests/ never contribute one. A Rust repo used to be claimed by no "
+        "stack and report a clean EMPTY plan",
+        since=SINCE_TSN_RUST)
+    row(s, "Rust units tiered as eval check 48 requires, of 11 (higher=better)",
+        oldp["tiers_right"], newp["tiers_right"], newp["tiers_right"] > oldp["tiers_right"],
+        "every direction at once: pure/method/re-export 1, filesystem/environment "
+        "2, network/clock 3, a pub(crate) fn and a pub fn in a private module 3 "
+        "(not reachable from tests/ without modifying source), a binary-only fn "
+        "3 (subprocess), inline asm! 4 (neither layer can see what it does)",
+        since=SINCE_TSN_RUST)
+    if newp["guard_trips"] >= 0:          # -1: no cargo/rustc here, nothing to measure
+        row(s, "the Rust guard trips a tier-1 env::var through its documented "
+               "wrapper (higher=better)",
+            oldp["guard_trips"], newp["guard_trips"],
+            newp["guard_trips"] > oldp["guard_trips"],
+            "the enforcement half: `cargo test --locked --offline --no-run`, "
+            "then the compiled test binary run under a preloaded interposition "
+            "hook, exit 3 and an IOGuardViolation naming the unit. The baseline "
+            "has no guard to run",
+            since=SINCE_TSN_RUST_GUARD)
+    if newp["stale_lock_stable"] >= 0:
+        row(s, "a proof run over a STALE Cargo.lock leaves it byte-identical "
+               "(the audit's A2) (higher=better)",
+            oldp["stale_lock_stable"], newp["stale_lock_stable"],
+            newp["stale_lock_stable"] > oldp["stale_lock_stable"],
+            "a plain `cargo test` would rewrite an out-of-date lock; the proof "
+            "runs `--locked`, so a manifest naming a package the lock has never "
+            "resolved is refused (NOT ARMED) rather than silently built against "
+            "an unreviewed dependency graph. The baseline has no guard to "
+            "refuse anything",
+            since=SINCE_TSN_RUST_GUARD)
+    row(s, "python, node and go rank a fixed trio of repos byte-identically in "
+           "both arms",
+        oldp["pnG_digest"], newp["pnG_digest"],
+        oldp["pnG_digest"] == newp["pnG_digest"]
+        and not str(newp["pnG_digest"]).startswith("ERROR"),
+        "the sixteenth interface name and a fourth registered stack must "
+        "change NOTHING for the other three",
+        kind="guard")
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -3724,6 +3938,7 @@ def main():
         check_test_safety_net_node_fixround_2(old, REPO)
         check_test_safety_net_go(old, REPO)
         check_test_safety_net_go_review2(old, REPO)
+        check_test_safety_net_rust(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
