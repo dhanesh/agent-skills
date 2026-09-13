@@ -367,6 +367,16 @@ V0 = {
     "mx_ref_self": v0("_RNvXs_{p}1pRNtB4_13TsnControlEnvNtNt{core}4core3fmt5Debug3fmt"),
     # ... while the helper's OWN impl still is (legacy `p::TsnControlEnv::restore`).
     "inherent_control": v0("_RNvMs0_{p}1pNtB5_13TsnControlEnv7restore"),
+    # Ruling R37: v0 prints a blanket `impl<T> Touch for T` at the type it ran
+    # on, and `impl<F: Fn> ViaFn for F` at the fn item; legacy prints `<T as
+    # p::Touch>::touch`, `<F as p::ViaFn>::via_fn` -- no control. Only core's
+    # `Drop` lends its self type a name (its path through a back-reference
+    # here); a crate's own trait named `drop::Drop` does not.
+    "blanket_x_control": v0("_RNvX{p}1pNt{p}1p13TsnControlEnvNt{p}1p5Touch5touch"),
+    "fnitem_x_control": v0("_RNvX{p}1pNv{p}1p19tsn_control_set_envNt{p}1p5ViaFn6via_fn"),
+    "drop_x_trait_backref": v0("_RNvXNt{core}4core3opsNt{p}1p13TsnControlEnvNtNtB2_4drop"
+                               "4Drop4drop"),
+    "drop_lookalike_x": v0("_RNvX{p}1pNt{p}1p13TsnControlEnvNtNt{p}1p4drop4Drop4drop"),
 }
 
 # Ruling R29: 1,200 `N` levels, as an `#[export_name]` may spell them. The
@@ -463,13 +473,17 @@ class TestV0Parser(unittest.TestCase):
         for name, ident in (("crate_fn", "tsn_control_temp_dir"),
                             ("trait_impl_backref", "TsnControlEnv"),
                             ("inherent_control", "TsnControlEnv"),
+                            ("drop_x_trait_backref", "TsnControlEnv"),
                             ("drop_control", "TsnControlEnv")):
             with self.subTest(sym=name):
                 self.assertIn(ident, self.facts(name).control_idents)
         for name in ("std_read_control_type", "provided_control_self", "mx_result_map",
-                     "mx_receiver", "mx_iter_x", "mx_ref_self"):
+                     "mx_receiver", "mx_iter_x", "mx_ref_self", "blanket_x_control",
+                     "drop_lookalike_x"):
             with self.subTest(sym=name):
                 self.assertNotIn("TsnControlEnv", self.facts(name).control_idents)
+        # R37: nor the fn item's name when `impl<F: Fn> ViaFn for F` runs on it.
+        self.assertNotIn("tsn_control_set_env", self.facts("fnitem_x_control").control_idents)
         self.assertEqual(self.facts("mx_result_map").krate, "p")     # R14 still decides
         seed = self.facts("seed")
         self.assertEqual(seed.krate, "std")

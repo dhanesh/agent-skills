@@ -184,9 +184,11 @@ spike's 128 slots used to fall off the end and be exempt):
   * a frame naming a `CONTROL_HELPERS` item decides, with THAT helper's
     group (`tsn_control_temp_dir` reads TMPDIR on its way to the filesystem,
     and is the tier-2 filesystem control). "Naming" is legacy's scope in
-    both manglings (ruling R28): the frame's own path, an impl's self type
-    by ITS OWN path (ruling R34: `<Result<&str, TsnControlEnv>>::map` is
-    std's, not the control), or drop glue's payload -- never a generic
+    both manglings (ruling R28): the frame's own path, an inherent or `Drop`
+    impl's self type by ITS OWN path (ruling R34: `<Result<&str,
+    TsnControlEnv>>::map` is std's, not the control; ruling R37: no other
+    trait impl, since v0 prints a blanket `impl<T> Tr for T` at the helper
+    type), or drop glue's payload -- never a generic
     argument of an ordinary std fn, so `std::fs::read::<TsnControlEnv>` is
     std's read, not the control;
   * std's own seeding frame (`std::sys::random::hashmap_random_keys`: a

@@ -489,8 +489,9 @@ fn control(s: &[u8]) -> Option<&'static [u8]> {
 //     `test` crate, is libtest's call into the test (R13, R17a);
 //   * the name tables match DECODED identifiers in LEGACY's scope exactly
 //     (ruling R28): SEED only in the main path of a symbol whose crate is
-//     SEED_CRATE (std); CONTROL only in the main path, an impl's (`M`/`X`)
-//     self type by ITS OWN path (R34: never its generic arguments --
+//     SEED_CRATE (std); CONTROL only in the main path, an inherent (`M`)
+//     or `core::ops::drop::Drop` (`X`) impl's self type -- never any other
+//     trait impl's, which may be blanket (R37) -- by ITS OWN path (R34: never its generic arguments --
 //     legacy prints `Result<T, E>`, not `Result<&str, p::TsnControlEnv>`),
 //     or drop glue's payload. Never an ordinary fn's generic
 //     arguments -- legacy never spells them, and `std::fs::read::<p::
@@ -774,8 +775,21 @@ mod v0 {
                 }
                 b'X' => {
                     self.impl_path()?;
-                    let own = self.searching(false, SCAN_OWN)?.unwrap_or(&[]);
+                    let at = self.pos;
+                    let own = self.searching(false, SCAN_OFF)?.unwrap_or(&[]);
+                    let trait_at = self.pos;
                     self.path_any()?;
+                    // Ruling R37: v0 substitutes an impl's generics into its
+                    // self type, so a blanket `impl<T> Tr for T` called on the
+                    // helper reads `<TsnControlEnv as Tr>` -- legacy prints
+                    // `<T as Tr>`, no crate. Only `core::ops::drop::Drop`,
+                    // which cannot be blanket, lends its self type a name.
+                    if self.is_core_drop(trait_at) {
+                        let end = self.pos;
+                        self.pos = at;
+                        self.searching(false, SCAN_OWN)?;
+                        self.pos = end;
+                    }
                     self.last = &[];
                     own
                 }
@@ -899,6 +913,51 @@ mod v0 {
                 self.scan = SCAN_OFF;
             }
             scan
+        }
+
+        /// Ruling R37: is the path at `at` exactly `core::ops::drop::Drop`,
+        /// read through back-references? The cursor is restored.
+        fn is_core_drop(&mut self, at: usize) -> bool {
+            let back = self.pos;
+            self.pos = at;
+            let hit = self.drop_seq(0) == Some(4);
+            self.pos = back;
+            hit
+        }
+
+        /// How many leading identifiers of `core::ops::drop::Drop` the plain
+        /// path here spells (its crate root, then its `N` chain), or `None`
+        /// when it is anything else. Back-references nest at most 8 deep.
+        fn drop_seq(&mut self, depth: u32) -> Option<usize> {
+            const DROP: [&[u8]; 4] = [b"core", b"ops", b"drop", b"Drop"];
+            if depth > 8 {
+                return None;
+            }
+            let nest = self.nest()?;
+            let mut n = match self.next()? {
+                b'C' => {
+                    if self.ident()? != DROP[0] {
+                        return None;
+                    }
+                    1
+                }
+                b'B' => {
+                    let (t, back) = self.backref()?;
+                    self.pos = t;
+                    let n = self.drop_seq(depth + 1)?;
+                    self.pos = back;
+                    n
+                }
+                _ => return None,
+            };
+            for _ in 0..nest {
+                let id = self.ident()?;
+                if n >= DROP.len() || id != DROP[n] {
+                    return None;
+                }
+                n += 1;
+            }
+            Some(n)
         }
 
         fn generic_arg(&mut self) -> Option<()> {

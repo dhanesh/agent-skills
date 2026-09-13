@@ -3795,12 +3795,19 @@ CASES = [
     (v0("_RNvMNtNt{std}3std4sync4mpscINtNtNt{std}3std4sync4mpsc8ReceiverNt{p}1p"
         "13TsnControlEnvE12recv_timeout"), False, False),
     (v0("_RNvMs0_{p}1pNtB5_13TsnControlEnv7restore"), False, True),
+    # R37: a trait impl other than core's Drop -- a blanket `impl<T> Tr for T`
+    # (legacy `<T as Tr>::m`), or `impl<F: Fn> Tr for F` run on a helper fn
+    # item -- lends its self type no control; `<TsnControlEnv as Drop>` does.
+    (v0("_RNvX{p}1pNt{p}1p13TsnControlEnvNt{p}1p5Touch5touch"), False, False),
+    (v0("_RNvX{p}1pNv{p}1p19tsn_control_set_envNt{p}1p5ViaFn6via_fn"), False, False),
+    (v0("_RNvXs3_{p}1pNtB5_13TsnControlEnvNtNtNt{core}4core3ops4drop4Drop4drop"), False, True),
 ]
 try:
     for sym, want_seed, want_control in CASES:
         f = rb.v0_facts(sym, frozenset({"std", "core", "alloc", "test"}))
         seed = f.krate == "std" and any("hashmap_random_keys" in i for i in f.main_idents)
-        control = "TsnControlEnv" in f.control_idents
+        control = bool({"TsnControlEnv", "tsn_control_set_env", "tsn_control_temp_dir"}
+                       & set(f.control_idents))
         res["scope"] += int(seed == want_seed and control == want_control)
 except Exception:
     res["scope"] = 0
@@ -3891,7 +3898,7 @@ def check_test_safety_net_rust_v0(old, new):
     newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_V0_PROBE)
     if _errored(oldp, newp):
         return
-    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 9 (higher=better)",
+    row(s, "Rust v0 names read in SEED/CONTROL's LEGACY scope, of 12 (higher=better)",
         oldp["scope"], newp["scope"], newp["scope"] > oldp["scope"],
         "std::fs::read::<p::hashmap_random_keys> and ::<p::TsnControlEnv> are std's read "
         "(legacy spells them _ZN3std2fs4read); a Y self type and a crate fn named like the "

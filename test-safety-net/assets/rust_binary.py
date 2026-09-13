@@ -168,8 +168,10 @@ V0Facts.__doc__ = """What the frame classifier reads from one v0 symbol.
     drop_crate   for `core::ptr::drop_glue<T>` / `drop_in_place<T>`: the first
                  crate not in `skip` anywhere in T, else None
     control_idents  the identifiers in CONTROL's scope, which is legacy's
-                 (ruling R28): the main path's, an M/X impl's self type's OWN
-                 path's (R34: not its generic arguments) and drop glue's
+                 (ruling R28): the main path's, an inherent (`M`) or `Drop`
+                 (`X`) impl's self type's OWN path's (R34: not its generic
+                 arguments; R37: no other trait impl, which may be blanket)
+                 and drop glue's
                  payload's -- never an ordinary fn's generic
                  arguments, never a `Y` self type's. SEED's scope is
                  `main_idents` of a symbol whose `krate` is std.
@@ -513,6 +515,16 @@ def _v0_own_idents(node):
             return out
 
 
+def _v0_plain_path(node):
+    """[crate, ident, ...] of a plain path -- a crate root and `N` chains
+    only -- or None for anything else (generics, impls)."""
+    tail = []
+    while node[0] == "N":
+        tail[:0] = [seg[2][1] for seg in node[2]]
+        node = node[1]
+    return [node[1][1]] + tail if node[0] == "C" else None
+
+
 def _v0_crates(node):
     """Every crate root in `node`, in the order the symbol spells them."""
     if isinstance(node, list):
@@ -545,9 +557,17 @@ def _v0_decide(node, skip, st):
             st["control"].append(ident[1])
             st["last"] = ident[1]
         return krate
-    if tag in ("M", "X"):
+    if tag == "M":
         st["last"] = ""
         st["control"].extend(_v0_own_idents(node[2]))
+        return _v0_first_crate(node[2], skip) or ""
+    if tag == "X":
+        st["last"] = ""
+        # Ruling R37: only a `Drop` impl -- never blanket -- lends its self
+        # type a control name; v0 prints a blanket `impl<T> Tr for T` at the
+        # type it was called on.
+        if _v0_plain_path(node[3]) == ["core", "ops", "drop", "Drop"]:
+            st["control"].extend(_v0_own_idents(node[2]))
         return _v0_first_crate(node[2], skip) or ""
     if tag == "Y":
         own = _v0_first_crate(node[1], skip)

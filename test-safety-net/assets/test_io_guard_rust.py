@@ -114,6 +114,14 @@ Fix round 2 (rulings R34, R35), each run:
   `test_a_control_type_only_as_a_std_generic_argument_is_judged`;
 * R35, a bin/example/bench target counted as a linked crate ->
   `TestReservedTargets.test_a_bin_example_or_bench_so_named_is_not_refused`.
+Fix round 3 (rulings R37, R38), each run:
+* R37, every X impl lending its self type a control name again ->
+  `TestClassifier.test_the_name_tables_keep_legacy_scope` (blanket and
+  fn-item fixtures) and, live on 1.98 and in TestProbeV0Crate,
+  `test_a_blanket_or_fn_item_impl_over_the_helper_is_judged`;
+* R38, a shipped helper without `#[inline(never)]` ->
+  `test_every_honest_control_path_still_passes_at_tier_2` (the temp-dir
+  control at opt1).
 
 The WRAPPER (`main` and its helpers) is tested the same way, through a
 fixture crate `fx` with its own committed `Cargo.lock` under a temp dir: the
@@ -566,9 +574,29 @@ pub fn stdin_line() -> String {
     let _ = std::io::stdin().read_line(&mut s);
     s
 }
+
+// Ruling R37: blanket impls over a BARE generic (legacy `<T as probe::Touch>
+// ::touch`, no crate) and over `F: Fn` -- v0 prints the type they run on.
+pub trait Touch { fn touch(&self) -> usize; }
+impl<T> Touch for T {
+    #[inline(never)]
+    fn touch(&self) -> usize { std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0) }
+}
+#[inline(never)] pub fn record<T: Touch>(x: &T) -> usize { x.touch() }
+pub trait SpawnTrue { fn spawn_true(&self) -> bool; }
+impl<T> SpawnTrue for T {
+    #[inline(never)]
+    fn spawn_true(&self) -> bool { std::process::Command::new("true").status().is_ok() }
+}
+pub trait ViaFn { fn via_fn(&self) -> usize; }
+impl<F: Fn(&str, &str) -> R, R> ViaFn for F {
+    #[inline(never)]
+    fn via_fn(&self) -> usize { std::fs::read("/etc/hosts").map(|b| b.len()).unwrap_or(0) }
+}
 '''
 # The control helpers: Task 8's canonical text, verbatim (ruling R2).
-CONTROL_HELPERS_RS = r'''fn tsn_control_temp_dir() -> std::path::PathBuf {
+CONTROL_HELPERS_RS = r'''#[inline(never)]
+fn tsn_control_temp_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -580,6 +608,7 @@ CONTROL_HELPERS_RS = r'''fn tsn_control_temp_dir() -> std::path::PathBuf {
 struct TsnControlEnv { key: String, old: Option<std::ffi::OsString> }
 
 impl Drop for TsnControlEnv {
+    #[inline(never)]
     #[allow(unused_unsafe)]
     fn drop(&mut self) {
         match &self.old {
@@ -589,6 +618,7 @@ impl Drop for TsnControlEnv {
     }
 }
 
+#[inline(never)]
 #[allow(unused_unsafe)]
 fn tsn_control_set_env(key: &str, value: &str) -> TsnControlEnv {
     let old = std::env::var_os(key);
@@ -814,6 +844,28 @@ impl AsRef<std::path::Path> for TsnControlEnv {
     let (_tx, rx) = std::sync::mpsc::channel::<TsnControlEnv>();
     assert!(rx.recv_timeout(std::time::Duration::from_millis(1)).is_err());
 }
+
+// Ruling R37: a blanket impl over a bare generic, or over `F: Fn`, run on the
+// helper -- `<p::TsnControlEnv as probe::Touch>::touch` under v0 -- is the
+// impl's own work, not the control.
+#[test] fn a_blanket_record_fs() {
+    let g = tsn_control_set_env("TSN_R37_KEY", "1");
+    assert!(record(&g) > 0);
+}
+#[test] fn a_blanket_spawn() {
+    let g = tsn_control_set_env("TSN_R37_KEY", "1");
+    assert!(g.spawn_true());
+}
+#[test] fn a_fnitem_setenv_fs() { assert!(tsn_control_set_env.via_fn() > 0); }
+// ... while the honest control paths stay the control: an inherent method on
+// the helper, and drop glue whose payload is the helper.
+impl TsnControlEnv {
+    #[inline(never)]
+    #[allow(unused_unsafe)]
+    fn restore(&mut self) { unsafe { std::env::remove_var(&self.key) } }
+}
+#[test] fn h_env_inherent() { let mut g = tsn_control_set_env("TSN_R37_KEY", "1"); g.restore(); }
+#[test] fn h_env_tuple_glue() { let _t = (tsn_control_set_env("TSN_R37_KEY", "1"), 7u8); }
 '''
 
 
@@ -1196,6 +1248,44 @@ class TestProbe(ProbeCase):
                 self.assertEqual(code, 0, out)
                 self.assertNotIn("IOGuardViolation", out)
 
+    def test_a_blanket_or_fn_item_impl_over_the_helper_is_judged(self):
+        # Ruling R37: v0 prints a blanket `impl<T> Touch for T` at the type it
+        # ran on -- `<p::TsnControlEnv as probe::Touch>::touch` -- and an
+        # `impl<F: Fn> ViaFn for F` at the fn item, `<p::tsn_control_set_env
+        # as probe::ViaFn>::via_fn`; legacy prints `<T as ...>`, `<F as ...>`.
+        # Neither is the control, so at tier 2 with environment allowed each
+        # is the test's filesystem or subprocess I/O. MUTATION: letting every
+        # X impl lend its self type a control name passes all three (1.98,
+        # TestProbeV0Crate).
+        for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
+            with self.subTest(build=label):
+                for name, group in (("a_blanket_record_fs", "filesystem"),
+                                    ("a_blanket_spawn", "subprocess"),
+                                    ("a_fnitem_setenv_fs", "filesystem")):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"], tier=2,
+                                             blocked=_blocked(2, ["environment"]), exe=exe)
+                    self.assertEqual(code, 3, out)
+                    self.assertRegex(out, r"(?m)^IOGuardViolation: a tier 2 candidate reached "
+                                          r"%s I/O" % group)
+
+    def test_every_honest_control_path_still_passes_at_tier_2(self):
+        # Rulings R37 and R38: the shipped control paths -- tsn_control_set_env
+        # and `<TsnControlEnv as Drop>::drop` (t_env_control), an inherent
+        # method on the helper, drop glue whose payload is the helper, and
+        # tsn_control_temp_dir -- each pass with their group allowed, at debug
+        # AND opt1. At opt-level >= 1 an inlinable helper vanished into the
+        # test body and the honest temp-dir run tripped; `#[inline(never)]`
+        # (R38) keeps each its own frame.
+        for label, exe in (("debug", self.exe), ("opt1", self.exe_opt)):
+            for name, allow in (("t_env_control", "environment"), ("h_env_inherent", "environment"),
+                                ("h_env_tuple_glue", "environment"),
+                                ("t_tmp_control", "filesystem")):
+                with self.subTest(build=label, test=name):
+                    code, out = self.run_exe([name, "--exact", "--test-threads=1"], tier=2,
+                                             blocked=_blocked(2, [allow]), exe=exe)
+                    self.assertEqual(code, 0, out)
+                    self.assertNotIn("IOGuardViolation", out)
+
     def test_optimized_pure_suite_does_not_trip_on_teardown(self):
         # MEASURE (ruling R15b): libtest's test-thread teardown -- TLS
         # destructors and output-capture cleanup after a PURE test returns --
@@ -1482,6 +1572,13 @@ class TestClassifier(unittest.TestCase):
         "mx_iter_x": ("1", "0", "-", "=p"),
         "mx_ref_self": ("1", "0", "-", "=p"),
         "inherent_control": ("1", "0", "environment", "=p"),
+        # Ruling R37, written from LEGACY: `<T as p::Touch>::touch`, `<F as
+        # p::ViaFn>::via_fn` name no control; `Drop` alone lends one, and only
+        # core's (its path read through a back-reference, too).
+        "blanket_x_control": ("1", "0", "-", "=p"),
+        "fnitem_x_control": ("1", "0", "-", "=p"),
+        "drop_x_trait_backref": ("1", "0", "environment", "=p"),
+        "drop_lookalike_x": ("1", "0", "-", "=p"),
     }
 
     @classmethod
@@ -1555,7 +1652,8 @@ class TestClassifier(unittest.TestCase):
         self.check(["std_read_seed_type", "std_read_control_type", "provided_control_self",
                     "crate_fn_seed_name", "seed", "drop_control", "trait_impl_backref",
                     "mx_result_map", "mx_receiver", "mx_iter_x", "mx_ref_self",
-                    "inherent_control"])
+                    "inherent_control", "blanket_x_control", "fnitem_x_control",
+                    "drop_x_trait_backref", "drop_lookalike_x"])
 
     def test_a_deep_nested_path_reads_as_the_hook_reads_it(self):
         # Ruling R29: 1,200 `N` levels. The hook reads the chain iteratively;

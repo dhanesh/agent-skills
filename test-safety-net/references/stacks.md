@@ -599,7 +599,9 @@ own image, over a 1024-frame buffer. It resolves symbols with `dladdr` on macOS 
 of `/proc/self/exe` on Linux.
 
 - A `CONTROL_HELPERS` frame decides, with that helper's group. The helper must be named by the
-  frame's own path, an impl's self type (by that type's own path), or drop glue's payload. A helper
+  frame's own path, by an inherent or `Drop` impl's self type (by that type's own path), or by drop
+  glue's payload. No other trait impl counts, because under v0 a blanket `impl<T> Tr for T` is
+  printed with the helper as its self type. A helper
   type used only as a generic argument is std's work, not the control. That covers a std function's
   generic (`std::fs::read::<TsnControlEnv>`) and a std type's generic
   (`<Result<&str, TsnControlEnv>>::map`).

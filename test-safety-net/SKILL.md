@@ -328,6 +328,7 @@ than none, because it makes the invariant look enforced when it is not.
    copy into the test file verbatim:
 
    ```rust
+   #[inline(never)]
    fn tsn_control_temp_dir() -> std::path::PathBuf {
        use std::sync::atomic::{AtomicUsize, Ordering};
        static N: AtomicUsize = AtomicUsize::new(0);
@@ -340,6 +341,7 @@ than none, because it makes the invariant look enforced when it is not.
    struct TsnControlEnv { key: String, old: Option<std::ffi::OsString> }
 
    impl Drop for TsnControlEnv {
+       #[inline(never)]
        #[allow(unused_unsafe)]
        fn drop(&mut self) {
            match &self.old {
@@ -349,6 +351,7 @@ than none, because it makes the invariant look enforced when it is not.
        }
    }
 
+   #[inline(never)]
    #[allow(unused_unsafe)]
    fn tsn_control_set_env(key: &str, value: &str) -> TsnControlEnv {
        let old = std::env::var_os(key);
@@ -359,6 +362,8 @@ than none, because it makes the invariant look enforced when it is not.
 
    - **An environment-controlled test goes alone in `tests/tsn_<module_path>_env_<n>.rs`.** The
      guard refuses a file that breaks this.
+   - **Keep each helper's `#[inline(never)]`.** At opt-level 1 or above, an inlined helper stops
+     being a frame of its own, and an honest control run trips.
    - Clock and randomness are uncontrollable on rust. `TEST_SAFETY_NET_ALLOW=clock` is refused with
      a note.
    - A unit the ranker tiers 3 as *not reachable* or *binary-only* is reported, never tested.
