@@ -3647,9 +3647,7 @@ if shutil.which("cargo") and shutil.which("rustc"):
                              "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "RUST_TEST_NOCAPTURE",
                              "RUSTUP_TOOLCHAIN")}
         env["RUSTUP_AUTO_INSTALL"] = "0"
-        cache = os.path.join(root, "..", "rust-ab-cache")
-        os.makedirs(cache, exist_ok=True)
-        env["TEST_SAFETY_NET_CACHE"] = cache
+        env["TEST_SAFETY_NET_CACHE"] = tempfile.mkdtemp()
         subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=env,
                        capture_output=True)
         genv = dict(env, TEST_SAFETY_NET_TIER="1")
