@@ -46,7 +46,10 @@ BinaryFacts.__doc__ = """What the guard needs to know about a compiled test bina
                    not std/core/alloc/test -- the frames a hook could attribute
 """
 
-_NON_CRATE = frozenset({"std", "core", "alloc", "test"})
+_NON_CRATE = frozenset({"std", "core", "alloc", "test"})  # narrower than the hook's
+# TRANSPARENT_CRATES on purpose: this only feeds the stripped-binary crate_symbols count
+# below, not the hook's frame-attribution rule, so it need not carry panic_unwind,
+# backtrace, hashbrown or std_detect too.
 
 # ── The bounds-checked reader ────────────────────────────────────────────
 #
@@ -889,7 +892,7 @@ def symbol_names(path) -> list:
     return []
 
 
-def refusal(facts: BinaryFacts):
+def refusal(facts: BinaryFacts) -> str | None:
     """The reason a preloaded hook would fail open on `facts`, or None.
 
     Checked in this order -- the first true reason wins, so a stripped

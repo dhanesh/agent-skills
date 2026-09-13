@@ -141,6 +141,16 @@ RESIDUALS, STATED RATHER THAN IMPLIED
    `PARTIALLY_INTERCEPTED` below carry each, measured; the filter still
    marks them.
 7. darwin and linux only; x86_64 macOS is unproven.
+8. An unmangled `#[no_mangle]`/`#[export_name]` fn reached only from a C or
+   std frame on the main thread (an `atexit` handler, a signal handler, an
+   `.init_array` entry) carries a plain C symbol: the walk finds no crate
+   frame beneath it, and the main-thread branch of the thread-identity rule
+   (below) reads that as pre-`main` init and exempts it -- its I/O reads
+   GREEN (ruling R41; measured on darwin 1.92, `scratchpad/final-review/ax/`:
+   a `#[no_mangle]` `atexit` handler wrote a file and exited 0, the same
+   handler mangled exited 3). Follow-up, not shipped: treat an unmangled
+   symbol inside the executable's own image as a crate frame, minus std's
+   own C-ABI exports.
 
 THE HOOK
 --------
@@ -267,6 +277,14 @@ from guard_env import (                                             # noqa: E402
     EXIT_GREEN, EXIT_RED, EXIT_NOT_ARMED, EXIT_TRIP, EXIT_NO_TEST, EXIT_NO_BUILD,
     OUTCOME as _OUTCOME,
 )
+
+# guard_env.OUTCOME[EXIT_NO_TEST] is worded for go ("-run matched no test, the
+# package has no test files") -- go reads it verbatim and must keep reading it
+# verbatim (ab-validate's byte-identity row), so it is not edited here. Rust's
+# own NO TEST paths are named at classify()'s call sites, not `go test -run`,
+# so this guard prints its own wording instead of the shared one.
+_RUST_NO_TEST = ("NO TEST (exit 4): nothing was proved -- the test name matched no test in "
+                 "that tests/ target, it is #[ignore]d, or the process exited early")
 
 HOOK_SOURCE = os.path.join(_ASSETS, "io_guard_rust_hook.rs")
 
@@ -1254,7 +1272,7 @@ def main(argv=None):
         _say("note: %s does not link libtest's harness (a `harness = false` target): no libtest "
              "run can be observed, and its verdict lines are its own; nothing was proved"
              % built.exe)
-        _say(_OUTCOME[EXIT_NO_TEST])
+        _say(_RUST_NO_TEST)
         return EXIT_NO_TEST
     try:
         hook = hook_library(repo, env)
@@ -1271,7 +1289,7 @@ def main(argv=None):
                  % (m.group(2), m.group(3), demangle(m.group(4))))
     if note:
         _say("note: " + note)
-    _say(_OUTCOME[outcome])
+    _say(_RUST_NO_TEST if outcome == EXIT_NO_TEST else _OUTCOME[outcome])
     return outcome
 
 

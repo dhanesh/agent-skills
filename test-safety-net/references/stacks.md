@@ -563,7 +563,7 @@ comes from the build's JSON and the `test result:` line, and the exit table is g
 |---|---|---|
 | 0 | GREEN | exit 0, a `test result:` line, and libtest's own `test <name> ... ok` line before it |
 | 1 | RED | an assertion failed, or the binary died with no result line (a signal, an abort) |
-| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; not darwin or linux |
+| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; the hook failed to build with this toolchain; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; a test or lib target named like one of Rust's own crates (ruling R30) -- rename it; no `rustc` or `cargo` on PATH; not darwin or linux |
 | 3 | GUARD TRIP | `IOGuardViolation: a tier <N> candidate reached <group> I/O via <call> from <symbol>` |
 | 4 | NO TEST | one of: an `#[ignore]` test, or a name matching no test; the test process exiting early, because the hook forces status 125 when a crate frame calls `exit` or `quick_exit` (so a unit that calls `process::exit` cannot be proven in-process); a `harness = false` target; the 300 s timeout |
 | 5 | NO BUILD | the test did not compile |
@@ -609,12 +609,17 @@ of `/proc/self/exe` on Linux.
   (`<Result<&str, TsnControlEnv>>::map`).
 - `hashmap_random_keys` in std's own frame (std seeding a HashMap) is exempt. A crate function, type
   or test that merely carries the name is not.
-- A **crate frame** decides with the call's group. Its crate is decided in one of four ways:
+- A **crate frame** decides with the call's group. Its crate is decided in one of five ways:
   - a plain path's first segment;
   - for an impl frame (`<T as Trait>::m`, `<T>::m`), the crate of the self type `T`, so a crate's
     own `Drop` or `Display` impl is judged;
   - for `core::ptr::drop_in_place<T>`, the first crate path in `T` that is not transparent;
-  - a generic parameter or a primitive is a bare segment that names no crate.
+  - a generic parameter or a primitive is a bare segment that names no crate;
+  - when none of those resolves a crate, a `drop_slow` identifier in the frame is Rc/Arc's shared
+    refcount-zero destructor (residual 3): at opt-level the compiler shares one
+    `Arc<T, A>::drop_slow` across every `T`, erasing the payload's own crate, so the frame is
+    treated as its own boundary and judged rather than passed over as transparent — a payload
+    destructor's blocked call inlined into it still trips.
 - Each frame is read in its own mangling: legacy `_ZN…17h<hash>E`, or v0 `_R…`, which is rustc
   1.98's default and the mangling its std and libtest ship in. The same rules hold for both. In v0,
   an impl's self type decides, a primitive or placeholder names no crate, and `core::ptr::drop_glue<T>`
@@ -725,6 +730,20 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
     manglings. The wrapper's default debug build keeps the `Drop` its own frame and judges it, and
     so does `#[inline(never)]` on the `drop`. A `[profile.dev]`/`[profile.test]` opt-level of 1 or
     more with this shape can read GREEN.
+11. **An unmangled main-thread callback with no crate frame beneath it names no crate, and reads
+    GREEN.** A `#[no_mangle]` or `#[export_name]` function that only a C or std frame calls on the
+    main thread — an `atexit` handler, a signal handler, an `.init_array` entry — carries a plain C
+    symbol, not a Rust-mangled one. The walk finds no crate frame beneath it, decides nothing, and
+    the main-thread branch of the thread-identity rule (residual above, "pre-`main` libc/dyld
+    init") reads that as exempt rather than judged: its I/O passes unattributed. Measured on darwin
+    rustc 1.92 at tier 1 (`scratchpad/final-review/ax/`): an `atexit` handler registered from a
+    `#[no_mangle] extern "C" fn` wrote a file and exited 0; the identical handler with an ordinary
+    (mangled) name exited 3, `IOGuardViolation: … via open from ax::ax_flush_mangled`. The shape can
+    be accidental — any exported C-ABI callback qualifies, not just a deliberately hidden one — so
+    it is stated here rather than folded into residual 9's deliberate-forgery list. **Follow-up, not
+    shipped:** treat an unmangled symbol that resolves inside the executable's own image as a crate
+    frame, minus std's own C-ABI exports; that heuristic risks honest-run breakage and is left for
+    the next pass rather than landed after all six toolchains are already green (ruling R41).
 
 ## Python row, in detail
 
