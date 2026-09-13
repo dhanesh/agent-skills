@@ -166,6 +166,10 @@ SINCE_TSN_RUST_V0 = "a3e32f7"  # test-safety-net: the Rust guard reads rustc
 # legacy's scope under v0 (R28), a bounded Python v0 reader (R29), targets
 # named like std's or libtest's crates refused (R30), cargo 1.94's --locked
 # wording read as a stale lock (R27, R32).
+SINCE_TSN_RUST_R11 = "c837c1d"  # test-safety-net: the Rust guard judges a
+# crate's own `#[no_mangle]`/`#[export_name]` fns as crate frames (R42),
+# closing residual 11: the list is the unmangled TEXT symbols of cargo-built
+# rlibs' `*.rcgu.o` members, read by a stdlib ar/ELF/Mach-O reader.
 
 
 def _git_out(*args):
@@ -3937,6 +3941,174 @@ def check_test_safety_net_rust_v0(old, new):
         since=SINCE_TSN_RUST_V0)
 
 
+# Residual 11 (ruling R42). The first three measurements are toolchain-
+# independent: rust_binary's list builder over synthetic rlibs -- a GNU
+# archive of ELF objects (linux) and a BSD archive of Mach-O objects
+# (darwin), each with a bundled-C member beside the rustc codegen one. The
+# fourth runs the reviewer's `ax` shape through the wrapper and reads -1
+# (row skipped) without cargo and rustc. The baseline (the merge base with
+# main) has no Rust guard at all, so each reads 0 there.
+_RUST_R11_PROBE = r"""
+import shutil, struct, subprocess
+res = {"listed": 0, "native": 0, "bitcode": 0, "atexit": -1}
+try:
+    import rust_binary as rb
+except Exception:
+    rb = None
+
+
+def elf_rel(symbols):
+    strtab, offs = b"\0", []
+    for name, _k in symbols:
+        offs.append(len(strtab))
+        strtab += name.encode() + b"\0"
+    syms = struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0)
+    for (_n, kind), o in zip(symbols, offs):
+        syms += struct.pack("<IBBHQQ", o, (1 << 4) | kind, 0, 1, 0, 4)
+    text, shstr = b"\0" * 16, b"\0.text\0.symtab\0.strtab\0.shstrtab\0"
+    blobs, off, at = [text, syms, strtab, shstr], 64, []
+    for b in blobs:
+        at.append(off)
+        off += len(b)
+    pad = (-off) % 8
+    sh = [struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+          struct.pack("<IIQQQQIIQQ", 1, 1, 6, 0, at[0], len(text), 0, 0, 4, 0),
+          struct.pack("<IIQQQQIIQQ", 7, 2, 0, 0, at[1], len(syms), 3, 1, 8, 24),
+          struct.pack("<IIQQQQIIQQ", 15, 3, 0, 0, at[2], len(strtab), 0, 0, 1, 0),
+          struct.pack("<IIQQQQIIQQ", 23, 3, 0, 0, at[3], len(shstr), 0, 0, 1, 0)]
+    ehdr = (b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\0" * 8
+            + struct.pack("<HHIQQQIHHHHHH", 1, 0xB7, 1, 0, 0, off + pad, 0, 64, 0, 0, 64,
+                          len(sh), len(sh) - 1))
+    return ehdr + b"".join(blobs) + b"\0" * pad + b"".join(sh)
+
+
+def macho_obj(names):
+    seg = struct.pack("<II16sQQQQiiII", 0x19, 72 + 80, b"", 0, 0, 0, 0, 7, 7, 1, 0)
+    seg += struct.pack("<16s16sQQIIIIIIII", b"__text", b"__TEXT", 0, 16, 0, 2, 0, 0,
+                       0x80000400, 0, 0, 0)
+    strtab, offs = b"\0", []
+    for name in names:
+        offs.append(len(strtab))
+        strtab += name.encode() + b"\0"
+    nlist = b"".join(struct.pack("<IBBHQ", o, 0x0F, 1, 0, 0) for o in offs)
+    head = 32 + len(seg) + 24
+    symtab = struct.pack("<IIIIII", 0x2, 24, head, len(names), head + len(nlist), len(strtab))
+    return (struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 1, 2, len(seg) + 24, 0, 0)
+            + seg + symtab + nlist + strtab)
+
+
+def member(field, body):
+    hdr = (field.ljust(16) + "0".ljust(12) + "0".ljust(6) + "0".ljust(6) + "644".ljust(8)
+           + str(len(body)).ljust(10)).encode() + b"`\n"
+    return hdr + body + (b"\n" if len(body) % 2 else b"")
+
+
+RCGU = "ax-555212d5d7847123.8ahtpu3q62ny3yoa6vxew9po5.1dgocu1.rcgu.o"
+LEGACY = "_ZN2ax5inner17h" + "f" * 16 + "E"
+rcgu_elf = elf_rel([("ax_flush", 2), (LEGACY, 2), ("_RNvCs1234_2ax5inner", 2)])
+native_elf = elf_rel([("sqlite3_open", 2)])
+longnames = (RCGU + "/\n").encode()
+gnu = (b"!<arch>\n" + member("/", b"\0" * 4) + member("//", longnames)
+       + member("lib.rmeta/", b"meta") + member("/0", rcgu_elf)
+       + member("abc-sqlite3.o/", native_elf))
+
+
+def bsd_member(name, body):
+    raw = name.encode() + b"\0" * ((-len(name)) % 8)
+    return member("#1/%d" % len(raw), raw + body)
+
+
+bsd = (b"!<arch>\n" + bsd_member("__.SYMDEF SORTED", b"\0" * 8)
+       + bsd_member(RCGU, macho_obj(["_ax_flush", "_" + LEGACY]))
+       + bsd_member("abc-zstd.o", native_elf))
+bitcode = b"!<arch>\n" + member("//", longnames) + member("/0", b"BC\xc0\xde" + b"\0" * 32)
+tmp = tempfile.mkdtemp()
+paths = {}
+for name, data in (("gnu", gnu), ("bsd", bsd), ("bitcode", bitcode)):
+    paths[name] = os.path.join(tmp, "lib%s.rlib" % name)
+    with open(paths[name], "wb") as fh:
+        fh.write(data)
+try:
+    got = [rb.rlib_exports(paths["gnu"]), rb.rlib_exports(paths["bsd"])]
+    res["listed"] = sum(int(g == ["ax_flush"]) for g in got)
+    res["native"] = sum(int("sqlite3_open" in g) for g in got)
+except Exception:
+    res["listed"] = 0
+try:
+    rb.rlib_exports(paths["bitcode"])
+except Exception as exc:
+    res["bitcode"] = int(type(exc).__name__ == "ExportListError" and "bitcode" in str(exc))
+
+# The reviewer's shape, live: a `#[no_mangle]` fn in src/lib.rs registered
+# with atexit, reading a file after libtest has reported.
+guard = os.path.join(sys.path[0], "io_guard_rust.py")
+if shutil.which("cargo") and shutil.which("rustc") and (
+        sys.platform == "darwin" or sys.platform.startswith("linux")):
+    res["atexit"] = 0
+    if os.path.isfile(guard):
+        crate = os.path.join(tmp, "ax")
+        for rel, text in (
+                ("Cargo.toml", '[package]\nname = "ax"\nversion = "0.1.0"\nedition = "2021"\n'),
+                ("src/lib.rs", 'extern "C" { fn atexit(f: extern "C" fn()) -> i32; }\n'
+                               '#[no_mangle] pub extern "C" fn ax_exit_read() '
+                               '{ let _ = std::fs::read("/etc/hosts"); }\n'
+                               'pub fn register() { unsafe { atexit(ax_exit_read); } }\n'),
+                ("tests/tsn_ax.rs", "#[test] fn t_unmangled() { ax::register(); }\n")):
+            os.makedirs(os.path.dirname(os.path.join(crate, rel)), exist_ok=True)
+            with open(os.path.join(crate, rel), "w") as fh:
+                fh.write(text)
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("TSN_", "TEST_SAFETY_NET", "CARGO_TARGET_DIR", "RUSTFLAGS"))}
+        subprocess.run(["cargo", "generate-lockfile", "--offline"], cwd=crate, env=env,
+                       capture_output=True, timeout=300)
+        env.update(TEST_SAFETY_NET_TIER="1", TEST_SAFETY_NET_CACHE=os.path.join(tmp, "cache"),
+                   CARGO_TARGET_DIR=os.path.join(tmp, "target"))
+        r = subprocess.run([sys.executable, guard, "--test", "tsn_ax", "t_unmangled"], cwd=crate,
+                           env=env, capture_output=True, text=True, timeout=600,
+                           stdin=subprocess.DEVNULL)
+        res["atexit"] = int(r.returncode == 3 and "ax_exit_read" in r.stdout + r.stderr)
+shutil.rmtree(tmp, ignore_errors=True)
+print(json.dumps(res))
+"""
+
+
+def check_test_safety_net_rust_r11(old, new):
+    """Residual 11: is a crate's own `#[no_mangle]`/`#[export_name]` fn judged
+    as a crate frame -- listed from its rlib's codegen objects, never from a
+    bundled C member, and refused rather than guessed when unreadable?"""
+    s = "test-safety-net"
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _RUST_R11_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _RUST_R11_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "a crate's unmangled fn listed from a synthetic GNU and BSD rlib, of 2 "
+           "(higher=better)",
+        oldp["listed"], newp["listed"], newp["listed"] > oldp["listed"],
+        "the rcgu member's `ax_flush` (Mach-O `_ax_flush`), and nothing mangled: the list "
+        "the hook reads a `#[no_mangle]` frame as the crate's from. The baseline has no "
+        "list, so such a callback named no crate",
+        since=SINCE_TSN_RUST_R11)
+    row(s, "a bundled C member's fn listed as a crate's (lower=better)",
+        oldp["native"], newp["native"], newp["native"] == 0,
+        "`sqlite3_open` in a build script's `.o` member beside the codegen one: counted, "
+        "std or libtest calling into bundled C would trip honest runs (ruling R42)",
+        kind="guard")
+    row(s, "an rlib whose codegen member is LLVM bitcode is refused, never read as "
+           "empty (1=yes)",
+        oldp["bitcode"], newp["bitcode"], newp["bitcode"] > oldp["bitcode"],
+        "linker-plugin LTO makes rustc emit bitcode: a list built past it would be "
+        "silently short, so the proof exits 2 with the remedy",
+        since=SINCE_TSN_RUST_R11)
+    if newp["atexit"] >= 0:          # -1: no cargo/rustc here, nothing to measure
+        row(s, "a #[no_mangle] atexit handler's file read trips through the wrapper "
+               "(1=yes)",
+            oldp["atexit"], newp["atexit"], newp["atexit"] > oldp["atexit"],
+            "the final review's `ax` probe: the handler carries a plain C symbol and only "
+            "libc calls it, so the walk found no crate frame and the main-thread rule "
+            "exempted it (exit 0, the file written). It now exits 3, named",
+            since=SINCE_TSN_RUST_R11)
+
+
 def self_test():
     """Assert the row lifecycle, so the corpus can survive its own merges.
 
@@ -4124,6 +4296,7 @@ def main():
         check_test_safety_net_go_review2(old, REPO)
         check_test_safety_net_rust(old, REPO)
         check_test_safety_net_rust_v0(old, REPO)
+        check_test_safety_net_rust_r11(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
