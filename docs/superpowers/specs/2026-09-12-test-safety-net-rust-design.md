@@ -330,8 +330,10 @@ Classifying output stays in each stack's guard, because it reads a different tes
    crate's own constructor symbol, and `tsn-hook: armed` is printed before the trip. A test pins
    the mechanism without vendoring `ctor`: the `#[used]` init-array fn pointer it expands to.
 5. Verdict lines share stdout with repo code, so an `init`-style print can spoof one (as on go).
-6. 1.86 and 1.90 are first run in CI, not in the spikes.
-7. The macOS floor may be Linux-proven only.
+6. 1.86 and 1.90 are first run in CI, not in the spikes. (Task 10: run green locally on linux
+   arm64 and in CI on amd64.)
+7. The macOS floor may be Linux-proven only. **Closed in Task 10:** a `macos-latest` (arm64) job
+   on 1.82 linked and passed, so it is kept as a `versions` leg.
 8. Rust's own support policy covers only the latest stable, so the four older legs are this skill's
    claim, not the Rust project's.
 
@@ -357,7 +359,7 @@ plan's progress ledger. One line each, what changed and why:
 - **The fat-LTO residual (R23).** Fat LTO in `[profile.dev]`/`[profile.test]` inlines the panic hook's `getenv` and libtest's exit into the harness `main`, so honest failures read 3 or 4. It fails closed (never a false GREEN) and is stated rather than fixed; the candidate fix, exempting rustc's generated harness `main`, goes to the final review.
 - **The arm handshake is two-part (R1), and two more refusals exist (R20, R21).** `tsn-hook: armed`, plus `tsn-hook: cannot attribute` (exit 2) on an unresolvable walk or a missing Linux `.symtab`, because executable symbols are not in `.dynsym` and a by-name self-check could not work. Several packages with `tests/<stem>.rs` and no `-p`, a preload the loader skipped, or a handshake after `running N test` also exit 2.
 - **The proof builds `--offline` (R24).** `cargo test --locked --offline --no-run`: the skill never fetches anything, matching go's `GOPROXY=off`, so a dependency missing from the local cargo cache exits 2 (NOT ARMED) with the remedy `cargo fetch`, never a download and never NO BUILD.
-- **CI legs are "run", not "proven", until watched green (R25).** Until the `versions` legs have been seen passing, every document says the rust versions are run by CI, never proven or proved.
+- **CI legs are "run", not "proven", until watched green (R25).** Until the `versions` legs have been seen passing, every document says the rust versions are run by CI, never proven or proved. Task 10 watched every leg pass (run 34747361975: the five amd64 linux legs and 1.82 on macos-latest), and restored "proven".
 - **The rustix build plan reads `Cargo.lock`.** Any `rustix` in the lockfile selects the separate target dir and `--cfg=rustix_use_libc` on Linux, so the plan needs no `cargo metadata` call.
 
 The shipped residuals are nine, not the eight above: `references/stacks.md` merges and extends them.
