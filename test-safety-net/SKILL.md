@@ -1,32 +1,33 @@
 ---
 name: test-safety-net
 description: >-
-  Author unit tests into a Python, node/TypeScript or Go codebase that has none, so an agent can
-  change it safely. Use when a repo has no meaningful tests, when someone says "I don't trust an
+  Author unit tests into a Python, node/TypeScript, Go or Rust codebase that has none, so an agent
+  can change it safely. Use when a repo has no meaningful tests, when someone says "I don't trust an
   agent in this codebase", "add tests before we refactor", or "we need a safety net before this
-  migration" — and equally for a JS/TS repo with no `*.test.js`, or a Go module with no
-  `_test.go`. Ranks units by blast
-  radius and churn, then writes characterization tests that pin current behaviour — each one proved
-  able to FAIL before it is kept, so the suite is a real change-detector and not green noise. Every
-  test declares whether it pins behaviour or asserts a spec; suspected bugs are pinned AND reported,
-  never blessed. Untestable code is triaged, not forced: it becomes a ranked seam list for
-  clean-code. Never modifies your source and never writes a test that performs real I/O. Not a
-  correctness audit, not a coverage chaser, and not for rust. Fills the loop
-  verifier-installer installs; clean-code judges what comes out.
+  migration" — and equally for a JS/TS repo with no `*.test.js`, a Go module with no `_test.go`,
+  or a Rust crate with no `tests/`. Ranks units by blast radius and churn, then writes
+  characterization tests that pin current behaviour — each one proved able to FAIL before it is
+  kept, so the suite is a real change-detector. Every test declares whether it pins behaviour or
+  asserts a spec; suspected bugs are pinned AND reported, never blessed. Untestable code is
+  triaged, not forced: it becomes a ranked seam list for clean-code. Never modifies your source and
+  never writes a test that performs real I/O. Not a correctness audit and not a coverage chaser.
+  Fills the loop verifier-installer installs; clean-code judges what comes out.
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
-  CLI. Writes and proves tests on three stacks, each on the last five versions of its language —
-  python 3.10–3.14 (pytest, falling back to unittest), node/TypeScript on the LTS lines 18, 20, 22,
-  24 and 26 (`node --test`) and go 1.22–1.26 (`go test`, on darwin and linux); rust is declined
-  (references/stacks.md). No pip, no npm, no network: node's optional precise discovery
-  drives a `typescript` the repo already ships and never downloads one — that runs the analysed
-  repo's own compiler in-process, and `--no-precise` declines it — and go's runs this skill's own
-  `go/ast` helper under `GOTOOLCHAIN=local`, so no toolchain is ever fetched.
+  CLI. Writes and proves tests on four stacks — python 3.10–3.14 (pytest, falling back to
+  unittest), node/TypeScript on the LTS lines 18, 20, 22, 24 and 26 (`node --test`), go 1.22–1.26
+  (`go test`, on darwin and linux) and rust 1.82–1.98 (`cargo test`, on darwin and linux; 1.82,
+  1.86, 1.90, 1.94 and 1.98 proven by CI's `versions` legs on amd64 linux, and 1.82 on arm64
+  macOS too, the minors between expected by bracketing, not proven) (references/stacks.md). No pip, no npm, no network: node's optional
+  precise discovery drives a `typescript` the repo already ships and never downloads one — that
+  runs the analysed repo's own compiler in-process, and `--no-precise` declines it — go's runs this
+  skill's own `go/ast` helper under `GOTOOLCHAIN=local`, and the rust guard builds `--offline`
+  under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.2.0"
-  tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go"
+  version: "1.3.0"
+  tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
 
 # test-safety-net
@@ -49,24 +50,29 @@ list this skill cannot act on itself (see Tiers 3/4 below). Do not use this to c
 number, to bless current behaviour as correct, or to refactor code to make it testable — that
 inverts the safety property the skill exists to provide (see Invariant 1).
 
-**Locating this skill's helpers (do this first).** Four bundled scripts ship with this skill — the
+**Locating this skill's helpers (do this first).** Five bundled scripts ship with this skill — the
 stack-agnostic ranker (`assets/rank_risk.py`, step 2) and one runtime I/O guard per stack
-(`assets/io_guard.py` for python, `assets/io_guard.js` for node, `assets/io_guard_go.py` for go, all
-step 4). A path written relative to this skill will not resolve from the target repo you're working
-in. Resolve the base directory once and reuse it everywhere:
+(`assets/io_guard.py` for python, `assets/io_guard.js` for node, `assets/io_guard_go.py` for go,
+`assets/io_guard_rust.py` for rust, all step 4). A path written relative to this skill will not
+resolve from the target repo you're working in. Resolve the base directory once and reuse it
+everywhere:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
 # If you don't have it, discover it:
 SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'test-safety-net' 2>/dev/null | head -1)
-test -f "$SKILL_DIR/assets/rank_risk.py"   || echo "SKILL_DIR not resolved"
-test -f "$SKILL_DIR/assets/io_guard.py"    || echo "SKILL_DIR not resolved"
-test -f "$SKILL_DIR/assets/io_guard.js"    || echo "SKILL_DIR not resolved"
-test -f "$SKILL_DIR/assets/io_guard_go.py" || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/rank_risk.py"     || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard.py"      || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard.js"      || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard_go.py"   || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/io_guard_rust.py" || echo "SKILL_DIR not resolved"
 ```
 
-The ranker and the python and go guards are stdlib-only python3 — the go guard drives the
-machine's own `go`; the node guard is dependency-free CommonJS for node 18+. All four are offline.
+The ranker and the python, go and rust guards are stdlib-only python3 — the go guard drives the
+machine's own `go`, the rust guard the machine's own `cargo` and `rustc`; the node guard is
+dependency-free CommonJS for node 18+. All five are offline: no guard ever downloads a toolchain,
+and the rust guard builds `--offline`, so a dependency missing from the cargo cache is refused
+(step 1), never fetched.
 Do not author your own guard: the one that ships is
 what Invariant 2 is enforced by, and a hand-rolled substitute that patches the wrong layer is worse
 than none, because it makes the invariant look enforced when it is not.
@@ -75,13 +81,12 @@ than none, because it makes the invariant look enforced when it is not.
 
 1. **Detect** the stack and — critically — how to run exactly **one** test, not just the suite.
    The ranker detects the stack itself and prints its verdict and the evidence behind it on
-   stderr (`note: stack=python (evidence: python=52, node=18, go=0)`); read that line rather than
-   assuming, and pass `--stack` when it is wrong or when it reports a tie. Three stacks are complete
-   end to end — **python**, **node/TypeScript** and **go** — because each ships a runtime guard that
-   can prove the no-I/O invariant during step 4. A stack that cannot prove it declines to write
-   rather than writing unproven tests, which is what rust does today: it is not registered, so the
-   ranker writes `note: no stack claims <repo>` to stderr and returns an empty plan — read that
-   line and stop. Consult `references/stacks.md` for the row that applies, and stop plainly, without
+   stderr (`note: stack=python (evidence: python=52, node=18, go=0, rust=0)`); read that line
+   rather than assuming, and pass `--stack` when it is wrong or when it reports a tie. Four stacks
+   are complete end to end — **python**, **node/TypeScript**, **go** and **rust** — because each
+   ships a runtime guard that can prove the no-I/O invariant during step 4. A repo none of them
+   claims gets `note: no stack claims <repo>` on stderr and an empty plan — read that line and
+   stop. Consult `references/stacks.md` for the row that applies, and stop plainly, without
    improvising, for anything with no complete row. Single-test invocation is load-bearing: step 4's
    proof is impossible without it.
 
@@ -100,11 +105,21 @@ than none, because it makes the invariant look enforced when it is not.
    toolchain — so on a cold module cache run `go mod download` yourself first. A missing module
    shows up as exit 5 (the package did not build), never as a verdict about the unit.
 
+   **On rust, check the lockfile, the toolchain and the cargo cache before you plan to write.**
+   The rust guard builds with `cargo test --locked --offline` and runs every `rustc` and `cargo`
+   call with `RUSTUP_AUTO_INSTALL=0`, so it never writes `Cargo.lock` and never downloads a
+   toolchain or a crate. Every proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale
+   one, with a `rust-toolchain.toml` pin below 1.82 or not installed, or with a dependency not in
+   the local cargo cache. The remedy for a missing lockfile is `cargo generate-lockfile`. It writes
+   a file into the user's tree, which this skill never does on its own, so ask first. The remedy
+   for an uncached dependency is `cargo fetch` (or building the tests once), then re-run: the proof
+   never downloads anything.
+
 2. **Rank** the risk surface:
 
    ```sh
    python3 "$SKILL_DIR/assets/rank_risk.py" <repo> [--top-n N] [--since "6 months ago"] \
-     [--stack python|node|go]
+     [--stack python|node|go|rust]
    ```
 
    Offline, stdlib + git only, deterministic. Read `references/parameters.md` for the full
@@ -113,7 +128,8 @@ than none, because it makes the invariant look enforced when it is not.
    for `clean-code`; `covered` is a flat index of already-tested unit ids, not a fourth bucket — a
    `not_netted` unit can also appear in `covered`. `discovery` says which reader found the units
    (`precise` = a real parser, `heuristic` = a text reader); a node repo reads `heuristic` unless
-   it ships its own `typescript`, a go repo reads `precise` wherever `go` is on PATH, and two runs
+   it ships its own `typescript`, a go repo reads `precise` wherever `go` is on PATH, a rust repo
+   always reads `heuristic` (Rust has one reader, and the ranker never runs cargo), and two runs
    are only comparable when it agrees. **Carry that
    value into your report's header**, as the template below does: a run that silently degraded is a
    run whose numbers cannot be compared to the last one's. Node's precise path reaches that repo's
@@ -164,10 +180,11 @@ than none, because it makes the invariant look enforced when it is not.
 
    **The runtime guard, not the tier, is what enforces "never real I/O."** Static triage is a
    filter — it declines obvious hazards, but dynamic dispatch (Python's `getattr`, JavaScript's
-   computed member access and dynamic `import()`) means it cannot decide reachability from source
-   alone; review rounds on the ranker found fifteen-plus constructions it called safe that actually
-   reached real I/O. So the invariant is enforced during this red→green proof by the **tier-aware
-   runtime guard this skill ships for the stack you are on** — one per stack, both loaded on the
+   computed member access and dynamic `import()`, Rust's trait objects and macros) means it cannot
+   decide reachability from source alone; review rounds on the ranker found fifteen-plus
+   constructions it called safe that actually reached real I/O. So the invariant is enforced during
+   this red→green proof by the **tier-aware runtime guard this skill ships for the stack you are
+   on** — one per stack, each loaded on the
    single-test invocation itself and never written into the repo, so Invariant 1 stays clean with
    no carve-out. **Run every RED and every GREEN through it.**
 
@@ -288,6 +305,98 @@ than none, because it makes the invariant look enforced when it is not.
    `TEST_SAFETY_NET_ALLOW=randomness` is refused with a note. Go's clock control is
    `testing/synctest`.
 
+   On **rust** that is `assets/io_guard_rust.py`. It builds the test with `cargo test --locked
+   --offline --no-run`, then runs the compiled binary under a preloaded hook library that
+   intercepts libc and attributes each call to the function that made it:
+
+   ```sh
+   # Tier 1 candidate — the unit claims to touch nothing, so block everything.
+   TEST_SAFETY_NET_TIER=1 \
+     python3 "$SKILL_DIR/assets/io_guard_rust.py" \
+     --test <test_file_stem> <test_name>
+
+   # Tier 2 candidate — name EVERY controllable group this test deliberately fakes.
+   TEST_SAFETY_NET_TIER=2 TEST_SAFETY_NET_ALLOW=filesystem \
+     python3 "$SKILL_DIR/assets/io_guard_rust.py" \
+     --test <test_file_stem> <test_name>
+   ```
+
+   **Copy the whole block.** Run it from the crate root, adding `-p <package>` for a workspace
+   member. Tests go in `tests/tsn_<module_path>.rs` and reach the unit through its public path
+   (`use <crate>::<path>::<item>;`). Append to that file when it exists; never overwrite it. The exit
+   table is go's. Rust controls two groups, filesystem and environment, through two helpers that you
+   copy into the test file verbatim:
+
+   ```rust
+   #[inline(never)]
+   fn tsn_control_temp_dir() -> std::path::PathBuf {
+       use std::sync::atomic::{AtomicUsize, Ordering};
+       static N: AtomicUsize = AtomicUsize::new(0);
+       let dir = std::env::temp_dir().join(format!(
+           "tsn-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+       std::fs::create_dir_all(&dir).expect("tsn_control_temp_dir");
+       dir
+   }
+
+   struct TsnControlEnv { key: String, old: Option<std::ffi::OsString> }
+
+   impl Drop for TsnControlEnv {
+       #[inline(never)]
+       #[allow(unused_unsafe)]
+       fn drop(&mut self) {
+           match &self.old {
+               Some(v) => unsafe { std::env::set_var(&self.key, v) },
+               None => unsafe { std::env::remove_var(&self.key) },
+           }
+       }
+   }
+
+   #[inline(never)]
+   #[allow(unused_unsafe)]
+   fn tsn_control_set_env(key: &str, value: &str) -> TsnControlEnv {
+       let old = std::env::var_os(key);
+       unsafe { std::env::set_var(key, value) };
+       TsnControlEnv { key: key.to_string(), old }
+   }
+   ```
+
+   - **An environment-controlled test goes alone in `tests/tsn_<module_path>_env_<n>.rs`.** The
+     guard refuses a file that breaks this.
+   - **Keep each helper's `#[inline(never)]`.** At opt-level 1 or above, an inlined helper stops
+     being a frame of its own, and an honest control run trips.
+   - Clock and randomness are uncontrollable on rust. `TEST_SAFETY_NET_ALLOW=clock` is refused with
+     a note.
+   - A unit the ranker tiers 3 as *not reachable* or *binary-only* is reported, never tested.
+   - **Import the unit with exactly the `use` line its `tier_reason` names.** Every reachable Tier 1
+     or 2 rust unit's reason ends ``; import as `use <public_path>;` ``. That path is the shortest
+     one a `tests/` crate can name: a re-export when one is shorter, and for a method, its type's.
+   - **`-p <package>` is required when more than one package has `tests/<stem>.rs`.** The guard exits
+     2 otherwise. A test name cannot begin with `-`.
+   - **The rust ways to reach exit 4 (NO TEST).** An `#[ignore]`d test, and a name that matches no
+     test. The test process exiting early: the hook forces status 125 when a crate frame calls `exit`
+     or `quick_exit`, so a unit that calls `process::exit` cannot be proven in-process. A binary that
+     does not link libtest's harness (`harness = false`). The 300 s timeout. libtest exits 0 for the
+     first two, which is why the guard reads its result lines rather than its exit code.
+   - A compile error is exit 5, never RED; cargo exits 101 for both.
+   - Rust has ten extra ways to reach exit 2 (NOT ARMED), beyond step 1's lockfile and toolchain:
+     - a dependency not in the local cargo cache (run `cargo fetch`, or build the tests once; the
+       proof never downloads anything);
+     - a static, stripped or musl test binary;
+     - a list of the crates' own unmangled fns that cannot be built or does not fit the hook --
+       most often an `lto` setting (fat or thin) in `[profile.dev]`/`[profile.test]`, or `-C
+       linker-plugin-lto`, which makes rustc write LLVM bitcode rlibs: set `lto = false` for the
+       profile the tests build with;
+     - a hook that failed to load, or that could not attribute a call;
+     - an environment-controlled test that is not alone in its file;
+     - several packages and no `-p`;
+     - a test name beginning with `-`;
+     - a test or lib target named like one of Rust's own crates (ruling R30: `tests/test.rs`
+       compiles to crate `test`, read as libtest's own work) -- rename it;
+     - the hook failed to build with this toolchain;
+     - no `rustc` or `cargo` on PATH.
+   - The guard never passes `--nocapture`, and do not add it: under it the default panic hook reads
+     `RUST_BACKTRACE`, and every RED would trip `environment`.
+
    The tier is passed per invocation by environment variable, which is sufficient because the proof
    runs one unit at a time — a single run has a single tier:
    - **Tier 1 candidate:** blocks *everything* — filesystem, clock, randomness, environment,
@@ -298,7 +407,7 @@ than none, because it makes the invariant look enforced when it is not.
      you did *not* name in `TEST_SAFETY_NET_ALLOW`. The boundary this test controls (a temp dir, a
      frozen clock) is the point, not a violation — so name it, and name **all** of it. Omitting the
      variable falls back to permitting every controllable group the stack has — four on python and
-     node, three on go — which is looser than the test actually needs.
+     node, three on go, two on rust — which is looser than the test actually needs.
 
    The guard patches the **lowest** layer reachable, which for CPython is the `os` primitives, the
    `_io` C module, and the file-object constructors — every name the ranker's marker tables
@@ -325,6 +434,22 @@ than none, because it makes the invariant look enforced when it is not.
    decides a call made beneath them. It decides each call by call provenance (`runtime.Callers`),
    as the node guard does; its decision rule, patch table and residuals are in
    `references/stacks.md`.
+
+   The rust guard hooks libc beneath the compiled test binary: the open/stat family, the
+   environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
+   each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
+   `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
+   and eleven residuals (two of them, 7 and 11, now closed) are in `references/stacks.md`. Read
+   residuals 1, 9, 10 and 11 before you trust a GREEN: anything that bypasses libc is unseen
+   whatever its intent (a dependency's raw syscall included), deliberate verdict forgery by the code
+   under test is outside the threat model, and at opt-level 1 or more a crate's generic `Drop`
+   holding the control helper can read GREEN. Residual 11 is closed only for the crates' own code:
+   a `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
+   (an `atexit` handler, a signal handler) is now judged as a crate frame, but one defined in a
+   build script's bundled C, or in any object cargo did not build into an rlib, still names no
+   crate and reads GREEN; so does, at opt-level 1 or more, a callback whose last act is a
+   tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
+   symbol (a `#[no_mangle] getenv` wrapper) trips every honest run instead: that fails closed.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

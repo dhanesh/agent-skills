@@ -65,19 +65,30 @@ jobs:
         with:
           go-version: "1.26"
           cache: false
+      # PINNED, like go. The rust guard is the sole runtime enforcement on the
+      # rust stack, and its suites and eval check 49 SKIP where `cargo` is
+      # absent. rustup ships on both runner images; nothing is downloaded but
+      # the toolchain itself.
+      - name: Rust 1.98
+        run: rustup toolchain install 1.98 --profile minimal && rustup default 1.98
       - name: Run skill quality gates
         run: make gate
 
-  # test-safety-net supports the LAST FIVE VERSIONS of every language it covers
-  # -- teams on legacy code have the oldest toolchains and the fewest tests --
-  # and a support claim nobody runs is a claim nobody has checked. Each leg runs
-  # that stack's suites on one version. Measured before this job existed: the
-  # python guard missed every pathlib read on 3.10, the node suite parsed a
-  # reporter node 26 no longer defaults to, and the go guard could not run on
-  # 1.22-1.23 at all. ubuntu only: the full gate above already covers macOS on
-  # the pinned versions.
+  # test-safety-net supports the LAST FIVE VERSIONS of python, node and go, and
+  # five rust minors across about two years (1.82, 1.86, 1.90, 1.94, 1.98: every
+  # 4th, because the last five would span only ~7 months) -- teams on legacy
+  # code have the oldest toolchains and the fewest tests -- and a support claim
+  # nobody runs is a claim nobody has checked. Each leg runs that stack's suites
+  # on one version. Measured before this job existed: the python guard missed
+  # every pathlib read on 3.10, the node suite parsed a reporter node 26 no
+  # longer defaults to, and the go guard could not run on 1.22-1.23 at all.
+  # ubuntu, bar one leg: the full gate above already covers macOS on the pinned
+  # versions. ubuntu-latest is amd64, so the rust legs are also the rust
+  # guard's only amd64 runs: its hook was developed on arm64. The one macOS
+  # leg is the rust floor, 1.82, whose darwin link and hook are otherwise
+  # never run (the gate above pins 1.98).
   versions:
-    name: tsn ${{ matrix.stack }} ${{ matrix.version }}
+    name: tsn ${{ matrix.stack }} ${{ matrix.version }}${{ matrix.os && format(' ({0})', matrix.os) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -97,8 +108,14 @@ jobs:
           - {stack: go, version: "1.24"}
           - {stack: go, version: "1.25"}
           - {stack: go, version: "1.26"}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+          - {stack: rust, version: "1.82"}
+          - {stack: rust, version: "1.86"}
+          - {stack: rust, version: "1.90"}
+          - {stack: rust, version: "1.94"}
+          - {stack: rust, version: "1.98"}
+          - {stack: rust, version: "1.82", os: macos-latest}
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: test-safety-net/assets
@@ -120,6 +137,8 @@ jobs:
         with:
           go-version: ${{ matrix.version }}
           cache: false
+      - if: matrix.stack == 'rust'
+        run: rustup toolchain install ${{ matrix.version }} --profile minimal && rustup default ${{ matrix.version }}
       - if: matrix.stack == 'python'
         run: |
           python test_rank_risk.py
@@ -132,6 +151,11 @@ jobs:
         run: |
           python test_stack_go.py
           python test_io_guard_go.py
+      - if: matrix.stack == 'rust'
+        run: |
+          python test_stack_rust.py
+          python test_rust_binary.py
+          python test_io_guard_rust.py
       - name: outcome eval on this version
         working-directory: test-safety-net
         run: python eval/run_eval.py

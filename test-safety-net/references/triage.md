@@ -62,6 +62,9 @@ can reach, and a unit drawing from it tiers 3 — the seam is an injected `*rand
 three are `t.TempDir()`, `testing/synctest` (Go 1.25+) and `t.Setenv()`. The group NAMES are the same
 seven on every stack; which side of the line each sits on is the stack's to say.
 
+**On rust the controllable set is two**: filesystem (`tsn_control_temp_dir`) and environment
+(`tsn_control_set_env`). std has no clock freeze and no RNG, so clock and randomness tier 3.
+
 **Database, HTTP, and subprocess are never auto-Tier-2.** The classifier buckets them as
 uncontrollable and tiers any unit that reaches one at **Tier 3** ("needs a seam") by default —
 even though a database or an HTTP call often does have a real, seam-free boundary control:
