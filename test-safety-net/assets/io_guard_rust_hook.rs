@@ -541,8 +541,15 @@ fn names(s: &[u8], name: &[u8]) -> bool {
 /// never on the list and is not looked up. The walk is bounded by the list:
 /// each step moves past one line.
 fn exported<'a>(list: &'a [u8], s: &[u8]) -> Option<&'a [u8]> {
-    if s.is_empty() || s.starts_with(b"_ZN") || s.starts_with(b"__ZN") || v0_body(s).is_some() {
+    if s.is_empty() || s.starts_with(b"_ZN") || s.starts_with(b"__ZN") {
         return None;
+    }
+    // Ruling R46: a `_R` name is v0 only when the v0 reader reads it; a
+    // `#[no_mangle] fn _Rfoo` is a plain name, as rust_binary lists it.
+    if let Some(body) = v0_body(s) {
+        if v0::facts(body).is_some() {
+            return None;
+        }
     }
     let mut rest = list;
     while !rest.is_empty() {

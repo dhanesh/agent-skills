@@ -382,9 +382,10 @@ than none, because it makes the invariant look enforced when it is not.
      - a dependency not in the local cargo cache (run `cargo fetch`, or build the tests once; the
        proof never downloads anything);
      - a static, stripped or musl test binary;
-     - a list of the crates' own unmangled fns that cannot be built or does not fit the hook: a
-       cargo-built rlib whose codegen objects are LLVM bitcode (`-C linker-plugin-lto`), so build
-       without that flag;
+     - a list of the crates' own unmangled fns that cannot be built or does not fit the hook --
+       most often an `lto` setting (fat or thin) in `[profile.dev]`/`[profile.test]`, or `-C
+       linker-plugin-lto`, which makes rustc write LLVM bitcode rlibs: set `lto = false` for the
+       profile the tests build with;
      - a hook that failed to load, or that could not attribute a call;
      - an environment-controlled test that is not alone in its file;
      - several packages and no `-p`;
@@ -446,7 +447,9 @@ than none, because it makes the invariant look enforced when it is not.
    a `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
    (an `atexit` handler, a signal handler) is now judged as a crate frame, but one defined in a
    build script's bundled C, or in any object cargo did not build into an rlib, still names no
-   crate and reads GREEN.
+   crate and reads GREEN; so does, at opt-level 1 or more, a callback whose last act is a
+   tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
+   symbol (a `#[no_mangle] getenv` wrapper) trips every honest run instead: that fails closed.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
    three outcomes, not two: an `AssertionError` is the RED half of red→green (the expectation is

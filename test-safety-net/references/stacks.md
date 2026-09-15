@@ -540,8 +540,10 @@ its reason and exits 2:
    TEXT symbols of the `*.rcgu.o` (rustc codegen) members of every rlib named in cargo's
    compiler-artifact messages. Those rlibs are the crate under test and its dependencies, never
    the sysroot, and a build script's bundled C members (zstd, sqlite, zlib, ring) are never read.
-   An rlib or codegen member it cannot read, such as LLVM bitcode under `-C linker-plugin-lto`,
-   exits 2 with that remedy. Most crates list nothing. Then the repo's own `rustc` builds the hook
+   An rlib or codegen member it cannot read exits 2, never a traceback (ruling R44). LLVM
+   bitcode, which an `lto` setting (fat or thin) in `[profile.dev]`/`[profile.test]` or `-C
+   linker-plugin-lto` makes rustc write, is refused naming the setting it found and the remedy,
+   `lto = false` for the profile the tests build with (ruling R43). Most crates list nothing. Then the repo's own `rustc` builds the hook
    (`--crate-type cdylib -C panic=abort -C force-unwind-tables=yes`). It is cached outside the
    repo, under `~/.cache/test-safety-net/rust-hook/` (or `$TEST_SAFETY_NET_CACHE`), keyed by the
    rendered source, the toolchain and the flags. The list is written beside it, under
@@ -569,7 +571,7 @@ comes from the build's JSON and the `test result:` line, and the exit table is g
 |---|---|---|
 | 0 | GREEN | exit 0, a `test result:` line, and libtest's own `test <name> ... ok` line before it |
 | 1 | RED | an assertion failed, or the binary died with no result line (a signal, an abort) |
-| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; a cargo-built rlib whose codegen objects cannot be read for the unmangled-fn list (LLVM bitcode under `-C linker-plugin-lto`), or a list the hook cannot hold; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; the hook failed to build with this toolchain; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; a test or lib target named like one of Rust's own crates (ruling R30) -- rename it; no `rustc` or `cargo` on PATH; not darwin or linux |
+| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; a cargo-built rlib whose codegen objects cannot be read for the unmangled-fn list (LLVM bitcode from an `lto` setting in `[profile.dev]`/`[profile.test]` or `-C linker-plugin-lto` -- set `lto = false` -- or a malformed archive), or a list the hook cannot hold; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; the hook failed to build with this toolchain; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; a test or lib target named like one of Rust's own crates (ruling R30) -- rename it; no `rustc` or `cargo` on PATH; not darwin or linux |
 | 3 | GUARD TRIP | `IOGuardViolation: a tier <N> candidate reached <group> I/O via <call> from <symbol>` |
 | 4 | NO TEST | one of: an `#[ignore]` test, or a name matching no test; the test process exiting early, because the hook forces status 125 when a crate frame calls `exit` or `quick_exit` (so a unit that calls `process::exit` cannot be proven in-process); a `harness = false` target; the 300 s timeout |
 | 5 | NO BUILD | the test did not compile |
@@ -696,9 +698,13 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
 5. **HashMap seeding is real entropy.** `RandomState` draws it through the seed exemption, so a unit
    whose output depends on HashMap iteration order passes the guard. Pin sorted output, never
    iteration order.
-6. **Fat LTO.** Fat LTO in `[profile.dev]` or `[profile.test]` makes honest failing tests read 3 or
-   4 instead of 1: the inlined panic hook's `getenv` and libtest's own exit land in the harness
-   `main`. This fails closed. Units in such repos are declined, never falsely passed.
+6. **LTO in the test profile.** An `lto` setting, fat or thin, in `[profile.dev]` or
+   `[profile.test]` makes every proof exit 2 (NOT ARMED) since residual 11's list (ruling R43):
+   rustc writes LLVM bitcode into the rlibs, the crates' unmangled fns cannot be listed from it,
+   and the refusal names the setting and the remedy, `lto = false` for that profile. Before the
+   list, fat LTO made honest failing tests read 3 or 4 instead of 1 (the inlined panic hook's
+   `getenv` and libtest's own exit landed in the harness `main`), and thin LTO was proven like any
+   other build. Both fail closed: units in such repos are declined, never falsely passed.
 7. **Closed: life-before-main crates (`ctor`) are seen and attributed.** The preloaded hook's
    initialiser runs before the executable's constructors, so a constructor's I/O is judged by its
    own crate frame, like any other. Measured with the real `ctor` 1.0.13 (`#[ctor::ctor(unsafe)]`
@@ -754,7 +760,11 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
     after, because their C is never on the list. **Still unseen:** an unmangled fn defined
     anywhere but a cargo-built rlib's codegen objects: a build script's bundled C member, a
     `cc`-built static library, or a `#[no_mangle]` item in `tests/` itself (the skill never writes
-    one there). Such a callback still names no crate and reads GREEN.
+    one there). Such a callback still names no crate and reads GREEN. So does, at opt-level 1 or
+    more, a callback whose last act is a tail-called libc call: it leaves no frame of its own for
+    the walk to find, mangled or not, as it did before the list (ruling R45). The other way round,
+    a crate that exports a libc-named symbol (a `#[no_mangle] getenv` wrapper) puts that name on
+    the list, and every honest run that reaches it trips: that fails closed.
 
 ## Python row, in detail
 

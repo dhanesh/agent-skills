@@ -85,8 +85,10 @@ Every refusal prints its reason and exits 2:
      the defined global TEXT symbols, neither `_ZN` nor `_R` mangled, of the
      `*.rcgu.o` members of every rlib cargo's build messages name -- never a
      bundled C member, never the sysroot. An rlib or member it cannot read
-     (LLVM bitcode under `-C linker-plugin-lto`) exits 2 with that remedy;
-     an empty list is the common case. Then the hook, built by the repo's
+     exits 2, never a traceback (ruling R44): LLVM bitcode -- an `lto`
+     setting in [profile.dev]/[profile.test], or `-C linker-plugin-lto` --
+     names what it found and the remedy, `lto = false` for the test profile
+     (ruling R43); an empty list is the common case. Then the hook, built by the repo's
      own rustc (`hook_library`), and the list written OUTSIDE the repo
      (`<cache>/rust-exports/`) for the hook to read, removed after the run;
  10. `<exe> <test_name> --exact --test-threads=1` under the preload, with
@@ -1030,23 +1032,77 @@ def build_test(repo, plan, test_target, package, env):
 
 _EXPORTS_UNREADABLE = ("the list of the crates' own unmangled fns could not be built (%s). The "
                        "hook reads a `#[no_mangle]`/`#[export_name]` fn as a crate frame only "
-                       "from that list, and each cargo-built rlib's codegen objects must be "
-                       "machine code for it: build without `-C linker-plugin-lto` (or any flag "
-                       "that makes rustc emit LLVM bitcode), then re-run")
+                       "from that list, so nothing was run")
+# Ruling R43: bitcode rlibs come from an `lto` setting in the profile the
+# tests build with ([profile.test] inherits [profile.dev]) -- fat or thin --
+# or from `-C linker-plugin-lto`. The refusal names what it found.
+_EXPORTS_BITCODE = ("%s: rustc wrote LLVM bitcode, not machine code, into a cargo-built rlib. "
+                    "That is what an `lto` setting (fat or thin) in the profile the tests build "
+                    "with does -- [profile.test], which inherits [profile.dev] -- and what `-C "
+                    "linker-plugin-lto` does. Found: %s. Set `lto = false` for that profile (or "
+                    "drop the flag), then re-run")
+_PROFILE_HEADER = re.compile(r"^\s*\[\s*profile\s*\.\s*(dev|test)\s*\]\s*(?:#.*)?$")
+_LTO_LINE = re.compile(r"^\s*lto\s*=\s*([^#\s][^#]*?)\s*(?:#.*)?$")
+_LTO_OFF = {"false", '"off"', "'off'", '"false"'}
 
 
-def export_list(rlibs):
+def _lto_causes(root, env):
+    """What in this repo makes rustc emit bitcode: an `lto` in the root
+    Cargo.toml's [profile.dev]/[profile.test], a CARGO_PROFILE_{DEV,TEST}_LTO
+    variable, or `-C linker-plugin-lto` in RUSTFLAGS. Never raises."""
+    causes = []
+    env = env or {}
+    for prof in ("TEST", "DEV"):
+        value = (env.get("CARGO_PROFILE_%s_LTO" % prof) or "").strip()
+        if value and value.lower() not in ("false", "off"):
+            causes.append("CARGO_PROFILE_%s_LTO=%s" % (prof, value))
+    if root:
+        try:
+            with open(os.path.join(root, "Cargo.toml"), encoding="utf-8",
+                      errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            lines = []
+        section = None
+        for line in lines:
+            if line.lstrip().startswith("["):
+                m = _PROFILE_HEADER.match(line)
+                section = m.group(1) if m else None
+                continue
+            m = _LTO_LINE.match(line) if section else None
+            if m and m.group(1).strip().lower() not in _LTO_OFF:
+                causes.append("`lto = %s` in [profile.%s] of Cargo.toml" % (m.group(1).strip(),
+                                                                          section))
+    flags = (env.get("RUSTFLAGS") or "") + " " + (env.get("CARGO_ENCODED_RUSTFLAGS") or "")
+    if "linker-plugin-lto" in flags:
+        causes.append("`-C linker-plugin-lto` in RUSTFLAGS")
+    return causes
+
+
+def export_list(rlibs, root=None, env=None):
     """[(name, crate)] of every unmangled fn the rcgu members of `rlibs`
     ((crate, path) pairs, from `BuildResult.rlibs`) define, sorted by name;
     a name defined twice keeps its first crate. Empty is the common case.
-    Raises GuardCannotArm when an rlib cannot be read, or a name cannot be
-    carried in the hook's `<name>\\t<label>\\n` lines."""
+    Raises GuardCannotArm -- never anything else (ruling R44) -- when an
+    rlib cannot be read, or a name cannot be carried in the hook's
+    `<name>\\t<label>\\n` lines. A bitcode rlib's refusal names the `lto`
+    setting it found under `root` or in `env` (ruling R43)."""
     found = {}
     for crate, path in rlibs:
         try:
             names = rust_binary.rlib_exports(path)
         except rust_binary.ExportListError as exc:
+            if "bitcode" in str(exc):
+                causes = _lto_causes(root, env)
+                raise GuardCannotArm(_EXPORTS_UNREADABLE % (_EXPORTS_BITCODE % (
+                    exc, "; ".join(causes) if causes else "no `lto` in the root Cargo.toml's "
+                    "[profile.dev]/[profile.test] and no flag in RUSTFLAGS -- look in "
+                    ".cargo/config.toml"))) from exc
             raise GuardCannotArm(_EXPORTS_UNREADABLE % exc) from exc
+        except Exception as exc:                  # noqa: BLE001 -- R44: never a traceback
+            raise GuardCannotArm(_EXPORTS_UNREADABLE % ("%s could not be read: %s: %s"
+                                                        % (path, type(exc).__name__, exc))) \
+                from exc
         for name in names:
             if any(c in name for c in "\t\n\r"):
                 raise GuardCannotArm(_EXPORTS_UNREADABLE
@@ -1368,7 +1424,7 @@ def main(argv=None):
         _say(_RUST_NO_TEST)
         return EXIT_NO_TEST
     try:
-        exports = export_text(export_list(built.rlibs))
+        exports = export_text(export_list(built.rlibs, root, env))
         hook = hook_library(repo, env)
         exports_path = write_exports(exports, env)
     except GuardCannotArm as exc:

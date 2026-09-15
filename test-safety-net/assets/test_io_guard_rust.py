@@ -1898,6 +1898,7 @@ class TestExportedLookup(unittest.TestCase):
     LIST = (b"ax_flush\tax_flush (unmangled fn of crate ax)\n"
             + _LISTED_LEGACY.encode() + b"\tlisted legacy\n"
             b"_RNvCs1234_2ax5inner\tlisted v0\n"
+            b"_Rfoo\t_Rfoo (not v0)\n"
             b"no_label\n"
             b"last_line\tlast (no newline)")
 
@@ -1950,6 +1951,12 @@ class TestExportedLookup(unittest.TestCase):
         self.assertEqual(self.answer([_LISTED_LEGACY, "_" + _LISTED_LEGACY,
                                       "_RNvCs1234_2ax5inner", "__RNvCs1234_2ax5inner"]),
                          ["-"] * 4)
+
+    def test_a_name_spelled_like_v0_that_is_not_v0_is_looked_up(self):
+        # Ruling R46: `#[no_mangle] fn _Rfoo` -- rust_binary lists it, and the
+        # hook finds it (darwin's dladdr spells it `_Rfoo` too).
+        self.assertEqual(self.answer(["_Rfoo", "_RNvCs1234_2ax5inner"]),
+                         ["_Rfoo (not v0)", "-"])
 
     def test_an_empty_list_finds_nothing(self):
         self.assertEqual(self.answer(["ax_flush", "no_label"], which="empty"), ["-", "-"])
@@ -2445,17 +2452,57 @@ class TestUnmangledExports(WrapperCase):
         self.assertEqual(os.listdir(self.exports_dir()), [], "the list file outlived the run")
 
     def test_a_list_that_cannot_be_built_is_not_armed(self):
-        why = ("/t/libfx.rlib, member fx.rcgu.o: LLVM bitcode, not machine code "
-               "(linker-plugin LTO)")
+        why = "/t/libfx.rlib, member fx.rcgu.o: LLVM bitcode, not machine code (an LTO build)"
         with mock.patch.object(io_guard_rust.rust_binary, "rlib_exports",
                                side_effect=rust_binary.ExportListError(why)):
             code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
                                 ["--test", "fx", "t_clean"])
         self.assertEqual(code, 2, out)
         self.assertIn("NOT ARMED (exit 2)", out)
+        self.assertIn("lto = false", out)
         self.assertIn("linker-plugin-lto", out)
         self.assertIn("fx.rcgu.o", out)
         self.assertNotIn("running 1 test", out)
+
+    def test_an_lto_profile_is_refused_and_named(self):
+        # Ruling R43: `lto` (fat or thin) in the dev/test profile makes the
+        # rlibs bitcode, so the list cannot be built: exit 2, naming the
+        # setting and the remedy -- never a blame on a flag nobody passed.
+        crate = self.scratch_copy()
+        with open(os.path.join(crate, "Cargo.toml"), "a", encoding="utf-8") as f:
+            f.write('\n[profile.dev]\nlto = "thin"\n')
+        code, out = self.guard(1, None, "t_clean", cwd=crate)
+        self.assertEqual(code, 2, out[-1200:])
+        self.assertIn('`lto = "thin"` in [profile.dev] of Cargo.toml', out)
+        self.assertIn("Set `lto = false` for that profile", out)
+        self.assertIn("bitcode", out)
+        self.assertNotIn("running 1 test", out)
+
+    def test_a_malformed_rlib_is_not_armed_never_a_traceback(self):
+        # Ruling R44: a planted rlib whose ar size field holds `²` made
+        # int() raise, and main's traceback exited 1 -- read as RED.
+        planted = os.path.join(tempfile.mkdtemp(prefix="tsn-rust-planted-"), "libevil.rlib")
+        self.addCleanup(shutil.rmtree, os.path.dirname(planted), ignore_errors=True)
+        with open(planted, "wb") as f:
+            f.write(b"!<arch>\n" + ("x.rcgu.o/".ljust(16) + "0".ljust(12) + "0".ljust(6)
+                                    + "0".ljust(6) + "644".ljust(8) + "1²".ljust(10))
+                    .encode("latin-1") + b"`\nxx")
+        real = io_guard_rust.build_test
+
+        def planted_build(*a, **kw):
+            built = real(*a, **kw)
+            return built._replace(rlibs=built.rlibs + (("evil", planted),))
+
+        for patch in (mock.patch.object(io_guard_rust, "build_test", planted_build),
+                      mock.patch.object(io_guard_rust.rust_binary, "rlib_exports",
+                                        side_effect=ValueError("an unforeseen reader bug"))):
+            with self.subTest(patch=str(patch.attribute)):
+                with patch:
+                    code, out = main_in(self.crate, _guard_env(TEST_SAFETY_NET_TIER="1"),
+                                        ["--test", "fx", "t_clean"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("NOT ARMED (exit 2)", out)
+                self.assertNotIn("Traceback", out)
 
     def test_a_name_the_list_cannot_carry_or_a_list_past_the_cap_is_refused(self):
         with mock.patch.object(io_guard_rust.rust_binary, "rlib_exports",

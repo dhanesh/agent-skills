@@ -902,7 +902,7 @@ def symbol_names(path) -> list:
 # Bundled native members (a build script's C: zstd, sqlite, zlib, ring) are
 # NOT rcgu members and are never read: std or libtest calling into that C
 # must stay transparent. A member this cannot read -- LLVM bitcode under
-# linker-plugin LTO, an unknown object format, a truncated archive -- is an
+# an `lto` profile or linker-plugin LTO, an unknown object format, a truncated archive -- is an
 # ExportListError, and the proof refuses to run rather than guess.
 
 class ExportListError(Exception):
@@ -915,6 +915,12 @@ _AR_SYMTABS = frozenset({"/", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SY
                          "__.SYMDEF_64 SORTED"})
 _RCGU = ".rcgu.o"
 _BITCODE = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")   # raw LLVM bitcode, and its wrapper
+
+
+def _ascii_digits(text: str) -> bool:
+    """A decimal ar field (ruling R44): ASCII `0`-`9` only. `str.isdigit()`
+    also accepts `²`, which `int()` then refuses with a ValueError."""
+    return bool(text) and text.isascii() and text.isdigit()
 
 
 def ar_members(data: bytes) -> list:
@@ -937,7 +943,7 @@ def ar_members(data: bytes) -> list:
             raise ExportListError("a truncated or malformed archive member header")
         raw = hdr[:16].decode("latin-1").rstrip(" ")
         size_text = hdr[48:58].decode("latin-1").strip()
-        if not size_text.isdigit():
+        if not _ascii_digits(size_text):
             raise ExportListError("an archive member with no decimal size")
         size = int(size_text)
         start = off + _AR_HDR
@@ -946,7 +952,7 @@ def ar_members(data: bytes) -> list:
             raise ExportListError("an archive member that runs past the end of the file")
         off = start + size + (size & 1)
         if raw.startswith("#1/"):
-            if not raw[3:].isdigit() or int(raw[3:]) > size:
+            if not _ascii_digits(raw[3:]) or int(raw[3:]) > size:
                 raise ExportListError("a BSD long member name with a bad length")
             n = int(raw[3:])
             name, body = body[:n].split(b"\0", 1)[0].decode("utf-8", "replace"), body[n:]
@@ -955,13 +961,17 @@ def ar_members(data: bytes) -> list:
             continue
         elif raw in _AR_SYMTABS:                # `/`, `/SYM64/`: before `/` is stripped
             continue
-        elif raw.startswith("/") and raw[1:].isdigit():
+        elif raw.startswith("/") and _ascii_digits(raw[1:]):
             at = int(raw[1:])
             if longnames is None or at >= len(longnames):
                 raise ExportListError("a GNU long member name with no long-name table entry")
             end = longnames.find(b"\n", at)
             text = longnames[at:end if end >= 0 else len(longnames)]
             name = text.decode("utf-8", "replace").rstrip("/")
+        elif raw.startswith("/"):
+            # Neither a table nor `/<ASCII offset>` (ruling R44: `/¹` included).
+            raise ExportListError("a GNU member name %r that is neither a table nor a "
+                                  "/<offset> long name" % raw)
         else:
             name = raw[:-1] if raw.endswith("/") and raw != "/" else raw
         if name in _AR_SYMTABS:
@@ -971,8 +981,12 @@ def ar_members(data: bytes) -> list:
 
 
 def _is_rust_mangled(name: str) -> bool:
-    """Legacy `_ZN...` or v0 `_R...`, as the hook's frame names spell them."""
-    return name.startswith(("_ZN", "_R"))
+    """Legacy `_ZN...`, or a `_R...` name the v0 reader reads -- the hook's
+    own rule (ruling R46): `#[no_mangle] fn _Rfoo` is not v0, so it is a
+    crate's unmangled fn like any other."""
+    if name.startswith("_ZN"):
+        return True
+    return name.startswith("_R") and v0_facts(name, frozenset()) is not None
 
 
 _ET_REL = 1
@@ -1071,9 +1085,9 @@ def _macho_obj_exports(data: bytes) -> list:
 def object_exports(data: bytes) -> list:
     """The defined global TEXT symbol names of one relocatable object (ELF64
     LE or Mach-O 64), in the hook's spelling. Raises ExportListError for LLVM
-    bitcode (linker-plugin LTO) and any other format it cannot read."""
+    bitcode (an LTO build) and any other format it cannot read."""
     if data[:4] in _BITCODE:
-        raise ExportListError("LLVM bitcode, not machine code (linker-plugin LTO)")
+        raise ExportListError("LLVM bitcode, not machine code (an LTO build)")
     try:
         if data[:4] == b"\x7fELF":
             return _elf_rel_exports(data)
@@ -1092,9 +1106,11 @@ def rlib_exports(path) -> list:
     data = _read(path)
     if data is None:
         raise ExportListError("%s cannot be read" % path)
+    # Ruling R44: whatever goes wrong reading an rlib is an ExportListError,
+    # never another exception a caller could miss and print as a traceback.
     try:
         members = ar_members(data)
-    except ExportListError as exc:
+    except Exception as exc:                  # noqa: BLE001
         raise ExportListError("%s: %s" % (path, exc)) from exc
     names = set()
     for name, body in members:
@@ -1102,7 +1118,7 @@ def rlib_exports(path) -> list:
             continue
         try:
             found = object_exports(body)
-        except ExportListError as exc:
+        except Exception as exc:              # noqa: BLE001 -- R44
             raise ExportListError("%s, member %s: %s" % (path, name, exc)) from exc
         names.update(n for n in found if not _is_rust_mangled(n))
     return sorted(names)

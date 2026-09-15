@@ -943,8 +943,46 @@ class TestRlibExports(BinaryCase):
             rust_binary.rlib_exports(self.write(gnu_ar([(LONG_RCGU, b"not an object")])))
 
 
+class TestFixRound1(BinaryCase):
+    """Rulings R44 and R46."""
+
+    def test_a_non_ascii_digit_in_a_numeric_field_is_refused_never_a_valueerror(self):
+        # `str.isdigit()` accepts `²`; `int()` then raised ValueError, and the
+        # wrapper printed a traceback that exited 1 -- read as RED.
+        def header(name_field, size_field):
+            return (name_field.ljust(16) + "0".ljust(12) + "0".ljust(6) + "0".ljust(6)
+                    + "644".ljust(8) + size_field.ljust(10)).encode("latin-1") + b"`\n"
+        cases = {"size": b"!<arch>\n" + header("a.rcgu.o/", "1²") + b"xx",
+                 "gnu long name": (b"!<arch>\n" + _ar_member("//", b"a.rcgu.o/\n")
+                                   + header("/¹", "2") + b"xx"),
+                 "bsd name length": b"!<arch>\n" + header("#1/³", "4") + b"abcd"}
+        for what, data in cases.items():
+            with self.subTest(field=what):
+                with self.assertRaises(rust_binary.ExportListError):
+                    rust_binary.ar_members(data)
+                with self.assertRaises(rust_binary.ExportListError):
+                    rust_binary.rlib_exports(self.write(data))
+
+    def test_any_reader_failure_is_an_export_list_error(self):
+        from unittest import mock
+        path = self.write(gnu_ar([(LONG_RCGU, elf_rcgu())]))
+        with mock.patch.object(rust_binary, "object_exports", side_effect=ValueError("boom")):
+            with self.assertRaisesRegex(rust_binary.ExportListError, "boom"):
+                rust_binary.rlib_exports(path)
+
+    def test_a_no_mangle_fn_spelled_like_v0_is_listed_and_a_real_v0_name_is_not(self):
+        # R46: `_R` drops a name only when the v0 reader reads it -- the
+        # hook's own rule -- so `#[no_mangle] fn _Rfoo` is the crate's fn.
+        elf = elf_rel([("_Rfoo", _GLOBAL, _FUNC, 1), (V0_SYM, _GLOBAL, _FUNC, 1)])
+        macho = macho_obj([("__Rfoo", _N_SECT | _N_EXT, 1), ("_" + V0_SYM, _N_SECT | _N_EXT, 1)])
+        self.assertEqual(rust_binary.rlib_exports(self.write(gnu_ar([(LONG_RCGU, elf)]))),
+                         ["_Rfoo"])
+        self.assertEqual(rust_binary.rlib_exports(self.write(bsd_ar([(LONG_RCGU, macho)]))),
+                         ["_Rfoo"])
+
+
 RUSTC = shutil.which("rustc")
-_RLIB_SRC = r'''#[no_mangle] pub extern "C" fn rr_export(x: u32) -> u32 { x + 1 }
+_RLIB_SRC =r'''#[no_mangle] pub extern "C" fn rr_export(x: u32) -> u32 { x + 1 }
 #[export_name = "rr_named"] pub extern "C" fn named(x: u32) -> u32 { x + 2 }
 pub fn mangled(x: u32) -> u32 { x + 3 }
 #[no_mangle] pub static RR_DATA: u32 = 7;
