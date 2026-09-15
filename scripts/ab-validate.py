@@ -173,6 +173,9 @@ SINCE_TSN_RUST_R11 = "c837c1d"  # test-safety-net: the Rust guard judges a
 SINCE_TSN_RUST_R11_FR1 = "caf4ca0"  # test-safety-net: residual-11 fix round 1
 # -- an LTO profile named in the refusal (R43), a malformed rlib refused
 # rather than a traceback (R44), `_R` dropped only when v0 parses (R46).
+SINCE_README_CATALOG = "79f7678"  # gates: readme-catalog.sh -- the root README
+# lists every skill (install line + table row) and only skills; test-safety-net
+# had shipped with no install line because no gate read the README.
 
 
 def _git_out(*args):
@@ -742,6 +745,17 @@ def check_audit_guardrails(old, new):
     row("gates", "skills invoking helpers by a skill-relative path", a, b, b < a,
         "agents run from the target repo, where `python3 assets/x.py` does not exist",
         since=SINCE_AUDIT_2026_09)
+
+    # 5) readme-catalog: README entries missing or stale, each tree measured by
+    # the NEW checker (the baseline predates it), so the number is the README's.
+    def catalog_errors(tree):
+        _, out = run(new, "scripts/gates/readme-catalog.sh", tree)
+        return sum(1 for line in out.splitlines() if line.startswith("FAIL:"))
+
+    a, b = catalog_errors(old), catalog_errors(new)
+    row("gates", "README catalog entries missing or stale", a, b, b < a,
+        "test-safety-net shipped with no install line: no gate read the root README",
+        since=SINCE_README_CATALOG)
 
 
 # ── bug-autopsy (evidence, not just structure) ──────────────────────────────
