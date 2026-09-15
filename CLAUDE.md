@@ -21,6 +21,7 @@ failing check for that one skill.) The checks:
 | Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`) |
 | Install replay | `scripts/gates/dry-run-replay.sh` | for skills with a `PARAMETERS.md` |
 | Asset paths | `scripts/gates/asset-paths.sh` | no skill-relative helper invocation in `SKILL.md` — agents run from the *target repo*, so `python3 assets/x.py` never resolves for them; use `"$SKILL_DIR/assets/x.py"` |
+| README catalog | `scripts/gates/readme-catalog.sh` | the root `README.md` lists **every** skill (an `npx skills add … --skill <name>` install line **and** a Skills-table row) and nothing that isn't one — runs once per `make gate`, `make readme` alone. A new skill isn't shipped until it's in the catalog |
 | Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
 | **Shell suites** | `*/assets/test_*.sh` | each shell suite marked `# gate: offline`. Every `test_*.sh` **must** carry a `# gate:` marker — `offline` (runs here) or `integration` (excluded); an unmarked suite **fails** the gate rather than silently skipping |
