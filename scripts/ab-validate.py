@@ -170,6 +170,9 @@ SINCE_TSN_RUST_R11 = "c837c1d"  # test-safety-net: the Rust guard judges a
 # crate's own `#[no_mangle]`/`#[export_name]` fns as crate frames (R42),
 # closing residual 11: the list is the unmangled TEXT symbols of cargo-built
 # rlibs' `*.rcgu.o` members, read by a stdlib ar/ELF/Mach-O reader.
+SINCE_TSN_RUST_R11_FR1 = "caf4ca0"  # test-safety-net: residual-11 fix round 1
+# -- an LTO profile named in the refusal (R43), a malformed rlib refused
+# rather than a traceback (R44), `_R` dropped only when v0 parses (R46).
 
 
 def _git_out(*args):
@@ -3950,7 +3953,7 @@ def check_test_safety_net_rust_v0(old, new):
 # main) has no Rust guard at all, so each reads 0 there.
 _RUST_R11_PROBE = r"""
 import shutil, struct, subprocess
-res = {"listed": 0, "native": 0, "bitcode": 0, "atexit": -1}
+res = {"listed": 0, "native": 0, "bitcode": 0, "atexit": -1, "malformed": 0, "rfoo": 0}
 try:
     import rust_binary as rb
 except Exception:
@@ -4039,6 +4042,32 @@ try:
 except Exception as exc:
     res["bitcode"] = int(type(exc).__name__ == "ExportListError" and "bitcode" in str(exc))
 
+# Ruling R44: an ar size field holding `²` passes str.isdigit() and made int()
+# raise -- the wrapper's traceback exited 1, read as RED. It must be the
+# wrapper's own refusal (GuardCannotArm, exit 2).
+evil = os.path.join(tmp, "libevil.rlib")
+with open(evil, "wb") as fh:
+    fh.write(b"!<arch>\n" + ("x.rcgu.o/".ljust(16) + "0".ljust(12) + "0".ljust(6) + "0".ljust(6)
+                             + "644".ljust(8) + "1²".ljust(10)).encode("latin-1")
+             + b"`\nxx")
+try:
+    import io_guard_rust as G
+    try:
+        G.export_list([("evil", evil)])
+    except G.GuardCannotArm:
+        res["malformed"] = 1
+except Exception:
+    res["malformed"] = 0
+# Ruling R46: `#[no_mangle] fn _Rfoo` is not v0 -- listed, as the hook reads it.
+try:
+    rfoo = os.path.join(tmp, "librfoo.rlib")
+    with open(rfoo, "wb") as fh:
+        fh.write(b"!<arch>\n" + member("//", longnames)
+                 + member("/0", elf_rel([("_Rfoo", 2), ("_RNvCs1234_2ax5inner", 2)])))
+    res["rfoo"] = int(rb.rlib_exports(rfoo) == ["_Rfoo"])
+except Exception:
+    res["rfoo"] = 0
+
 # The reviewer's shape, live: a `#[no_mangle]` fn in src/lib.rs registered
 # with atexit, reading a file after libtest has reported.
 guard = os.path.join(sys.path[0], "io_guard_rust.py")
@@ -4099,6 +4128,18 @@ def check_test_safety_net_rust_r11(old, new):
         "linker-plugin LTO makes rustc emit bitcode: a list built past it would be "
         "silently short, so the proof exits 2 with the remedy",
         since=SINCE_TSN_RUST_R11)
+    row(s, "a malformed rlib (an ar size field holding a superscript digit) refused NOT "
+           "ARMED, never a traceback read as RED (1=yes)",
+        oldp["malformed"], newp["malformed"], newp["malformed"] > oldp["malformed"],
+        "str.isdigit() accepts a superscript digit and int() then raised; main caught only "
+        "GuardCannotArm, so the traceback exited 1. Numeric ar fields are ASCII digits now, "
+        "and any reader failure is the refusal (ruling R44)",
+        since=SINCE_TSN_RUST_R11_FR1)
+    row(s, "a `#[no_mangle] fn _Rfoo` (not v0) listed as the crate's (1=yes)",
+        oldp["rfoo"], newp["rfoo"], newp["rfoo"] > oldp["rfoo"],
+        "the list dropped every `_R` name, the hook only those its v0 reader reads: both now "
+        "drop a `_R` name only when it parses (ruling R46)",
+        since=SINCE_TSN_RUST_R11_FR1)
     if newp["atexit"] >= 0:          # -1: no cargo/rustc here, nothing to measure
         row(s, "a #[no_mangle] atexit handler's file read trips through the wrapper "
                "(1=yes)",
