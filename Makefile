@@ -11,7 +11,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -33,6 +33,8 @@ gate: clean
 	 [ $$st -eq 0 ] || { printf '%s\n' "$$out"; echo "GATE_RESULT: FAIL (the gate scripts themselves are broken)"; exit 2; }
 	@rc=0; \
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
+	printf '\n=== README catalog ===\n'; \
+	out=$$(sh $(GATES)/readme-catalog.sh . 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "README catalog" "$$(printf '%s\n' "$$out" | grep -v '^PASS:')"; rc=1; }; \
 	for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \
 		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d validate" "$$out"; rc=1; }; \
@@ -142,6 +144,11 @@ frontmatter:
 		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; \
 		printf '%s: %s\n' "$$d" "$$(printf '%s\n' "$$out" | tail -1)"; [ $$st -eq 0 ] || rc=1; \
 	done; exit $$rc
+
+# The root README's skill catalog: every skill has an install line and a table
+# row, and no entry names a directory that is not a skill. Also runs in `gate`.
+readme:
+	@sh $(GATES)/readme-catalog.sh .
 
 # Lint every skill against "The Prompting Playbook" conventions (full output).
 # Promote the two advisories (PP-5/PP-6) to hard failures: make playbook PLAYBOOK_FLAGS=--strict

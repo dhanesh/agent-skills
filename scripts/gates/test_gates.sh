@@ -214,4 +214,42 @@ else
   bad "validate-skill fails a dangling references/ path"
 fi
 
+# ── readme-catalog: the root README must list every skill, and only skills ───
+# A skill once shipped with no install line, because no gate read the README.
+# Each case is a fresh temp repo holding two skills, so a regex that matches
+# nothing (or everything) flips a row instead of passing quietly.
+mkcatalog() {
+  r="$WORK/catalog-$1"
+  rm -rf "$r"; mkdir -p "$r/alpha" "$r/beta"
+  : > "$r/alpha/SKILL.md"; : > "$r/beta/SKILL.md"
+  printf '%s\n' "$r"
+}
+catalog_readme() {  # $1 repo, then the skills to install, a --, then the table rows
+  r="$1"; shift
+  { printf '# Skills\n\n```bash\nnpx skills add dhanesh/agent-skills --skill <skill-name>\n'
+    while [ "$1" != "--" ]; do printf 'npx skills add dhanesh/agent-skills --skill %s\n' "$1"; shift; done; shift
+    printf '```\n\n| Skill | Description |\n|-------|-------------|\n'
+    for row in "$@"; do printf '| %s | does a thing |\n' "$row"; done
+  } > "$r/README.md"
+}
+catalog_case() {  # $1 label, $2 expected PASS|FAIL, $3 repo
+  if sh "$GATES/readme-catalog.sh" "$3" 2>&1 | grep -q "^README_CATALOG_RESULT: $2"; then
+    ok "readme-catalog: $1"
+  else
+    bad "readme-catalog: $1 (expected README_CATALOG_RESULT: $2)"
+  fi
+}
+r="$(mkcatalog complete)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)' '[`beta`](beta/)'
+catalog_case "a complete catalog passes" PASS "$r"
+r="$(mkcatalog noinstall)"; catalog_readme "$r" alpha -- '[`alpha`](alpha/)' '[`beta`](beta/)'
+catalog_case "a skill with no install line fails" FAIL "$r"
+r="$(mkcatalog norow)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)'
+catalog_case "a skill with no table row fails" FAIL "$r"
+r="$(mkcatalog stale)"; catalog_readme "$r" alpha beta gamma -- '[`alpha`](alpha/)' '[`beta`](beta/)'
+catalog_case "an install line for a non-skill fails" FAIL "$r"
+r="$(mkcatalog stalerow)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)' '[`beta`](beta/)' '[`gamma`](gamma/)'
+catalog_case "a table row for a non-skill fails" FAIL "$r"
+r="$(mkcatalog mislink)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)' '[`beta`](alpha/)'
+catalog_case "a row whose label and link disagree fails" FAIL "$r"
+
 exit $rc
