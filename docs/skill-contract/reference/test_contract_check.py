@@ -69,6 +69,12 @@ def run_discovery_vector(inp, tmp):
     for label, skills in inp["roots"].items():
         for name, md in skills.items():
             _write(os.path.join(base[label], name, "SKILL.md"), md)
+    for label, skills in inp.get("raw_skills", {}).items():
+        for name, hexdata in skills.items():
+            path = os.path.join(base[label], name, "SKILL.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(bytes.fromhex(hexdata))
     for link in inp.get("links", []):
         os.makedirs(base[link["root"]], exist_ok=True)
         os.symlink(os.path.join(base[link["to_root"]], link["name"]),

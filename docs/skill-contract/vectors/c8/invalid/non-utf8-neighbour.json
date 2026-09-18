@@ -1,0 +1,28 @@
+{
+  "expect": {
+    "consumers": [
+      "beta"
+    ],
+    "invalid": [
+      "gamma"
+    ],
+    "shadowed": [],
+    "warnings_contain": []
+  },
+  "input": {
+    "from": "alpha",
+    "kind": "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+    "raw_skills": {
+      "sibling": {
+        "gamma": "2d2d2d0a6e616d653a2067616d6d610a6465736372697074696f6e3a20416363657074732061207461736b2d706c616e20656e76656c6f706520ff2e0a6c6963656e73653a204d49540a636f6d7061746962696c6974793a206e6f6e650a6d657461646174613a0a2020617574686f723a206578616d706c650a202076657273696f6e3a2022312e302e30220a2020736b696c6c2d636f6e74726163743a202231220a2d2d2d0a0a232320436f6e74726163740a0a5468697320736b696c6c20666f6c6c6f777320736b696c6c2d636f6e74726163742076312e0a0a6060606a736f6e20736b696c6c2d636f6e74726163740a7b2270726f7669646573223a205b5d2c2022636f6e73756d6573223a205b2268747470733a2f2f6769746875622e636f6d2f6468616e6573682f6167656e742d736b696c6c732f736b696c6c2d636f6e74726163742f7461736b2d706c616e2f7631225d7d0a6060600a"
+      }
+    },
+    "roots": {
+      "sibling": {
+        "alpha": "---\nname: alpha\ndescription: Hands off a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n  skill-contract: \"1\"\n---\n\n## Contract\n\nThis skill follows skill-contract v1.\n\n```json skill-contract\n{\"provides\": [\"https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1\"], \"consumes\": []}\n```\n",
+        "beta": "---\nname: beta\ndescription: Accepts a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n  skill-contract: \"1\"\n---\n\n## Contract\n\nThis skill follows skill-contract v1.\n\n```json skill-contract\n{\"provides\": [], \"consumes\": [\"https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1\"]}\n```\n"
+      }
+    },
+    "type": "discovery"
+  }
+}

@@ -231,8 +231,13 @@ def consumer_md(name="beta", kinds=(KIND,), optin="1"):
 
 
 def disc_vector(roots, consumers, shadowed=(), invalid=(), plugins=None, plugin_skills=None,
-                warnings_contain=(), links=(), posix_only=False):
+                warnings_contain=(), links=(), posix_only=False, raw_skills=None):
     inp = {"type": "discovery", "kind": KIND, "from": "alpha", "roots": roots}
+    if raw_skills:
+        # SKILL.md files given as raw bytes (hex), for content that is not valid
+        # UTF-8 text: {"<root>": {"<skill dir>": "<hex of the file's bytes>"}}.
+        inp["raw_skills"] = {root: {name: data.hex() for name, data in skills.items()}
+                             for root, skills in raw_skills.items()}
     if plugins is not None:
         inp["plugins"] = plugins
     if plugin_skills:
@@ -277,6 +282,11 @@ def discovery_cases():
          D({"sibling": dict(sib, beta=consumer_md(),
                             gamma=skill_md("gamma", optin="1", body=contract_section('{"provides": [')))},
            ["beta"], invalid=["gamma"])),
+        ("c8", "invalid", "non-utf8-neighbour",
+         D({"sibling": dict(sib, beta=consumer_md())}, ["beta"], invalid=["gamma"],
+           raw_skills={"sibling": {"gamma": skill_md(
+               "gamma", optin="1", description="Accepts a task-plan envelope \xff.",
+               body=contract_section(block(consumes=[KIND]))).encode("latin-1")}})),
         ("c8", "invalid", "plugin-project-scope",
          D({"sibling": sib}, [], plugins=project_plugin, plugin_skills={"p1": {"beta": consumer_md()}},
            warnings_contain=["only user-scope"])),

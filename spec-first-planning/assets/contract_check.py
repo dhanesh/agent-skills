@@ -147,7 +147,7 @@ def check_skill(skill_dir):
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # ValueError: UnicodeDecodeError, not UTF-8
         viol.append((1, "cannot read %s: %s" % (path, exc)))
         return report
     fm, body = split_frontmatter(text)
@@ -450,12 +450,21 @@ def skill_roots(env=None, from_dir=None, cwd=None, home=None, warnings=None):
 
 
 def iter_skills(roots):
-    """Yield (label, skill_dir, name, frontmatter_lines), deduplicated by realpath."""
+    """Yield (label, skill_dir, name, frontmatter_lines, read_error), deduplicated by realpath.
+
+    A SKILL.md that cannot be read or decoded as UTF-8 is still yielded, with
+    frontmatter None and read_error set, so discovery reports it as invalid
+    instead of dropping it or failing the caller.
+    """
     seen = set()
     for label, root in roots:
         if not os.path.isdir(root):
             continue
-        for entry in sorted(os.listdir(root)):
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
             d = os.path.join(root, entry)
             md = os.path.join(d, "SKILL.md")
             if not os.path.isfile(md):
@@ -467,15 +476,17 @@ def iter_skills(roots):
             try:
                 with open(md, encoding="utf-8") as f:
                     fm, _ = split_frontmatter(f.read())
-            except OSError:
+            except (OSError, ValueError) as exc:  # ValueError: UnicodeDecodeError
+                yield label, d, entry, None, "cannot read %s: %s" % (md, exc)
                 continue
-            yield label, d, (fm and frontmatter_value(fm, "name")) or entry, fm
+            yield label, d, (fm and frontmatter_value(fm, "name")) or entry, fm, None
 
 
 def skill_index(env=None, from_dir=None, cwd=None, home=None):
     idx = {}
-    for _label, d, name, _fm in iter_skills(skill_roots(env, from_dir, cwd, home, [])):
-        idx.setdefault(name, d)
+    for _label, d, name, _fm, err in iter_skills(skill_roots(env, from_dir, cwd, home, [])):
+        if err is None:
+            idx.setdefault(name, d)
     return idx
 
 
@@ -483,15 +494,22 @@ def discover(kind, env=None, from_dir=None, cwd=None, home=None):
     out = {"kind": kind, "consumers": [], "shadowed": [], "invalid": [], "warnings": []}
     self_name = None
     if from_dir and os.path.isfile(os.path.join(from_dir, "SKILL.md")):
-        with open(os.path.join(from_dir, "SKILL.md"), encoding="utf-8") as f:
-            fm, _ = split_frontmatter(f.read())
-        self_name = fm and frontmatter_value(fm, "name")
+        try:
+            with open(os.path.join(from_dir, "SKILL.md"), encoding="utf-8") as f:
+                fm, _ = split_frontmatter(f.read())
+            self_name = fm and frontmatter_value(fm, "name")
+        except (OSError, ValueError):  # ValueError: UnicodeDecodeError
+            self_name = None
     names = set()
-    for label, d, name, fm in iter_skills(skill_roots(env, from_dir, cwd, home, out["warnings"])):
+    for label, d, name, fm, err in iter_skills(skill_roots(env, from_dir, cwd, home, out["warnings"])):
         if name in names:
             out["shadowed"].append({"skill": name, "dir": d, "root": label})
             continue
         names.add(name)
+        if err is not None:
+            out["invalid"].append({"skill": name, "dir": d, "root": label,
+                                   "violations": ["C1: " + err]})
+            continue
         if not fm or metadata_value(fm, "skill-contract") is None:
             continue
         rep = check_skill(d)
