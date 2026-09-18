@@ -76,3 +76,8 @@ Standards referenced: BCP 14 (RFC 2119, RFC 8174); in-toto Attestation Statement
 checker in any language conforms if it reaches the verdict every file under
 [`vectors/`](vectors/) expects. Adopters vendor the reference checker byte-identical into their
 `assets/`.
+
+*Non-normative.* `PROVEN` rests on fields the producer wrote itself: a `run_url`, or an
+`assertedBy` naming a human or another skill. Nothing in this contract verifies them. A receiver
+that reports claims to a person shows the basis (the `run_url` or the `assertedBy`) for each
+`PROVEN` claim too, not only for the claims that aren't `PROVEN`.
