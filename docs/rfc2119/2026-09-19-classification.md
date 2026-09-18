@@ -76,3 +76,22 @@ Skills appear in rewrite order.
 | c9 | 80 | If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: s… | plain (0.57, 0.51) | plain |  |
 | c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched |
 | c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | MUST | the named deliverable format and its already-absolute ALWAYS; harm 0.51, and the template carries the mandatory backstop and <data> slots |
+
+## mockstar-mock (14 candidates · 10 MUST · 1 SHOULD · 0 MAY · 3 plain · 3 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 21 | The defining rule: **no fabricated endpoints.** Every mock traces back to a fetche… | MUST (0.92, 0.83) | plain | restates Invariant 1 (no fabricated endpoints), which carries the MUST NOT; one keyword per rule |
+| c2 | 46 | \`bunx @dhaneshpurohit/mockstar\` available (install: \`bun add -g @dhaneshpurohit/mock… | MUST (0.74, 0.80) | MUST |  |
+| c3 | 60 | 1. **No fabricated endpoints.** Every endpoint in the output must trace to a fetc… | MUST (0.96, 0.82) | MUST |  |
+| c4 | 62 | 2. **Prefer native tooling.** Use \`bunx @dhaneshpurohit/mockstar import\` for OpenAP… | SHOULD (0.28, 0.48) | SHOULD | harm 0.48 caps it below MUST; a strong default with a legitimate exception (the hand-authored path used elsewhere for non-liftable inputs) |
+| c5 | 65 | 3. **Schema-valid output.** Verification (Stage 5) boots the server. A mock proje… | MUST (0.84, 0.74) | MUST |  |
+| c6 | 68 | 4. **No silent truncation.** When \`--max-endpoints\` caps the inventory, every drop… | MUST (0.87, 0.76) | MUST |  |
+| c7 | 70 | 5. **Read-only inputs.** Never modify source spec files, HAR archives, or documen… | MUST (0.56, 0.74) | MUST | low confidence, but Invariants heading + real data-loss harm (0.74) support MUST |
+| c8 | 81 | \`--runtime auto\|local\|docker\` — selects how mockstar is invoked (default: \`auto\`)… | MUST (0.15, 0.74) | plain | describes what each \`--runtime\` value does; not a directive to the agent (confidence 0.15) |
+| c9 | 100 | Hand subagents the literal absolute \`$EXTRACT\` and \`$SMOKE\` values — never a rela… | MUST (0.71, 0.82) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c10 | 177 | For **documentation URLs**, fetch the content first with \`curl -L\` (or WebFetch),… | MUST (0.77, 0.82) | MUST |  |
+| c11 | 216 | **Prose** — extract from code fences, Markdown tables, and inline backtick refer… | MUST (0.75, 0.81) | MUST |  |
+| c12 | 253 | \`webhookHints[]\` → \`webhooks[]\` on the triggering entry. When a hint carries \`sig… | MUST (0.82, 0.82) | MUST |  |
+| c13 | 379 | **Consequence for this skill:** if \`--tenant\` is not \`default\`, every consumer —… | MUST (0.80, 0.82) | plain | the only always ("the CLI serve path always enables path + header modes") describes default CLI config, not a directive; not under a hard-rule heading |
+| c14 | 464 | The skill's asset helpers (\`assets/extract_text.py\`, \`assets/smoke.sh\`) live in t… | MUST (0.81, 0.81) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
