@@ -1,0 +1,65 @@
+{
+  "expect": {
+    "commandments": [
+      9
+    ],
+    "result": "FAIL"
+  },
+  "input": {
+    "envelope": {
+      "_type": "https://in-toto.io/Statement/v1",
+      "predicate": {
+        "assertions": [
+          {
+            "assertedBy": {
+              "skill": "alpha"
+            },
+            "command": [
+              "{python}",
+              "{skill_dir:alpha}/assets/lint.py",
+              "docs/spec.md"
+            ],
+            "result": {
+              "outcome": "passed"
+            },
+            "subject": [
+              {
+                "digest": {
+                  "sha256": "41028ddf536e594778c6b23d0a527099836b813c46687c269eff9b980746f34f"
+                },
+                "name": "docs/spec.md"
+              }
+            ],
+            "test": "spec-lint"
+          }
+        ],
+        "generatedAtTime": "2026-09-18T10:22:00Z",
+        "id": "task-plan-v1-20260918T102200Z-a1b2c3",
+        "payload": {
+          "tasks": [],
+          "title": "Export"
+        },
+        "skillContract": "1",
+        "wasAttributedTo": {
+          "skill": "alpha",
+          "version": "1.0.0"
+        },
+        "wasRevisionOf": null
+      },
+      "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+      "subject": [
+        {
+          "digest": {
+            "sha256": "41028ddf536e594778c6b23d0a527099836b813c46687c269eff9b980746f34f"
+          },
+          "name": "docs/spec.md"
+        }
+      ]
+    },
+    "for_skill": {
+      "dir": "beta",
+      "skill_md": "---\nname: beta\ndescription: Hands off a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n---\n\n# Alpha\n"
+    },
+    "type": "envelope"
+  }
+}

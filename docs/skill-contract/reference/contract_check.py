@@ -26,6 +26,9 @@ import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import shlex  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
@@ -402,15 +405,6 @@ def load_envelope(path):
         return None, [(3, "cannot read the envelope: %s" % exc)]
 
 
-def check_envelope(path):
-    """Structural check of one envelope file. Task 5 adds staleness, claims and --for."""
-    report = {"envelope": path, "violations": [], "stale": [], "claims": {}}
-    st, report["violations"] = load_envelope(path)
-    if st is not None:
-        report["violations"] = check_statement(st)
-    return report
-
-
 # ── Commandment 8: find partners, never require them ────────────────────────
 def _plugin_skill_roots(home, warnings):
     idx = os.path.join(home, ".claude", "plugins", "installed_plugins.json")
@@ -510,6 +504,133 @@ def discover(kind, env=None, from_dir=None, cwd=None, home=None):
     return out
 
 
+# ── Commandments 5, 7 and 9: staleness, claim status, validation for a receiver ─
+def stale_names(root, subjects):
+    """Subject paths whose file is missing or whose sha256 no longer matches."""
+    out = []
+    for s in subjects or []:
+        name = s.get("name")
+        want = (s.get("digest") or {}).get("sha256")
+        if not safe_path(name):
+            continue
+        p = os.path.join(root, *name.split("/"))
+        if not os.path.isfile(p) or sha256_file(p) != want:
+            out.append(name)
+    return out
+
+
+def claim_status(statement, root=None, rerun_results=None):
+    """Commandment 7. First match wins: STALE, FAILED, PROVEN, CLAIMED, OPEN."""
+    pred = statement["predicate"]
+    producer = (pred.get("wasAttributedTo") or {}).get("skill")
+    rerun_results = rerun_results or {}
+    by_test = {}
+    for i, a in enumerate(pred.get("assertions") or []):
+        by_test.setdefault(a["test"], []).append((i, a))
+    status = {}
+    for test, items in by_test.items():
+        if root is not None and any(stale_names(root, a.get("subject")) for _, a in items):
+            status[test] = "STALE"
+        elif any(a["result"]["outcome"] == "failed" or rerun_results.get(i) is False for i, a in items):
+            status[test] = "FAILED"
+        elif any(a["result"]["outcome"] == "passed"
+                 and (a["assertedBy"].get("skill") != producer or "run_url" in a
+                      or rerun_results.get(i) is True)
+                 for i, a in items):
+            status[test] = "PROVEN"
+        elif any(a["result"]["outcome"] == "passed" for _, a in items):
+            status[test] = "CLAIMED"
+        else:
+            status[test] = "OPEN"
+    return status
+
+
+def resolve_python(env=None, min_version=(3, 10)):
+    """The {python} lookup: SKILL_CONTRACT_PYTHON, python3, python, py -3; first to pass the probe."""
+    env = dict(os.environ if env is None else env)
+    candidates = []
+    override = env.get("SKILL_CONTRACT_PYTHON", "").strip()
+    if override:
+        candidates.append([p.strip('"') for p in shlex.split(override, posix=(os.name != "nt"))])
+    candidates += [["python3"], ["python"], ["py", "-3"]]
+    probe = "import sys; sys.exit(0 if sys.version_info >= (%d, %d) else 1)" % min_version
+    for cand in candidates:
+        exe = shutil.which(cand[0], path=env.get("PATH"))
+        if exe is None:
+            continue
+        try:
+            r = subprocess.run([exe] + cand[1:] + ["-I", "-c", probe],
+                               capture_output=True, timeout=10, env=env)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0:
+            return [exe] + cand[1:]
+    return None
+
+
+def resolve_command(cmd, python_argv, skill_dirs):
+    out = []
+    for i, arg in enumerate(cmd):
+        if i == 0 and arg == "{python}":
+            if not python_argv:
+                raise LookupError("no Python >= 3.10 found")
+            out.extend(python_argv)
+            continue
+        m = SKILL_DIR_RE.match(arg)
+        if m:
+            d = skill_dirs.get(m.group("name"))
+            if d is None:
+                raise LookupError("skill %s is not installed" % m.group("name"))
+            out.append(d + arg[m.end():])
+            continue
+        out.append(arg)
+    return out
+
+
+def rerun_assertions(statement, root, python_argv, skill_dirs):
+    """Re-run each assertion's command from `root`. {index: passed?}; unresolvable ones are skipped."""
+    results = {}
+    for i, a in enumerate(statement["predicate"].get("assertions") or []):
+        if "command" not in a:
+            continue
+        try:
+            argv = resolve_command(a["command"], python_argv, skill_dirs)
+        except LookupError:
+            continue
+        try:
+            r = subprocess.run(argv, cwd=root, capture_output=True, timeout=600)
+            results[i] = r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            results[i] = False
+    return results
+
+
+def check_envelope(path, root=None, for_skill=None, rerun=False, env=None):
+    """Everything a receiver checks before acting (commandments 3-7, 9)."""
+    report = {"envelope": path, "violations": [], "stale": [], "claims": {}}
+    st, report["violations"] = load_envelope(path)
+    if st is None:
+        return report
+    report["violations"] = check_statement(st)
+    if report["violations"]:
+        return report
+    if for_skill is not None:
+        rep = check_skill(for_skill)
+        consumes = (rep["contract"] or {}).get("consumes") or []
+        if rep["violations"] or st["predicateType"] not in consumes:
+            report["violations"].append(
+                (9, "%s does not consume %s" % (rep["skill"], st["predicateType"])))
+            return report
+    results = {}
+    if root is not None:
+        report["stale"] = stale_names(root, st["subject"])
+        if rerun:
+            env = dict(os.environ if env is None else env)
+            results = rerun_assertions(st, root, resolve_python(env), skill_index(env=env, cwd=root))
+    report["claims"] = claim_status(st, root, results)
+    return report
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def finish(violations, lines=()):
     for ln in lines:
@@ -530,8 +651,12 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("check-skill", help="commandments 1-2 for one skill directory")
     p.add_argument("skill_dir")
-    p = sub.add_parser("check-envelope", help="commandments 3-6 for one envelope")
+    p = sub.add_parser("check-envelope", help="commandments 3-7 and 9 for one envelope")
     p.add_argument("file")
+    p.add_argument("--root", help="repo root: check digests (C5) and grade claims (C7)")
+    p.add_argument("--for", dest="for_skill", help="receiving skill dir: it must consume the kind (C9)")
+    p.add_argument("--rerun", action="store_true",
+                   help="re-run each command (only after the user approved it; needs --root)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("discover", help="commandment 8: installed consumers of a kind")
     p.add_argument("--kind", required=True)
@@ -551,11 +676,21 @@ def main(argv=None):
         lines += ["WARN: %s" % w for w in rep["warnings"]]
         return finish(rep["violations"], lines)
     if a.cmd == "check-envelope":
-        rep = check_envelope(a.file)
+        if a.rerun and not a.root:
+            print("usage: --rerun needs --root", file=sys.stderr)
+            return 1
+        rep = check_envelope(a.file, root=a.root, for_skill=a.for_skill, rerun=a.rerun)
         if a.json:
             print(json.dumps(dict(rep, violations=["C%d: %s" % v for v in rep["violations"]]),
                              sort_keys=True))
-        return finish(rep["violations"])
+            return finish(rep["violations"])
+        lines = []
+        if not rep["violations"]:
+            lines.append("ENVELOPE: %s" % ("UNCHECKED" if a.root is None
+                                           else "STALE" if rep["stale"] else "FRESH"))
+            lines += ["STALE: %s" % s for s in rep["stale"]]
+            lines += ["CLAIM: %s %s" % (t, s) for t, s in sorted(rep["claims"].items())]
+        return finish(rep["violations"], lines)
     if a.cmd == "discover":
         if kind_parts(a.kind) is None:
             return finish([(2, "%r is not a kind URI (https, ending in /v<N>)" % a.kind)])

@@ -286,8 +286,52 @@ def discovery_cases():
     ]
 
 
+def claims_cases():
+    E = env_vector
+    files = {"docs/spec.md": SPEC}
+    ci = "https://ci.example/runs/1"
+    return [
+        ("c5", "valid", "fresh",
+         E(envelope(), "PASS", files=files, stale=[], claims={"spec-lint": "CLAIMED"})),
+        ("c5", "valid", "stale",
+         E(envelope(), "PASS", files={"docs/spec.md": SPEC_EDITED}, stale=["docs/spec.md"],
+           claims={"spec-lint": "STALE"})),
+        ("c5", "valid", "missing-file",
+         E(envelope(), "PASS", files={}, stale=["docs/spec.md"], claims={"spec-lint": "STALE"})),
+        ("c7", "valid", "proven-by-another-skill",
+         E(envelope([claim(by={"skill": "beta"})]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "PROVEN"})),
+        ("c7", "valid", "proven-by-a-human",
+         E(envelope([claim(by={"human": "reviewer@example"})]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "PROVEN"})),
+        ("c7", "valid", "proven-by-ci",
+         E(envelope([claim(command=None, run_url=ci)]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "PROVEN"})),
+        ("c7", "valid", "failed",
+         E(envelope([claim(outcome="failed")]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "FAILED"})),
+        ("c7", "valid", "failed-beats-passed",
+         E(envelope([claim(), claim(by={"skill": "beta"}, outcome="failed")]), "PASS", files=files,
+           stale=[], claims={"spec-lint": "FAILED"})),
+        ("c7", "valid", "open",
+         E(envelope([claim(outcome="cantTell")]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "OPEN"})),
+        ("c7", "valid", "stale-claim",
+         E(envelope([claim(subject_text=SPEC_EDITED)]), "PASS", files=files, stale=[],
+           claims={"spec-lint": "STALE"})),
+        ("c7", "invalid", "own-result-is-not-proof",
+         E(envelope(), "PASS", files=files, stale=[], claims={"spec-lint": "CLAIMED"})),
+        ("c9", "valid", "consumer-accepts-kind",
+         E(envelope(), "PASS", for_skill={"dir": "beta", "skill_md": consumer_md()})),
+        ("c9", "invalid", "consumer-does-not-accept-kind",
+         E(envelope(), "FAIL", [9], for_skill={"dir": "beta", "skill_md": consumer_md(kinds=(KIND_V2,))})),
+        ("c9", "invalid", "for-a-non-adopter",
+         E(envelope(), "FAIL", [9], for_skill={"dir": "beta", "skill_md": skill_md("beta")})),
+    ]
+
+
 def cases():
-    return skill_cases() + envelope_cases() + discovery_cases()
+    return skill_cases() + envelope_cases() + discovery_cases() + claims_cases()
 
 
 def write_all(out_dir):

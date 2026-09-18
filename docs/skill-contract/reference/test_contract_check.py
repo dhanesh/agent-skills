@@ -7,6 +7,7 @@ Run:  cd docs/skill-contract/reference && python3 -I test_contract_check.py
 import filecmp
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,17 @@ def run_skill_vector(inp, tmp):
 def run_envelope_vector(inp, tmp):
     path = os.path.join(tmp, "envelope.json")
     _write(path, json.dumps(inp["envelope"]))
-    rep = cc.check_envelope(path)
+    root = None
+    if "files" in inp:
+        root = os.path.join(tmp, "root")
+        os.makedirs(root, exist_ok=True)
+        for rel, text in inp["files"].items():
+            _write(os.path.join(root, *rel.split("/")), text)
+    for_skill = None
+    if "for_skill" in inp:
+        for_skill = os.path.join(tmp, inp["for_skill"]["dir"])
+        _write(os.path.join(for_skill, "SKILL.md"), inp["for_skill"]["skill_md"])
+    rep = cc.check_envelope(path, root=root, for_skill=for_skill)
     return {"result": "FAIL" if rep["violations"] else "PASS",
             "commandments": sorted({n for n, _ in rep["violations"]}),
             "stale": rep["stale"], "claims": rep["claims"]}
@@ -137,7 +148,7 @@ class VectorTests(unittest.TestCase):
 
     @staticmethod
     def required_commandments():
-        return ["c1", "c2", "c3", "c4", "c6", "c8"]
+        return ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]
 
 
 class CliTests(unittest.TestCase):
@@ -238,6 +249,75 @@ class HelperTests(unittest.TestCase):
                                capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 2)
             self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: FAIL (C3)")
+
+
+def quoted_python():
+    return subprocess.list2cmdline([sys.executable]) if os.name == "nt" else shlex.quote(sys.executable)
+
+
+@unittest.skipIf(os.name == "nt", "shell-script stubs are POSIX-only")
+class RuntimeTests(unittest.TestCase):
+    def stub(self, d, name, body):
+        p = os.path.join(d, name)
+        _write(p, "#!/bin/sh\n%s\n" % body)
+        os.chmod(p, 0o755)
+        return p
+
+    def test_a_python3_that_fails_the_probe_falls_through_to_python(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.stub(d, "python3", "exit 1")
+            self.stub(d, "python", 'exec "%s" "$@"' % sys.executable)
+            self.assertEqual(cc.resolve_python({"PATH": d}), [os.path.join(d, "python")])
+
+    def test_a_multi_word_override_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.stub(d, "python3", 'exec "%s" "$@"' % sys.executable)
+            env = {"PATH": d, "SKILL_CONTRACT_PYTHON": "%s -X utf8" % quoted_python()}
+            self.assertEqual(cc.resolve_python(env), [sys.executable, "-X", "utf8"])
+
+    def test_nothing_resolves(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(cc.resolve_python({"PATH": d}))
+
+
+class RerunTests(unittest.TestCase):
+    def test_rerun_turns_claims_into_proof_or_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "repo")
+            _write(os.path.join(root, "docs", "spec.md"), build_vectors.SPEC)
+            ok = cc.assertion("ok", "alpha", "passed", root, ["docs/spec.md"],
+                              command=["{python}", "-c", "pass"])
+            bad = cc.assertion("bad", "alpha", "passed", root, ["docs/spec.md"],
+                               command=["{python}", "-c", "raise SystemExit(3)"])
+            st = cc.build_statement(build_vectors.KIND, "alpha", "1.0.0", root, ["docs/spec.md"],
+                                    {}, [ok, bad])
+            path = cc.write_envelope(root, st)
+            env = dict(os.environ, SKILL_CONTRACT_PYTHON=quoted_python(), HOME=tmp, USERPROFILE=tmp)
+            self.assertEqual(cc.check_envelope(path, root=root)["claims"],
+                             {"ok": "CLAIMED", "bad": "CLAIMED"})
+            self.assertEqual(cc.check_envelope(path, root=root, rerun=True, env=env)["claims"],
+                             {"ok": "PROVEN", "bad": "FAILED"})
+
+    def test_cli_rerun_needs_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "e.json")
+            _write(path, json.dumps(build_vectors.envelope()))
+            r = subprocess.run([sys.executable, "-I", CHECKER, "check-envelope", path, "--rerun"],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1)
+
+    def test_cli_reports_stale_and_claims(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "repo")
+            _write(os.path.join(root, "docs", "spec.md"), build_vectors.SPEC_EDITED)
+            path = os.path.join(tmp, "e.json")
+            _write(path, json.dumps(build_vectors.envelope()))
+            r = subprocess.run([sys.executable, "-I", CHECKER, "check-envelope", path, "--root", root],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("ENVELOPE: STALE", r.stdout)
+            self.assertIn("STALE: docs/spec.md", r.stdout)
+            self.assertIn("CLAIM: spec-lint STALE", r.stdout)
 
 
 if __name__ == "__main__":
