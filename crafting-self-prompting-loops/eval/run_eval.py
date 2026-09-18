@@ -22,6 +22,7 @@ enforced must not pass as typed state.
 
 Offline, deterministic, stdlib-only; all scratch under tempfile.mkdtemp().
 """
+import json
 import os
 import re
 import shutil
@@ -90,6 +91,22 @@ def grade_state_typing(text):
     a guarantee and delivers nothing — so both markers are required."""
     missing = [m for m in STATE_TYPING_MARKERS if m not in text]
     return (not missing, missing)
+
+
+INTAKE_HEADING = "## Receiving a skill-contract envelope"
+INTAKE_MARKERS = ("check-envelope", "--for", "UNVALIDATED", "LSC-1", "LSC-4", "LSC-7", "LSC-8")
+TASK_PLAN = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+
+
+def grade_intake(text):
+    """The intake section must validate first and map the plan onto the loop spec."""
+    start = text.find(INTAKE_HEADING)
+    if start < 0:
+        return False, list(INTAKE_MARKERS)
+    end = text.find("\n## ", start + len(INTAKE_HEADING))
+    section = text[start:end if end > 0 else len(text)]
+    missing = [m for m in INTAKE_MARKERS if m not in section]
+    return not missing, missing
 
 
 def copy_skill(dst):
@@ -199,6 +216,72 @@ def main():
         check("negative: a declared-but-unenforced schema is not counted as typed state",
               base and not grade_state_typing(declared_only)[0]
               and "STATE_SCHEMA" in declared_only)
+
+        # ── skill-contract arm: receiving a task-plan envelope ───────────────
+        # Static fixtures only (no sibling skill needed): the envelope is built
+        # with this skill's own vendored checker, then checked --for this skill.
+        sys.path.insert(0, os.path.join(pristine, "assets"))
+        import contract_check as cc  # noqa: E402  (the skill's vendored checker)
+        cc_py = os.path.join(pristine, "assets", "contract_check.py")
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(os.path.join(repo, "docs"))
+        spec = os.path.join(repo, "docs", "spec.md")
+        with open(spec, "w", encoding="utf-8") as f:
+            f.write("# Spec\n\n- R1: The export must include every row.\n")
+        payload = {"title": "Export", "spec": "docs/spec.md", "coverage": {"R1": ["T1"]},
+                   "uncovered": [],
+                   "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "Export every row",
+                              "verify": [{"text": "row count matches", "command": None}]}]}
+        lint = cc.assertion("spec-lint", "spec-first-planning", "passed", repo, ["docs/spec.md"],
+                            command=["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                     "docs/spec.md"])
+        good = cc.write_envelope(repo, cc.build_statement(
+            TASK_PLAN, "spec-first-planning", "1.1.0", repo, ["docs/spec.md"], payload, [lint]))
+
+        def receive(path):
+            r = subprocess.run([sys.executable, cc_py, "check-envelope", path, "--root", repo,
+                                "--for", pristine, "--json"],
+                               capture_output=True, text=True, timeout=60)
+            try:
+                return r.returncode, json.loads(r.stdout.splitlines()[0])
+            except (ValueError, IndexError):
+                return r.returncode, None
+
+        rc, rep = receive(good)
+        check("a task-plan envelope is accepted for this skill (--for)",
+              rc == 0 and rep is not None and rep["claims"] == {"spec-lint": "CLAIMED"},
+              f"rc={rc}")
+
+        with open(good, encoding="utf-8") as f:
+            tampered = json.load(f)
+        tampered["_type"] = "https://example.com/not-in-toto"
+        bad_path = os.path.join(tmp, "tampered.json")
+        with open(bad_path, "w", encoding="utf-8") as f:
+            json.dump(tampered, f)
+        rc, rep = receive(bad_path)
+        check("negative: a tampered envelope is refused with commandment 3",
+              rc == 2 and rep is not None and any(v.startswith("C3:") for v in rep["violations"]))
+
+        v2 = cc.write_envelope(repo, cc.build_statement(
+            TASK_PLAN[:-1] + "2", "spec-first-planning", "2.0.0", repo, ["docs/spec.md"], payload))
+        rc, rep = receive(v2)
+        check("negative: a task-plan/v2 envelope is refused (this skill consumes v1 only)",
+              rc == 2 and rep is not None and any(v.startswith("C9:") for v in rep["violations"]))
+
+        with open(spec, "a", encoding="utf-8") as f:
+            f.write("- R2: The export must keep row order.\n")
+        rc, rep = receive(good)
+        check("negative: an envelope whose spec changed is surfaced as STALE",
+              rc == 0 and rep is not None and rep["stale"] == ["docs/spec.md"])
+
+        with open(os.path.join(pristine, "SKILL.md"), encoding="utf-8") as f:
+            skill_text = f.read()
+        ok, missing = grade_intake(skill_text)
+        check("SKILL.md carries the intake section mapping the plan onto LSC-1/4/7/8",
+              ok, f"missing: {missing}")
+        stripped = "\n".join(ln for ln in skill_text.splitlines() if "LSC-7" not in ln)
+        check("negative: grader flags an intake section with the LSC-7 mapping stripped",
+              not grade_intake(stripped)[0])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

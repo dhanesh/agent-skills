@@ -1,0 +1,8 @@
+# skill-contract: the reference checker's conformance vectors are compared
+# byte-for-byte against build_vectors.py's output (LF), and every vendored
+# contract_check.py must stay byte-identical to the reference. Pin LF in the
+# working tree on every platform, so a Windows checkout with core.autocrlf=true
+# does not rewrite them as CRLF.
+docs/skill-contract/vectors/** text eol=lf
+docs/skill-contract/reference/*.py text eol=lf
+*/assets/contract_check.py text eol=lf

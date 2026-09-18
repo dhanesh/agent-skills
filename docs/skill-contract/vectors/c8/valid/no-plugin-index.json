@@ -1,0 +1,23 @@
+{
+  "expect": {
+    "consumers": [
+      "beta"
+    ],
+    "invalid": [],
+    "shadowed": [],
+    "warnings_contain": [
+      "no Claude Code plugin index"
+    ]
+  },
+  "input": {
+    "from": "alpha",
+    "kind": "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+    "roots": {
+      "sibling": {
+        "alpha": "---\nname: alpha\ndescription: Hands off a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n  skill-contract: \"1\"\n---\n\n## Contract\n\nThis skill follows skill-contract v1.\n\n```json skill-contract\n{\"provides\": [\"https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1\"], \"consumes\": []}\n```\n",
+        "beta": "---\nname: beta\ndescription: Accepts a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n  skill-contract: \"1\"\n---\n\n## Contract\n\nThis skill follows skill-contract v1.\n\n```json skill-contract\n{\"provides\": [], \"consumes\": [\"https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1\"]}\n```\n"
+      }
+    },
+    "type": "discovery"
+  }
+}

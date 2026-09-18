@@ -15,8 +15,8 @@ description: >-
   warnings instead of failing.
 license: MIT
 compatibility: Requires python3 (stdlib only) to inspect bundles and generate the project; Node.js 18+ with npm to build/preview the emitted Astro + Starlight site (network needed only for npm install).
-x-spec-version: 1.0
 metadata:
+  spec_version: "1.0"
   author: dhanesh
   version: "1.1.0"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"

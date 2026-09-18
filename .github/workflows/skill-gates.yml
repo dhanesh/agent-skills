@@ -160,6 +160,33 @@ jobs:
         working-directory: test-safety-net
         run: python eval/run_eval.py
 
+  # skill-contract is an open convention, so its reference checker is the one
+  # piece of this repo proven off POSIX: vectors and the end-to-end handoff on
+  # Windows too, at both ends of the supported Python range (3.10 floor, 3.14).
+  # Each file is its own step because pwsh (the Windows default shell) does not
+  # stop at a failing native command inside a multi-line `run`.
+  contract:
+    name: skill-contract (${{ matrix.os }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: docs/skill-contract/reference
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: conformance vectors
+        run: python -I test_contract_check.py
+      - name: end-to-end handoff
+        run: python -I test_e2e.py
+
   # Branch protection requires a check named exactly `gate`. A matrix job reports
   # one check PER LEG ("gate (ubuntu-latest)", ...) and never the bare name, so
   # adding the matrix silently removed the required context and left every PR
@@ -167,14 +194,15 @@ jobs:
   # that passes only when every leg passed. Keep it if you add another OS.
   gate:
     name: gate
-    needs: [matrix-gate, versions]
+    needs: [matrix-gate, versions, contract]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every matrix leg and every language version to pass
+      - name: Require every matrix leg, every language version and the contract legs to pass
         run: |
           gate="${{ needs.matrix-gate.result }}"
           versions="${{ needs.versions.result }}"
-          echo "matrix result: $gate  versions result: $versions"
-          [ "$gate" = "success" ] && [ "$versions" = "success" ] || exit 1
+          contract="${{ needs.contract.result }}"
+          echo "matrix: $gate  versions: $versions  contract: $contract"
+          [ "$gate" = "success" ] && [ "$versions" = "success" ] && [ "$contract" = "success" ] || exit 1

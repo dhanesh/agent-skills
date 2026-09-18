@@ -17,8 +17,8 @@ description: >-
   agent-ready-rails).
 license: MIT
 compatibility: Prompt-only; no runtime dependencies. Language-agnostic — the principles apply to any codebase the agent can read. python3 (stdlib only) is required to run the outcome eval, not the skill.
-x-spec-version: 1.0
 metadata:
+  spec_version: "1.0"
   author: dhanesh
   version: "1.0.0"
   tags: "clean-code,refactoring,solid,code-review,architecture,naming,tdd,code-smells,craftsmanship"

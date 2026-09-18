@@ -176,6 +176,8 @@ SINCE_TSN_RUST_R11_FR1 = "caf4ca0"  # test-safety-net: residual-11 fix round 1
 SINCE_README_CATALOG = "79f7678"  # gates: readme-catalog.sh -- the root README
 # lists every skill (install line + table row) and only skills; test-safety-net
 # had shipped with no install line because no gate read the README.
+SINCE_SKILL_CONTRACT = "1c193d3"  # skill-contract v1: spec-first-planning hands off
+# task-plan envelopes that crafting-self-prompting-loops discovers and accepts.
 SINCE_TSN_NODE_FFI = "5d46f99"  # test-safety-net: node 26's new `ffi` builtin
 # is marked (subprocess) and recorded as a guard residual, not left unclassified.
 
@@ -4292,6 +4294,115 @@ def _corpus_rows_without_since():
         i = j
 
 
+# ── skill-contract (docs/skill-contract/SPEC.md) ────────────────────────────
+SC_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+SC_SPEC = (
+    "# Spec: CSV export for saved reports\n\n## Problem\n"
+    "Analysts re-type report numbers into spreadsheets by hand.\n\n## Users\n"
+    "- Data analysts exporting weekly reports\n\n## Goals\n- Saved reports downloadable as CSV\n\n"
+    "## Non-goals\n- Excel (.xlsx) export\n\n## Requirements\n"
+    '- R1: The report page must offer a "Download CSV" action for every saved report. '
+    "[where: web/reports/]\n"
+    "- R2: The exported CSV must contain the same rows and columns as the on-screen table, "
+    "in the same order.\n"
+    "- R3: Export of a 10000-row report must complete within 5 seconds.\n\n"
+    "## Acceptance criteria\n"
+    "- R1: Open any saved report; the page shows a Download CSV control and clicking it "
+    "downloads a .csv file.\n"
+    "- R2: `python3 tests/compare_export.py fixtures/report.json export.csv` exits 0 "
+    "(row/column parity).\n"
+    "- R2: A report with zero rows exports a CSV containing only the header row.\n"
+    "- R3: Timing the export endpoint with a 10000-row fixture reports under 5 seconds.\n\n"
+    "## Open questions\n- (none)\n")
+
+
+def check_skill_contract(old, new):
+    import hashlib
+    checker = os.path.join(new, "docs", "skill-contract", "reference", "contract_check.py")
+    scratch = tempfile.mkdtemp()
+    try:
+        def fresh_repo():
+            repo = tempfile.mkdtemp(dir=scratch)
+            os.makedirs(os.path.join(repo, "docs"))
+            spec = os.path.join(repo, "docs", "spec.md")
+            with open(spec, "w", encoding="utf-8") as f:
+                f.write(SC_SPEC)
+            return repo, spec
+
+        def tool(tree, name):
+            return os.path.join(tree, "spec-first-planning", "assets", name)
+
+        def produce(tree):
+            repo, spec = fresh_repo()
+            r = subprocess.run([sys.executable, tool(tree, "spec_to_tasks.py"), spec, "--envelope", repo],
+                               capture_output=True, text=True, timeout=120)
+            paths = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")]
+            if r.returncode != 0 or not paths:
+                return 0, None
+            rc = subprocess.run([sys.executable, checker, "check-envelope", paths[0], "--root", repo],
+                                capture_output=True, text=True, timeout=120).returncode
+            return (1 if rc == 0 else 0), paths[0]
+
+        a, _ = produce(old)
+        b, _ = produce(new)
+        row("skill-contract", "spec-first-planning writes a valid task-plan envelope (1=yes)",
+            a, b, b > a, "a plan could only be handed off as prose; nothing could consume it",
+            since=SINCE_SKILL_CONTRACT)
+
+        def consumers(tree):
+            env = dict(os.environ, SKILL_CONTRACT_PATH=tree, HOME=scratch, USERPROFILE=scratch)
+            r = subprocess.run([sys.executable, checker, "discover", "--kind", SC_KIND,
+                                "--from", os.path.join(tree, "spec-first-planning"), "--json"],
+                               capture_output=True, text=True, timeout=120, env=env, cwd=scratch)
+            try:
+                return len(json.loads(r.stdout.splitlines()[0])["consumers"])
+            except (ValueError, IndexError, KeyError):
+                return 0
+
+        a, b = consumers(old), consumers(new)
+        row("skill-contract", "installed consumers discovered for a task plan", a, b, b > a,
+            "skills named each other only in prose", since=SINCE_SKILL_CONTRACT)
+
+        def json_plan(tree):
+            _repo, spec = fresh_repo()
+            return subprocess.run([sys.executable, tool(tree, "spec_to_tasks.py"), spec, "--json"],
+                                  capture_output=True, text=True, timeout=120).stdout
+
+        def envelope_verify_items(tree):
+            # Both arms measure the same thing: verify list items in the envelope
+            # that tree's own spec_to_tasks writes. A tree with no --envelope
+            # writes none and measures 0; once the base carries the change this
+            # row is a real HELD* guard (a 4 -> 3 regression moves it).
+            _ok, path = produce(tree)
+            if not path:
+                return 0
+            try:
+                with open(path, encoding="utf-8") as f:
+                    tasks = json.load(f)["predicate"]["payload"]["tasks"]
+            except (OSError, ValueError, KeyError, TypeError):
+                return 0
+            return sum(len(t["verify"]) for t in tasks
+                       if isinstance(t, dict) and isinstance(t.get("verify"), list))
+
+        a, b = envelope_verify_items(old), envelope_verify_items(new)
+        row("skill-contract", "verify steps handed off as separate items", a, b, b > a,
+            "spec_to_tasks joined them with '; ', losing the boundaries", since=SINCE_SKILL_CONTRACT)
+
+        ja, jb = json_plan(old), json_plan(new)
+        row("skill-contract", "--json plan output (sha256 prefix)",
+            hashlib.sha256(ja.encode()).hexdigest()[:12], hashlib.sha256(jb.encode()).hexdigest()[:12],
+            ja == jb, "existing readers of --json must see no change", kind="guard")
+
+        def lint_rc(tree):
+            _repo, spec = fresh_repo()
+            return subprocess.run([sys.executable, tool(tree, "spec_lint.py"), spec],
+                                  capture_output=True, text=True, timeout=120).returncode
+
+        a, b = lint_rc(old), lint_rc(new)
+        row("skill-contract", "spec-lint verdict on the fixture spec (exit code)", a, b, a == b,
+            "the linter is untouched by the contract work", kind="guard")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 # ── test-safety-net: node 26's `ffi` builtin ─────────────────────────────────
 _NODE_FFI_PROBE = r"""
 import stack_node
@@ -4375,6 +4486,7 @@ def main():
         check_test_safety_net_rust(old, REPO)
         check_test_safety_net_rust_v0(old, REPO)
         check_test_safety_net_rust_r11(old, REPO)
+        check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
