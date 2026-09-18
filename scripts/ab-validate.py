@@ -176,6 +176,8 @@ SINCE_TSN_RUST_R11_FR1 = "caf4ca0"  # test-safety-net: residual-11 fix round 1
 SINCE_README_CATALOG = "79f7678"  # gates: readme-catalog.sh -- the root README
 # lists every skill (install line + table row) and only skills; test-safety-net
 # had shipped with no install line because no gate read the README.
+SINCE_TSN_NODE_FFI = "5d46f99"  # test-safety-net: node 26's new `ffi` builtin
+# is marked (subprocess) and recorded as a guard residual, not left unclassified.
 
 
 def _git_out(*args):
@@ -4290,6 +4292,27 @@ def _corpus_rows_without_since():
         i = j
 
 
+# ── test-safety-net: node 26's `ffi` builtin ─────────────────────────────────
+_NODE_FFI_PROBE = r"""
+import stack_node
+groups = sorted(g for table in (stack_node.CONTROLLABLE, stack_node.UNCONTROLLABLE)
+                for g, names in table.items() if "ffi" in names)
+print(json.dumps({"marked": 1 if groups else 0}))
+"""
+
+
+def check_test_safety_net_node_ffi(old, new):
+    oldp = probe(old, os.path.join("test-safety-net", "assets"), _NODE_FFI_PROBE)
+    newp = probe(new, os.path.join("test-safety-net", "assets"), _NODE_FFI_PROBE)
+    if _errored(oldp, newp):
+        return
+    row("test-safety-net", "node 26's `ffi` builtin is marked, so it is never netted as pure (1=yes)",
+        oldp["marked"], newp["marked"], newp["marked"] > oldp["marked"],
+        "node:ffi calls native code; unclassified, the completeness test failed on node 26 "
+        "and a unit using it could have been proved pure",
+        since=SINCE_TSN_NODE_FFI)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4352,6 +4375,7 @@ def main():
         check_test_safety_net_rust(old, REPO)
         check_test_safety_net_rust_v0(old, REPO)
         check_test_safety_net_rust_r11(old, REPO)
+        check_test_safety_net_node_ffi(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
