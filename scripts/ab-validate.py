@@ -4342,7 +4342,7 @@ def check_skill_contract(old, new):
             return (1 if rc == 0 else 0), paths[0]
 
         a, _ = produce(old)
-        b, env_path = produce(new)
+        b, _ = produce(new)
         row("skill-contract", "spec-first-planning writes a valid task-plan envelope (1=yes)",
             a, b, b > a, "a plan could only be handed off as prose; nothing could consume it",
             since=SINCE_SKILL_CONTRACT)
@@ -4366,17 +4366,23 @@ def check_skill_contract(old, new):
             return subprocess.run([sys.executable, tool(tree, "spec_to_tasks.py"), spec, "--json"],
                                   capture_output=True, text=True, timeout=120).stdout
 
-        def list_items(tasks):
-            return sum(len(t["verify"]) for t in tasks if isinstance(t.get("verify"), list))
+        def envelope_verify_items(tree):
+            # Both arms measure the same thing: verify list items in the envelope
+            # that tree's own spec_to_tasks writes. A tree with no --envelope
+            # writes none and measures 0; once the base carries the change this
+            # row is a real HELD* guard (a 4 -> 3 regression moves it).
+            _ok, path = produce(tree)
+            if not path:
+                return 0
+            try:
+                with open(path, encoding="utf-8") as f:
+                    tasks = json.load(f)["predicate"]["payload"]["tasks"]
+            except (OSError, ValueError, KeyError, TypeError):
+                return 0
+            return sum(len(t["verify"]) for t in tasks
+                       if isinstance(t, dict) and isinstance(t.get("verify"), list))
 
-        try:
-            a = list_items(json.loads(json_plan(old))["tasks"])
-        except (ValueError, KeyError):
-            a = 0
-        b = 0
-        if env_path:
-            with open(env_path, encoding="utf-8") as f:
-                b = list_items(json.load(f)["predicate"]["payload"]["tasks"])
+        a, b = envelope_verify_items(old), envelope_verify_items(new)
         row("skill-contract", "verify steps handed off as separate items", a, b, b > a,
             "spec_to_tasks joined them with '; ', losing the boundaries", since=SINCE_SKILL_CONTRACT)
 
