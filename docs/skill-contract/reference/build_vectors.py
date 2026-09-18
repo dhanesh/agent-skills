@@ -221,8 +221,73 @@ def envelope_cases():
     ]
 
 
+def producer_md():
+    return skill_md("alpha", optin="1", body=contract_section(block([KIND])))
+
+
+def consumer_md(name="beta", kinds=(KIND,), optin="1"):
+    return skill_md(name, optin=optin, description="Accepts a task-plan envelope.",
+                    body=contract_section(block(consumes=kinds)))
+
+
+def disc_vector(roots, consumers, shadowed=(), invalid=(), plugins=None, plugin_skills=None,
+                warnings_contain=(), links=(), posix_only=False):
+    inp = {"type": "discovery", "kind": KIND, "from": "alpha", "roots": roots}
+    if plugins is not None:
+        inp["plugins"] = plugins
+    if plugin_skills:
+        inp["plugin_skills"] = plugin_skills
+    if links:
+        inp["links"] = list(links)
+    v = {"input": inp, "expect": {"consumers": list(consumers), "shadowed": sorted(shadowed),
+                                  "invalid": sorted(invalid),
+                                  "warnings_contain": list(warnings_contain)}}
+    if posix_only:
+        v["posix_only"] = True
+    return v
+
+
+def discovery_cases():
+    D = disc_vector
+    sib = {"alpha": producer_md()}
+    user_plugin = {"version": 2, "plugins": {"p1@market": [{"scope": "user", "installPath": "{plugins}/p1"}]}}
+    project_plugin = {"version": 2, "plugins": {"p1@market": [{"scope": "project", "installPath": "{plugins}/p1"}]}}
+    return [
+        ("c8", "valid", "sibling-consumer", D({"sibling": dict(sib, beta=consumer_md())}, ["beta"])),
+        ("c8", "valid", "project-root", D({"sibling": sib, "project": {"beta": consumer_md()}}, ["beta"])),
+        ("c8", "valid", "path-beats-user",
+         D({"sibling": sib, "path": {"beta": consumer_md()}, "user": {"beta": consumer_md()}},
+           ["beta"], shadowed=["beta"])),
+        ("c8", "valid", "plugin-user-scope",
+         D({"sibling": sib}, ["beta"], plugins=user_plugin, plugin_skills={"p1": {"beta": consumer_md()}})),
+        ("c8", "valid", "no-plugin-index",
+         D({"sibling": dict(sib, beta=consumer_md())}, ["beta"],
+           warnings_contain=["no Claude Code plugin index"])),
+        ("c8", "valid", "symlink-deduplicated",
+         D({"sibling": sib, "user": {"beta": consumer_md()}}, ["beta"],
+           links=[{"root": "project", "name": "beta", "to_root": "user"}], posix_only=True)),
+        ("c8", "invalid", "self-is-not-a-consumer",
+         D({"sibling": {"alpha": skill_md("alpha", optin="1",
+                                          body=contract_section(block([KIND], [KIND])))}}, [])),
+        ("c8", "invalid", "v2-only-consumer",
+         D({"sibling": dict(sib, beta=consumer_md(kinds=(KIND_V2,)))}, [])),
+        ("c8", "invalid", "block-without-optin-ignored",
+         D({"sibling": dict(sib, beta=skill_md("beta", body=contract_section(block(consumes=[KIND]))))}, [])),
+        ("c8", "invalid", "broken-neighbour",
+         D({"sibling": dict(sib, beta=consumer_md(),
+                            gamma=skill_md("gamma", optin="1", body=contract_section('{"provides": [')))},
+           ["beta"], invalid=["gamma"])),
+        ("c8", "invalid", "plugin-project-scope",
+         D({"sibling": sib}, [], plugins=project_plugin, plugin_skills={"p1": {"beta": consumer_md()}},
+           warnings_contain=["only user-scope"])),
+        ("c8", "invalid", "plugin-index-unknown-version",
+         D({"sibling": sib}, [], plugins={"version": 3, "plugins": {}},
+           warnings_contain=["unknown format"])),
+    ]
+
+
 def cases():
-    return skill_cases() + envelope_cases()
+    return skill_cases() + envelope_cases() + discovery_cases()
 
 
 def write_all(out_dir):

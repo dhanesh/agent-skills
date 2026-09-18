@@ -411,6 +411,105 @@ def check_envelope(path):
     return report
 
 
+# ── Commandment 8: find partners, never require them ────────────────────────
+def _plugin_skill_roots(home, warnings):
+    idx = os.path.join(home, ".claude", "plugins", "installed_plugins.json")
+    if not os.path.isfile(idx):
+        warnings.append("no Claude Code plugin index at %s; plugin skills not searched" % idx)
+        return []
+    try:
+        with open(idx, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        warnings.append("unreadable plugin index %s: %s" % (idx, exc))
+        return []
+    if not isinstance(data, dict) or data.get("version") != 2 or not isinstance(data.get("plugins"), dict):
+        warnings.append("plugin index %s has an unknown format; plugin skills not searched" % idx)
+        return []
+    roots = []
+    for key, entries in sorted(data["plugins"].items()):
+        for e in entries if isinstance(entries, list) else [entries]:
+            if not isinstance(e, dict):
+                continue
+            if e.get("scope") != "user":
+                warnings.append("plugin %s has scope %r; only user-scope plugins are searched"
+                                % (key, e.get("scope")))
+                continue
+            if isinstance(e.get("installPath"), str):
+                roots.append(os.path.join(e["installPath"], "skills"))
+    return roots
+
+
+def skill_roots(env=None, from_dir=None, cwd=None, home=None, warnings=None):
+    """[(label, dir)] in precedence order: path, sibling, project, user, plugin."""
+    env = os.environ if env is None else env
+    cwd = cwd or os.getcwd()
+    home = home or env.get("HOME") or env.get("USERPROFILE") or os.path.expanduser("~")
+    warnings = [] if warnings is None else warnings
+    roots = [("path", d) for d in (env.get("SKILL_CONTRACT_PATH") or "").split(os.pathsep) if d]
+    if from_dir:
+        roots.append(("sibling", os.path.dirname(os.path.abspath(from_dir))))
+    roots += [("project", os.path.join(cwd, b, "skills")) for b in (".agents", ".claude")]
+    roots += [("user", os.path.join(home, b, "skills")) for b in (".agents", ".claude")]
+    roots += [("plugin", r) for r in _plugin_skill_roots(home, warnings)]
+    return roots
+
+
+def iter_skills(roots):
+    """Yield (label, skill_dir, name, frontmatter_lines), deduplicated by realpath."""
+    seen = set()
+    for label, root in roots:
+        if not os.path.isdir(root):
+            continue
+        for entry in sorted(os.listdir(root)):
+            d = os.path.join(root, entry)
+            md = os.path.join(d, "SKILL.md")
+            if not os.path.isfile(md):
+                continue
+            real = os.path.realpath(d)
+            if real in seen:
+                continue
+            seen.add(real)
+            try:
+                with open(md, encoding="utf-8") as f:
+                    fm, _ = split_frontmatter(f.read())
+            except OSError:
+                continue
+            yield label, d, (fm and frontmatter_value(fm, "name")) or entry, fm
+
+
+def skill_index(env=None, from_dir=None, cwd=None, home=None):
+    idx = {}
+    for _label, d, name, _fm in iter_skills(skill_roots(env, from_dir, cwd, home, [])):
+        idx.setdefault(name, d)
+    return idx
+
+
+def discover(kind, env=None, from_dir=None, cwd=None, home=None):
+    out = {"kind": kind, "consumers": [], "shadowed": [], "invalid": [], "warnings": []}
+    self_name = None
+    if from_dir and os.path.isfile(os.path.join(from_dir, "SKILL.md")):
+        with open(os.path.join(from_dir, "SKILL.md"), encoding="utf-8") as f:
+            fm, _ = split_frontmatter(f.read())
+        self_name = fm and frontmatter_value(fm, "name")
+    names = set()
+    for label, d, name, fm in iter_skills(skill_roots(env, from_dir, cwd, home, out["warnings"])):
+        if name in names:
+            out["shadowed"].append({"skill": name, "dir": d, "root": label})
+            continue
+        names.add(name)
+        if not fm or metadata_value(fm, "skill-contract") is None:
+            continue
+        rep = check_skill(d)
+        if rep["violations"]:
+            out["invalid"].append({"skill": name, "dir": d, "root": label,
+                                   "violations": ["C%d: %s" % v for v in rep["violations"]]})
+            continue
+        if name != self_name and kind in (rep["contract"].get("consumes") or []):
+            out["consumers"].append({"skill": name, "dir": d, "root": label})
+    return out
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def finish(violations, lines=()):
     for ln in lines:
@@ -434,6 +533,10 @@ def build_parser():
     p = sub.add_parser("check-envelope", help="commandments 3-6 for one envelope")
     p.add_argument("file")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("discover", help="commandment 8: installed consumers of a kind")
+    p.add_argument("--kind", required=True)
+    p.add_argument("--from", dest="from_dir")
+    p.add_argument("--json", action="store_true")
     return ap
 
 
@@ -453,6 +556,21 @@ def main(argv=None):
             print(json.dumps(dict(rep, violations=["C%d: %s" % v for v in rep["violations"]]),
                              sort_keys=True))
         return finish(rep["violations"])
+    if a.cmd == "discover":
+        if kind_parts(a.kind) is None:
+            return finish([(2, "%r is not a kind URI (https, ending in /v<N>)" % a.kind)])
+        out = discover(a.kind, from_dir=a.from_dir)
+        if a.json:
+            print(json.dumps(out, sort_keys=True))
+            return finish([])
+        lines = ["CONSUMER: %s (%s) %s" % (c["skill"], c["root"], c["dir"]) for c in out["consumers"]]
+        lines += ["SHADOWED: %s (%s) %s" % (s["skill"], s["root"], s["dir"]) for s in out["shadowed"]]
+        lines += ["INVALID: %s %s" % (i["skill"], "; ".join(i["violations"])) for i in out["invalid"]]
+        lines += ["WARN: %s" % w for w in out["warnings"]]
+        if not out["consumers"]:
+            lines.append("NO_CONSUMER: no installed skill consumes %s; give the envelope to the user"
+                         % a.kind)
+        return finish([], lines)
     return 1
 
 

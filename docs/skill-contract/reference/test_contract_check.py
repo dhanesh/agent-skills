@@ -45,7 +45,44 @@ def run_envelope_vector(inp, tmp):
             "stale": rep["stale"], "claims": rep["claims"]}
 
 
-RUNNERS = {"skill": run_skill_vector, "envelope": run_envelope_vector}
+ROOT_DIRS = {"path": ("path",), "sibling": ("sibling",),
+             "project": ("cwd", ".agents", "skills"), "user": ("home", ".agents", "skills")}
+
+
+def run_discovery_vector(inp, tmp):
+    base = {k: os.path.join(tmp, *v) for k, v in ROOT_DIRS.items()}
+    home, cwd, plugins_dir = (os.path.join(tmp, "home"), os.path.join(tmp, "cwd"),
+                              os.path.join(tmp, "plugins"))
+    os.makedirs(home, exist_ok=True)
+    os.makedirs(cwd, exist_ok=True)
+    for label, skills in inp["roots"].items():
+        for name, md in skills.items():
+            _write(os.path.join(base[label], name, "SKILL.md"), md)
+    for link in inp.get("links", []):
+        os.makedirs(base[link["root"]], exist_ok=True)
+        os.symlink(os.path.join(base[link["to_root"]], link["name"]),
+                   os.path.join(base[link["root"]], link["name"]))
+    for plugin, skills in inp.get("plugin_skills", {}).items():
+        for name, md in skills.items():
+            _write(os.path.join(plugins_dir, plugin, "skills", name, "SKILL.md"), md)
+    if "plugins" in inp:
+        index = json.loads(json.dumps(inp["plugins"]))
+        for entries in (index.get("plugins") or {}).values():
+            for e in entries if isinstance(entries, list) else [entries]:
+                if isinstance(e.get("installPath"), str):
+                    e["installPath"] = e["installPath"].replace("{plugins}", plugins_dir)
+        _write(os.path.join(home, ".claude", "plugins", "installed_plugins.json"), json.dumps(index))
+    env = {"SKILL_CONTRACT_PATH": base["path"] if "path" in inp["roots"] else ""}
+    rep = cc.discover(inp["kind"], env=env, from_dir=os.path.join(base["sibling"], inp["from"]),
+                      cwd=cwd, home=home)
+    return {"consumers": [c["skill"] for c in rep["consumers"]],
+            "shadowed": sorted(s["skill"] for s in rep["shadowed"]),
+            "invalid": sorted(i["skill"] for i in rep["invalid"]),
+            "warnings": rep["warnings"]}
+
+
+RUNNERS = {"skill": run_skill_vector, "envelope": run_envelope_vector,
+           "discovery": run_discovery_vector}
 
 
 def run_vector(vector):
@@ -84,7 +121,12 @@ class VectorTests(unittest.TestCase):
             with self.subTest(vector=os.path.relpath(path, VECTORS)):
                 actual = run_vector(vector)
                 for key, want in vector["expect"].items():
-                    self.assertEqual(actual.get(key), want, key)
+                    if key == "warnings_contain":
+                        for s in want:
+                            self.assertTrue(any(s in w for w in actual["warnings"]),
+                                            "no warning contains %r: %r" % (s, actual["warnings"]))
+                    else:
+                        self.assertEqual(actual.get(key), want, key)
 
     def test_every_commandment_has_valid_and_invalid_vectors(self):
         present = {os.path.relpath(os.path.dirname(p), VECTORS).replace(os.sep, "/")
@@ -95,7 +137,7 @@ class VectorTests(unittest.TestCase):
 
     @staticmethod
     def required_commandments():
-        return ["c1", "c2", "c3", "c4", "c6"]
+        return ["c1", "c2", "c3", "c4", "c6", "c8"]
 
 
 class CliTests(unittest.TestCase):
@@ -121,6 +163,25 @@ class CliTests(unittest.TestCase):
             r = self.run_cli("check-skill", d)
             self.assertEqual(r.returncode, 2)
             self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: FAIL (C2)")
+
+    def test_discover_json_lists_consumers_and_exits_0(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            universe, home = os.path.join(tmp, "skills"), os.path.join(tmp, "home")
+            _write(os.path.join(universe, "alpha", "SKILL.md"), build_vectors.producer_md())
+            _write(os.path.join(universe, "beta", "SKILL.md"), build_vectors.consumer_md())
+            env = dict(os.environ, SKILL_CONTRACT_PATH=universe, HOME=home, USERPROFILE=home)
+            r = subprocess.run([sys.executable, "-I", CHECKER, "discover", "--kind", build_vectors.KIND,
+                                "--from", os.path.join(universe, "alpha"), "--json"],
+                               capture_output=True, text=True, timeout=60, env=env, cwd=tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            out = json.loads(r.stdout.splitlines()[0])
+            self.assertEqual([c["skill"] for c in out["consumers"]], ["beta"])
+            self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: PASS")
+
+    def test_discover_rejects_a_bad_kind_with_c2(self):
+        r = self.run_cli("discover", "--kind", "http://x/k/v1")
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: FAIL (C2)")
 
     def test_usage_error_exits_1(self):
         self.assertEqual(self.run_cli().returncode, 1)
