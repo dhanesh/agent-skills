@@ -36,7 +36,16 @@ def run_skill_vector(inp, tmp):
             "warnings": len(rep["warnings"]), "adopter": rep["adopter"]}
 
 
-RUNNERS = {"skill": run_skill_vector}
+def run_envelope_vector(inp, tmp):
+    path = os.path.join(tmp, "envelope.json")
+    _write(path, json.dumps(inp["envelope"]))
+    rep = cc.check_envelope(path)
+    return {"result": "FAIL" if rep["violations"] else "PASS",
+            "commandments": sorted({n for n, _ in rep["violations"]}),
+            "stale": rep["stale"], "claims": rep["claims"]}
+
+
+RUNNERS = {"skill": run_skill_vector, "envelope": run_envelope_vector}
 
 
 def run_vector(vector):
@@ -86,7 +95,7 @@ class VectorTests(unittest.TestCase):
 
     @staticmethod
     def required_commandments():
-        return ["c1", "c2"]
+        return ["c1", "c2", "c3", "c4", "c6"]
 
 
 class CliTests(unittest.TestCase):
@@ -116,6 +125,49 @@ class CliTests(unittest.TestCase):
     def test_usage_error_exits_1(self):
         self.assertEqual(self.run_cli().returncode, 1)
         self.assertEqual(self.run_cli("no-such-command").returncode, 1)
+
+
+class HelperTests(unittest.TestCase):
+    KIND = build_vectors.KIND
+
+    def repo(self, tmp):
+        _write(os.path.join(tmp, "docs", "spec.md"), build_vectors.SPEC)
+        return tmp
+
+    def test_new_id_matches_the_grammar_and_the_kind(self):
+        eid = cc.new_id(self.KIND)
+        m = cc.ID_RE.match(eid)
+        self.assertIsNotNone(m, eid)
+        self.assertEqual((m.group("name"), int(m.group("ver"))), ("task-plan", 1))
+
+    def test_build_statement_is_valid_and_pins_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.repo(tmp)
+            a = cc.assertion("spec-lint", "alpha", "passed", root, ["docs/spec.md"],
+                             command=["{python}", "{skill_dir:alpha}/assets/lint.py", "docs/spec.md"])
+            st = cc.build_statement(self.KIND, "alpha", "1.0.0", root, ["docs/spec.md"],
+                                    {"title": "x"}, [a])
+            self.assertEqual(cc.check_statement(st), [])
+            self.assertEqual(st["subject"][0]["digest"]["sha256"], build_vectors.sha(build_vectors.SPEC))
+
+    def test_write_envelope_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.repo(tmp)
+            st = cc.build_statement(self.KIND, "alpha", "1.0.0", root, ["docs/spec.md"], {})
+            path = cc.write_envelope(root, st)
+            self.assertTrue(path.endswith(os.path.join(".skill-contract", "envelopes",
+                                                       st["predicate"]["id"] + ".json")))
+            with self.assertRaises(FileExistsError):
+                cc.write_envelope(root, st)
+
+    def test_cli_check_envelope_reports_c3_and_exits_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "e.json")
+            _write(path, "not json")
+            r = subprocess.run([sys.executable, "-I", CHECKER, "check-envelope", path],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 2)
+            self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: FAIL (C3)")
 
 
 if __name__ == "__main__":

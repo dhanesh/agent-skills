@@ -1,0 +1,12 @@
+{
+  "expect": {
+    "commandments": [
+      3
+    ],
+    "result": "FAIL"
+  },
+  "input": {
+    "envelope": [],
+    "type": "envelope"
+  }
+}
