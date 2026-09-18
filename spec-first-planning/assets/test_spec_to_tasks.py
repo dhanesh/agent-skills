@@ -167,6 +167,33 @@ class TestCli(unittest.TestCase):
         r = self._run("# Spec: empty\n\n## Problem\nSomething.\n")
         self.assertEqual(r.returncode, 2)
 
+    def test_plain_and_json_runs_never_import_contract_check(self):
+        # contract_check exits 2 below Python 3.10, so importing it on a path that
+        # has nothing to do with envelopes broke `spec_to_tasks.py spec.md` on
+        # macOS's /usr/bin/python3 (3.9). Only --envelope may load it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "spec.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(GOOD)
+            probe = textwrap.dedent("""
+                import contextlib, io, sys
+                sys.path.insert(0, sys.argv[1])
+                import spec_to_tasks
+                assert "contract_check" not in sys.modules, "loaded on import"
+                spec_to_tasks.to_json(spec_to_tasks.derive_plan(open(sys.argv[2], encoding="utf-8").read()))
+                for flags in ([], ["--json"]):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        rc = spec_to_tasks.main(["spec_to_tasks.py", sys.argv[2]] + flags)
+                    assert rc == 0, (flags, rc)
+                    assert "contract_check" not in sys.modules, "loaded by main %r" % flags
+                print("NOT_IMPORTED")
+            """)
+            here = os.path.dirname(os.path.abspath(__file__))
+            r = subprocess.run([sys.executable, "-I", "-c", probe, here, path],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "NOT_IMPORTED")
+
 
 
 class TestCoverageOwnership(unittest.TestCase):

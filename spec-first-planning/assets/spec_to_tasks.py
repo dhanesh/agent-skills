@@ -34,7 +34,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_lint  # noqa: E402  (shared parser lives beside this script)
-import contract_check  # noqa: E402  (vendored skill-contract checker, same dir)
+# contract_check (the vendored skill-contract checker, same dir) is imported only
+# on the --envelope path: it requires Python >= 3.10 and exits 2 below that, so a
+# plain or --json run must not load it.
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
@@ -160,6 +162,8 @@ def payload_errors(payload):
 
 def write_task_plan_envelope(plan, spec_path, root):
     """Write the plan as a skill-contract task-plan/v1 envelope; return its path."""
+    import contract_check  # lazy: needs Python >= 3.10 (see the note at the imports)
+
     root = os.path.abspath(root)
     rel = os.path.relpath(os.path.abspath(spec_path), root).replace(os.sep, "/")
     if rel == ".." or rel.startswith("../") or os.path.isabs(rel):
