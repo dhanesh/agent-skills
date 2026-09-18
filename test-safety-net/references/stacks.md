@@ -266,7 +266,9 @@ And five that are ordinary limits, each named in `assets/io_guard.js` itself:
    tier, so this needs the spawn to be exempt to begin with.)
 4. A native addon (`.node`), `process.loadEnvFile`, or `node:sqlite`'s and WASI's C++ layers reach
    the syscall through their own bindings. What is enforced is that a handle cannot be *built* under
-   the guard.
+   the guard. `node:ffi` (node 26) is the extreme case: it calls native functions directly, so the
+   guard records it in `NOT_INTERCEPTED` and cannot stop the call — the filter marks it
+   (`subprocess`), so a unit that uses it is never proved as pure.
 5. A reference bound before the guard armed keeps the original. `--require` is what makes this rare
    rather than routine.
 6. `"KEY" in process.env` and `Object.keys(process.env).length` read no **value**, so they do not

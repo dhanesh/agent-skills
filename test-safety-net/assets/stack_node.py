@@ -1680,7 +1680,10 @@ UNCONTROLLABLE = {
     # run a file of their own; neither goes through `child_process`, so a guard
     # patching that module would never see them -- the same shape as
     # `os.posix_spawn` bypassing `subprocess.Popen` on the Python side.
-    "subprocess": ("child_process", "cluster", "worker_threads",
+    # `ffi` (node 26) calls native C functions directly: arbitrary I/O that no
+    # JS-level guard can see, the same escape hatch `ctypes` is on the Python
+    # side. Marking it keeps such code out of the netted-as-pure bucket.
+    "subprocess": ("child_process", "cluster", "worker_threads", "ffi",
                    "spawn", "exec", "execSync", "spawnSync", "fork",
                    "execFile", "execFileSync"),
     # `sqlite` is node's own built-in database module (`node:sqlite`); the rest
