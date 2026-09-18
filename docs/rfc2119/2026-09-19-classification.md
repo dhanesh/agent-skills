@@ -60,3 +60,19 @@ Skills appear in rewrite order.
 | c8 | 166 | 5. **Every triple is ontology-checked before it enters the ledger.** Predicates are a clo… | SHOULD (0.51, 0.70) | MUST | the write-boundary contract: harm 0.70, and the eval (ontology rejects a hallucinated predicate / an impossible triple) and unit tests enforce it; "hooks never break" describes the hooks and stays plain |
 | c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. "Prefer these defaults" stays plain |
 | c10 | 178 | Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis i… | MUST (0.59, 0.71) | MUST |  |
+
+## crafting-self-prompting-loops (11 candidates · 7 MUST · 0 SHOULD · 0 MAY · 4 plain · 4 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 26 | Your job with this skill: turn a fuzzy "make it keep going until it's good" request into … | MUST (0.49, 0.85) | plain | the never/always list describes the properties of a sound loop; step 4 non-negotiables carry the MUSTs |
+| c2 | 34 | Ask the user (or infer, then state your assumption): *what is this loop trying to achieve… | MUST (0.69, 0.74) | plain | "can never legitimately stop" is rationale for the done test; the imperative is a workflow step |
+| c3 | 49 | \| LSC-2 \| Stop condition (primary) \| how the model signals "done" (a flag/token the harne… | MUST (0.79, 0.85) | MUST |  |
+| c4 | 61 | These are the constraints loops most often skip and most often die on. Never ship a loop … | MUST (0.81, 0.84) | MUST |  |
+| c5 | 63 | - **A mandatory backstop (LSC-3).** Model self-termination (LSC-2) *can fail* — the model… | MUST (0.95, 0.89) | MUST |  |
+| c6 | 64 | - **The two-channel boundary (LSC-7).** Anything the model produces, a tool returns, or c… | MUST (0.87, 0.88) | MUST |  |
+| c7 | 65 | - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible actio… | MUST (0.70, 0.79) | MUST | (no departure) note: the output-only exemption in the same block carries MAY, a genuine option |
+| c8 | 72 | 2. **A runnable scaffold** — in the user's target runtime. For Claude Code, that's the re… | MUST (0.27, 0.62) | MUST |  |
+| c9 | 80 | If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: s… | plain (0.57, 0.51) | plain |  |
+| c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched |
+| c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | MUST | the named deliverable format and its already-absolute ALWAYS; harm 0.51, and the template carries the mandatory backstop and <data> slots |
