@@ -1,0 +1,13 @@
+{
+  "expect": {
+    "adopter": false,
+    "commandments": [],
+    "result": "PASS",
+    "warnings": 0
+  },
+  "input": {
+    "dir": "alpha",
+    "skill_md": "---\nname: alpha\ndescription: Hands off a task-plan envelope.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n---\n\n# Alpha\n",
+    "type": "skill"
+  }
+}

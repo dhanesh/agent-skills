@@ -1,0 +1,13 @@
+{
+  "expect": {
+    "adopter": true,
+    "commandments": [],
+    "result": "PASS",
+    "warnings": 1
+  },
+  "input": {
+    "dir": "alpha",
+    "skill_md": "---\nname: alpha\ndescription: Does alpha things.\nlicense: MIT\ncompatibility: none\nmetadata:\n  author: example\n  version: \"1.0.0\"\n  skill-contract: \"1\"\n---\n\n## Contract\n\nThis skill follows skill-contract v1.\n\n```json skill-contract\n{\"provides\": [\"https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1\"], \"consumes\": []}\n```\n",
+    "type": "skill"
+  }
+}
