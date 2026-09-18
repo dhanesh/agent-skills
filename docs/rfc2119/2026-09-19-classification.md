@@ -45,3 +45,18 @@ Skills appear in rewrite order.
 | c25 | 484 | > Emit every captured value with `repr()`. Never build a test's expected value by string… | MUST (0.97, 0.82) | MUST |  |
 | c26 | 519 | **Promoted units** get a line in the report naming the ranker's original tier, the tier u… | MUST (0.73, 0.44) | plain | harm 0.44 caps it at SHOULD, and a SHOULD here would contradict step 2's MUST NOT (c7) for the same rule; left as its restatement |
 | c27 | 522 | **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurre… | plain (0.36, 0.16) | plain |  |
+
+## world-model-ledger (10 candidates · 7 MUST · 0 SHOULD · 0 MAY · 3 plain · 6 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 93 | \| **PostToolUse** → `hooks/posttooluse-observe.sh` \| after **every** tool call \| the univ… | MUST (0.82, 0.79) | plain | the "never" describes what the PostToolUse hook reads (tool input, not output); Invariants 2 and 3 carry the rule |
+| c2 | 99 | The model maintains itself: the universal `PostToolUse` hook captures entities and behavi… | MAY (0.41, 0.28) | plain | the only never/always sentence ("A model never guesses facts inside a hook") describes the hook design; Invariant 2 carries the MUST NOT |
+| c3 | 107 | 0. **(Usually automatic) Seed the model repo-wide.** `SessionStart` auto-seeds a fresh re… | plain (0.31, 0.28) | plain |  |
+| c4 | 151 | 1. **Code observation never raises normative confidence.** A hook may set `observed_conf`… | MUST (0.96, 0.85) | MUST |  |
+| c5 | 154 | 2. **No invented facts in hooks.** Hooks capture only what is deterministically parseable… | SHOULD (0.34, 0.71) | MUST | harm 0.71: a model summarizing inside a hook would put invented facts in the ledger; one of the invariants the skill says not to weaken |
+| c6 | 158 | 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into f… | MUST (0.90, 0.86) | MUST |  |
+| c7 | 163 | 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get `in… | SHOULD (0.72, 0.61) | MUST | harm 0.61 and soft-invalidation is asserted by the install-gate suite (test_derive_skips_invalidated, test_prune_soft_invalidates_vanished_edges); "confidence is always derived" describes the derivation and stays plain |
+| c8 | 166 | 5. **Every triple is ontology-checked before it enters the ledger.** Predicates are a clo… | SHOULD (0.51, 0.70) | MUST | the write-boundary contract: harm 0.70, and the eval (ontology rejects a hallucinated predicate / an impossible triple) and unit tests enforce it; "hooks never break" describes the hooks and stays plain |
+| c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. "Prefer these defaults" stays plain |
+| c10 | 178 | Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis i… | MUST (0.59, 0.71) | MUST |  |

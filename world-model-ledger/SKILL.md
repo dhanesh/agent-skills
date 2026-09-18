@@ -18,11 +18,13 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 
 # world-model-ledger
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 A persistent **world model** for a coding agent, backed by SQLite. It records what the agent
 learns about a codebase — **entities** (symbols / files / modules / real-world referents), the
@@ -148,34 +150,34 @@ normative correctness improves over time. The loop is detailed in
 
 ## The invariants (do not weaken these)
 
-1. **Code observation never raises normative confidence.** A hook may set `observed_conf` high,
+1. **Code observation MUST NOT raise normative confidence.** A hook may set `observed_conf` high,
    but `normative_conf` moves *only* on oracle evidence. This is the whole point — the model
    must be able to say "observed, but unverified."
-2. **No invented facts in hooks.** Hooks capture only what is deterministically parseable from
+2. **No invented facts in hooks.** Hooks MUST capture only what is deterministically parseable from
    the trusted channel — files any tool names, executions parsed from a Bash command's argv,
-   verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions come
-   from the agent's own markers/CLI, never from a model summarizing inside a hook.
-3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into facts
+   verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions
+   MUST come from the agent's own markers/CLI and MUST NOT come from a model summarizing inside a hook.
+3. **Trusted channel only.** `tool_result` / `tool_use` content MUST NOT be harvested into facts
    or evidence, so untrusted output cannot forge a marker. The two tags that raise the
-   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) are additionally accepted from the user's
-   channel only — an agent quoting a poisoned file back into its own reply must not be
+   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST additionally be accepted from the user's
+   channel only — an agent quoting a poisoned file back into its own reply MUST NOT be
    able to validate a fact. Regression tests guard both the direct and the echo path.
-4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get
+4. **Append-only evidence; you MUST soft-invalidate and MUST NOT hard-delete.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.
-5. **Every triple is ontology-checked before it enters the ledger.** Predicates are a closed,
+5. **Every triple MUST be ontology-checked before it enters the ledger.** Predicates are a closed,
    deliberately-extensible vocabulary with RDFS-style domain/range per verb — a hallucinated
-   verb or a semantically impossible pairing (a referent that `imports` a file) is rejected
-   with the allowed set named, never silently stored. Markers that violate it are skipped
-   (hooks never break); CLI writes get a structured, self-correctable error. Extend with
-   `wm ontology --add`, never as a side effect of a marker. See `references/ontology.md`.
+   verb or a semantically impossible pairing (a referent that `imports` a file) MUST be rejected
+   with the allowed set named and MUST NOT be silently stored. Markers that violate it are skipped
+   (hooks never break); CLI writes get a structured, self-correctable error. You MUST extend it with
+   `wm ontology --add` and MUST NOT extend it as a side effect of a marker. See `references/ontology.md`.
 
-Prefer these defaults; when a situation genuinely needs an exception, surface it to the user
+Prefer these defaults; when a situation genuinely needs an exception, you MUST surface it to the user
 rather than silently working around an invariant.
 
 ## Verifying after install
 
-Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis
+You MUST confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
