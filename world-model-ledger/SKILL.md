@@ -169,11 +169,10 @@ normative correctness improves over time. The loop is detailed in
    deliberately-extensible vocabulary with RDFS-style domain/range per verb — a hallucinated
    verb or a semantically impossible pairing (a referent that `imports` a file) MUST be rejected
    with the allowed set named and MUST NOT be silently stored. Markers that violate it are skipped
-   (hooks never break); CLI writes get a structured, self-correctable error. You MUST extend it with
-   `wm ontology --add` and MUST NOT extend it as a side effect of a marker. See `references/ontology.md`.
+   (hooks never break); CLI writes get a structured, self-correctable error. Extensions MUST go through
+   `wm ontology --add` and MUST NOT happen as a side effect of a marker. See `references/ontology.md`.
 
-Prefer these defaults; when a situation genuinely needs an exception, you MUST surface it to the user
-rather than silently working around an invariant.
+When a situation genuinely needs an exception to an invariant, you MUST surface it to the user rather than silently working around it.
 
 ## Verifying after install
 
