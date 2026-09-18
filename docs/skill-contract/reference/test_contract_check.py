@@ -160,6 +160,15 @@ class HelperTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 cc.write_envelope(root, st)
 
+    def test_write_envelope_refuses_an_unsafe_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.repo(tmp)
+            st = cc.build_statement(self.KIND, "alpha", "1.0.0", root, ["docs/spec.md"], {})
+            st["predicate"]["id"] = "../escape"
+            with self.assertRaises(ValueError):
+                cc.write_envelope(root, st)
+            self.assertFalse(os.path.exists(os.path.join(tmp, ".skill-contract", "escape.json")))
+
     def test_cli_check_envelope_reports_c3_and_exits_2(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "e.json")

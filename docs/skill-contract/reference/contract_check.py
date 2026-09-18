@@ -271,9 +271,12 @@ def envelope_dir(root):
 
 def write_envelope(root, statement):
     """Commandment 4: create exclusively, never overwrite. Returns the path."""
+    eid = statement.get("predicate", {}).get("id") if isinstance(statement, dict) else None
+    if not (isinstance(eid, str) and ID_RE.match(eid)):
+        raise ValueError("refusing to write an envelope whose id %r does not match the id grammar" % (eid,))
     d = envelope_dir(root)
     os.makedirs(d, exist_ok=True)
-    path = os.path.join(d, statement["predicate"]["id"] + ".json")
+    path = os.path.join(d, eid + ".json")
     with open(path, "x", encoding="utf-8", newline="\n") as f:
         json.dump(statement, f, indent=2, sort_keys=True)
         f.write("\n")
