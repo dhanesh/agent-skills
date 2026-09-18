@@ -1,10 +1,10 @@
 ---
 name: base-in-reality
 description: "Research-grounded, read-only audit that validates a repository's codebase, architecture, and business logic against real-world knowledge from authoritative sources (arxiv, PubMed, Google Scholar, JSTOR, OpenAlex, Crossref, Semantic Scholar) plus standards bodies (NIST, IETF/RFC, OWASP, ISO, sector regulators). Use when you want an audit that flags algorithms, architectural choices, or business rules violating established norms, standards, or best practices — e.g. 'is our APR calculation correct per lending norms?', 'does our crypto follow NIST?', 'is this consensus approach sound?' — each finding tied to a real, fetched citation. Extracts falsifiable claims across algo/arch/biz layers, routes each to the right source class, verifies against fetched evidence, and adversarially refutes before reporting; emits a severity-graded cited report with UNCONFIRMED for anything ungrounded. Not a linter, SAST, or CVE scanner — it reasons about norms, not syntax."
-x-spec-version: 1.0
 license: MIT
 compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSearch; bundled helpers run via `uv run` (fetch_sources.py) and python3 stdlib (report_lint.py).
 metadata:
+  spec_version: "1.0"
   author: dhanesh
   version: "1.1.0"
   tags: "audit,research,citations,standards,verification,architecture,business-logic"

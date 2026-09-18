@@ -16,8 +16,8 @@ description: >-
   exists but is strictly opt-in.
 license: MIT
 compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
-x-spec-version: 1.0
 metadata:
+  spec_version: "1.0"
   author: dhanesh
   version: "1.2.0"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
