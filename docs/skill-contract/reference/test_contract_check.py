@@ -133,9 +133,13 @@ class VectorTests(unittest.TestCase):
         for path in files:
             with open(path, encoding="utf-8") as f:
                 vector = json.load(f)
-            if vector.get("posix_only") and os.name == "nt":
-                continue
-            with self.subTest(vector=os.path.relpath(path, VECTORS)):
+            rel = os.path.relpath(path, VECTORS)
+            with self.subTest(vector=rel):
+                if vector.get("posix_only") and os.name == "nt":
+                    # spec §6.4: the skip prints its reason rather than passing silently
+                    reason = "vector %s is posix_only (it needs symlinks); skipped on Windows" % rel
+                    print("SKIP: " + reason, file=sys.stderr)
+                    self.skipTest(reason)
                 actual = run_vector(vector)
                 for key, want in vector["expect"].items():
                     if key == "warnings_contain":
