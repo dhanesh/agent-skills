@@ -252,4 +252,60 @@ catalog_case "a table row for a non-skill fails" FAIL "$r"
 r="$(mkcatalog mislink)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)' '[`beta`](alpha/)'
 catalog_case "a row whose label and link disagree fails" FAIL "$r"
 
+# ── skill-contract: half-adoptions, drifted copies and stray keys all fail ───
+# docs/skill-contract/SPEC.md commandment 1. Each case is a fresh fixture skill,
+# so a checker that passes everything (or nothing) flips a row.
+REF="$GATES/../../docs/skill-contract/reference/contract_check.py"
+mkadopter() {  # $1 name, $2 opt-in line or '', $3 contract JSON or '', $4 extra frontmatter line or ''
+  d="$WORK/sc-$1"
+  rm -rf "$d"; mkdir -p "$d/assets"
+  {
+    echo '---'
+    echo "name: sc-$1"
+    echo 'description: Hands off a task-plan envelope in the gate self-tests.'
+    echo 'license: MIT'
+    echo 'compatibility: none'
+    if [ -n "$4" ]; then echo "$4"; fi
+    echo 'metadata:'
+    echo '  author: dhanesh'
+    echo '  version: "1.0.0"'
+    echo '  tags: "fixture"'
+    if [ -n "$2" ]; then echo "$2"; fi
+    echo '---'
+    echo '# fixture'
+    echo '## Steps'
+    echo '1. Do the thing.'
+    echo '## Verify'
+    echo 'Run the check.'
+    if [ -n "$3" ]; then
+      echo ''
+      echo '## Contract'
+      echo ''
+      echo '```json skill-contract'
+      echo "$3"
+      echo '```'
+    fi
+  } > "$d/SKILL.md"
+  echo "# fixture" > "$d/README.md"
+  cp "$REF" "$d/assets/contract_check.py"
+  printf '%s\n' "$d"
+}
+sc_case() {  # $1 label, $2 expected PASS|FAIL, $3 skill dir
+  if sh "$GATES/skill-contract.sh" "$3" 2>&1 | grep -q "^SKILL_CONTRACT_RESULT: $2"; then
+    ok "skill-contract: $1"
+  else
+    bad "skill-contract: $1 (expected SKILL_CONTRACT_RESULT: $2)"
+  fi
+}
+OPT='  skill-contract: "1"'
+BLOCK='{"provides": ["https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"], "consumes": []}'
+sc_case "a non-adopter passes" PASS "$(mkadopter plain '' '' '')"
+sc_case "a well-formed adopter passes" PASS "$(mkadopter good "$OPT" "$BLOCK" '')"
+sc_case "a Contract block without the opt-in fails" FAIL "$(mkadopter noopt '' "$BLOCK" '')"
+sc_case "the opt-in without a Contract block fails" FAIL "$(mkadopter noblock "$OPT" '' '')"
+d="$(mkadopter drift "$OPT" "$BLOCK" '')"; echo '# drift' >> "$d/assets/contract_check.py"
+sc_case "a drifted vendored checker fails" FAIL "$d"
+sc_case "an unknown contract key fails" FAIL "$(mkadopter key "$OPT" '{"provides": [], "consumes": [], "extra": 1}' '')"
+sc_case "a top-level frontmatter key outside the allowed set fails" FAIL "$(mkadopter fm '' '' 'x-spec-version: 1.0')"
+
 exit $rc

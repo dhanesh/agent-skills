@@ -1,6 +1,7 @@
 # Skill quality gates. Run `make gate` to validate every skill in this repo.
 SHELL := /bin/sh
 GATES := scripts/gates
+CONTRACT_REF := docs/skill-contract/reference
 
 # Every top-level directory containing a SKILL.md is a skill.
 SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
@@ -11,7 +12,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme ab-validate list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -35,6 +36,8 @@ gate: clean
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
 	printf '\n=== README catalog ===\n'; \
 	out=$$(sh $(GATES)/readme-catalog.sh . 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "README catalog" "$$(printf '%s\n' "$$out" | grep -v '^PASS:')"; rc=1; }; \
+	printf '\n=== skill-contract reference ===\n'; \
+	out=$$(cd $(CONTRACT_REF) && for t in test_*.py; do python3 -I "$$t" 2>&1 || exit 1; done); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "skill-contract reference" "$$out"; rc=1; }; \
 	for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \
 		out=$$(sh $(GATES)/validate-skill.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d validate" "$$out"; rc=1; }; \
@@ -42,6 +45,7 @@ gate: clean
 		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d playbook" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d frontmatter" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/asset-paths.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d asset-paths" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/skill-contract.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d skill-contract" "$$out"; rc=1; }; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
 			out=$$(sh $(GATES)/dry-run-replay.sh "$$d" "$$scratch" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d dry-run" "$$out"; rc=1; }; \
@@ -97,7 +101,7 @@ dry-run:
 
 # Run every skill's stdlib unit test suite (offline, deterministic — no pip, no network).
 # Covers the Python suites and the shell suites marked `# gate: offline`.
-test: clean gate-selftest
+test: clean gate-selftest contract
 	@rc=0; for d in $(SKILLS); do \
 		for t in "$$d"/assets/test_*.py; do \
 			[ -f "$$t" ] || continue; \
@@ -166,6 +170,21 @@ playbook:
 ab-validate: clean
 	@python3 scripts/ab-validate.py $(BASE)
 
+# skill-contract (docs/skill-contract/SPEC.md): the reference checker's
+# conformance vectors and the end-to-end handoff proof. Also runs in `gate`.
+contract: clean
+	@cd $(CONTRACT_REF) && for t in test_*.py; do printf '\n=== %s ===\n' "$$t"; python3 -I "$$t" || exit 1; done
+
+# Copy the reference checker into every skill that opts in to skill-contract.
+# The gate fails an adopter whose copy differs; this is the fix it names.
+contract-vendor:
+	@for d in $(SKILLS); do \
+		if grep -qE '^[[:space:]]+skill-contract:' "$$d/SKILL.md"; then \
+			cp $(CONTRACT_REF)/contract_check.py "$$d/assets/contract_check.py"; \
+			printf 'vendored: %s/assets/contract_check.py\n' "$$d"; \
+		fi; \
+	done
+
 # Gate a single skill: make gate-skill SKILL=base-in-reality
 gate-skill: clean
 	@test -n "$(SKILL)" || { echo "usage: make gate-skill SKILL=<dir>"; exit 2; }
@@ -180,6 +199,7 @@ gate-skill: clean
 	fi
 	@sh $(GATES)/frontmatter-standard.sh "$(SKILL)"
 	@sh $(GATES)/asset-paths.sh "$(SKILL)"
+	@sh $(GATES)/skill-contract.sh "$(SKILL)"
 	@for t in "$(SKILL)"/assets/test_*.py; do \
 		[ -f "$$t" ] || continue; \
 		out=$$(cd "$(SKILL)/assets" && python3 "$$(basename "$$t")" 2>&1) || { printf '%s\n' "$$out" | tail -5; exit 1; }; \
