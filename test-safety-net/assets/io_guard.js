@@ -356,7 +356,12 @@ const PARTIALLY_INTERCEPTED = {
           "not, and on those the marker can never fire.",
 };
 
-const NOT_INTERCEPTED = {};
+const NOT_INTERCEPTED = {
+  "ffi": "node:ffi (node 26) calls native C functions directly; that I/O never " +
+         "passes through a JS function this guard can wrap -- the same residual " +
+         "`ctypes` is for io_guard.py. The filter marks it, so a unit that uses it " +
+         "is never proved as pure; the guard cannot stop the call itself.",
+};
 
 const state = {
   armed: false,

@@ -2193,6 +2193,7 @@ class TestMarkerTableCompleteness(unittest.TestCase):
         for mod, group in (("dns", "network"), ("tls", "network"),
                            ("http2", "network"), ("inspector", "network"),
                            ("cluster", "subprocess"), ("worker_threads", "subprocess"),
+                           ("ffi", "subprocess"),
                            ("wasi", "filesystem"), ("trace_events", "filesystem"),
                            ("perf_hooks", "clock"), ("os", "environment")):
             with self.subTest(module=mod):
