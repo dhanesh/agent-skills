@@ -13,3 +13,35 @@ Spec: [`docs/superpowers/specs/2026-09-19-bcp14-skills-design.md`](../superpower
 - **plain** means no keyword; the sentence is left as prose.
 
 Skills appear in rewrite order.
+
+## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 35 | Build the change-detector that unblocks agent work on an untested codebase. This is **not… | MUST (0.34, 0.79) | plain | the "never" describes the deliverable; the no-coverage-percentage rule itself is stated in Deliverable |
+| c2 | 71 | The ranker and the python, go and rust guards are stdlib-only python3 — the go guard driv… | MUST (0.84, 0.88) | plain | both nevers describe guard behaviour (offline, never fetches); no never/always sentence here is a directive |
+| c3 | 103 | **On go, make sure the module's dependencies are already downloaded.** The go guard runs… | MUST (0.41, 0.63) | plain | both nevers describe the go guard (never fetches; exit 5 never a verdict); the imperative is a workflow step |
+| c4 | 108 | **On rust, check the lockfile, the toolchain and the cargo cache before you plan to write… | MUST (0.48, 0.81) | MUST |  |
+| c5 | 125 | Offline, stdlib + git only, deterministic. Read `references/parameters.md` for the full a… | MUST (0.61, 0.75) | plain | "always"/"never" describe the ranker (rust reads heuristic, never runs cargo); the imperatives are workflow steps |
+| c6 | 142 | Every unit lands in exactly one of the four testability tiers described in full in `refer… | SHOULD (0.39, 0.69) | plain | a summary of the tier outcomes; "reported, never applied" is carried as MUST NOT by Invariant 1 |
+| c7 | 158 | The ranker's triage is conservative on purpose — it would rather under-tier a unit than o… | MUST (0.72, 0.70) | MUST |  |
+| c8 | 181 | **The runtime guard, not the tier, is what enforces "never real I/O."** Static triage is… | MUST (0.94, 0.87) | plain | both nevers describe the guard (quoted invariant name; never written into the repo); Invariant 2 carries the MUST NOT |
+| c9 | 191 | On **python** that is `assets/io_guard.py`, loaded as a **pytest plugin via `-p`** (never… | MUST (0.63, 0.77) | plain | describes how the guard loads (plugin, not a conftest.py or fixture); eval check 19 needs the negation wording, which stays |
+| c10 | 234 | **On node, read the exit status, not the per-test results.** When a violation lands *afte… | MUST (0.74, 0.81) | plain | "Never the test that caused it" describes node --test attribution, not a directive |
+| c11 | 259 | - **Never keep a test reported `ok` from a run that exited nonzero.** | MUST (0.69, 0.78) | MUST |  |
+| c12 | 283 | **Copy the whole block.** `<package>` is the package directory (`./internal/billing`), an… | MUST (0.60, 0.75) | plain | restates Invariant 1 (append, never overwrite), which already carries the MUST NOT; one keyword per rule |
+| c13 | 324 | **Copy the whole block.** Run it from the crate root, adding `-p <package>` for a workspa… | MUST (0.52, 0.73) | plain | restates Invariant 1 (append, never overwrite), which already carries the MUST NOT; one keyword per rule |
+| c14 | 369 | - A unit the ranker tiers 3 as *not reachable* or *binary-only* is reported, never tested. | MUST (0.51, 0.76) | plain | states the triage outcome for an unreachable unit; a test for one cannot be proven (Invariant 3 carries the MUST NOT) |
+| c15 | 380 | - A compile error is exit 5, never RED; cargo exits 101 for both. | MUST (0.47, 0.79) | plain | defines the exit mapping (compile error is exit 5, never RED); descriptive |
+| c16 | 382 | - a dependency not in the local cargo cache (run `cargo fetch`, or build the tests once;… | MUST (0.52, 0.80) | plain | "the proof never downloads anything" describes the guard |
+| c17 | 397 | - The guard never passes `--nocapture`, and do not add it: under it the default panic hoo… | MUST (0.67, 0.84) | MUST |  |
+| c18 | 406 | - **Tier 2 candidate:** blocks the uncontrollable groups always, plus every controllable… | MUST (0.64, 0.81) | plain | "blocks ... always" describes the Tier 2 guard; the "name all of it" imperative is a workflow step |
+| c19 | 412 | The guard patches the **lowest** layer reachable, which for CPython is the `os` primitive… | MUST (0.87, 0.83) | plain | "never routes through" describes CPython internals |
+| c20 | 467 | 1. **Never modifies source.** Only creates test files; **appends** to an existing test fi… | MUST (0.90, 0.85) | MUST |  |
+| c21 | 470 | 2. **Never writes a test that performs real I/O.** Enforced by the tier-aware runtime gua… | MUST (0.94, 0.83) | MUST |  |
+| c22 | 473 | 3. **Never ships an unproven test.** A test that did not go RED is discarded and listed u… | MUST (0.88, 0.66) | MUST |  |
+| c23 | 475 | 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the… | MUST (0.92, 0.77) | MUST |  |
+| c24 | 477 | 5. **Hard gate before writing** — step 3's confirmation happens before any test file is t… | MUST (0.86, 0.76) | MUST |  |
+| c25 | 484 | > Emit every captured value with `repr()`. Never build a test's expected value by string… | MUST (0.97, 0.82) | MUST |  |
+| c26 | 519 | **Promoted units** get a line in the report naming the ranker's original tier, the tier u… | MUST (0.73, 0.44) | plain | harm 0.44 caps it at SHOULD, and a SHOULD here would contradict step 2's MUST NOT (c7) for the same rule; left as its restatement |
+| c27 | 522 | **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurre… | plain (0.36, 0.16) | plain |  |

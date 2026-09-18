@@ -26,11 +26,13 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.3.0"
+  version: "1.3.1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
 
 # test-safety-net
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Build the change-detector that unblocks agent work on an untested codebase. This is **not** a
 correctness audit: current behaviour gets pinned even where it looks wrong, and a suspected bug
@@ -111,7 +113,7 @@ than none, because it makes the invariant look enforced when it is not.
    toolchain or a crate. Every proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale
    one, with a `rust-toolchain.toml` pin below 1.82 or not installed, or with a dependency not in
    the local cargo cache. The remedy for a missing lockfile is `cargo generate-lockfile`. It writes
-   a file into the user's tree, which this skill never does on its own, so ask first. The remedy
+   a file into the user's tree, which this skill never does on its own, so you MUST ask first. The remedy
    for an uncached dependency is `cargo fetch` (or building the tests once), then re-run: the proof
    never downloads anything.
 
@@ -158,8 +160,8 @@ than none, because it makes the invariant look enforced when it is not.
    The ranker's triage is conservative on purpose — it would rather under-tier a unit than
    over-tier one into a false Tier 1. If inspection shows a Tier 3/4 unit is actually reachable at
    a controlled boundary, you may promote it, but only by **recording** the promotion (the tier
-   the ranker assigned, the tier you used instead, and why) in the report below. Never silently
-   treat a ranker tier as advisory.
+   the ranker assigned, the tier you used instead, and why) in the report below. You MUST NOT
+   silently treat a ranker tier as advisory.
 
 3. **Confirm with the user before writing anything.** Show the `ranked` top N (default 10) and
    the size of `remainder`/`not_netted`. This is a hard gate — do not proceed past it unconfirmed.
@@ -256,7 +258,7 @@ than none, because it makes the invariant look enforced when it is not.
    - On a nonzero exit whose failure is an `IOGuardViolation`, **discard the whole batch and
      re-prove one test at a time.** Per-test attribution cannot be trusted for an async violation,
      and a batch is cheap to re-run.
-   - **Never keep a test reported `ok` from a run that exited nonzero.**
+   - **You MUST NOT keep a test reported `ok` from a run that exited nonzero.**
 
    `assets/test_io_guard_node.sh` builds all three fixtures (assertions 12, 13 and 14) and asserts
    both the invariant they share — the culprit reporting `ok` while some *other* entry carries the
@@ -394,7 +396,7 @@ than none, because it makes the invariant look enforced when it is not.
        compiles to crate `test`, read as libtest's own work) -- rename it;
      - the hook failed to build with this toolchain;
      - no `rustc` or `cargo` on PATH.
-   - The guard never passes `--nocapture`, and do not add it: under it the default panic hook reads
+   - The guard never passes `--nocapture`, and you MUST NOT add it: under it the default panic hook reads
      `RUST_BACKTRACE`, and every RED would trip `environment`.
 
    The tier is passed per invocation by environment variable, which is sufficient because the proof
@@ -464,26 +466,26 @@ than none, because it makes the invariant look enforced when it is not.
 
 ## Invariants (do not violate)
 
-1. **Never modifies source.** Only creates test files; **appends** to an existing test file, never
-   overwrites. This is what makes the skill safe to run unattended on a repo nobody trusts yet —
+1. **You MUST NOT modify source.** You MUST only create test files, and MUST **append** to an
+   existing test file, never overwrite it. This is what makes the skill safe to run unattended on a repo nobody trusts yet —
    and why Tier 3 seams are reported, never applied.
-2. **Never writes a test that performs real I/O.** Enforced by the tier-aware runtime guard in
+2. **You MUST NOT write a test that performs real I/O.** Enforced by the tier-aware runtime guard in
    step 4, not by the static tier alone — see `references/triage.md` for the full mechanism and
    why the tiers cannot enforce this on their own.
-3. **Never ships an unproven test.** A test that did not go RED is discarded and listed under
-   "could not prove," never shipped.
-4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the report. A
+3. **You MUST NOT ship an unproven test.** A test that did not go RED MUST be discarded and listed
+   under "could not prove," never shipped.
+4. **You MUST NOT leave the suite red.** End state is a green suite plus suspected bugs in the report. A
    red generated test is a bug in this skill, not an acceptable outcome.
-5. **Hard gate before writing** — step 3's confirmation happens before any test file is touched.
+5. **Hard gate before writing** — step 3's confirmation MUST happen before any test file is touched.
 
 ## The literal-emission rule
 
 Captured output from running the user's code gets embedded into generated test files — that is
 code generation from program output, and it is the one real injection surface in this skill.
 
-> Emit every captured value with `repr()`. Never build a test's expected value by string
-> concatenation or f-string interpolation of captured output. A captured string containing a
-> quote, a newline or a backslash must become an inert literal, never executable source.
+> You MUST emit every captured value with `repr()`. You MUST NOT build a test's expected value by
+> string concatenation or f-string interpolation of captured output. A captured string containing
+> a quote, a newline or a backslash MUST become an inert literal, never executable source.
 
 ## Deliverable
 
