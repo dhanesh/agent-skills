@@ -8,12 +8,13 @@ description: >-
   code. Ships a deterministic spec linter and a spec→tasks compiler that reports the
   requirement↔task coverage map. Not the executor — hand the finished plan to the implementing
   session or a loop built with crafting-self-prompting-loops; not a project-management tracker;
-  complements, not replaces, heavier PRD workflows.
+  complements, not replaces, heavier PRD workflows. Hands off a skill-contract task-plan envelope to any installed consumer.
 license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.1.0"
+  skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
 
@@ -82,13 +83,37 @@ The exact grammar, lint rules, JSON schema, and exit codes live in
    `TASKS_RESULT: PASS`. Then hand the deliverable to whoever executes: the implementing
    session, task files, or a loop built with the crafting-self-prompting-loops skill — each
    task's verify step is the loop's per-iteration "done" check, ready-made.
+6. **Hand off through skill-contract.** Write the plan as an envelope any installed skill can
+   find: `python3 "$SKILL_DIR/assets/spec_to_tasks.py" <spec.md> --envelope <repo-root>` prints
+   `ENVELOPE: <path>`. Check it with
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <path> --root <repo-root>`;
+   a failure there is this skill's bug, so fix it before going on. Then look for consumers:
+   `python3 "$SKILL_DIR/assets/contract_check.py" discover --kind https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1 --from "$SKILL_DIR"`.
+   If it names one, propose the handoff (the consumer, the envelope path, and each claim's
+   status) and wait for the user's yes before invoking that skill with the envelope path. If it
+   names none (`NO_CONSUMER:`), give the user the envelope path; the plan is still done. Run the
+   checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
+   Python 3.10 or newer.
 
 ## Deliverable
 
 A **lint-clean spec plus a coverage-complete task plan**: the spec file passing
 `assets/spec_lint.py`, and the plan (markdown for humans, `--json` for machines) passing
 `assets/spec_to_tasks.py` with zero uncovered requirements. Present both to the user with the
-coverage table, remaining Open questions, and your suggested execution order.
+coverage table, remaining Open questions, and your suggested execution order. Add the envelope
+path from step 6, and propose the handoff when a consumer is installed.
+
+## Contract
+
+This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).
+It hands off its task plan as an in-toto Statement with predicateType
+`https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1`; the payload schema is
+`assets/schemas/task-plan.v1.json`. Its two claims, `spec-lint` and `coverage-total`, are this
+skill's own results, so a receiver sees them as CLAIMED until someone else re-runs them.
+
+```json skill-contract
+{"provides": ["https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"], "consumes": []}
+```
 
 ## Boundaries
 

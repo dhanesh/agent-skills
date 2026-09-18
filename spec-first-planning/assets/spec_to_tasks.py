@@ -9,8 +9,11 @@ yields no task and is reported as UNCOVERED, and the exit code is
 non-zero: a plan with a hole is not a plan.
 
 Usage:
-    python3 spec_to_tasks.py <spec.md>          # markdown plan + coverage map
-    python3 spec_to_tasks.py <spec.md> --json   # machine-readable plan only
+    python3 spec_to_tasks.py <spec.md>                       # markdown plan + coverage map
+    python3 spec_to_tasks.py <spec.md> --json                # machine-readable plan only
+    python3 spec_to_tasks.py <spec.md> --envelope <root>     # also write a skill-contract
+                                                             # task-plan envelope under
+                                                             # <root>/.skill-contract/envelopes/
 
 JSON shape:
     {"tasks":    [{"id": "T1", "requirement_ids": ["R1"],
@@ -31,6 +34,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_lint  # noqa: E402  (shared parser lives beside this script)
+import contract_check  # noqa: E402  (vendored skill-contract checker, same dir)
+
+TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+SKILL_NAME = "spec-first-planning"
+SKILL_VERSION = "1.1.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
+USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
 
@@ -105,6 +114,76 @@ def to_json(plan):
     }
 
 
+def to_task_plan_payload(plan, spec_rel):
+    """The task-plan/v1 payload (assets/schemas/task-plan.v1.json): verify steps stay a list."""
+    tasks = []
+    for t in plan["tasks"]:
+        jt = {"id": t["id"], "requirement_ids": t["requirement_ids"], "title": t["title"],
+              "verify": [{"text": s, "command": None} for s in t["_verify_steps"]]}
+        if t["_where"]:
+            jt["where"] = t["_where"]
+        tasks.append(jt)
+    return {"title": plan["title"], "spec": spec_rel, "tasks": tasks,
+            "coverage": plan["coverage"], "uncovered": plan["uncovered"]}
+
+
+def payload_errors(payload):
+    """Structural check of a task-plan/v1 payload. [] means valid."""
+    if not isinstance(payload, dict):
+        return ["payload must be an object"]
+    errs = []
+    for key, typ in (("title", str), ("spec", str), ("tasks", list), ("coverage", dict),
+                     ("uncovered", list)):
+        if not isinstance(payload.get(key), typ):
+            errs.append("payload.%s must be a %s" % (key, typ.__name__))
+    for i, t in enumerate(payload.get("tasks") if isinstance(payload.get("tasks"), list) else []):
+        if not isinstance(t, dict):
+            errs.append("tasks[%d] must be an object" % i)
+            continue
+        if not isinstance(t.get("id"), str) or not isinstance(t.get("title"), str):
+            errs.append("tasks[%d] needs string id and title" % i)
+        rids = t.get("requirement_ids")
+        if not (isinstance(rids, list) and rids and all(isinstance(r, str) for r in rids)):
+            errs.append("tasks[%d].requirement_ids must be a non-empty list of strings" % i)
+        verify = t.get("verify")
+        if not (isinstance(verify, list) and verify):
+            errs.append("tasks[%d].verify must be a non-empty list" % i)
+            continue
+        for j, item in enumerate(verify):
+            cmd = item.get("command") if isinstance(item, dict) else None
+            if not (isinstance(item, dict) and isinstance(item.get("text"), str)
+                    and (cmd is None or (isinstance(cmd, list) and cmd
+                                         and all(isinstance(a, str) for a in cmd)))):
+                errs.append("tasks[%d].verify[%d] must be {text, command: list or null}" % (i, j))
+    return errs
+
+
+def write_task_plan_envelope(plan, spec_path, root):
+    """Write the plan as a skill-contract task-plan/v1 envelope; return its path."""
+    root = os.path.abspath(root)
+    rel = os.path.relpath(os.path.abspath(spec_path), root).replace(os.sep, "/")
+    if rel == ".." or rel.startswith("../") or os.path.isabs(rel):
+        raise ValueError("the spec %s is outside the repo root %s" % (spec_path, root))
+    with open(spec_path, encoding="utf-8") as f:
+        text = f.read()
+    payload = to_task_plan_payload(plan, rel)
+    errs = payload_errors(payload)
+    if errs:
+        raise ValueError("; ".join(errs))
+    here = "{skill_dir:%s}/assets" % SKILL_NAME
+    claims = [
+        contract_check.assertion("spec-lint", SKILL_NAME,
+                                 "passed" if not spec_lint.lint(text) else "failed",
+                                 root, [rel], command=["{python}", here + "/spec_lint.py", rel]),
+        contract_check.assertion("coverage-total", SKILL_NAME,
+                                 "passed" if not plan["uncovered"] else "failed",
+                                 root, [rel], command=["{python}", here + "/spec_to_tasks.py", rel]),
+    ]
+    statement = contract_check.build_statement(TASK_PLAN_KIND, SKILL_NAME, SKILL_VERSION, root,
+                                               [rel], payload, claims)
+    return contract_check.write_envelope(root, statement)
+
+
 def render_markdown(plan, spec_name):
     lines = []
     lines.append("# Task plan — %s" % (plan["title"] or spec_name))
@@ -145,10 +224,19 @@ def render_markdown(plan, spec_name):
 
 
 def main(argv):
-    as_json = "--json" in argv[1:]
-    args = [a for a in argv[1:] if a != "--json"]
+    args = list(argv[1:])
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    envelope_root = None
+    if "--envelope" in args:
+        i = args.index("--envelope")
+        if i + 1 >= len(args):
+            print(USAGE, file=sys.stderr)
+            return 2
+        envelope_root = args[i + 1]
+        del args[i:i + 2]
     if len(args) != 1:
-        print("usage: spec_to_tasks.py <spec.md> [--json]", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
     try:
         with open(args[0], encoding="utf-8") as f:
@@ -185,7 +273,19 @@ def main(argv):
                 len(plan["tasks"]),
             )
         )
-    return 0 if not plan["uncovered"] else 1
+    if plan["uncovered"]:
+        if envelope_root is not None:
+            print("ERROR: not writing an envelope for a plan with uncovered requirements",
+                  file=sys.stderr)
+        return 1
+    if envelope_root is not None:
+        try:
+            path = write_task_plan_envelope(plan, args[0], envelope_root)
+        except (OSError, ValueError) as exc:
+            print("ERROR: cannot write the envelope: %s" % exc, file=sys.stderr)
+            return 2
+        print("ENVELOPE: %s" % path, file=sys.stderr if as_json else sys.stdout)
+    return 0
 
 
 if __name__ == "__main__":

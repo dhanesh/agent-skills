@@ -6,6 +6,7 @@ Run standalone:  cd spec-first-planning/assets && python3 test_spec_to_tasks.py
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_to_tasks  # noqa: E402
+import contract_check  # noqa: E402
 
 GOOD = textwrap.dedent(
     """\
@@ -207,6 +209,83 @@ class TestCoverageOwnership(unittest.TestCase):
         plan = spec_to_tasks.derive_plan(spec)
         self.assertEqual(plan["coverage"]["R1"], ["T1"])
         self.assertEqual(plan["uncovered"], [])
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT = os.path.join(_HERE, "spec_to_tasks.py")
+
+
+class TestEnvelope(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, "docs"))
+        self.spec = os.path.join(self.root, "docs", "spec.md")
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(GOOD)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, _SCRIPT, *args],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_envelope_is_valid_and_its_claims_are_the_producers_own(self):
+        path = spec_to_tasks.write_task_plan_envelope(spec_to_tasks.derive_plan(GOOD), self.spec, self.root)
+        rep = contract_check.check_envelope(path, root=self.root)
+        self.assertEqual(rep["violations"], [])
+        self.assertEqual(rep["stale"], [])
+        self.assertEqual(rep["claims"], {"spec-lint": "CLAIMED", "coverage-total": "CLAIMED"})
+
+    def test_payload_keeps_each_verify_step_as_its_own_item(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(GOOD), "docs/spec.md")
+        r2 = [t for t in payload["tasks"] if t["requirement_ids"] == ["R2"]][0]
+        self.assertEqual(len(r2["verify"]), 2)
+        self.assertTrue(all(v["command"] is None for v in r2["verify"]))
+        self.assertEqual(payload["tasks"][0]["where"], "web/reports/")
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_payload_errors_flags_a_joined_verify_string(self):
+        bad = {"title": "x", "spec": "s", "coverage": {}, "uncovered": [],
+               "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "t", "verify": "a; b"}]}
+        self.assertTrue(spec_to_tasks.payload_errors(bad))
+
+    def test_json_output_is_unchanged(self):
+        out = spec_to_tasks.to_json(spec_to_tasks.derive_plan(GOOD))
+        self.assertEqual(sorted(out), ["coverage", "tasks", "uncovered"])
+        self.assertIsInstance(out["tasks"][0]["verify"], str)
+
+    def test_a_spec_outside_the_root_is_refused(self):
+        other = tempfile.mkdtemp()
+        try:
+            with self.assertRaises(ValueError):
+                spec_to_tasks.write_task_plan_envelope(spec_to_tasks.derive_plan(GOOD), self.spec, other)
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_cli_writes_one_envelope(self):
+        r = self.cli(self.spec, "--envelope", self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        paths = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")]
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(os.path.isfile(paths[0]))
+
+    def test_cli_json_keeps_stdout_pure_json(self):
+        r = self.cli(self.spec, "--json", "--envelope", self.root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        json.loads(r.stdout)
+        self.assertIn("ENVELOPE: ", r.stderr)
+
+    def test_cli_writes_no_envelope_for_an_uncovered_plan(self):
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(UNCOVERED)
+        r = self.cli(self.spec, "--envelope", self.root)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(os.path.isdir(os.path.join(self.root, ".skill-contract")))
+
+    def test_skill_version_matches_skill_md(self):
+        with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
+            self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -195,6 +195,59 @@ def main():
               and doctored["coverage"]["R2"] == [],
               "" if doctored is None else "uncovered=%s" % doctored["uncovered"])
 
+        # ── skill-contract arm: the task-plan envelope (docs/skill-contract/SPEC.md) ──
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(os.path.join(repo, "docs"))
+        spec_path = os.path.join(repo, "docs", "spec.md")
+        with open(spec_path, "w", encoding="utf-8") as f:
+            f.write(good)
+        r = subprocess.run([sys.executable, tasks_py, spec_path, "--envelope", repo],
+                           capture_output=True, text=True, timeout=30, env=env)
+        env_paths = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines()
+                     if ln.startswith("ENVELOPE: ")]
+        env_path = env_paths[0] if env_paths else ""
+        check("--envelope writes a task-plan envelope",
+              r.returncode == 0 and os.path.isfile(env_path), r.stderr.strip()[-80:])
+
+        cc_py = os.path.join(dst, "assets", "contract_check.py")
+
+        def contract(*args):
+            out = subprocess.run([sys.executable, cc_py, *args],
+                                 capture_output=True, text=True, timeout=30, env=env)
+            try:
+                return out.returncode, json.loads(out.stdout.splitlines()[0])
+            except (ValueError, IndexError):
+                return out.returncode, None
+
+        rc, rep = contract("check-envelope", env_path, "--root", repo, "--json")
+        check("the envelope passes the vendored checker; its claims are CLAIMED, not PROVEN",
+              rc == 0 and rep is not None and rep["stale"] == []
+              and rep["claims"] == {"spec-lint": "CLAIMED", "coverage-total": "CLAIMED"},
+              "" if rep is None else "claims=%s" % rep["claims"])
+
+        with open(spec_path, "a", encoding="utf-8") as f:
+            f.write("\n")
+        rc, rep = contract("check-envelope", env_path, "--root", repo, "--json")
+        check("negative: editing the spec afterwards marks the envelope STALE",
+              rc == 0 and rep is not None and rep["stale"] == ["docs/spec.md"])
+
+        sys.path.insert(0, os.path.join(dst, "assets"))
+        import spec_to_tasks as stt  # noqa: E402  (the copied skill's own module)
+        import contract_check as cc  # noqa: E402
+        malformed = {"title": "x", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+                     "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "t",
+                                "verify": "a; b"}]}
+        check("negative: a payload with a joined verify string is rejected",
+              bool(stt.payload_errors(malformed)))
+        with open(env_path, encoding="utf-8") as f:
+            statement = json.load(f)
+        try:
+            cc.write_envelope(repo, statement)
+            overwritten = True
+        except FileExistsError:
+            overwritten = False
+        check("negative: an existing envelope id is never overwritten", not overwritten)
+
         # ── Template arm: the shipped skeleton is actually usable ────────────
         tpl_path = os.path.join(dst, "references", "spec-template.md")
         with open(tpl_path, encoding="utf-8") as f:
