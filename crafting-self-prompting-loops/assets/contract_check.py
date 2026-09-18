@@ -635,7 +635,11 @@ def check_envelope(path, root=None, for_skill=None, rerun=False, env=None):
     if for_skill is not None:
         rep = check_skill(for_skill)
         consumes = (rep["contract"] or {}).get("consumes") or []
-        if rep["violations"] or st["predicateType"] not in consumes:
+        if rep["violations"]:
+            report["violations"].append(
+                (9, "%s's own contract is invalid: C%d: %s" % ((rep["skill"],) + rep["violations"][0])))
+            return report
+        if st["predicateType"] not in consumes:
             report["violations"].append(
                 (9, "%s does not consume %s" % (rep["skill"], st["predicateType"])))
             return report

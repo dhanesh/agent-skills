@@ -256,6 +256,24 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(r.returncode, 2)
             self.assertEqual(r.stdout.strip().splitlines()[-1], "CONTRACT_RESULT: FAIL (C3)")
 
+    def test_for_a_consumer_with_an_invalid_contract_names_the_real_cause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "e.json")
+            _write(path, json.dumps(build_vectors.envelope()))
+            beta = os.path.join(tmp, "beta")
+            _write(os.path.join(beta, "SKILL.md"), build_vectors.skill_md(
+                "beta", optin="1", body=build_vectors.contract_section('{"consumes": [')))
+            rep = cc.check_envelope(path, for_skill=beta)
+            self.assertEqual([n for n, _ in rep["violations"]], [9])
+            detail = rep["violations"][0][1]
+            self.assertTrue(detail.startswith("beta's own contract is invalid: C1: "), detail)
+            self.assertNotIn("does not consume", detail)
+            # a valid consumer of another kind still reads "does not consume"
+            _write(os.path.join(beta, "SKILL.md"),
+                   build_vectors.consumer_md(kinds=(build_vectors.KIND_V2,)))
+            self.assertEqual(cc.check_envelope(path, for_skill=beta)["violations"],
+                             [(9, "beta does not consume %s" % self.KIND)])
+
 
 def quoted_python():
     return subprocess.list2cmdline([sys.executable]) if os.name == "nt" else shlex.quote(sys.executable)
