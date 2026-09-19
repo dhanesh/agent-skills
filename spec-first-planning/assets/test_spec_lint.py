@@ -14,6 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_lint  # noqa: E402
 
+SPEC_LINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spec_lint.py")
+
 GOOD = textwrap.dedent(
     """\
     # Spec: CSV export for saved reports
@@ -258,6 +260,23 @@ p
 """
 
 
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
 class LightRules(unittest.TestCase):
     def issues(self, text):
         return spec_lint.lint(text)
@@ -373,6 +392,74 @@ class TestCli(unittest.TestCase):
             [sys.executable, script], capture_output=True, text=True, timeout=30
         )
         self.assertEqual(r.returncode, 2)
+
+
+class ConvergedRules(unittest.TestCase):
+    def lint(self, t, mode):
+        return spec_lint.lint(t, mode=mode)
+
+    def test_full_spec_converges_and_is_unattended_ready(self):
+        self.assertEqual(self.lint(FULL, "converged"), [])
+        self.assertEqual(self.lint(FULL, "unattended"), [])
+
+    def test_light_spec_does_not_converge(self):
+        self.assertTrue(self.lint(LIGHT, "converged"))
+
+    def test_not_ready_truth_blocks_convergence(self):
+        t = FULL.replace("RT2 [SPECIFICATION_READY]", "RT2 [PARTIAL]")
+        self.assertTrue(any("RT2" in i for i in self.lint(t, "converged")))
+
+    def test_unresolved_tension_without_decision_fails(self):
+        t = FULL.replace("status: resolved; strategy: Partition", "status: accepted; strategy: Accept")
+        self.assertTrue(any("TN1" in i and "decision" in i for i in self.lint(t, "converged")))
+
+    def test_recommending_the_less_pragmatic_option_fails(self):
+        t = FULL.replace("OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)",
+                         "OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1, RT2)")
+        t = t.replace("Recommended: OPT-A", "Recommended: OPT-B")
+        self.assertTrue(any("OPT-A" in i and "pragmatic" in i for i in self.lint(t, "converged")))
+
+    def test_recommended_must_satisfy_every_truth(self):
+        t = FULL.replace("Recommended: OPT-A", "Recommended: OPT-B")
+        self.assertTrue(any("OPT-B" in i and "RT2" in i for i in self.lint(t, "converged")))
+
+    def test_tie_needs_a_decision(self):
+        t = FULL.replace("(complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)",
+                         "(complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)")
+        self.assertTrue(any("tie" in i for i in self.lint(t, "converged")))
+        t2 = t.replace("at the lowest complexity.", "at the lowest complexity. (decision: D1)")
+        self.assertEqual(self.lint(t2, "converged"), [])
+
+    def test_iteration_cap(self):
+        extra = "".join("- I%d: again\n" % n for n in range(2, 7))
+        t = FULL.replace("- I1: constrained, tensioned, anchored; chose OPT-A.\n",
+                         "- I1: constrained, tensioned, anchored; chose OPT-A.\n" + extra)
+        self.assertTrue(any("iteration cap" in i for i in self.lint(t, "converged")))
+
+    def test_open_question_blocks_convergence(self):
+        t = FULL.replace("## Open questions\n", "## Open questions\n- Which delimiter?\n")
+        self.assertTrue(any("Open questions" in i for i in self.lint(t, "converged")))
+
+    def test_unattended_needs_answered_decisions(self):
+        t = FULL.replace("-> no (source: sweep)", "-> (source: sweep)")
+        self.assertTrue(any("D1" in i for i in self.lint(t, "unattended")))
+        t2 = FULL.split("## Decisions")[0]
+        self.assertTrue(any("Decisions" in i for i in self.lint(t2, "unattended")))
+
+    def test_unknown_decision_reference_fails(self):
+        t = FULL.replace("strategy: Partition)", "strategy: Partition; decision: D9)")
+        self.assertTrue(any("D9" in i for i in self.lint(t, "converged")))
+
+    def test_cli_modes(self):
+        import subprocess, sys, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.md")
+            with open(p, "w") as f:
+                f.write(LIGHT)
+            run = lambda *a: subprocess.run([sys.executable, SPEC_LINT, *a, p], capture_output=True, text=True)
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(run("--converged").returncode, 1)
+            self.assertEqual(run("--unattended").returncode, 1)
 
 
 if __name__ == "__main__":

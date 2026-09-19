@@ -54,6 +54,29 @@ _CONSTRAINT_RE = re.compile(r"^(?:\*\*)?([BTUSO][0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+
 _TRUTH_RE = re.compile(r"^(?:\*\*)?RT([0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.*)\s*\(\s*(?i:parent)\s*:(.*)\)\s*$")
 _ID_LIST_RE = re.compile(r"[A-Za-z]+[0-9]+")
 
+# Tension step (full loop, --converged): trade-offs / resource tensions /
+# hidden dependencies between constraints, and how each was resolved.
+TENSION_TYPES = ("trade_off", "resource_tension", "hidden_dependency")
+TENSION_STATUSES = ("resolved", "accepted")
+TENSION_STRATEGIES = ("Prioritize", "Partition", "Transform", "Accept", "Invalidate")
+# Same last-"(field:"-anchored split as _TRUTH_RE, anchored on "(between:".
+_TENSION_RE = re.compile(r"^(?:\*\*)?TN([0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.*)\s*\(\s*(?i:between)\s*:(.*)\)\s*$")
+
+# Choose step: solution options and the pragmatic recommendation.
+COMPLEXITY_RANK = {"Low": 0, "Medium": 1, "High": 2}
+REVERSIBILITY_RANK = {"TWO_WAY": 0, "REVERSIBLE_WITH_COST": 1, "ONE_WAY": 2}
+# Anchored on "(complexity:", same style as _TRUTH_RE / _TENSION_RE.
+_OPTION_RE = re.compile(r"^(?:\*\*)?OPT-([A-Z])(?:\*\*)?\s*:\s*(.*)\s*\(\s*(?i:complexity)\s*:(.*)\)\s*$")
+_RECOMMENDED_RE = re.compile(r"^Recommended:\s*(OPT-[A-Z])\b(.*)$")
+_RECOMMENDED_DECISION_RE = re.compile(r"\(decision:\s*(D[0-9]+)\)")
+
+# Iterations: one bullet per pass through the loop, I1..In, capped at 5.
+ITERATION_CAP = 5
+_ITERATION_RE = re.compile(r"^(?:\*\*)?I([0-9]+)(?:\*\*)?\s*:\s*(.*)$")
+
+# Decisions: the unattended-mode sweep, D1..Dn. "->" and "→" both accepted.
+_DECISION_RE = re.compile(r"^D([0-9]+)\s*:\s*(.*?)\s*(?:->|→)\s*(.*?)\s*\(source:\s*(.*)\)\s*$")
+
 # Sections that must exist but are allowed to have an empty body.
 MAY_BE_EMPTY = frozenset({"Open questions"})
 
@@ -141,6 +164,74 @@ def _parse_truths(sections):
     return good, bad
 
 
+def _parse_tensions(sections):
+    good, bad = [], []
+    for b in _section_bullets(sections, "Tensions"):
+        if b.strip().lower() == "none":
+            continue
+        m = _TENSION_RE.match(b)
+        if not m:
+            bad.append(b)
+            continue
+        f = _fields("between:" + m.group(4))
+        good.append({
+            "id": "TN%s" % m.group(1),
+            "type": m.group(2).lower(),
+            "text": m.group(3).strip(),
+            "between": _ID_LIST_RE.findall(f.get("between", "")),
+            "status": f.get("status", "").strip().lower(),
+            "strategy": f.get("strategy", "").strip(),
+            "decision": f.get("decision", "").strip() or None,
+        })
+    return good, bad
+
+
+def _parse_options(sections):
+    good, bad = [], []
+    for b in _section_bullets(sections, "Solution options"):
+        m = _OPTION_RE.match(b)
+        if not m:
+            bad.append(b)
+            continue
+        f = _fields("complexity:" + m.group(3))
+        good.append({
+            "id": "OPT-%s" % m.group(1),
+            "text": m.group(2).strip(),
+            "complexity": f.get("complexity", "").strip(),
+            "reversibility": f.get("reversibility", "").strip(),
+            "satisfies": _ID_LIST_RE.findall(f.get("satisfies", "")),
+        })
+    return good, bad
+
+
+def _parse_recommended(sections):
+    """The single non-bullet 'Recommended: OPT-<LETTER> — ...' line, or None."""
+    for line in find_section(sections, "Solution options") or []:
+        m = _RECOMMENDED_RE.match(line.strip())
+        if m:
+            dm = _RECOMMENDED_DECISION_RE.search(m.group(2))
+            return {"id": m.group(1), "decision": dm.group(1) if dm else None}
+    return None
+
+
+def _parse_iterations(sections):
+    return [int(m.group(1)) for m in
+            (_ITERATION_RE.match(b) for b in _section_bullets(sections, "Iterations"))
+            if m]
+
+
+def _parse_decisions(sections):
+    good, bad = [], []
+    for b in _section_bullets(sections, "Decisions"):
+        m = _DECISION_RE.match(b)
+        if not m:
+            bad.append(b)
+            continue
+        good.append({"id": "D%s" % m.group(1), "question": m.group(2).strip(),
+                     "answer": m.group(3).strip(), "source": m.group(4).strip()})
+    return good, bad
+
+
 def _reaches_outcome(start_id, parent_of):
     """Follow `parent` links from start_id; True iff they terminate at OUTCOME.
 
@@ -218,6 +309,146 @@ def lint_light(spec):
     return issues
 
 
+def lint_converged(spec):
+    """Tension + Choose full-loop rules (design spec §4), plus convergence
+    itself. Gated behind --converged (and --unattended, which implies it)."""
+    issues = []
+    sections = spec["sections"]
+
+    for name in ("Tensions", "Solution options", "Iterations"):
+        if find_section(sections, name) is None:
+            issues.append("missing required section '## %s' for convergence" % name)
+
+    for b in spec["malformed_tensions"]:
+        issues.append("Tensions bullet is not '- TN<n> [type]: ... (between: ...; "
+                      "status: ...; strategy: ...; decision: ...)': '%s'" % b[:60])
+    for b in spec["malformed_options"]:
+        issues.append("Solution options bullet is not '- OPT-<LETTER>: ... "
+                      "(complexity: ...; reversibility: ...; satisfies: ...)': '%s'" % b[:60])
+
+    tensions, options, decisions = spec["tensions"], spec["options"], spec["decisions"]
+    known_c = {c["id"] for c in spec["constraints"]}
+    known_d = {d["id"] for d in decisions}
+
+    # (11) tension grammar, types, known between ids (>= 2), resolved or a decision.
+    seen_tn = set()
+    for t in tensions:
+        if t["id"] in seen_tn:
+            issues.append("tension %s is defined twice" % t["id"])
+        seen_tn.add(t["id"])
+        if t["type"] not in TENSION_TYPES:
+            issues.append("%s has type '%s'; use %s" % (t["id"], t["type"], ", ".join(TENSION_TYPES)))
+        if len(set(t["between"])) < 2:
+            issues.append("%s must name at least 2 ids in 'between:'" % t["id"])
+        for cid in t["between"]:
+            if cid not in known_c:
+                issues.append("%s between id '%s' is not a known constraint" % (t["id"], cid))
+        if t["status"] not in TENSION_STATUSES:
+            issues.append("%s has status '%s'; use resolved or accepted" % (t["id"], t["status"]))
+        if t["strategy"] not in TENSION_STRATEGIES:
+            issues.append("%s has strategy '%s'; use one of %s"
+                          % (t["id"], t["strategy"], ", ".join(TENSION_STRATEGIES)))
+        needs_decision = t["status"] == "accepted" or t["strategy"] == "Accept"
+        if needs_decision and not t["decision"]:
+            issues.append("%s needs a decision: status 'accepted' or strategy 'Accept' "
+                          "requires a 'decision: D<k>' field" % t["id"])
+        elif t["status"] != "resolved" and not t["decision"]:
+            issues.append("%s must have status 'resolved' or cite a decision" % t["id"])
+        if t["decision"] and t["decision"] not in known_d:
+            issues.append("%s references unknown decision %s" % (t["id"], t["decision"]))
+
+    # (12) every RT must be ready to converge.
+    for t in spec["truths"]:
+        if t["status"] not in ("SATISFIED", "SPECIFICATION_READY"):
+            issues.append("%s must be SATISFIED or SPECIFICATION_READY to converge (is %s)"
+                          % (t["id"], t["status"]))
+
+    # (13) option grammar, 2-4 options, a Recommended line naming a known option.
+    seen_opt = set()
+    for o in options:
+        if o["id"] in seen_opt:
+            issues.append("option %s is defined twice" % o["id"])
+        seen_opt.add(o["id"])
+        if o["complexity"] not in COMPLEXITY_RANK:
+            issues.append("%s has complexity '%s'; use Low, Medium or High" % (o["id"], o["complexity"]))
+        if o["reversibility"] not in REVERSIBILITY_RANK:
+            issues.append("%s has reversibility '%s'; use TWO_WAY, REVERSIBLE_WITH_COST or ONE_WAY"
+                          % (o["id"], o["reversibility"]))
+        if not o["satisfies"]:
+            issues.append("%s satisfies no required truth" % o["id"])
+    if not 2 <= len(options) <= 4:
+        issues.append("Solution options must list 2-4 options (got %d)" % len(options))
+
+    recommended = spec["recommended"]
+    known_opt = {o["id"] for o in options}
+    if recommended is None:
+        issues.append("Solution options has no 'Recommended: OPT-<LETTER> — ...' line")
+    elif recommended["id"] not in known_opt:
+        issues.append("Recommended line names unknown option %s" % recommended["id"])
+    else:
+        if recommended["decision"] and recommended["decision"] not in known_d:
+            issues.append("Recommended line references unknown decision %s" % recommended["decision"])
+        # (14) the recommendation satisfies every RT, and is the pragmatic
+        # choice: among the options that satisfy every RT, the lowest
+        # (complexity rank, reversibility rank). A tie needs a decision.
+        rt_ids = {t["id"] for t in spec["truths"]}
+        opt_by_id = {o["id"]: o for o in options}
+        rec = opt_by_id[recommended["id"]]
+        missing = sorted(rt_ids - set(rec["satisfies"]))
+        if missing:
+            issues.append("%s does not satisfy %s" % (rec["id"], ", ".join(missing)))
+        else:
+            def _rank(o):
+                return (COMPLEXITY_RANK.get(o["complexity"], 99),
+                        REVERSIBILITY_RANK.get(o["reversibility"], 99))
+            candidates = [o for o in options if rt_ids <= set(o["satisfies"])]
+            rec_rank = _rank(rec)
+            better = [o["id"] for o in candidates if o["id"] != rec["id"] and _rank(o) < rec_rank]
+            if better:
+                issues.append("%s is not the pragmatic choice — %s has a lower "
+                              "(complexity, reversibility) rank" % (rec["id"], ", ".join(better)))
+            else:
+                tied = [o["id"] for o in candidates if o["id"] != rec["id"] and _rank(o) == rec_rank]
+                if tied and not recommended["decision"]:
+                    issues.append("%s ties with %s on (complexity, reversibility) — the "
+                                  "Recommended line needs a '(decision: D<k>)'"
+                                  % (rec["id"], ", ".join(tied)))
+
+    # (15) iterations I1..In, in order, capped at 5.
+    its = spec["iterations"]
+    if its and its != list(range(1, len(its) + 1)):
+        issues.append("iterations must be numbered I1..I%d in order without gaps or duplicates"
+                      % len(its))
+    if len(its) > ITERATION_CAP:
+        issues.append("iterations: iteration cap exceeded — stop and ask the user "
+                      "(got %d, max %d)" % (len(its), ITERATION_CAP))
+
+    # (16) Open questions must be empty to converge.
+    if _section_bullets(sections, "Open questions"):
+        issues.append("Open questions must be empty to converge")
+
+    return issues
+
+
+def lint_unattended(spec):
+    """The decision sweep on top of --converged: Decisions present, non-empty,
+    every decision answered."""
+    issues = []
+    body = find_section(spec["sections"], "Decisions")
+    if body is None:
+        issues.append("missing required section '## Decisions' for unattended mode")
+    elif not any(ln.strip() for ln in body):
+        issues.append("section '## Decisions' is empty; unattended mode needs at least one decision")
+    for b in spec["malformed_decisions"]:
+        issues.append("Decisions bullet is not '- D<n>: <question> -> <answer> "
+                      "(source: <where>)': '%s'" % b[:60])
+    for d in spec["decisions"]:
+        if not d["answer"]:
+            issues.append("%s has no answer — every decision must be answered "
+                          "before unattended mode" % d["id"])
+    return issues
+
+
 def parse_spec(text):
     """Parse spec markdown into a structure shared with spec_to_tasks.py.
 
@@ -232,6 +463,18 @@ def parse_spec(text):
       truths                  -- list of {id, num, status, text, parent, maps_to,
                                   reqs, confidence, check} from ## Required truths
       malformed_truths        -- bullets in Required truths not matching the grammar
+      tensions                -- list of {id, type, text, between, status, strategy,
+                                  decision} from ## Tensions (full loop)
+      malformed_tensions      -- bullets in Tensions not matching the grammar
+      options                 -- list of {id, text, complexity, reversibility,
+                                  satisfies} from ## Solution options
+      malformed_options       -- bullets in Solution options not matching the grammar
+      recommended             -- {id, decision} from the 'Recommended: OPT-...' line,
+                                  or None
+      iterations               -- list[int] of iteration numbers from ## Iterations
+      decisions                -- list of {id, question, answer, source} from
+                                  ## Decisions (unattended mode)
+      malformed_decisions      -- bullets in Decisions not matching the grammar
     """
     title = ""
     sections = OrderedDict()
@@ -276,6 +519,11 @@ def parse_spec(text):
 
     constraints, bad_c = _parse_constraints(sections)
     truths, bad_t = _parse_truths(sections)
+    tensions, bad_tn = _parse_tensions(sections)
+    options, bad_opt = _parse_options(sections)
+    recommended = _parse_recommended(sections)
+    iterations = _parse_iterations(sections)
+    decisions, bad_dec = _parse_decisions(sections)
 
     return {
         "title": title,
@@ -287,6 +535,14 @@ def parse_spec(text):
         "malformed_constraints": bad_c,
         "truths": truths,
         "malformed_truths": bad_t,
+        "tensions": tensions,
+        "malformed_tensions": bad_tn,
+        "options": options,
+        "malformed_options": bad_opt,
+        "recommended": recommended,
+        "iterations": iterations,
+        "decisions": decisions,
+        "malformed_decisions": bad_dec,
     }
 
 
@@ -311,8 +567,19 @@ def _section_bullets(sections, name):
     return out
 
 
-def lint(text):
-    """Return the (deterministic, ordered) list of issue strings; [] = clean."""
+def lint(text, mode="light"):
+    """Return the (deterministic, ordered) list of issue strings; [] = clean.
+
+    mode is one of:
+      "light"      -- (default, backward compatible) Constrain + Anchor rules
+                       that run on every spec, attended or unattended.
+      "converged"  -- light, plus the Tension + Choose full-loop rules and
+                       convergence (design spec §4).
+      "unattended" -- converged, plus the decision sweep: Decisions present,
+                       non-empty, every decision answered.
+    """
+    if mode not in ("light", "converged", "unattended"):
+        raise ValueError("mode must be 'light', 'converged' or 'unattended', got %r" % (mode,))
     issues = []
     spec = parse_spec(text)
     sections = spec["sections"]
@@ -391,29 +658,41 @@ def lint(text):
     # and traceability from constraint to RT to requirement (always on).
     issues += lint_light(spec)
 
+    # Tension + Choose full-loop rules, gated behind --converged/--unattended.
+    if mode in ("converged", "unattended"):
+        issues += lint_converged(spec)
+    if mode == "unattended":
+        issues += lint_unattended(spec)
+
     return issues
 
 
 def main(argv):
-    if len(argv) != 2:
-        print("usage: spec_lint.py <spec.md>", file=sys.stderr)
+    args = argv[1:]
+    mode = "light"
+    if args and args[0] in ("--converged", "--unattended"):
+        mode = args[0][2:]
+        args = args[1:]
+    if len(args) != 1:
+        print("usage: spec_lint.py [--converged|--unattended] <spec.md>", file=sys.stderr)
         return 2
+    path = args[0]
     try:
-        with open(argv[1], encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             text = f.read()
     except OSError as exc:
-        print("ERROR: cannot read %s: %s" % (argv[1], exc), file=sys.stderr)
+        print("ERROR: cannot read %s: %s" % (path, exc), file=sys.stderr)
         return 2
-    issues = lint(text)
+    issues = lint(text, mode=mode)
     for issue in issues:
         print("FAIL: %s" % issue)
     if issues:
-        print("LINT_RESULT: FAIL (%d issue(s))" % len(issues))
+        print("LINT_RESULT: FAIL (%d issue(s), mode=%s)" % (len(issues), mode))
         return 1
     spec = parse_spec(text)
     print(
-        "LINT_RESULT: PASS (%d requirement(s), %d acceptance criteria)"
-        % (len(spec["requirements"]), len(spec["criteria"]))
+        "LINT_RESULT: PASS (%d requirement(s), %d acceptance criteria, mode=%s)"
+        % (len(spec["requirements"]), len(spec["criteria"]), mode)
     )
     return 0
 
