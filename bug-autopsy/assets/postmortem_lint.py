@@ -95,7 +95,11 @@ EVIDENCE_RE = re.compile(
 #     claim: "none found in logs after grep of app.log" is evidence of an
 #     absence, not an unstated basis, and "Nonesuch.py:12" merely starts
 #     with those letters.
-_NULL_FIRST_TOKENS = frozenset(("tbd", "todo", "unknown", "na"))
+#   - "n" is a deferral token because the captured value stops at the first
+#     ".", so "n.a." / "N. A." reach this check as a bare "n" (final review).
+#     Dropping "." as a terminator instead would let "none. Later text"
+#     through as a non-null whole value, so the token list is the fix.
+_NULL_FIRST_TOKENS = frozenset(("tbd", "todo", "unknown", "na", "n"))
 _NULL_WHOLE_VALUES = frozenset(("none", "null", "nil", "missing", "empty"))
 
 # Text captured after an `evidence:`/`systemic:` label, up to the next

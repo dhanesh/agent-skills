@@ -276,6 +276,40 @@ class EvidenceValueTests(unittest.TestCase):
                     "evidence/systemic: %s should not satisfy the why-chain "
                     "check" % value)
 
+    def test_dotted_na_fails(self):
+        # Final review: `(evidence: n.a.)` passed, because the captured value
+        # stops at the first "." and "n" was not a null token.
+        for value in ("n.a.", "N.A.", "n.a", "N. A."):
+            with self.subTest(value=value):
+                doc = make_doc({
+                    "Timeline": "- 2026-07-01 09:00 — trigger (evidence: %s)"
+                                % value,
+                    "Root cause": (
+                        "1. **Why A?** x (evidence: %s).\n"
+                        "2. **Why B?** y (systemic: %s).\n"
+                        "3. **Why C?** z (evidence: %s)."
+                        % (value, value, value)),
+                })
+                got, _ = results(doc)
+                self.assertFalse(
+                    got["timeline: every entry cites evidence"][0], value)
+                self.assertFalse(
+                    got["root cause: every why cites evidence"][0], value)
+
+    def test_dotted_values_that_are_real_evidence_still_pass(self):
+        # control for the n.a. fix: a file name and a sha in prose still pass
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(evidence: abc123 in deploy log)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: Nonesuch.py:12).\n"
+                "2. **Why B?** y (evidence: abc123 in deploy log).\n"
+                "3. **Why C?** z (evidence: notes.md line 4)."),
+        })
+        got, _ = results(doc)
+        self.assertTrue(got["timeline: every entry cites evidence"][0])
+        self.assertTrue(got["root cause: every why cites evidence"][0])
+
     def test_systemic_null_word_with_filler_still_fails(self):
         doc = make_doc({"Root cause": (
             "1. **Why A?** x (evidence: keys.py:57).\n"

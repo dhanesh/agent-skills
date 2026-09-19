@@ -17,7 +17,7 @@ license: MIT
 compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.0.2"
+  version: "1.1.0"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 
