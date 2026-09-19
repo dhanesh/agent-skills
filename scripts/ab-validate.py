@@ -4914,12 +4914,16 @@ def check_autonomy_grant(old, new):
 
     def forged_accepted(tree):
         """1 if a SKILL-attributed (self-certified) grant is COVERED (bad); else 0.
+        None if the sanity check below fails (recorded in PROBE_ERRORS instead).
 
         The fixture must pass every other check so the only thing that can make
         it fail is the forged attribution — otherwise a rejection would prove
-        nothing. A sanity build of the SAME fixture, human-attributed, is
-        asserted COVERED so the guard cannot pass vacuously (e.g. by an
-        unrelated bug that rejects everything).
+        nothing. A sanity build of the SAME fixture, human-attributed, must be
+        COVERED, so the guard cannot pass vacuously (e.g. by an unrelated bug
+        that rejects everything). A failed sanity check is routed through
+        PROBE_ERRORS rather than a bare `assert`: an `assert` would crash the
+        whole run with a traceback instead of a report, and disappears under
+        `python3 -O`.
         """
         if not decides(tree):
             return 0
@@ -4971,10 +4975,14 @@ def check_autonomy_grant(old, new):
         forged_rc = check(build({"skill": "spec-first-planning"}))
 
         sane_rc = check(build({"human": "Dana"}))
-        assert sane_rc == 0, (
-            "sanity check failed on %r: a human-attributed grant of the same "
-            "shape was not COVERED (rc=%d) -- the fixture itself is broken, "
-            "not just the forged attribution" % (tree, sane_rc))
+        if sane_rc != 0:
+            PROBE_ERRORS.append((
+                tree, "docs/skill-contract/reference/contract_check.py",
+                "autonomy-grant sanity check failed: a human-attributed grant of "
+                "the same shape was not COVERED (check-grant exit %d) -- the "
+                "fixture itself is broken, not just the forged attribution"
+                % sane_rc))
+            return None
 
         return 1 if forged_rc == 0 else 0
 
