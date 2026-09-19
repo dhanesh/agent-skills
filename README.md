@@ -40,6 +40,95 @@ To install every skill in this repo, omit the `--skill` flag:
 npx skills add dhanesh/agent-skills
 ```
 
+## Software factory
+
+The long-term aim of this collection is an autonomous software factory for an indie developer:
+idea → spec → build → verify → review → release → operate → support → growth. **Today it is a
+set of skills a human orchestrates, not yet autonomous.** You choose the next skill, confirm each
+handoff, and drive the build step yourself. The evidence behind this section, and the gaps, are
+in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
+
+### Which skills cover which stage
+
+Status is the more conservative of the assessment's two judges (Claude and Jev).
+
+| Stage | Skills | Status |
+|---|---|---|
+| Idea validation | none (ai-migration-operating-model `qualify` covers migrations only) | missing |
+| Requirements / spec | `spec-first-planning` | covered |
+| Design / plan | `spec-first-planning`, `clean-code` (architecture), `ai-migration-operating-model` (migrations) | partly |
+| Build / execute | `crafting-self-prompting-loops` designs the loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
+| Test / verify | `verifier-installer`, `test-safety-net`. Nothing checks built work against the spec's acceptance criteria. | partly |
+| Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
+| Release / deploy | none (`agent-ready-rails` only audits deploy safety) | missing |
+| Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
+| Support / feedback | none | missing |
+| Growth / monetise | none | missing |
+| Knowledge / docs | `feynman-walkthrough`, `okf-site-kit`, `knowledge-gardener`, `starlight-handbook-kit`, `bug-autopsy`; agent memory: `world-model-ledger`, `context-hygiene-kit` | covered |
+| Governance | `security-posture-audit`, `base-in-reality`, `agent-ready-rails` (audit), `crafting-self-prompting-loops` (per-loop budget). No spend governor or gate policy. | partly |
+
+### Recipes that work today
+
+Each recipe is one install command. A human drives the steps between skills.
+
+**Plan → loop.** Turn a fuzzy request into a spec and task plan, then design the loop that
+executes it. This is the one pair with a machine handoff (a `task-plan/v1` envelope).
+
+```bash
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops
+```
+
+**Make a repo agent-ready.** Audit the repo's rails, install the format/build/test loop and CI,
+add characterisation tests, then act on the seam list. Run them in that order.
+
+```bash
+npx skills add dhanesh/agent-skills --skill agent-ready-rails --skill verifier-installer --skill test-safety-net --skill clean-code
+```
+
+**Audit claims and security.** Check the codebase's algorithms and business rules against cited
+sources, and its security hygiene, with design review alongside.
+
+```bash
+npx skills add dhanesh/agent-skills --skill base-in-reality --skill security-posture-audit --skill clean-code
+```
+
+**Knowledge loop.** Explain a codebase or subject into an OKF bundle, publish it as a site, keep
+it fresh, and file post-mortems into the same bundle.
+
+```bash
+npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site-kit --skill knowledge-gardener --skill bug-autopsy
+```
+
+### What happens when you install a subset
+
+- **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
+  time and hand off a validated envelope, after asking you first. Today that is two skills and one
+  handoff: `spec-first-planning` → `crafting-self-prompting-loops`.
+- **A missing consumer is not an error.** The producer reports `NO_CONSUMER`, gives you the
+  envelope path, and finishes normally.
+- **Every other link between skills is prose.** A skill says "use X next". If X is not installed,
+  the step is skipped, and nothing tells you what you lose.
+- **Reinstall copies installed before the contract merged.** They carry no contract block, so
+  discovery cannot see them.
+
+### Unattended mode: not yet
+
+There is no unattended mode yet. What exists today:
+
+- skill-contract handoffs are proposed and wait for your yes;
+- each skill keeps its own gates (for example, `verifier-installer` and `test-safety-net` stop
+  for confirmation before writing).
+
+Planned on the roadmap:
+
+1. Every decision that needs a human is captured upfront, during requirements and design, as an
+   `autonomy-grant`.
+2. A conductor runs the plan within that grant, and still stops for anything irreversible or
+   not covered by the grant.
+
+The design and the gap analysis are in
+[the assessment's unattended-mode section](docs/factory/2026-09-19-assessment.md#6-unattended-mode-q3-gap-analysis).
+
 ## Skills
 
 | Skill | Description |
