@@ -21,8 +21,8 @@ not the solution.>
      O operational) plus a number, e.g. B1, T2. <type> is invariant, goal or
      boundary. No pre-mortem is required for the light pass — see
      references/spec-format.md for the full-loop Tension/Choose steps. -->
-- B1: <business/technical/UX/security/operational constraint>
-- T1: <another constraint>
+- B1 [invariant]: <business/technical/UX/security/operational constraint>
+- T1 [boundary]: <another constraint>
 
 ## Required truths
 <!-- The Anchor step: work backwards from the outcome asking "what must be
@@ -30,10 +30,10 @@ not the solution.>
      (parent: <OUTCOME|RT<k>>; maps_to: <constraint ids>; reqs: <R ids>;
      confidence: <0..1>; check: <runnable check>)". IDs run RT1..RTn in
      order. <status> is SATISFIED, PARTIAL, NOT_SATISFIED or
-     SPECIFICATION_READY. At least one RT must have parent: OUTCOME. Every
-     constraint above must be named in some RT's maps_to; every RT must
-     name at least one requirement below in reqs. check: MUST be the last
-     field. -->
+     SPECIFICATION_READY. Every RT must reach OUTCOME by following parent
+     links (no dangling parent, no cycle). Every constraint above must be
+     named in some RT's maps_to; every RT must name at least one
+     requirement below in reqs. check: MUST be the last field. -->
 - RT1 [SPECIFICATION_READY]: <what must be true> (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: <runnable check>)
 - RT2 [SPECIFICATION_READY]: <what must be true> (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.7; check: <runnable check>)
 

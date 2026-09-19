@@ -292,6 +292,21 @@ def main():
         check("template filled with fixture content lints clean",
               r.returncode == 0 and "LINT_RESULT: PASS" in r.stdout,
               r.stdout.strip()[-60:])
+
+        # I2 (review round 1): the template's raw example Constraints and
+        # Required truths bullets must themselves satisfy the light grammar
+        # and traceability rules (lint_light, rules 6-9) once their <...>
+        # placeholders are swapped for sample text — not just when the whole
+        # section is replaced wholesale by fill_template above. A naive global
+        # placeholder swap breaks unrelated rules (e.g. the Requirements
+        # placeholder loses its coincidental "must"), so this checks
+        # lint_light's own rules directly rather than the full lint().
+        import spec_lint as sl  # noqa: E402  (already on sys.path; the copied skill's own module)
+        swapped = re.sub(r"<[^>]+>", "sample text", template)
+        grammar_issues = sl.lint_light(sl.parse_spec(swapped))
+        check("template's Constraints/Required truths examples satisfy the "
+              "light grammar rules once placeholders are swapped for sample text",
+              grammar_issues == [], "issues=%s" % grammar_issues)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

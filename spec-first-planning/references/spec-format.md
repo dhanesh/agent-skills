@@ -48,7 +48,7 @@ A spec is one markdown file:
 | 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
 | 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
 | 8 | Traceability: every constraint is named in some RT's `maps_to`; every RT names ≥1 known constraint and ≥1 known requirement (`reqs:`); every RT's `parent` is `OUTCOME` or another RT in this spec, and not itself | a constraint nobody anchors; a truth that traces to nothing |
-| 9 | At least one required truth has `parent: OUTCOME` | no truth anchored at the root — Anchor never actually ran |
+| 9 | Every RT reaches OUTCOME through parent links (no dangling parent, no cycle) | a truth chain that never actually anchors at the outcome — including a cycle of otherwise-valid RTs (e.g. RT1 -> RT2 -> RT1) that a per-RT "parent is OUTCOME or another RT" check alone can't see |
 
 Rules 6-9 are the Constrain + Anchor light pass (design spec §4): they run
 on every spec, attended or unattended — only Tension and Choose (Solution
