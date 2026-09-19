@@ -5,11 +5,13 @@ license: MIT
 compatibility: Any agent harness with shell access to the target repo; the evidence collector needs python3 (stdlib only). Audit mode is read-only.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "agent-readiness,audit,coding-agents,ci,verification,repo-hygiene"
 ---
 
 # agent-ready-rails
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 A read-only audit of whether a codebase is **ready for coding agents** — and a scaffolder for the rails it is missing.
 
@@ -20,8 +22,8 @@ Default mode is **read-only**: observe, score, report. It only writes files when
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -58,11 +60,11 @@ Full probe/score/fix detail is in `references/rubric.md`; the evidence for each 
 | R9 | Deploy-path safety & kill switch | staged rollout + automated rollback + spend/rate caps + tested fleet stop |
 | R10 | Continuous re-verification | rails re-checked over time + program metrics + autonomy pauses on regression |
 
-Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. Report the two tiers as **separate subtotals** — Tier 1 is 0–12, Tier 2 is 0–8 — and never fold them together: a repo can be perfectly ready for PR work (Tier 1 = 12) and unsafe to run unattended (Tier 2 = 0). Within Tier 1 the **minimum rail matters more than the sum** — R1/R2 are load-bearing, so a repo strong everywhere except the verify→repair loop is still not agent-ready. Lead the report with the weakest rail in whichever tier is in scope.
+Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. You MUST report the two tiers as **separate subtotals** — Tier 1 is 0–12, Tier 2 is 0–8 — and MUST NOT fold them together: a repo can be perfectly ready for PR work (Tier 1 = 12) and unsafe to run unattended (Tier 2 = 0). Within Tier 1 the **minimum rail matters more than the sum** — R1/R2 are load-bearing, so a repo strong everywhere except the verify→repair loop is still not agent-ready. Lead the report with the weakest rail in whichever tier is in scope.
 
 ## Workflow
 
-Follow these steps in order. Steps 1–4 are read-only and always run; step 5 writes only on explicit request; step 6 verifies the writes.
+Follow these steps in order. Steps 1–4 MUST stay read-only and always run; step 5 MUST write only on explicit request; step 6 verifies the writes.
 
 ### 1. Scope and detect the stack
 
@@ -78,7 +80,7 @@ python3 "$SKILL_DIR/assets/collect_evidence.py" <repo-dir>
 
 It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rail (`R-verifiers`, `R-ci`, `R-house-style`, `R-context`, `R-scoped-tools`, `R-checkpoints` — mapping to R1–R6), each entry a `{kind, path, detail}` lead: test/lint/build configs and Make targets, CI workflows (flagging whether each actually runs tests), style docs and EditorConfig, CLAUDE.md/AGENTS.md/README/docs structure, `.claude/settings*.json` permissions and MCP config, CODEOWNERS/PR-template/.gitignore hygiene. It collects and flags only — it never scores; malformed config files surface as `settings-error` entries rather than crashes.
 
-Then, for each rail in scope, verify and extend the collector's leads against the concrete signals named in `references/rubric.md`: read the cited configs and CI files, check that named commands actually exist, and hunt for evidence the collector's fixed patterns cannot see (a bespoke task runner, a wiki style guide). For Tier 2, the evidence lives as much in the *agent harness and deploy/runtime config* (CI/CD workflows, sandbox/container setup, feature-flag and rollout config, bot identity, logging/alerting) as in the repo source — probe there too. **Run nothing destructive** — confirm a verifier or control *exists* and is wired, don't execute migrations, deploys, or a kill switch. Any rail you cannot back with a file/line is scored as absent and tagged `UNVERIFIED`; never credit a rail on a README claim alone.
+Then, for each rail in scope, verify and extend the collector's leads against the concrete signals named in `references/rubric.md`: read the cited configs and CI files, check that named commands actually exist, and hunt for evidence the collector's fixed patterns cannot see (a bespoke task runner, a wiki style guide). For Tier 2, the evidence lives as much in the *agent harness and deploy/runtime config* (CI/CD workflows, sandbox/container setup, feature-flag and rollout config, bot identity, logging/alerting) as in the repo source — probe there too. **You MUST NOT run anything destructive** — confirm a verifier or control *exists* and is wired, don't execute migrations, deploys, or a kill switch. Any rail you cannot back with a file/line MUST be scored as absent and tagged `UNVERIFIED`; you MUST NOT credit a rail on a README claim alone.
 
 ### 3. Score against the rubric
 
@@ -98,7 +100,7 @@ After any install, re-run the relevant probes and confirm the rail now scores hi
 
 ## Output template
 
-ALWAYS structure the scorecard like this:
+You MUST structure the scorecard like this:
 
 ```
 ## Agent-readiness: <repo> — Build <t1>/12  (weakest: R<n> <rail>)

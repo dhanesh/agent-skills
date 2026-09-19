@@ -193,3 +193,15 @@ Skills appear in rewrite order.
 | c6 | 132 | - **One ground truth.** Local \`verify\` and CI run the same commands; when in dou… | MUST (0.41, 0.58) | MUST |  |
 | c7 | 134 | - **Prove, don't presume.** A rail counts as installed when it was watched faili… | MUST (0.58, 0.55) | MUST |  |
 | c8 | 137 | - **Stay off the style battlefield.** Wire checks for whatever formatter/tooling… | SHOULD (0.29, 0.38) | SHOULD |  |
+
+## agent-ready-rails (7 candidates · 5 MUST · 0 SHOULD · 0 MAY · 2 plain · 2 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 20 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.86, 0.74) | MUST |  |
+| c2 | 41 | **Tier 1 — Build rails (author → merge).** Always audited. These decide whether … | MUST (0.55, 0.70) | plain | "Always audited" describes Tier 1's scope; the scoping directive itself is step 1, a plain workflow step |
+| c3 | 61 | Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. Report the two … | MUST (0.80, 0.74) | MUST |  |
+| c4 | 65 | Follow these steps in order. Steps 1–4 are read-only and always run; step 5 writ… | MUST (0.38, 0.65) | MUST |  |
+| c5 | 79 | It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rai… | MUST (0.86, 0.71) | plain | describes what collect_evidence.py does (collects and flags, never scores; settings-error instead of crashes); not a directive |
+| c6 | 81 | Then, for each rail in scope, verify and extend the collector's leads against th… | MUST (0.95, 0.79) | MUST |  |
+| c7 | 101 | ALWAYS structure the scorecard like this: | MUST (0.73, 0.51) | MUST |  |
