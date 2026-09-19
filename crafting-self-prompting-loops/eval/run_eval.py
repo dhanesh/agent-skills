@@ -172,8 +172,11 @@ def _grant_fixture(root, asserted_by, gate_policy=None):
 
 
 def _check_grant(root, action="local_reversible"):
+    # GIT_CEILING_DIRECTORIES: a TMPDIR inside a git repo on its default branch
+    # must not turn a covering grant into ASK (the default-branch floor).
+    env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(root))}
     r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
-                        "--action", action], capture_output=True, text=True, timeout=60)
+                        "--action", action], capture_output=True, text=True, timeout=60, env=env)
     return r.returncode, r.stdout.strip()
 
 
@@ -196,13 +199,23 @@ def grant_checks(labels=("", "", "")):
               rc == 2 and "GRANT: INVALID" in out, f"rc={rc} {out[-160:]}")
 
 
+# The grantable set is a CLOSED list of class tokens: the model is not left to
+# judge reversibility (a tag push, a release or a comment is not push_branch).
+A8_CLOSED_LIST = ("Under LSC-8 only `push_branch` (pushing the current non-default branch) and "
+                  "`open_pr` (opening or updating a pull request) are grantable; `merge`, "
+                  "`deploy`, `spend`, `external_message` and `delete` always wait for the human")
+
 # The LSC-8 principle and the intake must both wire the grant in; the principle
 # must keep the irreversible classes out of any grant's reach (A8).
 LSC8_MARKERS = ("MUST wait for explicit human approval",
                 "check-grant --root <repo> --action <the action's class>",
-                "at the moment of the action", "push_branch", "open_pr",
-                "merge, deploy, spend, external messages or deletes",
-                "MUST name the grant id and action class")
+                "at the moment of the action",
+                "resolve `$SKILL_DIR` as in \"Receiving a skill-contract envelope\"",
+                "write the absolute checker path into the loop's scaffold",
+                "MUST name the grant id and action class",
+                A8_CLOSED_LIST,
+                "and so does any action you cannot place exactly in `push_branch` or `open_pr`",
+                "never force-push")
 INTAKE_GRANT_MARKERS = ("check-grant --root <repo-root> --action local_reversible",
                         "exits 0", "MAY", "MUST name the grant id",
                         "or a grant covered it")
@@ -407,7 +420,7 @@ def main():
                   rc == 3 and "GRANT: ASK" in out, f"rc={rc} {out[-160:]}")
             # The checker is the gate for EVERY envelope it is handed, so the
             # grant must also pass check-envelope --for this skill (consumes).
-            r = subprocess.run([sys.executable, CONTRACT_CHECKER, "check-envelope",
+            r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-envelope",
                                 os.path.join(t, ".skill-contract", "envelopes", GRANT_ID + ".json"),
                                 "--root", t, "--for", SKILL],
                                capture_output=True, text=True, timeout=60)
@@ -422,9 +435,18 @@ def main():
         ok, missing = grade_grant_text(skill_text)
         check("SKILL.md wires check-grant into the intake and the LSC-8 principle",
               ok, f"missing: {missing}")
-        check("negative: grader flags an LSC-8 principle with the A8 carve-out stripped",
+        check("negative: grader flags an LSC-8 principle with the A8 closed list stripped",
+              not grade_grant_text(skill_text.replace(A8_CLOSED_LIST, "some actions"))[0])
+        check("negative: grader flags an LSC-8 principle with the catch-all stripped",
               not grade_grant_text(skill_text.replace(
-                  "merge, deploy, spend, external messages or deletes", "some actions"))[0])
+                  "and so does any action you cannot place exactly", "and so do some"))[0])
+        check("negative: grader flags an LSC-8 principle with the force-push ban stripped",
+              not grade_grant_text(skill_text.replace("never force-push", "push"))[0])
+        compat = re.search(r"^compatibility:(.*)$", skill_text, re.M)
+        check("compatibility says python validates handoffs AND checks grants",
+              compat is not None and "check grants" in compat.group(1)
+              and "validate skill-contract handoffs" in compat.group(1),
+              compat.group(1).strip()[-120:] if compat else "no compatibility line")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
