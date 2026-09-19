@@ -26,8 +26,7 @@ metadata:
 
 # Clean Code, Clean Architecture & Clean Craftsmanship
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
-described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 A working guide to Robert C. Martin's principles. The aim is not to recite
 rules — it's to make code that the next person (often you, in six months) can

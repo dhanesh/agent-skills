@@ -25,8 +25,7 @@ metadata:
 
 # feynman-walkthrough
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
-described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Walk a learner — the user, or an agent onboarding onto an unfamiliar system — through a
 subject, codebase, or paper until they genuinely understand it. The goal is **enriched

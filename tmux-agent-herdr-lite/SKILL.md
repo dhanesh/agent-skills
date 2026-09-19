@@ -11,8 +11,7 @@ metadata:
 
 # Tmux Agent Herdr-Lite
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
-described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
@@ -119,7 +118,7 @@ Statuses are routing hints, not truth:
 - `done` — completion sentinel or finished-agent prompt chrome; focusing the pane demotes it to `idle` (viewed), Herdr-style.
 - `unknown` — the pane is gone or metadata is incomplete.
 
-Detection is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts MUST fall back to `idle`, and MUST NOT be classified `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
+Detection is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
 
 For best accuracy, instruct coding agents to print explicit markers — they outrank every heuristic:
 

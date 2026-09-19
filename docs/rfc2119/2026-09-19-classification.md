@@ -143,7 +143,7 @@ Skills appear in rewrite order.
 | c4 | 136 | **STALE** → the source moved (new commits, revised doc). Say so before relying on… | plain (0.28, 0.53) | plain | "never trips STALE" describes \`okf.py\`'s diff-detection behaviour, not a directive |
 | c5 | 182 | the **reference explainer** — standalone, revisitable, sharable; useful to the le… | plain (0.63, 0.29) | plain | "never saw this session" describes a hypothetical colleague, not a directive |
 
-## tmux-agent-herdr-lite (6 candidates · 2 MUST · 1 SHOULD · 0 MAY · 3 plain · 3 departures)
+## tmux-agent-herdr-lite (6 candidates · 1 MUST · 1 SHOULD · 0 MAY · 4 plain · 2 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -152,4 +152,4 @@ Skills appear in rewrite order.
 | c3 | 49 | **Humans use tmux only.** They just run their agent (\`claude\`, \`codex\`, …) in an… | plain (0.28, 0.38) | SHOULD | harm 0.38 <0.5 caps below MUST; a genuine behavioural default keeping the human surface pure tmux (per the skill's own description promise), with an alternative named in the same sentence |
 | c4 | 54 | The cockpit deliberately claims exactly **one** prefix key (\`prefix a\`) and puts … | MUST (0.32, 0.54) | plain | describes the key-table design's non-collision guarantee, not a directive to the agent |
 | c5 | 105 | 5. Verify real outcomes separately — a \`done\` state means the pane looks finish… | plain (0.21, 0.29) | plain | Recommended agent workflow step 5; out of scope per the spec's "workflow steps stay plain imperatives" |
-| c6 | 119 | Detection is two-layered, ported from Herdr's manifests: panes with a known age… | plain (0.51, 0.55) | MUST | mechanically enforced by \`assets/test_agent_classify.py\` (the generic-path and strict-blocked cases), run by \`make gate\`; subject stays the classifier, not the agent |
+| c6 | 119 | Detection is two-layered, ported from Herdr's manifests: panes with a known age… | plain (0.51, 0.55) | plain |  |

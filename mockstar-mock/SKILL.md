@@ -12,8 +12,7 @@ metadata:
 
 # mockstar-mock
 
-The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
-described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Converts any combination of API specs and docs into a runnable mockstar mock project. It accepts
 OpenAPI 3.x (JSON/YAML), Postman collections, HAR captures, curl command files, GraphQL
