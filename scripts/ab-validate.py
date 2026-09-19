@@ -191,6 +191,10 @@ SINCE_FACTORY_TRUST_VI = "6818b41"  # verifier-installer: the python format rail
 # is a real formatter check (detected, or an honest placeholder) instead of
 # `compileall` — a syntax check byte-identical to the build rail; the go
 # format rail actually fails on gofmt -l output instead of always exiting 0.
+SINCE_FACTORY_TRUST_BA = "afbdc71"  # bug-autopsy: the "declared basis" escape
+# hatch requires a real value after evidence:/systemic:, not just the label —
+# `evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / file:line>`
+# template placeholder no longer lint-pass as cited evidence.
 
 
 def _git_out(*args):
@@ -4721,6 +4725,86 @@ def check_factory_trust_vi(old, new):
         "adopted a formatter", kind="guard")
 
 
+# ── bug-autopsy (evidence VALUE, not just the label) ────────────────────────
+_BA_EVIDENCE_NONE = (
+    "# Post-mortem: checkout 500s\n\n"
+    "## Summary\nCheckout returned 500s for an hour.\n\n"
+    "## Impact\nSome users could not pay.\n\n"
+    "## Timeline\n"
+    "- 2026-09-01 10:00 — bad deploy went out (evidence: none)\n"
+    "- 2026-09-01 10:05 — errors started (evidence: none)\n"
+    "- 2026-09-01 11:00 — rolled back (evidence: n/a)\n\n"
+    "## Root cause\n"
+    "1. **Why did checkout fail?** The config was wrong. (evidence: none)\n"
+    "2. **Why was the config wrong?** Nobody checked it. (evidence: none)\n"
+    "3. **Why did nobody check it?** No check existed. (evidence: TBD)\n\n"
+    "## Contributing factors\n- Friday deploy.\n\n"
+    "## Fix\nReverted in commit 3f9a1c2.\n\n"
+    "## Prevention\n- [ ] Add a config check (owner: platform; check: manual audit)\n\n"
+    "## Links\n- none\n"
+)
+_BA_UNFILLED_PLACEHOLDER = _BA_EVIDENCE_NONE.replace(
+    "(evidence: none)", "(evidence: <commit sha / file:line>)").replace(
+    "(evidence: n/a)", "(evidence: <commit sha / file:line>)").replace(
+    "(evidence: TBD)", "(evidence: <commit sha / file:line>)")
+_BA_GOOD = (
+    "# Post-mortem: checkout 500s\n\n"
+    "## Summary\nCheckout returned 500s for an hour.\n\n"
+    "## Impact\nSome users could not pay.\n\n"
+    "## Timeline\n"
+    "- 2026-09-01 10:00 — bad deploy went out (evidence: commit 3f9a1c2)\n"
+    "- 2026-09-01 10:05 — errors started (evidence: app.log 10:05:03)\n"
+    "- 2026-09-01 11:00 — rolled back (evidence: commit 9a1c2f3, CI run 4821)\n\n"
+    "## Root cause\n"
+    "1. **Why did checkout fail?** The config was wrong. (evidence: config.py:12)\n"
+    "2. **Why was the config wrong?** Nobody checked it. (evidence: no such case under tests/)\n"
+    "3. **Why did nobody check it?** No check existed. (systemic: missing guardrail)\n\n"
+    "## Contributing factors\n- Friday deploy.\n\n"
+    "## Fix\nReverted in commit 3f9a1c2; verified by CI run 4821.\n\n"
+    "## Prevention\n- [ ] Add a config check (owner: platform; check: CI run 4821 green)\n\n"
+    "## Links\n- Issue #123\n"
+)
+
+
+def check_factory_trust_ba(old, new):
+    s = "bug-autopsy"
+    scratch = tempfile.mkdtemp()
+
+    def lint_passes(tree, name, text):
+        """1 if the tree's postmortem_lint.py exits 0 on `text`, else 0."""
+        lint = os.path.join(tree, s, "assets", "postmortem_lint.py")
+        if not os.path.isfile(lint):
+            return 0
+        path = os.path.join(scratch, "%s-%s.md" % (os.path.basename(tree), name))
+        with open(path, "w") as f:
+            f.write(text)
+        r = subprocess.run([sys.executable, lint, path], capture_output=True,
+                           text=True, timeout=60)
+        return 1 if r.returncode == 0 else 0
+
+    def bad_that_lint_pass(tree):
+        return (lint_passes(tree, "evidence_none", _BA_EVIDENCE_NONE)
+                + lint_passes(tree, "unfilled_placeholder", _BA_UNFILLED_PLACEHOLDER))
+
+    a, b = bad_that_lint_pass(old), bad_that_lint_pass(new)
+    row(s, "evidence-none / unfilled-placeholder post-mortems that lint-pass "
+           "(lower=better)",
+        a, b, b == 0 and a == 2,
+        "`evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / "
+        "file:line>` placeholder satisfied the declared-basis escape hatch, "
+        "which matched the evidence:/systemic: LABEL and never looked at "
+        "the value",
+        since=SINCE_FACTORY_TRUST_BA)
+
+    ga = lint_passes(old, "good", _BA_GOOD)
+    gb = lint_passes(new, "good", _BA_GOOD)
+    row(s, "known-good, evidence-cited post-mortem still lint-passes",
+        ga, gb, ga == 1 and gb == 1,
+        "a real citation (file:line, sha, CI run), free-text absence "
+        "evidence, and a genuine systemic conclusion must keep passing",
+        kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4788,6 +4872,7 @@ def main():
         check_bcp14(old, REPO)
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
+        check_factory_trust_ba(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
