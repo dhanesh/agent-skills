@@ -18,7 +18,7 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.1"
+  version: "1.2.0"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 
@@ -134,6 +134,8 @@ is useful with zero markers. A model never guesses facts inside a hook. Full con
 2. **Validate with evidence.** When a test/doc/human confirms a relationship is *correct*,
    record it: `WM-VALIDATED: hash_pw uses bcrypt by test:tests/test_auth.py::test_hash`. Only
    `test|ci|doc|human` evidence raises *normative* confidence and flips status to `validated`.
+   Human evidence comes only from the user: they type `WM-VALIDATED: … by human:<name>` in
+   their own message. `wm validate --by human…` exits 2, because the CLI runs with your authority.
 3. **Assert constraints and map referents.** Declare what should hold
    (`WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | …`) and tie
    code to the reality it stands for (`WM-MAPS: billing/refund.py -> stripe/refunds-api`).
@@ -161,7 +163,9 @@ normative correctness improves over time. The loop is detailed in
    or evidence, so untrusted output cannot forge a marker. The two tags that raise the
    ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST NOT be accepted from any channel but the
    user's — an agent quoting a poisoned file back into its own reply MUST NOT be
-   able to validate a fact. Regression tests guard both the direct and the echo path.
+   able to validate a fact. The `wm` CLI runs with the agent's authority, so `wm validate`
+   MUST refuse a `human` evidence kind and `constraint --assert-valid` MUST record `agent_assert`.
+   Regression tests guard the direct path, the echo path and the CLI path.
 4. **Append-only evidence: evidence MUST be soft-invalidated and MUST NOT be hard-deleted.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.
@@ -176,7 +180,7 @@ When a situation genuinely needs an exception to an invariant, you MUST surface 
 
 ## Verifying after install
 
-You MUST confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis
+You MUST confirm the gate passed: `python3 test_world_model.py` (114 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -202,5 +206,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 108-test install gate.
+- `assets/test_world_model.py` — the 114-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.

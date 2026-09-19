@@ -853,6 +853,59 @@ class TestTrustBoundary(Base):
             self.wm.add_evidence("interaction", iid, "totally_made_up", "x")
 
 
+class TestCliCannotSelfCertify(Base):
+    """The CLI runs with the agent's authority, so it must never mint human evidence.
+    Human validation enters only as a user-typed WM-VALIDATED marker (invariant 3)."""
+
+    def _cli(self, *argv):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = W.main(["--db", self.cli_db, *argv])
+        return rc, buf.getvalue()
+
+    def setUp(self):
+        super().setUp()
+        self.cli_db = os.path.join(self.tmp, "cli.db")
+        self._cli("observe", "hash_pw", "uses", "bcrypt")
+
+    def _rows(self, sql):
+        wm = W.WorldModel(self.cli_db)
+        try:
+            return wm.conn.execute(sql).fetchall()
+        finally:
+            wm.close()
+
+    def test_cli_refuses_named_human_validation(self):
+        rc, out = self._cli("validate", "hash_pw,uses,bcrypt", "--by", "human:alice")
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(out)["error"], "human_evidence_not_accepted_from_cli")
+        self.assertIn("WM-VALIDATED", out)
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE evidence_kind='human'"), [])
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='validate'"), [])
+        self.assertEqual(self._rows("SELECT validation FROM interaction")[0][0], "unverified")
+
+    def test_cli_refuses_bare_human_validation(self):
+        rc, out = self._cli("validate", "hash_pw,uses,bcrypt", "--by", "human")
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(out)["error"], "human_evidence_not_accepted_from_cli")
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='validate'"), [])
+
+    def test_assert_valid_records_agent_assert_not_human(self):
+        rc, _ = self._cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
+                          "--params", '{"patterns":["md5"]}', "--assert-valid")
+        self.assertEqual(rc, 0)
+        rows = self._rows("SELECT evidence_kind, agent FROM evidence WHERE fact_kind='constraint'")
+        self.assertEqual([tuple(r) for r in rows], [("agent_assert", "wm-cli")])
+
+    def test_refute_unknown_kind_is_a_clean_error(self):
+        rc, out = self._cli("refute", "hash_pw,uses,bcrypt", "--by", "rumor:x")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("error", json.loads(out))
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='refute'"), [])
+
+
 class TestExecEdgeParsing(unittest.TestCase):
     """parse_exec_edges is structural, high-precision, and never inspects output."""
 

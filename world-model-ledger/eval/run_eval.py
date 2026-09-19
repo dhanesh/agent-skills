@@ -109,6 +109,27 @@ def main():
             check("ontology rejects a domain/range-impossible triple", rejected)
         finally:
             wm.close()
+
+        # NEGATIVE: the CLI runs with the agent's authority, so an agent-run
+        # `validate --by human:x` must not validate (invariant 3). Human evidence
+        # enters only as a WM-VALIDATED marker typed in the user's own message.
+        cdb = os.path.join(tmp, "cli.db")
+        wcli = os.path.join(dst, "assets", "wm.py")
+        subprocess.run([sys.executable, wcli, "--db", cdb, "observe", "hash_pw", "uses", "bcrypt"],
+                       capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, wcli, "--db", cdb, "validate",
+                            "hash_pw,uses,bcrypt", "--by", "human:x"],
+                           capture_output=True, text=True, timeout=30)
+        wm = wmod.WorldModel(cdb)
+        try:
+            human = wm.conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE evidence_kind='human'").fetchone()[0]
+            status = wm.conn.execute("SELECT validation FROM interaction").fetchone()[0]
+        finally:
+            wm.close()
+        check("agent-run `validate --by human:x` is refused and does not validate",
+              r.returncode != 0 and human == 0 and status == "unverified",
+              f"rc={r.returncode} human_rows={human} status={status}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
