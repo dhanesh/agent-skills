@@ -33,19 +33,21 @@ carries unit tests, eval negatives and an A/B row:
 - **world-model-ledger 1.2.0.** The `wm` CLI no longer lets an agent self-certify human
   evidence. `wm validate --by human[:name]` and `wm refute --by human` exit 2, and
   `constraint --assert-valid` records agent-asserted evidence that raises no normative
-  confidence. Human evidence comes only from markers the user types. Residual, documented:
+  confidence. The sanctioned route for human evidence is a marker the user types. Residual, documented:
   a shell-capable agent could still forge a transcript. Real provenance for human decisions is
   a design input for the autonomy grant (§6).
 - **base-in-reality 1.2.0.** The refutation vote follows the verdict rubric: any refute
-  downgrades a critical/high finding, two refutes downgrade any other, a missing or crashed
-  vote counts as a refute, and the report linter rejects a surviving finding without recorded
-  votes.
-- **verifier-installer.** The Python format rail is a real formatter check (`ruff format --check`
+  downgrades a critical/high finding (or one with a missing or unknown severity), two refutes
+  downgrade a medium/low one, a missing or crashed vote counts as a refute, and the report
+  linter rejects a surviving finding without recorded votes.
+- **verifier-installer 1.1.0.** The Python format rail is a real formatter check (`ruff format --check`
   or `black --check`) when the repo already adopts one. Otherwise it is a `make format`
   placeholder that stays red and is reported as unproven. It is never `compileall`, which is a
   syntax check. The Go format rail now fails when `gofmt -l` lists files.
-- **bug-autopsy.** The post-mortem linter rejects `evidence: none` and other null or
-  placeholder evidence values (`tbd`, `unknown`, `n/a` and similar), not just a missing label.
+- **bug-autopsy 1.1.0.** The post-mortem linter rejects `evidence: none` and other null or
+  placeholder evidence values (`tbd`, `unknown`, `n/a`, `n.a.` and similar), not just a missing label.
+- **README Q2 re-judged by Jev after the factory section:** no (0.97) → partly (0.80); 'would a
+  new user know which skills to install' P(yes) 0.09 → 0.63; the section judged honest P=0.97.
 
 Nothing else in this document has been re-measured since.
 
@@ -287,7 +289,7 @@ Ranked by how much each blocks the acceptance test (Q1, Q2, Q3).
 | 2 | **No autonomy grant or gate policy**: C10's "unless" has no artifact. Per-skill hard gates (verifier-installer, test-safety-net, the handoff) cannot be pre-approved. No reversibility tags, no pipeline budget or stop rules. | Q3 | 4, plus the grant *writer* in 3 |
 | 3 | **Decision closure missing in planning**: Open questions do not block, are not in the envelope, and there are no `depends_on`/waves or typed constraints, so an executor can't schedule the plan or know that every decision was made. | Q3, Q1 | 3 |
 | 4 | **Contract adoption is 2 of 19, with one kind**: every other link is prose. There is no `loop-spec`, `rails-audit`, `verifier-loop`, `seam-list` or `review-findings` kind, so "discover and use each other" is true for one edge only. Installed copies predate the contract. | Q1 | 3 and 4 (kinds), plus the portability retrofit |
-| 5 | **README has no stage map, recipes, handoff table, or autonomy statement** (Jev P(yes)=0.09). This is cheap to fix and should track each roadmap step. | Q2 | any; do it now and update it per step. *Partly addressed with this document (see §5 status); not re-judged.* |
+| 5 | **README has no stage map, recipes, handoff table, or autonomy statement** (Jev P(yes)=0.09). This is cheap to fix and should track each roadmap step. | Q2 | any; do it now and update it per step. *Partly addressed (Jev re-judged: partly, 0.80); section 4 open.* |
 | 6 | **Release/deploy and ops intake missing**: CI exists, but no release, rollout, rollback or live incident intake. bug-autopsy is post-hoc only. | Q1 | 5 |
 | 7 | **Business loop missing**: idea validation, support/feedback, growth/monetisation/analytics, spend governor. | Q1 (full factory) | 6 |
 | 8 | **Trust bugs that would poison unattended evidence**: world-model-ledger `--by human` self-certification; base-in-reality 2-of-3 vote vs the unanimity rubric; verifier-installer python "format" = `compileall` (a syntax check, not a formatter); bug-autopsy accepting `evidence: none`. In unattended mode, weak oracles become false PROVEN. | Q3 (quality of autonomy) | *Fixed on `fix/factory-trust-bugs`; see "Since this assessment".* |
