@@ -257,3 +257,10 @@ Skills appear in rewrite order.
 | c2 | 47 | - **Evidence or inference, labeled.** Every timeline entry and every "why" cite… | MUST (0.36, 0.51) | MUST | confidence 0.36 < 0.6, decided ourselves; mechanically enforced by `assets/postmortem_lint.py`'s evidence-citation FAIL check |
 | c3 | 51 | - **Blameless, structurally.** Root causes are systemic — a missing guardrail,… | plain (0.42, 0.34) | plain | harm 0.34 < 0.5, no gate enforces it — the lint's blame-phrasing check is an advisory WARN, not a FAIL |
 | c4 | 55 | - **Boundaries.** This skill explains failures that already happened. Live deb… | plain (0.38, 0.44) | MUST NOT | controller ruling per task brief: "refuses live incidents" is a MUST NOT (this skill's refusal to be used for live debugging/on-call triage) |
+
+## knowledge-gardener (2 candidates · 1 MUST · 1 SHOULD · 0 MAY · 0 plain · 1 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 31 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.77) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c2 | 104 | - **Never silently rely on a stale explainer** — the whole point of the pins is… | MUST (0.16, 0.41) | SHOULD NOT | confidence 0.16 < 0.6, decided ourselves; harm 0.41 < 0.5 caps it below MUST — no gate or test can enforce a conversational disclosure step |
