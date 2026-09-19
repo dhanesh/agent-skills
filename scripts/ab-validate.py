@@ -182,6 +182,8 @@ SINCE_TSN_NODE_FFI = "5d46f99"  # test-safety-net: node 26's new `ffi` builtin
 # is marked (subprocess) and recorded as a guard residual, not left unclassified.
 SINCE_BCP14 = "8179b71"  # BCP 14 across skills: every SKILL.md declares RFC 2119/8174
 # keywords (PP-7) and marks its hard rules with them.
+SINCE_FACTORY_TRUST_WM = "391cd4a"  # world-model-ledger: the wm CLI refuses
+# `validate --by human...` and `--assert-valid` records agent_assert, not human.
 
 
 def _git_out(*args):
@@ -345,6 +347,32 @@ n = wm.conn.execute("SELECT COUNT(*) c FROM interaction i JOIN entity s "
 print(json.dumps({"forged": n}))
 """
 
+# The wm CLI runs with the agent's authority. If it accepts `--by human:<name>`
+# or mints human evidence on `--assert-valid`, an agent self-certifies the most
+# entrenched evidence kind with one Bash call. The user's own WM-VALIDATED
+# marker must keep working: that is the sanctioned human path.
+WM_CLI_HUMAN = r"""
+import contextlib, io
+import world_model as W, harvest as H
+db = os.path.join(tempfile.mkdtemp(), "m.db")
+def cli(*a):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return W.main(["--db", db, *a])
+cli("observe", "hash_pw", "uses", "bcrypt")
+cli("validate", "hash_pw,uses,bcrypt", "--by", "human:alice")
+cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
+    "--params", '{"patterns":["md5"]}', "--assert-valid")
+wm = W.WorldModel(db)
+minted = wm.conn.execute("SELECT COUNT(*) c FROM evidence "
+                         "WHERE evidence_kind='human'").fetchone()["c"]
+wm2 = W.WorldModel(os.path.join(tempfile.mkdtemp(), "u.db"))
+H.apply_markers(wm2, [("user", "WM-VALIDATED: hash_pw uses bcrypt by human:alice")])
+wm2.consolidate()
+v = wm2.conn.execute("SELECT COUNT(*) c FROM interaction "
+                     "WHERE validation='validated'").fetchone()["c"]
+print(json.dumps({"minted": minted, "user_validated": v}))
+"""
+
 def check_world_model(old, new):
     s = "world-model-ledger"
     a, b = (probe(t, s + "/assets", WM_ADVERSARIAL) for t in (old, new))
@@ -387,6 +415,17 @@ def check_world_model(old, new):
         "the direct tool_result channel was excluded, but an agent quoting a file "
         "back into its own reply re-emitted the marker into the trusted channel",
         since=SINCE_ONTOLOGY)
+
+    a, b = (probe(t, s + "/assets", WM_CLI_HUMAN) for t in (old, new))
+    row(s, "human evidence rows the agent-run CLI mints (lower=better)",
+        a.get("minted"), b.get("minted"),
+        b.get("minted", 9) == 0 and (a.get("minted") or 0) > 0,
+        "validate --by human:alice + constraint --assert-valid",
+        since=SINCE_FACTORY_TRUST_WM)
+    row(s, "user-channel WM-VALIDATED by human still validates",
+        a.get("user_validated"), b.get("user_validated"),
+        a.get("user_validated") == b.get("user_validated") == 1,
+        "the sanctioned human path is not disarmed", kind="guard")
 
 
 # ── context-hygiene-kit ─────────────────────────────────────────────────────
