@@ -18,7 +18,7 @@ Skills appear in rewrite order.
 
 **Line numbers** are as of the BCP 14 rewrite. Later edits to a SKILL.md can shift them, and the rows are not renumbered.
 
-## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
+## test-safety-net (29 candidates · 11 MUST · 0 SHOULD · 0 MAY · 18 plain · 16 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -45,10 +45,12 @@ Skills appear in rewrite order.
 | c21 | 470 | 2. **Never writes a test that performs real I/O.** Enforced by the tier-aware runtime gua… | MUST (0.94, 0.83) | MUST |  |
 | c22 | 473 | 3. **Never ships an unproven test.** A test that did not go RED is discarded and listed u… | MUST (0.88, 0.66) | MUST |  |
 | c23 | 475 | 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the… | MUST (0.92, 0.77) | MUST |  |
-| c24 | 477 | 5. **Hard gate before writing** — step 3's confirmation happens before any test file is t… | MUST (0.86, 0.76) | MUST |  |
+| c24 | 477 | 5. **Hard gate before writing** — step 3's confirmation happens before any test file is t… | MUST (0.86, 0.76) | MUST | (no departure) changed in 1.4.0 (autonomy-grant Task 7, now line 489): "…MUST happen before any test file is touched, unless `check-grant … --action local_reversible` exits 0; then you MAY write tests without asking, and MUST name the grant id and action class in the report. A grant never lifts Invariant 1." Still MUST: the grant is the one release, and it never reaches source edits |
 | c25 | 484 | > Emit every captured value with `repr()`. Never build a test's expected value by string… | MUST (0.97, 0.82) | MUST |  |
 | c26 | 519 | **Promoted units** get a line in the report naming the ranker's original tier, the tier u… | MUST (0.73, 0.44) | plain | harm 0.44 caps it at SHOULD, and a SHOULD here would contradict step 2's MUST NOT (c7) for the same rule; left as its restatement |
 | c27 | 522 | **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurre… | plain (0.36, 0.16) | plain |  |
+| c28 | 171 | 3. **Confirm with the user before writing anything.** … This is a hard gate — you MUST NOT proceed past it unconfirmed, unless `check-grant --root <repo> --action local_reversible` exits 0 …; then you MAY proceed without asking, and MUST name the grant id and action class in the report. | not judged (new in 1.4.0, autonomy-grant Task 7) | MUST | the step-3 write gate (design spec §5): was plain "do not proceed past it unconfirmed"; keyworded to match Invariant 5 (c24) now that it carries the grant clause; counted once at MUST, the MAY being the option the grant opens; eval checks 53-54 grade both places |
+| c29 | 548 | This skill follows [skill-contract v1](…). It consumes autonomy grants, which only lift step 3's confirmation, … | not judged (new in 1.4.0, autonomy-grant Task 7) | plain | describes the skill-contract adoption, like crafting-self-prompting-loops c10; the rule it points at is carried by c24 and c28 |
 
 ## world-model-ledger (10 candidates · 7 MUST · 0 SHOULD · 0 MAY · 3 plain · 6 departures)
 

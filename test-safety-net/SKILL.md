@@ -4,14 +4,15 @@ description: >-
   Author unit tests into a Python, node/TypeScript, Go or Rust codebase that has none, so an agent
   can change it safely. Use when a repo has no meaningful tests, when someone says "I don't trust an
   agent in this codebase", "add tests before we refactor", or "we need a safety net before this
-  migration" — and equally for a JS/TS repo with no `*.test.js`, a Go module with no `_test.go`,
+  migration" — or for a JS/TS repo with no `*.test.js`, a Go module with no `_test.go`,
   or a Rust crate with no `tests/`. Ranks units by blast radius and churn, then writes
-  characterization tests that pin current behaviour — each one proved able to FAIL before it is
-  kept, so the suite is a real change-detector. Every test declares whether it pins behaviour or
-  asserts a spec; suspected bugs are pinned AND reported, never blessed. Untestable code is
-  triaged, not forced: it becomes a ranked seam list for clean-code. Never modifies your source and
-  never writes a test that performs real I/O. Not a correctness audit and not a coverage chaser.
-  Fills the loop verifier-installer installs; clean-code judges what comes out.
+  characterization tests that pin current behaviour — each proved able to FAIL before it is kept,
+  so the suite detects change. Every test declares whether it pins behaviour or
+  asserts a spec; suspected bugs are pinned AND reported, never blessed. Untestable code becomes
+  a ranked seam list for clean-code. Never modifies your source and never
+  writes a test that performs real I/O. Not a correctness audit or a coverage chaser.
+  Fills verifier-installer's loop; clean-code judges what comes out.
+  Honors a skill-contract autonomy grant at its write gate.
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
@@ -26,7 +27,8 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.3.1"
+  version: "1.4.0"
+  skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
 
@@ -52,10 +54,11 @@ list this skill cannot act on itself (see Tiers 3/4 below). Do not use this to c
 number, to bless current behaviour as correct, or to refactor code to make it testable — that
 inverts the safety property the skill exists to provide (see Invariant 1).
 
-**Locating this skill's helpers (do this first).** Five bundled scripts ship with this skill — the
-stack-agnostic ranker (`assets/rank_risk.py`, step 2) and one runtime I/O guard per stack
+**Locating this skill's helpers (do this first).** Six bundled scripts ship with this skill — the
+stack-agnostic ranker (`assets/rank_risk.py`, step 2), one runtime I/O guard per stack
 (`assets/io_guard.py` for python, `assets/io_guard.js` for node, `assets/io_guard_go.py` for go,
-`assets/io_guard_rust.py` for rust, all step 4). A path written relative to this skill will not
+`assets/io_guard_rust.py` for rust, all step 4) and the skill-contract checker
+(`assets/contract_check.py`, step 3's autonomy-grant check). A path written relative to this skill will not
 resolve from the target repo you're working in. Resolve the base directory once and reuse it
 everywhere:
 
@@ -68,6 +71,7 @@ test -f "$SKILL_DIR/assets/io_guard.py"      || echo "SKILL_DIR not resolved"
 test -f "$SKILL_DIR/assets/io_guard.js"      || echo "SKILL_DIR not resolved"
 test -f "$SKILL_DIR/assets/io_guard_go.py"   || echo "SKILL_DIR not resolved"
 test -f "$SKILL_DIR/assets/io_guard_rust.py" || echo "SKILL_DIR not resolved"
+test -f "$SKILL_DIR/assets/contract_check.py" || echo "SKILL_DIR not resolved"
 ```
 
 The ranker and the python, go and rust guards are stdlib-only python3 — the go guard drives the
@@ -164,7 +168,13 @@ than none, because it makes the invariant look enforced when it is not.
    silently treat a ranker tier as advisory.
 
 3. **Confirm with the user before writing anything.** Show the `ranked` top N (default 10) and
-   the size of `remainder`/`not_netted`. This is a hard gate — do not proceed past it unconfirmed.
+   the size of `remainder`/`not_netted`. This is a hard gate — you MUST NOT proceed past it
+   unconfirmed, unless
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
+   exits 0 (an autonomy grant the user approved covers it); then you MAY proceed without asking,
+   and MUST name the grant id and action class in the report. Exit 3 (ASK or NONE) or 2
+   (INVALID) means ask as usual. A grant lets test-writing proceed and nothing more: Invariant 1
+   still binds, so source stays untouched under a grant too.
 
 4. **Write and prove, one unit at a time.** For each confirmed unit:
    1. Write the test at the unit's tier (unit test at Tier 1; a narrow characterization test at
@@ -476,7 +486,11 @@ than none, because it makes the invariant look enforced when it is not.
    under "could not prove," never shipped.
 4. **You MUST NOT leave the suite red.** End state is a green suite plus suspected bugs in the report. A
    red generated test is a bug in this skill, not an acceptable outcome.
-5. **Hard gate before writing** — step 3's confirmation MUST happen before any test file is touched.
+5. **Hard gate before writing** — step 3's confirmation MUST happen before any test file is touched,
+   unless
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
+   exits 0; then you MAY write tests without asking, and MUST name the grant id and action class
+   in the report. A grant never lifts Invariant 1.
 
 ## The literal-emission rule
 
@@ -528,6 +542,16 @@ the module still counts even when it means something else (a same-named local, o
 from a different module). Qualified forms are exact: `mod.name` counts, `buf.name` does not. Where
 the user already has a real call-graph tool, it computes that half of the score better. This is an
 **optional** upgrade, never a dependency — nothing here or in the eval requires one.
+
+## Contract
+
+This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).
+It consumes autonomy grants, which only lift step 3's confirmation, and it provides no kind of
+its own: the safety-net report is prose.
+
+```json skill-contract
+{"provides": [], "consumes": ["https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"]}
+```
 
 ## Verify and repair
 
