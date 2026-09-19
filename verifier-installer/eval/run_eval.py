@@ -104,28 +104,42 @@ def _grant_fixture(root, asserted_by, gate_policy=None):
         json.dump(st, f)
 
 
+def _git_repo(root):
+    """Make root its own git repo on a non-default branch (main holds one empty commit,
+    HEAD is on factory/x), so check-grant's branch probes find root's .git rather than
+    any repo enclosing TMPDIR. Without git, root stays a plain directory, which
+    check-grant treats as outside git."""
+    if shutil.which("git") is None:
+        return
+    for args in (["init", "-q", "-b", "main"],
+                 ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "--allow-empty", "-m", "x"],
+                 ["checkout", "-q", "-b", "factory/x"]):
+        subprocess.run(["git", "-C", root] + args, check=True, capture_output=True, timeout=60)
+
+
 def _check_grant(root, action="local_reversible"):
-    # GIT_CEILING_DIRECTORIES: a TMPDIR inside a git repo on its default branch
-    # must not turn a covering grant into ASK (the default-branch floor).
-    env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(root))}
     r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
-                        "--action", action], capture_output=True, text=True, timeout=60, env=env)
+                        "--action", action], capture_output=True, text=True, timeout=60)
     return r.returncode, r.stdout.strip()
 
 
 def grant_checks(labels=("", "", "")):
     """The write gate's grant arm: NONE asks, a human grant covers, a skill one is INVALID."""
     with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
         rc, out = _check_grant(t)
         check(labels[0] + "NEGATIVE: no grant -> check-grant exits 3 and the gate must ask",
               rc == 3 and "GRANT: NONE" in out, f"rc={rc} {out[-160:]}")
     with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
         _grant_fixture(t, {"human": "Dana"})
         rc, out = _check_grant(t)
         check(labels[1] + "a human-accepted grant covers local_reversible and names its id",
               rc == 0 and "GRANT: COVERED" in out and GRANT_ID in out,
               f"rc={rc} {out[-160:]}")
     with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
         _grant_fixture(t, {"skill": "spec-first-planning"})
         rc, out = _check_grant(t)
         check(labels[2] + "NEGATIVE: a skill-attributed grant is INVALID (exit 2)",
