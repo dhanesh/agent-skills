@@ -264,3 +264,9 @@ Skills appear in rewrite order.
 |---|---|---|---|---|---|
 | c1 | 31 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.77) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
 | c2 | 104 | - **Never silently rely on a stale explainer** — the whole point of the pins is… | MUST (0.16, 0.41) | SHOULD NOT | confidence 0.16 < 0.6, decided ourselves; harm 0.41 < 0.5 caps it below MUST — no gate or test can enforce a conversational disclosure step |
+
+## repo2skill (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 29 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.73) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
