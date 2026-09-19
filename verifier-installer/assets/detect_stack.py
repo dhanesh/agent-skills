@@ -181,23 +181,95 @@ def _detect_python(root, files, fileset):
     return True, rails
 
 
+# _python_formatter matches STRUCTURE, not bare words — a bare `\bruff\b` /
+# `\bblack\b` scan (the original implementation) also matched a `# black
+# compat` comment, a `description = "Paint it black"` string, an unrelated
+# `black-magic==1.0` / `ruff-lint-only` requirement, and a lint-only
+# `[tool.ruff.lint]` section with no formatter behind it. Each pattern below
+# anchors to a specific structural position instead.
+_RUFF_HEADER_RE = re.compile(r"(?m)^\s*(\[tool\.ruff(?:\.[A-Za-z0-9_]+)?\])")
+_BLACK_HEADER_RE = re.compile(r"(?m)^\s*\[tool\.black(?:\.[A-Za-z0-9_]+)?\]")
+# A requirement/dependency LINE: `ruff`, `ruff==1.0`, `ruff[cli]`, `ruff;
+# python_version<"3.12"` all match; `black-magic==1.0` and `ruff-lint-only`
+# do not, because the character right after the tool name is `-`, which is
+# in neither the version/extras class nor end-of-line.
+_REQUIREMENT_LINE_RE = re.compile(r"(?m)^\s*(ruff|black)\s*(\[[^\]]*\])?\s*([=<>!~;@]|$)")
+# A quoted pyproject dependency STRING: `"ruff>=0.1"`, `'ruff'`, `"ruff[cli]"`.
+_DEP_STRING_RE = re.compile(r"[\"'](ruff|black)\s*([=<>!~\[;]|[\"'])")
+# A pre-commit hook entry naming the tool's repo or hook id specifically.
+_PRECOMMIT_RE = re.compile(r"astral-sh/ruff-pre-commit|psf/black|id:\s*(ruff-format|black)\b")
+
+
+def _strip_hash_comments(text):
+    """Drop everything from an unquoted `#` to end of line.
+
+    Coarse — it doesn't track whether the `#` is inside a quoted string —
+    but that is the safe direction: at worst it under-detects, which
+    declines to the honest placeholder rather than imposing a formatter
+    nobody adopted.
+    """
+    return "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+
+
+def _name_matches(pattern, blob, name):
+    return any(m.group(1) == name for m in pattern.finditer(blob))
+
+
+def _precommit_adopts(blob):
+    """Return (ruff_adopted, black_adopted) from pre-commit hook evidence."""
+    ruff = black = False
+    for m in _PRECOMMIT_RE.finditer(blob):
+        if m.group(0) == "astral-sh/ruff-pre-commit" or m.group(1) == "ruff-format":
+            ruff = True
+        if m.group(0) == "psf/black" or m.group(1) == "black":
+            black = True
+    return ruff, black
+
+
 def _python_formatter(root, files, fileset):
     """The formatter-check command a python repo already adopts, else None.
 
-    Detects adoption the same way a human would: a ruff/black config file, or
-    the tool named in pyproject.toml/setup.cfg/tox.ini/.pre-commit-config.yaml
-    or a requirements*.txt. This skill MAY propose a formatter but SHOULD NOT
-    impose one, so absent any of that evidence it returns None and the caller
-    falls back to the honest placeholder rather than guessing.
+    Detects adoption the same way a human would: a ruff/black config
+    section, config file, pre-commit hook, or a pinned dependency — never a
+    bare word, so a comment, a description string, or an unrelated package
+    name can't trip it (see the pattern comments above). This skill MAY
+    propose a formatter but SHOULD NOT impose one, so absent structural
+    evidence it returns None and the caller falls back to the honest
+    placeholder rather than guessing.
     """
-    blob = "".join(_read(root, f) for f in
-                   ("pyproject.toml", "setup.cfg", "tox.ini",
-                    ".pre-commit-config.yaml") if f in fileset)
-    blob += "".join(_read(root, f) for f in files
-                    if re.match(r"^requirements[A-Za-z0-9_.-]*\.txt$", f))
-    if "ruff.toml" in fileset or ".ruff.toml" in fileset or re.search(r"\bruff\b", blob):
+    config_blob = _strip_hash_comments("".join(
+        _read(root, f) for f in
+        ("pyproject.toml", "setup.cfg", "tox.ini", ".pre-commit-config.yaml")
+        if f in fileset))
+    # Requirements are matched only at the repo root: `re.match` anchors to
+    # the start of the (already root-relative) path, so a nested
+    # requirements*.txt (e.g. a vendored subproject's) never matches here.
+    # A miss just declines to the placeholder rather than proposing a
+    # formatter for a dependency set that isn't this repo's own.
+    req_blob = _strip_hash_comments("".join(
+        _read(root, f) for f in files
+        if re.match(r"^requirements[A-Za-z0-9_.-]*\.txt$", f)))
+    blob = config_blob + "\n" + req_blob
+
+    ruff_headers = _RUFF_HEADER_RE.findall(config_blob)
+    # A `[tool.ruff.lint]`-only section configures rule selection, not
+    # formatting — ruff's linter and formatter are separate subcommands, so
+    # lint-only config must not read as "this repo runs ruff format". A
+    # bare `[tool.ruff]` (settings shared by both) or an explicit
+    # `[tool.ruff.format]` section both do count.
+    ruff_non_lint_header = any(
+        not h.startswith("[tool.ruff.lint") for h in ruff_headers)
+    ruff_toml = "ruff.toml" in fileset or ".ruff.toml" in fileset
+    ruff_precommit, black_precommit = _precommit_adopts(config_blob)
+    ruff_dep = (_name_matches(_REQUIREMENT_LINE_RE, blob, "ruff")
+                or _name_matches(_DEP_STRING_RE, blob, "ruff"))
+    if ruff_non_lint_header or ruff_toml or ruff_precommit or ruff_dep:
         return "ruff format --check ."
-    if re.search(r"\bblack\b", blob):
+
+    black_header = bool(_BLACK_HEADER_RE.search(config_blob))
+    black_dep = (_name_matches(_REQUIREMENT_LINE_RE, blob, "black")
+                 or _name_matches(_DEP_STRING_RE, blob, "black"))
+    if black_header or black_precommit or black_dep:
         return "black --check ."
     return None
 
@@ -293,13 +365,22 @@ def detect(root):
 
     proposals = []
     for rail in missing:
+        # `placeholder` starts True and is cleared only when a real,
+        # stack-specific command is found below. A proposal that stays on
+        # FALLBACK_PROPOSALS (the `make format`/`make build`/`make test`
+        # skeleton, or a python format rail with no adopted formatter) is
+        # never watched go red on a real violation — the plan says so
+        # mechanically, rather than leaving "unproven" to an agent's memory.
+        placeholder = True
         if rail == "ci":
             cmd, path = CI_PROPOSAL
+            placeholder = False
         else:
             cmd, path = FALLBACK_PROPOSALS[rail]
             for stack in STACK_PRIORITY:
                 if stack in stacks and rail in stack_proposals.get(stack, {}):
                     cmd, path = stack_proposals[stack][rail]
+                    placeholder = False
                     break
         # `exists`/`action` rather than a bare `file_to_create`: the detector
         # already knows whether the path is in the tree (it detected the make
@@ -316,6 +397,7 @@ def detect(root):
             "exists": exists,
             "action": "extend" if exists else "create",
             "file_to_create": path,
+            "placeholder": placeholder,
         })
     proposals.sort(key=lambda p: (p["rail"], p["command"], p["file"]))
 

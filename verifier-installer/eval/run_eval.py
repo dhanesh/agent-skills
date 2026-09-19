@@ -99,6 +99,27 @@ def main():
         check("python+ruff fixture: format rail proposes a real ruff check",
               len(ruff_fmt) == 1 and ruff_fmt[0].get("command") == "ruff format --check .",
               str(ruff_fmt))
+        check("M3: adopted-formatter proposal is not marked a placeholder",
+              bool(ruff_fmt) and ruff_fmt[0].get("placeholder") is False,
+              str(ruff_fmt[0].get("placeholder")) if ruff_fmt else "no proposal")
+
+        # NEGATIVE (I1): bare-word matching used to false-positive on a
+        # comment, a description string, an unrelated package name, and a
+        # lint-only ruff section. None of these is a real formatter
+        # adoption, so all must still get the placeholder.
+        falsepos = os.path.join(tmp, "falsepositives")
+        write(falsepos, "pyproject.toml",
+              '[project]\nname = "demo"\ndescription = "Paint it black"\n'
+              '# black compat\n[tool.ruff.lint]\nselect = ["E"]\n')
+        write(falsepos, "requirements.txt", "black-magic==1.0\nruff-lint-only==2.0\n")
+        r = run_detector(falsepos)
+        fp_plan = json.loads(r.stdout) if r.returncode == 0 else {}
+        fp_fmt = [p for p in fp_plan.get("proposals", []) if p.get("rail") == "format"]
+        check("NEGATIVE I1: comment/description/unrelated-package/lint-only-ruff "
+              "are not read as an adopted formatter",
+              len(fp_fmt) == 1 and fp_fmt[0].get("command") == "make format"
+              and fp_fmt[0].get("placeholder") is True,
+              str(fp_fmt))
 
         # ── Fixture 2: node repo with real scripts + existing workflow ──────
         nd = os.path.join(tmp, "nodrepo")

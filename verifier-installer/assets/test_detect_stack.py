@@ -96,6 +96,59 @@ class TestPythonDetection(TempRepoCase):
         self.assertEqual(len(fmt_props), 1)
         self.assertEqual(fmt_props[0]["command"], "black --check .")
 
+    # ── I1: false-positive adoption (bare-word matching used to accept all
+    # of these) ──────────────────────────────────────────────────────────
+
+    def test_comment_mentioning_black_is_not_adoption(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n# black compat\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_description_string_mentioning_black_is_not_adoption(self):
+        write(self.root, "pyproject.toml",
+              '[project]\nname = "x"\ndescription = "Paint it black"\n')
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_black_magic_requirement_is_not_black_adoption(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        write(self.root, "requirements.txt", "black-magic==1.0\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_ruff_lint_only_requirement_name_is_not_ruff_adoption(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        write(self.root, "requirements.txt", "ruff-lint-only==2.0\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_lint_only_ruff_section_is_not_format_adoption(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n[tool.ruff.lint]\nselect = [\"E\"]\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    # ── M3: the plan mechanically marks a fallback proposal as a placeholder
+
+    def test_no_formatter_proposal_is_marked_placeholder(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertTrue(fmt_props[0]["placeholder"])
+
+    def test_adopted_ruff_proposal_is_not_marked_placeholder(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n[tool.ruff]\nline-length = 100\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertFalse(fmt_props[0]["placeholder"])
+
     def test_go_format_rail_fails_on_unformatted(self):
         # `gofmt -l .` lists offending files but still exits 0 — it never
         # fails the rail. Wrap it in `test -z` so the rail can actually go

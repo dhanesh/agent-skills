@@ -37,19 +37,26 @@ if __name__ == "__main__":
 
 Add (or extend) a `Makefile` verify entrypoint. `detect_stack.py` proposes the
 `format` target from what the repo already adopts: `ruff format --check .` when
-it finds `[tool.ruff]`/`ruff.toml`/a `ruff` dependency, `black --check .` for the
-black equivalent, and otherwise the loudly-failing placeholder from the
-Make-only section below — never `compileall`, which checks syntax, not
-formatting, and would give a "format" rail that can never go red on a
-formatting violation:
+it finds structural evidence of ruff (a `[tool.ruff]`/`[tool.ruff.format]`
+section, `ruff.toml`, a pinned `ruff` dependency, or a `ruff-format`
+pre-commit hook — a lint-only `[tool.ruff.lint]` section alone does not
+count), `black --check .` for the black equivalent, and otherwise the
+loudly-failing placeholder from the Make-only section below — never
+`compileall`, which checks syntax, not formatting, and would give a "format"
+rail that can never go red on a formatting violation. The placeholder is the
+**default**; only replace it with the real command when the plan's proposal
+actually says so:
 
 ```makefile
 .PHONY: format build test verify
 
 format:
-	ruff format --check .              # or: black --check .  — only if the repo
-	                                    # already adopts one; otherwise install the
-	                                    # TODO placeholder from the Make-only section
+	@echo "TODO: wire the repo's formatter here" && exit 1
+	# Only if `detect_stack.py`'s plan proposed one (the repo already
+	# adopted it), replace the line above with the exact command from the
+	# plan instead:
+	#   ruff format --check .      # adopted via pyproject/pre-commit/ruff.toml
+	#   black --check .            # adopted via pyproject/pre-commit/requirements
 
 build:
 	python3 -m compileall -q -f .
@@ -69,19 +76,27 @@ matters: without it, `compileall` skips a file whose compiled `.pyc` header
 in the same second as the previous run goes undetected — a false green in
 exactly the fast edit→verify loop an agent runs. Do not start a style debate
 this skill is not for: propose a formatter check only when the repo already
-adopted one.
+adopted one — `detect_stack.py`'s plan marks every fallback proposal
+`"placeholder": true`, so read that field rather than guessing.
 
-**Prove the loop.** These are two different breaks for two different rails —
-do not use the syntax break to "prove" format:
+**Prove the loop.** `build` and `test` do not depend on `format` — prove them
+against their OWN targets (`make build`, `make test`), never through `make
+verify`. When `format` is the placeholder it exits non-zero on purpose and
+`verify`'s chain (format → build → test) never reaches `build`/`test` at all,
+so `make verify` cannot be the proof for either of them:
 
-- **build**: append `def broken(:` to any tracked `.py` file → `make verify`
+- **build**: append `def broken(:` to any tracked `.py` file → `make build`
   goes red at the compile step. Revert the line → green.
 - **format** (only if a formatter check was installed): violate the adopted
-  formatter's rule — e.g. under ruff/black, misindent a line or remove a
-  required blank line — → `make format` goes red. Run `ruff format .` (or
-  `black .`) or revert by hand → green. If no formatter was installed, the
-  `format` rail is the placeholder: leave it red and report it unproven
-  rather than inventing a break for a rail that does not exist yet.
+  formatter's rule with a pure style change that stays syntactically valid —
+  e.g. `x=1` → `x  =  1` (never misindent a line: in python that's a syntax
+  error, so it would trip `build`, not prove `format`) → `make format` goes
+  red. Run `ruff format .` (or `black .`) or revert by hand → green.
+- If no formatter was installed, `format` is the placeholder: leave it red,
+  and state plainly in the install summary that `make verify` and CI stay
+  red on the format step until the owner wires a real formatter — that
+  belongs in "Follow-ups for the owner", not something this skill fixes for
+  them.
 
 ## Node
 

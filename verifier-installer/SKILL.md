@@ -123,15 +123,20 @@ You SHOULD end with this report:
 | ci     | push/PR triggers <workflow path> | ... | ... |
 
 Skipped (already present): <rails the plan found existing, with their commands>
-Follow-ups for the owner: <branch protection, placeholder targets to fill, …>
+Follow-ups for the owner: <branch protection, wire a real formatter — `make verify`
+  and CI stay red on the format step until then, …>
 ```
 
-When a rail is a placeholder that was never watched go red and back to green — most
-commonly `format` on a python repo with no adopted formatter — report it as `unproven
-(no formatter adopted)`, not `red→green demonstrated`. The `make format` placeholder
-exits non-zero until the owner wires a real formatter; that is not the same as a rail
-you proved catches a violation, and reporting it as demonstrated is a false claim the
-next agent will trust.
+`detect_stack.py`'s plan marks this mechanically: every proposal carries a `placeholder`
+field, `true` for a fallback (the `make format`/`make build`/`make test` skeleton, or a
+python format rail with no adopted formatter) and `false` for a real, stack-specific
+command. Read that field rather than guessing. When a rail's proposal was `placeholder:
+true` — most commonly `format` on a python repo with no adopted formatter — it was never
+watched go red and back to green; report it as `unproven (no formatter adopted)`, not
+`red→green demonstrated`, and say plainly that `make verify` and CI stay red on that step
+until the owner wires one. That is not the same as a rail you proved catches a violation,
+and reporting it as demonstrated is a false claim the next agent will trust — put wiring
+it in "Follow-ups for the owner" instead.
 
 The loop now runs, but its `test` rail proves only the smoke test this skill wrote — it does not
 mean the codebase is netted. Point the owner at `test-safety-net` to fill it with real,
