@@ -4912,6 +4912,128 @@ def check_autonomy_grant(old, new):
         c = checker(tree)
         return 1 if os.path.isfile(c) and '"check-grant"' in open(c, encoding="utf-8").read() else 0
 
+    gid = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+
+    def build(asserted_by, policy=None):
+        # A plain, non-git temp dir (mirrors docs/skill-contract/reference/
+        # test_e2e.py's GrantE2ETests): in_git_work_tree() walks the
+        # filesystem, never git, so no GIT_CEILING_DIRECTORIES is needed —
+        # there is simply no .git to find above an OS tempdir.
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "docs"))
+        spec = "# Spec\n"
+        open(os.path.join(root, "docs", "spec.md"), "w").write(spec)
+        plan = '{"tasks": []}\n'
+        open(os.path.join(root, "plan.json"), "w").write(plan)
+        st = {"_type": "https://in-toto.io/Statement/v1",
+              "subject": [{"name": "docs/spec.md",
+                           "digest": {"sha256": hashlib.sha256(spec.encode()).hexdigest()}},
+                          {"name": "plan.json",
+                           "digest": {"sha256": hashlib.sha256(plan.encode()).hexdigest()}}],
+              "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
+              "predicate": {"skillContract": "1", "id": gid,
+                            "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                            "generatedAtTime": _now_z(), "wasRevisionOf": None,
+                            "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
+                                        "decisions": [], "defaults": [],
+                                        "gate_policy": policy or {"local_reversible": "grant"},
+                                        "budget": {}, "stop_on": [],
+                                        "expires_at": _in_one_day(),
+                                        "system_one": {"allowed": False}, "revoked": False},
+                            "assertions": [{"test": "grant-accepted",
+                                            "assertedBy": asserted_by,
+                                            "result": {"outcome": "passed"},
+                                            "command": ["{python}",
+                                                        "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                                        "--unattended", "docs/spec.md"]}]}}
+        d = os.path.join(root, ".skill-contract", "envelopes")
+        os.makedirs(d)
+        json.dump(st, open(os.path.join(d, gid + ".json"), "w"))
+        return root
+
+    def run_check(tree, root, action="local_reversible"):
+        r = subprocess.run([sys.executable, checker(tree), "check-grant", "--root", root,
+                            "--action", action], capture_output=True, text=True, timeout=60)
+        return r.returncode, r.stdout
+
+    def git(root, *args):
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "-c", "commit.gpgsign=false"] + list(args),
+                       check=True, capture_output=True, timeout=60)
+
+    def factory_repo(root):
+        """root as its own repo: main holds one empty commit, HEAD on factory/x."""
+        git(root, "init", "-q", "-b", "main")
+        git(root, "commit", "-q", "--allow-empty", "-m", "x")
+        git(root, "checkout", "-q", "-b", "factory/x")
+
+    def commit_file(root, rel, text, force=False):
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").write(text)
+        git(root, "add", *(["-f"] if force else []), rel)
+        git(root, "commit", "-q", "-m", "c")
+
+    def git_probe(tree, what, probe_fn):
+        """Run a git-backed probe; any git failure is a PROBE_ERROR, never a pass."""
+        if shutil.which("git") is None:
+            PROBE_ERRORS.append((tree, "docs/skill-contract/reference/contract_check.py",
+                                 "%s needs git, which is not installed" % what))
+            return None
+        try:
+            return probe_fn()
+        except (OSError, subprocess.SubprocessError) as exc:
+            PROBE_ERRORS.append((tree, "docs/skill-contract/reference/contract_check.py",
+                                 "%s: git fixture failed: %s" % (what, exc)))
+            return None
+
+    def tracked_covers(tree):
+        """1 if a COMMITTED grant still covers local_reversible (bad); else 0.
+        None (PROBE_ERRORS) if the sanity arm fails: the same grant, untracked,
+        in the same repo on factory/x MUST be COVERED, or a 0 would prove nothing."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "tracked-grant sanity check failed: the untracked grant was not "
+                    "COVERED (check-grant exit %d)" % rc))
+                return None
+            commit_file(root, ".skill-contract/envelopes/%s.json" % gid,
+                        open(os.path.join(root, ".skill-contract", "envelopes",
+                                          gid + ".json")).read(), force=True)
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "tracked-grant probe", go)
+
+    def ci_push_refused(tree):
+        """1 if check-grant refuses (ASK ci-config) a granted push whose commits add
+        a workflow; else 0. None (PROBE_ERRORS) if the sanity arm fails: a push of
+        a plain source commit under the same grant MUST be COVERED."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"}, {"local_reversible": "grant", "push_branch": "grant"})
+            factory_repo(root)
+            commit_file(root, "src/a.py", "x = 1\n")
+            rc, out = run_check(tree, root, "push_branch")
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "ci-config sanity check failed: a granted push of src/a.py was not "
+                    "COVERED (check-grant exit %d: %s)" % (rc, out.strip()[-120:])))
+                return None
+            commit_file(root, ".github/workflows/x.yml", "on: push\n")
+            rc, out = run_check(tree, root, "push_branch")
+            return 1 if rc == 3 and "reason=ci-config" in out else 0
+        return git_probe(tree, "ci-config probe", go)
+
     def forged_accepted(tree):
         """1 if a SKILL-attributed (self-certified) grant is COVERED (bad); else 0.
         None if the sanity check below fails (recorded in PROBE_ERRORS instead).
@@ -4927,50 +5049,9 @@ def check_autonomy_grant(old, new):
         """
         if not decides(tree):
             return 0
-        gid = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
-
-        def build(asserted_by):
-            # A plain, non-git temp dir (mirrors docs/skill-contract/reference/
-            # test_e2e.py's GrantE2ETests): in_git_work_tree() walks the
-            # filesystem, never git, so no GIT_CEILING_DIRECTORIES is needed —
-            # there is simply no .git to find above an OS tempdir.
-            root = tempfile.mkdtemp()
-            os.makedirs(os.path.join(root, "docs"))
-            spec = "# Spec\n"
-            open(os.path.join(root, "docs", "spec.md"), "w").write(spec)
-            plan = '{"tasks": []}\n'
-            open(os.path.join(root, "plan.json"), "w").write(plan)
-            st = {"_type": "https://in-toto.io/Statement/v1",
-                  "subject": [{"name": "docs/spec.md",
-                               "digest": {"sha256": hashlib.sha256(spec.encode()).hexdigest()}},
-                              {"name": "plan.json",
-                               "digest": {"sha256": hashlib.sha256(plan.encode()).hexdigest()}}],
-                  "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
-                  "predicate": {"skillContract": "1", "id": gid,
-                                "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
-                                "generatedAtTime": _now_z(), "wasRevisionOf": None,
-                                "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
-                                            "decisions": [], "defaults": [],
-                                            "gate_policy": {"local_reversible": "grant"},
-                                            "budget": {}, "stop_on": [],
-                                            "expires_at": _in_one_day(),
-                                            "system_one": {"allowed": False}, "revoked": False},
-                                "assertions": [{"test": "grant-accepted",
-                                                "assertedBy": asserted_by,
-                                                "result": {"outcome": "passed"},
-                                                "command": ["{python}",
-                                                            "{skill_dir:spec-first-planning}/assets/spec_lint.py",
-                                                            "--unattended", "docs/spec.md"]}]}}
-            d = os.path.join(root, ".skill-contract", "envelopes")
-            os.makedirs(d)
-            json.dump(st, open(os.path.join(d, gid + ".json"), "w"))
-            return root
 
         def check(root):
-            r = subprocess.run([sys.executable, checker(tree), "check-grant", "--root", root,
-                                "--action", "local_reversible"], capture_output=True, text=True,
-                               timeout=60)
-            return r.returncode
+            return run_check(tree, root)[0]
 
         forged_rc = check(build({"skill": "spec-first-planning"}))
 
@@ -5003,6 +5084,16 @@ def check_autonomy_grant(old, new):
         "a grant only counts when a human accepted it — sanity-checked against "
         "a human-attributed grant of the same shape, which the new tree's "
         "checker DOES accept", kind="guard")
+    a, b = tracked_covers(old), tracked_covers(new)
+    row(s, "a committed (tracked) grant covers local_reversible", a, b, a == 0 and b == 0,
+        "a grant is one person's acceptance: committed, it would cover every clone. Built "
+        "in a real repo on factory/x with the grant committed; sanity-checked against the "
+        "same grant untracked, which the new tree's checker DOES cover", kind="guard")
+    a, b = ci_push_refused(old), ci_push_refused(new)
+    row(s, "CI-config push under a grant is refused by the checker", a, b, a == 0 and b == 1,
+        "a granted push whose commits add .github/workflows/x.yml answers ASK ci-config: CI "
+        "runs with the repository's secrets, so that push is deploy (A8); sanity-checked "
+        "against a granted push of src/a.py, which stays COVERED", since=SINCE_AUTONOMY_GRANT)
 
 
 def main():
