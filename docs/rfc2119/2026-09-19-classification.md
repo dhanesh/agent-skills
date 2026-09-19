@@ -95,3 +95,40 @@ Skills appear in rewrite order.
 | c12 | 253 | \`webhookHints[]\` → \`webhooks[]\` on the triggering entry. When a hint carries \`sig… | MUST (0.82, 0.82) | MUST |  |
 | c13 | 379 | **Consequence for this skill:** if \`--tenant\` is not \`default\`, every consumer —… | MUST (0.80, 0.82) | plain | the only always ("the CLI serve path always enables path + header modes") describes default CLI config, not a directive; not under a hard-rule heading |
 | c14 | 464 | The skill's asset helpers (\`assets/extract_text.py\`, \`assets/smoke.sh\`) live in t… | MUST (0.81, 0.81) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+
+## clean-code (32 candidates · 0 MUST · 16 SHOULD · 0 MAY · 16 plain · 3 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 29 | A working guide to Robert C. Martin's principles. The aim is not to recite rules — … | plain (0.94, 0.16) | plain |  |
+| c2 | 34 | But *clean* means **as simple as the problem allows**, never as elaborate as possi… | plain (0.57, 0.20) | plain |  |
+| c3 | 39 | This file (L1) is always active. Apply it to every function, class, or module you … | MUST (0.44, 0.23) | plain | describes the skill's always-loaded scope; harm 0.23 <0.5, no gate — the imperative that follows is a workflow step |
+| c4 | 72 | 1. Run the suite. Green? Refactor. Red? Fix or report the failure first — never re… | MUST (0.55, 0.43) | SHOULD | harm 0.43 <0.5 caps it below MUST (no gate enforces it); the exception is named in step 4 (no test covering the change) |
+| c5 | 142 | The **principle and the shape** are the point, never the syntax. A snippet in one … | plain (0.80, 0.16) | plain |  |
+| c6 | 153 | \| Rule \| One-line \| Violation signal \| | plain (0.68, 0.23) | plain | table header, not a sentence |
+| c7 | 154 | \|---\|---\|---\| | plain (0.83, 0.16) | plain | table separator, not a sentence |
+| c8 | 155 | \| **Meaningful names** \| Names reveal intent \| \`d\`, \`tmp\`, \`data\`, \`obj\` \| | SHOULD (0.18, 0.22) | SHOULD |  |
+| c9 | 156 | \| **Small functions** \| Do ONE thing, do it well \| Function > ~20 lines \| | SHOULD (0.20, 0.34) | SHOULD |  |
+| c10 | 157 | \| **No side effects** \| A function either DOES or ANSWERS, never both \| Hidden s… | SHOULD (0.24, 0.28) | SHOULD |  |
+| c11 | 158 | \| **DRY** \| Don't repeat yourself \| Copy-paste with minor edits \| | SHOULD (0.35, 0.37) | SHOULD |  |
+| c12 | 159 | \| **No magic numbers** \| Name your literals \| \`if (x > 86400)\` \| | SHOULD (0.25, 0.44) | SHOULD |  |
+| c13 | 160 | \| **Fail fast** \| Validate early, throw exceptions not codes \| Returning \`-1\`/\`n… | SHOULD (0.20, 0.29) | SHOULD |  |
+| c14 | 161 | \| **Boy Scout Rule** \| Leave code cleaner than you found it \| No cleanup before c… | SHOULD (0.32, 0.30) | SHOULD |  |
+| c15 | 165 | 1. **Small** — rarely exceed ~20 lines; aim for 5–10. | SHOULD (0.38, 0.25) | SHOULD |  |
+| c16 | 166 | 2. **Do one thing** — if you can extract a sub-function with a name that isn't jus… | SHOULD (0.34, 0.28) | SHOULD |  |
+| c17 | 168 | 3. **One level of abstraction per function** — don't mix high-level policy with lo… | SHOULD (0.31, 0.28) | SHOULD |  |
+| c18 | 170 | 4. **No flag arguments** — \`render(true)\` hides two behaviors; split into \`renderF… | SHOULD (0.35, 0.29) | SHOULD |  |
+| c19 | 172 | 5. **Fewer arguments** — 0 is best, 1 good, 2 fine, 3 needs justification. More th… | SHOULD (0.33, 0.31) | SHOULD |  |
+| c20 | 174 | 6. **Command-Query Separation** — change state *or* return a value, not both. | SHOULD (0.32, 0.29) | SHOULD |  |
+| c21 | 178 | Name reveals intent (\`elapsedTimeInDays\`, not \`d\`). | plain (0.75, 0.15) | plain |  |
+| c22 | 179 | Pronounceable and searchable; avoid cryptic abbreviations and disinformation. | SHOULD (0.41, 0.20) | SHOULD |  |
+| c23 | 180 | Classes are nouns (\`Customer\`, \`Account\`); methods are verbs (\`postPayment\`, \`save… | plain (0.70, 0.16) | plain |  |
+| c24 | 182 | No type encodings (\`strName\`, \`iCount\`), no noise words (\`theData\`, \`aInfo\`). | plain (0.50, 0.15) | plain |  |
+| c25 | 183 | One word per concept across the codebase — pick \`get\` *or* \`fetch\` *or* \`retrieve… | SHOULD (0.34, 0.19) | SHOULD |  |
+| c26 | 188 | A design is simple to the extent that it: | plain (0.94, 0.19) | plain |  |
+| c27 | 189 | 1. **Passes all the tests** — it works, verifiably. | MUST (0.53, 0.51) | plain | defines Kent Beck's four rules descriptively, like siblings c26/c28-31; low confidence (0.53) and no gate enforces this restatement (the project's own test suite already governs whether tests pass) |
+| c28 | 190 | 2. **Reveals intent** — names and structure say what it does. | plain (0.43, 0.25) | plain |  |
+| c29 | 191 | 3. **Has no duplication** — one fact in one place (DRY). | plain (0.69, 0.20) | plain |  |
+| c30 | 192 | 4. **Minimizes elements** — no more classes, methods, or abstraction than rules 1–… | plain (0.82, 0.18) | plain |  |
+| c31 | 195 | Rules 2–4 are applied by refactoring once it works. **Rule 4 is the guard against … | plain (0.82, 0.16) | plain |  |
+| c32 | 278 | \| **Data clumps** — fields always travel together \| extract a class \| | plain (0.77, 0.19) | plain |  |

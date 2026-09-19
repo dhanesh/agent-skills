@@ -20,11 +20,14 @@ compatibility: Prompt-only; no runtime dependencies. Language-agnostic — the p
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "clean-code,refactoring,solid,code-review,architecture,naming,tdd,code-smells,craftsmanship"
 ---
 
 # Clean Code, Clean Architecture & Clean Craftsmanship
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
+described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 A working guide to Robert C. Martin's principles. The aim is not to recite
 rules — it's to make code that the next person (often you, in six months) can
@@ -69,9 +72,9 @@ Pick the mode that fits the task. Most requests are one of these.
   Run the project's tests *before* you start and *after* every structural
   change, and read the failure rather than guessing at it:
 
-  1. Run the suite. Green? Refactor. Red? Fix or report the failure first —
-     never refactor on top of a failing test, because you cannot then tell your
-     change from the pre-existing break.
+  1. Run the suite. Green? Refactor. Red? Fix or report the failure first — you
+     SHOULD NOT refactor on top of a failing test, because you cannot then tell
+     your change from the pre-existing break.
   2. Make one structural change. Behaviour must not change.
   3. Run the suite again. Still green → continue. Newly red → revert or repair
      that change before making another.
@@ -152,36 +155,38 @@ but every example is **illustrative, not a template**:
 
 | Rule | One-line | Violation signal |
 |---|---|---|
-| **Meaningful names** | Names reveal intent | `d`, `tmp`, `data`, `obj` |
-| **Small functions** | Do ONE thing, do it well | Function > ~20 lines |
-| **No side effects** | A function either DOES or ANSWERS, never both | Hidden state mutation |
-| **DRY** | Don't repeat yourself | Copy-paste with minor edits |
-| **No magic numbers** | Name your literals | `if (x > 86400)` |
-| **Fail fast** | Validate early, throw exceptions not codes | Returning `-1`/`null` on error |
-| **Boy Scout Rule** | Leave code cleaner than you found it | No cleanup before commit |
+| **Meaningful names** | Names SHOULD reveal intent | `d`, `tmp`, `data`, `obj` |
+| **Small functions** | SHOULD do ONE thing, do it well | Function > ~20 lines |
+| **No side effects** | A function either DOES or ANSWERS — it SHOULD NOT do both | Hidden state mutation |
+| **DRY** | You SHOULD NOT repeat yourself | Copy-paste with minor edits |
+| **No magic numbers** | SHOULD name your literals | `if (x > 86400)` |
+| **Fail fast** | SHOULD validate early, throw exceptions not codes | Returning `-1`/`null` on error |
+| **Boy Scout Rule** | SHOULD leave code cleaner than you found it | No cleanup before commit |
 
 ### Function rules
 
-1. **Small** — rarely exceed ~20 lines; aim for 5–10.
-2. **Do one thing** — if you can extract a sub-function with a name that isn't
-   just a restatement, the original did more than one thing.
-3. **One level of abstraction per function** — don't mix high-level policy with
-   low-level detail in the same body.
-4. **No flag arguments** — `render(true)` hides two behaviors; split into
-   `renderForSuite()` and `renderForPage()`.
+1. **Small** — functions SHOULD rarely exceed ~20 lines; aim for 5–10.
+2. **A function SHOULD do one thing** — if you can extract a sub-function with
+   a name that isn't just a restatement, the original did more than one thing.
+3. **One level of abstraction per function** — you SHOULD NOT mix high-level
+   policy with low-level detail in the same body.
+4. **No flag arguments** — `render(true)` hides two behaviors; you SHOULD split
+   into `renderForSuite()` and `renderForPage()`.
 5. **Fewer arguments** — 0 is best, 1 good, 2 fine, 3 needs justification. More
-   than that usually means a missing object. Avoid output arguments.
-6. **Command-Query Separation** — change state *or* return a value, not both.
+   than that usually means a missing object. You SHOULD avoid output arguments.
+6. **Command-Query Separation** — a function SHOULD change state *or* return a
+   value, not both.
 
 ### Naming checklist
 
 - Name reveals intent (`elapsedTimeInDays`, not `d`).
-- Pronounceable and searchable; avoid cryptic abbreviations and disinformation.
+- Names SHOULD be pronounceable and searchable, and SHOULD avoid cryptic
+  abbreviations and disinformation.
 - Classes are nouns (`Customer`, `Account`); methods are verbs (`postPayment`,
   `save`).
 - No type encodings (`strName`, `iCount`), no noise words (`theData`, `aInfo`).
-- One word per concept across the codebase — pick `get` *or* `fetch` *or*
-  `retrieve`, not all three.
+- One word per concept across the codebase — you SHOULD pick `get` *or* `fetch`
+  *or* `retrieve`, not all three.
 
 ### Simple design (Kent Beck's four rules, in priority order)
 
