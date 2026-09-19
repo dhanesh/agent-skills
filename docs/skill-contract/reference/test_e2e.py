@@ -130,10 +130,12 @@ class HandoffTests(unittest.TestCase):
         md = os.path.join(self.universe, CONSUMER, "SKILL.md")
         with open(md, encoding="utf-8") as f:
             text = f.read()
-        old = '"consumes": ["%s"]' % KIND
-        self.assertIn(old, text)
+        # Swap only the task-plan/v1 entry: the consumer also consumes other
+        # kinds (autonomy-grant/v1), and those must not make it a v1 consumer.
+        old = '"%s"' % KIND
+        self.assertEqual(text.count(old), 1)
         with open(md, "w", encoding="utf-8") as f:
-            f.write(text.replace(old, '"consumes": ["%s2"]' % KIND[:-1]))
+            f.write(text.replace(old, '"%s2"' % KIND[:-1]))
         self.assertEqual(self.discover()["consumers"], [])
 
     def test_d_a_corrupt_neighbour_is_reported_and_the_consumer_still_found(self):

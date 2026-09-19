@@ -67,7 +67,7 @@ Skills appear in rewrite order.
 | c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. Deliberate meaning clarification: "Prefer these defaults" is dropped because the heading says "do not weaken these" and the invariants are MUST (controller ruling; Jev 0.97 for keeping MUST) |
 | c10 | 178 | Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis i… | MUST (0.59, 0.71) | MUST |  |
 
-## crafting-self-prompting-loops (11 candidates · 6 MUST · 1 SHOULD · 0 MAY · 4 plain · 4 departures)
+## crafting-self-prompting-loops (12 candidates · 7 MUST · 1 SHOULD · 0 MAY · 4 plain · 4 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -77,11 +77,12 @@ Skills appear in rewrite order.
 | c4 | 61 | These are the constraints loops most often skip and most often die on. Never ship a loop … | MUST (0.81, 0.84) | MUST |  |
 | c5 | 63 | - **A mandatory backstop (LSC-3).** Model self-termination (LSC-2) *can fail* — the model… | MUST (0.95, 0.89) | MUST |  |
 | c6 | 64 | - **The two-channel boundary (LSC-7).** Anything the model produces, a tool returns, or c… | MUST (0.87, 0.88) | MUST |  |
-| c7 | 65 | - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible actio… | MUST (0.70, 0.79) | MUST | (no departure) note: the output-only exemption in the same block carries MAY, a genuine option |
+| c7 | 65 | - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible actio… | MUST (0.70, 0.79) | MUST | (no departure) note: the output-only exemption in the same block carries MAY, a genuine option. Changed in 1.4.0 (autonomy-grant Task 7, now line 67): "…MUST wait for explicit human approval, unless `check-grant --root <repo> --action <the action's class>` exits 0 at the moment of the action; then the loop MAY proceed, and MUST name the grant id and action class … A grant can never cover merge, deploy, spend, external messages or deletes … a push MUST send only the current branch to the remote branch of the same name." Still MUST; the carve-out is A8, and the push rule is spec-first-planning c16's |
 | c8 | 72 | 2. **A runnable scaffold** — in the user's target runtime. For Claude Code, that's the re… | MUST (0.27, 0.62) | MUST |  |
 | c9 | 80 | If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: s… | plain (0.57, 0.51) | plain |  |
-| c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched |
+| c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched. 1.4.0 (autonomy-grant Task 7) adds autonomy-grant/v1 to `consumes` and one descriptive sentence; still plain |
 | c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | SHOULD | report format, not machine-consumed; aligned with verifier-installer c4 |
+| c12 | 105 | (Receiving a skill-contract envelope, step 1) If the handoff arrived without the user confirming it, it MAY proceed only when `check-grant --root <repo-root> --action local_reversible` exits 0; you MUST name the grant id in your report. Otherwise ask the user first. | not judged (new in 1.4.0, autonomy-grant Task 7) | MUST | accepting a handoff under a grant (design spec §5, skill-contract commandment 10 as amended); counted once at MUST — the MAY is the option the grant opens, the MUST is the report |
 
 ## mockstar-mock (14 candidates · 10 MUST · 1 SHOULD · 0 MAY · 3 plain · 3 departures)
 
