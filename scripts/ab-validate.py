@@ -182,6 +182,23 @@ SINCE_TSN_NODE_FFI = "5d46f99"  # test-safety-net: node 26's new `ffi` builtin
 # is marked (subprocess) and recorded as a guard residual, not left unclassified.
 SINCE_BCP14 = "8179b71"  # BCP 14 across skills: every SKILL.md declares RFC 2119/8174
 # keywords (PP-7) and marks its hard rules with them.
+SINCE_FACTORY_TRUST_WM = "391cd4a"  # world-model-ledger: the wm CLI refuses
+# `validate --by human...` and `--assert-valid` records agent_assert, not human.
+SINCE_FACTORY_TRUST_BIR = "fa9556a"  # base-in-reality: refutation follows the
+# rubric (critical/high need unanimous non-refute, a crashed refuter refutes)
+# and report_lint.py requires + checks the recorded `refutation` votes.
+SINCE_FACTORY_TRUST_VI = "382e4a0"  # verifier-installer: the python format rail
+# is a real formatter check (detected, or an honest placeholder) instead of
+# `compileall` — a syntax check byte-identical to the build rail; the go
+# format rail actually fails on gofmt -l output instead of always exiting 0.
+SINCE_FACTORY_TRUST_BA = "0cc65c2"  # bug-autopsy: the "declared basis" escape
+# hatch requires a real value after evidence:/systemic:, not just the label —
+# `evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / file:line>`
+# template placeholder no longer lint-pass as cited evidence.
+SINCE_FACTORY_TRUST_BA_R1 = "f8178b8"  # bug-autopsy review round 1 (I2): a
+# deferral word (tbd/todo/unknown/na/-/?) followed by filler prose no longer
+# bypasses the check by failing a whole-value-only comparison — it is now
+# rejected as the value's first normalized token.
 
 
 def _git_out(*args):
@@ -345,6 +362,38 @@ n = wm.conn.execute("SELECT COUNT(*) c FROM interaction i JOIN entity s "
 print(json.dumps({"forged": n}))
 """
 
+# The wm CLI runs with the agent's authority. If it accepts `--by human:<name>`
+# or mints human evidence on `--assert-valid`, an agent self-certifies the most
+# entrenched evidence kind with one Bash call. The user's own WM-VALIDATED
+# marker must keep working: that is the sanctioned human path.
+WM_CLI_HUMAN = r"""
+import contextlib, io
+import world_model as W, harvest as H
+db = os.path.join(tempfile.mkdtemp(), "m.db")
+def cli(*a):
+    with contextlib.redirect_stdout(io.StringIO()):
+        return W.main(["--db", db, *a])
+cli("observe", "hash_pw", "uses", "bcrypt")
+cli("validate", "hash_pw,uses,bcrypt", "--by", "human:alice")
+cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
+    "--params", '{"patterns":["md5"]}', "--assert-valid")
+wm = W.WorldModel(db)
+minted = wm.conn.execute("SELECT COUNT(*) c FROM evidence "
+                         "WHERE evidence_kind='human'").fetchone()["c"]
+cli("observe", "cart", "uses", "stripe")
+cli("refute", "cart,uses,stripe", "--by", "human:alice")
+cli("refute", "cart,uses,stripe", "--by", "human")
+wm = W.WorldModel(db)
+minted_all = wm.conn.execute("SELECT COUNT(*) c FROM evidence "
+                             "WHERE evidence_kind='human'").fetchone()["c"]
+wm2 = W.WorldModel(os.path.join(tempfile.mkdtemp(), "u.db"))
+H.apply_markers(wm2, [("user", "WM-VALIDATED: hash_pw uses bcrypt by human:alice")])
+wm2.consolidate()
+v = wm2.conn.execute("SELECT COUNT(*) c FROM interaction "
+                     "WHERE validation='validated'").fetchone()["c"]
+print(json.dumps({"minted": minted, "minted_all": minted_all, "user_validated": v}))
+"""
+
 def check_world_model(old, new):
     s = "world-model-ledger"
     a, b = (probe(t, s + "/assets", WM_ADVERSARIAL) for t in (old, new))
@@ -387,6 +436,22 @@ def check_world_model(old, new):
         "the direct tool_result channel was excluded, but an agent quoting a file "
         "back into its own reply re-emitted the marker into the trusted channel",
         since=SINCE_ONTOLOGY)
+
+    a, b = (probe(t, s + "/assets", WM_CLI_HUMAN) for t in (old, new))
+    row(s, "human evidence rows the agent-run CLI mints (lower=better)",
+        a.get("minted"), b.get("minted"),
+        b.get("minted", 9) == 0 and (a.get("minted") or 0) > 0,
+        "validate --by human:alice + constraint --assert-valid",
+        since=SINCE_FACTORY_TRUST_WM)
+    row(s, "human evidence rows the CLI mints across validate + refute (lower=better)",
+        a.get("minted_all"), b.get("minted_all"),
+        b.get("minted_all", 9) == 0 and (a.get("minted_all") or 0) > (a.get("minted") or 0),
+        "adds refute --by human:alice / human; baseline must mint more than the validate row",
+        since=SINCE_FACTORY_TRUST_WM)
+    row(s, "user-channel WM-VALIDATED by human still validates",
+        a.get("user_validated"), b.get("user_validated"),
+        a.get("user_validated") == b.get("user_validated") == 1,
+        "the sanctioned human path is not disarmed", kind="guard")
 
 
 # ── context-hygiene-kit ─────────────────────────────────────────────────────
@@ -805,7 +870,10 @@ def check_grounding(old, new):
                 "verdict": "VIOLATION", "severity": "high", "recommended_fix": "f",
                 "citations": [{"title": "never retrieved",
                                "url": "https://arxiv.org/abs/2401.99999",
-                               "doi": "10.1234/fabricated", "fetched": True}]}],
+                               "doi": "10.1234/fabricated", "fetched": True}],
+                # clean votes, so this row still fails on fabrication alone and
+                # not on the refutation rule SINCE_FACTORY_TRUST_BIR added
+                "refutation": {"refuters": 3, "verdicts": [False, False, False]}}],
               open(fab, "w"))
 
     def rejected(tree):
@@ -4466,6 +4534,325 @@ def check_bcp14(old, new):
         a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
 
 
+# ── base-in-reality: the refutation vote follows the verdict rubric ─────────
+# A critical finding with one dissenting refuter, or with refuters that
+# crashed, shipped as VIOLATION: the workflow took a flat 2-of-3 majority and
+# dropped missing votes, and the linter never read `refutation`. An unattended
+# run then treats an unchallenged finding as proven.
+_BIR_WORKFLOW_HARNESS = r"""
+import { readFileSync } from 'node:fs'
+const src = readFileSync(process.argv[2], 'utf8').replace('export const meta', 'const meta')
+const AsyncFn = Object.getPrototypeOf(async function () {}).constructor
+const run = new AsyncFn('args', 'agent', 'phase', 'log', 'pipeline', 'parallel', src)
+const cases = [['critical', [true, false, false]], ['high', [false, true, false]],
+               ['critical', [false, null, false]], ['critical', [null, null, null]],
+               ['medium', [true, false, false]], ['critical', [false, false, false]]]
+const out = []
+for (const [severity, votes] of cases) {
+  let i = 0
+  const agent = async (prompt, opts) => {
+    if (opts.label === 'extract') return { domains: ['x'], claims: [{ claim: 'c', layer: 'algo', location: 'a.py:1' }] }
+    if (opts.label.startsWith('verify')) return { claim: 'c', layer: 'algo', location: 'a.py:1', verdict: 'VIOLATION', severity, citations: [{ title: 't', url: 'https://example.org/x', fetched: true }], recommended_fix: 'f' }
+    const v = votes[i++]; return v === null ? null : { refuted: v, reason: 'r' }
+  }
+  const pipeline = async (items, f1, f2) => Promise.all(items.map(async (c) => f2(await f1(c), c)))
+  const parallel = async (fns) => Promise.all(fns.map((f) => f()))
+  const r = await run({}, agent, () => {}, () => {}, pipeline, parallel)
+  out.push({ severity, votes, verdict: r[0].verdict, recorded: !!r[0].refutation })
+}
+console.log(JSON.stringify(out))
+"""
+
+
+def check_factory_trust_bir(old, new):
+    s = "base-in-reality"
+    scratch = tempfile.mkdtemp()
+
+    def finding(severity, verdict="VIOLATION", votes=None):
+        f = {"claim": "c", "layer": "algo", "location": "a.py:1", "verdict": verdict,
+             "severity": severity, "recommended_fix": "f",
+             "citations": [{"title": "t", "url": "https://example.org/x",
+                            "fetched": True}]}
+        if votes is not None:
+            f["refutation"] = {"refuters": len(votes), "verdicts": votes}
+        return f
+
+    def passes(tree, findings):
+        """How many of `findings`, linted one at a time, the tree's linter passes."""
+        lint = os.path.join(tree, s, "assets", "report_lint.py")
+        n = 0
+        for k, f in enumerate(findings):
+            path = os.path.join(scratch, "%s-%d.json" % (os.path.basename(tree), k))
+            with open(path, "w") as fh:
+                json.dump([f], fh)
+            r = subprocess.run([sys.executable, lint, path], capture_output=True,
+                               text=True, timeout=60)
+            n += 1 if r.returncode == 0 else 0
+        return n
+
+    dissent = [finding("critical", votes=[True, False, False]),
+               finding("high", "DEVIATION", votes=[False, True, False]),
+               finding("critical", votes=[False, None, False]),
+               finding("critical", votes=[False, False])]
+    a, b = passes(old, dissent), passes(new, dissent)
+    row(s, "critical/high survivors lint-passed despite a refute or missing vote (lower=better)",
+        a, b, b == 0 and a > 0,
+        "1-of-3 refute, a crashed (null) refuter, and a missing third vote",
+        since=SINCE_FACTORY_TRUST_BIR)
+    bare = [finding("critical"), finding("medium", "DEVIATION")]
+    a, b = passes(old, bare), passes(new, bare)
+    row(s, "VIOLATION/DEVIATION with no `refutation` lint-passed (lower=better)",
+        a, b, b == 0 and a > 0,
+        "\"no refutation recorded\" read the same as \"survived refutation\"",
+        since=SINCE_FACTORY_TRUST_BIR)
+    within = [finding("medium", votes=[True, False, False]),
+              finding("critical", votes=[False, False, False])]
+    a, b = passes(old, within), passes(new, within)
+    row(s, "survivors within the rubric still lint-pass",
+        a, b, a == b == 2,
+        "medium with one dissent, critical with unanimous non-refute", kind="guard")
+
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    harness = os.path.join(scratch, "harness.mjs")
+    with open(harness, "w") as fh:
+        fh.write(_BIR_WORKFLOW_HARNESS)
+
+    def workflow(tree):
+        r = subprocess.run(["node", harness, os.path.join(tree, s, "assets", "workflow.mjs")],
+                           capture_output=True, text=True, timeout=60)
+        try:
+            return json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            PROBE_ERRORS.append((tree, s + "/assets/workflow.mjs",
+                                 (r.stderr or r.stdout).strip()[-300:]))
+            return None
+
+    wa, wb = workflow(old), workflow(new)
+    if wa is None or wb is None:
+        return
+
+    def kept(res):   # the first four cases must be downgraded
+        return sum(1 for x in res[:4] if x["verdict"] != "UNCONFIRMED")
+
+    def unrecorded(res):
+        return sum(1 for x in res if not x["recorded"])
+
+    row(s, "critical/high findings the workflow keeps despite a refute or crashed refuter (lower=better)",
+        kept(wa), kept(wb), kept(wb) == 0 and kept(wa) > 0,
+        "the unmodified workflow.mjs under stubbed agents; null = refuter returned nothing",
+        since=SINCE_FACTORY_TRUST_BIR)
+    row(s, "workflow findings with no `refutation` votes recorded (lower=better)",
+        unrecorded(wa), unrecorded(wb), unrecorded(wb) == 0 and unrecorded(wa) > 0,
+        "verdict-rubric.md step 4: the votes are recorded on every refuted finding",
+        since=SINCE_FACTORY_TRUST_BIR)
+    row(s, "workflow survivors within the rubric kept",
+        [x["verdict"] for x in wa[4:]], [x["verdict"] for x in wb[4:]],
+        [x["verdict"] for x in wa[4:]] == [x["verdict"] for x in wb[4:]]
+        == ["VIOLATION", "VIOLATION"],
+        "medium with one dissent, critical with unanimous non-refute", kind="guard")
+
+
+# ── verifier-installer ──────────────────────────────────────────────────────
+VI_DETECT = r"""
+import detect_stack, tempfile, os
+
+def repo(files):
+    root = tempfile.mkdtemp()
+    for rel, content in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(content)
+    return root
+
+out = {}
+
+# No adopted formatter: format rail must not be a syntax check in disguise.
+r1 = repo({"pyproject.toml": '[project]\nname = "x"\n'})
+p1 = detect_stack.detect(r1)
+fmt1 = [p for p in p1["proposals"] if p["rail"] == "format"]
+build1 = [p for p in p1["proposals"] if p["rail"] == "build"]
+out["py_format_is_syntax_check"] = 1 if (
+    fmt1 and "compileall" in fmt1[0]["command"]) else 0
+out["py_build_lacks_dash_f"] = 1 if (
+    build1 and "-f" not in build1[0]["command"].split()) else 0
+
+# Adopted ruff: format rail must be the real check, not swallowed by the
+# "no formatter -> placeholder" fallback.
+r2 = repo({"pyproject.toml":
+           '[project]\nname = "x"\n[tool.ruff]\nline-length = 100\n'})
+p2 = detect_stack.detect(r2)
+fmt2 = [p for p in p2["proposals"] if p["rail"] == "format"]
+out["py_ruff_format_cmd"] = fmt2[0]["command"] if fmt2 else None
+
+# Go: format rail must be able to fail, not just list offenders.
+r3 = repo({"go.mod": "module x\n\ngo 1.22\n"})
+p3 = detect_stack.detect(r3)
+go_fmt = p3["existing_verifiers"].get("format")
+out["go_format_cannot_fail"] = 1 if (
+    go_fmt and not go_fmt.startswith("test -z")) else 0
+
+# I1: a comment, a description string, an unrelated package name, and a
+# lint-only ruff section are not a real formatter adoption. None of these
+# has ever been a true positive (the pre-bug3-fix baseline always proposes
+# compileall, ignorant of content) so this is a guard against a false
+# positive the fix's own new detection logic could introduce.
+r4 = repo({
+    "pyproject.toml": ('[project]\nname = "x"\ndescription = "Paint it black"\n'
+                        '# black compat\n[tool.ruff.lint]\nselect = ["E"]\n'),
+    "requirements.txt": "black-magic==1.0\nruff-lint-only==2.0\n",
+})
+p4 = detect_stack.detect(r4)
+fmt4 = [p for p in p4["proposals"] if p["rail"] == "format"]
+cmd4 = fmt4[0]["command"] if fmt4 else None
+out["py_falsepos_reads_as_real_formatter"] = 1 if cmd4 in (
+    "ruff format --check .", "black --check .") else 0
+
+import json
+print(json.dumps(out))
+"""
+
+
+def check_factory_trust_vi(old, new):
+    s = "verifier-installer"
+    a, b = (probe(t, s + "/assets", VI_DETECT) for t in (old, new))
+    row(s, "python format rail proposed for a repo with no adopted formatter "
+           "is a syntax check, not a formatter check (1=yes, lower=better)",
+        a.get("py_format_is_syntax_check"), b.get("py_format_is_syntax_check"),
+        b.get("py_format_is_syntax_check") == 0 and a.get("py_format_is_syntax_check", 0) > 0,
+        "compileall byte-identical to the build rail can never go red on a "
+        "formatting violation; the fix falls back to the `make format` "
+        "placeholder instead",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "python build rail can go falsely green on a same-second syntax "
+           "error (no -f) (1=yes, lower=better)",
+        a.get("py_build_lacks_dash_f"), b.get("py_build_lacks_dash_f"),
+        b.get("py_build_lacks_dash_f") == 0 and a.get("py_build_lacks_dash_f", 0) > 0,
+        "compileall skips a file whose .pyc header still matches within the "
+        "same second; -f forces a fresh compile",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "go format rail command cannot fail on gofmt -l output (1=yes, lower=better)",
+        a.get("go_format_cannot_fail"), b.get("go_format_cannot_fail"),
+        b.get("go_format_cannot_fail") == 0 and a.get("go_format_cannot_fail", 0) > 0,
+        "bare `gofmt -l .` lists offenders but always exits 0; "
+        "`test -z \"$(gofmt -l .)\"` is the failing form",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "python repo that adopts ruff gets a real format check, not compileall",
+        a.get("py_ruff_format_cmd"), b.get("py_ruff_format_cmd"),
+        b.get("py_ruff_format_cmd") == "ruff format --check ."
+        and "compileall" in (a.get("py_ruff_format_cmd") or ""),
+        "before the fix, adopting ruff changed nothing — the format rail was "
+        "still the build rail's compileall syntax check",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "a comment/description/unrelated-package/lint-only-ruff repo is "
+           "credited a real formatter check (1=yes, lower=better)",
+        a.get("py_falsepos_reads_as_real_formatter"),
+        b.get("py_falsepos_reads_as_real_formatter"),
+        a.get("py_falsepos_reads_as_real_formatter") == 0
+        and b.get("py_falsepos_reads_as_real_formatter") == 0,
+        "`# black compat`, `description = \"Paint it black\"`, "
+        "`black-magic==1.0`/`ruff-lint-only`, and a lint-only [tool.ruff.lint] "
+        "section must never read as an adopted formatter — the baseline never "
+        "detects one at all (always compileall), and the fix's structural "
+        "matching must not introduce a false positive either",
+        kind="guard")
+
+
+# ── bug-autopsy (evidence VALUE, not just the label) ────────────────────────
+_BA_EVIDENCE_NONE = (
+    "# Post-mortem: checkout 500s\n\n"
+    "## Summary\nCheckout returned 500s for an hour.\n\n"
+    "## Impact\nSome users could not pay.\n\n"
+    "## Timeline\n"
+    "- 2026-09-01 10:00 — bad deploy went out (evidence: none)\n"
+    "- 2026-09-01 10:05 — errors started (evidence: none)\n"
+    "- 2026-09-01 11:00 — rolled back (evidence: n/a)\n\n"
+    "## Root cause\n"
+    "1. **Why did checkout fail?** The config was wrong. (evidence: none)\n"
+    "2. **Why was the config wrong?** Nobody checked it. (evidence: none)\n"
+    "3. **Why did nobody check it?** No check existed. (evidence: TBD)\n\n"
+    "## Contributing factors\n- Friday deploy.\n\n"
+    "## Fix\nReverted in commit 3f9a1c2.\n\n"
+    "## Prevention\n- [ ] Add a config check (owner: platform; check: manual audit)\n\n"
+    "## Links\n- none\n"
+)
+_BA_UNFILLED_PLACEHOLDER = _BA_EVIDENCE_NONE.replace(
+    "(evidence: none)", "(evidence: <commit sha / file:line>)").replace(
+    "(evidence: n/a)", "(evidence: <commit sha / file:line>)").replace(
+    "(evidence: TBD)", "(evidence: <commit sha / file:line>)")
+_BA_GOOD = (
+    "# Post-mortem: checkout 500s\n\n"
+    "## Summary\nCheckout returned 500s for an hour.\n\n"
+    "## Impact\nSome users could not pay.\n\n"
+    "## Timeline\n"
+    "- 2026-09-01 10:00 — bad deploy went out (evidence: commit 3f9a1c2)\n"
+    "- 2026-09-01 10:05 — errors started (evidence: app.log 10:05:03)\n"
+    "- 2026-09-01 11:00 — rolled back (evidence: commit 9a1c2f3, CI run 4821)\n\n"
+    "## Root cause\n"
+    "1. **Why did checkout fail?** The config was wrong. (evidence: config.py:12)\n"
+    "2. **Why was the config wrong?** Nobody checked it. (evidence: no such case under tests/)\n"
+    "3. **Why did nobody check it?** No check existed. (systemic: missing guardrail)\n\n"
+    "## Contributing factors\n- Friday deploy.\n\n"
+    "## Fix\nReverted in commit 3f9a1c2; verified by CI run 4821.\n\n"
+    "## Prevention\n- [ ] Add a config check (owner: platform; check: CI run 4821 green)\n\n"
+    "## Links\n- Issue #123\n"
+)
+_BA_NULL_WORD_WITH_FILLER = _BA_EVIDENCE_NONE.replace(
+    "(evidence: none)", "(evidence: tbd — later)").replace(
+    "(evidence: n/a)", "(evidence: unknown yet)").replace(
+    "(evidence: TBD)", "(systemic: unknown yet)")
+
+
+def check_factory_trust_ba(old, new):
+    s = "bug-autopsy"
+    scratch = tempfile.mkdtemp()
+
+    def lint_passes(tree, name, text):
+        """1 if the tree's postmortem_lint.py exits 0 on `text`, else 0."""
+        lint = os.path.join(tree, s, "assets", "postmortem_lint.py")
+        if not os.path.isfile(lint):
+            return 0
+        path = os.path.join(scratch, "%s-%s.md" % (os.path.basename(tree), name))
+        with open(path, "w") as f:
+            f.write(text)
+        r = subprocess.run([sys.executable, lint, path], capture_output=True,
+                           text=True, timeout=60)
+        return 1 if r.returncode == 0 else 0
+
+    def bad_that_lint_pass(tree):
+        return (lint_passes(tree, "evidence_none", _BA_EVIDENCE_NONE)
+                + lint_passes(tree, "unfilled_placeholder", _BA_UNFILLED_PLACEHOLDER))
+
+    a, b = bad_that_lint_pass(old), bad_that_lint_pass(new)
+    row(s, "evidence-none / unfilled-placeholder post-mortems that lint-pass "
+           "(lower=better)",
+        a, b, b == 0 and a == 2,
+        "`evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / "
+        "file:line>` placeholder satisfied the declared-basis escape hatch, "
+        "which matched the evidence:/systemic: LABEL and never looked at "
+        "the value",
+        since=SINCE_FACTORY_TRUST_BA)
+
+    ga = lint_passes(old, "good", _BA_GOOD)
+    gb = lint_passes(new, "good", _BA_GOOD)
+    row(s, "known-good, evidence-cited post-mortem still lint-passes",
+        ga, gb, ga == 1 and gb == 1,
+        "a real citation (file:line, sha, CI run), free-text absence "
+        "evidence, and a genuine systemic conclusion must keep passing",
+        kind="guard")
+
+    fa = lint_passes(old, "null_word_with_filler", _BA_NULL_WORD_WITH_FILLER)
+    fb = lint_passes(new, "null_word_with_filler", _BA_NULL_WORD_WITH_FILLER)
+    row(s, "null word padded with filler (`tbd — later`/`unknown yet`) "
+           "lint-passes (lower=better)",
+        fa, fb, fb == 0 and fa == 1,
+        "the first fix's whole-value-only comparison missed a deferral "
+        "word followed by prose; review round 1 (I2) rejects it as the "
+        "value's first normalized token instead",
+        since=SINCE_FACTORY_TRUST_BA_R1)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4531,6 +4918,9 @@ def main():
         check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
+        check_factory_trust_bir(old, REPO)
+        check_factory_trust_vi(old, REPO)
+        check_factory_trust_ba(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

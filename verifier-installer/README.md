@@ -60,7 +60,11 @@ Detected stacks: python (pyproject/setup/requirements, pytest vs unittest),
 node (package.json scripts + lockfiles, npm-placeholder-aware), go, rust, and
 Makefile targets — plus existing `.github/workflows/` CI, so it never installs
 a duplicate workflow. Malformed manifests are reported in the plan's `errors`
-list instead of crashing.
+list instead of crashing. Python's format rail proposes a real `ruff`/`black`
+check only when the repo structurally adopts one (a config section, config
+file, pre-commit hook, or pinned dependency — never a bare word match), and
+otherwise falls back to a loudly-failing placeholder that the plan marks
+`"placeholder": true` so it's never mistaken for a proven rail.
 
 ## Testing
 

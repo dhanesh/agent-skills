@@ -37,7 +37,9 @@ Numbers where the evidence supports them; "unknown" is honest when it doesn't.>
 
 All times UTC unless an entry states otherwise. Every entry carries its own
 timestamp and cites its evidence; reconstruction not backed by a record is
-labeled (inference).
+labeled (inference). `evidence: none`/`TBD`/an unfilled angle-bracket
+placeholder left in place is not evidence and fails the lint; a lint PASS
+means a basis was stated, not that it is true.
 
 - YYYY-MM-DD HH:MM — <trigger: the change or event that introduced the defect> (evidence: <commit sha / file:line>)
 - YYYY-MM-DD HH:MM — <propagation: first bad behavior in the wild> (evidence: <log ref / metric / trace>)

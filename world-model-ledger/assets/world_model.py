@@ -2167,7 +2167,9 @@ def cmd_constraint(wm, a):
     cid = wm.add_constraint(a.name, a.kind, a.message, scope_predicate=a.predicate,
                             params=params, severity=a.severity)
     if a.assert_valid:
-        wm.add_evidence("constraint", cid, "human", "asserted", weight=0.9, agent="human")
+        # Agent-asserted and labelled as such: the CLI runs with the agent's authority,
+        # so it cannot attest a human. This raises nothing on the normative axis.
+        wm.add_evidence("constraint", cid, "agent_assert", "asserted-by:wm-cli", weight=0.9, agent="wm-cli")
     wm.conn.commit()
     print(json.dumps({"constraint_id": cid}))
 
@@ -2185,13 +2187,28 @@ def _select_interaction(wm, sel):
     return int(sel)  # bare id
 
 
+def _refuse_human(by, verb, tag):
+    """The CLI runs with the agent's authority, so it cannot attest a human.
+    Human evidence enters only via a user-channel WM-VALIDATED/WM-REFUTES
+    marker (invariant 3). Prints the structured refusal and returns True."""
+    if by.strip() != "human" and not by.startswith("human:"):
+        return False
+    print(json.dumps({"error": "human_evidence_not_accepted_from_cli",
+                      "detail": f"a human {verb} by typing `{tag}: <s> <p> <o> by human:<name>` "
+                                "in their own message; the Stop hook harvests it from the user channel only"}))
+    return True
+
+
 def cmd_validate(wm, a):
     iid = _select_interaction(wm, a.interaction)
     if iid is None:
         print(json.dumps({"error": "interaction not found"})); return 1
+    if _refuse_human(a.by, "validates", "WM-VALIDATED"):
+        return 2
     kind, ref = _parse_evidence_flag(a.by)
     if kind not in ORACLE_KINDS:
-        print(json.dumps({"error": f"validate needs an oracle kind {sorted(ORACLE_KINDS)}, got {kind}"})); return 1
+        print(json.dumps({"error": f"validate needs an oracle kind {sorted(ORACLE_KINDS - {'human'})} "
+                                   f"(human: user channel only), got {kind}"})); return 1
     wm.add_evidence("interaction", iid, kind, ref, polarity="supports",
                     agent="wm-cli", activity="validate", weight=a.weight)
     wm.conn.commit()
@@ -2203,7 +2220,13 @@ def cmd_refute(wm, a):
     iid = _select_interaction(wm, a.interaction)
     if iid is None:
         print(json.dumps({"error": "interaction not found"})); return 1
+    if _refuse_human(a.by, "refutes", "WM-REFUTES"):
+        return 2
     kind, ref = _parse_evidence_flag(a.by)
+    if kind not in ALL_EVIDENCE_KINDS:
+        print(json.dumps({"error": "unknown_evidence_kind",
+                          "detail": f"refute needs one of {sorted(ALL_EVIDENCE_KINDS - {'human'})} "
+                                    f"(human: user channel only), got {kind}"})); return 1
     wm.add_evidence("interaction", iid, kind, ref, polarity="refutes",
                     agent="wm-cli", activity="refute", weight=a.weight)
     wm.conn.commit()
@@ -2373,17 +2396,22 @@ def build_parser():
     c.add_argument("--predicate"); c.add_argument("--params")
     c.add_argument("--severity", default="violation")
     c.add_argument("--assert-valid", dest="assert_valid", action="store_true",
-                   help="attach human evidence that the constraint itself is desired")
+                   help="attach agent_assert evidence that the constraint itself is desired "
+                        "(an agent claim; it does not raise normative confidence)")
     c.set_defaults(func=cmd_constraint)
 
     v = sub.add_parser("validate", help="raise normative confidence via oracle evidence")
     v.add_argument("interaction", help="'subj,pred,obj' or interaction id")
-    v.add_argument("--by", required=True, help="test:<id> | ci:<run> | doc:<path> | human")
+    v.add_argument("--by", required=True, help="test:<id> | ci:<run> | doc:<path>. human is refused here: "
+                        "a human validates by typing WM-VALIDATED ... by human:<name> in their own message")
     v.add_argument("--weight", type=float, default=0.8)
     v.set_defaults(func=cmd_validate)
 
     r = sub.add_parser("refute", help="record refuting evidence (→ contradicted)")
-    r.add_argument("interaction"); r.add_argument("--by", required=True)
+    r.add_argument("interaction")
+    r.add_argument("--by", required=True,
+                   help="test:<id> | ci:<run> | doc:<path> | ... human is refused here: "
+                        "a human refutes by typing WM-REFUTES ... by human:<name> in their own message")
     r.add_argument("--weight", type=float, default=0.8)
     r.set_defaults(func=cmd_refute)
 

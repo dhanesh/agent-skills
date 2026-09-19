@@ -30,10 +30,11 @@
     "downgraded": {"type": "boolean", "description": "True if the refutation pass downgraded the verdict to UNCONFIRMED."},
     "refutation": {
       "type": "object",
-      "description": "Outcome of the adversarial refutation pass.",
+      "description": "Outcome of the adversarial refutation pass. verdicts[i] is true when refuter i refuted (a refuter that returned nothing is recorded as true).",
+      "required": ["refuters", "verdicts"],
       "properties": {
         "refuters": {"type": "integer"},
-        "verdicts": {"type": "array", "items": {"type": "boolean"}},
+        "verdicts": {"type": "array", "minItems": 3, "items": {"type": "boolean"}},
         "rationale": {"type": "string"}
       }
     }
@@ -50,6 +51,11 @@
           }
         }
       }
+    },
+    {
+      "comment": "Refutation rule: a surviving VIOLATION/DEVIATION records its refutation votes (verdict-rubric.md step 4). The vote-count rule itself is enforced by report_lint.py.",
+      "if": {"properties": {"verdict": {"enum": ["VIOLATION", "DEVIATION"]}}},
+      "then": {"required": ["refutation"]}
     }
   ]
 }

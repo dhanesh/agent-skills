@@ -81,6 +81,9 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 
 `WM-VALIDATED` with a non-oracle kind is ignored — only `test|ci|doc|human` can raise
 normative confidence.
+The sanctioned route for `WM-VALIDATED` and `WM-REFUTES` is the user's own message: the Stop hook
+takes them only from transcript rows whose role is `user`. In an assistant turn they are rejected and
+counted as `rejected_echo`.
 
 **Predicates are vocabulary, not free text.** Every triple is validated against the ontology
 (RDFS-style domain/range per verb — see `ontology.md`) before insert. A marker with a
@@ -139,8 +142,8 @@ already the behavioural signal edits cannot provide.
 wm build [path] [--max-files N] [--prune]             # repo-wide seed: files + structural edges (observation-only)
 wm observe <subj> <pred> <obj> [--evidence file:line] [--conf 0.7]
 wm constraint <name> <kind> "<message>" --predicate <p> --params '<json>' [--severity ...]
-wm validate "<subj>,<pred>,<obj>" --by test:<id>|ci:<run>|doc:<path>|human   # raises normative
-wm refute   "<subj>,<pred>,<obj>" --by ...                                    # → contradicted
+wm validate "<subj>,<pred>,<obj>" --by test:<id>|ci:<run>|doc:<path>   # raises normative; human is refused (exit 2)
+wm refute   "<subj>,<pred>,<obj>" --by ...                                    # → contradicted; human is refused (exit 2)
 wm map      <symbol> --to <referent>
 wm contradictions [--open] [--touching <path>]        # list + proposed fixes
 wm resolve  <id> --as retract|supersede|fixed_code|defer
@@ -150,6 +153,17 @@ wm exec     --command "<cmd>" [--exit-code N]         # observe an execution (or
 wm ontology [--add <pred> --domain <kinds> --range <kinds>]   # list / deliberately extend the vocabulary
 wm stats | wm consolidate | wm digest | wm export
 ```
+
+`wm validate` and `wm refute` with `--by human` or `--by human:<name>` exit 2. The CLI runs with the
+agent's authority, so it cannot attest a human. A human validates or refutes by typing
+`WM-VALIDATED: <s> <p> <o> by human:<name>` or `WM-REFUTES: <s> <p> <o> by human:<name>` in their own
+message, and the Stop hook accepts those tags only from the user channel.
+`wm constraint --assert-valid` records `agent_assert` evidence, which raises nothing on the normative axis.
+A `test:` or `ci:` validation from the CLI is not checked against a real run, so treat
+`validated` backed only by `agent=wm-cli` test evidence as an agent claim.
+The user-channel check trusts the role field of each transcript row, so a forged transcript fed to
+`harvest.py` or `stop.sh` can plant a human marker; like a direct write to the database, that is
+outside the threat model.
 
 (`wm` = `python3 wm.py`, or `python3 world_model.py`. DB path from `--db`, `$WM_DB`, or the
 default `.world-model/model.db`.)

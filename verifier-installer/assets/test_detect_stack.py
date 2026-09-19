@@ -63,6 +63,127 @@ class TestPythonDetection(TempRepoCase):
         test_props = [p for p in plan["proposals"] if p["rail"] == "test"]
         self.assertEqual(test_props[0]["file_to_create"], "tests/test_smoke.py")
 
+    def test_python_format_rail_is_never_compileall(self):
+        # Bug 3: compileall checks syntax, not formatting. A repo with no
+        # adopted formatter must NOT get compileall proposed as its format
+        # rail — it must fall back to the honest `make format` placeholder,
+        # which the install summary reports as unproven until the owner
+        # wires a real formatter.
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(len(fmt_props), 1)
+        self.assertNotIn("compileall", fmt_props[0]["command"])
+        self.assertEqual(fmt_props[0]["command"], "make format")
+        self.assertIsNone(plan["existing_verifiers"]["format"])
+        for rail, cmd in plan["existing_verifiers"].items():
+            if cmd:
+                self.assertNotIn("compileall", cmd)
+
+    def test_python_adopted_ruff_proposes_ruff_check(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n[tool.ruff]\nline-length = 100\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(len(fmt_props), 1)
+        self.assertEqual(fmt_props[0]["command"], "ruff format --check .")
+
+    def test_python_adopted_black_proposes_black_check(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        write(self.root, "requirements-dev.txt", "black==24.1.0\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(len(fmt_props), 1)
+        self.assertEqual(fmt_props[0]["command"], "black --check .")
+
+    # ── I1: false-positive adoption (bare-word matching used to accept all
+    # of these) ──────────────────────────────────────────────────────────
+
+    def test_comment_mentioning_black_is_not_adoption(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n# black compat\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_description_string_mentioning_black_is_not_adoption(self):
+        write(self.root, "pyproject.toml",
+              '[project]\nname = "x"\ndescription = "Paint it black"\n')
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_black_magic_requirement_is_not_black_adoption(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        write(self.root, "requirements.txt", "black-magic==1.0\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_ruff_lint_only_requirement_name_is_not_ruff_adoption(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        write(self.root, "requirements.txt", "ruff-lint-only==2.0\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    def test_lint_only_ruff_section_is_not_format_adoption(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n[tool.ruff.lint]\nselect = [\"E\"]\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertEqual(fmt_props[0]["command"], "make format")
+
+    # ── M3: the plan mechanically marks a fallback proposal as a placeholder
+
+    def test_no_formatter_proposal_is_marked_placeholder(self):
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertTrue(fmt_props[0]["placeholder"])
+
+    def test_adopted_ruff_proposal_is_not_marked_placeholder(self):
+        write(self.root, "pyproject.toml",
+              "[project]\nname = \"x\"\n[tool.ruff]\nline-length = 100\n")
+        plan = self.plan()
+        fmt_props = [p for p in plan["proposals"] if p["rail"] == "format"]
+        self.assertFalse(fmt_props[0]["placeholder"])
+
+    def test_go_format_rail_fails_on_unformatted(self):
+        # `gofmt -l .` lists offending files but still exits 0 — it never
+        # fails the rail. Wrap it in `test -z` so the rail can actually go
+        # red, matching install-playbooks.md's own form.
+        write(self.root, "go.mod", "module example.com/x\n")
+        plan = self.plan()
+        self.assertIn("test -z", plan["existing_verifiers"]["format"])
+        self.assertEqual(plan["existing_verifiers"]["format"],
+                         'test -z "$(gofmt -l .)"')
+
+    def test_compileall_build_rail_is_forced(self):
+        # Without -f, compileall skips a file whose .pyc header (incl.
+        # whole-second mtime) matches — a syntax error introduced in the
+        # same second as the previous run goes undetected. -f forces a
+        # fresh compile every time.
+        write(self.root, "pyproject.toml", "[project]\nname = \"x\"\n")
+        plan = self.plan()
+        build_props = [p for p in plan["proposals"] if p["rail"] == "build"]
+        self.assertEqual(len(build_props), 1)
+        self.assertIn("-f", build_props[0]["command"].split())
+        self.assertIn("compileall", build_props[0]["command"])
+
+    def test_workflow_mentioning_test_is_not_credited_via_go_format_command(self):
+        # The CI-crediting heuristic keys on cmd.split()[0] / cmd.split()[-1].
+        # For 'test -z "$(gofmt -l .)"' those are 'test' and '.)"' — a
+        # workflow that merely contains the word "test" (but neither runs
+        # gofmt nor any other rail) must not be credited as the ci rail.
+        write(self.root, "go.mod", "module example.com/x\n")
+        write(self.root, ".github/workflows/lint-test-names.yml",
+              "on: push\njobs:\n  test-labels:\n    steps:\n"
+              "      - uses: actions/labeler@v5\n")
+        plan = self.plan()
+        self.assertIsNone(plan["existing_verifiers"]["ci"])
+        self.assertIn("ci", plan["missing"])
+
 
 class TestNodeDetection(TempRepoCase):
     def test_full_scripts_and_lockfile(self):
@@ -122,7 +243,11 @@ class TestOtherStacks(TempRepoCase):
         ev = plan["existing_verifiers"]
         self.assertEqual(ev["build"], "go build ./...")
         self.assertEqual(ev["test"], "go test ./...")
-        self.assertEqual(ev["format"], "gofmt -l .")
+        # Bug 3: bare `gofmt -l .` lists offenders but still exits 0, so it
+        # never fails the rail. `test -z "$(...)"` is the strictly stricter
+        # form — it keeps the same detection and additionally fails when
+        # gofmt lists anything. See also test_go_format_rail_fails_on_unformatted.
+        self.assertEqual(ev["format"], 'test -z "$(gofmt -l .)"')
         self.assertEqual(plan["missing"], ["ci"])
 
     def test_rust_crate_is_toolchain_complete(self):

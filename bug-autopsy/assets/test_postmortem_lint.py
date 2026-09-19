@@ -194,6 +194,150 @@ class PreventionTests(unittest.TestCase):
         self.assertFalse(got["prevention: checkbox-style actionable items"][0])
 
 
+class EvidenceValueTests(unittest.TestCase):
+    """`evidence: none`/`n/a`/`TBD` and an unfilled `<...>` template
+    placeholder are not evidence: the old INFERENCE_RE matched the LABEL and
+    never looked at the value, so a label wearing the shape of a citation
+    with nothing behind it read as cited. `systemic:` had the same hole."""
+
+    def test_null_evidence_and_systemic_values_fail(self):
+        for value in ("none", "N/A", "TBD", "unknown", "-", "?"):
+            with self.subTest(value=value):
+                doc = make_doc({
+                    "Timeline": "- 2026-07-01 09:00 — trigger (evidence: %s)"
+                                % value,
+                    "Root cause": (
+                        "1. **Why A?** x (evidence: %s).\n"
+                        "2. **Why B?** y (systemic: %s).\n"
+                        "3. **Why C?** z (evidence: %s)."
+                        % (value, value, value)),
+                })
+                got, _ = results(doc)
+                self.assertFalse(
+                    got["timeline: every entry cites evidence"][0],
+                    "evidence: %s should not satisfy the timeline check" % value)
+                self.assertFalse(
+                    got["root cause: every why cites evidence"][0],
+                    "evidence/systemic: %s should not satisfy the why-chain "
+                    "check" % value)
+
+    def test_unfilled_template_placeholder_fails(self):
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(evidence: <commit sha / file:line>)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: <ref>).\n"
+                "2. **Why B?** y (evidence: <ref>).\n"
+                "3. **Why C?** z (evidence: <ref>)."),
+        })
+        got, _ = results(doc)
+        self.assertFalse(got["timeline: every entry cites evidence"][0])
+        self.assertFalse(got["root cause: every why cites evidence"][0])
+
+    def test_absence_and_free_text_evidence_still_pass(self):
+        # Free text ("no such case under tests/"), the (inference) label
+        # with no artifact behind it, and a genuine systemic conclusion all
+        # remain honest ways to satisfy the check — the regression guard
+        # against over-reach (rejecting only artifacts, per diagnosis option B,
+        # would break these).
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(inference; evidence: none)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: keys.py:57).\n"
+                "2. **Why B?** y (evidence: no such case under tests/).\n"
+                "3. **Why C?** z (systemic: missing guardrail)."),
+        })
+        got, _ = results(doc)
+        self.assertTrue(got["timeline: every entry cites evidence"][0])
+        self.assertTrue(got["root cause: every why cites evidence"][0])
+
+    def test_null_word_with_filler_still_fails(self):
+        # I2 (review round 1): a null word followed by prose is still a
+        # null word with padding on it, not a real citation. Only the FIRST
+        # normalized token needs to be null for tbd/todo/unknown/na/-/?.
+        for value in ("tbd — later", "unknown yet"):
+            with self.subTest(value=value):
+                doc = make_doc({
+                    "Timeline": ("- 2026-07-01 09:00 — trigger "
+                                 "(evidence: %s)" % value),
+                    "Root cause": (
+                        "1. **Why A?** x (evidence: %s).\n"
+                        "2. **Why B?** y (systemic: %s).\n"
+                        "3. **Why C?** z (evidence: %s)."
+                        % (value, value, value)),
+                })
+                got, _ = results(doc)
+                self.assertFalse(
+                    got["timeline: every entry cites evidence"][0],
+                    "evidence: %s should not satisfy the timeline check" % value)
+                self.assertFalse(
+                    got["root cause: every why cites evidence"][0],
+                    "evidence/systemic: %s should not satisfy the why-chain "
+                    "check" % value)
+
+    def test_dotted_na_fails(self):
+        # Final review: `(evidence: n.a.)` passed, because the captured value
+        # stops at the first "." and "n" was not a null token.
+        for value in ("n.a.", "N.A.", "n.a", "N. A."):
+            with self.subTest(value=value):
+                doc = make_doc({
+                    "Timeline": "- 2026-07-01 09:00 — trigger (evidence: %s)"
+                                % value,
+                    "Root cause": (
+                        "1. **Why A?** x (evidence: %s).\n"
+                        "2. **Why B?** y (systemic: %s).\n"
+                        "3. **Why C?** z (evidence: %s)."
+                        % (value, value, value)),
+                })
+                got, _ = results(doc)
+                self.assertFalse(
+                    got["timeline: every entry cites evidence"][0], value)
+                self.assertFalse(
+                    got["root cause: every why cites evidence"][0], value)
+
+    def test_dotted_values_that_are_real_evidence_still_pass(self):
+        # control for the n.a. fix: a file name and a sha in prose still pass
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(evidence: abc123 in deploy log)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: Nonesuch.py:12).\n"
+                "2. **Why B?** y (evidence: abc123 in deploy log).\n"
+                "3. **Why C?** z (evidence: notes.md line 4)."),
+        })
+        got, _ = results(doc)
+        self.assertTrue(got["timeline: every entry cites evidence"][0])
+        self.assertTrue(got["root cause: every why cites evidence"][0])
+
+    def test_systemic_null_word_with_filler_still_fails(self):
+        doc = make_doc({"Root cause": (
+            "1. **Why A?** x (evidence: keys.py:57).\n"
+            "2. **Why B?** y (evidence: abc1234).\n"
+            "3. **Why C?** z (systemic: unknown yet).")})
+        got, _ = results(doc)
+        self.assertFalse(got["root cause: every why cites evidence"][0])
+
+    def test_absence_evidence_with_null_prefix_still_passes(self):
+        # `none` is rejected only as the WHOLE value — "none found in logs
+        # after grep of app.log" is a real, checkable absence claim, not a
+        # null word with padding, and "Nonesuch.py:12" is an ordinary
+        # file:line reference that happens to start with those letters.
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(evidence: none found in logs after grep of "
+                         "app.log)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: Nonesuch.py:12).\n"
+                "2. **Why B?** y (evidence: abc1234).\n"
+                "3. **Why C?** z (evidence: none found in logs after grep "
+                "of app.log)."),
+        })
+        got, _ = results(doc)
+        self.assertTrue(got["timeline: every entry cites evidence"][0])
+        self.assertTrue(got["root cause: every why cites evidence"][0])
+
+
 class BlameWarningTests(unittest.TestCase):
     def test_blame_phrasing_warns_but_does_not_fail(self):
         doc = make_doc({"Contributing factors":

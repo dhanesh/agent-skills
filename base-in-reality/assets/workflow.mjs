@@ -104,8 +104,28 @@ const results = await pipeline(
         ),
       ),
     ).then((votes) => {
-      const refutes = votes.filter(Boolean).filter((v) => v.refuted).length
-      return refutes >= 2 ? { ...finding, verdict: 'UNCONFIRMED', downgraded: true } : finding
+      // references/verdict-rubric.md step 2: an uncertain refuter refutes, and a
+      // refuter that returned nothing is maximally uncertain, so a crash is a refute.
+      const verdicts = votes.map((v) => (v ? v.refuted !== false : true))
+      const refutes = verdicts.filter(Boolean).length
+      // Step 3: medium/low are downgraded by >= 2 refutes; every other severity
+      // (critical, high, and a missing or unknown one: fail closed) keeps
+      // VIOLATION/DEVIATION only on unanimous non-refute. Mirrored by
+      // refutation_downgrades() in assets/report_lint.py; keep the two in step.
+      // One vote per lens is always recorded (a crash is a refute), so
+      // refuters === verdicts.length here and the linter's padding is a no-op.
+      const unanimity = !['medium', 'low'].includes(finding.severity)
+      const downgrade = unanimity ? refutes >= 1 : refutes >= 2
+      // Step 4: record the votes on every finding, so the linter can check them.
+      const refutation = {
+        refuters: votes.length,
+        verdicts,
+        rationale: votes.filter((v) => !v || v.refuted !== false)
+          .map((v) => (v ? v.reason || '' : 'refuter returned nothing')).join(' | '),
+      }
+      return downgrade
+        ? { ...finding, verdict: 'UNCONFIRMED', downgraded: true, refutation }
+        : { ...finding, refutation }
     })
   },
 )

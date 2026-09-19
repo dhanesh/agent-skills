@@ -6,7 +6,7 @@ compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSear
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.1"
+  version: "1.2.0"
   tags: "audit,research,citations,standards,verification,architecture,business-logic"
 ---
 
@@ -109,7 +109,10 @@ subagent's prompt:
 5. **Refute (fan-out, adversarial).** For each candidate `VIOLATION`/`DEVIATION`, dispatch
    independent refuters across distinct lenses (correctness, citation-applicability,
    severity) per `references/verdict-rubric.md`. Each defaults to skeptical. Downgrade to
-   `UNCONFIRMED` when ≥2 of 3 refute.
+   `UNCONFIRMED` when ≥2 of 3 refute a `medium`/`low` finding, or when any refuter refutes a
+   finding of any other severity (`critical`, `high`, or a missing or unknown one). A refuter
+   that returns nothing counts as a refute. Record
+   the votes in the finding's `refutation` field, whether it survives or not.
 
 6. **Synthesize.** Before filling the report, lint the merged findings array with the
    bundled contract linter: write the findings to a temp JSON file and run
@@ -118,7 +121,10 @@ subagent's prompt:
    `VIOLATION`/`DEVIATION` with no fetched citation is rejected — downgrade it to `UNCONFIRMED`
    rather than shipping it), and with `--evidence` it checks each `fetched: true` citation
    against the URLs a retrieval actually returned, so a plausible-looking but never-fetched
-   DOI fails instead of rendering as grounded. You MUST run it WITH `--evidence`: the result line
+   DOI fails instead of rendering as grounded. It also checks refutation: a surviving
+   `VIOLATION`/`DEVIATION` with no recorded `refutation`, or with votes that stage 5 says
+   downgrade it, is rejected. A PASS means the recorded votes agree with the verdict, not that
+   the votes were honest. You MUST run it WITH `--evidence`: the result line
    states which mode ran, and a report linted without it is only shape-checked.
    Fix every `ERROR:` line, then fill `assets/report-skeleton.md`. Writing the report to
    `docs/base-in-reality/<YYYY-MM-DD>-audit.md` is this skill's one expected write outside
@@ -137,7 +143,7 @@ subagent's prompt:
 
 - `assets/fetch_sources.py` — keyless scholarly-source query helper (stdlib; `uv run`).
 - `assets/findings.schema.json` — the finding schema verification subagents emit.
-- `assets/report_lint.py` — stdlib linter that gates findings on the schema + grounding invariant (stage 6).
+- `assets/report_lint.py` — stdlib linter that gates findings on the schema, the grounding invariant and the refutation rule (stage 6).
 - `assets/report-skeleton.md` — the report template filled in stage 6.
 - `assets/workflow.mjs` — optional Claude Code Workflow accelerator.
 

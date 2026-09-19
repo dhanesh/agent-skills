@@ -16,6 +16,8 @@ Spec: [`docs/superpowers/specs/2026-09-19-bcp14-skills-design.md`](../superpower
 
 Skills appear in rewrite order.
 
+**Line numbers** are as of the BCP 14 rewrite. Later edits to a SKILL.md can shift them, and the rows are not renumbered.
+
 ## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
@@ -57,7 +59,7 @@ Skills appear in rewrite order.
 | c3 | 107 | 0. **(Usually automatic) Seed the model repo-wide.** `SessionStart` auto-seeds a fresh re… | plain (0.31, 0.28) | plain |  |
 | c4 | 151 | 1. **Code observation never raises normative confidence.** A hook may set `observed_conf`… | MUST (0.96, 0.85) | MUST |  |
 | c5 | 154 | 2. **No invented facts in hooks.** Hooks capture only what is deterministically parseable… | SHOULD (0.34, 0.71) | MUST | harm 0.71: a model summarizing inside a hook would put invented facts in the ledger; one of the invariants the skill says not to weaken |
-| c6 | 158 | 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into f… | MUST (0.90, 0.86) | MUST |  |
+| c6 | 158 | 3. **Trusted channel only.** `tool_result` / `tool_use` content is never harvested into f… | MUST (0.90, 0.86) | MUST | (no departure) note: the factory-trust fix (world-model-ledger 1.2.0) adds the CLI path to this invariant (`wm validate` and `wm refute` MUST refuse a `human` kind; `--assert-valid` MUST record `agent_assert`); the candidate and its level are unchanged |
 | c7 | 163 | 4. **Append-only evidence; soft-invalidate, never hard-delete.** Superseded facts get `in… | SHOULD (0.72, 0.61) | MUST | harm 0.61 and soft-invalidation is asserted by the install-gate suite (test_derive_skips_invalidated, test_prune_soft_invalidates_vanished_edges); "confidence is always derived" describes the derivation and stays plain |
 | c8 | 166 | 5. **Every triple is ontology-checked before it enters the ledger.** Predicates are a clo… | SHOULD (0.51, 0.70) | MUST | the write-boundary contract: harm 0.70, and the eval (ontology rejects a hallucinated predicate / an impossible triple) and unit tests enforce it; "hooks never break" describes the hooks and stays plain |
 | c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. Deliberate meaning clarification: "Prefer these defaults" is dropped because the heading says "do not weaken these" and the invariants are MUST (controller ruling; Jev 0.97 for keeping MUST) |

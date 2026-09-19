@@ -69,6 +69,58 @@ def main():
               len(ci_props) == 1 and
               ci_props[0].get("file_to_create") == ".github/workflows/verify.yml")
 
+        # NEGATIVE: the pyrepo fixture has no pyproject.toml/setup.cfg/tox.ini
+        # dependency on ruff or black, so it must NOT be credited a proven
+        # format rail. Bug 3: the format rail used to be byte-identical to
+        # the build rail (both `python3 -m compileall -q .`) — a syntax
+        # check that can never go red on a formatting violation. An
+        # unformatted-but-syntactically-valid repo must get the honest
+        # `make format` placeholder, not a false "format rail installed".
+        fmt_props = [p for p in plan.get("proposals", []) if p.get("rail") == "format"]
+        build_props = [p for p in plan.get("proposals", []) if p.get("rail") == "build"]
+        fmt_cmd = fmt_props[0].get("command") if fmt_props else None
+        build_cmd = build_props[0].get("command") if build_props else None
+        check("NEGATIVE python fixture: format rail is not a syntax check "
+              "(format rail != build rail; no formatter adopted)",
+              len(fmt_props) == 1 and fmt_cmd == "make format"
+              and fmt_cmd != build_cmd and "compileall" not in fmt_cmd,
+              str(fmt_cmd))
+        check("python fixture: build rail forces a fresh compileall pass (-f)",
+              build_cmd is not None and "-f" in build_cmd.split(),
+              str(build_cmd))
+
+        # ── Fixture 1b: python repo that HAS adopted ruff ────────────────────
+        pyruff = os.path.join(tmp, "pyruff")
+        write(pyruff, "pyproject.toml",
+              '[project]\nname = "demo"\n[tool.ruff]\nline-length = 100\n')
+        r = run_detector(pyruff)
+        ruff_plan = json.loads(r.stdout) if r.returncode == 0 else {}
+        ruff_fmt = [p for p in ruff_plan.get("proposals", []) if p.get("rail") == "format"]
+        check("python+ruff fixture: format rail proposes a real ruff check",
+              len(ruff_fmt) == 1 and ruff_fmt[0].get("command") == "ruff format --check .",
+              str(ruff_fmt))
+        check("M3: adopted-formatter proposal is not marked a placeholder",
+              bool(ruff_fmt) and ruff_fmt[0].get("placeholder") is False,
+              str(ruff_fmt[0].get("placeholder")) if ruff_fmt else "no proposal")
+
+        # NEGATIVE (I1): bare-word matching used to false-positive on a
+        # comment, a description string, an unrelated package name, and a
+        # lint-only ruff section. None of these is a real formatter
+        # adoption, so all must still get the placeholder.
+        falsepos = os.path.join(tmp, "falsepositives")
+        write(falsepos, "pyproject.toml",
+              '[project]\nname = "demo"\ndescription = "Paint it black"\n'
+              '# black compat\n[tool.ruff.lint]\nselect = ["E"]\n')
+        write(falsepos, "requirements.txt", "black-magic==1.0\nruff-lint-only==2.0\n")
+        r = run_detector(falsepos)
+        fp_plan = json.loads(r.stdout) if r.returncode == 0 else {}
+        fp_fmt = [p for p in fp_plan.get("proposals", []) if p.get("rail") == "format"]
+        check("NEGATIVE I1: comment/description/unrelated-package/lint-only-ruff "
+              "are not read as an adopted formatter",
+              len(fp_fmt) == 1 and fp_fmt[0].get("command") == "make format"
+              and fp_fmt[0].get("placeholder") is True,
+              str(fp_fmt))
+
         # ── Fixture 2: node repo with real scripts + existing workflow ──────
         nd = os.path.join(tmp, "nodrepo")
         write(nd, "package.json", json.dumps({

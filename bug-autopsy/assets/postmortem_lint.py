@@ -73,14 +73,89 @@ EVIDENCE_RE = re.compile(
 # reconstructed rather than recorded may say so, and a systemic conclusion may
 # name itself as one; both are honest, and both beat tempting an author to
 # invent a plausible sha to satisfy a linter. What fails is an assertion with
-# no stated basis at all ("Because of a thing.").
-INFERENCE_RE = re.compile(
-    r"(?:\bevidence\s*[:=]"
-    r"|\bsystemic\s*[:=]"
-    r"|\binferen(?:ce|ces)\b|\binferred\b"
+# no stated basis at all ("Because of a thing.") — and, per the null-value
+# guard below, an assertion wearing an `evidence:`/`systemic:` label with
+# nothing behind it ("evidence: none"). A PASS here means a basis was
+# *stated*, never that it is *true* — a free-text "evidence: trust me" still
+# passes, by design (see SKILL.md).
+#
+# Null/placeholder values that must NOT satisfy the label below. Matching is
+# case-insensitive and ignores whitespace and punctuation: "N/A", "n / a.",
+# "(none)" and "---" all normalize the same way (stripped to letters/digits,
+# or to nothing at all for a bare "-"/"?"). An unfilled template placeholder
+# ("<commit sha / file:line>") is checked separately, before that stripping,
+# since its angle brackets are what identify it.
+#
+# Two shapes of null word, checked differently (review round 1, I2):
+#   - DEFERRAL words (tbd/todo/unknown/na/-/?) are rejected as the FIRST
+#     normalized token, filler or not: "tbd — later" and "unknown yet" are
+#     still a deferred answer with padding on it, not a citation.
+#   - ABSENCE words (none/null/nil/missing/empty) are rejected only as the
+#     WHOLE value, because they can legitimately start a real, checkable
+#     claim: "none found in logs after grep of app.log" is evidence of an
+#     absence, not an unstated basis, and "Nonesuch.py:12" merely starts
+#     with those letters.
+#   - "n" is a deferral token because the captured value stops at the first
+#     ".", so "n.a." / "N. A." reach this check as a bare "n" (final review).
+#     Dropping "." as a terminator instead would let "none. Later text"
+#     through as a non-null whole value, so the token list is the fix.
+_NULL_FIRST_TOKENS = frozenset(("tbd", "todo", "unknown", "na", "n"))
+_NULL_WHOLE_VALUES = frozenset(("none", "null", "nil", "missing", "empty"))
+
+# Text captured after an `evidence:`/`systemic:` label, up to the next
+# closing punctuation or end of line.
+_LABELED_VALUE_RE = re.compile(
+    r"\b(?:evidence|systemic)\s*[:=]\s*(?P<value>.*?)(?=[).;,]|$)",
+    re.IGNORECASE)
+
+
+def _normalize_token(s):
+    """Lowercase, then drop everything but letters and digits."""
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _is_stated_value(value):
+    """True if `value` (text captured after an evidence:/systemic: label) is
+    a real, stated basis — not empty, not a null word (deferral as its
+    first token, or absence as the whole value — see the comment above
+    _NULL_FIRST_TOKENS), and not an unfilled `<...>` template placeholder."""
+    v = value.strip()
+    if not v:
+        return False
+    if v.startswith("<") and v.endswith(">"):
+        return False  # unfilled template placeholder
+    first_norm = _normalize_token(v.split(None, 1)[0])
+    if not first_norm or first_norm in _NULL_FIRST_TOKENS:
+        return False  # bare "-"/"?"/"--", or a deferral word with filler
+    if _normalize_token(v) in _NULL_WHOLE_VALUES:
+        return False  # the ENTIRE value is an absence word, no real claim
+    return True
+
+
+def _has_labeled_basis(line):
+    """True if `line` carries an evidence:/systemic: label whose value is
+    real, stated text. `evidence: none`/`TBD`/an unfilled `<...>` no longer
+    counts — see _is_stated_value."""
+    return any(_is_stated_value(m.group("value"))
+               for m in _LABELED_VALUE_RE.finditer(line))
+
+
+# The rest of the "declared basis" escape hatch: markers that don't carry a
+# label/value pair, so the null-value guard above doesn't apply to them.
+OTHER_INFERENCE_RE = re.compile(
+    r"(?:\binferen(?:ce|ces)\b|\binferred\b"
     r"|\bno artifact\b|\bunrecorded\b"
     r"|\bper\s+(?:the\s+)?(?:log|logs|transcript|report)\b)",
     re.IGNORECASE)
+
+
+def _has_basis(line):
+    """True if `line` cites an artifact (EVIDENCE_RE), a real evidence:/
+    systemic: value, or an inference/unrecorded marker."""
+    return bool(EVIDENCE_RE.search(line) or _has_labeled_basis(line)
+                or OTHER_INFERENCE_RE.search(line))
+
+
 OWNER_RE = re.compile(r"(?:@[\w.-]+|\bowner\s*[:=]|\bowned by\b)", re.IGNORECASE)
 BLAME_RE = re.compile(
     r"human error|should have known|careless|negligen\w*|operator error"
@@ -213,7 +288,7 @@ def lint_text(text):
             checks.append((ev_name, False, "no entries to check"))
         else:
             bare = [n for n, line in entries
-                    if not (EVIDENCE_RE.search(line) or INFERENCE_RE.search(line))]
+                    if not _has_basis(line)]
             detail = "%d/%d entries cite evidence" % (
                 len(entries) - len(bare), len(entries))
             if bare:
@@ -232,7 +307,7 @@ def lint_text(text):
             checks.append((wev_name, False, "no why levels to check"))
         else:
             bare = [n for n, line in whys
-                    if not (EVIDENCE_RE.search(line) or INFERENCE_RE.search(line))]
+                    if not _has_basis(line)]
             detail = "%d/%d why levels cite evidence" % (len(whys) - len(bare), len(whys))
             if bare:
                 detail += ("; uncited on line(s) %s"
