@@ -28,6 +28,7 @@ requirement is covered; exit 2 on unreadable/requirement-free input.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -119,11 +120,37 @@ def to_json(plan):
     }
 
 
+def _confidence_well_formed(conf):
+    return (isinstance(conf, (int, float)) and not isinstance(conf, bool)
+            and math.isfinite(conf) and 0.0 <= conf <= 1.0)
+
+
+def _truth_well_formed(t):
+    """A required-truth dict is well formed for the payload: id/status/text/parent/check are
+    non-empty strings, maps_to/reqs are lists, and confidence is a finite number in [0, 1].
+
+    spec_lint.parse_spec leaves confidence None (unparsable, e.g. 'confidence: high') or a
+    non-finite/out-of-range float (e.g. 'confidence: nan') when the spec's field is bad —
+    that is a lint failure to repair, not a value to carry into the envelope (a bare NaN
+    isn't even valid JSON).
+    """
+    if not _confidence_well_formed(t.get("confidence")):
+        return False
+    for key in ("id", "status", "text", "parent", "check"):
+        if not isinstance(t.get(key), str) or not t[key]:
+            return False
+    return isinstance(t.get("maps_to"), list) and isinstance(t.get("reqs"), list)
+
+
 def to_task_plan_payload(plan, spec_rel):
     """The task-plan/v1 payload (assets/schemas/task-plan.v1.json): verify steps stay a list.
 
     `constraints`, `required_truths` and `decisions` are optional (task-plan/v1 stays v1: the
     change is additive) and are added only when the spec the plan was derived from has them.
+    `required_truths` is added only when every truth is well formed (see
+    `_truth_well_formed`) — a spec with a malformed truth already fails spec-lint (recorded
+    in the envelope's `spec-lint` claim), so the payload omits the field rather than carry a
+    broken or unserializable value.
     """
     tasks = []
     for t in plan["tasks"]:
@@ -138,8 +165,9 @@ def to_task_plan_payload(plan, spec_rel):
         payload["constraints"] = [{"id": c["id"], "type": c["type"], "text": c["text"]}
                                   for c in plan["constraints"]]
     if plan.get("required_truths"):
-        payload["required_truths"] = [{k: v for k, v in t.items() if k != "num"}
-                                      for t in plan["required_truths"]]
+        truths = [{k: v for k, v in t.items() if k != "num"} for t in plan["required_truths"]]
+        if all(_truth_well_formed(t) for t in truths):
+            payload["required_truths"] = truths
     if plan.get("decisions"):
         payload["decisions"] = [{"id": d["id"], "question": d["question"], "answer": d["answer"],
                                  "source": d["source"]} for d in plan["decisions"]]
@@ -194,11 +222,10 @@ def payload_errors(payload):
                         and isinstance(t.get("parent"), str)
                         and isinstance(t.get("maps_to"), list)
                         and isinstance(t.get("reqs"), list)
-                        and isinstance(t.get("confidence"), (int, float))
-                        and not isinstance(t.get("confidence"), bool)
+                        and _confidence_well_formed(t.get("confidence"))
                         and isinstance(t.get("check"), str)):
                     errs.append("required_truths[%d] must be {id, status, text, parent, maps_to, "
-                                "reqs, confidence, check}" % i)
+                                "reqs, confidence: a finite number in [0, 1], check}" % i)
     if "decisions" in payload:
         decisions = payload["decisions"]
         if not isinstance(decisions, list):
