@@ -1,0 +1,100 @@
+{
+  "expect": {
+    "status": "COVERED"
+  },
+  "input": {
+    "action": "local_reversible",
+    "branch": "factory/x",
+    "files": {
+      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
+      "plan.json": "{\"plan\": 1}\n"
+    },
+    "grant": {
+      "_type": "https://in-toto.io/Statement/v1",
+      "predicate": {
+        "assertions": [
+          {
+            "assertedBy": {
+              "human": "Dana"
+            },
+            "command": [
+              "{python}",
+              "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+              "--unattended",
+              "docs/spec.md"
+            ],
+            "result": {
+              "outcome": "passed"
+            },
+            "subject": [
+              {
+                "digest": {
+                  "sha256": "41028ddf536e594778c6b23d0a527099836b813c46687c269eff9b980746f34f"
+                },
+                "name": "docs/spec.md"
+              }
+            ],
+            "test": "grant-accepted"
+          }
+        ],
+        "generatedAtTime": "2026-09-19T12:00:00Z",
+        "id": "autonomy-grant-v1-20260919T120000Z-a1b2c3",
+        "payload": {
+          "budget": {
+            "wall_clock_min": 60
+          },
+          "decisions": [
+            {
+              "answer": "no",
+              "id": "D1",
+              "question": "Add deps?",
+              "source": "sweep"
+            }
+          ],
+          "defaults": [],
+          "expires_at": "2026-09-20T12:00:00Z",
+          "gate_policy": {
+            "local_reversible": "grant",
+            "read_only": "auto"
+          },
+          "require_signature": {},
+          "revoked": false,
+          "scope": {
+            "branch_pattern": "factory/*",
+            "repo": "."
+          },
+          "stop_on": [
+            "new_human_decision"
+          ],
+          "system_one": {
+            "allowed": false
+          }
+        },
+        "skillContract": "1",
+        "wasAttributedTo": {
+          "skill": "spec-first-planning",
+          "version": "2.0.0"
+        },
+        "wasRevisionOf": null
+      },
+      "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
+      "subject": [
+        {
+          "digest": {
+            "sha256": "41028ddf536e594778c6b23d0a527099836b813c46687c269eff9b980746f34f"
+          },
+          "name": "docs/spec.md"
+        },
+        {
+          "digest": {
+            "sha256": "f903a924500a33050df97cb71aa2dec71cb35d001c0216c265ff588099239243"
+          },
+          "name": "plan.json"
+        }
+      ]
+    },
+    "now": "2026-09-19T13:00:00Z",
+    "others": [],
+    "type": "grant"
+  }
+}

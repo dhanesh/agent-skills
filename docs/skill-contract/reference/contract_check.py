@@ -9,9 +9,14 @@ byte-identical into their assets/ (`make contract-vendor`).
     contract_check.py check-envelope <file> [--root DIR] [--for SKILL_DIR]
                                             [--rerun] [--json]                 C3-C7, C9
     contract_check.py discover --kind URI [--from SKILL_DIR] [--json]          C8
+    contract_check.py check-grant [FILE] --root DIR --action CLASS [--json]    C10
+    contract_check.py revoke-grant [ID] --root DIR                             C10
 
 Exit 0 pass, 2 a commandment is violated, 1 usage or internal error. The last
 line is always CONTRACT_RESULT: PASS or CONTRACT_RESULT: FAIL (C<n>, ...).
+
+check-grant exits 0 COVERED, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is GRANT: ...
+A caller proceeds only on exit 0. revoke-grant prints REVOKED: <path> and exits 0.
 """
 import sys
 
@@ -21,6 +26,7 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
@@ -49,6 +55,13 @@ OUTCOMES = ("passed", "failed", "cantTell", "inapplicable", "untested")
 SKILL_DIR_RE = re.compile(r"^\{skill_dir:(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)\}")
 PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
 BARE_PYTHON_RE = re.compile(r"^(?:python[0-9.]*|py)(?:\.exe)?$", re.IGNORECASE)
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+ACTION_CLASSES = ("read_only", "local_reversible", "push_branch", "open_pr", "merge",
+                  "deploy", "spend", "external_message", "delete")
+LOCAL_CLASSES = frozenset({"read_only", "local_reversible"})
+GATES = ("auto", "grant", "ask")
+SIG_LEVELS = ("UNSIGNED", "SIGNED", "SIGNED_HW")
+GRANT_NAMESPACE = "skill-contract-grant"
 
 
 # ── SKILL.md reading (no YAML library: a line reader is enough) ──────────────
@@ -653,6 +666,192 @@ def check_envelope(path, root=None, for_skill=None, rerun=False, env=None):
     return report
 
 
+# ── Commandment 10: the autonomy grant ─────────────────────────────────────
+def _parse_time(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def grant_violations(st):
+    """Grant-specific problems (after check_statement passed). [] = valid.
+
+    Order follows SPEC: the payload's shape, then human attribution (skipped
+    for a revoked revision), then the gate-policy floors.
+    """
+    if not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND:
+        return ["predicateType must be %s" % GRANT_KIND]
+    out = []
+    pred = st["predicate"]
+    p = pred.get("payload") or {}
+    scope = p.get("scope")
+    if not (isinstance(scope, dict) and isinstance(scope.get("repo"), str)
+            and isinstance(scope.get("branch_pattern"), str) and scope["branch_pattern"]):
+        out.append("payload.scope must be {repo, branch_pattern}")
+    for d in p.get("decisions") if isinstance(p.get("decisions"), list) else [None]:
+        if not (isinstance(d, dict) and all(isinstance(d.get(k), str) and d[k].strip()
+                                            for k in ("id", "question", "answer"))):
+            out.append("each decision must carry non-empty id, question and answer")
+            break
+    req = p.get("require_signature", {})
+    if not (isinstance(req, dict) and all(c in ACTION_CLASSES and v in SIG_LEVELS[1:]
+                                          for c, v in req.items())):
+        out.append("require_signature maps action classes to SIGNED or SIGNED_HW")
+    try:
+        _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", ""))) else "")
+    except ValueError:
+        out.append("payload.expires_at must be RFC 3339 UTC (YYYY-MM-DDThh:mm:ssZ)")
+    if not isinstance(p.get("revoked"), bool):
+        out.append("payload.revoked must be a boolean")
+    if p.get("revoked") is not True:
+        accepted = [a for a in pred.get("assertions") or [] if a.get("test") == "grant-accepted"]
+        if len(accepted) != 1:
+            out.append("a grant needs exactly one grant-accepted assertion, asserted by a human")
+        elif not (isinstance(accepted[0].get("assertedBy"), dict)
+                  and isinstance(accepted[0]["assertedBy"].get("human"), str)
+                  and accepted[0]["assertedBy"]["human"].strip()
+                  and (accepted[0].get("result") or {}).get("outcome") == "passed"):
+            out.append("grant-accepted must be asserted by a human with outcome passed")
+    policy = p.get("gate_policy")
+    if not isinstance(policy, dict):
+        out.append("payload.gate_policy must be an object")
+        policy = {}
+    for cls, gate in policy.items():
+        if cls not in ACTION_CLASSES:
+            out.append("gate_policy names unknown action class %r" % cls)
+        elif gate not in GATES:
+            out.append("gate_policy[%r] must be one of auto, grant, ask" % cls)
+        elif gate == "auto" and cls not in LOCAL_CLASSES:
+            out.append("gate_policy[%r] may not be auto; at most grant" % cls)
+    return out
+
+
+def _grant_envelopes(root, strict=True):
+    """[(path, statement)] for grant envelopes under root.
+
+    strict=True keeps only statements that pass check_statement (candidates
+    that may cover something). strict=False keeps any JSON object of the grant
+    kind: used for supersession, so a revision fails closed even if malformed.
+    """
+    d = envelope_dir(root)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for f in sorted(os.listdir(d)):
+        if not f.endswith(".json"):
+            continue
+        st, err = load_envelope(os.path.join(d, f))
+        if err or not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND \
+                or not isinstance(st.get("predicate"), dict):
+            continue
+        if strict and check_statement(st):
+            continue
+        out.append((os.path.join(d, f), st))
+    return out
+
+
+def is_superseded(root, grant_id):
+    """True when any grant envelope under root names grant_id in wasRevisionOf."""
+    return any(st["predicate"].get("wasRevisionOf") == grant_id
+               for _, st in _grant_envelopes(root, strict=False))
+
+
+def latest_grant(root):
+    """The path of the newest valid-shaped grant that no revision supersedes."""
+    revised = {st["predicate"].get("wasRevisionOf") for _, st in _grant_envelopes(root, strict=False)}
+    heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
+             for p, st in _grant_envelopes(root) if st["predicate"]["id"] not in revised]
+    return max(heads)[2] if heads else None
+
+
+def current_branch(root):
+    """The checked-out branch ("HEAD" when detached), or None outside git."""
+    try:
+        r = subprocess.run(["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def signature_level(path, env=None):
+    """UNSIGNED unless <path>.sig verifies. Verification is not implemented yet, so this
+    always returns UNSIGNED: an unverified .sig file never raises the level."""
+    return "UNSIGNED"
+
+
+def check_grant(root, action, path=None, now=None, branch=None, env=None):
+    """Commandment 10: does a grant cover `action`? First failing check wins.
+
+    Returns {status: COVERED|ASK|INVALID|NONE, id, reason, gate, signed, path,
+    violations}. A caller proceeds only on COVERED.
+    """
+    rep = {"status": "NONE", "id": None, "reason": None, "gate": None, "signed": None,
+           "path": None, "violations": []}
+    path = path or latest_grant(root)
+    if path is None:
+        rep["reason"] = "no-grant"
+        return rep
+    rep["path"] = path
+    st, err = load_envelope(path)
+    viol = ["C%d: %s" % v for v in (err or check_statement(st))]
+    if not viol:
+        viol = ["C10: %s" % v for v in grant_violations(st)]
+    if viol:
+        rep.update(status="INVALID", reason="invalid", violations=viol)
+        return rep
+    pred, p = st["predicate"], st["predicate"]["payload"]
+    rep["id"] = pred["id"]
+
+    def ask(reason):
+        rep.update(status="ASK", reason=reason)
+        return rep
+
+    if p["revoked"]:
+        return ask("revoked")
+    if is_superseded(root, pred["id"]):
+        return ask("superseded")
+    if (now or utc_now()) >= _parse_time(p["expires_at"]):
+        return ask("expired")
+    if stale_names(root, st["subject"]):
+        return ask("stale")
+    branch = branch if branch is not None else current_branch(root)
+    if branch is not None and not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
+        return ask("branch")
+    gate = p["gate_policy"].get(action, "ask")
+    rep["gate"] = gate
+    if gate not in ("auto", "grant"):
+        return ask("gate-ask")
+    rep["signed"] = signature_level(path, env)
+    need = (p.get("require_signature") or {}).get(action)
+    if need and SIG_LEVELS.index(rep["signed"]) < SIG_LEVELS.index(need):
+        return ask("signature")
+    rep["status"] = "COVERED"
+    return rep
+
+
+def revoke_grant(root, grant_id=None, now=None):
+    """Write a revision with revoked: true. Tightening is always allowed: no human needed."""
+    if grant_id is None:
+        path = latest_grant(root)
+    elif isinstance(grant_id, str) and ID_RE.match(grant_id):
+        path = os.path.join(envelope_dir(root), grant_id + ".json")
+    else:
+        raise ValueError("%r is not an envelope id" % (grant_id,))
+    st, err = load_envelope(path) if path and os.path.isfile(path) else (None, [(3, "no such grant")])
+    if st is None or err or check_statement(st) or st.get("predicateType") != GRANT_KIND:
+        raise ValueError("no valid grant to revoke under %s" % envelope_dir(root))
+    if is_superseded(root, st["predicate"]["id"]):
+        raise ValueError("%s is superseded; revoke the newest revision" % st["predicate"]["id"])
+    now = now or utc_now()
+    pred = st["predicate"]
+    payload = dict(pred["payload"], revoked=True)
+    rev = {"_type": STATEMENT_TYPE, "subject": st["subject"], "predicateType": GRANT_KIND,
+           "predicate": {"skillContract": CONTRACT_VERSION, "id": new_id(GRANT_KIND, now),
+                         "wasAttributedTo": pred["wasAttributedTo"],
+                         "generatedAtTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "wasRevisionOf": pred["id"], "payload": payload, "assertions": []}}
+    return write_envelope(root, rev)
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def finish(violations, lines=()):
     for ln in lines:
@@ -684,6 +883,14 @@ def build_parser():
     p.add_argument("--kind", required=True)
     p.add_argument("--from", dest="from_dir")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("check-grant", help="commandment 10: does a grant cover this action")
+    p.add_argument("file", nargs="?")
+    p.add_argument("--root", required=True)
+    p.add_argument("--action", required=True)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("revoke-grant", help="commandment 10: revoke the newest (or named) grant")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--root", required=True)
     return ap
 
 
@@ -728,6 +935,34 @@ def main(argv=None):
             lines.append("NO_CONSUMER: no installed skill consumes %s; give the envelope to the user"
                          % a.kind)
         return finish([], lines)
+    if a.cmd == "check-grant":
+        if a.action not in ACTION_CLASSES:
+            print("usage: --action must be one of %s" % ", ".join(ACTION_CLASSES), file=sys.stderr)
+            return 1
+        rep = check_grant(a.root, a.action, path=a.file)
+        if a.json:
+            print(json.dumps(rep, sort_keys=True))
+        for v in rep["violations"]:
+            print("FAIL: %s" % v)
+        if rep["status"] == "COVERED":
+            print("GRANT: COVERED id=%s class=%s gate=%s signed=%s"
+                  % (rep["id"], a.action, rep["gate"], rep["signed"]))
+            return 0
+        if rep["status"] == "INVALID":
+            print("GRANT: INVALID %s" % (rep["path"],))
+            return 2
+        if rep["status"] == "NONE":
+            print("GRANT: NONE")
+            return 3
+        print("GRANT: ASK id=%s reason=%s" % (rep["id"], rep["reason"]))
+        return 3
+    if a.cmd == "revoke-grant":
+        try:
+            print("REVOKED: %s" % revoke_grant(a.root, a.id))
+            return 0
+        except (ValueError, OSError) as exc:
+            print("ERROR: %s" % exc, file=sys.stderr)
+            return 1
     return 1
 
 

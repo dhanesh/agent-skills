@@ -4,14 +4,18 @@ the generator/committed-vector agreement, and the CLI. Stdlib only, offline.
 
 Run:  cd docs/skill-contract/reference && python3 -I test_contract_check.py
 """
+import contextlib
 import filecmp
+import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # `python -I` drops the script dir from sys.path
@@ -98,8 +102,21 @@ def run_discovery_vector(inp, tmp):
             "warnings": rep["warnings"]}
 
 
+def run_grant_vector(inp, tmp):
+    root = os.path.join(tmp, "root")
+    for rel, text in inp["files"].items():
+        _write(os.path.join(root, *rel.split("/")), text)
+    edir = cc.envelope_dir(root)
+    for st in [inp["grant"]] + inp.get("others", []):
+        _write(os.path.join(edir, st["predicate"]["id"] + ".json"), json.dumps(st))
+    path = os.path.join(edir, inp["grant"]["predicate"]["id"] + ".json")
+    now = datetime.strptime(inp["now"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    rep = cc.check_grant(root, inp["action"], path=path, now=now, branch=inp["branch"], env={})
+    return {"status": rep["status"], "reason": rep["reason"]}
+
+
 RUNNERS = {"skill": run_skill_vector, "envelope": run_envelope_vector,
-           "discovery": run_discovery_vector}
+           "discovery": run_discovery_vector, "grant": run_grant_vector}
 
 
 def run_vector(vector):
@@ -158,7 +175,7 @@ class VectorTests(unittest.TestCase):
 
     @staticmethod
     def required_commandments():
-        return ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]
+        return ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10"]
 
 
 class CliTests(unittest.TestCase):
@@ -346,6 +363,141 @@ class RerunTests(unittest.TestCase):
             self.assertIn("ENVELOPE: STALE", r.stdout)
             self.assertIn("STALE: docs/spec.md", r.stdout)
             self.assertIn("CLAIM: spec-lint STALE", r.stdout)
+
+
+class GrantTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sc-grant-")
+        _write(os.path.join(self.tmp, "docs", "spec.md"), build_vectors.SPEC)
+        _write(os.path.join(self.tmp, "plan.json"), build_vectors.PLAN_TEXT)
+        self.now = datetime(2026, 9, 19, 13, 0, 0, tzinfo=timezone.utc)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def put(self, st):
+        path = os.path.join(cc.envelope_dir(self.tmp), st["predicate"]["id"] + ".json")
+        _write(path, json.dumps(st))
+        return path
+
+    def check(self, action="local_reversible", **kw):
+        kw.setdefault("now", self.now)
+        kw.setdefault("branch", "factory/x")
+        kw.setdefault("env", {})
+        return cc.check_grant(self.tmp, action, **kw)
+
+    def test_no_grant_is_none(self):
+        self.assertEqual(self.check()["status"], "NONE")
+
+    def test_latest_head_is_used_without_a_path(self):
+        self.put(build_vectors.grant())
+        self.assertEqual(self.check()["status"], "COVERED")
+
+    def test_revoke_makes_the_next_check_ask(self):
+        self.put(build_vectors.grant())
+        out = cc.revoke_grant(self.tmp, now=self.now)
+        self.assertTrue(os.path.isfile(out))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"))
+
+    def test_explicit_path_to_a_revoked_grant_still_asks(self):
+        p = self.put(build_vectors.grant())
+        cc.revoke_grant(self.tmp, now=self.now)
+        rep = self.check(path=p)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "superseded"))
+
+    def test_a_malformed_revision_still_supersedes(self):
+        # Tightening fails closed: a revision naming the grant supersedes it
+        # even when the revision itself would not pass check_statement.
+        p = self.put(build_vectors.grant())
+        bad = build_vectors.grant(revoked=True, assertions=[], rev=build_vectors.GRANT_ID,
+                                  gid="autonomy-grant-v1-20260919T121000Z-d4e5f6")
+        bad["subject"] = []
+        self.put(bad)
+        rep = self.check(path=p)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "superseded"))
+
+    def test_revoke_by_id_refuses_a_path_outside_the_envelope_dir(self):
+        self.put(build_vectors.grant())
+        with self.assertRaises(ValueError):
+            cc.revoke_grant(self.tmp, grant_id="../../plan", now=self.now)
+
+    def test_revoke_by_id_and_a_second_revoke_of_the_old_id_is_refused(self):
+        self.put(build_vectors.grant())
+        cc.revoke_grant(self.tmp, grant_id=build_vectors.GRANT_ID, now=self.now)
+        with self.assertRaises(ValueError):
+            cc.revoke_grant(self.tmp, grant_id=build_vectors.GRANT_ID, now=self.now)
+
+    def test_revocation_is_a_valid_revoked_grant_envelope(self):
+        self.put(build_vectors.grant())
+        out = cc.revoke_grant(self.tmp, now=self.now)
+        with open(out, encoding="utf-8") as f:
+            st = json.load(f)
+        self.assertEqual(cc.check_statement(st), [])
+        self.assertEqual(cc.grant_violations(st), [])
+        self.assertIs(st["predicate"]["payload"]["revoked"], True)
+        self.assertEqual(st["predicate"]["wasRevisionOf"], build_vectors.GRANT_ID)
+        self.assertEqual(st["predicate"]["assertions"], [])
+
+    def test_revoke_with_no_grant_fails(self):
+        with self.assertRaises(ValueError):
+            cc.revoke_grant(self.tmp, now=self.now)
+
+    def test_detached_or_foreign_branch_asks(self):
+        self.put(build_vectors.grant())
+        rep = self.check(branch="HEAD")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch"))
+
+    def test_signature_stub_is_unsigned_even_with_a_sig_file(self):
+        p = self.put(build_vectors.grant())
+        _write(p + ".sig", "not a signature")
+        self.assertEqual(cc.signature_level(p, env={}), "UNSIGNED")
+
+    def test_covered_report_names_gate_and_signature(self):
+        self.put(build_vectors.grant())
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["id"], rep["gate"], rep["signed"]),
+                         ("COVERED", build_vectors.GRANT_ID, "grant", "UNSIGNED"))
+
+    def test_invalid_report_carries_violations(self):
+        self.put(build_vectors.grant(attributed={"skill": "spec-first-planning"},
+                                     policy={"merge": "auto"}))
+        rep = self.check()
+        self.assertEqual(rep["status"], "INVALID")
+        self.assertEqual(len(rep["violations"]), 2, rep["violations"])
+        self.assertIn("human", rep["violations"][0])  # attribution is checked before floors
+        self.assertIn("merge", rep["violations"][1])
+
+    def test_unknown_action_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = cc.main(["check-grant", "--root", self.tmp, "--action", "launch"])
+        self.assertEqual(rc, 1)
+
+    def test_cli_exit_codes(self):
+        self.put(build_vectors.grant(expires="2999-01-01T00:00:00Z"))
+        codes = {}
+        for action in ("local_reversible", "merge"):
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                codes[action] = (cc.main(["check-grant", "--root", self.tmp, "--action", action]),
+                                 buf.getvalue())
+        self.assertEqual(codes["local_reversible"][0], 0)
+        self.assertEqual(codes["local_reversible"][1].strip().splitlines()[-1],
+                         "GRANT: COVERED id=%s class=local_reversible gate=grant signed=UNSIGNED"
+                         % build_vectors.GRANT_ID)
+        self.assertEqual(codes["merge"][0], 3)
+        self.assertIn("GRANT: ASK", codes["merge"][1])
+
+    def test_cli_invalid_none_and_revoke(self):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(cc.main(["check-grant", "--root", self.tmp, "--action", "read_only"]), 3)
+        self.assertEqual(buf.getvalue().strip().splitlines()[-1], "GRANT: NONE")
+        self.put(build_vectors.grant(policy={"deploy": "auto"}, expires="2999-01-01T00:00:00Z"))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(cc.main(["check-grant", "--root", self.tmp, "--action", "read_only"]), 2)
+        self.assertTrue(buf.getvalue().strip().splitlines()[-1].startswith("GRANT: INVALID"))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(cc.main(["revoke-grant", "--root", self.tmp]), 0)
+        self.assertTrue(buf.getvalue().startswith("REVOKED: "))
 
 
 if __name__ == "__main__":
