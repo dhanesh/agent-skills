@@ -54,7 +54,7 @@ The signature level:
 - `SIGNED` for any other key that verifies;
 - `UNSIGNED` otherwise, including when `ssh-keygen` is not installed.
 
-**Revocation:** `revoke-grant <id>` writes a revision (`wasRevisionOf: <id>`) with `revoked: true`. The user runs it; no grant ever covers it.
+**Revocation:** `revoke-grant <id>` writes a revision (`wasRevisionOf: <id>`) with `revoked: true`. The user runs it; no grant ever covers it. A revocation only tightens, so it needs no human attribution: its `assertions` list is empty. Anyone may revoke.
 
 ## 2. Action classes (normative, in SPEC.md)
 
@@ -71,7 +71,7 @@ The signature level:
 | `delete` | delete branches, files outside the working tree, data | irreversible | `grant`, only if named explicitly |
 
 - A class absent from `gate_policy` is `ask`.
-- `auto` on any of the last five classes makes the grant INVALID.
+- `auto` on any class other than `read_only` and `local_reversible` makes the grant INVALID (the table's "most permissive gate" column).
 
 ## 3. `contract_check.py check-grant`
 
@@ -82,14 +82,15 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
 - **Without a path**, it uses the newest grant under `.skill-contract/envelopes/` that has not been superseded by a revision.
 - **It runs these checks in order:**
   1. envelope validity (C3–C6, C9);
-  2. human attribution;
+  2. human attribution, skipped for a revoked revision;
   3. the gate-policy floors;
   4. not revoked;
-  5. not expired;
-  6. subjects not stale;
-  7. the current git branch matches `branch_pattern` (the check is skipped outside git);
-  8. the class's gate is `auto` or `grant`;
-  9. the required signature level is met.
+  5. not superseded, meaning no revision names this grant in `wasRevisionOf`. This stops an explicit path to an old grant from bypassing a revocation;
+  6. not expired;
+  7. subjects not stale;
+  8. the current git branch matches `branch_pattern` (the check is skipped outside git);
+  9. the class's gate is `auto` or `grant`;
+  10. the required signature level is met.
 - **Outputs:**
   - `GRANT: COVERED id=… class=… gate=auto|grant signed=UNSIGNED|SIGNED|SIGNED_HW`, exit 0;
   - `GRANT: ASK id=… reason=<first failing check>`, exit 3;
