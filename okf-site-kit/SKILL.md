@@ -18,11 +18,13 @@ compatibility: Requires python3 (stdlib only) to inspect bundles and generate th
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 
 # okf-site-kit
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Generate a browsable website from an Open Knowledge Format bundle. OKF (Google's open
 spec for agent-readable knowledge) deliberately ships no required tooling — a bundle is
@@ -35,8 +37,8 @@ site is a generated view of it, regenerated whenever the bundle changes.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -47,16 +49,16 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## Ground rules
 
-- **The bundle is read-only.** The generator never mutates the source bundle. When the
+- **The bundle is read-only.** The generator MUST NOT mutate the source bundle. When the
   scan finds problems worth fixing at the source (missing `type`, broken links), surface
   them to the user and fix the bundle only if they ask.
 - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types, extra
-  frontmatter keys, missing optional files, and broken links must degrade gracefully.
+  frontmatter keys, missing optional files, and broken links MUST degrade gracefully.
   The generator renders everything it can and prints `WARN:` lines for the rest — pass
   the warnings on, don't suppress them.
 - **Spec tracking.** The generator targets OKF v0.1. If the spec has moved (check
-  [references/okf-spec.md](references/okf-spec.md) for the URL and update rule), update
-  the generator before emitting a stale dialect.
+  [references/okf-spec.md](references/okf-spec.md) for the URL and update rule), you
+  SHOULD update the generator before emitting a stale dialect.
 
 ## Workflow
 

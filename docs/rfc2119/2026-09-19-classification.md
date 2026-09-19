@@ -224,3 +224,13 @@ Skills appear in rewrite order.
 |---|---|---|---|---|---|
 | c1 | 23 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.77, 0.78) | MUST | |
 | c2 | 113 | 4. Diagrams: use the `<Mermaid code={\`...\`} />` component. **Never** a fenced | MUST (0.34, 0.46) | MUST | low confidence (0.34) and harm 0.46 < 0.5, but mechanically enforced by the `verify:mermaid` gate |
+
+## okf-site-kit (5 candidates · 3 MUST · 1 SHOULD · 0 MAY · 1 plain · 2 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 35 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.75, 0.76) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c2 | 50 | - **The bundle is read-only.** The generator never mutates the source bundle. Wh… | MUST (0.60, 0.59) | MUST | |
+| c3 | 53 | - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types… | MUST (0.80, 0.77) | MUST | |
+| c4 | 57 | - **Spec tracking.** The generator targets OKF v0.1. If the spec has moved (che… | MUST (0.38, 0.64) | SHOULD | confidence 0.38 < 0.6, decided ourselves; no gate/test enforces staying on the current spec version — a strong default with a legitimate exception (the spec hasn't moved), not a hard failure |
+| c5 | 103 | - **Producer-extended bundles** (e.g. `feynman-walkthrough`'s explainers): arbit… | MUST (0.31, 0.61) | plain | describes the generator's rendering behavior for extra frontmatter keys; a descriptive never, not a directive (confidence 0.31 < 0.6) |
