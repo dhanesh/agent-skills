@@ -132,3 +132,13 @@ Skills appear in rewrite order.
 | c30 | 192 | 4. **Minimizes elements** — no more classes, methods, or abstraction than rules 1–… | plain (0.82, 0.18) | plain |  |
 | c31 | 195 | Rules 2–4 are applied by refactoring once it works. **Rule 4 is the guard against … | plain (0.82, 0.16) | plain |  |
 | c32 | 278 | \| **Data clumps** — fields always travel together \| extract a class \| | plain (0.77, 0.19) | plain |  |
+
+## feynman-walkthrough (5 candidates · 1 MUST · 0 SHOULD · 0 MAY · 4 plain · 0 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 28 | Walk a learner — the user, or an agent onboarding onto an unfamiliar system — thro… | plain (0.69, 0.43) | plain |  |
+| c2 | 36 | **Locating this skill's helpers (do this first).** The steps below run bundled sc… | MUST (0.79, 0.73) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c3 | 98 | 4. **Check understanding — after the walkthrough, never before.** A few targeted … | plain (0.47, 0.33) | plain | Workflow step 4; out of scope per the spec's "workflow steps stay plain imperatives" |
+| c4 | 136 | **STALE** → the source moved (new commits, revised doc). Say so before relying on… | plain (0.28, 0.53) | plain | "never trips STALE" describes \`okf.py\`'s diff-detection behaviour, not a directive |
+| c5 | 182 | the **reference explainer** — standalone, revisitable, sharable; useful to the le… | plain (0.63, 0.29) | plain | "never saw this session" describes a hypothetical colleague, not a directive |

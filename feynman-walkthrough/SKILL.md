@@ -19,11 +19,14 @@ compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-sche
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.0"
+  version: "1.2.1"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
 # feynman-walkthrough
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
+described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Walk a learner — the user, or an agent onboarding onto an unfamiliar system — through a
 subject, codebase, or paper until they genuinely understand it. The goal is **enriched
@@ -36,8 +39,8 @@ answers, or manufacture friction.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
