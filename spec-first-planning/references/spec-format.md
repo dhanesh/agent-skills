@@ -37,7 +37,8 @@ A spec is one markdown file:
 - **Open questions**: the section must exist; its list may be empty.
 
 **Full-loop sections** (Tension + Choose; required only under `--converged` /
-`--unattended`, design spec §4):
+`--unattended`, design spec §4). How to run the loop that fills them, the
+pre-mortem and the decision sweep are in `references/unattended.md`:
 
 - **Tension bullets** (in `## Tensions`): `- TN<n> [<type>]: <text>
   (between: <ids>; status: <resolved|accepted>; strategy:
@@ -145,3 +146,19 @@ Deterministic: same spec in, byte-identical plan out.
 
 Exit codes: `0` total coverage; `1` any requirement uncovered (a plan with
 a hole is not a plan); `2` unreadable input or no `R<n>:` bullets at all.
+
+### The task-plan envelope (`--envelope <repo-root>`)
+
+`spec_to_tasks.py <spec.md> --envelope <repo-root>` also writes the plan as a
+skill-contract `task-plan/v1` envelope under
+`<repo-root>/.skill-contract/envelopes/` and prints `ENVELOPE: <path>`. The
+payload is the JSON plan above plus `title` and `spec`, and three optional
+fields lifted from the spec when present: `constraints` (`{id, type, text}`),
+`required_truths` (only when every truth is well formed) and `decisions`
+(`{id, question, answer, source}`). `task-plan/v1` stays v1 because the
+fields are additive. The schema is `assets/schemas/task-plan.v1.json`.
+
+In unattended mode this envelope is the plan a grant pins:
+`assets/write_grant.py` takes it as `--plan`, refuses a plan that was
+derived from a different spec or is stale, and writes an
+`autonomy-grant/v1` envelope beside it (see `references/unattended.md`).

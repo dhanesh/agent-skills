@@ -20,7 +20,8 @@ not the solution.>
      category prefix (B business, T technical, U UX, S security,
      O operational) plus a number, e.g. B1, T2. <type> is invariant, goal or
      boundary. No pre-mortem is required for the light pass — see
-     references/spec-format.md for the full-loop Tension/Choose steps. -->
+     references/unattended.md for the full-loop Tension/Choose steps and
+     references/spec-format.md for their grammar. -->
 - B1 [invariant]: <business/technical/UX/security/operational constraint>
 - T1 [boundary]: <another constraint>
 
@@ -58,3 +59,8 @@ not the solution.>
 
 ## Open questions
 - <unknown that could still change the requirements — list may be empty>
+
+<!-- Full loop only (go deeper, or unattended mode): add ## Tensions,
+     ## Solution options and ## Iterations here; unattended mode also adds
+     ## Decisions. Grammar: references/spec-format.md. How to run the loop:
+     references/unattended.md. -->

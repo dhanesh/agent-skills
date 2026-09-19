@@ -8,7 +8,11 @@ outcomes deterministically — the lint accepts a complete spec and rejects
 each seeded defect; the compiler yields a total requirement↔task coverage
 map with a verify step on every task, and reports uncovered requirements
 with a non-zero exit; the shipped spec template, filled with fixture
-content, produces a lint-clean spec. Stdlib-only, offline, no repo writes.
+content, produces a lint-clean spec. The autonomy-grant arm (2.0.0) runs the
+lint modes, write_grant.py, check-grant and revoke-grant on NEGATIVE and
+positive fixtures, validates references/unattended.md's answers.json example
+against write_grant.py, and checks the SKILL.md gate text. Stdlib-only,
+offline, no repo writes.
 """
 
 import json
@@ -18,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -75,6 +80,66 @@ FIXTURE_BODIES = {
     "Open questions": "- (none)",
 }
 
+# ── Autonomy-grant arm fixtures (copied verbatim from assets/test_spec_lint.py,
+# Tasks 3-4): LIGHT is a light-pass spec; FULL is converged and decision-closed.
+LIGHT = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: python3 -m pytest -k rows)
+- RT2 [NOT_SATISFIED]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: python3 bench.py --max 10)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: run `python3 -m pytest -k rows`, expect exit 0.
+
+## Open questions
+"""
+
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
+def _now_z():
+    """RFC 3339 UTC 'now', to the second (runtime fixture helper)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    """RFC 3339 UTC one day from now: inside write_grant's 7-day lifetime cap."""
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 _checks = []
 
 
@@ -121,6 +186,155 @@ def fill_template(template_text, title, bodies):
     return "\n".join(out) + "\n"
 
 
+# ── Autonomy-grant arm (2.0.0): the planning-loop lint modes, write_grant.py,
+# check-grant, and the SKILL.md text that wires them together. ASSETS is the
+# *copied* skill's assets/ dir (set in main), so `-I` runs never write
+# __pycache__ into the repo.
+ASSETS = None
+
+
+def lint(text, *flags):
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "spec.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "spec_lint.py"), *flags, p],
+                              capture_output=True, text=True, timeout=60).returncode
+
+
+def write_grant(repo, policy=None, answers=None):
+    subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "spec_to_tasks.py"),
+                    os.path.join(repo, "docs", "spec.md"), "--envelope", repo],
+                   capture_output=True, text=True, timeout=60, check=True)
+    plan = [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.join(repo, ".skill-contract"))
+            for f in fs if f.startswith("task-plan-")][0]
+    ans = os.path.join(repo, "answers.json")
+    if answers is None:
+        answers = {"branch_pattern": "*", "gate_policy": policy,
+                   "expires_at": _in_one_day()}
+    with open(ans, "w", encoding="utf-8") as f:
+        json.dump(answers, f)
+    return subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "write_grant.py"),
+                           "--root", repo, "--spec", "docs/spec.md", "--plan", plan,
+                           "--answers", ans, "--accepted-by", "Dana"],
+                          capture_output=True, text=True, timeout=60)
+
+
+def check_grant(repo, action="local_reversible"):
+    return subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "contract_check.py"),
+                           "check-grant", "--root", repo, "--action", action],
+                          capture_output=True, text=True, timeout=60)
+
+
+def fresh_repo():
+    repo = tempfile.mkdtemp(prefix="sfp-grant-")
+    os.makedirs(os.path.join(repo, "docs"))
+    with open(os.path.join(repo, "docs", "spec.md"), "w", encoding="utf-8") as f:
+        f.write(FULL)
+    return repo
+
+
+def grant_arm():
+    check("NEGATIVE: an Open question blocks --unattended",
+          lint(FULL.replace("## Open questions\n", "## Open questions\n- Which delimiter?\n"), "--unattended") == 1, "")
+    check("NEGATIVE: a PARTIAL truth blocks --converged",
+          lint(FULL.replace("RT2 [SPECIFICATION_READY]", "RT2 [PARTIAL]"), "--converged") == 1, "")
+    check("NEGATIVE: a truth with no check fails the light lint",
+          lint(LIGHT.replace("; check: python3 -m pytest -k rows)", ")")) == 1, "")
+    check("NEGATIVE: a constraint no truth maps to fails the light lint",
+          lint(LIGHT.replace("maps_to: T1;", "maps_to: B1;")) == 1, "")
+    check("NEGATIVE: the light pass (LIGHT) is not converged",
+          lint(LIGHT) == 0 and lint(LIGHT, "--converged") == 1, "")
+    check("FULL is unattended-ready", lint(FULL, "--unattended") == 0, "")
+
+    for policy, want in (({"merge": "auto"}, 1), ({"merge": "grant"}, 1),
+                         ({"local_reversible": "grant"}, 0)):
+        repo = fresh_repo()
+        try:
+            r = write_grant(repo, policy)
+            check("write_grant %s -> exit %d" % (policy, want), r.returncode == want,
+                  (r.stdout + r.stderr).strip()[-120:])
+            if want == 0:
+                c = check_grant(repo)
+                check("the written grant covers local_reversible", c.returncode == 0, c.stdout.strip())
+                c = check_grant(repo, "merge")
+                check("NEGATIVE: the same grant still asks for merge (exit 3)",
+                      c.returncode == 3, c.stdout.strip())
+                rv = subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "contract_check.py"),
+                                     "revoke-grant", "--root", repo],
+                                    capture_output=True, text=True, timeout=60)
+                c = check_grant(repo)
+                check("NEGATIVE: after the documented revoke command, check-grant asks (exit 3)",
+                      rv.returncode == 0 and c.returncode == 3, (rv.stdout + c.stdout).strip())
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    base = {"branch_pattern": "factory/*", "gate_policy": {"local_reversible": "grant"}}
+    for label, answers in (
+            ("an 8-day expiry (the 7-day cap)",
+             dict(base, expires_at=(datetime.now(timezone.utc) + timedelta(days=8))
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"))),
+            ("an expiry that is not in the future", dict(base, expires_at=_now_z())),
+            ("a require_signature key (A8: no signing)",
+             dict(base, expires_at=_in_one_day(), require_signature="SIGNED"))):
+        repo = fresh_repo()
+        try:
+            r = write_grant(repo, answers=answers)
+            check("NEGATIVE: write_grant refuses %s" % label, r.returncode == 1,
+                  (r.stdout + r.stderr).strip()[-120:])
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    # The answers.json example in references/unattended.md is the one agents copy:
+    # it MUST carry exactly the 7 keys write_grant.py accepts and be accepted by it.
+    skill_dir = os.path.dirname(ASSETS)
+    ref_path = os.path.join(skill_dir, "references", "unattended.md")
+    check("references/unattended.md exists", os.path.isfile(ref_path), "")
+    ref = ""
+    if os.path.isfile(ref_path):
+        with open(ref_path, encoding="utf-8") as f:
+            ref = f.read()
+    blocks = re.findall(r"```json\n(.*?)```", ref, re.S)
+    example = None
+    try:
+        example = json.loads(blocks[0]) if blocks else None
+    except ValueError:
+        pass
+    keys = sorted(example) if isinstance(example, dict) else []
+    check("unattended.md's answers.json example has exactly the 7 write_grant keys",
+          keys == sorted(["branch_pattern", "gate_policy", "expires_at", "budget",
+                          "stop_on", "defaults", "system_one"]), "keys=%s" % keys)
+    if isinstance(example, dict):
+        repo = fresh_repo()
+        try:
+            r = write_grant(repo, answers=dict(example, expires_at=_in_one_day()))
+            check("write_grant accepts unattended.md's answers.json example",
+                  r.returncode == 0, (r.stdout + r.stderr).strip()[-120:])
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+    check("unattended.md explains the 7-day cap, the default-branch floor and factory/*",
+          "7 days" in ref and "default branch" in ref and "factory/*" in ref
+          and "pre-mortem" in ref.lower(), "")
+
+    with open(os.path.join(skill_dir, "SKILL.md"), encoding="utf-8") as f:
+        skill_md = f.read()
+    check("SKILL.md's handoff calls check-grant --action local_reversible",
+          "check-grant" in skill_md and "--action local_reversible" in skill_md, "")
+    check("SKILL.md waits for the yes before write_grant.py and gives revoke-grant",
+          "write_grant.py" in skill_md and "revoke-grant" in skill_md
+          and "MUST wait for the user's explicit yes" in skill_md, "")
+    check("SKILL.md provides autonomy-grant/v1 in its contract block",
+          re.search(r'```json skill-contract\n\{"provides": \[[^]]*autonomy-grant/v1', skill_md)
+          is not None, "")
+    check("SKILL.md says irreversible actions always ask and pins pushes to the current branch",
+          all(c in skill_md for c in ("`merge`", "`deploy`", "`spend`", "`external_message`",
+                                      "`delete`", "always ask"))
+          and "MUST push only the current branch" in skill_md, "")
+    check("NEGATIVE: SKILL.md offers no signing step (A8)",
+          "ssh-keygen" not in skill_md and "require_signature" not in skill_md
+          and "SIGNED" not in skill_md, "")
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="sfp-eval-")
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
@@ -131,6 +345,8 @@ def main():
         )
         lint_py = os.path.join(dst, "assets", "spec_lint.py")
         tasks_py = os.path.join(dst, "assets", "spec_to_tasks.py")
+        global ASSETS
+        ASSETS = os.path.join(dst, "assets")
 
         def run(script, content, *flags):
             path = os.path.join(tmp, "spec.md")
@@ -307,6 +523,8 @@ def main():
         check("template's Constraints/Required truths examples satisfy the "
               "light grammar rules once placeholders are swapped for sample text",
               grammar_issues == [], "issues=%s" % grammar_issues)
+
+        grant_arm()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
