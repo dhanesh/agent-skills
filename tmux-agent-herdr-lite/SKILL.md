@@ -5,17 +5,20 @@ license: MIT
 compatibility: Requires tmux 3.2+, bash, python3, and a POSIX-like shell. Optional clipboard support uses pbcopy, xclip, or wl-copy; optional sounds use paplay, pw-play, or afplay; optional persistence uses TPM with tmux-resurrect/tmux-continuum.
 metadata:
   author: dhanesh
-  version: "2.1.0"
+  version: "2.1.1"
   tags: "tmux,zellij,herdr,coding-agents,terminal-multiplexer,automation"
 ---
 
 # Tmux Agent Herdr-Lite
 
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as
+described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -46,7 +49,7 @@ When this skill fires (slash command or auto-trigger), immediately do this — i
 
 ## The two surfaces
 
-- **Humans use tmux only.** They just run their agent (`claude`, `codex`, …) in any pane — it is tracked automatically. Everything else lives under one prefix key — `prefix a` opens the cockpit key-table, then a single lowercase key (`m` = menu, `d` = dashboard, jumps, etc.). Never tell the user to run `agent-*` commands; point them at `prefix a` and the menu.
+- **Humans use tmux only.** They just run their agent (`claude`, `codex`, …) in any pane — it is tracked automatically. Everything else lives under one prefix key — `prefix a` opens the cockpit key-table, then a single lowercase key (`m` = menu, `d` = dashboard, jumps, etc.). You SHOULD NOT tell the user to run `agent-*` commands; point them at `prefix a` and the menu.
 - **Agents use the scripts.** The `agent-*` commands in `scripts/` are the coordination API (Herdr socket-API equivalents). Invoke them by path from this skill directory (`bash "$SKILL_DIR/scripts/agent-pane"` and siblings). Full reference: `references/commands.md`; recipes: `references/coordination-recipes.md`; what is and isn't ported from Herdr: `references/herdr-parity.md`.
 
 ## Keybindings installed (the human surface)
@@ -116,7 +119,7 @@ Statuses are routing hints, not truth:
 - `done` — completion sentinel or finished-agent prompt chrome; focusing the pane demotes it to `idle` (viewed), Herdr-style.
 - `unknown` — the pane is gone or metadata is incomplete.
 
-Detection is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
+Detection is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts MUST fall back to `idle`, and MUST NOT be classified `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
 
 For best accuracy, instruct coding agents to print explicit markers — they outrank every heuristic:
 
