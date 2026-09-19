@@ -193,6 +193,70 @@ Users cannot export rows.
 ## Open questions
 """
 
+# I3: RT1 and RT2 parent each other (a cycle); RT3 anchors on OUTCOME.
+CYCLE = """# Spec: Cycle
+
+## Problem
+p
+
+## Users
+- u
+
+## Goals
+- g
+
+## Non-goals
+- n
+
+## Constraints
+- B1 [invariant]: c1
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: t1 (parent: RT2; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT2 [SPECIFICATION_READY]: t2 (parent: RT1; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT3 [SPECIFICATION_READY]: t3 (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+
+## Requirements
+- R1: The thing must happen.
+
+## Acceptance criteria
+- R1: run true, expect exit 0.
+
+## Open questions
+"""
+
+# I3: a two-level chain RT2 -> RT1 -> OUTCOME reaches the root and is clean.
+CHAIN = """# Spec: Chain
+
+## Problem
+p
+
+## Users
+- u
+
+## Goals
+- g
+
+## Non-goals
+- n
+
+## Constraints
+- B1 [invariant]: c1
+- T1 [boundary]: c2
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: t1 (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT2 [SPECIFICATION_READY]: t2 (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.5; check: true)
+
+## Requirements
+- R1: The thing must happen.
+
+## Acceptance criteria
+- R1: run true, expect exit 0.
+
+## Open questions
+"""
+
 
 class LightRules(unittest.TestCase):
     def issues(self, text):
@@ -240,6 +304,39 @@ class LightRules(unittest.TestCase):
     def test_bad_status_fails(self):
         t = LIGHT.replace("RT1 [SPECIFICATION_READY]", "RT1 [DONE]")
         self.assertTrue(any("RT1" in i and "status" in i for i in self.issues(t)))
+
+    # I1: parentheses inside a required-truth statement used to be where the
+    # lazy split landed, corrupting the field parse.
+    def test_truth_statement_with_parentheses_parses_correctly(self):
+        t = LIGHT.replace(
+            "RT1 [SPECIFICATION_READY]: Every row reaches the file.",
+            "RT1 [SPECIFICATION_READY]: Every row (including duplicates) reaches the file.",
+        )
+        self.assertEqual(self.issues(t), [])
+
+    def test_truth_without_field_list_is_malformed(self):
+        t = LIGHT.replace(
+            "## Required truths\n",
+            "## Required truths\n- RT9 [SATISFIED]: No field list at all.\n",
+        )
+        issues = self.issues(t)
+        self.assertTrue(any("RT9" in i and "Required truths bullet is not" in i for i in issues))
+
+    # Minor: duplicate RT ids get their own message (mirrors the constraint one).
+    def test_duplicate_truth_id_fails(self):
+        t = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT1 [NOT_SATISFIED]")
+        self.assertTrue(any("required truth RT1 is defined twice" in i for i in self.issues(t)))
+
+    # I3: every RT must trace back to OUTCOME through parent links, not just
+    # have a non-dangling immediate parent — a cycle among RTs must be caught.
+    def test_cycle_does_not_trace_to_outcome(self):
+        issues = self.issues(CYCLE)
+        self.assertTrue(any("RT1" in i and "does not trace back to OUTCOME" in i for i in issues))
+        self.assertTrue(any("RT2" in i and "does not trace back to OUTCOME" in i for i in issues))
+        self.assertFalse(any("RT3" in i and "does not trace back to OUTCOME" in i for i in issues))
+
+    def test_chain_reaches_outcome_is_clean(self):
+        self.assertEqual(self.issues(CHAIN), [])
 
 
 class TestCli(unittest.TestCase):

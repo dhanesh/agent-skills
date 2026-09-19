@@ -46,7 +46,12 @@ REQUIRED_SECTIONS = (
 CONSTRAINT_TYPES = ("invariant", "goal", "boundary")
 TRUTH_STATUSES = ("SATISFIED", "PARTIAL", "NOT_SATISFIED", "SPECIFICATION_READY")
 _CONSTRAINT_RE = re.compile(r"^(?:\*\*)?([BTUSO][0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.+)$")
-_TRUTH_RE = re.compile(r"^(?:\*\*)?RT([0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.*?)\s*\((.*)\)\s*$")
+# The statement (group 3) may itself contain parentheses — e.g. "The
+# (parenthetical) thing happens." — so the split into statement vs. field
+# list is anchored on the LAST "(parent:" in the line (greedy `.*` finds the
+# rightmost match by backtracking from the end), not the first "(".  A
+# bullet with no "(parent:" at all has no field list and is malformed.
+_TRUTH_RE = re.compile(r"^(?:\*\*)?RT([0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.*)\s*\(\s*(?i:parent)\s*:(.*)\)\s*$")
 _ID_LIST_RE = re.compile(r"[A-Za-z]+[0-9]+")
 
 # Sections that must exist but are allowed to have an empty body.
@@ -119,7 +124,10 @@ def _parse_truths(sections):
         if not m:
             bad.append(b)
             continue
-        f = _fields(m.group(4))
+        # group(4) is everything after "parent:"; put the label back so
+        # _fields sees the same "parent: ...; maps_to: ...; ..." string it
+        # always has.
+        f = _fields("parent:" + m.group(4))
         try:
             conf = float(f.get("confidence", ""))
         except ValueError:
@@ -131,6 +139,21 @@ def _parse_truths(sections):
                      "reqs": [int(n) for n in re.findall(r"R([0-9]+)", f.get("reqs", ""))],
                      "confidence": conf, "check": f.get("check", "")})
     return good, bad
+
+
+def _reaches_outcome(start_id, parent_of):
+    """Follow `parent` links from start_id; True iff they terminate at OUTCOME.
+
+    False for a dangling parent (points outside parent_of and isn't OUTCOME)
+    and for a cycle (a node is revisited before OUTCOME is reached)."""
+    cur = start_id
+    seen = set()
+    while cur != "OUTCOME":
+        if cur is None or cur in seen:
+            return False
+        seen.add(cur)
+        cur = parent_of.get(cur)
+    return True
 
 
 def lint_light(spec):
@@ -157,7 +180,11 @@ def lint_light(spec):
     if truths and nums != list(range(1, len(nums) + 1)):
         issues.append("required truth ids must be RT1..RT%d in order" % len(nums))
     known_t = {t["id"] for t in truths}
+    seen_t = set()
     for t in truths:
+        if t["id"] in seen_t:
+            issues.append("required truth %s is defined twice" % t["id"])
+        seen_t.add(t["id"])
         if t["status"] not in TRUTH_STATUSES:
             issues.append("%s has status '%s'; use one of %s"
                           % (t["id"], t["status"], ", ".join(TRUTH_STATUSES)))
@@ -181,8 +208,13 @@ def lint_light(spec):
     for c in cons:
         if c["id"] not in mapped:
             issues.append("constraint %s has no required truth mapping to it" % c["id"])
-    if truths and not any(t["parent"] == "OUTCOME" for t in truths):
-        issues.append("no required truth has parent OUTCOME — anchor from the outcome")
+    # Every RT must reach OUTCOME by following parent links — not just have a
+    # non-dangling immediate parent. Catches a cycle among otherwise-valid RTs
+    # (e.g. RT1 -> RT2 -> RT1) that the per-RT parent check above can't see.
+    parent_of = {t["id"]: t["parent"] for t in truths}
+    for t in truths:
+        if not _reaches_outcome(t["id"], parent_of):
+            issues.append("%s does not trace back to OUTCOME (cycle or dangling parent)" % t["id"])
     return issues
 
 
