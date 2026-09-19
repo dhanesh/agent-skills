@@ -153,3 +153,18 @@ Skills appear in rewrite order.
 | c4 | 54 | The cockpit deliberately claims exactly **one** prefix key (\`prefix a\`) and puts … | MUST (0.32, 0.54) | plain | describes the key-table design's non-collision guarantee, not a directive to the agent |
 | c5 | 105 | 5. Verify real outcomes separately — a \`done\` state means the pane looks finish… | plain (0.21, 0.29) | plain | Recommended agent workflow step 5; out of scope per the spec's "workflow steps stay plain imperatives" |
 | c6 | 119 | Detection is two-layered, ported from Herdr's manifests: panes with a known age… | plain (0.51, 0.55) | plain |  |
+
+## security-posture-audit (10 candidates · 4 MUST · 0 SHOULD · 0 MAY · 6 plain · 5 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 19 | The division of labor is the point: \`assets/audit_posture.py\` finds candidate de… | plain (0.53, 0.66) | plain |  |
+| c2 | 24 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.79, 0.74) | MUST |  |
+| c3 | 39 | State these in the report so it cannot be over-read: | MUST (0.32, 0.53) | MUST |  |
+| c4 | 41 | - **Not a CVE scanner.** No advisory database, no network, no version-vulnerabil… | MUST (0.45, 0.54) | plain | describes what the scanner does not do (no advisory DB, no network); not a directive |
+| c5 | 43 | - **Not SAST.** No dataflow, taint, or injection analysis. | MUST (0.45, 0.68) | plain | describes what the scanner does not do (no dataflow/taint analysis); not a directive |
+| c6 | 44 | - **Not a secrets-content scanner.** It flags credential-*shaped files by name* … | MUST (0.59, 0.69) | plain | describes the scanner's name-only behaviour ("it never reads for secret values"); the pairing tip is advice |
+| c7 | 47 | - **Not norms/claims verification** (that is \`base-in-reality\`) and **not an age… | MUST (0.80, 0.80) | plain | names sibling skills for out-of-scope work; a scope description, not a directive |
+| c8 | 50 | Audit only repositories the user owns or is explicitly authorized to review; if … | MUST (0.90, 0.87) | MUST |  |
+| c9 | 117 | \| \`credential-file\` (.env*/.pem/id_* presence, content never read) \| HIGH \| | MUST (0.61, 0.59) | plain | table row describing the check's behaviour (content never read), not a directive |
+| c10 | 140 | - **Unreadable/malformed manifests** surface as \`parse-error\` entries, never cra… | MUST (0.50, 0.56) | MUST |  |

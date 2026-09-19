@@ -5,11 +5,13 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "security,audit,posture,hygiene,dependency-pinning,ci-security,defensive"
 ---
 
 # security-posture-audit
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 A defensive, read-only audit of a repository's security *hygiene posture* — the
 deterministic layer of the repo's trust family. It answers one question: *which posture
@@ -24,8 +26,8 @@ production entrypoint is HIGH. The tool never guesses context; you never grep by
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -36,7 +38,7 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## Boundaries — what this is not
 
-State these in the report so it cannot be over-read:
+You MUST state these in the report so it cannot be over-read:
 
 - **Not a CVE scanner.** No advisory database, no network, no version-vulnerability
   matching.
@@ -47,8 +49,8 @@ State these in the report so it cannot be over-read:
 - **Not norms/claims verification** (that is `base-in-reality`) and **not an
   agent-readiness audit** (that is `agent-ready-rails`).
 
-Audit only repositories the user owns or is explicitly authorized to review; if
-authorization is unclear, ask before running.
+You MUST audit only repositories the user owns or is explicitly authorized to review; if
+authorization is unclear, you MUST ask before running.
 
 ## Workflow
 
@@ -138,4 +140,4 @@ cannot prove, severity rationale, remediation pattern):
 - **Windows trees:** file-mode checks are skipped (POSIX-only); say so in Not covered.
 - **Huge files:** content checks skip files over ~1 MB; name/mode checks still apply.
 - **Unreadable/malformed manifests** surface as `parse-error` entries, never crashes —
-  report them as audit blind spots rather than dropping them.
+  you MUST report them as audit blind spots rather than dropping them.
