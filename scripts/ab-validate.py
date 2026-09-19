@@ -187,6 +187,10 @@ SINCE_FACTORY_TRUST_WM = "391cd4a"  # world-model-ledger: the wm CLI refuses
 SINCE_FACTORY_TRUST_BIR = "fa9556a"  # base-in-reality: refutation follows the
 # rubric (critical/high need unanimous non-refute, a crashed refuter refutes)
 # and report_lint.py requires + checks the recorded `refutation` votes.
+SINCE_FACTORY_TRUST_VI = "6818b41"  # verifier-installer: the python format rail
+# is a real formatter check (detected, or an honest placeholder) instead of
+# `compileall` — a syntax check byte-identical to the build rail; the go
+# format rail actually fails on gofmt -l output instead of always exiting 0.
 
 
 def _git_out(*args):
@@ -4641,6 +4645,82 @@ def check_factory_trust_bir(old, new):
         "medium with one dissent, critical with unanimous non-refute", kind="guard")
 
 
+# ── verifier-installer ──────────────────────────────────────────────────────
+VI_DETECT = r"""
+import detect_stack, tempfile, os
+
+def repo(files):
+    root = tempfile.mkdtemp()
+    for rel, content in files.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(content)
+    return root
+
+out = {}
+
+# No adopted formatter: format rail must not be a syntax check in disguise.
+r1 = repo({"pyproject.toml": '[project]\nname = "x"\n'})
+p1 = detect_stack.detect(r1)
+fmt1 = [p for p in p1["proposals"] if p["rail"] == "format"]
+build1 = [p for p in p1["proposals"] if p["rail"] == "build"]
+out["py_format_is_syntax_check"] = 1 if (
+    fmt1 and "compileall" in fmt1[0]["command"]) else 0
+out["py_build_lacks_dash_f"] = 1 if (
+    build1 and "-f" not in build1[0]["command"].split()) else 0
+
+# Adopted ruff: format rail must be the real check, not swallowed by the
+# "no formatter -> placeholder" fallback.
+r2 = repo({"pyproject.toml":
+           '[project]\nname = "x"\n[tool.ruff]\nline-length = 100\n'})
+p2 = detect_stack.detect(r2)
+fmt2 = [p for p in p2["proposals"] if p["rail"] == "format"]
+out["py_ruff_format_cmd"] = fmt2[0]["command"] if fmt2 else None
+
+# Go: format rail must be able to fail, not just list offenders.
+r3 = repo({"go.mod": "module x\n\ngo 1.22\n"})
+p3 = detect_stack.detect(r3)
+go_fmt = p3["existing_verifiers"].get("format")
+out["go_format_cannot_fail"] = 1 if (
+    go_fmt and not go_fmt.startswith("test -z")) else 0
+
+import json
+print(json.dumps(out))
+"""
+
+
+def check_factory_trust_vi(old, new):
+    s = "verifier-installer"
+    a, b = (probe(t, s + "/assets", VI_DETECT) for t in (old, new))
+    row(s, "python format rail proposed for a repo with no adopted formatter "
+           "is a syntax check, not a formatter check (1=yes, lower=better)",
+        a.get("py_format_is_syntax_check"), b.get("py_format_is_syntax_check"),
+        b.get("py_format_is_syntax_check") == 0 and a.get("py_format_is_syntax_check", 0) > 0,
+        "compileall byte-identical to the build rail can never go red on a "
+        "formatting violation; the fix falls back to the `make format` "
+        "placeholder instead",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "python build rail can go falsely green on a same-second syntax "
+           "error (no -f) (1=yes, lower=better)",
+        a.get("py_build_lacks_dash_f"), b.get("py_build_lacks_dash_f"),
+        b.get("py_build_lacks_dash_f") == 0 and a.get("py_build_lacks_dash_f", 0) > 0,
+        "compileall skips a file whose .pyc header still matches within the "
+        "same second; -f forces a fresh compile",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "go format rail command cannot fail on gofmt -l output (1=yes, lower=better)",
+        a.get("go_format_cannot_fail"), b.get("go_format_cannot_fail"),
+        b.get("go_format_cannot_fail") == 0 and a.get("go_format_cannot_fail", 0) > 0,
+        "bare `gofmt -l .` lists offenders but always exits 0; "
+        "`test -z \"$(gofmt -l .)\"` is the failing form",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "python repo that adopts ruff still gets a real format check",
+        a.get("py_ruff_format_cmd"), b.get("py_ruff_format_cmd"),
+        b.get("py_ruff_format_cmd") == "ruff format --check .",
+        "the detect-or-decline fallback must not swallow a repo that already "
+        "adopted a formatter", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4707,6 +4787,7 @@ def main():
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
         check_factory_trust_bir(old, REPO)
+        check_factory_trust_vi(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
