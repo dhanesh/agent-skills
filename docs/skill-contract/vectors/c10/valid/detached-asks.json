@@ -1,10 +1,11 @@
 {
   "expect": {
-    "status": "INVALID"
+    "reason": "detached",
+    "status": "ASK"
   },
   "input": {
-    "action": "merge",
-    "branch": "factory/x",
+    "action": "local_reversible",
+    "branch": "HEAD",
     "default_branch": "main",
     "files": {
       "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
@@ -56,11 +57,11 @@
           "expires_at": "2026-09-20T12:00:00Z",
           "gate_policy": {
             "local_reversible": "grant",
-            "merge": "auto"
+            "read_only": "auto"
           },
           "revoked": false,
           "scope": {
-            "branch_pattern": "factory/*",
+            "branch_pattern": "*",
             "repo": "."
           },
           "stop_on": [

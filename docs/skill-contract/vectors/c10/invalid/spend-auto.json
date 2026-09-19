@@ -3,7 +3,7 @@
     "status": "INVALID"
   },
   "input": {
-    "action": "merge",
+    "action": "spend",
     "branch": "factory/x",
     "default_branch": "main",
     "files": {
@@ -56,7 +56,7 @@
           "expires_at": "2026-09-20T12:00:00Z",
           "gate_policy": {
             "local_reversible": "grant",
-            "merge": "auto"
+            "spend": "auto"
           },
           "revoked": false,
           "scope": {

@@ -84,6 +84,8 @@ These floors live in the checker, and no grant can lower them:
 - A grant MUST NOT cover an action while HEAD is detached (HEAD names a commit but no branch),
   whatever its `branch_pattern`: a rebase started on the default branch detaches HEAD, and
   `rebase --continue` then advances that branch.
+- A receiver MUST ignore inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`
+  and `GIT_CEILING_DIRECTORIES` when it asks git for the branch, so the answer is about `root`.
 
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
 name.
@@ -147,6 +149,8 @@ Standards referenced: BCP 14 (RFC 2119, RFC 8174); in-toto Attestation Statement
 checker in any language conforms if it reaches the verdict every file under
 [`vectors/`](vectors/) expects. Adopters vendor the reference checker byte-identical into their
 `assets/`.
+A grant vector gives the current branch as `input.branch`; the value `"HEAD"` stands for a
+detached HEAD, which must give `ASK` with reason `detached`.
 
 *Non-normative.* `PROVEN` rests on fields the producer wrote itself: a `run_url`, or an
 `assertedBy` naming a human or another skill. Nothing in this contract verifies them. A receiver

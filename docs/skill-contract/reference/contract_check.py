@@ -793,6 +793,16 @@ def latest_grant(root):
     return max(heads)[2] if heads else None
 
 
+GIT_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                     "GIT_CEILING_DIRECTORIES")
+
+
+def git_env():
+    """os.environ without the variables that make git look at another repository, so an
+    inherited GIT_DIR cannot redirect the branch probes away from root."""
+    return {k: v for k, v in os.environ.items() if k not in GIT_REDIRECT_VARS}
+
+
 def current_branch(root):
     """The checked-out branch (DETACHED when HEAD is detached), or None when git cannot say.
 
@@ -801,7 +811,7 @@ def current_branch(root):
     """
     try:
         r = subprocess.run(["git", "-C", root, "symbolic-ref", "-q", "HEAD"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     ref = r.stdout.strip()
@@ -812,7 +822,7 @@ def current_branch(root):
         # names a real commit; anything else is git failing, which the caller fails closed on.
         try:
             v = subprocess.run(["git", "-C", root, "rev-parse", "-q", "--verify", "HEAD^{commit}"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, env=git_env())
         except (OSError, subprocess.SubprocessError):
             return None
         return DETACHED if v.returncode == 0 else None
@@ -841,7 +851,7 @@ def detect_default_branches(root):
     out = set(FALLBACK_DEFAULT_BRANCHES)
     try:
         r = subprocess.run(["git", "-C", root, "symbolic-ref", "refs/remotes/origin/HEAD"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, env=git_env())
     except (OSError, subprocess.SubprocessError):
         return out
     ref = r.stdout.strip() if r.returncode == 0 else ""
@@ -850,12 +860,11 @@ def detect_default_branches(root):
     return out
 
 
-def check_grant(root, action, path=None, now=None, branch=None, env=None, default_branches=None):
+def check_grant(root, action, path=None, now=None, branch=None, default_branches=None):
     """Commandment 10: does a grant cover `action`? First failing check wins.
 
     default_branches: the repo's default branch names; None detects them
     (origin/HEAD, else main and master).
-    env: accepted for callers' compatibility; unused since A8 removed signing.
 
     Returns {status: COVERED|ASK|INVALID|NONE, id, reason, gate, path,
     violations}. A caller proceeds only on COVERED.

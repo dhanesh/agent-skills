@@ -55,6 +55,7 @@
           "defaults": [],
           "expires_at": "2026-09-20T12:00:00Z",
           "gate_policy": {
+            "local_reversible": "grant",
             "merge": "grant"
           },
           "revoked": false,

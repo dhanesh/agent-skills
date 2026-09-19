@@ -414,7 +414,7 @@ def grant_cases():
         ("c10", "valid", "irreversible-explicit-ask-asks",
          grant_vector(grant(policy={"local_reversible": "grant", "delete": "ask"}), "delete",
                       "ASK", "gate-ask")),
-        ("c10", "valid", "unsigned-push-covered",
+        ("c10", "valid", "push-open-pr-covered",
          grant_vector(grant(policy={"push_branch": "grant", "open_pr": "grant"}), "open_pr",
                       "COVERED")),
         ("c10", "valid", "lifetime-asks",
@@ -422,6 +422,9 @@ def grant_cases():
                       "local_reversible", "ASK", "lifetime")),
         ("c10", "valid", "seven-days-exactly-covered",
          grant_vector(grant(expires="2026-09-26T12:00:00Z"), "local_reversible", "COVERED")),
+        ("c10", "valid", "detached-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "detached",
+                      branch="HEAD")),
         ("c10", "valid", "default-branch-asks",
          grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
                       branch="main")),
@@ -439,12 +442,6 @@ def grant_cases():
                       "local_reversible", "INVALID")),
         ("c10", "invalid", "lifetime-over-seven-days",
          grant_vector(grant(expires="2026-09-26T12:00:01Z"), "local_reversible", "INVALID")),
-        ("c10", "invalid", "merge-auto",
-         grant_vector(grant(policy={"merge": "auto"}), "merge", "INVALID")),
-        ("c10", "invalid", "merge-grant",
-         grant_vector(grant(policy={"merge": "grant"}), "merge", "INVALID")),
-        ("c10", "invalid", "delete-auto",
-         grant_vector(grant(policy={"delete": "auto"}), "delete", "INVALID")),
         ("c10", "invalid", "require-signature-field",
          grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
              "require_signature", {"local_reversible": "SIGNED"}), g),
@@ -469,9 +466,19 @@ def grant_cases():
     ]
 
 
+IRREVERSIBLE = ("merge", "deploy", "spend", "external_message", "delete")
+
+
+def irreversible_cases():
+    """A8: one INVALID vector per irreversible class and non-ask gate (merge-grant, ...)."""
+    return [("c10", "invalid", "%s-%s" % (c.replace("_", "-"), gate),
+             grant_vector(grant(policy={"local_reversible": "grant", c: gate}), c, "INVALID"))
+            for c in IRREVERSIBLE for gate in ("grant", "auto")]
+
+
 def cases():
     return (skill_cases() + envelope_cases() + discovery_cases() + claims_cases()
-            + grant_cases())
+            + grant_cases() + irreversible_cases())
 
 
 def write_all(out_dir):
