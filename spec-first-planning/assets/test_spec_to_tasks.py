@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_to_tasks  # noqa: E402
 import contract_check  # noqa: E402
+from test_spec_lint import FULL  # noqa: E402
 
 GOOD = textwrap.dedent(
     """\
@@ -320,6 +321,34 @@ class TestEnvelope(unittest.TestCase):
     def test_skill_version_matches_skill_md(self):
         with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
+
+    def test_skill_version_is_2_0_0(self):
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.0.0")
+
+
+class TestOptionalPayloadFields(unittest.TestCase):
+    def test_full_spec_payload_carries_constraints_truths_decisions(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(FULL), "docs/spec.md")
+        self.assertEqual(len(payload["constraints"]), 2)
+        self.assertEqual(len(payload["required_truths"]), 2)
+        self.assertEqual(len(payload["decisions"]), 1)
+        self.assertEqual(payload["decisions"][0]["id"], "D1")
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_spec_without_decisions_has_no_decisions_key(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(GOOD), "docs/spec.md")
+        self.assertNotIn("decisions", payload)
+        self.assertEqual(len(payload["constraints"]), 2)
+        self.assertEqual(len(payload["required_truths"]), 2)
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_required_truths_drop_the_num_field(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(FULL), "docs/spec.md")
+        for t in payload["required_truths"]:
+            self.assertNotIn("num", t)
+            self.assertIn("id", t)
+            self.assertIn("status", t)
+            self.assertIn("check", t)
 
 
 if __name__ == "__main__":

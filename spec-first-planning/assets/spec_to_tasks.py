@@ -40,7 +40,7 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
-SKILL_VERSION = "1.1.1"  # keep in step with SKILL.md metadata.version (a unit test checks)
+SKILL_VERSION = "2.0.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
 USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
@@ -93,6 +93,9 @@ def derive_plan(text):
         "tasks": tasks,
         "coverage": coverage,
         "uncovered": uncovered,
+        "constraints": spec["constraints"],
+        "required_truths": spec["truths"],
+        "decisions": spec["decisions"],
     }
 
 
@@ -117,7 +120,11 @@ def to_json(plan):
 
 
 def to_task_plan_payload(plan, spec_rel):
-    """The task-plan/v1 payload (assets/schemas/task-plan.v1.json): verify steps stay a list."""
+    """The task-plan/v1 payload (assets/schemas/task-plan.v1.json): verify steps stay a list.
+
+    `constraints`, `required_truths` and `decisions` are optional (task-plan/v1 stays v1: the
+    change is additive) and are added only when the spec the plan was derived from has them.
+    """
     tasks = []
     for t in plan["tasks"]:
         jt = {"id": t["id"], "requirement_ids": t["requirement_ids"], "title": t["title"],
@@ -125,8 +132,18 @@ def to_task_plan_payload(plan, spec_rel):
         if t["_where"]:
             jt["where"] = t["_where"]
         tasks.append(jt)
-    return {"title": plan["title"], "spec": spec_rel, "tasks": tasks,
-            "coverage": plan["coverage"], "uncovered": plan["uncovered"]}
+    payload = {"title": plan["title"], "spec": spec_rel, "tasks": tasks,
+              "coverage": plan["coverage"], "uncovered": plan["uncovered"]}
+    if plan.get("constraints"):
+        payload["constraints"] = [{"id": c["id"], "type": c["type"], "text": c["text"]}
+                                  for c in plan["constraints"]]
+    if plan.get("required_truths"):
+        payload["required_truths"] = [{k: v for k, v in t.items() if k != "num"}
+                                      for t in plan["required_truths"]]
+    if plan.get("decisions"):
+        payload["decisions"] = [{"id": d["id"], "question": d["question"], "answer": d["answer"],
+                                 "source": d["source"]} for d in plan["decisions"]]
+    return payload
 
 
 def payload_errors(payload):
@@ -157,6 +174,40 @@ def payload_errors(payload):
                     and (cmd is None or (isinstance(cmd, list) and cmd
                                          and all(isinstance(a, str) for a in cmd)))):
                 errs.append("tasks[%d].verify[%d] must be {text, command: list or null}" % (i, j))
+    if "constraints" in payload:
+        cons = payload["constraints"]
+        if not isinstance(cons, list):
+            errs.append("payload.constraints must be a list")
+        else:
+            for i, c in enumerate(cons):
+                if not (isinstance(c, dict) and isinstance(c.get("id"), str)
+                        and isinstance(c.get("type"), str) and isinstance(c.get("text"), str)):
+                    errs.append("constraints[%d] must be {id, type, text}" % i)
+    if "required_truths" in payload:
+        truths = payload["required_truths"]
+        if not isinstance(truths, list):
+            errs.append("payload.required_truths must be a list")
+        else:
+            for i, t in enumerate(truths):
+                if not (isinstance(t, dict) and isinstance(t.get("id"), str)
+                        and isinstance(t.get("status"), str) and isinstance(t.get("text"), str)
+                        and isinstance(t.get("parent"), str)
+                        and isinstance(t.get("maps_to"), list)
+                        and isinstance(t.get("reqs"), list)
+                        and isinstance(t.get("confidence"), (int, float))
+                        and not isinstance(t.get("confidence"), bool)
+                        and isinstance(t.get("check"), str)):
+                    errs.append("required_truths[%d] must be {id, status, text, parent, maps_to, "
+                                "reqs, confidence, check}" % i)
+    if "decisions" in payload:
+        decisions = payload["decisions"]
+        if not isinstance(decisions, list):
+            errs.append("payload.decisions must be a list")
+        else:
+            for i, d in enumerate(decisions):
+                if not (isinstance(d, dict)
+                        and all(isinstance(d.get(k), str) for k in ("id", "question", "answer", "source"))):
+                    errs.append("decisions[%d] must be {id, question, answer, source}" % i)
     return errs
 
 
