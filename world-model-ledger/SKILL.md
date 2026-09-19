@@ -134,7 +134,8 @@ is useful with zero markers. A model never guesses facts inside a hook. Full con
 2. **Validate with evidence.** When a test/doc/human confirms a relationship is *correct*,
    it is recorded with oracle evidence. Only `test|ci|doc|human` evidence raises *normative*
    confidence and flips status to `validated`. The `WM-VALIDATED` and `WM-REFUTES` markers
-   count only when the user types them in their own message, for example
+   are harvested only from the user's own message (the sanctioned route; a forged transcript
+   is outside the threat model, see `references/capture.md`), for example
    `WM-VALIDATED: hash_pw uses bcrypt by test:tests/test_auth.py::test_hash`; the Stop hook
    rejects them from your turn. From your side, record a passing test or CI run with
    `python3 wm.py validate "hash_pw,uses,bcrypt" --by test:tests/test_auth.py::test_hash`.
