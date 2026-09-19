@@ -16,6 +16,8 @@ Spec: [`docs/superpowers/specs/2026-09-19-bcp14-skills-design.md`](../superpower
 
 Skills appear in rewrite order.
 
+**Line numbers** are as of the BCP 14 rewrite. Later edits to a SKILL.md can shift them, and the rows are not renumbered.
+
 ## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |

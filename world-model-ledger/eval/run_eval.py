@@ -128,7 +128,7 @@ def main():
         finally:
             wm.close()
         check("agent-run `validate --by human:x` is refused and does not validate",
-              r.returncode != 0 and human == 0 and status == "unverified",
+              r.returncode == 2 and human == 0 and status == "unverified",
               f"rc={r.returncode} human_rows={human} status={status}")
 
         # NEGATIVE: the same holds for the other ORACLE tag. An agent-run
@@ -144,7 +144,7 @@ def main():
         finally:
             wm.close()
         check("agent-run `refute --by human:x` is refused and does not contradict",
-              r.returncode != 0 and human == 0 and status == "unverified",
+              r.returncode == 2 and human == 0 and status == "unverified",
               f"rc={r.returncode} human_rows={human} status={status}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

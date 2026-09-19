@@ -902,6 +902,18 @@ class TestCliCannotSelfCertify(Base):
         self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='refute'"), [])
         self.assertEqual(self._rows("SELECT validation FROM interaction")[0][0], "unverified")
 
+    def test_user_channel_human_marker_still_validates(self):
+        # The CLI refusal must not disarm the feature: the user's own
+        # WM-VALIDATED ... by human:<name> is the sanctioned human route.
+        import harvest as H
+        c = H.apply_markers(self.wm, [("user", "WM-VALIDATED: hash_pw uses bcrypt by human:alice")])
+        self.assertEqual(c["validate"], 1)
+        self.wm.consolidate()
+        row = self.wm.conn.execute(
+            "SELECT validation FROM interaction i JOIN entity s ON s.id=i.subject_id "
+            "WHERE s.name=?", ("hash_pw",)).fetchone()
+        self.assertEqual(row["validation"], "validated")
+
     def test_assert_valid_records_agent_assert_not_human(self):
         rc, _ = self._cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
                           "--params", '{"patterns":["md5"]}', "--assert-valid")

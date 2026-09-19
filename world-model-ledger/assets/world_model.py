@@ -2207,7 +2207,8 @@ def cmd_validate(wm, a):
         return 2
     kind, ref = _parse_evidence_flag(a.by)
     if kind not in ORACLE_KINDS:
-        print(json.dumps({"error": f"validate needs an oracle kind {sorted(ORACLE_KINDS)}, got {kind}"})); return 1
+        print(json.dumps({"error": f"validate needs an oracle kind {sorted(ORACLE_KINDS - {'human'})} "
+                                   f"(human: user channel only), got {kind}"})); return 1
     wm.add_evidence("interaction", iid, kind, ref, polarity="supports",
                     agent="wm-cli", activity="validate", weight=a.weight)
     wm.conn.commit()
@@ -2224,7 +2225,8 @@ def cmd_refute(wm, a):
     kind, ref = _parse_evidence_flag(a.by)
     if kind not in ALL_EVIDENCE_KINDS:
         print(json.dumps({"error": "unknown_evidence_kind",
-                          "detail": f"refute needs one of {sorted(ALL_EVIDENCE_KINDS)}, got {kind}"})); return 1
+                          "detail": f"refute needs one of {sorted(ALL_EVIDENCE_KINDS - {'human'})} "
+                                    f"(human: user channel only), got {kind}"})); return 1
     wm.add_evidence("interaction", iid, kind, ref, polarity="refutes",
                     agent="wm-cli", activity="refute", weight=a.weight)
     wm.conn.commit()

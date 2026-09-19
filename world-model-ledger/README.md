@@ -34,7 +34,7 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 ```
 
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
-merging. Restart Claude Code afterward so the hooks load. The install runs a 108-test gate.
+merging. Restart Claude Code afterward so the hooks load. The install runs a 116-test gate.
 
 ## What gets installed
 
@@ -69,8 +69,8 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 WM-MAPS: billing/refund.py -> stripe/refunds-api
 ```
 
-`WM-VALIDATED` and `WM-REFUTES` count only when the user types them in their own message; the Stop
-hook rejects them from the agent's turn, and the CLI refuses `--by human`.
+The sanctioned route for `WM-VALIDATED` and `WM-REFUTES` is the user typing them in their own message;
+the Stop hook rejects them from the agent's turn, and the CLI refuses `--by human`.
 
 ```bash
 python3 wm.py stats                 # validated / unverified / contradicted counts

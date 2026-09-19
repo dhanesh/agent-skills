@@ -81,8 +81,9 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 
 `WM-VALIDATED` with a non-oracle kind is ignored — only `test|ci|doc|human` can raise
 normative confidence.
-The Stop hook accepts `WM-VALIDATED` and `WM-REFUTES` only from the user's own message.
-In an assistant turn they are rejected and counted as `rejected_echo`.
+The sanctioned route for `WM-VALIDATED` and `WM-REFUTES` is the user's own message: the Stop hook
+takes them only from transcript rows whose role is `user`. In an assistant turn they are rejected and
+counted as `rejected_echo`.
 
 **Predicates are vocabulary, not free text.** Every triple is validated against the ontology
 (RDFS-style domain/range per verb — see `ontology.md`) before insert. A marker with a
@@ -160,6 +161,9 @@ message, and the Stop hook accepts those tags only from the user channel.
 `wm constraint --assert-valid` records `agent_assert` evidence, which raises nothing on the normative axis.
 A `test:` or `ci:` validation from the CLI is not checked against a real run, so treat
 `validated` backed only by `agent=wm-cli` test evidence as an agent claim.
+The user-channel check trusts the role field of each transcript row, so a forged transcript fed to
+`harvest.py` or `stop.sh` can plant a human marker; like a direct write to the database, that is
+outside the threat model.
 
 (`wm` = `python3 wm.py`, or `python3 world_model.py`. DB path from `--db`, `$WM_DB`, or the
 default `.world-model/model.db`.)

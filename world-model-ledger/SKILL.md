@@ -76,7 +76,7 @@ scripts/install.sh --seed                 # install AND seed the repo in one go
 
 Both modes are idempotent: they copy the core files (`world_model.py`, `wm.py`, `harvest.py`,
 `test_world_model.py`) plus `hooks/`, **additively** merge the four hooks into the right
-`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 108-test
+`settings.json` (existing hooks preserved), gitignore `.world-model/`, and **run the 116-test
 suite as an install gate** — the guarantees are only real if those pass. Requires `python3`
 (stdlib only — no pip, no network) and, for clean settings merging, `jq` (falls back to
 writing `settings.hooks.json` for manual merge). After install, tell the user to **restart
@@ -138,8 +138,9 @@ is useful with zero markers. A model never guesses facts inside a hook. Full con
    `WM-VALIDATED: hash_pw uses bcrypt by test:tests/test_auth.py::test_hash`; the Stop hook
    rejects them from your turn. From your side, record a passing test or CI run with
    `python3 wm.py validate "hash_pw,uses,bcrypt" --by test:tests/test_auth.py::test_hash`.
-   Human evidence comes only from the user's own `WM-VALIDATED`/`WM-REFUTES … by human:<name>`;
-   `wm validate` and `wm refute` with `--by human…` exit 2, because the CLI runs with your authority.
+   The sanctioned route for human evidence is the user's own `WM-VALIDATED`/`WM-REFUTES … by
+   human:<name>`; `wm validate` and `wm refute` with `--by human…` exit 2, because the CLI runs
+   with your authority.
 3. **Assert constraints and map referents.** Declare what should hold
    (`WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | …`) and tie
    code to the reality it stands for (`WM-MAPS: billing/refund.py -> stripe/refunds-api`).
@@ -184,7 +185,7 @@ When a situation genuinely needs an exception to an invariant, you MUST surface 
 
 ## Verifying after install
 
-You MUST confirm the gate passed: `python3 test_world_model.py` (115 tests — the two-axis
+You MUST confirm the gate passed: `python3 test_world_model.py` (116 tests — the two-axis
 invariant, noisy-OR derivation, soft-invalidation, contradiction detect + propose, trust
 boundary, idempotent ingest, referent mapping, cycle-safe recursive-CTE traversal, repo-wide
 build seeding, measurable improvement). If any fail, the
@@ -210,5 +211,5 @@ with `python3 wm.py stats` and `cat .world-model/digest.md`.
 - `assets/harvest.py` — the deterministic marker harvester (trusted channel only).
 - `assets/hooks/` — the four lifecycle hook scripts.
 - `assets/starter_constraints.json` — the optional starter constraint pack (off by default).
-- `assets/test_world_model.py` — the 115-test install gate.
+- `assets/test_world_model.py` — the 116-test install gate.
 - `scripts/install.sh` — project / global installer with additive settings merge.
