@@ -105,8 +105,11 @@ def _grant_fixture(root, asserted_by, gate_policy=None):
 
 
 def _check_grant(root, action="local_reversible"):
+    # GIT_CEILING_DIRECTORIES: a TMPDIR inside a git repo on its default branch
+    # must not turn a covering grant into ASK (the default-branch floor).
+    env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(root))}
     r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
-                        "--action", action], capture_output=True, text=True, timeout=60)
+                        "--action", action], capture_output=True, text=True, timeout=60, env=env)
     return r.returncode, r.stdout.strip()
 
 
@@ -134,6 +137,29 @@ def grant_checks(labels=("", "", "")):
 GATE_MARKERS = ("MUST NOT write anything before this confirmation",
                 "check-grant --root <repo> --action local_reversible",
                 "exits 0", "MAY proceed", "MUST name the grant id and action class")
+
+
+# Under a grant the install is scoped: the plan's proposals only, GitHub
+# Actions, manifest errors reported not fixed, and nothing else lifted.
+SCOPE_MARKERS = ("Under a grant you MUST install only the plan's proposals for the missing rails",
+                 "GitHub Actions as the CI provider",
+                 "MUST report manifest errors", "instead of fixing them",
+                 "The grant lifts this confirmation and nothing more",
+                 "stop and ask before fixing pre-existing debt still applies")
+GATE_LINE = "Gate: confirmed by user | grant <id> (<class>)"
+
+
+def grade_scope(text):
+    start = text.find("2. **Confirm the plan with the user.**")
+    end = text.find("3. **Install per the playbook.**", start)
+    step = " ".join(text[start:end].split()) if start >= 0 and end > start else ""
+    return [m for m in SCOPE_MARKERS if m not in step]
+
+
+def grade_summary_gate_line(text):
+    start = text.find("## Verifier loop installed: <repo>")
+    end = text.find("```", start)
+    return start >= 0 and GATE_LINE in text[start:end]
 
 
 def grade_gate(text):
@@ -325,6 +351,15 @@ def main():
               not grade_gate(skill_md.replace("check-grant", "check-envelope"))[0])
         check("the read-only guardrail names a covering grant as the only other release",
               "(or a covering grant)" in skill_md)
+        missing = grade_scope(skill_md)
+        check("step 2 scopes a grant: proposals only, GitHub Actions, manifest errors "
+              "reported, nothing else lifted", not missing, f"missing: {missing}")
+        check("NEGATIVE: grader flags a step 2 with the grant-scope sentence stripped",
+              bool(grade_scope(skill_md.replace("nothing more", "more"))))
+        check("the install summary template carries the Gate line",
+              grade_summary_gate_line(skill_md))
+        check("NEGATIVE: grader flags a summary template with the Gate line stripped",
+              not grade_summary_gate_line(skill_md.replace(GATE_LINE, "")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
