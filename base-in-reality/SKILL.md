@@ -40,8 +40,8 @@ domain(s).
    fetch with `BIR_EVIDENCE_LOG` set, then lint with `--evidence`. `fetched: true` is a
    claim the agent makes about itself — the evidence log is what makes it checkable.
    Ungrounded ⇒ `UNCONFIRMED`. See `references/verdict-rubric.md`.
-3. **Adversarial gate.** Every `VIOLATION`/`DEVIATION` MUST survive a
-   refutation pass before it is reported.
+3. **Adversarial gate.** A `VIOLATION`/`DEVIATION` MUST NOT be reported unless it survives a
+   refutation pass.
 4. **No silent truncation.** If `--max-claims` caps extraction, you MUST list what was dropped in
    the report's Dropped-claims log.
 

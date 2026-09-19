@@ -466,9 +466,9 @@ than none, because it makes the invariant look enforced when it is not.
 
 ## Invariants (do not violate)
 
-1. **You MUST NOT modify source.** You MUST only create test files, and MUST **append** to an
-   existing test file, never overwrite it. This is what makes the skill safe to run unattended on a repo nobody trusts yet —
-   and why Tier 3 seams are reported, never applied.
+1. **You MUST NOT modify source.** You MUST only create test files. When a test file exists, you
+   MUST **append** to it and MUST NOT overwrite it. This is what makes the skill safe to run
+   unattended on a repo nobody trusts yet — and why Tier 3 seams are reported, never applied.
 2. **You MUST NOT write a test that performs real I/O.** Enforced by the tier-aware runtime guard in
    step 4, not by the static tier alone — see `references/triage.md` for the full mechanism and
    why the tiers cannot enforce this on their own.

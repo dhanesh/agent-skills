@@ -159,10 +159,10 @@ normative correctness improves over time. The loop is detailed in
    MUST come from the agent's own markers/CLI and MUST NOT come from a model summarizing inside a hook.
 3. **Trusted channel only.** `tool_result` / `tool_use` content MUST NOT be harvested into facts
    or evidence, so untrusted output cannot forge a marker. The two tags that raise the
-   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST additionally be accepted from the user's
-   channel only — an agent quoting a poisoned file back into its own reply MUST NOT be
+   ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST NOT be accepted from any channel but the
+   user's — an agent quoting a poisoned file back into its own reply MUST NOT be
    able to validate a fact. Regression tests guard both the direct and the echo path.
-4. **Append-only evidence; you MUST soft-invalidate and MUST NOT hard-delete.** Superseded facts get
+4. **Append-only evidence: evidence MUST be soft-invalidated and MUST NOT be hard-deleted.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.
 5. **Every triple MUST be ontology-checked before it enters the ledger.** Predicates are a closed,

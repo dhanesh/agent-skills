@@ -171,6 +171,21 @@ Every response either took the right read-only first step (locating the skill's 
 
 The unblinded mapping (key → id/arm/run) is kept with the transcripts in `.superpowers/bcp14/out/spotcheck-unblinded.json` (session tooling, not committed).
 
+## Post-trial edits
+
+After the trial, the final branch review reworded three trialled rules. Each change keeps the
+meaning and the level (MUST / MUST NOT throughout), so the numbers above still apply. The
+quoted wording in the Protocol table is what the trial ran against.
+
+- **test-safety-net Invariant 1** (scenario `tsn-t1`): "…and MUST **append** to an existing test
+  file, never overwrite it" became "When a test file exists, you MUST **append** to it and MUST
+  NOT overwrite it". The never-clause is now an explicit MUST NOT.
+- **world-model-ledger c6, Invariant 3** (scenario `wml-t1`): "MUST additionally be accepted
+  from the user's channel only" became "MUST NOT be accepted from any channel but the user's".
+- **world-model-ledger c7, Invariant 4:** "you MUST soft-invalidate and MUST NOT hard-delete"
+  became "evidence MUST be soft-invalidated and MUST NOT be hard-deleted". The subject is now
+  the evidence, not the reader.
+
 ## Limits
 
 - **A model judge.** Jev's verdicts are evidence, not proof; the transcripts in

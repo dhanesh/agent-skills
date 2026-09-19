@@ -65,10 +65,9 @@ generating.
    (and losslessly-liftable Postman/HAR) rather than hand-authoring what the importer can produce.
    You SHOULD use `bunx @dhaneshpurohit/mockstar enhance` for Tier 2 placeholder rewriting rather
    than hand-tokenizing bodies.
-3. **Schema-valid output.** Verification (Stage 5) boots the server, and the generated project
-   MUST boot successfully. A mock project that fails to boot is not a valid deliverable. The
-   `--no-verify` flag skips the boot, which is only acceptable in CI pre-check mode where boot is
-   deferred.
+3. **Schema-valid output.** Verification (Stage 5) boots the server. A mock project that fails to
+   boot is not a valid deliverable, and you MUST NOT skip the boot with `--no-verify` except in CI
+   pre-check mode, where boot is deferred.
 4. **No silent truncation.** When `--max-endpoints` caps the inventory, every dropped endpoint
    MUST be logged to `MOCKSTAR-COVERAGE.md` under the "Dropped" section with its source.
 5. **Read-only inputs.** You MUST NOT modify source spec files, HAR archives, or documentation.
