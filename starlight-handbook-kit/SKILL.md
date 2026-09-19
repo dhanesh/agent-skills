@@ -112,9 +112,9 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
    `Overview`, `Mental model`, `Types / Variants`, `When to use / When NOT`,
    `Tradeoffs`, `Diagram`, `Try it`, `Real-world examples`, `Further reading`.
    Do not add, remove, rename, or reorder them.
-4. Diagrams: use the `<Mermaid code={\`...\`} />` component. A fenced
-   ```` ```mermaid ```` block **MUST NOT** be used — Starlight renders that as code, not a diagram
-   (the mermaid gate fails it).
+4. Diagrams MUST use the `<Mermaid code={\`...\`} />` component. A fenced
+   ```` ```mermaid ```` block MUST NOT be used — Starlight renders that as code, not a
+   diagram (the mermaid gate fails it).
 5. Widgets (optional, in `## Try it`): import from `../../../components/` (three
    levels up from a `<cluster>/<topic>.mdx` page) and pass `client:visible`.
 6. Register the page in `astro.config.mjs`: add
