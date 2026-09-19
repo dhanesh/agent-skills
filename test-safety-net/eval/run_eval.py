@@ -173,8 +173,11 @@ def _grant_fixture(root, asserted_by, gate_policy=None):
 
 
 def _check_grant(root, action="local_reversible"):
+    # GIT_CEILING_DIRECTORIES: a TMPDIR inside a git repo on its default branch
+    # must not turn a covering grant into ASK (the default-branch floor).
+    env = {**os.environ, "GIT_CEILING_DIRECTORIES": os.path.dirname(os.path.abspath(root))}
     r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
-                        "--action", action], capture_output=True, text=True, timeout=60)
+                        "--action", action], capture_output=True, text=True, timeout=60, env=env)
     return r.returncode, r.stdout.strip()
 
 
@@ -208,6 +211,15 @@ def _span(text, start_pat, end_pat):
     start = text.find(start_pat)
     end = text.find(end_pat, start + 1) if start >= 0 else -1
     return " ".join(text[start:end].split()) if start >= 0 and end > start else ""
+
+
+GATE_LINE = "Gate: confirmed by user | grant <id> (<class>)"
+
+
+def grade_deliverable_gate_line(text):
+    start = text.find("## Test safety net: <repo>")
+    end = text.find("```", start)
+    return start >= 0 and GATE_LINE in text[start:end]
 
 
 def grade_gate(text):
@@ -1834,6 +1846,10 @@ def main():
               not grade_gate(skill_md.replace("check-grant", "check-envelope"))[0])
         check("55 Invariant 1 still forbids modifying source",
               "1. **You MUST NOT modify source.**" in skill_md)
+        check("56 the Deliverable template carries the Gate line (who lifted step 3)",
+              grade_deliverable_gate_line(skill_md))
+        check("57 NEGATIVE: grader flags a Deliverable template with the Gate line stripped",
+              not grade_deliverable_gate_line(skill_md.replace(GATE_LINE, "")))
 
         n, k = len(_checks), sum(_checks)
         ok = k == n

@@ -505,6 +505,7 @@ code generation from program output, and it is the one real injection surface in
 
 ```
 ## Test safety net: <repo>  (stack: python · discovery: precise · 3 added, 1 unproven, 1 needs a seam)
+Gate: confirmed by user | grant <id> (<class>)
 
 | unit                    | tier                 | kind             | test file              | proved    |
 |-------------------------|----------------------|------------------|------------------------|-----------|
