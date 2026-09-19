@@ -50,10 +50,11 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
   evidence — `file:line`, commit sha, CI run, log timestamp, issue comment. Where the
   record is silent, reconstruct by judgment, but the entry MUST be marked *(inference)*;
   a labeled guess is useful, an unlabeled one poisons the document.
-- **Blameless, structurally.** Root causes are systemic — a missing guardrail, an absent
-  test, a process or design gap — never a person. When a chain lands on "someone made a
-  mistake", it is unfinished: ask why the system let that mistake reach users (the
-  translation table is in [references/five-whys.md](references/five-whys.md)).
+- **Blameless, structurally.** Root causes SHOULD be systemic — a missing guardrail, an
+  absent test, a process or design gap — and SHOULD NOT be a person. When a chain lands
+  on "someone made a mistake", it is unfinished: ask why the system let that mistake
+  reach users (the translation table is in
+  [references/five-whys.md](references/five-whys.md)).
 - **Boundaries.** This skill explains failures that already happened. It MUST NOT be used
   for live debugging or on-call triage; understanding a healthy system is
   `feynman-walkthrough`; verifying a codebase's claims against authoritative sources is

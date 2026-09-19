@@ -250,13 +250,13 @@ Skills appear in rewrite order.
 | c9 | 127 | - **Not a code-quality judge.** "How should I structure this service?" asked a… | plain (0.63, 0.27) | plain | |
 | c10 | 94 | 6. **Hand off through skill-contract.** … If it names one, propose the handoff … | not extracted (no never/always, not a hard-rule heading) | MUST / MUST NOT | fix round 1, correcting 0f5e62a: this workflow step directly implements skill-contract commandment 10 ("A producer MUST propose each handoff and wait for a yes") and commandment 8's "MUST NOT fail when none exists"; the earlier commit's rationale for leaving it plain was wrong — the creed's own MUSTs apply here, not just to the `## Contract` section |
 
-## bug-autopsy (4 candidates · 3 MUST · 0 SHOULD · 0 MAY · 1 plain · 1 departures)
+## bug-autopsy (4 candidates · 3 MUST · 1 SHOULD · 0 MAY · 0 plain · 2 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.66, 0.66) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
 | c2 | 47 | - **Evidence or inference, labeled.** Every timeline entry and every "why" cite… | MUST (0.36, 0.51) | MUST | confidence 0.36 < 0.6, decided ourselves; mechanically enforced by `assets/postmortem_lint.py`'s evidence-citation FAIL check |
-| c3 | 51 | - **Blameless, structurally.** Root causes are systemic — a missing guardrail,… | plain (0.42, 0.34) | plain | harm 0.34 < 0.5, no gate enforces it — the lint's blame-phrasing check is an advisory WARN, not a FAIL |
+| c3 | 51 | - **Blameless, structurally.** Root causes are systemic — a missing guardrail,… | plain (0.42, 0.34) | SHOULD | fix round 1: `references/five-whys.md:50` and `references/postmortem-template.md:50` both assert "never a person" as the skill's own standing rule, but `assets/postmortem_lint.py`'s blame-phrasing check is an advisory WARN, not a FAIL — no gate enforces it, so it lands at SHOULD/SHOULD NOT, consistent with knowledge-gardener's c2 |
 | c4 | 55 | - **Boundaries.** This skill explains failures that already happened. Live deb… | plain (0.38, 0.44) | MUST NOT | controller ruling per task brief: "refuses live incidents" is a MUST NOT (this skill's refusal to be used for live debugging/on-call triage) |
 
 ## knowledge-gardener (2 candidates · 1 MUST · 1 SHOULD · 0 MAY · 0 plain · 1 departures)
