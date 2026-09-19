@@ -12,6 +12,8 @@ Spec: [`docs/superpowers/specs/2026-09-19-bcp14-skills-design.md`](../superpower
 - **MAY** is an option.
 - **plain** means no keyword; the sentence is left as prose.
 
+**How the header counts work.** Each candidate counts once, at its final level. A keyword inside a candidate at another level is not counted separately; for example, the MAY in verifier-installer c8's "MAY propose, but SHOULD NOT impose" is not.
+
 Skills appear in rewrite order.
 
 ## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
@@ -181,13 +183,13 @@ Skills appear in rewrite order.
 | c6 | 74 | - Hand subagents the literal absolute \`$FETCH\` value — never a relative \`assets/… | MUST (0.70, 0.80) | MUST |  |
 | c7 | 112 | 6. **Synthesize.** Before filling the report, lint the merged findings array wit… | MUST (0.68, 0.80) | MUST |  |
 
-## verifier-installer (8 candidates · 4 MUST · 3 SHOULD · 0 MAY · 1 plain · 2 departures)
+## verifier-installer (8 candidates · 5 MUST · 2 SHOULD · 0 MAY · 1 plain · 1 departure)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.81, 0.77) | MUST |  |
 | c2 | 73 | 1. **Detect the stack.** Run \`python3 "$SKILL_DIR/assets/detect_stack.py" <repo>… | plain (0.61, 0.49) | plain |  |
-| c3 | 88 | 3. **Install per the playbook.** For each approved missing rail, follow the matc… | MUST (0.35, 0.64) | SHOULD | a strong default with legitimate exceptions (a repo may keep a deploy/release workflow that should not carry the verifiers); only the "never add a second workflow" clause is keyed, the rest is a plain workflow step |
+| c3 | 88 | 3. **Install per the playbook.** For each approved missing rail, follow the matc… | MUST (0.35, 0.64) | MUST |  |
 | c4 | 108 | ALWAYS end with this report: | MUST (0.70, 0.48) | SHOULD | harm 0.48 < 0.5 caps it at SHOULD; no gate or test checks the agent's closing summary (the eval grades detect_stack.py output only) |
 | c5 | 130 | - **Read-only until step 2's confirmation** — detection never writes; installs h… | MUST (0.92, 0.65) | MUST |  |
 | c6 | 132 | - **One ground truth.** Local \`verify\` and CI run the same commands; when in dou… | MUST (0.41, 0.58) | MUST |  |

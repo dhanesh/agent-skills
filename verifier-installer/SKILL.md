@@ -91,7 +91,7 @@ rather than inventing config from memory.
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
    and the CI workflow. Extend existing files rather than replacing them, and you
-   SHOULD NOT add a second workflow when one already exists — you SHOULD extend the existing
+   MUST NOT add a second workflow when one already exists — you MUST extend the existing
    one. Keep the diff small and reviewable.
 4. **Prove the loop (verify and repair).** For each installed rail, run its
    command and record the result. Then follow the prove-the-loop protocol in
