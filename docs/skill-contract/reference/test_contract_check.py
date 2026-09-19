@@ -657,6 +657,132 @@ class GrantTests(unittest.TestCase):
                        capture_output=True)
         self.assertEqual(cc.current_branch(self.tmp), "HEAD")
 
+    def _factory_repo(self):
+        """self.tmp as a git repo: main holds one commit, HEAD is on factory/x."""
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+        def git(*args):
+            return subprocess.run(["git", "-C", self.tmp] + list(args), check=True,
+                                  capture_output=True, text=True, env=env)
+        git("init", "-q", "-b", "main")
+        git("commit", "-q", "--allow-empty", "-m", "x")
+        git("checkout", "-q", "-b", "factory/x")
+        return git
+
+    # I1: a grant is one person's acceptance; a committed grant would cover every clone.
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_an_untracked_grant_is_covered_and_a_committed_one_asks_tracked(self):
+        git = self._factory_repo()
+        p = self.put(build_vectors.grant(branch_pattern="factory/*"))
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual(rep["status"], "COVERED", rep)
+        git("add", "-f", p)
+        git("commit", "-q", "-m", "commit the grant")
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"))
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_staged_grant_asks_tracked(self):
+        git = self._factory_repo()
+        p = self.put(build_vectors.grant(branch_pattern="factory/*"))
+        git("add", "-f", p)
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"))
+
+    def test_a_git_failure_on_the_tracked_probe_asks_tracked(self):
+        os.makedirs(os.path.join(self.tmp, ".git"))
+        self.put(build_vectors.grant())
+        with mock.patch.object(cc.subprocess, "run", side_effect=OSError("no git")):
+            rep = self.check()  # branch given, so only the tracked probe runs git
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"))
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_grant_path_outside_the_repo_asks_tracked(self):
+        self._factory_repo()
+        other = tempfile.mkdtemp(prefix="sc-outside-")
+        self.addCleanup(shutil.rmtree, other, True)
+        p = os.path.join(other, build_vectors.GRANT_ID + ".json")
+        _write(p, json.dumps(build_vectors.grant(branch_pattern="factory/*")))
+        rep = cc.check_grant(self.tmp, "local_reversible", path=p, now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"))
+
+    # I2: CI configuration runs with the repository's secrets: pushing it is `deploy`.
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_push_whose_commits_touch_ci_config_asks_ci_config(self):
+        git = self._factory_repo()
+        self.put(build_vectors.grant(branch_pattern="factory/*",
+                                     policy={"local_reversible": "grant", "push_branch": "grant",
+                                             "open_pr": "grant"}))
+        _write(os.path.join(self.tmp, "src", "a.py"), "x = 1\n")
+        git("add", "src/a.py")
+        git("commit", "-q", "-m", "code")
+        for action in ("push_branch", "open_pr"):
+            rep = cc.check_grant(self.tmp, action, now=self.now)
+            self.assertEqual(rep["status"], "COVERED", (action, rep))
+        _write(os.path.join(self.tmp, ".github", "workflows", "x.yml"), "on: push\n")
+        git("add", ".github/workflows/x.yml")
+        git("commit", "-q", "-m", "ci")
+        for action in ("push_branch", "open_pr"):
+            rep = cc.check_grant(self.tmp, action, now=self.now)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"), action)
+        # local work is not a push: the CI file only runs once it reaches the remote
+        self.assertEqual(cc.check_grant(self.tmp, "local_reversible", now=self.now)["status"],
+                         "COVERED")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_every_ci_config_pattern_asks_and_a_lookalike_does_not(self):
+        git = self._factory_repo()
+        self.put(build_vectors.grant(branch_pattern="factory/*", policy={"push_branch": "grant"}))
+        ci = [".github/workflows/x.yml", ".github/actions/a/action.yml", ".gitlab-ci.yml",
+              ".circleci/config.yml", "azure-pipelines.yml", "Jenkinsfile", ".buildkite/p.yml",
+              "bitbucket-pipelines.yml", ".drone.yml", ".travis.yml", "ci/Jenkinsfile"]
+        for rel in ci:
+            self.assertTrue(cc.is_ci_config(rel), rel)
+        for rel in ("src/workflows/x.yml", "docs/github/workflows.md", "src/a.py",
+                    "notJenkinsfile", ".github/CODEOWNERS"):
+            self.assertFalse(cc.is_ci_config(rel), rel)
+        # a deletion is a change too
+        _write(os.path.join(self.tmp, ".travis.yml"), "language: python\n")
+        git("add", ".travis.yml")
+        git("commit", "-q", "-m", "travis")
+        git("checkout", "-q", "main")
+        git("merge", "-q", "--ff-only", "factory/x")
+        git("checkout", "-q", "factory/x")
+        self.assertEqual(cc.check_grant(self.tmp, "push_branch", now=self.now)["status"], "COVERED")
+        git("rm", "-q", ".travis.yml")
+        git("commit", "-q", "-m", "drop travis")
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"))
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_with_no_default_ref_every_commit_counts(self):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        _write(os.path.join(self.tmp, ".gitlab-ci.yml"), "x: 1\n")
+        for args in (["init", "-q", "-b", "factory/x"], ["add", ".gitlab-ci.yml"],
+                     ["commit", "-q", "-m", "x"]):
+            subprocess.run(["git", "-C", self.tmp] + args, check=True, capture_output=True, env=env)
+        self.put(build_vectors.grant(branch_pattern="factory/*", policy={"push_branch": "grant"}))
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"))
+
+    def test_a_git_failure_on_the_ci_probe_asks_ci_config(self):
+        self.put(build_vectors.grant(policy={"push_branch": "grant"}))
+        with mock.patch.object(cc, "in_git_work_tree", return_value=True), \
+                mock.patch.object(cc, "grant_is_tracked", return_value=False), \
+                mock.patch.object(cc.subprocess, "run", side_effect=OSError("no git")):
+            rep = self.check("push_branch")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"))
+
+    def test_an_unanswerable_ci_probe_asks_ci_config(self):
+        self.put(build_vectors.grant(policy={"push_branch": "grant"}))
+        with mock.patch.object(cc, "in_git_work_tree", return_value=True), \
+                mock.patch.object(cc, "grant_is_tracked", return_value=False), \
+                mock.patch.object(cc, "changed_since_default", return_value=None):
+            rep = self.check("push_branch")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"))
+
     def test_an_unhashable_revision_in_a_junk_envelope_does_not_crash(self):
         self.put(build_vectors.grant(expires="2026-09-20T12:00:00Z"))
         _write(os.path.join(cc.envelope_dir(self.tmp), "junk.json"),

@@ -341,6 +341,43 @@ class GrantE2ETests(unittest.TestCase):
         self.assertEqual(rc, 3)
         self.assertIn("reason=default-branch", last)
 
+    def _commit(self, *paths, force=False):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "-C", self.repo, "add"] + (["-f"] if force else []) + list(paths),
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "commit", "-q", "-m", "c"], check=True,
+                       capture_output=True, env=env)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_h_a_committed_grant_asks_tracked(self):
+        path = self.grant()
+        self.assertEqual(self.check("local_reversible")[0], 0)
+        self._commit(path, force=True)  # write_grant excluded it; -f forces it in
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=tracked", last)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_i_a_push_that_changes_ci_config_asks_ci_config(self):
+        self.grant(dict(ANSWERS, gate_policy={"local_reversible": "grant",
+                                              "push_branch": "grant", "open_pr": "grant"}))
+        src = os.path.join(self.repo, "src", "a.py")
+        os.makedirs(os.path.dirname(src))
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        self._commit("src/a.py")
+        self.assertEqual(self.check("push_branch")[0], 0)
+        wf = os.path.join(self.repo, ".github", "workflows", "x.yml")
+        os.makedirs(os.path.dirname(wf))
+        with open(wf, "w", encoding="utf-8") as f:
+            f.write("on: push\n")
+        self._commit(".github/workflows/x.yml")
+        for action in ("push_branch", "open_pr"):
+            rc, last = self.check(action)
+            self.assertEqual(rc, 3, action)
+            self.assertIn("reason=ci-config", last)
+
     def test_g_a_grant_for_merge_is_refused(self):
         r = self.run_py("spec_to_tasks.py", self.spec, "--envelope", self.repo)
         plan = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")][0]

@@ -48,14 +48,14 @@ or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `r
 | Class | Examples | Reversibility | Most permissive gate |
 |---|---|---|---|
 | `read_only` | read files, run read-only checks | none needed | `auto` |
-| `local_reversible` | edit the working tree, commit on a local branch, hand an envelope to a local skill | local | `auto` |
+| `local_reversible` | change tracked files, or commit on a local branch; hand an envelope to a local skill | local | `auto` |
 | `push_branch` | push a non-default branch | remote, reversible | `grant` |
 | `open_pr` | open or update a pull request | remote, reversible | `grant` |
 | `merge` | merge to a default or protected branch | irreversible or externally visible | `ask` only |
 | `deploy` | release, publish, deploy | irreversible or externally visible | `ask` only |
 | `spend` | any paid API or resource beyond the budget | irreversible | `ask` only |
 | `external_message` | email, chat, issue comments to others | externally visible | `ask` only |
-| `delete` | delete branches, files outside the working tree, data | irreversible | `ask` only |
+| `delete` | delete branches, files outside the working tree, untracked or ignored files (e.g. `git clean`, `.env`), data | irreversible | `ask` only |
 
 - A class absent from `gate_policy` is `ask`.
 - `auto` is allowed only on `read_only` and `local_reversible`; `auto` on any other class makes
@@ -70,6 +70,9 @@ or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `r
 - A grant MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human; a
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
+- A grant is one user's acceptance and MUST NOT be committed; a receiver MUST treat a tracked
+  grant as not covering anything. Committed, one person's yes would cover every clone. When git
+  cannot say whether the grant is tracked, the grant covers nothing.
 
 These floors live in the checker, and no grant can lower them:
 
@@ -88,18 +91,33 @@ These floors live in the checker, and no grant can lower them:
   and `GIT_CEILING_DIRECTORIES` when it asks git for the branch, so the answer is about `root`.
 
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
-name.
+name, and MUST NOT force-push.
+
+A push or pull request whose commits add or change CI configuration (`.github/workflows/`,
+`.github/actions/`, `.gitlab-ci.yml`, `.circleci/`, `azure-pipelines.yml`, `Jenkinsfile`,
+`.buildkite/`, `bitbucket-pipelines.yml`, `.drone.yml`, `.travis.yml`) runs that configuration
+with the repository's secrets; it is not `push_branch` or `open_pr`: it is `deploy`, and the
+checker answers ASK `ci-config`. The commits compared are those on HEAD since its merge base with
+each default branch (every commit on HEAD when no default branch exists); when git cannot say, the
+checker answers ASK `ci-config` too.
+
+*Non-normative.* Workflows that already exist and trigger on any push, such as preview deploys,
+still run on a granted push. The repository owner controls those; the grant does not.
 
 A revocation is a revision (`wasRevisionOf` names the grant) whose payload has `revoked: true`
 and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
-superseded, not expired, not living past the 7-day floor, subjects not stale, HEAD not detached, not
-on a default branch, the current git branch matches `branch_pattern` (the branch checks are skipped only when
-no `.git` exists in `root` or any parent), and the class's gate is `auto` or `grant`. An `ASK`
-names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `branch-unknown`, `detached`, `default-branch`, `branch` or `gate-ask`). It prints
+superseded, not expired, not living past the 7-day floor, subjects not stale, git can report the
+branch (`branch-unknown`), HEAD not detached, not on a default branch, the current git branch
+matches `branch_pattern`, the grant file not tracked by git, the class's gate is `auto` or
+`grant`, and, for `push_branch` and `open_pr`, no commit since the default branch touching CI
+configuration. The git checks are skipped only when no `.git` exists in `root` or any parent. An
+`ASK` names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
+`stale`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask` or
+`ci-config`). The conformance vectors run outside git, so `tracked` and `ci-config` are proven by
+the reference checker's unit and end-to-end tests instead. It prints
 `GRANT: COVERED id=… class=… gate=auto|grant` on success and exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 

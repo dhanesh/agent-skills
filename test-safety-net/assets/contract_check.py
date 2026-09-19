@@ -860,6 +860,74 @@ def detect_default_branches(root):
     return out
 
 
+def _git(root, *args, stdin=None):
+    """Run git on root with the redirect variables scrubbed; the CompletedProcess, or None
+    when git cannot be run at all."""
+    try:
+        return subprocess.run(["git", "-C", root] + list(args), capture_output=True,
+                              input=stdin, timeout=30, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def grant_is_tracked(root, path):
+    """True when git tracks (or has staged) the grant file, False when it does not, None
+    when git cannot say. A grant is one person's acceptance: committed, it covers every clone."""
+    r = _git(root, "ls-files", "-z", "--cached", "--", os.path.realpath(path))
+    if r is None or r.returncode != 0:
+        return None  # includes a grant outside the work tree: git refuses the pathspec
+    return bool(r.stdout.strip(b"\0"))
+
+
+# CI configuration runs with the repository's secrets, so pushing a change to it is
+# `deploy`, not `push_branch` or `open_pr` (A8). Directories match at the repo top;
+# the file names match at any depth, since Jenkins and GitLab can point anywhere.
+CI_CONFIG_DIRS = (".github/workflows/", ".github/actions/", ".circleci/", ".buildkite/")
+CI_CONFIG_FILES = frozenset({".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile",
+                             "bitbucket-pipelines.yml", ".drone.yml", ".travis.yml"})
+
+
+def is_ci_config(rel):
+    """True when a repo-relative, forward-slash path is CI configuration."""
+    return rel.startswith(CI_CONFIG_DIRS) or rel.rsplit("/", 1)[-1] in CI_CONFIG_FILES
+
+
+def changed_since_default(root, default_branches):
+    """Paths the commits on HEAD change relative to the default branch, or None when git
+    cannot say. Each local or origin ref named like a default branch contributes the diff
+    from its merge base with HEAD; with none, every commit on HEAD counts (the empty tree).
+    Only commits are compared: staged or uncommitted edits cannot be pushed without a
+    commit, and a commit made later is seen by the check that precedes that push."""
+    keys = {_branch_key(b) for b in default_branches}
+    r = _git(root, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin")
+    if r is None or r.returncode != 0:
+        return None
+    refs = []
+    for ref in r.stdout.decode("utf-8", "replace").splitlines():
+        name = ref.split("/", 2)[2] if ref.startswith("refs/heads/") else ref.split("/", 3)[-1]
+        if name != "HEAD" and _branch_key(name) in keys:
+            refs.append(ref)
+    bases = []
+    for ref in refs:
+        m = _git(root, "merge-base", ref, "HEAD")
+        if m is None or m.returncode != 0 or not m.stdout.strip():
+            return None  # unrelated histories or no HEAD: cannot bound the push, fail closed
+        bases.append(m.stdout.strip().decode("ascii", "replace"))
+    if not bases:
+        e = _git(root, "hash-object", "-t", "tree", "--stdin", stdin=b"")
+        if e is None or e.returncode != 0 or not e.stdout.strip():
+            return None
+        bases.append(e.stdout.strip().decode("ascii", "replace"))
+    changed = set()
+    for base in bases:
+        d = _git(root, "-c", "diff.relative=false", "diff", "--no-ext-diff", "--no-renames",
+                 "--name-only", "-z", base, "HEAD", "--")
+        if d is None or d.returncode != 0:
+            return None
+        changed.update(p for p in d.stdout.decode("utf-8", "surrogateescape").split("\0") if p)
+    return changed
+
+
 def check_grant(root, action, path=None, now=None, branch=None, default_branches=None):
     """Commandment 10: does a grant cover `action`? First failing check wins.
 
@@ -902,8 +970,9 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
         return ask("lifetime")
     if stale_names(root, st["subject"]):
         return ask("stale")
+    in_git = in_git_work_tree(root)
     branch = branch if branch is not None else current_branch(root)
-    if branch is None and in_git_work_tree(root):
+    if branch is None and in_git:
         return ask("branch-unknown")  # inside git but git cannot answer: fail closed
     if branch == DETACHED:
         # A rebase started on the default branch detaches HEAD, and `rebase --continue`
@@ -916,10 +985,18 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
             return ask("default-branch")
         if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
             return ask("branch")
+    if in_git and grant_is_tracked(root, path) is not False:
+        return ask("tracked")  # committed, staged, or git cannot say: fail closed
     gate = p["gate_policy"].get(action, "ask")
     rep["gate"] = gate
     if gate not in ("auto", "grant"):
         return ask("gate-ask")
+    if in_git and action in ("push_branch", "open_pr"):
+        if default_branches is None:
+            default_branches = detect_default_branches(root)
+        changed = changed_since_default(root, default_branches)
+        if changed is None or any(is_ci_config(c) for c in changed):
+            return ask("ci-config")  # CI runs with the repo's secrets: that push is deploy
     rep["status"] = "COVERED"
     return rep
 

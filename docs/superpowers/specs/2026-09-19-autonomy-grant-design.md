@@ -20,7 +20,7 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 | A4 | **Architecture.** The grant is a skill-contract envelope kind, checked by the reference checker's `check-grant`. The action-class table is normative in SPEC.md. | — | A separate grant skill; a plain policy file |
 | A5 | **The planning method follows manifold:** constrain → tension → anchor (backward reasoning to required truths) → choose, iterated until it converges. | — | — |
 | A6 | **Loop depth follows the mode.** Unattended runs the full loop. Attended runs a light pass, and the user can switch to the full loop, or to unattended, at any point. | 0.96 | The full loop always (owner's first choice, revised after spec review); attended mode unchanged |
-| A7 | **Checker-held floors that no grant can lower** (added 2026-09-19, after Task 1 showed that `require_signature` inside a grant cannot stop a forged grant that omits it): (a) [superseded by A8]; (b) a grant may live at most 7 days, so `expires_at − generatedAtTime > 7d` is INVALID and `expires_at > now + 7d` is ASK; (c) a grant never covers an action on the repo's default branch (from `origin/HEAD`, else `main`/`master`). Grants cover `read_only`, `local_reversible`, `push_branch` and `open_pr` (see A8). | 0.98 | The same floors but any signature for the irreversible classes; no floors, documented only |
+| A7 | **Checker-held floors that no grant can lower** (added 2026-09-19, after Task 1 showed that `require_signature` inside a grant cannot stop a forged grant that omits it): (a) [superseded by A8]; (b) a grant may live at most 7 days, so `expires_at − generatedAtTime > 7d` is INVALID and `expires_at > now + 7d` is ASK; (c) a grant never covers an action on the repo's default branch (`origin/HEAD` unioned with `main`/`master`). Grants cover `read_only`, `local_reversible`, `push_branch` and `open_pr` (see A8). | 0.98 | The same floors but any signature for the irreversible classes; no floors, documented only |
 | A8 | **No signing; irreversible actions are never grantable** (owner, 2026-09-19, superseding A2's optional signing and A7(a)). Task 2 showed that any local signature, including an `sk-` "hardware" key, can be forged by an agent running as the same user, because it can edit the allowed-signers file. The owner judged hardware keys and root-owned setup too complex. A grant is honestly labelled as the user's acceptance, and it can cover only `read_only`, `local_reversible`, `push_branch` and `open_pr`. For `merge`, `deploy`, `spend`, `external_message` and `delete`, any gate other than `ask` makes the grant INVALID, so those actions always ask the human at the moment they happen. The factory runs autonomously up to an open pull request, and the human merges. | 0.74 | Approval through GitHub branch protection; software signing, documented as forgeable |
 
 ## 1. The grant: `autonomy-grant/v1`
@@ -82,9 +82,11 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
   5. not superseded: no revision names this grant in `wasRevisionOf`, so an explicit path to an old grant cannot bypass a revocation;
   6. not expired, and `expires_at` no more than 7 days after now (ASK `lifetime`);
   7. subjects not stale;
-  8. inside a git work tree, the branch must be known (ASK `branch-unknown`) and HEAD must not be detached (ASK `detached`); outside git, steps 8–9 are skipped;
+  8. inside a git work tree, the branch must be known (ASK `branch-unknown`) and HEAD must not be detached (ASK `detached`); outside git, steps 8–12 except 11 are skipped;
   9. not the default branch (ASK `default-branch`), and the branch matches `branch_pattern` (ASK `branch`);
-  10. the class's gate is `auto` or `grant` (otherwise ASK `gate-ask`).
+  10. the grant file is not tracked or staged by git (ASK `tracked`, also when git cannot say): a grant is one person's acceptance, and committed it would cover every clone (final fix wave, I1);
+  11. the class's gate is `auto` or `grant` (otherwise ASK `gate-ask`);
+  12. for `push_branch` and `open_pr`, no commit on HEAD since its merge base with a default branch (every commit when none exists) adds, changes or deletes CI configuration (ASK `ci-config`, also when git cannot say): CI runs with the repository's secrets, so that push is `deploy` (final fix wave, I2).
 - **Outputs:**
   - `GRANT: COVERED id=… class=… gate=auto|grant`, exit 0;
   - `GRANT: ASK id=… reason=<first failing check>`, exit 3;
@@ -207,7 +209,7 @@ crafting-self-prompting-loops, already an adopter, adds `autonomy-grant/v1` to w
   - forged or skill-attributed grants accepted, 0 → 0, as a guard.
 - **AC7. Versions and BCP 14.**
   - spec-first-planning goes to 2.0.0, with an upgrade note for existing specs.
-  - The other four skills get a minor bump.
+  - The other three skills get a minor bump.
   - Every new hard rule carries a BCP 14 keyword and a classification-doc row.
   - PP-7 passes, and PP-5 is not newly advisory.
 - **AC8. Jev re-judges Q3** of the acceptance test after merge. The result is recorded in the assessment doc.
