@@ -504,11 +504,13 @@ class GrantTests(unittest.TestCase):
                            capture_output=True, text=True)
         git("init", "-q")
         git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
-        self.assertEqual(cc.detect_default_branches(self.tmp), {"trunk"})
+        # origin/HEAD is added to main and master, never a replacement for them
+        self.assertEqual(cc.detect_default_branches(self.tmp), {"trunk", "main", "master"})
         self.put(build_vectors.grant(branch_pattern="*"))
-        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="trunk", env={})
-        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"))
-        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="main", env={})
+        for b in ("trunk", "main"):
+            rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch=b, env={})
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"), b)
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="feature", env={})
         self.assertEqual(rep["status"], "COVERED")
 
     def test_revocation_of_a_week_long_grant_stays_valid(self):
@@ -516,6 +518,107 @@ class GrantTests(unittest.TestCase):
         out = cc.revoke_grant(self.tmp, now=self.now)
         with open(out, encoding="utf-8") as f:
             self.assertEqual(cc.grant_violations(json.load(f)), [])
+
+    def test_git_failure_inside_a_work_tree_asks_branch_unknown(self):
+        os.makedirs(os.path.join(self.tmp, ".git"))
+        self.put(build_vectors.grant())
+        orig = cc.current_branch
+        cc.current_branch = lambda root: None
+        try:
+            rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, env={})
+        finally:
+            cc.current_branch = orig
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch-unknown"))
+
+    def test_git_failure_below_a_work_tree_asks_branch_unknown(self):
+        _write(os.path.join(self.tmp, ".git"), "gitdir: /nowhere\n")  # a worktree's .git file
+        sub = os.path.join(self.tmp, "sub")
+        _write(os.path.join(sub, "docs", "spec.md"), build_vectors.SPEC)
+        _write(os.path.join(sub, "plan.json"), build_vectors.PLAN_TEXT)
+        _write(os.path.join(cc.envelope_dir(sub), build_vectors.GRANT_ID + ".json"),
+               json.dumps(build_vectors.grant()))
+        rep = cc.check_grant(sub, "local_reversible", now=self.now, env={})
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch-unknown"))
+
+    def test_no_git_anywhere_skips_the_branch_floors(self):
+        self.assertFalse(cc.in_git_work_tree(self.tmp))
+        self.put(build_vectors.grant())
+        orig = cc.current_branch
+        cc.current_branch = lambda root: None
+        try:
+            rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, env={})
+        finally:
+            cc.current_branch = orig
+        self.assertEqual(rep["status"], "COVERED")
+
+    def test_casefolded_and_compatibility_forms_hit_the_default_branch(self):
+        self.put(build_vectors.grant(branch_pattern="*"))
+        for b in ("MAIN", "Master", "ma\u017fter"):  # U+017F LATIN SMALL LETTER LONG S
+            rep = self.check(branch=b, default_branches={"main", "master"})
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"), b)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_tag_named_like_the_branch_does_not_hide_it(self):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"],
+                     ["tag", "main"]):
+            subprocess.run(["git", "-C", self.tmp] + args, check=True, capture_output=True, env=env)
+        self.assertEqual(cc.current_branch(self.tmp), "main")
+        subprocess.run(["git", "-C", self.tmp, "checkout", "-q", "--detach"], check=True,
+                       capture_output=True)
+        self.assertEqual(cc.current_branch(self.tmp), "HEAD")
+
+    def test_an_unhashable_revision_in_a_junk_envelope_does_not_crash(self):
+        self.put(build_vectors.grant(expires="2026-09-20T12:00:00Z"))
+        _write(os.path.join(cc.envelope_dir(self.tmp), "junk.json"),
+               json.dumps({"predicateType": cc.GRANT_KIND, "predicate": {"wasRevisionOf": []}}))
+        self.assertEqual(self.check()["status"], "COVERED")
+        self.assertEqual(cc.latest_grant(self.tmp).endswith(build_vectors.GRANT_ID + ".json"), True)
+        self.assertTrue(os.path.isfile(cc.revoke_grant(self.tmp, now=self.now)))
+
+    def test_cli_last_line_is_grant_with_a_junk_envelope(self):
+        self.put(self.fresh_grant())
+        _write(os.path.join(cc.envelope_dir(self.tmp), "junk.json"),
+               json.dumps({"predicateType": cc.GRANT_KIND, "predicate": {"wasRevisionOf": {}}}))
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = cc.main(["check-grant", "--root", self.tmp, "--action", "local_reversible"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(buf.getvalue().strip().splitlines()[-1].startswith("GRANT: COVERED"))
+
+    def test_deeply_nested_or_oversized_json_is_unreadable_not_a_crash(self):
+        self.put(build_vectors.grant())
+        deep = os.path.join(cc.envelope_dir(self.tmp), "deep.json")
+        _write(deep, "[" * 200000 + "]" * 200000)
+        big = os.path.join(cc.envelope_dir(self.tmp), "big.json")
+        _write(big, json.dumps({"pad": "x" * (cc.ENVELOPE_MAX_BYTES + 1)}))
+        for p in (deep, big):
+            st, err = cc.load_envelope(p)
+            self.assertIsNone(st)
+            self.assertEqual([n for n, _ in err], [3])
+            self.assertEqual(self.check(path=p)["status"], "INVALID")
+        self.assertEqual(self.check()["status"], "COVERED")
+
+    def test_revoke_by_id_refuses_a_file_whose_content_names_another_id(self):
+        alias = "autonomy-grant-v1-20260919T110000Z-000000"
+        _write(os.path.join(cc.envelope_dir(self.tmp), alias + ".json"),
+               json.dumps(build_vectors.grant()))
+        with self.assertRaises(ValueError):
+            cc.revoke_grant(self.tmp, grant_id=alias, now=self.now)
+
+    def test_a_grant_filed_under_another_name_is_not_a_candidate(self):
+        newer = build_vectors.grant(generated="2026-09-19T12:30:00Z")
+        _write(os.path.join(cc.envelope_dir(self.tmp),
+                            "autonomy-grant-v1-20260919T123000Z-ffffff.json"), json.dumps(newer))
+        self.assertIsNone(cc.latest_grant(self.tmp))
+        self.assertEqual(self.check()["status"], "NONE")
+
+    def test_revocation_of_a_two_subject_grant_is_valid(self):
+        self.put(build_vectors.grant())
+        with open(cc.revoke_grant(self.tmp, now=self.now), encoding="utf-8") as f:
+            st = json.load(f)
+        self.assertEqual(len(st["subject"]), 2)
+        self.assertEqual(cc.grant_violations(st), [])
 
     def test_unknown_action_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()):

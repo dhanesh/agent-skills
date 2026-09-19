@@ -26,6 +26,7 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import unicodedata  # noqa: E402
 import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
@@ -42,13 +43,13 @@ CONTRACT_VERSION = "1"
 FENCE_INFO = "json skill-contract"
 KIND_RE = re.compile(
     r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~-]+)*"
-    r"/(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)/v(?P<ver>[1-9][0-9]*)$")
+    r"/(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)/v(?P<ver>[1-9][0-9]*)\Z")
 ID_RE = re.compile(
     r"^(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)-v(?P<ver>[1-9][0-9]*)"
-    r"-(?P<ts>[0-9]{8}T[0-9]{6}Z)-(?P<hex>[0-9a-f]{6})$")
-TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    r"-(?P<ts>[0-9]{8}T[0-9]{6}Z)-(?P<hex>[0-9a-f]{6})\Z")
+TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 ALLOWED_FRONTMATTER = ("name", "description", "license", "compatibility",
                        "metadata", "allowed-tools")
 OUTCOMES = ("passed", "failed", "cantTell", "inapplicable", "untested")
@@ -66,6 +67,7 @@ GRANT_NAMESPACE = "skill-contract-grant"
 HW_SIGNED_CLASSES = frozenset({"merge", "deploy", "spend", "external_message", "delete"})
 MAX_GRANT_LIFETIME = timedelta(days=7)
 FALLBACK_DEFAULT_BRANCHES = frozenset({"main", "master"})
+ENVELOPE_MAX_BYTES = 1024 * 1024
 
 
 # ── SKILL.md reading (no YAML library: a line reader is enough) ──────────────
@@ -417,9 +419,14 @@ def check_statement(st):
 def load_envelope(path):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f), []
-    except (OSError, ValueError) as exc:
-        return None, [(3, "cannot read the envelope: %s" % exc)]
+            text = f.read(ENVELOPE_MAX_BYTES + 1)
+        if len(text.encode("utf-8")) > ENVELOPE_MAX_BYTES:
+            return None, [(3, "cannot read the envelope: larger than %d bytes" % ENVELOPE_MAX_BYTES)]
+        return json.loads(text), []
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        return None, [(3, "cannot read the envelope: %s" % (exc.__class__.__name__
+                                                            if isinstance(exc, (RecursionError, MemoryError))
+                                                            else exc))]
 
 
 # ── Commandment 8: find partners, never require them ────────────────────────
@@ -714,6 +721,8 @@ def grant_violations(st):
         out.append("a grant may live at most 7 days (expires_at - generatedAtTime)")
     if not isinstance(p.get("revoked"), bool):
         out.append("payload.revoked must be a boolean")
+    if not (isinstance(st.get("subject"), list) and len(st["subject"]) >= 2):
+        out.append("a grant must pin at least 2 subjects: the spec and the plan it was approved for")
     if p.get("revoked") is not True:
         accepted = [a for a in pred.get("assertions") or [] if a.get("test") == "grant-accepted"]
         if len(accepted) != 1:
@@ -755,47 +764,78 @@ def _grant_envelopes(root, strict=True):
         if err or not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND \
                 or not isinstance(st.get("predicate"), dict):
             continue
-        if strict and check_statement(st):
-            continue
+        if strict and (check_statement(st) or st["predicate"].get("id") + ".json" != f):
+            continue  # a candidate must be well-formed and filed under its own id
         out.append((os.path.join(d, f), st))
     return out
 
 
 def is_superseded(root, grant_id):
     """True when any grant envelope under root names grant_id in wasRevisionOf."""
-    return any(st["predicate"].get("wasRevisionOf") == grant_id
-               for _, st in _grant_envelopes(root, strict=False))
+    return any(_revision_of(st) == grant_id for _, st in _grant_envelopes(root, strict=False))
+
+
+def _revision_of(st):
+    rev = st["predicate"].get("wasRevisionOf")
+    return rev if isinstance(rev, str) else None
 
 
 def latest_grant(root):
     """The path of the newest valid-shaped grant that no revision supersedes."""
-    revised = {st["predicate"].get("wasRevisionOf") for _, st in _grant_envelopes(root, strict=False)}
+    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
     heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
              for p, st in _grant_envelopes(root) if st["predicate"]["id"] not in revised]
     return max(heads)[2] if heads else None
 
 
 def current_branch(root):
-    """The checked-out branch ("HEAD" when detached), or None outside git."""
+    """The checked-out branch ("HEAD" when detached), or None when git cannot say.
+
+    Uses the full ref (refs/heads/<name>), never --abbrev-ref, which answers
+    "heads/main" when a tag is also named main.
+    """
     try:
-        r = subprocess.run(["git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD"],
+        r = subprocess.run(["git", "-C", root, "symbolic-ref", "-q", "HEAD"],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
-    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    ref = r.stdout.strip()
+    if r.returncode == 0 and ref.startswith("refs/heads/") and len(ref) > len("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    if r.returncode == 1 and not ref:
+        return "HEAD"  # detached: -q exits 1 silently
+    return None
+
+
+def in_git_work_tree(root):
+    """True when root or any parent holds a .git directory or file."""
+    d = os.path.abspath(root)
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _branch_key(name):
+    """Compare branch names as a case-insensitive filesystem would (and then some)."""
+    return unicodedata.normalize("NFKC", name).casefold()
 
 
 def detect_default_branches(root):
-    """The repo's default branch from origin/HEAD, else {"main", "master"}."""
+    """main, master, and the target of origin/HEAD when there is one."""
+    out = set(FALLBACK_DEFAULT_BRANCHES)
     try:
-        r = subprocess.run(["git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        r = subprocess.run(["git", "-C", root, "symbolic-ref", "refs/remotes/origin/HEAD"],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return set(FALLBACK_DEFAULT_BRANCHES)
-    name = r.stdout.strip() if r.returncode == 0 else ""
-    if name.startswith("origin/"):
-        name = name[len("origin/"):]
-    return {name} if name else set(FALLBACK_DEFAULT_BRANCHES)
+        return out
+    ref = r.stdout.strip() if r.returncode == 0 else ""
+    if ref.startswith("refs/remotes/origin/") and len(ref) > len("refs/remotes/origin/"):
+        out.add(ref[len("refs/remotes/origin/"):])
+    return out
 
 
 def signature_level(path, env=None):
@@ -847,10 +887,12 @@ def check_grant(root, action, path=None, now=None, branch=None, env=None, defaul
     if stale_names(root, st["subject"]):
         return ask("stale")
     branch = branch if branch is not None else current_branch(root)
+    if branch is None and in_git_work_tree(root):
+        return ask("branch-unknown")  # inside git but git cannot answer: fail closed
     if branch is not None:
         if default_branches is None:
             default_branches = detect_default_branches(root)
-        if branch in default_branches:
+        if _branch_key(branch) in {_branch_key(b) for b in default_branches}:
             return ask("default-branch")
         if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
             return ask("branch")
@@ -879,6 +921,8 @@ def revoke_grant(root, grant_id=None, now=None):
     st, err = load_envelope(path) if path and os.path.isfile(path) else (None, [(3, "no such grant")])
     if st is None or err or check_statement(st) or st.get("predicateType") != GRANT_KIND:
         raise ValueError("no valid grant to revoke under %s" % envelope_dir(root))
+    if grant_id is not None and st["predicate"]["id"] != grant_id:
+        raise ValueError("%s.json holds grant %s, not %s" % (grant_id, st["predicate"]["id"], grant_id))
     if is_superseded(root, st["predicate"]["id"]):
         raise ValueError("%s is superseded; revoke the newest revision" % st["predicate"]["id"])
     now = now or utc_now()

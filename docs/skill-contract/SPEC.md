@@ -61,6 +61,7 @@ or `ask`), an optional `require_signature` (action class → `SIGNED` or `SIGNED
 - A class absent from `gate_policy` is `ask`.
 - `auto` is allowed only on `read_only` and `local_reversible`; `auto` on any other class makes
   the grant invalid.
+- A grant MUST pin at least 2 subjects: the spec and the task-plan envelope it was approved for.
 - A grant MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human; a
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
@@ -73,19 +74,25 @@ Three floors live in the checker, and no grant can lower them:
 - A grant MUST NOT live more than 7 days: `expires_at` more than 7 days after `generatedAtTime`
   makes it invalid, and a receiver MUST treat a grant whose `expires_at` is more than 7 days after
   now as not covering anything.
-- A grant MUST NOT cover an action while the current branch is the repo's default branch (from
-  `origin/HEAD`, else `main` or `master`).
+- A grant MUST NOT cover an action while the current branch is a default branch: `main`,
+  `master`, and the target of `origin/HEAD` when there is one. Branch names are compared
+  case-insensitively (Unicode NFKC, then case folding), because a case-insensitive filesystem lets
+  `Main` advance `main`. When `root` or any parent holds a `.git` directory or file but git cannot
+  report the current branch, a receiver MUST treat the grant as not covering anything.
+
+A caller acting under a grant MUST push only the current branch to the remote branch of the same
+name.
 
 A revocation is a revision (`wasRevisionOf` names the grant) whose payload has `revoked: true`
 and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
-superseded, not expired, not living past the 7-day floor, subjects not stale, not on the default
-branch, the current git branch matches `branch_pattern` (both branch checks are skipped outside
-git), the class's gate is `auto` or `grant`, and the required signature level is met. An `ASK`
+superseded, not expired, not living past the 7-day floor, subjects not stale, not on a default
+branch, the current git branch matches `branch_pattern` (both branch checks are skipped only when
+no `.git` exists in `root` or any parent), the class's gate is `auto` or `grant`, and the required signature level is met. An `ASK`
 names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
+`stale`, `branch-unknown`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 
 *Non-normative.* An agent with a shell on the same machine can write an unsigned grant, or sign one
