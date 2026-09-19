@@ -892,6 +892,16 @@ class TestCliCannotSelfCertify(Base):
         self.assertEqual(json.loads(out)["error"], "human_evidence_not_accepted_from_cli")
         self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='validate'"), [])
 
+    def test_cli_refuses_human_refutation(self):
+        for by in ("human:alice", "human"):
+            rc, out = self._cli("refute", "hash_pw,uses,bcrypt", "--by", by)
+            self.assertEqual(rc, 2, by)
+            self.assertEqual(json.loads(out)["error"], "human_evidence_not_accepted_from_cli")
+            self.assertIn("WM-REFUTES", out)
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE evidence_kind='human'"), [])
+        self.assertEqual(self._rows("SELECT 1 FROM evidence WHERE activity='refute'"), [])
+        self.assertEqual(self._rows("SELECT validation FROM interaction")[0][0], "unverified")
+
     def test_assert_valid_records_agent_assert_not_human(self):
         rc, _ = self._cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
                           "--params", '{"patterns":["md5"]}', "--assert-valid")

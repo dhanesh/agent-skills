@@ -69,6 +69,9 @@ WM-CONSTRAINT: no-weak-hash | forbids | uses | {"patterns":["md5","sha1"]} | {su
 WM-MAPS: billing/refund.py -> stripe/refunds-api
 ```
 
+`WM-VALIDATED` and `WM-REFUTES` count only when the user types them in their own message; the Stop
+hook rejects them from the agent's turn, and the CLI refuses `--by human`.
+
 ```bash
 python3 wm.py stats                 # validated / unverified / contradicted counts
 python3 wm.py contradictions --open # open contradictions + proposed fixes

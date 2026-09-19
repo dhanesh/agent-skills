@@ -2187,16 +2187,23 @@ def _select_interaction(wm, sel):
     return int(sel)  # bare id
 
 
+def _refuse_human(by, verb, tag):
+    """The CLI runs with the agent's authority, so it cannot attest a human.
+    Human evidence enters only via a user-channel WM-VALIDATED/WM-REFUTES
+    marker (invariant 3). Prints the structured refusal and returns True."""
+    if by.strip() != "human" and not by.startswith("human:"):
+        return False
+    print(json.dumps({"error": "human_evidence_not_accepted_from_cli",
+                      "detail": f"a human {verb} by typing `{tag}: <s> <p> <o> by human:<name>` "
+                                "in their own message; the Stop hook harvests it from the user channel only"}))
+    return True
+
+
 def cmd_validate(wm, a):
     iid = _select_interaction(wm, a.interaction)
     if iid is None:
         print(json.dumps({"error": "interaction not found"})); return 1
-    if a.by.strip() == "human" or a.by.startswith("human:"):
-        # The CLI runs with the agent's authority, so it cannot attest a human.
-        # Human evidence enters only via a user-channel WM-VALIDATED (invariant 3).
-        print(json.dumps({"error": "human_evidence_not_accepted_from_cli",
-                          "detail": "a human validates by typing `WM-VALIDATED: <s> <p> <o> by human:<name>` "
-                                    "in their own message; the Stop hook harvests it from the user channel only"}))
+    if _refuse_human(a.by, "validates", "WM-VALIDATED"):
         return 2
     kind, ref = _parse_evidence_flag(a.by)
     if kind not in ORACLE_KINDS:
@@ -2212,6 +2219,8 @@ def cmd_refute(wm, a):
     iid = _select_interaction(wm, a.interaction)
     if iid is None:
         print(json.dumps({"error": "interaction not found"})); return 1
+    if _refuse_human(a.by, "refutes", "WM-REFUTES"):
+        return 2
     kind, ref = _parse_evidence_flag(a.by)
     if kind not in ALL_EVIDENCE_KINDS:
         print(json.dumps({"error": "unknown_evidence_kind",
@@ -2397,7 +2406,10 @@ def build_parser():
     v.set_defaults(func=cmd_validate)
 
     r = sub.add_parser("refute", help="record refuting evidence (→ contradicted)")
-    r.add_argument("interaction"); r.add_argument("--by", required=True)
+    r.add_argument("interaction")
+    r.add_argument("--by", required=True,
+                   help="test:<id> | ci:<run> | doc:<path> | ... human is refused here: "
+                        "a human refutes by typing WM-REFUTES ... by human:<name> in their own message")
     r.add_argument("--weight", type=float, default=0.8)
     r.set_defaults(func=cmd_refute)
 

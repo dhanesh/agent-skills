@@ -130,6 +130,22 @@ def main():
         check("agent-run `validate --by human:x` is refused and does not validate",
               r.returncode != 0 and human == 0 and status == "unverified",
               f"rc={r.returncode} human_rows={human} status={status}")
+
+        # NEGATIVE: the same holds for the other ORACLE tag. An agent-run
+        # `refute --by human:x` must not record a human refutation.
+        r = subprocess.run([sys.executable, wcli, "--db", cdb, "refute",
+                            "hash_pw,uses,bcrypt", "--by", "human:x"],
+                           capture_output=True, text=True, timeout=30)
+        wm = wmod.WorldModel(cdb)
+        try:
+            human = wm.conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE evidence_kind='human'").fetchone()[0]
+            status = wm.conn.execute("SELECT validation FROM interaction").fetchone()[0]
+        finally:
+            wm.close()
+        check("agent-run `refute --by human:x` is refused and does not contradict",
+              r.returncode != 0 and human == 0 and status == "unverified",
+              f"rc={r.returncode} human_rows={human} status={status}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

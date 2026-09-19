@@ -365,12 +365,18 @@ cli("constraint", "no-md5", "forbids", "no md5", "--predicate", "uses",
 wm = W.WorldModel(db)
 minted = wm.conn.execute("SELECT COUNT(*) c FROM evidence "
                          "WHERE evidence_kind='human'").fetchone()["c"]
+cli("observe", "cart", "uses", "stripe")
+cli("refute", "cart,uses,stripe", "--by", "human:alice")
+cli("refute", "cart,uses,stripe", "--by", "human")
+wm = W.WorldModel(db)
+minted_all = wm.conn.execute("SELECT COUNT(*) c FROM evidence "
+                             "WHERE evidence_kind='human'").fetchone()["c"]
 wm2 = W.WorldModel(os.path.join(tempfile.mkdtemp(), "u.db"))
 H.apply_markers(wm2, [("user", "WM-VALIDATED: hash_pw uses bcrypt by human:alice")])
 wm2.consolidate()
 v = wm2.conn.execute("SELECT COUNT(*) c FROM interaction "
                      "WHERE validation='validated'").fetchone()["c"]
-print(json.dumps({"minted": minted, "user_validated": v}))
+print(json.dumps({"minted": minted, "minted_all": minted_all, "user_validated": v}))
 """
 
 def check_world_model(old, new):
@@ -421,6 +427,11 @@ def check_world_model(old, new):
         a.get("minted"), b.get("minted"),
         b.get("minted", 9) == 0 and (a.get("minted") or 0) > 0,
         "validate --by human:alice + constraint --assert-valid",
+        since=SINCE_FACTORY_TRUST_WM)
+    row(s, "human evidence rows the CLI mints across validate + refute (lower=better)",
+        a.get("minted_all"), b.get("minted_all"),
+        b.get("minted_all", 9) == 0 and (a.get("minted_all") or 0) > (a.get("minted") or 0),
+        "adds refute --by human:alice / human; baseline must mint more than the validate row",
         since=SINCE_FACTORY_TRUST_WM)
     row(s, "user-channel WM-VALIDATED by human still validates",
         a.get("user_validated"), b.get("user_validated"),

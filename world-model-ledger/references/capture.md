@@ -142,7 +142,7 @@ wm build [path] [--max-files N] [--prune]             # repo-wide seed: files + 
 wm observe <subj> <pred> <obj> [--evidence file:line] [--conf 0.7]
 wm constraint <name> <kind> "<message>" --predicate <p> --params '<json>' [--severity ...]
 wm validate "<subj>,<pred>,<obj>" --by test:<id>|ci:<run>|doc:<path>   # raises normative; human is refused (exit 2)
-wm refute   "<subj>,<pred>,<obj>" --by ...                                    # → contradicted
+wm refute   "<subj>,<pred>,<obj>" --by ...                                    # → contradicted; human is refused (exit 2)
 wm map      <symbol> --to <referent>
 wm contradictions [--open] [--touching <path>]        # list + proposed fixes
 wm resolve  <id> --as retract|supersede|fixed_code|defer
@@ -153,9 +153,10 @@ wm ontology [--add <pred> --domain <kinds> --range <kinds>]   # list / deliberat
 wm stats | wm consolidate | wm digest | wm export
 ```
 
-`wm validate --by human` and `--by human:<name>` exit 2. The CLI runs with the agent's authority,
-so it cannot attest a human. A human validates by typing `WM-VALIDATED: <s> <p> <o> by human:<name>`
-in their own message, and the Stop hook accepts that tag only from the user channel.
+`wm validate` and `wm refute` with `--by human` or `--by human:<name>` exit 2. The CLI runs with the
+agent's authority, so it cannot attest a human. A human validates or refutes by typing
+`WM-VALIDATED: <s> <p> <o> by human:<name>` or `WM-REFUTES: <s> <p> <o> by human:<name>` in their own
+message, and the Stop hook accepts those tags only from the user channel.
 `wm constraint --assert-valid` records `agent_assert` evidence, which raises nothing on the normative axis.
 A `test:` or `ci:` validation from the CLI is not checked against a real run, so treat
 `validated` backed only by `agent=wm-cli` test evidence as an agent claim.
