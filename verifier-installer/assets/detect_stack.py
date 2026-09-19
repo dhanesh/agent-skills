@@ -38,8 +38,16 @@ LOCKFILE_NAMES = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock")
 # Per-stack proposals for a missing rail: rail -> (command, file_to_create).
 STACK_PROPOSALS = {
     "python": {
-        "format": ("python3 -m compileall -q .", "Makefile"),
-        "build": ("python3 -m compileall -q .", "Makefile"),
+        # No "format" entry here: compileall checks syntax, not formatting,
+        # and can never go red on a formatting violation. A python repo gets
+        # a formatter-check proposal only when it already adopts one — see
+        # _python_formatter() and its use in detect(). Otherwise the format
+        # rail falls through to FALLBACK_PROPOSALS["format"] (the `make
+        # format` placeholder), which stays red until the owner wires one.
+        "build": ("python3 -m compileall -q -f .", "Makefile"),  # -f: without
+        # it, compileall skips a file whose .pyc header (incl. whole-second
+        # mtime) still matches, so a syntax error introduced in the same
+        # second as the last run goes undetected (a false green).
         "test": ("python3 -m unittest discover -s tests", "tests/test_smoke.py"),
     },
     "node": {
@@ -48,7 +56,10 @@ STACK_PROPOSALS = {
         "test": ("npm test", "package.json"),
     },
     "go": {
-        "format": ("gofmt -l .", "Makefile"),
+        # gofmt -l lists misformatted files but exits 0 regardless — it never
+        # fails the rail on its own. `test -z "$(...)"` fails whenever gofmt
+        # lists anything, which is what a "format" rail must do.
+        "format": ('test -z "$(gofmt -l .)"', "Makefile"),
         "build": ("go build ./...", "Makefile"),
         "test": ("go test ./...", "Makefile"),
     },
@@ -170,6 +181,27 @@ def _detect_python(root, files, fileset):
     return True, rails
 
 
+def _python_formatter(root, files, fileset):
+    """The formatter-check command a python repo already adopts, else None.
+
+    Detects adoption the same way a human would: a ruff/black config file, or
+    the tool named in pyproject.toml/setup.cfg/tox.ini/.pre-commit-config.yaml
+    or a requirements*.txt. This skill MAY propose a formatter but SHOULD NOT
+    impose one, so absent any of that evidence it returns None and the caller
+    falls back to the honest placeholder rather than guessing.
+    """
+    blob = "".join(_read(root, f) for f in
+                   ("pyproject.toml", "setup.cfg", "tox.ini",
+                    ".pre-commit-config.yaml") if f in fileset)
+    blob += "".join(_read(root, f) for f in files
+                    if re.match(r"^requirements[A-Za-z0-9_.-]*\.txt$", f))
+    if "ruff.toml" in fileset or ".ruff.toml" in fileset or re.search(r"\bruff\b", blob):
+        return "ruff format --check ."
+    if re.search(r"\bblack\b", blob):
+        return "black --check ."
+    return None
+
+
 def detect(root):
     """Build the deterministic plan dict for the repo rooted at `root`."""
     files = _walk_files(root)
@@ -177,6 +209,10 @@ def detect(root):
     errors = []
     stacks = set()
     per_stack = {}  # stack -> rail -> command
+    # Per-call view of STACK_PROPOSALS: shared unless a stack's proposal set
+    # depends on what THIS repo adopts (currently only python/format). Never
+    # mutate the module-level STACK_PROPOSALS — that would leak across calls.
+    stack_proposals = STACK_PROPOSALS
 
     present, rails = _detect_make(root, fileset)
     if present:
@@ -192,11 +228,16 @@ def detect(root):
     if present:
         stacks.add("python")
         per_stack["python"] = rails
+        adopted_formatter = _python_formatter(root, files, fileset)
+        if adopted_formatter:
+            stack_proposals = dict(STACK_PROPOSALS)
+            stack_proposals["python"] = dict(STACK_PROPOSALS["python"])
+            stack_proposals["python"]["format"] = (adopted_formatter, "Makefile")
 
     if "go.mod" in fileset:
         stacks.add("go")
         per_stack["go"] = {
-            "format": "gofmt -l .",
+            "format": 'test -z "$(gofmt -l .)"',  # gofmt -l lists but exits 0
             "build": "go build ./...",
             "test": "go test ./...",
         }
@@ -257,8 +298,8 @@ def detect(root):
         else:
             cmd, path = FALLBACK_PROPOSALS[rail]
             for stack in STACK_PRIORITY:
-                if stack in stacks and rail in STACK_PROPOSALS.get(stack, {}):
-                    cmd, path = STACK_PROPOSALS[stack][rail]
+                if stack in stacks and rail in stack_proposals.get(stack, {}):
+                    cmd, path = stack_proposals[stack][rail]
                     break
         # `exists`/`action` rather than a bare `file_to_create`: the detector
         # already knows whether the path is in the tree (it detected the make

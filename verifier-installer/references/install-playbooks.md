@@ -35,16 +35,24 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-Add (or extend) a `Makefile` verify entrypoint:
+Add (or extend) a `Makefile` verify entrypoint. `detect_stack.py` proposes the
+`format` target from what the repo already adopts: `ruff format --check .` when
+it finds `[tool.ruff]`/`ruff.toml`/a `ruff` dependency, `black --check .` for the
+black equivalent, and otherwise the loudly-failing placeholder from the
+Make-only section below — never `compileall`, which checks syntax, not
+formatting, and would give a "format" rail that can never go red on a
+formatting violation:
 
 ```makefile
 .PHONY: format build test verify
 
 format:
-	python3 -m compileall -q .        # swap for black/ruff if the repo adopts one
+	ruff format --check .              # or: black --check .  — only if the repo
+	                                    # already adopts one; otherwise install the
+	                                    # TODO placeholder from the Make-only section
 
 build:
-	python3 -m compileall -q .
+	python3 -m compileall -q -f .
 
 test:
 	python3 -m pytest                  # or: python3 -m unittest discover -s tests
@@ -54,12 +62,26 @@ verify: format build test
 
 Use `python3 -m pytest` only when the plan detected pytest; otherwise the
 stdlib `unittest discover` needs no installs at all. `compileall` is the
-zero-dependency floor for format/build (it catches syntax errors); if the repo
-already uses black/ruff, wire those instead — but do not start a style debate
-this skill is not for.
+zero-dependency floor for **build** (it catches syntax errors) — it is not a
+format check, so it must never be wired to the `format` target. The `-f` flag
+matters: without it, `compileall` skips a file whose compiled `.pyc` header
+(including a whole-second mtime) still matches, so a syntax error introduced
+in the same second as the previous run goes undetected — a false green in
+exactly the fast edit→verify loop an agent runs. Do not start a style debate
+this skill is not for: propose a formatter check only when the repo already
+adopted one.
 
-**Prove the loop.** Append `def broken(:` to any tracked `.py` file →
-`make verify` goes red at the compile step. Revert the line → green.
+**Prove the loop.** These are two different breaks for two different rails —
+do not use the syntax break to "prove" format:
+
+- **build**: append `def broken(:` to any tracked `.py` file → `make verify`
+  goes red at the compile step. Revert the line → green.
+- **format** (only if a formatter check was installed): violate the adopted
+  formatter's rule — e.g. under ruff/black, misindent a line or remove a
+  required blank line — → `make format` goes red. Run `ruff format .` (or
+  `black .`) or revert by hand → green. If no formatter was installed, the
+  `format` rail is the placeholder: leave it red and report it unproven
+  rather than inventing a break for a rail that does not exist yet.
 
 ## Node
 

@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.1.0"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
 
@@ -48,9 +48,12 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 Reach for this when a repo needs the loop built: no test command, no CI, an
 undocumented build, or an agent-ready-rails scorecard with R1/R2 at 0–1. Do
-not use it to referee style — installing a formatter *check* is in scope,
-choosing tabs-vs-spaces is not (prefer whatever the repo already leans
-toward). Do not use it on a repo whose verify+CI loop is already green;
+not use it to referee style — installing a formatter *check* is in scope
+when the repo already adopts a formatter, choosing tabs-vs-spaces is not
+(prefer whatever the repo already leans toward). When no formatter is
+adopted, this skill does not invent a style opinion: the format rail becomes
+an honest placeholder that stays red until the owner picks one. Do not use
+it on a repo whose verify+CI loop is already green;
 `agent-ready-rails` will say so, and re-installing over a working loop only
 adds noise. When only *part* of the loop is missing (say, tests exist but CI
 doesn't), install just the missing rails.
@@ -61,7 +64,7 @@ Per the confirmed plan, some subset of:
 
 | Rail | Typical form | Exercised by |
 |------|--------------|--------------|
-| format | formatter/lint check command or script | e.g. `npm run format`, `gofmt -l .` |
+| format | formatter/lint check command or script (only when the repo already adopts one; otherwise an honest placeholder) | e.g. `npm run format`, `ruff format --check .`, `test -z "$(gofmt -l .)"` |
 | build | compile/typecheck command | e.g. `npm run build`, `go build ./...` |
 | test | test-runner command (+ a smoke test if none exists) | e.g. `python3 -m pytest`, `npm test` |
 | ci | one workflow running the rails above | `.github/workflows/verify.yml` on push/PR |
@@ -122,6 +125,13 @@ You SHOULD end with this report:
 Skipped (already present): <rails the plan found existing, with their commands>
 Follow-ups for the owner: <branch protection, placeholder targets to fill, …>
 ```
+
+When a rail is a placeholder that was never watched go red and back to green — most
+commonly `format` on a python repo with no adopted formatter — report it as `unproven
+(no formatter adopted)`, not `red→green demonstrated`. The `make format` placeholder
+exits non-zero until the owner wires a real formatter; that is not the same as a rail
+you proved catches a violation, and reporting it as demonstrated is a false claim the
+next agent will trust.
 
 The loop now runs, but its `test` rail proves only the smoke test this skill wrote — it does not
 mean the codebase is netted. Point the owner at `test-safety-net` to fill it with real,
