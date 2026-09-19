@@ -172,8 +172,8 @@ than none, because it makes the invariant look enforced when it is not.
    unconfirmed, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed without asking,
-   and MUST name the grant id and action class in the report. Exit 3 (ASK or NONE) or 2
-   (INVALID) means ask as usual. A grant lets test-writing proceed and nothing more: Invariant 1
+   and MUST name the grant id and action class in the report. Any other exit (3 ASK/NONE, 2
+   INVALID, 1 usage error) means ask as usual. A grant lets test-writing proceed and nothing more: Invariant 1
    still binds, so source stays untouched under a grant too.
 
 4. **Write and prove, one unit at a time.** For each confirmed unit:

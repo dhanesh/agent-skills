@@ -114,8 +114,8 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site
 ### Unattended mode: partial
 
 `spec-first-planning` 2.0.0 can plan unattended, and — after you say yes — write a
-skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope naming
-exactly what it may do without asking again. Four skills' confirmation gates honour it:
+skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope that
+covers chosen action classes, on branches matching a pattern, for at most 7 days. Four skills' confirmation gates honour it:
 `spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
 `test-safety-net` each call `check-grant` before falling back to their own ask.
 
@@ -126,7 +126,10 @@ What a grant can and cannot do:
   no grant can change that;
 - there is no signing: no `require_signature`, no `.sig`, no signature levels;
 - a grant lives at most 7 days, and it never covers your repo's default branch (`main`/`master`),
-  no matter what its branch pattern says.
+  no matter what its branch pattern says;
+- a grant is yours alone: it is kept out of commits, and a committed grant covers nothing;
+- a push or PR whose commits change CI configuration (`.github/workflows/` and the like) asks
+  you, because CI runs with the repository's secrets.
 
 Still on the roadmap: a **conductor** that runs a whole plan end to end inside that grant
 (step 4) — today you still drive the handoff between skills yourself.

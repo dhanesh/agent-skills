@@ -87,7 +87,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
 0. **Pick the mode.** Attended is the default: a light pass through the planning loop.
    Unattended runs only when the user asks for it, and then the full loop MUST run, plus the
    decision sweep in `references/unattended.md`. You MUST tell the user which depth you are
-   using. At each checkpoint (after the spec draft, and after the plan) you MUST offer two
+   using. In attended mode, at each checkpoint (after the spec draft, and after the plan) you
+   MUST offer two
    switches, *go deeper* (the full loop) and *go unattended* (the full loop, the decision
    sweep, then a grant), and you MUST NOT escalate unless the user asks.
 1. **Elicit — one focused round.** Ask only what the conversation hasn't already answered:
@@ -129,20 +130,22 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    a failure there is this skill's bug, so fix it before going on. Then look for consumers:
    `python3 "$SKILL_DIR/assets/contract_check.py" discover --kind https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1 --from "$SKILL_DIR"`.
    If it names one, run this before proposing:
-   `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo-root> --action local_reversible`.
-   If it exits 0 (`GRANT: COVERED`), you MAY hand off without asking, and you MUST name the
-   grant id and class in your report. Otherwise (exit 3 ASK or NONE, exit 2 INVALID), you MUST
-   propose the handoff (the consumer, the envelope path, and each claim's status) and MUST
-   wait for the user's yes before invoking that skill with the envelope path. If discover
-   names none (`NO_CONSUMER:`), you MUST NOT treat that as a failure: give the user the
-   envelope path; the plan is still done. In unattended mode, write the grant (below) before
-   this check. Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo-root> --action local_reversible --subject <envelope path>`.
+   If it exits 0 (`GRANT: COVERED`), you MAY hand off without asking, but only when the
+   envelope you hand off is the plan the grant pins (one of its subjects, which `--subject`
+   checks), and you MUST name the grant id and class in your report. Otherwise (any other
+   exit: 3 ASK/NONE, 2 INVALID, 1 usage error), you MUST propose the handoff (the consumer,
+   the envelope path, and each claim's status) and MUST wait for the user's yes before
+   invoking that skill with the envelope path. If discover names none (`NO_CONSUMER:`), you
+   MUST NOT treat that as a failure: give the user the envelope path; the plan is still done.
+   In unattended mode, the grant is written between `check-envelope` and this check (see
+   `## Unattended mode`). Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
    Python 3.10 or newer.
 
 ## Unattended mode
 
-Opt-in only, and only when the user asks. After `TASKS_RESULT: PASS` and the plan envelope,
-show the grant summary: the decisions, the gate for each action class, the branch pattern,
+Opt-in only, and only when the user asks. Write the grant after step 6's `check-envelope`
+passes and before `check-grant`, whether or not a consumer exists. First show the grant summary: the decisions, the gate for each action class, the branch pattern,
 the expiry and the budget (the layout and a filled `answers.json` are in
 `references/unattended.md`). You MUST wait for the user's explicit yes before running:
 
@@ -151,15 +154,21 @@ python3 "$SKILL_DIR/assets/write_grant.py" --root <repo> --spec <spec> --plan <e
   --answers <answers.json> --accepted-by "<user's name>"
 ```
 
-It prints `GRANT: <path>`, or `REFUSED: <reason>` when the spec, the plan or the answers fail
-a check. Then give the user the revoke command:
+`--accepted-by` is the name the user gives you: if you don't know it, you MUST ask the user
+for it rather than taking it from git config or inventing one. It prints `GRANT: <path>`, or
+`REFUSED: <reason>` when the spec, the plan or the answers fail a check. The grant is yours
+alone: `write_grant.py` lists it in `.git/info/exclude`, and `check-grant` treats a committed
+grant as covering nothing. Then give the user the revoke command:
 `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`.
 
 Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are
 never covered by a grant and will always ask: you MUST ask the user right before any of them,
 whatever the grant says. A grant lasts 7 days at most and does not cover the default
-branch or a detached HEAD, so work on a branch such as `factory/*`.
-Under a grant, you MUST push only the current branch, to the remote branch of the same name.
+branch or a detached HEAD, so work on a branch such as `factory/*`. Before the handoff check you
+MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/<slug>`).
+Under a grant, you MUST push only the current branch, to the remote branch of the same name,
+and MUST NOT force-push. A push or pull request whose commits change CI configuration (such as
+`.github/workflows/`) counts as `deploy`: `check-grant` answers ASK `ci-config`, so ask first.
 
 The linter checks structure and traceability, not the quality of the reasoning. A grant is
 the user's recorded yes, but an agent with a shell could forge one, which is why grants cover

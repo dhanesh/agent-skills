@@ -212,7 +212,19 @@ is written. Set it from the user's answer, not from this example.
 ## What a grant can never cover
 
 `merge`, `deploy`, `spend`, `external_message` and `delete` always ask, at the moment
-they happen. No answer can change that. A grant is the user's recorded yes, but an agent
+they happen. No answer can change that.
+
+A push or pull request whose commits add or change CI configuration (`.github/workflows/`,
+`.github/actions/`, `.gitlab-ci.yml`, `.circleci/`, `azure-pipelines.yml`, `Jenkinsfile`,
+`.buildkite/`, `bitbucket-pipelines.yml`, `.drone.yml`, `.travis.yml`) counts as `deploy`,
+because CI runs that configuration with the repository's secrets. `check-grant` answers ASK
+`ci-config` for it, even when the grant covers `push_branch` and `open_pr`. Workflows that
+already exist and run on any push (a preview deploy, say) still run on a granted push: the
+repository owner controls those, not the grant.
+
+A committed grant covers nothing either. A grant is one person's yes, so `write_grant.py`
+lists it in `.git/info/exclude`, and `check-grant` answers ASK `tracked` for a grant that
+git tracks. A grant is the user's recorded yes, but an agent
 with a shell on the same machine could write one itself. So a grant only ever covers
 actions that can be undone, and a human still merges.
 

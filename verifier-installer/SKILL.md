@@ -93,11 +93,13 @@ rather than inventing config from memory.
    confirmation, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed, and MUST name
-   the grant id and action class in the report. Exit 3 (ASK or NONE) or 2 (INVALID) means ask
-   as usual. Under a grant you MUST install only the plan's proposals for the missing rails,
+   the grant id and action class in the report. Any other exit (3 ASK/NONE, 2 INVALID, 1 usage
+   error) means ask as usual. Under a grant you MUST install only the plan's proposals for the missing rails,
    with GitHub Actions as the CI provider, and MUST report manifest errors (a corrupt
    `package.json`, say) for the user instead of fixing them. The grant lifts this confirmation
    and nothing more: the playbook's prove-the-loop rule to stop and ask before fixing pre-existing debt still applies.
+   The workflow you write under a grant stays local; pushing it asks, because CI runs with the
+   repository's secrets (`check-grant` answers ASK `ci-config` for that push).
 3. **Install per the playbook.** For each approved missing rail, follow the
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
