@@ -14,6 +14,29 @@ not the solution.>
 - <adjacent thing this feature deliberately will not do — naming it here is
   what keeps the plan small>
 
+## Constraints
+<!-- The Constrain step (always on, even in a light attended pass). One
+     bullet per constraint: "- <ID> [<type>]: <statement>". <ID> is a
+     category prefix (B business, T technical, U UX, S security,
+     O operational) plus a number, e.g. B1, T2. <type> is invariant, goal or
+     boundary. No pre-mortem is required for the light pass — see
+     references/spec-format.md for the full-loop Tension/Choose steps. -->
+- B1: <business/technical/UX/security/operational constraint>
+- T1: <another constraint>
+
+## Required truths
+<!-- The Anchor step: work backwards from the outcome asking "what must be
+     TRUE?". One bullet per required truth: "- RT<n> [<status>]: <statement>
+     (parent: <OUTCOME|RT<k>>; maps_to: <constraint ids>; reqs: <R ids>;
+     confidence: <0..1>; check: <runnable check>)". IDs run RT1..RTn in
+     order. <status> is SATISFIED, PARTIAL, NOT_SATISFIED or
+     SPECIFICATION_READY. At least one RT must have parent: OUTCOME. Every
+     constraint above must be named in some RT's maps_to; every RT must
+     name at least one requirement below in reqs. check: MUST be the last
+     field. -->
+- RT1 [SPECIFICATION_READY]: <what must be true> (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: <runnable check>)
+- RT2 [SPECIFICATION_READY]: <what must be true> (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.7; check: <runnable check>)
+
 ## Requirements
 <!-- One bullet per requirement, numbered R1..Rn with no gaps. Each is a
      SINGLE testable statement containing "must" (or "shall"). No vague

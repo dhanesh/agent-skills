@@ -27,6 +27,8 @@ REQUIRED_SECTIONS = (
     "Users",
     "Goals",
     "Non-goals",
+    "Constraints",
+    "Required truths",
     "Requirements",
     "Acceptance criteria",
     "Open questions",
@@ -41,6 +43,20 @@ FIXTURE_BODIES = {
     "Users": "- Data analysts exporting weekly reports",
     "Goals": "- Saved reports downloadable as CSV from the report page",
     "Non-goals": "- Excel (.xlsx) export\n- Scheduled email delivery",
+    "Constraints": (
+        "- B1 [invariant]: No exported row may differ from the on-screen table.\n"
+        "- T1 [boundary]: Export of a 10000-row report finishes within 5 seconds."
+    ),
+    "Required truths": (
+        "- RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and "
+        "column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; "
+        "confidence: 0.8; check: python3 tests/compare_export.py "
+        "fixtures/report.json export.csv)\n"
+        "- RT2 [SPECIFICATION_READY]: The export path stays within the time "
+        "budget at scale. (parent: RT1; maps_to: T1; reqs: R3; "
+        "confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 "
+        "--max-seconds 5)"
+    ),
     "Requirements": (
         '- R1: The report page must offer a "Download CSV" action for every '
         "saved report. [where: web/reports/]\n"
@@ -161,6 +177,20 @@ def main():
         r = run(lint_py, build_spec(drop=("Non-goals",)))
         check("lint rejects a spec missing Non-goals", r.returncode != 0
               and "Non-goals" in r.stdout)
+
+        r = run(lint_py, build_spec(drop=("Constraints", "Required truths")))
+        check("lint rejects an attended spec missing Constraints/Required truths "
+              "(light-pass rules, always on)", r.returncode != 0
+              and "Constraints" in r.stdout and "Required truths" in r.stdout)
+
+        unmapped = build_spec(bodies={
+            "Required truths": FIXTURE_BODIES["Required truths"].replace(
+                "maps_to: T1;", "maps_to: B1;",
+            )
+        })
+        r = run(lint_py, unmapped)
+        check("lint rejects a constraint (T1) with no required truth mapping to it",
+              r.returncode != 0 and "no required truth mapping" in r.stdout)
 
         vague = build_spec(bodies={
             "Requirements": FIXTURE_BODIES["Requirements"].replace(

@@ -32,6 +32,14 @@ GOOD = textwrap.dedent(
     - Excel (.xlsx) export
     - Scheduled email delivery
 
+    ## Constraints
+    - B1 [invariant]: No exported row may differ from the on-screen table.
+    - T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.
+
+    ## Required truths
+    - RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: python3 tests/compare_export.py fixtures/report.json export.csv)
+    - RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. (parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)
+
     ## Requirements
     - R1: The report page must offer a "Download CSV" action for every saved report.
     - R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order.
@@ -152,6 +160,86 @@ class TestLint(unittest.TestCase):
     def test_deterministic_issue_order(self):
         bad = GOOD.replace("must offer", "offers").replace("must contain", "contains")
         self.assertEqual(spec_lint.lint(bad), spec_lint.lint(bad))
+
+
+LIGHT = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: python3 -m pytest -k rows)
+- RT2 [NOT_SATISFIED]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: python3 bench.py --max 10)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: run `python3 -m pytest -k rows`, expect exit 0.
+
+## Open questions
+"""
+
+
+class LightRules(unittest.TestCase):
+    def issues(self, text):
+        return spec_lint.lint(text)
+
+    def test_light_spec_is_clean(self):
+        self.assertEqual(self.issues(LIGHT), [])
+
+    def test_missing_constraints_section_fails(self):
+        t = LIGHT.replace("## Constraints\n- B1 [invariant]: No row is lost.\n- T1 [boundary]: Export finishes within 10 s for 10000 rows.\n\n", "")
+        self.assertTrue(any("Constraints" in i for i in self.issues(t)))
+
+    def test_bad_constraint_type_fails(self):
+        t = LIGHT.replace("B1 [invariant]", "B1 [wish]")
+        self.assertTrue(any("B1" in i and "type" in i for i in self.issues(t)))
+
+    def test_unmapped_constraint_fails(self):
+        t = LIGHT.replace("maps_to: T1;", "maps_to: B1;")
+        self.assertTrue(any("T1" in i and "no required truth" in i for i in self.issues(t)))
+
+    def test_truth_unknown_constraint_fails(self):
+        t = LIGHT.replace("maps_to: B1;", "maps_to: B9;")
+        self.assertTrue(any("RT1" in i and "B9" in i for i in self.issues(t)))
+
+    def test_truth_unknown_requirement_fails(self):
+        t = LIGHT.replace("reqs: R1; confidence: 0.8", "reqs: R7; confidence: 0.8")
+        self.assertTrue(any("RT1" in i and "R7" in i for i in self.issues(t)))
+
+    def test_truth_without_check_fails(self):
+        t = LIGHT.replace("; check: python3 -m pytest -k rows)", ")")
+        self.assertTrue(any("RT1" in i and "check" in i for i in self.issues(t)))
+
+    def test_bad_parent_fails(self):
+        t = LIGHT.replace("parent: RT1;", "parent: RT5;")
+        self.assertTrue(any("RT2" in i and "parent" in i for i in self.issues(t)))
+
+    def test_no_outcome_root_fails(self):
+        t = LIGHT.replace("parent: OUTCOME;", "parent: RT2;")
+        self.assertTrue(any("OUTCOME" in i for i in self.issues(t)))
+
+    def test_confidence_out_of_range_fails(self):
+        t = LIGHT.replace("confidence: 0.8", "confidence: 1.4")
+        self.assertTrue(any("RT1" in i and "confidence" in i for i in self.issues(t)))
+
+    def test_bad_status_fails(self):
+        t = LIGHT.replace("RT1 [SPECIFICATION_READY]", "RT1 [DONE]")
+        self.assertTrue(any("RT1" in i and "status" in i for i in self.issues(t)))
 
 
 class TestCli(unittest.TestCase):

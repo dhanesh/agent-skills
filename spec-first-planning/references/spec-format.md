@@ -11,9 +11,19 @@ A spec is one markdown file:
 - **Title**: an H1, conventionally `# Spec: <name>` (the `Spec:` prefix is
   stripped when the plan inherits the title).
 - **Sections**: H2 headings, matched case-insensitively. Required, in any
-  order: `Problem`, `Users`, `Goals`, `Non-goals`, `Requirements`,
-  `Acceptance criteria`, `Open questions`. Extra sections are allowed and
-  ignored by the tooling.
+  order: `Problem`, `Users`, `Goals`, `Non-goals`, `Constraints`,
+  `Required truths`, `Requirements`, `Acceptance criteria`,
+  `Open questions`. Extra sections are allowed and ignored by the tooling.
+- **Constraint bullets** (in `## Constraints`, the Constrain step, always
+  on): `- <ID> [<type>]: <statement>`. `<ID>` matches `(B|T|U|S|O)[0-9]+`
+  (business, technical, UX, security, operational). `<type>` is
+  `invariant`, `goal` or `boundary`.
+- **Required-truth bullets** (in `## Required truths`, the Anchor step,
+  always on): `- RT<n> [<status>]: <statement> (parent: <OUTCOME|RT<k>>;
+  maps_to: <constraint ids>; reqs: <R ids>; confidence: <0..1>;
+  check: <runnable check>)`. `<status>` is `SATISFIED`, `PARTIAL`,
+  `NOT_SATISFIED` or `SPECIFICATION_READY`. `check:` MUST be the last
+  field — everything after `check:` up to the final `)` is the check.
 - **Requirement bullets** (in `## Requirements`): `- R<n>: <statement>`.
   Ids run R1..Rn in document order with no gaps or duplicates. Each
   statement is a single testable obligation containing `must` or `shall`.
@@ -35,6 +45,14 @@ A spec is one markdown file:
 | 3 | Every requirement contains `must`/`shall` | a wish posing as a requirement |
 | 4 | Vague term with no metric in the same statement | unfalsifiable adjective ("fast", "robust", "user-friendly", "simple", "reliable", "scalable", "efficient", "seamless", "responsive", ...). A digit, `%`, `<=`, `>=`, `≤`, or `≥` in the statement licenses the word |
 | 5 | Every requirement referenced by ≥1 criterion; no criterion references an unknown id | a requirement nothing can prove; a check proving nothing |
+| 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
+| 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
+| 8 | Traceability: every constraint is named in some RT's `maps_to`; every RT names ≥1 known constraint and ≥1 known requirement (`reqs:`); every RT's `parent` is `OUTCOME` or another RT in this spec, and not itself | a constraint nobody anchors; a truth that traces to nothing |
+| 9 | At least one required truth has `parent: OUTCOME` | no truth anchored at the root — Anchor never actually ran |
+
+Rules 6-9 are the Constrain + Anchor light pass (design spec §4): they run
+on every spec, attended or unattended — only Tension and Choose (Solution
+options, Iterations, convergence) are gated behind `--converged`.
 
 Output: one `FAIL: ...` line per issue, final `LINT_RESULT: PASS` or
 `LINT_RESULT: FAIL (n issue(s))`. Exit 0 iff clean; 2 on unreadable input.

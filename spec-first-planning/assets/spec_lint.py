@@ -34,10 +34,20 @@ REQUIRED_SECTIONS = (
     "Users",
     "Goals",
     "Non-goals",
+    "Constraints",
+    "Required truths",
     "Requirements",
     "Acceptance criteria",
     "Open questions",
 )
+
+# Constrain step: typed constraints. Anchor step: required truths that must
+# hold, each traced back to a constraint and forward to a requirement.
+CONSTRAINT_TYPES = ("invariant", "goal", "boundary")
+TRUTH_STATUSES = ("SATISFIED", "PARTIAL", "NOT_SATISFIED", "SPECIFICATION_READY")
+_CONSTRAINT_RE = re.compile(r"^(?:\*\*)?([BTUSO][0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.+)$")
+_TRUTH_RE = re.compile(r"^(?:\*\*)?RT([0-9]+)(?:\*\*)?\s*\[([A-Za-z_]+)\]\s*:\s*(.*?)\s*\((.*)\)\s*$")
+_ID_LIST_RE = re.compile(r"[A-Za-z]+[0-9]+")
 
 # Sections that must exist but are allowed to have an empty body.
 MAY_BE_EMPTY = frozenset({"Open questions"})
@@ -80,6 +90,102 @@ _RID_PREFIX_RE = re.compile(r"^(?:\*\*)?R(\d+)(?:\*\*)?\s*[:.]\s*(.*)$")
 _RID_REF_RE = re.compile(r"\bR(\d+)\b")
 
 
+def _fields(raw):
+    """Split 'a: x; b: y; check: anything; even; semicolons' into a dict."""
+    head, sep, check = raw.partition("check:")
+    out = {"check": check.strip() if sep else ""}
+    for part in head.split(";"):
+        k, s, v = part.partition(":")
+        if s:
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _parse_constraints(sections):
+    good, bad = [], []
+    for b in _section_bullets(sections, "Constraints"):
+        m = _CONSTRAINT_RE.match(b)
+        if m:
+            good.append({"id": m.group(1), "type": m.group(2).lower(), "text": m.group(3).strip()})
+        else:
+            bad.append(b)
+    return good, bad
+
+
+def _parse_truths(sections):
+    good, bad = [], []
+    for b in _section_bullets(sections, "Required truths"):
+        m = _TRUTH_RE.match(b)
+        if not m:
+            bad.append(b)
+            continue
+        f = _fields(m.group(4))
+        try:
+            conf = float(f.get("confidence", ""))
+        except ValueError:
+            conf = None
+        good.append({"id": "RT%s" % m.group(1), "num": int(m.group(1)),
+                     "status": m.group(2).upper(), "text": m.group(3).strip(),
+                     "parent": f.get("parent", "").strip(),
+                     "maps_to": _ID_LIST_RE.findall(f.get("maps_to", "")),
+                     "reqs": [int(n) for n in re.findall(r"R([0-9]+)", f.get("reqs", ""))],
+                     "confidence": conf, "check": f.get("check", "")})
+    return good, bad
+
+
+def lint_light(spec):
+    """Constrain + Anchor light-pass rules: typed constraints, required truths,
+    and their traceability (constraint -> RT -> requirement). Always on."""
+    issues = []
+    cons, truths = spec["constraints"], spec["truths"]
+    for b in spec["malformed_constraints"]:
+        issues.append("Constraints bullet is not '- <B|T|U|S|O><n> [type]: ...': '%s'" % b[:60])
+    for b in spec["malformed_truths"]:
+        issues.append("Required truths bullet is not '- RT<n> [status]: ... (parent: ...; "
+                      "maps_to: ...; reqs: ...; confidence: ...; check: ...)': '%s'" % b[:60])
+    seen = set()
+    for c in cons:
+        if c["id"] in seen:
+            issues.append("constraint %s is defined twice" % c["id"])
+        seen.add(c["id"])
+        if c["type"] not in CONSTRAINT_TYPES:
+            issues.append("constraint %s has type '%s'; use invariant, goal or boundary"
+                          % (c["id"], c["type"]))
+    known_c = {c["id"] for c in cons}
+    known_r = {n for n, _ in spec["requirements"]}
+    nums = [t["num"] for t in truths]
+    if truths and nums != list(range(1, len(nums) + 1)):
+        issues.append("required truth ids must be RT1..RT%d in order" % len(nums))
+    known_t = {t["id"] for t in truths}
+    for t in truths:
+        if t["status"] not in TRUTH_STATUSES:
+            issues.append("%s has status '%s'; use one of %s"
+                          % (t["id"], t["status"], ", ".join(TRUTH_STATUSES)))
+        if t["parent"] != "OUTCOME" and (t["parent"] not in known_t or t["parent"] == t["id"]):
+            issues.append("%s parent '%s' must be OUTCOME or another RT" % (t["id"], t["parent"]))
+        if not t["maps_to"]:
+            issues.append("%s maps to no constraint" % t["id"])
+        for cid in t["maps_to"]:
+            if cid not in known_c:
+                issues.append("%s maps to unknown constraint %s" % (t["id"], cid))
+        if not t["reqs"]:
+            issues.append("%s names no requirement (reqs: R<n>)" % t["id"])
+        for r in t["reqs"]:
+            if r not in known_r:
+                issues.append("%s names unknown requirement R%d" % (t["id"], r))
+        if t["confidence"] is None or not 0.0 <= t["confidence"] <= 1.0:
+            issues.append("%s confidence must be a number from 0 to 1" % t["id"])
+        if not t["check"]:
+            issues.append("%s has no runnable check (end the fields with 'check: ...')" % t["id"])
+    mapped = {cid for t in truths for cid in t["maps_to"]}
+    for c in cons:
+        if c["id"] not in mapped:
+            issues.append("constraint %s has no required truth mapping to it" % c["id"])
+    if truths and not any(t["parent"] == "OUTCOME" for t in truths):
+        issues.append("no required truth has parent OUTCOME — anchor from the outcome")
+    return issues
+
+
 def parse_spec(text):
     """Parse spec markdown into a structure shared with spec_to_tasks.py.
 
@@ -89,6 +195,11 @@ def parse_spec(text):
       requirements            -- list of (number:int, text:str) in document order
       malformed_requirements  -- bullets in Requirements without an R<n> prefix
       criteria                -- list of (text:str, [referenced numbers]) in order
+      constraints             -- list of {id, type, text} from ## Constraints
+      malformed_constraints   -- bullets in Constraints not matching the grammar
+      truths                  -- list of {id, num, status, text, parent, maps_to,
+                                  reqs, confidence, check} from ## Required truths
+      malformed_truths        -- bullets in Required truths not matching the grammar
     """
     title = ""
     sections = OrderedDict()
@@ -131,12 +242,19 @@ def parse_spec(text):
         owner = int(pm.group(1)) if pm else None
         criteria.append((bullet, refs, owner))
 
+    constraints, bad_c = _parse_constraints(sections)
+    truths, bad_t = _parse_truths(sections)
+
     return {
         "title": title,
         "sections": sections,
         "requirements": requirements,
         "malformed_requirements": malformed,
         "criteria": criteria,
+        "constraints": constraints,
+        "malformed_constraints": bad_c,
+        "truths": truths,
+        "malformed_truths": bad_t,
     }
 
 
@@ -236,6 +354,10 @@ def lint(text):
                 "R%d has no acceptance criterion — add at least one "
                 "'- R%d: <runnable check>' line" % (num, num)
             )
+
+    # 6-9. Constrain + Anchor light pass: typed constraints, required truths,
+    # and traceability from constraint to RT to requirement (always on).
+    issues += lint_light(spec)
 
     return issues
 

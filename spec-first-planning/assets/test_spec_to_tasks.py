@@ -33,6 +33,14 @@ GOOD = textwrap.dedent(
     ## Non-goals
     - Excel (.xlsx) export
 
+    ## Constraints
+    - B1 [invariant]: No exported row may differ from the on-screen table.
+    - T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.
+
+    ## Required truths
+    - RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: python3 tests/compare_export.py fixtures/report.json export.csv)
+    - RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. (parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)
+
     ## Requirements
     - R1: The report page must offer a "Download CSV" action for every saved report. [where: web/reports/]
     - R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order.
