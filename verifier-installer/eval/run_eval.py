@@ -9,15 +9,20 @@ shipped detector against each and grades the emitted plans deterministically.
 Negative fixtures: the bare repo must report every rail missing (and must NOT
 claim existing verifiers); the repo with existing CI must NOT propose creating
 a duplicate workflow; the malformed package.json must yield a graceful error
-entry, not a crash. Offline, stdlib-only, no repo writes.
+entry, not a crash. The write gate's autonomy-grant arm is graded against the
+vendored checker: no grant must ask, a skill-attributed grant must be INVALID,
+and step 2's gate text must stay a MUST NOT that only a covering grant lifts.
+Offline, stdlib-only, no repo writes.
 """
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -43,6 +48,100 @@ def run_detector(repo):
     r = subprocess.run([sys.executable, DETECTOR, repo],
                        capture_output=True, text=True, timeout=30)
     return r
+
+
+# ── Autonomy grant (skill-contract autonomy-grant/v1) ───────────────────────
+# Fixtures build a grant at run time, so they MUST satisfy the checker's floors:
+# at least 2 distinct subjects, a lifetime of at most 7 days (A7), no
+# require_signature, and no gate other than `ask` on an irreversible class (A8).
+# The temp dirs sit outside any git repo, so the default-branch floor skips.
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+GRANT_ID = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+CONTRACT_CHECKER = os.path.join(SKILL, "assets", "contract_check.py")
+
+
+def _now_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _grant_fixture(root, asserted_by, gate_policy=None):
+    """Write a spec, a plan and a grant pinning both (sha256) under `root`."""
+    subjects = []
+    for rel, content in (("docs/spec.md", "# Spec\n"),
+                         ("docs/plan.json", '{"tasks": []}\n')):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        subjects.append({"name": rel,
+                         "digest": {"sha256": hashlib.sha256(content.encode()).hexdigest()}})
+    st = {"_type": "https://in-toto.io/Statement/v1",
+          "subject": subjects,
+          "predicateType": GRANT_KIND,
+          "predicate": {"skillContract": "1", "id": GRANT_ID,
+                        "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                        "generatedAtTime": _now_z(), "wasRevisionOf": None,
+                        "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
+                                    "decisions": [{"id": "D1", "question": "q", "answer": "a",
+                                                   "source": "s"}],
+                                    "defaults": [],
+                                    "gate_policy": gate_policy or {"local_reversible": "grant"},
+                                    "budget": {}, "stop_on": [],
+                                    "expires_at": _in_one_day(),
+                                    "system_one": {"allowed": False}, "revoked": False},
+                        "assertions": [{"test": "grant-accepted", "assertedBy": asserted_by,
+                                        "result": {"outcome": "passed"},
+                                        "command": ["{python}",
+                                                    "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                                    "--unattended", "docs/spec.md"]}]}}
+    d = os.path.join(root, ".skill-contract", "envelopes")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, GRANT_ID + ".json"), "w", encoding="utf-8") as f:
+        json.dump(st, f)
+
+
+def _check_grant(root, action="local_reversible"):
+    r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
+                        "--action", action], capture_output=True, text=True, timeout=60)
+    return r.returncode, r.stdout.strip()
+
+
+def grant_checks(labels=("", "", "")):
+    """The write gate's grant arm: NONE asks, a human grant covers, a skill one is INVALID."""
+    with tempfile.TemporaryDirectory() as t:
+        rc, out = _check_grant(t)
+        check(labels[0] + "NEGATIVE: no grant -> check-grant exits 3 and the gate must ask",
+              rc == 3 and "GRANT: NONE" in out, f"rc={rc} {out[-160:]}")
+    with tempfile.TemporaryDirectory() as t:
+        _grant_fixture(t, {"human": "Dana"})
+        rc, out = _check_grant(t)
+        check(labels[1] + "a human-accepted grant covers local_reversible and names its id",
+              rc == 0 and "GRANT: COVERED" in out and GRANT_ID in out,
+              f"rc={rc} {out[-160:]}")
+    with tempfile.TemporaryDirectory() as t:
+        _grant_fixture(t, {"skill": "spec-first-planning"})
+        rc, out = _check_grant(t)
+        check(labels[2] + "NEGATIVE: a skill-attributed grant is INVALID (exit 2)",
+              rc == 2 and "GRANT: INVALID" in out, f"rc={rc} {out[-160:]}")
+
+
+# Step 2's write gate: still a MUST NOT, lifted only by check-grant exit 0, and
+# the report must name the grant. Graded on the step's own text, not the file.
+GATE_MARKERS = ("MUST NOT write anything before this confirmation",
+                "check-grant --root <repo> --action local_reversible",
+                "exits 0", "MAY proceed", "MUST name the grant id and action class")
+
+
+def grade_gate(text):
+    start = text.find("2. **Confirm the plan with the user.**")
+    end = text.find("3. **Install per the playbook.**", start)
+    step = " ".join(text[start:end].split()) if start >= 0 and end > start else ""
+    missing = [m for m in GATE_MARKERS if m not in step]
+    return not missing, missing
 
 
 def main():
@@ -214,6 +313,18 @@ def main():
         a, b = run_detector(nd), run_detector(nd)
         check("determinism: repeated runs emit byte-identical plans",
               a.stdout == b.stdout and a.returncode == b.returncode == 0)
+
+        # ── Autonomy grant: the write gate honours check-grant, nothing else ─
+        grant_checks()
+        with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as f:
+            skill_md = f.read()
+        ok, missing = grade_gate(skill_md)
+        check("step 2's gate is a MUST NOT lifted only by check-grant local_reversible exit 0",
+              ok, f"missing: {missing}")
+        check("NEGATIVE: grader flags a gate with the check-grant call stripped",
+              not grade_gate(skill_md.replace("check-grant", "check-envelope"))[0])
+        check("the read-only guardrail names a covering grant as the only other release",
+              "(or a covering grant)" in skill_md)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

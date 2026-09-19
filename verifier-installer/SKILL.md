@@ -10,12 +10,13 @@ description: >-
   and a GitHub Actions workflow, then proves the loop by demonstrating a red run and repairing it
   to green. Not a linter-config generator for style debates, and not for repos that already have
   a green verify+CI loop — use agent-ready-rails to audit first; this skill installs what that
-  audit finds missing.
+  audit finds missing. Honors a skill-contract autonomy grant at its write gate.
 license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.2.0"
+  skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
 
@@ -88,8 +89,12 @@ rather than inventing config from memory.
    translate the workflow per the CI section of
    `references/install-playbooks.md`. If the plan lists errors (broken
    manifest files), surface them here — fixing a corrupt `package.json` is a
-   decision the user makes, not you. Do not write anything before this
-   confirmation.
+   decision the user makes, not you. You MUST NOT write anything before this
+   confirmation, unless
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
+   exits 0 (an autonomy grant the user approved covers it); then you MAY proceed, and MUST name
+   the grant id and action class in the report. Exit 3 (ASK or NONE) or 2 (INVALID) means ask
+   as usual.
 3. **Install per the playbook.** For each approved missing rail, follow the
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
@@ -144,8 +149,9 @@ change-detecting tests.
 
 ## Guardrails
 
-- **Read-only until step 2's confirmation** — detection never writes; installs
-  MUST happen only after the user approves the plan.
+- **Read-only until step 2's confirmation (or a covering grant)** — detection never writes;
+  installs MUST happen only after the user approves the plan, or after `check-grant` exits 0
+  for `local_reversible` as step 2 describes.
 - **One ground truth.** Local `verify` and CI MUST run the same commands; when in
   doubt, make CI call the entrypoint rather than restating commands.
 - **Prove, don't presume.** A rail counts as installed when it was watched
@@ -154,3 +160,13 @@ change-detecting tests.
 - **Stay off the style battlefield.** Wire checks for whatever
   formatter/tooling the repo already implies; you MAY propose, but SHOULD NOT impose, new
   tools.
+
+## Contract
+
+This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).
+It consumes autonomy grants, which only lift step 2's confirmation, and it provides no kind of
+its own: the install summary is prose.
+
+```json skill-contract
+{"provides": [], "consumes": ["https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"]}
+```

@@ -185,7 +185,7 @@ Skills appear in rewrite order.
 | c6 | 74 | - Hand subagents the literal absolute \`$FETCH\` value — never a relative \`assets/… | MUST (0.70, 0.80) | MUST |  |
 | c7 | 112 | 6. **Synthesize.** Before filling the report, lint the merged findings array wit… | MUST (0.68, 0.80) | MUST |  |
 
-## verifier-installer (8 candidates · 5 MUST · 2 SHOULD · 0 MAY · 1 plain · 1 departure)
+## verifier-installer (10 candidates · 6 MUST · 2 SHOULD · 0 MAY · 2 plain · 1 departure)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -193,10 +193,12 @@ Skills appear in rewrite order.
 | c2 | 73 | 1. **Detect the stack.** Run \`python3 "$SKILL_DIR/assets/detect_stack.py" <repo>… | plain (0.61, 0.49) | plain |  |
 | c3 | 88 | 3. **Install per the playbook.** For each approved missing rail, follow the matc… | MUST (0.35, 0.64) | MUST |  |
 | c4 | 108 | ALWAYS end with this report: | MUST (0.70, 0.48) | SHOULD | harm 0.48 < 0.5 caps it at SHOULD; no gate or test checks the agent's closing summary (the eval grades detect_stack.py output only) |
-| c5 | 130 | - **Read-only until step 2's confirmation** — detection never writes; installs h… | MUST (0.92, 0.65) | MUST |  |
+| c5 | 130 | - **Read-only until step 2's confirmation** — detection never writes; installs h… | MUST (0.92, 0.65) | MUST | (no departure) changed in 1.2.0 (autonomy-grant Task 7, now line 152): "(or a covering grant)" … installs MUST happen only after the user approves the plan, or after `check-grant` exits 0 for `local_reversible` as step 2 describes. Still MUST |
 | c6 | 132 | - **One ground truth.** Local \`verify\` and CI run the same commands; when in dou… | MUST (0.41, 0.58) | MUST |  |
 | c7 | 134 | - **Prove, don't presume.** A rail counts as installed when it was watched faili… | MUST (0.58, 0.55) | MUST |  |
 | c8 | 137 | - **Stay off the style battlefield.** Wire checks for whatever formatter/tooling… | SHOULD (0.29, 0.38) | SHOULD |  |
+| c9 | 92 | 2. **Confirm the plan with the user.** … You MUST NOT write anything before this confirmation, unless `check-grant --root <repo> --action local_reversible` exits 0 …; then you MAY proceed, and MUST name the grant id and action class in the report. | not judged (new in 1.2.0, autonomy-grant Task 7) | MUST | the step-2 write gate (design spec §5): was plain "Do not write anything before this confirmation."; keyworded now that it carries the grant clause, matching guardrail c5; counted once at MUST, the MAY being the option the grant opens; the eval grades the step's text |
+| c10 | 166 | This skill follows [skill-contract v1](…). It consumes autonomy grants, which only lift step 2's confirmation, … | not judged (new in 1.2.0, autonomy-grant Task 7) | plain | describes the skill-contract adoption, like crafting-self-prompting-loops c10; the rule it points at is carried by c5 and c9 |
 
 ## agent-ready-rails (7 candidates · 4 MUST · 1 SHOULD · 0 MAY · 2 plain · 3 departures)
 
