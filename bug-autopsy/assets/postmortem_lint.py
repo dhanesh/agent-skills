@@ -85,9 +85,18 @@ EVIDENCE_RE = re.compile(
 # or to nothing at all for a bare "-"/"?"). An unfilled template placeholder
 # ("<commit sha / file:line>") is checked separately, before that stripping,
 # since its angle brackets are what identify it.
-_NULL_VALUES = frozenset((
-    "none", "na", "tbd", "todo", "unknown", "null", "nil", "missing", "empty",
-))
+#
+# Two shapes of null word, checked differently (review round 1, I2):
+#   - DEFERRAL words (tbd/todo/unknown/na/-/?) are rejected as the FIRST
+#     normalized token, filler or not: "tbd — later" and "unknown yet" are
+#     still a deferred answer with padding on it, not a citation.
+#   - ABSENCE words (none/null/nil/missing/empty) are rejected only as the
+#     WHOLE value, because they can legitimately start a real, checkable
+#     claim: "none found in logs after grep of app.log" is evidence of an
+#     absence, not an unstated basis, and "Nonesuch.py:12" merely starts
+#     with those letters.
+_NULL_FIRST_TOKENS = frozenset(("tbd", "todo", "unknown", "na"))
+_NULL_WHOLE_VALUES = frozenset(("none", "null", "nil", "missing", "empty"))
 
 # Text captured after an `evidence:`/`systemic:` label, up to the next
 # closing punctuation or end of line.
@@ -96,18 +105,26 @@ _LABELED_VALUE_RE = re.compile(
     re.IGNORECASE)
 
 
+def _normalize_token(s):
+    """Lowercase, then drop everything but letters and digits."""
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
 def _is_stated_value(value):
     """True if `value` (text captured after an evidence:/systemic: label) is
-    a real, stated basis — not empty, not a null word, and not an unfilled
-    `<...>` template placeholder."""
+    a real, stated basis — not empty, not a null word (deferral as its
+    first token, or absence as the whole value — see the comment above
+    _NULL_FIRST_TOKENS), and not an unfilled `<...>` template placeholder."""
     v = value.strip()
     if not v:
         return False
     if v.startswith("<") and v.endswith(">"):
         return False  # unfilled template placeholder
-    norm = re.sub(r"[^a-z0-9]+", "", v.lower())
-    if not norm or norm in _NULL_VALUES:
-        return False
+    first_norm = _normalize_token(v.split(None, 1)[0])
+    if not first_norm or first_norm in _NULL_FIRST_TOKENS:
+        return False  # bare "-"/"?"/"--", or a deferral word with filler
+    if _normalize_token(v) in _NULL_WHOLE_VALUES:
+        return False  # the ENTIRE value is an absence word, no real claim
     return True
 
 

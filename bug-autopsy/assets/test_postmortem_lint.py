@@ -252,6 +252,57 @@ class EvidenceValueTests(unittest.TestCase):
         self.assertTrue(got["timeline: every entry cites evidence"][0])
         self.assertTrue(got["root cause: every why cites evidence"][0])
 
+    def test_null_word_with_filler_still_fails(self):
+        # I2 (review round 1): a null word followed by prose is still a
+        # null word with padding on it, not a real citation. Only the FIRST
+        # normalized token needs to be null for tbd/todo/unknown/na/-/?.
+        for value in ("tbd — later", "unknown yet"):
+            with self.subTest(value=value):
+                doc = make_doc({
+                    "Timeline": ("- 2026-07-01 09:00 — trigger "
+                                 "(evidence: %s)" % value),
+                    "Root cause": (
+                        "1. **Why A?** x (evidence: %s).\n"
+                        "2. **Why B?** y (systemic: %s).\n"
+                        "3. **Why C?** z (evidence: %s)."
+                        % (value, value, value)),
+                })
+                got, _ = results(doc)
+                self.assertFalse(
+                    got["timeline: every entry cites evidence"][0],
+                    "evidence: %s should not satisfy the timeline check" % value)
+                self.assertFalse(
+                    got["root cause: every why cites evidence"][0],
+                    "evidence/systemic: %s should not satisfy the why-chain "
+                    "check" % value)
+
+    def test_systemic_null_word_with_filler_still_fails(self):
+        doc = make_doc({"Root cause": (
+            "1. **Why A?** x (evidence: keys.py:57).\n"
+            "2. **Why B?** y (evidence: abc1234).\n"
+            "3. **Why C?** z (systemic: unknown yet).")})
+        got, _ = results(doc)
+        self.assertFalse(got["root cause: every why cites evidence"][0])
+
+    def test_absence_evidence_with_null_prefix_still_passes(self):
+        # `none` is rejected only as the WHOLE value — "none found in logs
+        # after grep of app.log" is a real, checkable absence claim, not a
+        # null word with padding, and "Nonesuch.py:12" is an ordinary
+        # file:line reference that happens to start with those letters.
+        doc = make_doc({
+            "Timeline": ("- 2026-07-01 09:00 — trigger "
+                         "(evidence: none found in logs after grep of "
+                         "app.log)"),
+            "Root cause": (
+                "1. **Why A?** x (evidence: Nonesuch.py:12).\n"
+                "2. **Why B?** y (evidence: abc1234).\n"
+                "3. **Why C?** z (evidence: none found in logs after grep "
+                "of app.log)."),
+        })
+        got, _ = results(doc)
+        self.assertTrue(got["timeline: every entry cites evidence"][0])
+        self.assertTrue(got["root cause: every why cites evidence"][0])
+
 
 class BlameWarningTests(unittest.TestCase):
     def test_blame_phrasing_warns_but_does_not_fail(self):

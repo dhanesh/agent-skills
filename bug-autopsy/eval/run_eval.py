@@ -201,6 +201,18 @@ We noticed.
               r.returncode != 0 and "cites evidence - FAIL" in r.stdout,
               "exit %d" % r.returncode)
 
+        # Negative (review round 1, I2): a null word followed by filler is
+        # still a null word — "tbd — later" and "unknown yet" must not
+        # bypass the denylist by padding it with prose.
+        filler = re.sub(r"\(evidence: [^)]+\)", "(evidence: tbd — later)", GOOD)
+        filler = filler.replace(
+            "(systemic: missing guardrail)", "(systemic: unknown yet)")
+        r = lint(tmp, "null_word_with_filler.md", filler)
+        check("lint rejects a null word padded with filler (`tbd — later`, "
+              "`unknown yet`)",
+              r.returncode != 0 and "cites evidence - FAIL" in r.stdout,
+              "exit %d" % r.returncode)
+
         # Template usability: placeholders filled -> lint-clean.
         with open(TEMPLATE, encoding="utf-8") as f:
             template = f.read()
