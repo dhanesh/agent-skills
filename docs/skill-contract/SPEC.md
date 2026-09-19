@@ -109,14 +109,15 @@ and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
-superseded, not expired, not living past the 7-day floor, subjects not stale, git can report the
+superseded, not expired, not living past the 7-day floor, subjects not stale, the path given as
+`--subject` (when there is one) pinned among the grant's subjects, git can report the
 branch (`branch-unknown`), HEAD not detached, not on a default branch, the current git branch
 matches `branch_pattern`, the grant file not tracked by git, the class's gate is `auto` or
 `grant`, and, for `push_branch` and `open_pr`, no commit since the default branch touching CI
 configuration. The git checks are skipped only when no `.git` exists in `root` or any parent. An
 `ASK` names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask` or
-`ci-config`). The conformance vectors run outside git, so `tracked` and `ci-config` are proven by
+`stale`, `subject`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask`
+or `ci-config`). The conformance vectors run outside git, so `tracked` and `ci-config` are proven by
 the reference checker's unit and end-to-end tests instead. It prints
 `GRANT: COVERED id=… class=… gate=auto|grant` on success and exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.

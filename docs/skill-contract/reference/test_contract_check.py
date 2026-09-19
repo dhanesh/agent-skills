@@ -27,6 +27,14 @@ VECTORS = os.path.join(os.path.dirname(HERE), "vectors")
 CHECKER = os.path.join(HERE, "contract_check.py")
 
 
+def _now_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -782,6 +790,32 @@ class GrantTests(unittest.TestCase):
                 mock.patch.object(cc, "changed_since_default", return_value=None):
             rep = self.check("push_branch")
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"))
+
+    # M-g: a handoff under a grant hands off only the plan the grant pins.
+    def test_subject_must_be_one_the_grant_pins(self):
+        self.put(build_vectors.grant())
+        for pinned in ("plan.json", "./plan.json", "docs/spec.md",
+                       os.path.join(self.tmp, "plan.json")):
+            self.assertEqual(self.check(subject=pinned)["status"], "COVERED", pinned)
+        _write(os.path.join(self.tmp, "other-plan.json"), "{}")
+        for other in ("other-plan.json", os.path.join(self.tmp, "other-plan.json")):
+            rep = self.check(subject=other)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "subject"), other)
+
+    def test_cli_subject_flag(self):
+        # the CLI reads the real clock, so this grant is built at run time (A7 helpers)
+        self.put(build_vectors.grant(generated=_now_z(), expires=_in_one_day()))
+        base = [sys.executable, "-I", CHECKER, "check-grant", "--root", self.tmp,
+                "--action", "local_reversible"]
+        if shutil.which("git"):
+            self._factory_repo()  # its own repo, so no enclosing .git leaks in
+        r = subprocess.run(base + ["--subject", "plan.json"], capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = subprocess.run(base + ["--subject", "nope.json"], capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("reason=subject", r.stdout)
 
     def test_an_unhashable_revision_in_a_junk_envelope_does_not_crash(self):
         self.put(build_vectors.grant(expires="2026-09-20T12:00:00Z"))

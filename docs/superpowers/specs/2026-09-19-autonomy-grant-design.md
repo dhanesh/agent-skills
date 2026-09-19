@@ -70,7 +70,7 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 ## 3. `contract_check.py check-grant`
 
 ```
-contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
+contract_check.py check-grant [<grant.json>] --root <repo> --action <class> [--subject <path>]
 ```
 
 - **Without a path**, it uses the newest grant under `.skill-contract/envelopes/` that has not been superseded by a revision.
@@ -81,7 +81,7 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
   4. not revoked;
   5. not superseded: no revision names this grant in `wasRevisionOf`, so an explicit path to an old grant cannot bypass a revocation;
   6. not expired, and `expires_at` no more than 7 days after now (ASK `lifetime`);
-  7. subjects not stale;
+  7. subjects not stale, and the `--subject` path, when given, is one of the grant's subjects (ASK `subject`; final fix wave, M-g: a handoff under a grant hands off only the plan the grant pins);
   8. inside a git work tree, the branch must be known (ASK `branch-unknown`) and HEAD must not be detached (ASK `detached`); outside git, steps 8–12 except 11 are skipped;
   9. not the default branch (ASK `default-branch`), and the branch matches `branch_pattern` (ASK `branch`);
   10. the grant file is not tracked or staged by git (ASK `tracked`, also when git cannot say): a grant is one person's acceptance, and committed it would cover every clone (final fix wave, I1);

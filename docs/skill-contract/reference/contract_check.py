@@ -9,7 +9,8 @@ byte-identical into their assets/ (`make contract-vendor`).
     contract_check.py check-envelope <file> [--root DIR] [--for SKILL_DIR]
                                             [--rerun] [--json]                 C3-C7, C9
     contract_check.py discover --kind URI [--from SKILL_DIR] [--json]          C8
-    contract_check.py check-grant [FILE] --root DIR --action CLASS [--json]    C10
+    contract_check.py check-grant [FILE] --root DIR --action CLASS
+                                         [--subject PATH] [--json]             C10
     contract_check.py revoke-grant [ID] --root DIR                             C10
 
 Exit 0 pass, 2 a commandment is violated, 1 usage or internal error. The last
@@ -721,7 +722,7 @@ def grant_violations(st):
     if not isinstance(p.get("revoked"), bool):
         out.append("payload.revoked must be a boolean")
     subjects = st.get("subject") if isinstance(st.get("subject"), list) else []
-    names = {_branch_key(os.path.normpath(s["name"])) for s in subjects
+    names = {_subject_key(s["name"]) for s in subjects
              if isinstance(s, dict) and isinstance(s.get("name"), str)}
     if len(names) < 2:  # same file twice (or twice by case/`./`) pins only one thing
         out.append("a grant must pin at least 2 distinct subjects: the spec and the plan it was"
@@ -928,8 +929,16 @@ def changed_since_default(root, default_branches):
     return changed
 
 
-def check_grant(root, action, path=None, now=None, branch=None, default_branches=None):
+def _subject_key(name):
+    return _branch_key(os.path.normpath(name))
+
+
+def check_grant(root, action, path=None, now=None, branch=None, default_branches=None,
+                subject=None):
     """Commandment 10: does a grant cover `action`? First failing check wins.
+
+    subject: an optional path (relative to root, or absolute) that must be one of the
+    grant's subjects, e.g. the plan envelope about to be handed off under the grant.
 
     default_branches: the repo's default branch names; None detects them
     (origin/HEAD, else main and master).
@@ -970,6 +979,11 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
         return ask("lifetime")
     if stale_names(root, st["subject"]):
         return ask("stale")
+    if subject is not None:
+        rel = (os.path.relpath(os.path.realpath(subject), os.path.realpath(root))
+               if os.path.isabs(subject) else subject)
+        if _subject_key(rel) not in {_subject_key(s["name"]) for s in st["subject"]}:
+            return ask("subject")  # the grant was approved for other files
     in_git = in_git_work_tree(root)
     branch = branch if branch is not None else current_branch(root)
     if branch is None and in_git:
@@ -1062,6 +1076,7 @@ def build_parser():
     p.add_argument("file", nargs="?")
     p.add_argument("--root", required=True)
     p.add_argument("--action", required=True)
+    p.add_argument("--subject", help="a path the grant must pin (e.g. the plan being handed off)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("revoke-grant", help="commandment 10: revoke the newest (or named) grant")
     p.add_argument("id", nargs="?")
@@ -1114,7 +1129,7 @@ def main(argv=None):
         if a.action not in ACTION_CLASSES:
             print("usage: --action must be one of %s" % ", ".join(ACTION_CLASSES), file=sys.stderr)
             return 1
-        rep = check_grant(a.root, a.action, path=a.file)
+        rep = check_grant(a.root, a.action, path=a.file, subject=a.subject)
         if a.json:
             print(json.dumps(rep, sort_keys=True))
         for v in rep["violations"]:
