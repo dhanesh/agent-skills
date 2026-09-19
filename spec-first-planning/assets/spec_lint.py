@@ -16,13 +16,28 @@ references/spec-template.md. This linter enforces the mechanical half of
      bound like <= / >=).
   5. Every requirement has at least one acceptance criterion referencing
      its id; criteria may not reference unknown ids.
+  6-9. (always on, the Constrain + Anchor light pass) Constraints are typed
+     bullets; every required truth has a known status, parent, constraint
+     mapping, requirements and a runnable check, and traces back to OUTCOME;
+     every constraint is mapped by some required truth.
+
+--converged adds the Tension + Choose full-loop rules (10-16): Tensions,
+Solution options and Iterations sections; tension grammar, known ids, and a
+decision for an accepted tension; every required truth SATISFIED or
+SPECIFICATION_READY; 2-4 options, none satisfying an unknown truth; a
+Recommended option that satisfies every truth and is the pragmatic choice
+(a tie needs a decision); iterations I1..In capped at 5; no open questions.
+--unattended adds the decision sweep on top: a non-empty Decisions section
+with every decision answered.
 
 Usage:
-    python3 spec_lint.py <spec.md>
+    python3 spec_lint.py [--converged|--unattended] <spec.md>
+    python3 spec_lint.py -h | --help      (prints usage, exits 0)
 
 Output: one "FAIL: ..." line per issue, then a final
 "LINT_RESULT: PASS" or "LINT_RESULT: FAIL (n issue(s))" line.
-Exit 0 iff the spec is clean. Stdlib-only, offline, deterministic.
+Exit 0 iff the spec is clean; 1 on lint failures; 2 on a usage error or an
+unreadable file. Stdlib-only, offline, deterministic.
 """
 
 import re
@@ -329,6 +344,7 @@ def lint_converged(spec):
     tensions, options, decisions = spec["tensions"], spec["options"], spec["decisions"]
     known_c = {c["id"] for c in spec["constraints"]}
     known_d = {d["id"] for d in decisions}
+    known_rt = {t["id"] for t in spec["truths"]}
 
     # (11) tension grammar, types, known between ids (>= 2), resolved or a decision.
     seen_tn = set()
@@ -376,6 +392,8 @@ def lint_converged(spec):
                           % (o["id"], o["reversibility"]))
         if not o["satisfies"]:
             issues.append("%s satisfies no required truth" % o["id"])
+        for rt in sorted(set(o["satisfies"]) - known_rt, key=lambda x: (len(x), x)):
+            issues.append("%s satisfies unknown truth %s" % (o["id"], rt))
     if not 2 <= len(options) <= 4:
         issues.append("Solution options must list 2-4 options (got %d)" % len(options))
 
@@ -667,14 +685,20 @@ def lint(text, mode="light"):
     return issues
 
 
+USAGE = "usage: spec_lint.py [--converged|--unattended] <spec.md>"
+
+
 def main(argv):
     args = argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
     mode = "light"
     if args and args[0] in ("--converged", "--unattended"):
         mode = args[0][2:]
         args = args[1:]
     if len(args) != 1:
-        print("usage: spec_lint.py [--converged|--unattended] <spec.md>", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         return 2
     path = args[0]
     try:

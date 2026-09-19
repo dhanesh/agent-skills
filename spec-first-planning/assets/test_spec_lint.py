@@ -450,6 +450,22 @@ class ConvergedRules(unittest.TestCase):
         t = FULL.replace("strategy: Partition)", "strategy: Partition; decision: D9)")
         self.assertTrue(any("D9" in i for i in self.lint(t, "converged")))
 
+    def test_option_satisfying_an_unknown_truth_fails(self):
+        t = FULL.replace("satisfies: RT1)", "satisfies: RT1, RT9)")
+        issues = self.lint(t, "converged")
+        self.assertIn("OPT-B satisfies unknown truth RT9", issues)
+        self.assertEqual(self.lint(FULL, "converged"), [])
+
+    def test_cli_help_prints_usage_and_exits_0(self):
+        for flag in ("-h", "--help"):
+            r = subprocess.run([sys.executable, SPEC_LINT, flag], capture_output=True,
+                               text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, flag)
+            self.assertIn("usage: spec_lint.py [--converged|--unattended] <spec.md>", r.stdout)
+
+    def test_docstring_names_the_modes(self):
+        self.assertIn("[--converged|--unattended]", spec_lint.__doc__)
+
     def test_cli_modes(self):
         import subprocess, sys, tempfile, os
         with tempfile.TemporaryDirectory() as d:
