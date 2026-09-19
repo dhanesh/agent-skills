@@ -187,15 +187,15 @@ SINCE_FACTORY_TRUST_WM = "391cd4a"  # world-model-ledger: the wm CLI refuses
 SINCE_FACTORY_TRUST_BIR = "fa9556a"  # base-in-reality: refutation follows the
 # rubric (critical/high need unanimous non-refute, a crashed refuter refutes)
 # and report_lint.py requires + checks the recorded `refutation` votes.
-SINCE_FACTORY_TRUST_VI = "6818b41"  # verifier-installer: the python format rail
+SINCE_FACTORY_TRUST_VI = "382e4a0"  # verifier-installer: the python format rail
 # is a real formatter check (detected, or an honest placeholder) instead of
 # `compileall` — a syntax check byte-identical to the build rail; the go
 # format rail actually fails on gofmt -l output instead of always exiting 0.
-SINCE_FACTORY_TRUST_BA = "afbdc71"  # bug-autopsy: the "declared basis" escape
+SINCE_FACTORY_TRUST_BA = "0cc65c2"  # bug-autopsy: the "declared basis" escape
 # hatch requires a real value after evidence:/systemic:, not just the label —
 # `evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / file:line>`
 # template placeholder no longer lint-pass as cited evidence.
-SINCE_FACTORY_TRUST_BA_R1 = "271c3bb"  # bug-autopsy review round 1 (I2): a
+SINCE_FACTORY_TRUST_BA_R1 = "f8178b8"  # bug-autopsy review round 1 (I2): a
 # deferral word (tbd/todo/unknown/na/-/?) followed by filler prose no longer
 # bypasses the check by failing a whole-value-only comparison — it is now
 # rejected as the value's first normalized token.
