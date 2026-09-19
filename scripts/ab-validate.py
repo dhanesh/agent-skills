@@ -46,6 +46,7 @@ campaigns without either re-litigating settled work or quietly dropping it.
 Marks: IMPROVED · HELD (guard) · HELD* (landed delta) · UNPROVEN · WORSE.
 UNPROVEN and WORSE both fail.
 """
+import hashlib
 import json
 import os
 import re
@@ -53,8 +54,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _now_z():
+    """RFC 3339 UTC 'now' (runtime grant-fixture helper; global-constraints A7)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    """RFC 3339 UTC one day from now: a valid, well-inside-the-cap expires_at."""
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # The integration branch this work merges into. The default baseline is the
 # MERGE BASE with it, not a fixed commit.
@@ -199,6 +211,9 @@ SINCE_FACTORY_TRUST_BA_R1 = "f8178b8"  # bug-autopsy review round 1 (I2): a
 # deferral word (tbd/todo/unknown/na/-/?) followed by filler prose no longer
 # bypasses the check by failing a whole-value-only comparison — it is now
 # rejected as the value's first normalized token.
+SINCE_AUTONOMY_GRANT = "997f1c9"  # skill-contract commandment 10: the autonomy
+# grant kind and check-grant (Task 1) — a human-accepted grant that four
+# skills' confirmation gates can read instead of asking again.
 
 
 def _git_out(*args):
@@ -4871,6 +4886,117 @@ def check_factory_trust_ba(old, new):
         since=SINCE_FACTORY_TRUST_BA_R1)
 
 
+_AG_SKILLS = ("spec-first-planning", "crafting-self-prompting-loops", "verifier-installer",
+              "test-safety-net")
+
+
+def check_autonomy_grant(old, new):
+    def gates(tree):
+        n = 0
+        for sk in _AG_SKILLS:
+            p = os.path.join(tree, sk, "SKILL.md")
+            if os.path.isfile(p) and "check-grant" in open(p, encoding="utf-8").read():
+                n += 1
+        return n
+
+    def adopters(tree):
+        return sum(1 for d in sorted(os.listdir(tree))
+                   if os.path.isfile(os.path.join(tree, d, "SKILL.md"))
+                   and re.search(r"(?m)^## Contract\s*$",
+                                 open(os.path.join(tree, d, "SKILL.md"), encoding="utf-8").read()))
+
+    def checker(tree):
+        return os.path.join(tree, "docs", "skill-contract", "reference", "contract_check.py")
+
+    def decides(tree):
+        c = checker(tree)
+        return 1 if os.path.isfile(c) and '"check-grant"' in open(c, encoding="utf-8").read() else 0
+
+    def forged_accepted(tree):
+        """1 if a SKILL-attributed (self-certified) grant is COVERED (bad); else 0.
+
+        The fixture must pass every other check so the only thing that can make
+        it fail is the forged attribution — otherwise a rejection would prove
+        nothing. A sanity build of the SAME fixture, human-attributed, is
+        asserted COVERED so the guard cannot pass vacuously (e.g. by an
+        unrelated bug that rejects everything).
+        """
+        if not decides(tree):
+            return 0
+        gid = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+
+        def build(asserted_by):
+            # A plain, non-git temp dir (mirrors docs/skill-contract/reference/
+            # test_e2e.py's GrantE2ETests): in_git_work_tree() walks the
+            # filesystem, never git, so no GIT_CEILING_DIRECTORIES is needed —
+            # there is simply no .git to find above an OS tempdir.
+            root = tempfile.mkdtemp()
+            os.makedirs(os.path.join(root, "docs"))
+            spec = "# Spec\n"
+            open(os.path.join(root, "docs", "spec.md"), "w").write(spec)
+            plan = '{"tasks": []}\n'
+            open(os.path.join(root, "plan.json"), "w").write(plan)
+            st = {"_type": "https://in-toto.io/Statement/v1",
+                  "subject": [{"name": "docs/spec.md",
+                               "digest": {"sha256": hashlib.sha256(spec.encode()).hexdigest()}},
+                              {"name": "plan.json",
+                               "digest": {"sha256": hashlib.sha256(plan.encode()).hexdigest()}}],
+                  "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
+                  "predicate": {"skillContract": "1", "id": gid,
+                                "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                                "generatedAtTime": _now_z(), "wasRevisionOf": None,
+                                "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
+                                            "decisions": [], "defaults": [],
+                                            "gate_policy": {"local_reversible": "grant"},
+                                            "budget": {}, "stop_on": [],
+                                            "expires_at": _in_one_day(),
+                                            "system_one": {"allowed": False}, "revoked": False},
+                                "assertions": [{"test": "grant-accepted",
+                                                "assertedBy": asserted_by,
+                                                "result": {"outcome": "passed"},
+                                                "command": ["{python}",
+                                                            "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                                            "--unattended", "docs/spec.md"]}]}}
+            d = os.path.join(root, ".skill-contract", "envelopes")
+            os.makedirs(d)
+            json.dump(st, open(os.path.join(d, gid + ".json"), "w"))
+            return root
+
+        def check(root):
+            r = subprocess.run([sys.executable, checker(tree), "check-grant", "--root", root,
+                                "--action", "local_reversible"], capture_output=True, text=True,
+                               timeout=60)
+            return r.returncode
+
+        forged_rc = check(build({"skill": "spec-first-planning"}))
+
+        sane_rc = check(build({"human": "Dana"}))
+        assert sane_rc == 0, (
+            "sanity check failed on %r: a human-attributed grant of the same "
+            "shape was not COVERED (rc=%d) -- the fixture itself is broken, "
+            "not just the forged attribution" % (tree, sane_rc))
+
+        return 1 if forged_rc == 0 else 0
+
+    s = "skill-contract"
+    a, b = gates(old), gates(new)
+    row(s, "skills whose human gate calls check-grant", a, b, b == 4 and a == 0,
+        "no skill could proceed past its confirmation under a user-approved grant",
+        since=SINCE_AUTONOMY_GRANT)
+    a, b = adopters(old), adopters(new)
+    row(s, "skill-contract adopters", a, b, b > a,
+        "verifier-installer and test-safety-net adopt the contract to read grants",
+        since=SINCE_AUTONOMY_GRANT)
+    a, b = decides(old), decides(new)
+    row(s, "reference checker decides whether a grant covers an action", a, b, b == 1 and a == 0,
+        "commandment 10's 'unless' had no format or check", since=SINCE_AUTONOMY_GRANT)
+    a, b = forged_accepted(old), forged_accepted(new)
+    row(s, "skill-attributed (self-certified) grants accepted", a, b, a == 0 and b == 0,
+        "a grant only counts when a human accepted it — sanity-checked against "
+        "a human-attributed grant of the same shape, which the new tree's "
+        "checker DOES accept", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4939,6 +5065,7 @@ def main():
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
         check_factory_trust_ba(old, REPO)
+        check_autonomy_grant(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

@@ -48,6 +48,8 @@ carries unit tests, eval negatives and an A/B row:
   placeholder evidence values (`tbd`, `unknown`, `n/a`, `n.a.` and similar), not just a missing label.
 - **README Q2 re-judged by Jev after the factory section:** no (0.97) → partly (0.80); 'would a
   new user know which skills to install' P(yes) 0.09 → 0.63; the section judged honest P=0.97.
+- **Step 3A (autonomy grant) landed:** grant kind + `check-grant`; spec-first-planning 2.0.0;
+  4 adopters; Q3 to be re-judged by Jev after merge.
 
 Nothing else in this document has been re-measured since.
 

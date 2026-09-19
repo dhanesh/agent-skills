@@ -111,20 +111,29 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site
 - **Reinstall copies installed before the contract merged.** They carry no contract block, so
   discovery cannot see them.
 
-### Unattended mode: not yet
+### Unattended mode: partial
 
-There is no unattended mode yet. What exists today:
+`spec-first-planning` 2.0.0 can plan unattended, and — after you say yes — write a
+skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope naming
+exactly what it may do without asking again. Four skills' confirmation gates honour it:
+`spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
+`test-safety-net` each call `check-grant` before falling back to their own ask.
 
-- skill-contract handoffs are proposed and wait for your yes;
-- each skill keeps its own gates (for example, `verifier-installer` and `test-safety-net` stop
-  for confirmation before writing).
+What a grant can and cannot do:
 
-Planned on the roadmap:
+- it covers only reversible work: local edits and commits, pushing a branch, opening a PR;
+- merge, deploy, spending money, sending an external message, and deleting always ask you —
+  no grant can change that;
+- there is no signing: no `require_signature`, no `.sig`, no signature levels;
+- a grant lives at most 7 days, and it never covers your repo's default branch (`main`/`master`),
+  no matter what its branch pattern says.
 
-1. Every decision that needs a human is captured upfront, during requirements and design, as an
-   `autonomy-grant`.
-2. A conductor runs the plan within that grant, and still stops for anything irreversible or
-   not covered by the grant.
+Still on the roadmap: a **conductor** that runs a whole plan end to end inside that grant
+(step 4) — today you still drive the handoff between skills yourself.
+
+```bash
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops --skill verifier-installer --skill test-safety-net
+```
 
 The design and the gap analysis are in
 [the assessment's unattended-mode section](docs/factory/2026-09-19-assessment.md#6-unattended-mode-q3-gap-analysis).
