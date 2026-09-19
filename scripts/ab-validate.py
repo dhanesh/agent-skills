@@ -195,6 +195,10 @@ SINCE_FACTORY_TRUST_BA = "afbdc71"  # bug-autopsy: the "declared basis" escape
 # hatch requires a real value after evidence:/systemic:, not just the label —
 # `evidence: none`/`n/a`/`TBD` and an unfilled `<commit sha / file:line>`
 # template placeholder no longer lint-pass as cited evidence.
+SINCE_FACTORY_TRUST_BA_R1 = "271c3bb"  # bug-autopsy review round 1 (I2): a
+# deferral word (tbd/todo/unknown/na/-/?) followed by filler prose no longer
+# bypasses the check by failing a whole-value-only comparison — it is now
+# rejected as the value's first normalized token.
 
 
 def _git_out(*args):
@@ -4794,6 +4798,10 @@ _BA_GOOD = (
     "## Prevention\n- [ ] Add a config check (owner: platform; check: CI run 4821 green)\n\n"
     "## Links\n- Issue #123\n"
 )
+_BA_NULL_WORD_WITH_FILLER = _BA_EVIDENCE_NONE.replace(
+    "(evidence: none)", "(evidence: tbd — later)").replace(
+    "(evidence: n/a)", "(evidence: unknown yet)").replace(
+    "(evidence: TBD)", "(systemic: unknown yet)")
 
 
 def check_factory_trust_ba(old, new):
@@ -4833,6 +4841,16 @@ def check_factory_trust_ba(old, new):
         "a real citation (file:line, sha, CI run), free-text absence "
         "evidence, and a genuine systemic conclusion must keep passing",
         kind="guard")
+
+    fa = lint_passes(old, "null_word_with_filler", _BA_NULL_WORD_WITH_FILLER)
+    fb = lint_passes(new, "null_word_with_filler", _BA_NULL_WORD_WITH_FILLER)
+    row(s, "null word padded with filler (`tbd — later`/`unknown yet`) "
+           "lint-passes (lower=better)",
+        fa, fb, fb == 0 and fa == 1,
+        "the first fix's whole-value-only comparison missed a deferral "
+        "word followed by prose; review round 1 (I2) rejects it as the "
+        "value's first normalized token instead",
+        since=SINCE_FACTORY_TRUST_BA_R1)
 
 
 def main():
