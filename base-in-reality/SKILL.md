@@ -6,19 +6,21 @@ compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSear
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "audit,research,citations,standards,verification,architecture,business-logic"
 ---
 
 # base-in-reality
 
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+
 A read-only, research-grounded repository audit. It answers one question for each
 notable design decision in a repo: *does this violate an established norm, standard,
 algorithm, or best practice — provably, against a real source?*
 
-The defining rule: **no fabricated authority.** Every finding is tied to a source the
-agent actually fetched in-session. Ungrounded claims are reported as `UNCONFIRMED`, never
-as violations.
+The defining rule: **no fabricated authority.** Every finding MUST be tied to a source the
+agent actually fetched in-session. Ungrounded claims MUST be reported as `UNCONFIRMED`, and MUST NOT
+be reported as violations.
 
 ## When to use
 
@@ -30,17 +32,17 @@ domain(s).
 
 ## Invariants (do not violate)
 
-1. **Never edit code.** `--annotate` inserts comment markers only — never logic. The one
+1. **You MUST NOT edit code.** `--annotate` inserts comment markers only — never logic. The one
    file this skill creates on the default path is its own report under
-   `docs/base-in-reality/`; name it before writing it, and offer the in-conversation
+   `docs/base-in-reality/`; you MUST name it before writing it, and MUST offer the in-conversation
    report instead if the user wants their tree untouched.
-2. **No fabricated citations.** Cite only URLs/DOIs fetched this session, and prove it:
+2. **No fabricated citations.** You MUST cite only URLs/DOIs fetched this session, and MUST prove it:
    fetch with `BIR_EVIDENCE_LOG` set, then lint with `--evidence`. `fetched: true` is a
    claim the agent makes about itself — the evidence log is what makes it checkable.
    Ungrounded ⇒ `UNCONFIRMED`. See `references/verdict-rubric.md`.
-3. **Adversarial gate.** No `VIOLATION`/`DEVIATION` is reported without surviving a
-   refutation pass.
-4. **No silent truncation.** If `--max-claims` caps extraction, list what was dropped in
+3. **Adversarial gate.** Every `VIOLATION`/`DEVIATION` MUST survive a
+   refutation pass before it is reported.
+4. **No silent truncation.** If `--max-claims` caps extraction, you SHOULD list what was dropped in
    the report's Dropped-claims log.
 
 ## Flags
@@ -71,7 +73,7 @@ subagent's prompt:
 - Verify it resolves: `python3 "$FETCH" --source openalex --query test --limit 1` should emit
   JSON. (`uv run "$FETCH"` is equivalent; the script declares `dependencies = []` and imports
   only the stdlib, so `python3` works on any host and does not make `uv` a prerequisite.)
-- Hand subagents the literal absolute `$FETCH` value — never a relative `assets/`-prefixed form.
+- You MUST hand subagents the literal absolute `$FETCH` value — they MUST NOT receive a relative `assets/`-prefixed form.
 - **Open the evidence log before any fetching**, and export it so every subagent inherits it:
   `export BIR_EVIDENCE_LOG="$(mktemp -t bir-evidence-XXXXXX.jsonl)"`. Each retrieval appends the
   URL/DOI actually returned, and stage 6 reconciles the report against it. Without this, a
@@ -116,11 +118,11 @@ subagent's prompt:
    `VIOLATION`/`DEVIATION` with no fetched citation is rejected — downgrade it to `UNCONFIRMED`
    rather than shipping it), and with `--evidence` it checks each `fetched: true` citation
    against the URLs a retrieval actually returned, so a plausible-looking but never-fetched
-   DOI fails instead of rendering as grounded. Run it WITH `--evidence`: the result line
+   DOI fails instead of rendering as grounded. You MUST run it WITH `--evidence`: the result line
    states which mode ran, and a report linted without it is only shape-checked.
    Fix every `ERROR:` line, then fill `assets/report-skeleton.md`. Writing the report to
    `docs/base-in-reality/<YYYY-MM-DD>-audit.md` is this skill's one expected write outside
-   `--annotate`; say so before creating it, and emit the report in-conversation instead if
+   `--annotate`; you MUST say so before creating it, and emit the report in-conversation instead if
    the user would rather keep their tree untouched. The report contains: executive summary, domain map, findings
    (ordered by severity then layer), sources appendix, dropped-claims log. If `--annotate`,
    insert the comment markers at each finding's location.

@@ -168,3 +168,15 @@ Skills appear in rewrite order.
 | c8 | 50 | Audit only repositories the user owns or is explicitly authorized to review; if … | MUST (0.90, 0.87) | MUST |  |
 | c9 | 117 | \| \`credential-file\` (.env*/.pem/id_* presence, content never read) \| HIGH \| | MUST (0.61, 0.59) | plain | table row describing the check's behaviour (content never read), not a directive |
 | c10 | 140 | - **Unreadable/malformed manifests** surface as \`parse-error\` entries, never cra… | MUST (0.50, 0.56) | MUST |  |
+
+## base-in-reality (7 candidates · 6 MUST · 1 SHOULD · 0 MAY · 0 plain · 1 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 19 | The defining rule: **no fabricated authority.** Every finding is tied to a sourc… | MUST (0.90, 0.80) | MUST |  |
+| c2 | 33 | 1. **Never edit code.** \`--annotate\` inserts comment markers only — never logic.… | MUST (0.89, 0.76) | MUST |  |
+| c3 | 37 | 2. **No fabricated citations.** Cite only URLs/DOIs fetched this session, and pr… | MUST (0.93, 0.82) | MUST |  |
+| c4 | 41 | 3. **Adversarial gate.** No \`VIOLATION\`/\`DEVIATION\` is reported without survivin… | MUST (0.96, 0.73) | MUST |  |
+| c5 | 43 | 4. **No silent truncation.** If \`--max-claims\` caps extraction, list what was dr… | MUST (0.87, 0.44) | SHOULD | harm 0.44 < 0.5 caps it at SHOULD; no gate or test checks that dropped claims are listed (the eval only checks the skeleton has a Dropped-claims log section) |
+| c6 | 74 | - Hand subagents the literal absolute \`$FETCH\` value — never a relative \`assets/… | MUST (0.70, 0.80) | MUST |  |
+| c7 | 112 | 6. **Synthesize.** Before filling the report, lint the merged findings array wit… | MUST (0.68, 0.80) | MUST |  |
