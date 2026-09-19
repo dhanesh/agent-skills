@@ -348,7 +348,7 @@ NOW = "2026-09-19T13:00:00Z"
 
 def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00:00Z",
           require=None, branch_pattern="factory/*", spec_text=SPEC, gid=GRANT_ID, rev=None,
-          assertions=None, outcome="passed"):
+          assertions=None, outcome="passed", generated="2026-09-19T12:00:00Z"):
     a = {"test": "grant-accepted", "assertedBy": attributed or {"human": "Dana"},
          "result": {"outcome": outcome},
          "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
@@ -368,13 +368,15 @@ def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00
             "predicateType": GRANT_KIND,
             "predicate": {"skillContract": "1", "id": gid,
                           "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
-                          "generatedAtTime": "2026-09-19T12:00:00Z", "wasRevisionOf": rev,
+                          "generatedAtTime": generated, "wasRevisionOf": rev,
                           "payload": payload,
                           "assertions": [a] if assertions is None else assertions}}
 
 
-def grant_vector(st, action, status, reason=None, files=None, branch="factory/x", others=()):
+def grant_vector(st, action, status, reason=None, files=None, branch="factory/x", others=(),
+                 default_branch="main"):
     inp = {"type": "grant", "grant": st, "action": action, "now": NOW, "branch": branch,
+           "default_branch": default_branch,
            "files": files if files is not None else {"docs/spec.md": SPEC, "plan.json": PLAN_TEXT},
            "others": list(others)}
     exp = {"status": status}
@@ -396,7 +398,7 @@ def grant_cases():
          grant_vector(g, "local_reversible", "ASK", "stale",
                       files={"docs/spec.md": SPEC_EDITED, "plan.json": PLAN_TEXT})),
         ("c10", "valid", "branch-mismatch-asks",
-         grant_vector(g, "local_reversible", "ASK", "branch", branch="main")),
+         grant_vector(g, "local_reversible", "ASK", "branch", branch="feature/x")),
         ("c10", "valid", "revoked-asks",
          grant_vector(grant(revoked=True, assertions=[]), "local_reversible", "ASK", "revoked")),
         ("c10", "valid", "superseded-asks",
@@ -406,6 +408,27 @@ def grant_cases():
         ("c10", "valid", "signature-required-asks",
          grant_vector(grant(require={"local_reversible": "SIGNED"}), "local_reversible",
                       "ASK", "signature")),
+        ("c10", "valid", "irreversible-needs-hw-signature",
+         grant_vector(grant(policy={"merge": "grant"}), "merge", "ASK", "signature")),
+        ("c10", "valid", "irreversible-floor-beats-require-signature",
+         grant_vector(grant(policy={"delete": "grant"}, require={"delete": "SIGNED"}), "delete",
+                      "ASK", "signature")),
+        ("c10", "valid", "unsigned-push-covered",
+         grant_vector(grant(policy={"push_branch": "grant", "open_pr": "grant"}), "open_pr",
+                      "COVERED")),
+        ("c10", "valid", "lifetime-asks",
+         grant_vector(grant(generated="2026-09-25T12:00:00Z", expires="2026-09-30T12:00:00Z"),
+                      "local_reversible", "ASK", "lifetime")),
+        ("c10", "valid", "seven-days-exactly-covered",
+         grant_vector(grant(expires="2026-09-26T12:00:00Z"), "local_reversible", "COVERED")),
+        ("c10", "valid", "default-branch-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
+                      branch="main")),
+        ("c10", "valid", "origin-head-default-branch-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
+                      branch="trunk", default_branch="trunk")),
+        ("c10", "invalid", "lifetime-over-seven-days",
+         grant_vector(grant(expires="2026-09-26T12:00:01Z"), "local_reversible", "INVALID")),
         ("c10", "invalid", "merge-auto",
          grant_vector(grant(policy={"merge": "auto"}), "merge", "INVALID")),
         ("c10", "invalid", "push-auto",

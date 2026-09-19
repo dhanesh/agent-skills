@@ -6,6 +6,7 @@
   "input": {
     "action": "push_branch",
     "branch": "factory/x",
+    "default_branch": "main",
     "files": {
       "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
       "plan.json": "{\"plan\": 1}\n"

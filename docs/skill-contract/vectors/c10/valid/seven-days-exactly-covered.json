@@ -1,14 +1,13 @@
 {
   "expect": {
-    "reason": "stale",
-    "status": "ASK"
+    "status": "COVERED"
   },
   "input": {
     "action": "local_reversible",
     "branch": "factory/x",
     "default_branch": "main",
     "files": {
-      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n- R2: The export must keep row order.\n",
+      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
       "plan.json": "{\"plan\": 1}\n"
     },
     "grant": {
@@ -54,7 +53,7 @@
             }
           ],
           "defaults": [],
-          "expires_at": "2026-09-20T12:00:00Z",
+          "expires_at": "2026-09-26T12:00:00Z",
           "gate_policy": {
             "local_reversible": "grant",
             "read_only": "auto"

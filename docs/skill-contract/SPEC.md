@@ -65,19 +65,34 @@ or `ask`), an optional `require_signature` (action class → `SIGNED` or `SIGNED
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
 
+Three floors live in the checker, and no grant can lower them:
+
+- A grant MUST NOT cover `merge`, `deploy`, `spend`, `external_message` or `delete` unless its
+  signature level is `SIGNED_HW`. The required level is the higher of the grant's
+  `require_signature` and this floor.
+- A grant MUST NOT live more than 7 days: `expires_at` more than 7 days after `generatedAtTime`
+  makes it invalid, and a receiver MUST treat a grant whose `expires_at` is more than 7 days after
+  now as not covering anything.
+- A grant MUST NOT cover an action while the current branch is the repo's default branch (from
+  `origin/HEAD`, else `main` or `master`).
+
 A revocation is a revision (`wasRevisionOf` names the grant) whose payload has `revoked: true`
 and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
-superseded, not expired, subjects not stale, the current git branch matches `branch_pattern`
-(skipped outside git), the class's gate is `auto` or `grant`, and the required signature level is
-met. It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
+superseded, not expired, not living past the 7-day floor, subjects not stale, not on the default
+branch, the current git branch matches `branch_pattern` (both branch checks are skipped outside
+git), the class's gate is `auto` or `grant`, and the required signature level is met. An `ASK`
+names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
+`stale`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 
 *Non-normative.* An agent with a shell on the same machine can write an unsigned grant, or sign one
 with a software key it creates. Only a signature by a hardware-backed (`sk-`) key shows that a
-person physically touched a key. The same limit applies to transcript roles.
+person physically touched a key. The same limit applies to transcript roles. A `require_signature`
+inside a grant cannot protect against a forged grant, because the forger simply leaves it out;
+that is why the floors above live in the checker rather than in the grant.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 

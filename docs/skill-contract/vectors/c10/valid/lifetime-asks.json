@@ -1,6 +1,6 @@
 {
   "expect": {
-    "reason": "stale",
+    "reason": "lifetime",
     "status": "ASK"
   },
   "input": {
@@ -8,7 +8,7 @@
     "branch": "factory/x",
     "default_branch": "main",
     "files": {
-      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n- R2: The export must keep row order.\n",
+      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
       "plan.json": "{\"plan\": 1}\n"
     },
     "grant": {
@@ -39,7 +39,7 @@
             "test": "grant-accepted"
           }
         ],
-        "generatedAtTime": "2026-09-19T12:00:00Z",
+        "generatedAtTime": "2026-09-25T12:00:00Z",
         "id": "autonomy-grant-v1-20260919T120000Z-a1b2c3",
         "payload": {
           "budget": {
@@ -54,7 +54,7 @@
             }
           ],
           "defaults": [],
-          "expires_at": "2026-09-20T12:00:00Z",
+          "expires_at": "2026-09-30T12:00:00Z",
           "gate_policy": {
             "local_reversible": "grant",
             "read_only": "auto"

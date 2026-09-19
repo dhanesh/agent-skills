@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)  # `python -I` drops the script dir from sys.path
@@ -111,7 +111,8 @@ def run_grant_vector(inp, tmp):
         _write(os.path.join(edir, st["predicate"]["id"] + ".json"), json.dumps(st))
     path = os.path.join(edir, inp["grant"]["predicate"]["id"] + ".json")
     now = datetime.strptime(inp["now"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    rep = cc.check_grant(root, inp["action"], path=path, now=now, branch=inp["branch"], env={})
+    rep = cc.check_grant(root, inp["action"], path=path, now=now, branch=inp["branch"], env={},
+                         default_branches={inp.get("default_branch", "main")})
     return {"status": rep["status"], "reason": rep["reason"]}
 
 
@@ -468,13 +469,69 @@ class GrantTests(unittest.TestCase):
         self.assertIn("human", rep["violations"][0])  # attribution is checked before floors
         self.assertIn("merge", rep["violations"][1])
 
+    def test_irreversible_classes_ask_for_signature_even_when_granted(self):
+        policy = {c: "grant" for c in ("merge", "deploy", "spend", "external_message", "delete")}
+        self.put(build_vectors.grant(policy=policy))
+        for c in policy:
+            rep = self.check(c)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "signature"), c)
+
+    def test_signature_floor_is_met_only_by_signed_hw(self):
+        self.put(build_vectors.grant(policy={"merge": "grant"}))
+        orig = cc.signature_level
+        try:
+            for level, want in (("SIGNED", "ASK"), ("SIGNED_HW", "COVERED")):
+                cc.signature_level = lambda path, env=None, level=level: level
+                self.assertEqual(self.check("merge")["status"], want, level)
+        finally:
+            cc.signature_level = orig
+
+    def test_lifetime_over_seven_days_is_invalid(self):
+        st = build_vectors.grant(expires="2026-09-27T00:00:00Z")
+        self.assertTrue(any("7 days" in v for v in cc.grant_violations(st)))
+
+    def test_default_branch_falls_back_to_main_and_master_outside_git(self):
+        self.put(build_vectors.grant(branch_pattern="*"))
+        for b in ("main", "master"):
+            rep = self.check(branch=b)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"), b)
+        self.assertEqual(self.check(branch="feature")["status"], "COVERED")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_default_branch_comes_from_origin_head(self):
+        def git(*args):
+            subprocess.run(["git", "-C", self.tmp] + list(args), check=True,
+                           capture_output=True, text=True)
+        git("init", "-q")
+        git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+        self.assertEqual(cc.detect_default_branches(self.tmp), {"trunk"})
+        self.put(build_vectors.grant(branch_pattern="*"))
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="trunk", env={})
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"))
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="main", env={})
+        self.assertEqual(rep["status"], "COVERED")
+
+    def test_revocation_of_a_week_long_grant_stays_valid(self):
+        self.put(build_vectors.grant(expires="2026-09-26T12:00:00Z"))
+        out = cc.revoke_grant(self.tmp, now=self.now)
+        with open(out, encoding="utf-8") as f:
+            self.assertEqual(cc.grant_violations(json.load(f)), [])
+
     def test_unknown_action_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()):
             rc = cc.main(["check-grant", "--root", self.tmp, "--action", "launch"])
         self.assertEqual(rc, 1)
 
+    @staticmethod
+    def fresh_grant(**kw):
+        """A grant generated now (real clock) that expires in one day, for CLI tests."""
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        return build_vectors.grant(generated=now.strftime(fmt),
+                                   expires=(now + timedelta(days=1)).strftime(fmt), **kw)
+
     def test_cli_exit_codes(self):
-        self.put(build_vectors.grant(expires="2999-01-01T00:00:00Z"))
+        self.put(self.fresh_grant())
         codes = {}
         for action in ("local_reversible", "merge"):
             with contextlib.redirect_stdout(io.StringIO()) as buf:
@@ -491,7 +548,7 @@ class GrantTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             self.assertEqual(cc.main(["check-grant", "--root", self.tmp, "--action", "read_only"]), 3)
         self.assertEqual(buf.getvalue().strip().splitlines()[-1], "GRANT: NONE")
-        self.put(build_vectors.grant(policy={"deploy": "auto"}, expires="2999-01-01T00:00:00Z"))
+        self.put(self.fresh_grant(policy={"deploy": "auto"}))
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             self.assertEqual(cc.main(["check-grant", "--root", self.tmp, "--action", "read_only"]), 2)
         self.assertTrue(buf.getvalue().strip().splitlines()[-1].startswith("GRANT: INVALID"))

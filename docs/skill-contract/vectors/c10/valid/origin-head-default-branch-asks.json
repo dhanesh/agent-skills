@@ -1,14 +1,14 @@
 {
   "expect": {
-    "reason": "stale",
+    "reason": "default-branch",
     "status": "ASK"
   },
   "input": {
     "action": "local_reversible",
-    "branch": "factory/x",
-    "default_branch": "main",
+    "branch": "trunk",
+    "default_branch": "trunk",
     "files": {
-      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n- R2: The export must keep row order.\n",
+      "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
       "plan.json": "{\"plan\": 1}\n"
     },
     "grant": {
@@ -62,7 +62,7 @@
           "require_signature": {},
           "revoked": false,
           "scope": {
-            "branch_pattern": "factory/*",
+            "branch_pattern": "*",
             "repo": "."
           },
           "stop_on": [

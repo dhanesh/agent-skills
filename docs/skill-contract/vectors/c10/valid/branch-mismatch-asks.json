@@ -5,7 +5,8 @@
   },
   "input": {
     "action": "local_reversible",
-    "branch": "main",
+    "branch": "feature/x",
+    "default_branch": "main",
     "files": {
       "docs/spec.md": "# Spec\n\n- R1: The export must include every row.\n",
       "plan.json": "{\"plan\": 1}\n"

@@ -35,7 +35,7 @@ import secrets  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
-from datetime import datetime, timezone  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 CONTRACT_VERSION = "1"
@@ -62,6 +62,10 @@ LOCAL_CLASSES = frozenset({"read_only", "local_reversible"})
 GATES = ("auto", "grant", "ask")
 SIG_LEVELS = ("UNSIGNED", "SIGNED", "SIGNED_HW")
 GRANT_NAMESPACE = "skill-contract-grant"
+# Checker-held floors (A7): no grant can lower these.
+HW_SIGNED_CLASSES = frozenset({"merge", "deploy", "spend", "external_message", "delete"})
+MAX_GRANT_LIFETIME = timedelta(days=7)
+FALLBACK_DEFAULT_BRANCHES = frozenset({"main", "master"})
 
 
 # ── SKILL.md reading (no YAML library: a line reader is enough) ──────────────
@@ -696,9 +700,18 @@ def grant_violations(st):
                                           for c, v in req.items())):
         out.append("require_signature maps action classes to SIGNED or SIGNED_HW")
     try:
-        _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", ""))) else "")
+        expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
+                              else "")
     except ValueError:
+        expires = None
         out.append("payload.expires_at must be RFC 3339 UTC (YYYY-MM-DDThh:mm:ssZ)")
+    try:
+        generated = _parse_time(pred.get("generatedAtTime"))
+    except (TypeError, ValueError):
+        generated = None
+        out.append("generatedAtTime must be a real date")
+    if expires and generated and expires - generated > MAX_GRANT_LIFETIME:
+        out.append("a grant may live at most 7 days (expires_at - generatedAtTime)")
     if not isinstance(p.get("revoked"), bool):
         out.append("payload.revoked must be a boolean")
     if p.get("revoked") is not True:
@@ -772,14 +785,30 @@ def current_branch(root):
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
 
 
+def detect_default_branches(root):
+    """The repo's default branch from origin/HEAD, else {"main", "master"}."""
+    try:
+        r = subprocess.run(["git", "-C", root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return set(FALLBACK_DEFAULT_BRANCHES)
+    name = r.stdout.strip() if r.returncode == 0 else ""
+    if name.startswith("origin/"):
+        name = name[len("origin/"):]
+    return {name} if name else set(FALLBACK_DEFAULT_BRANCHES)
+
+
 def signature_level(path, env=None):
     """UNSIGNED unless <path>.sig verifies. Verification is not implemented yet, so this
     always returns UNSIGNED: an unverified .sig file never raises the level."""
     return "UNSIGNED"
 
 
-def check_grant(root, action, path=None, now=None, branch=None, env=None):
+def check_grant(root, action, path=None, now=None, branch=None, env=None, default_branches=None):
     """Commandment 10: does a grant cover `action`? First failing check wins.
+
+    default_branches: the repo's default branch names; None detects them
+    (origin/HEAD, else main and master).
 
     Returns {status: COVERED|ASK|INVALID|NONE, id, reason, gate, signed, path,
     violations}. A caller proceeds only on COVERED.
@@ -809,20 +838,31 @@ def check_grant(root, action, path=None, now=None, branch=None, env=None):
         return ask("revoked")
     if is_superseded(root, pred["id"]):
         return ask("superseded")
-    if (now or utc_now()) >= _parse_time(p["expires_at"]):
+    now = now or utc_now()
+    expires = _parse_time(p["expires_at"])
+    if now >= expires:
         return ask("expired")
+    if expires > now + MAX_GRANT_LIFETIME:
+        return ask("lifetime")
     if stale_names(root, st["subject"]):
         return ask("stale")
     branch = branch if branch is not None else current_branch(root)
-    if branch is not None and not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
-        return ask("branch")
+    if branch is not None:
+        if default_branches is None:
+            default_branches = detect_default_branches(root)
+        if branch in default_branches:
+            return ask("default-branch")
+        if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
+            return ask("branch")
     gate = p["gate_policy"].get(action, "ask")
     rep["gate"] = gate
     if gate not in ("auto", "grant"):
         return ask("gate-ask")
     rep["signed"] = signature_level(path, env)
-    need = (p.get("require_signature") or {}).get(action)
-    if need and SIG_LEVELS.index(rep["signed"]) < SIG_LEVELS.index(need):
+    need = [(p.get("require_signature") or {}).get(action) or "UNSIGNED"]
+    if action in HW_SIGNED_CLASSES:
+        need.append("SIGNED_HW")
+    if SIG_LEVELS.index(rep["signed"]) < max(SIG_LEVELS.index(n) for n in need):
         return ask("signature")
     rep["status"] = "COVERED"
     return rep
