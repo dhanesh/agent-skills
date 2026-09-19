@@ -100,9 +100,14 @@ class TestScaffoldOutput(unittest.TestCase):
         # PP-3 / PP-4 keyword families.
         self.assertRegex(body, r"(?i)\bdeliverable\b")
         self.assertRegex(body, r"(?i)\b(verify|check)\b")
-        # PP-5: skeleton ships no absolutist directives.
+        # PP-5: skeleton ships no absolutist directives. The BCP 14 declaration
+        # line names MUST NOT as a keyword, not as a directive — same exclusion
+        # PP-5 itself applies (scripts/gates/prompting-playbook.sh).
+        pp5_body = "\n".join(
+            ln for ln in body.splitlines()
+            if "BCP 14 (RFC 2119, RFC 8174)" not in ln)
         self.assertEqual(
-            re.findall(r"(?i)\b(never|always|must not)\b", body), [])
+            re.findall(r"(?i)\b(never|always|must not)\b", pp5_body), [])
 
     def test_body_references_only_files_that_exist(self):
         body = self.read("SKILL.md").split("---", 2)[2]

@@ -308,4 +308,35 @@ sc_case "a drifted vendored checker fails" FAIL "$d"
 sc_case "an unknown contract key fails" FAIL "$(mkadopter key "$OPT" '{"provides": [], "consumes": [], "extra": 1}' '')"
 sc_case "a top-level frontmatter key outside the allowed set fails" FAIL "$(mkadopter fm '' '' 'x-spec-version: 1.0')"
 
+# ── prompting-playbook PP-7: BCP 14 declared, only declared keywords used ────
+# docs/superpowers/specs/2026-09-19-bcp14-skills-design.md §3. Each case is a
+# fresh fixture; asserts on the PP-7 line only, not the whole verdict.
+DECL='The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.'
+mkbcp() {  # $1 name, then the body lines that follow the # title
+  d="$WORK/bcp-$1"; shift
+  rm -rf "$d"; mkdir -p "$d"
+  {
+    echo '---'
+    echo 'name: bcp-fixture'
+    echo 'description: A fixture skill for the PP-7 self-tests.'
+    echo '---'
+    echo '# fixture'
+    echo ''
+    for l in "$@"; do echo "$l"; done
+  } > "$d/SKILL.md"
+  printf '%s\n' "$d"
+}
+pp7_case() {  # $1 label, $2 expected PP-7 line prefix PASS|FAIL|INFO, $3 skill dir
+  if sh "$GATES/prompting-playbook.sh" "$3" 2>&1 | grep -q "^$2: PP-7"; then
+    ok "PP-7: $1"
+  else
+    bad "PP-7: $1 (expected a '$2: PP-7' line)"
+  fi
+}
+pp7_case "a skill with no declaration fails" FAIL "$(mkbcp none 'You MUST check the thing.')"
+pp7_case "a declared skill using MUST passes" PASS "$(mkbcp good "$DECL" '' 'You MUST check the thing.')"
+pp7_case "a stray SHALL fails" FAIL "$(mkbcp shall "$DECL" '' 'You SHALL check the thing.')"
+pp7_case "SHALL inside a code fence is ignored" PASS "$(mkbcp fencedshall "$DECL" '' 'You MUST check it.' '```' 'SHALL' '```')"
+pp7_case "keywords only inside a code fence count as none (advisory)" INFO "$(mkbcp fenced "$DECL" '' '```' 'MUST' '```')"
+
 exit $rc
