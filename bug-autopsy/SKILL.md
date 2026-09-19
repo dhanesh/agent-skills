@@ -17,11 +17,13 @@ license: MIT
 compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 
 # bug-autopsy
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 `feynman-walkthrough`'s sibling for failures. Where that skill walks a learner through a
 healthy system, this one walks a failure that already happened — trigger → propagation →
@@ -32,8 +34,8 @@ the incident is still burning, triage first and come back.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -44,16 +46,16 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## Ground rules
 
-- **Evidence or inference, labeled.** Every timeline entry and every "why" cites its
+- **Evidence or inference, labeled.** Every timeline entry and every "why" MUST cite its
   evidence — `file:line`, commit sha, CI run, log timestamp, issue comment. Where the
-  record is silent, reconstruct by judgment but mark the entry *(inference)*; a labeled
-  guess is useful, an unlabeled one poisons the document.
+  record is silent, reconstruct by judgment, but the entry MUST be marked *(inference)*;
+  a labeled guess is useful, an unlabeled one poisons the document.
 - **Blameless, structurally.** Root causes are systemic — a missing guardrail, an absent
   test, a process or design gap — never a person. When a chain lands on "someone made a
   mistake", it is unfinished: ask why the system let that mistake reach users (the
   translation table is in [references/five-whys.md](references/five-whys.md)).
-- **Boundaries.** This skill explains failures that already happened. Live debugging and
-  on-call triage are out of scope; understanding a healthy system is
+- **Boundaries.** This skill explains failures that already happened. It MUST NOT be used
+  for live debugging or on-call triage; understanding a healthy system is
   `feynman-walkthrough`; verifying a codebase's claims against authoritative sources is
   `base-in-reality`.
 

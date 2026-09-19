@@ -248,3 +248,12 @@ Skills appear in rewrite order.
 | c7 | 122 | - **Not a project-management tool.** No estimates, sprints, assignees, or stat… | plain (0.42, 0.29) | plain | |
 | c8 | 124 | - **Complements heavier PRD workflows.** When a full PRD process is in play, u… | plain (0.55, 0.29) | plain | |
 | c9 | 127 | - **Not a code-quality judge.** "How should I structure this service?" asked a… | plain (0.63, 0.27) | plain | |
+
+## bug-autopsy (4 candidates · 3 MUST · 0 SHOULD · 0 MAY · 1 plain · 1 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.66, 0.66) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c2 | 47 | - **Evidence or inference, labeled.** Every timeline entry and every "why" cite… | MUST (0.36, 0.51) | MUST | confidence 0.36 < 0.6, decided ourselves; mechanically enforced by `assets/postmortem_lint.py`'s evidence-citation FAIL check |
+| c3 | 51 | - **Blameless, structurally.** Root causes are systemic — a missing guardrail,… | plain (0.42, 0.34) | plain | harm 0.34 < 0.5, no gate enforces it — the lint's blame-phrasing check is an advisory WARN, not a FAIL |
+| c4 | 55 | - **Boundaries.** This skill explains failures that already happened. Live deb… | plain (0.38, 0.44) | MUST NOT | controller ruling per task brief: "refuses live incidents" is a MUST NOT (this skill's refusal to be used for live debugging/on-call triage) |
