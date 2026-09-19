@@ -28,7 +28,9 @@ answers.json keys (only these 7 are recognised; any other key is refused):
     defaults       (list of dict, optional)  -- default []
     system_one     (dict, optional)  -- {"allowed": bool, ...}; default {"allowed": false}
 
-Exit 0: prints "GRANT: <path>".
+Exit 0: prints "GRANT: <path>" as its last line. When <root>/.git is a directory, it first
+    appends GRANT_EXCLUDE to <root>/.git/info/exclude (once) and says so: a grant is one
+    person's acceptance, and check-grant treats a tracked grant as covering nothing.
 Exit 1: refused; prints "REFUSED: <reason>" (a GrantRefused: the spec, the plan, the
     answers, or the resulting statement failed a check).
 Exit 2: usage error (an unreadable or malformed --answers file, or one missing a required
@@ -56,6 +58,31 @@ USAGE = ("usage: write_grant.py --root DIR --spec REL_SPEC --plan PLAN_ENVELOPE_
 KNOWN_ANSWER_KEYS = frozenset({
     "branch_pattern", "gate_policy", "expires_at", "budget", "stop_on", "defaults", "system_one",
 })
+
+
+# Keeps every grant out of commits in this clone (skill-contract SPEC: a grant MUST NOT be
+# committed). info/exclude is per clone and never tracked, so no tracked file is touched.
+GRANT_EXCLUDE = ".skill-contract/envelopes/autonomy-grant-v1-*"
+
+
+def exclude_grants(root):
+    """Append GRANT_EXCLUDE to <root>/.git/info/exclude unless it is already there.
+    Returns True when the line is in place, False when <root>/.git is not a directory."""
+    git_dir = os.path.join(root, ".git")
+    if not os.path.isdir(git_dir):
+        return False
+    path = os.path.join(git_dir, "info", "exclude")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    if GRANT_EXCLUDE in (ln.strip() for ln in text.splitlines()):
+        return True
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(("\n" if text and not text.endswith("\n") else "") + GRANT_EXCLUDE + "\n")
+    return True
 
 
 class GrantRefused(Exception):
@@ -281,6 +308,15 @@ def main(argv=None):
     except (OSError, ValueError) as exc:
         print("REFUSED: cannot write the envelope: %s" % exc)
         return 1
+    try:
+        excluded = exclude_grants(root)
+    except (OSError, UnicodeDecodeError) as exc:
+        print("WARNING: could not add %s to .git/info/exclude (%s); do not commit the grant: "
+              "check-grant treats a tracked grant as covering nothing" % (GRANT_EXCLUDE, exc))
+    else:
+        if excluded:
+            print("NOTE: the grant is yours alone and is kept out of commits "
+                  "(.git/info/exclude lists %s)" % GRANT_EXCLUDE)
     print("GRANT: %s" % path)
     return 0
 

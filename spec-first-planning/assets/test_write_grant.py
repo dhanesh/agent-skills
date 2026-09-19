@@ -425,5 +425,58 @@ class TestCli(WriteGrantBase):
         self.assertTrue(r.stdout.strip().startswith("GRANT: "))
 
 
+
+class TestGitExclude(WriteGrantBase):
+    """A grant is one person's acceptance: write_grant keeps it out of commits (I1)."""
+
+    _write_answers = TestCli._write_answers
+    cli = TestCli.cli
+
+    EXCLUDE_LINE = ".skill-contract/envelopes/autonomy-grant-v1-*"
+
+    def _run(self):
+        r = self.cli("--root", self.root, "--spec", "docs/spec.md", "--plan", self.plan_path,
+                     "--answers", self._write_answers(), "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(r.stdout.strip().splitlines()[-1].startswith("GRANT: "), r.stdout)
+        return r
+
+    def _exclude(self):
+        with open(os.path.join(self.root, ".git", "info", "exclude"), encoding="utf-8") as f:
+            return f.read()
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_the_exclude_line_is_added_exactly_once(self):
+        subprocess.run(["git", "init", "-q", self.root], check=True)
+        before = self._exclude()
+        r = self._run()
+        self.assertIn("kept out of commits", r.stdout)
+        self._run()
+        text = self._exclude()
+        self.assertEqual(text.splitlines().count(self.EXCLUDE_LINE), 1, text)
+        self.assertTrue(text.startswith(before), "existing exclude lines must be kept")
+        st = subprocess.run(["git", "-C", self.root, "status", "--porcelain",
+                             "--untracked-files=all"], capture_output=True, text=True, check=True)
+        self.assertNotIn("autonomy-grant-v1-", st.stdout)
+
+    def test_a_missing_info_dir_is_created(self):
+        os.makedirs(os.path.join(self.root, ".git"))
+        self._run()
+        self.assertEqual(self._exclude().splitlines(), [self.EXCLUDE_LINE])
+
+    def test_an_exclude_without_a_trailing_newline_keeps_its_last_line(self):
+        os.makedirs(os.path.join(self.root, ".git", "info"))
+        with open(os.path.join(self.root, ".git", "info", "exclude"), "w",
+                  encoding="utf-8") as f:
+            f.write("*.log")
+        self._run()
+        self.assertEqual(self._exclude().splitlines(), ["*.log", self.EXCLUDE_LINE])
+
+    def test_no_git_dir_writes_no_exclude(self):
+        r = self._run()
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".git")))
+        self.assertNotIn("kept out of commits", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
