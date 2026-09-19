@@ -234,3 +234,17 @@ Skills appear in rewrite order.
 | c3 | 53 | - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types… | MUST (0.80, 0.77) | MUST | |
 | c4 | 57 | - **Spec tracking.** The generator targets OKF v0.1. If the spec has moved (che… | MUST (0.38, 0.64) | SHOULD | confidence 0.38 < 0.6, decided ourselves; no gate/test enforces staying on the current spec version — a strong default with a legitimate exception (the spec hasn't moved), not a hard failure |
 | c5 | 103 | - **Producer-extended bundles** (e.g. `feynman-walkthrough`'s explainers): arbit… | MUST (0.31, 0.61) | plain | describes the generator's rendering behavior for extra frontmatter keys; a descriptive never, not a directive (confidence 0.31 < 0.6) |
+
+## spec-first-planning (9 candidates · 3 MUST · 0 SHOULD · 0 MAY · 6 plain · 1 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 30 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.67, 0.72) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c2 | 45 | - **The spec** — drafted from `references/spec-template.md`. Required sections:… | MUST (0.79, 0.64) | MUST | enforced by `assets/spec_lint.py`'s missing-section FAIL |
+| c3 | 49 | - **The plan** — one or more tasks per requirement, each carrying *what* to cha… | MUST (0.87, 0.70) | MUST | enforced by `assets/spec_to_tasks.py`'s UNCOVERED gate |
+| c4 | 55 | The exact grammar, lint rules, JSON schema, and exit codes live in `references/… | plain (0.32, 0.37) | plain | |
+| c5 | 108 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills… | plain (0.53, 0.66) | plain | describes the contract's shape (predicateType, schema, claim status); the MUSTs of skill-contract commandments 8/10 live in workflow step 6, which stays a plain imperative per global constraints |
+| c6 | 120 | - **Not the executor.** This skill ends at the handoff; implementation belongs… | MUST (0.40, 0.65) | plain | confidence 0.40 < 0.6, decided ourselves; describes the skill's scope boundary, not a directive — matches the security-posture-audit Boundaries precedent |
+| c7 | 122 | - **Not a project-management tool.** No estimates, sprints, assignees, or stat… | plain (0.42, 0.29) | plain | |
+| c8 | 124 | - **Complements heavier PRD workflows.** When a full PRD process is in play, u… | plain (0.55, 0.29) | plain | |
+| c9 | 127 | - **Not a code-quality judge.** "How should I structure this service?" asked a… | plain (0.63, 0.27) | plain | |
