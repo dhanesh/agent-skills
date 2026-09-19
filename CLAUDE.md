@@ -18,7 +18,7 @@ failing check for that one skill.) The checks:
 | Structure/frontmatter | `scripts/gates/validate-skill.sh` | `SKILL.md`+`README.md` exist; `name` (kebab-case, ≤64) + `description` (≤1024); **no dangling** `references/`,`assets/`,`scripts/` paths; template↔`PARAMETERS.md` bijection |
 | Metadata standard | `scripts/gates/frontmatter-standard.sh` | frontmatter carries `license`, `compatibility`, and `metadata` (`author`/`version`/`tags`) |
 | Secrets/leaks | `scripts/gates/scan-leaks.sh` | no secrets, keys, or denylisted content |
-| Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`), including **PP-7**: every SKILL.md declares BCP 14 (RFC 2119/8174) and uses only `MUST`/`MUST NOT`/`SHOULD`/`SHOULD NOT`/`MAY` in capitals, on its hard rules |
+| Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`), including **PP-7**: every SKILL.md declares BCP 14 (RFC 2119/8174) and uses only `MUST`/`MUST NOT`/`SHOULD`/`SHOULD NOT`/`MAY` in capitals (whether keywords sit only on hard rules is item 7 of the agent review checklist in `docs/prompting-playbook.md`) |
 | Install replay | `scripts/gates/dry-run-replay.sh` | for skills with a `PARAMETERS.md` |
 | Asset paths | `scripts/gates/asset-paths.sh` | no skill-relative helper invocation in `SKILL.md` — agents run from the *target repo*, so `python3 assets/x.py` never resolves for them; use `"$SKILL_DIR/assets/x.py"` |
 | skill-contract | `scripts/gates/skill-contract.sh` | commandments 1–2 of [`docs/skill-contract/SPEC.md`](docs/skill-contract/SPEC.md) on **every** skill: frontmatter keys stay inside the Agent Skills allowed set, the `skill-contract` opt-in and the `## Contract` block come together or not at all, and an adopter's `assets/contract_check.py` is byte-identical to the reference (fix drift with `make contract-vendor`). `make contract` runs the reference checker's conformance vectors and the end-to-end handoff once per `make gate` |
@@ -42,7 +42,7 @@ make eval                       # just the outcome evals (docs/eval-standard.md)
 make frontmatter                # just the metadata-standard check
 make contract                   # skill-contract: reference checker vectors + end-to-end handoff
 make contract-vendor            # copy the reference checker into every adopting skill
-make playbook PLAYBOOK_FLAGS=--strict   # promote the two advisory checks to hard failures
+make playbook PLAYBOOK_FLAGS=--strict   # promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures; fails a fresh repo2skill scaffold by design
 make ab-validate [BASE=<ref>]   # behavioural A/B vs a baseline commit (see below)
 make list-skills
 ```

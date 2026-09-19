@@ -338,5 +338,10 @@ pp7_case "a declared skill using MUST passes" PASS "$(mkbcp good "$DECL" '' 'You
 pp7_case "a stray SHALL fails" FAIL "$(mkbcp shall "$DECL" '' 'You SHALL check the thing.')"
 pp7_case "SHALL inside a code fence is ignored" PASS "$(mkbcp fencedshall "$DECL" '' 'You MUST check it.' '```' 'SHALL' '```')"
 pp7_case "keywords only inside a code fence count as none (advisory)" INFO "$(mkbcp fenced "$DECL" '' '```' 'MUST' '```')"
+pp7_case "keywords only inside a code fence still PASS PP-7" PASS "$(mkbcp fencedpass "$DECL" '' '```' 'MUST' '```')"
+pp7_case "SHALL inside a ~~~ fence is ignored" PASS "$(mkbcp tilde "$DECL" '' 'You MUST check it.' '~~~' 'SHALL' '~~~')"
+pp7_case "a \`\`\`\` fence wrapping \`\`\` is one block" PASS "$(mkbcp fourbt "$DECL" '' 'You MUST check it.' '````md' '```' 'SHALL' '```' '````')"
+pp7_case "a declaration only inside a code fence does not count" FAIL "$(mkbcp declfence '```' "$DECL" '```' 'You MUST check it.')"
+pp7_case "SHALL after the declaration on its line is caught" FAIL "$(mkbcp declsame "$DECL You SHALL check it." 'You MUST check it.')"
 
 exit $rc

@@ -56,7 +56,7 @@ directory versus this repo's standard.
 `make gate-skill SKILL=<dir>` runs the repo's whole verify loop: structure and
 frontmatter validation (SKILL.md + README.md, kebab `name` ≤ 64, `description` ≤ 1024,
 no dangling `references/`/`assets/` paths, template↔PARAMETERS.md bijection), secret
-scanning, the Prompting Playbook lints (PP-1…PP-6, see `docs/prompting-playbook.md`),
+scanning, the Prompting Playbook lints (PP-1…PP-7, see `docs/prompting-playbook.md`),
 the standard-metadata check, each unit-test suite shipped under `assets/`, and the outcome eval per
 `docs/eval-standard.md`. All of that verifies **presence**. Substance — whether the
 sections are orthogonal, the deliverable is a real contract, each absolute is justified
