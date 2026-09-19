@@ -103,8 +103,8 @@ including a direct fingerprint-agreement test against the sibling tool.
 
 ## How to behave
 
-- **SHOULD NOT silently rely on a stale explainer** — the whole point of the pins is
-  that you can know better. Say "the repo has moved since this was written" before
+- **You SHOULD NOT silently rely on a stale explainer** — the whole point of the pins
+  is that you can know better. Say "the repo has moved since this was written" before
   quoting from it, then offer the refresh.
 - **Prefer surgical edits.** Refreshing is gardening, not replanting: keep prose,
   examples, and FAQ history that the diff didn't touch.
