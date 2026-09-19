@@ -22,6 +22,20 @@
 - Never weaken an existing check. If a fixture must change, keep the check at least as strict and say why in the commit.
 - **TDD:** write the failing test first, see it fail, then implement.
 - **The reference checker is the single source.** After any change to `docs/skill-contract/reference/contract_check.py`, run `make contract-vendor`, so every adopter's `assets/contract_check.py` stays byte-identical. The `skill-contract` gate fails on drift.
+- **Grant lifetime (owner decision A7, which no grant can lower):**
+  - A grant lives at most 7 days: `expires_at − generatedAtTime` must be ≤ 7 days, and `expires_at` ≤ now + 7 days.
+  - Every test, eval or A/B fixture that builds a grant at run time MUST use these module-level helpers (stdlib):
+
+    ```python
+    from datetime import datetime, timedelta, timezone
+    def _now_z(): return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    def _in_one_day(): return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ```
+
+    They set `generatedAtTime = _now_z()` and `expires_at = _in_one_day()`. `write_grant.py` sets `generatedAtTime` itself.
+- **More A7 floors:**
+  - `merge`, `deploy`, `spend`, `external_message` and `delete` are covered only by a `SIGNED_HW` grant;
+  - a grant never covers the repo's default branch. Test repos made with `git init -b main` therefore get `reason=default-branch`, so use a non-default branch such as `git checkout -q -b factory/x` whenever a covered result is expected inside git.
 - **Kind URI (verbatim):** `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1`.
 - **Action classes (verbatim, in this order):** `read_only`, `local_reversible`, `push_branch`, `open_pr`, `merge`, `deploy`, `spend`, `external_message`, `delete`.
   - `auto` is allowed only on `read_only` and `local_reversible`.
@@ -1084,7 +1098,7 @@ Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X"
   - `require_signature`, `budget`, `stop_on`, `defaults` and `system_one` (optional, defaulting to `{}`, `{}`, `[]`, `[]` and `{"allowed": false}`).
 
 - [ ] **Step 1: Write the failing tests** in `test_write_grant.py`. Use a temp repo with `docs/spec.md` = Task 4's `FULL` (import it from `test_spec_lint`, or copy the constant) and a plan envelope produced by `spec_to_tasks.write_task_plan_envelope`. Cover these cases:
-  1. `build_grant` + write gives an envelope for which `contract_check.check_grant(root, "local_reversible", branch="factory/x")` returns COVERED, with `gate_policy={"read_only": "auto", "local_reversible": "grant"}`, `expires_at="2999-01-01T00:00:00Z"`, `branch_pattern="factory/*"`.
+  1. `build_grant` + write gives an envelope for which `contract_check.check_grant(root, "local_reversible", branch="factory/x")` returns COVERED, with `gate_policy={"read_only": "auto", "local_reversible": "grant"}`, `expires_at=_in_one_day()`, `branch_pattern="factory/*"`.
   2. The decisions in the payload equal the spec's Decisions (D1).
   3. The single assertion is `grant-accepted`, `assertedBy {"human": "Dana"}`, with command `["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py", "--unattended", "docs/spec.md"]`.
   4. It is refused (exit 1, `REFUSED:`) when the spec fails `--unattended` (use `LIGHT`).
@@ -1226,7 +1240,7 @@ def write_grant(repo, policy):
             for f in fs if f.startswith("task-plan-")][0]
     ans = os.path.join(repo, "answers.json")
     json.dump({"branch_pattern": "*", "gate_policy": policy,
-               "expires_at": "2999-01-01T00:00:00Z"}, open(ans, "w"))
+               "expires_at": _in_one_day()}, open(ans, "w"))
     return subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "write_grant.py"),
                            "--root", repo, "--spec", "docs/spec.md", "--plan", plan,
                            "--answers", ans, "--accepted-by", "Dana"],
@@ -1308,13 +1322,13 @@ def _grant_fixture(root, assertedBy):
           "predicateType": GRANT_KIND,
           "predicate": {"skillContract": "1", "id": gid,
                         "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
-                        "generatedAtTime": "2026-09-19T12:00:00Z", "wasRevisionOf": None,
+                        "generatedAtTime": _now_z(), "wasRevisionOf": None,
                         "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
                                     "decisions": [{"id": "D1", "question": "q", "answer": "a",
                                                    "source": "s"}],
                                     "defaults": [], "gate_policy": {"local_reversible": "grant"},
                                     "require_signature": {}, "budget": {}, "stop_on": [],
-                                    "expires_at": "2999-01-01T00:00:00Z",
+                                    "expires_at": _in_one_day(),
                                     "system_one": {"allowed": False}, "revoked": False},
                         "assertions": [{"test": "grant-accepted", "assertedBy": assertedBy,
                                         "result": {"outcome": "passed"},
@@ -1415,7 +1429,7 @@ Recommended: OPT-A — satisfies every RT at the lowest complexity.
 - D1: May the export add a dependency? -> no (source: sweep)
 """
 ANSWERS = {"branch_pattern": "*", "gate_policy": {"read_only": "auto", "local_reversible": "grant"},
-           "expires_at": "2999-01-01T00:00:00Z"}
+           "expires_at": _in_one_day()}
 
 
 class GrantE2ETests(unittest.TestCase):
@@ -1500,10 +1514,25 @@ class GrantE2ETests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_e_a_branch_outside_the_pattern_asks(self):
         subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True)
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "other/x"], check=True)
         self.grant(dict(ANSWERS, branch_pattern="factory/*"))
         rc, last = self.check("local_reversible")
         self.assertEqual(rc, 3)
         self.assertIn("reason=branch", last)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_f_the_default_branch_is_never_covered(self):
+        subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True)
+        self.grant()  # branch_pattern "*" would match main, but the A7 floor wins
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=default-branch", last)
+
+    def test_g_merge_needs_a_hardware_signature(self):
+        self.grant(dict(ANSWERS, gate_policy={"local_reversible": "grant", "merge": "grant"}))
+        rc, last = self.check("merge")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=signature", last)
 ```
 
   `GRANT_SPEC` is Task 4's `FULL` text, verbatim: it passes `spec_lint.py --unattended`.
@@ -1569,12 +1598,12 @@ def check_autonomy_grant(old, new):
               "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
               "predicate": {"skillContract": "1", "id": gid,
                             "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
-                            "generatedAtTime": "2026-09-19T12:00:00Z", "wasRevisionOf": None,
+                            "generatedAtTime": _now_z(), "wasRevisionOf": None,
                             "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
                                         "decisions": [], "defaults": [],
                                         "gate_policy": {"local_reversible": "grant"},
                                         "require_signature": {}, "budget": {}, "stop_on": [],
-                                        "expires_at": "2999-01-01T00:00:00Z",
+                                        "expires_at": _in_one_day(),
                                         "system_one": {"allowed": False}, "revoked": False},
                             "assertions": [{"test": "grant-accepted",
                                             "assertedBy": {"skill": "spec-first-planning"},
