@@ -4689,6 +4689,22 @@ go_fmt = p3["existing_verifiers"].get("format")
 out["go_format_cannot_fail"] = 1 if (
     go_fmt and not go_fmt.startswith("test -z")) else 0
 
+# I1: a comment, a description string, an unrelated package name, and a
+# lint-only ruff section are not a real formatter adoption. None of these
+# has ever been a true positive (the pre-bug3-fix baseline always proposes
+# compileall, ignorant of content) so this is a guard against a false
+# positive the fix's own new detection logic could introduce.
+r4 = repo({
+    "pyproject.toml": ('[project]\nname = "x"\ndescription = "Paint it black"\n'
+                        '# black compat\n[tool.ruff.lint]\nselect = ["E"]\n'),
+    "requirements.txt": "black-magic==1.0\nruff-lint-only==2.0\n",
+})
+p4 = detect_stack.detect(r4)
+fmt4 = [p for p in p4["proposals"] if p["rail"] == "format"]
+cmd4 = fmt4[0]["command"] if fmt4 else None
+out["py_falsepos_reads_as_real_formatter"] = 1 if cmd4 in (
+    "ruff format --check .", "black --check .") else 0
+
 import json
 print(json.dumps(out))
 """
@@ -4718,11 +4734,25 @@ def check_factory_trust_vi(old, new):
         "bare `gofmt -l .` lists offenders but always exits 0; "
         "`test -z \"$(gofmt -l .)\"` is the failing form",
         since=SINCE_FACTORY_TRUST_VI)
-    row(s, "python repo that adopts ruff still gets a real format check",
+    row(s, "python repo that adopts ruff gets a real format check, not compileall",
         a.get("py_ruff_format_cmd"), b.get("py_ruff_format_cmd"),
-        b.get("py_ruff_format_cmd") == "ruff format --check .",
-        "the detect-or-decline fallback must not swallow a repo that already "
-        "adopted a formatter", kind="guard")
+        b.get("py_ruff_format_cmd") == "ruff format --check ."
+        and "compileall" in (a.get("py_ruff_format_cmd") or ""),
+        "before the fix, adopting ruff changed nothing — the format rail was "
+        "still the build rail's compileall syntax check",
+        since=SINCE_FACTORY_TRUST_VI)
+    row(s, "a comment/description/unrelated-package/lint-only-ruff repo is "
+           "credited a real formatter check (1=yes, lower=better)",
+        a.get("py_falsepos_reads_as_real_formatter"),
+        b.get("py_falsepos_reads_as_real_formatter"),
+        a.get("py_falsepos_reads_as_real_formatter") == 0
+        and b.get("py_falsepos_reads_as_real_formatter") == 0,
+        "`# black compat`, `description = \"Paint it black\"`, "
+        "`black-magic==1.0`/`ruff-lint-only`, and a lint-only [tool.ruff.lint] "
+        "section must never read as an adopted formatter — the baseline never "
+        "detects one at all (always compileall), and the fix's structural "
+        "matching must not introduce a false positive either",
+        kind="guard")
 
 
 # ── bug-autopsy (evidence VALUE, not just the label) ────────────────────────
