@@ -142,21 +142,33 @@ def lint_grounding(findings, evidence=None):
 # ── Refutation aggregation (verdict-rubric.md step 3) ────────────────────────
 # Mirrors the aggregation in assets/workflow.mjs. Keep the two in step.
 MIN_REFUTERS = 3
-UNANIMITY_SEVERITIES = ("critical", "high")
+# Only these severities get the lenient (>= 2 refutes) threshold. Every other
+# value, including a missing or unknown severity, fails closed to unanimity.
+LENIENT_SEVERITIES = ("medium", "low")
 
 
-def refutation_downgrades(severity, verdicts):
+def _declared_refuters(refuters):
+    """The refuter count a finding declares, or 0 when it is not a sane int."""
+    if isinstance(refuters, bool) or not isinstance(refuters, int):
+        return 0
+    return max(0, refuters)
+
+
+def refutation_downgrades(severity, verdicts, refuters=None):
     """True if these refuter votes must downgrade a finding to UNCONFIRMED.
 
     A vote counts as non-refute only when it is literally False: a refuter
     that crashed or returned nothing is maximally uncertain, and an uncertain
-    refuter refutes (rubric step 2). Missing votes below MIN_REFUTERS count
-    the same way. critical/high need unanimous non-refute; others need < 2.
+    refuter refutes (rubric step 2). Votes are padded with refutes up to
+    max(MIN_REFUTERS, refuters): a declared refuter with no recorded vote
+    crashed. medium/low are downgraded by >= 2 refutes; every other severity
+    (critical, high, missing, unknown) needs unanimous non-refute.
     """
     votes = list(verdicts or [])
-    votes += [None] * max(0, MIN_REFUTERS - len(votes))
+    floor = max(MIN_REFUTERS, _declared_refuters(refuters))
+    votes += [None] * max(0, floor - len(votes))
     refutes = sum(1 for v in votes if v is not False)
-    return refutes >= (1 if severity in UNANIMITY_SEVERITIES else 2)
+    return refutes >= (2 if severity in LENIENT_SEVERITIES else 1)
 
 
 def lint_findings(findings, schema=None):
@@ -229,13 +241,18 @@ def lint_findings(findings, schema=None):
                     f"{where}: verdict {verdict} with no recorded refutation "
                     f"(>= {MIN_REFUTERS} refuter verdicts) — a finding that did not "
                     "survive a recorded refutation pass must be UNCONFIRMED")
-            elif refutation_downgrades(f.get("severity"), votes):
-                n_ref = sum(1 for v in votes if v is not False)
-                rule = ("critical/high needs unanimous non-refute"
-                        if f.get("severity") in UNANIMITY_SEVERITIES
-                        else ">= 2 refutes downgrades")
+            elif refutation_downgrades(f.get("severity"), votes,
+                                       ref.get("refuters")):
+                declared = max(MIN_REFUTERS, len(votes),
+                               _declared_refuters(ref.get("refuters")))
+                n_ref = (sum(1 for v in votes if v is not False)
+                         + declared - len(votes))
+                rule = (">= 2 refutes downgrades"
+                        if f.get("severity") in LENIENT_SEVERITIES
+                        else "critical/high (or unknown severity) needs "
+                             "unanimous non-refute")
                 errors.append(
-                    f"{where}: {n_ref}/{len(votes)} refuters refuted a "
+                    f"{where}: {n_ref}/{declared} refuters refuted a "
                     f"{f.get('severity')} {verdict} — {rule}; report it as UNCONFIRMED")
 
         if f.get("downgraded") is True and verdict != "UNCONFIRMED":

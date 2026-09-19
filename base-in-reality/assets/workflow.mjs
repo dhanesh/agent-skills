@@ -108,10 +108,13 @@ const results = await pipeline(
       // refuter that returned nothing is maximally uncertain, so a crash is a refute.
       const verdicts = votes.map((v) => (v ? v.refuted !== false : true))
       const refutes = verdicts.filter(Boolean).length
-      // Step 3: critical/high keep VIOLATION/DEVIATION only on unanimous non-refute;
-      // any other severity is downgraded by >= 2 refutes. Mirrored by
+      // Step 3: medium/low are downgraded by >= 2 refutes; every other severity
+      // (critical, high, and a missing or unknown one: fail closed) keeps
+      // VIOLATION/DEVIATION only on unanimous non-refute. Mirrored by
       // refutation_downgrades() in assets/report_lint.py; keep the two in step.
-      const unanimity = finding.severity === 'critical' || finding.severity === 'high'
+      // One vote per lens is always recorded (a crash is a refute), so
+      // refuters === verdicts.length here and the linter's padding is a no-op.
+      const unanimity = !['medium', 'low'].includes(finding.severity)
       const downgrade = unanimity ? refutes >= 1 : refutes >= 2
       // Step 4: record the votes on every finding, so the linter can check them.
       const refutation = {

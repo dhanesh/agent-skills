@@ -109,8 +109,9 @@ subagent's prompt:
 5. **Refute (fan-out, adversarial).** For each candidate `VIOLATION`/`DEVIATION`, dispatch
    independent refuters across distinct lenses (correctness, citation-applicability,
    severity) per `references/verdict-rubric.md`. Each defaults to skeptical. Downgrade to
-   `UNCONFIRMED` when any refuter refutes a `critical`/`high` finding, or when ≥2 of 3 refute
-   a finding of any other severity. A refuter that returns nothing counts as a refute. Record
+   `UNCONFIRMED` when ≥2 of 3 refute a `medium`/`low` finding, or when any refuter refutes a
+   finding of any other severity (`critical`, `high`, or a missing or unknown one). A refuter
+   that returns nothing counts as a refute. Record
    the votes in the finding's `refutation` field, whether it survives or not.
 
 6. **Synthesize.** Before filling the report, lint the merged findings array with the
@@ -122,7 +123,8 @@ subagent's prompt:
    against the URLs a retrieval actually returned, so a plausible-looking but never-fetched
    DOI fails instead of rendering as grounded. It also checks refutation: a surviving
    `VIOLATION`/`DEVIATION` with no recorded `refutation`, or with votes that stage 5 says
-   downgrade it, is rejected. You MUST run it WITH `--evidence`: the result line
+   downgrade it, is rejected. A PASS means the recorded votes agree with the verdict, not that
+   the votes were honest. You MUST run it WITH `--evidence`: the result line
    states which mode ran, and a report linted without it is only shape-checked.
    Fix every `ERROR:` line, then fill `assets/report-skeleton.md`. Writing the report to
    `docs/base-in-reality/<YYYY-MM-DD>-audit.md` is this skill's one expected write outside

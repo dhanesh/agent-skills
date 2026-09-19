@@ -135,7 +135,32 @@ class RefutationAggregation(unittest.TestCase):
         self.assertTrue(refutation_downgrades("critical", [False, False]))
         self.assertTrue(refutation_downgrades("medium", [False]))
         errs = lint_findings([good_finding(refutation=votes(False, None, False))])
-        self.assertTrue(any("refute" in e for e in errs), errs)
+        self.assertTrue(any("unanimous" in e for e in errs), errs)
+
+    def test_unknown_or_missing_severity_fails_closed(self):
+        # An unknown or missing severity takes the strict (unanimity) threshold:
+        # one refute of three downgrades it, as it would a critical finding.
+        for sev in (None, "bogus", "", "CRITICAL"):
+            self.assertTrue(refutation_downgrades(sev, [True, False, False]), sev)
+            self.assertFalse(refutation_downgrades(sev, [False, False, False]), sev)
+        # control: only medium/low get the lenient >= 2 threshold
+        self.assertFalse(refutation_downgrades("medium", [True, False, False]))
+        self.assertFalse(refutation_downgrades("low", [True, False, False]))
+
+    def test_votes_padded_to_declared_refuters(self):
+        # A finding that declares 5 refuters but records 3 votes: the 2 missing
+        # refuters are counted as refutes (a crash is a refute), so it downgrades.
+        self.assertTrue(refutation_downgrades("critical", [False] * 3, refuters=5))
+        self.assertTrue(refutation_downgrades("medium", [False] * 3, refuters=5))
+        self.assertFalse(refutation_downgrades("medium", [False] * 3, refuters=4))
+        self.assertFalse(refutation_downgrades("critical", [False] * 5, refuters=5))
+        # a declared count below the floor never lowers it
+        self.assertTrue(refutation_downgrades("critical", [False] * 2, refuters=1))
+        errs = lint_findings([good_finding(refutation={
+            "refuters": 5, "verdicts": [False, False, False], "rationale": ""})])
+        self.assertTrue(any("unanimous" in e for e in errs), errs)
+        self.assertEqual(lint_findings([good_finding(refutation={
+            "refuters": 5, "verdicts": [False] * 5, "rationale": ""})]), [])
 
     def test_linter_fails_critical_violation_with_one_refute(self):
         errs = lint_findings([good_finding(refutation=votes(True, False, False))])
