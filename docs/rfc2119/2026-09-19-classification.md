@@ -270,3 +270,12 @@ Skills appear in rewrite order.
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 29 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.73) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+
+## ai-migration-operating-model (4 candidates · 3 MUST · 0 SHOULD · 0 MAY · 1 plain · 0 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.75) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c2 | 131 | - **Not the bulk executor.** This skill ends when the machine is built and the … | plain (0.50, 0.49) | plain | describes the skill's scope boundary, not a directive — matches the security-posture-audit/spec-first-planning Boundaries precedent |
+| c3 | 134 | - **Honest about "no".** If no judge can be built, the answer is "don't migrat… | MUST (0.39, 0.63) | MUST | confidence 0.39 < 0.6, decided ourselves; harm 0.63 justifies MUST on its own — a false "go" verdict on an unverifiable migration is the harm this doctrine exists to prevent |
+| c4 | 136 | - **Parity over aesthetics.** For money movement, fees, schedules, reconciliat… | MUST (0.76, 0.85) | MUST | |
