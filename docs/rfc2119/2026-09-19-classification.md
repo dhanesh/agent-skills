@@ -63,7 +63,7 @@ Skills appear in rewrite order.
 | c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. Deliberate meaning clarification: "Prefer these defaults" is dropped because the heading says "do not weaken these" and the invariants are MUST (controller ruling; Jev 0.97 for keeping MUST) |
 | c10 | 178 | Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis i… | MUST (0.59, 0.71) | MUST |  |
 
-## crafting-self-prompting-loops (11 candidates · 7 MUST · 0 SHOULD · 0 MAY · 4 plain · 4 departures)
+## crafting-self-prompting-loops (11 candidates · 6 MUST · 1 SHOULD · 0 MAY · 4 plain · 4 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -77,7 +77,7 @@ Skills appear in rewrite order.
 | c8 | 72 | 2. **A runnable scaffold** — in the user's target runtime. For Claude Code, that's the re… | MUST (0.27, 0.62) | MUST |  |
 | c9 | 80 | If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: s… | plain (0.57, 0.51) | plain |  |
 | c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched |
-| c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | MUST | the named deliverable format and its already-absolute ALWAYS; harm 0.51, and the template carries the mandatory backstop and <data> slots |
+| c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | SHOULD | report format, not machine-consumed; aligned with verifier-installer c4 |
 
 ## mockstar-mock (14 candidates · 10 MUST · 1 SHOULD · 0 MAY · 3 plain · 3 departures)
 
@@ -91,21 +91,21 @@ Skills appear in rewrite order.
 | c6 | 68 | 4. **No silent truncation.** When \`--max-endpoints\` caps the inventory, every drop… | MUST (0.87, 0.76) | MUST |  |
 | c7 | 70 | 5. **Read-only inputs.** Never modify source spec files, HAR archives, or documen… | MUST (0.56, 0.74) | MUST | low confidence, but Invariants heading + real data-loss harm (0.74) support MUST |
 | c8 | 81 | \`--runtime auto\|local\|docker\` — selects how mockstar is invoked (default: \`auto\`)… | MUST (0.15, 0.74) | plain | describes what each \`--runtime\` value does; not a directive to the agent (confidence 0.15) |
-| c9 | 100 | Hand subagents the literal absolute \`$EXTRACT\` and \`$SMOKE\` values — never a rela… | MUST (0.71, 0.82) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c9 | 100 | Hand subagents the literal absolute \`$EXTRACT\` and \`$SMOKE\` values — never a rela… | MUST (0.71, 0.82) | MUST | the SKILL.md \`$SKILL_DIR\` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c10 | 177 | For **documentation URLs**, fetch the content first with \`curl -L\` (or WebFetch),… | MUST (0.77, 0.82) | MUST |  |
 | c11 | 216 | **Prose** — extract from code fences, Markdown tables, and inline backtick refer… | MUST (0.75, 0.81) | MUST |  |
 | c12 | 253 | \`webhookHints[]\` → \`webhooks[]\` on the triggering entry. When a hint carries \`sig… | MUST (0.82, 0.82) | MUST |  |
 | c13 | 379 | **Consequence for this skill:** if \`--tenant\` is not \`default\`, every consumer —… | MUST (0.80, 0.82) | plain | the only always ("the CLI serve path always enables path + header modes") describes default CLI config, not a directive; not under a hard-rule heading |
-| c14 | 464 | The skill's asset helpers (\`assets/extract_text.py\`, \`assets/smoke.sh\`) live in t… | MUST (0.81, 0.81) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c14 | 464 | The skill's asset helpers (\`assets/extract_text.py\`, \`assets/smoke.sh\`) live in t… | MUST (0.81, 0.81) | MUST | the SKILL.md \`$SKILL_DIR\` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 
-## clean-code (32 candidates · 0 MUST · 16 SHOULD · 0 MAY · 16 plain · 3 departures)
+## clean-code (32 candidates · 0 MUST · 14 SHOULD · 0 MAY · 18 plain · 5 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 29 | A working guide to Robert C. Martin's principles. The aim is not to recite rules — … | plain (0.94, 0.16) | plain |  |
 | c2 | 34 | But *clean* means **as simple as the problem allows**, never as elaborate as possi… | plain (0.57, 0.20) | plain |  |
 | c3 | 39 | This file (L1) is always active. Apply it to every function, class, or module you … | MUST (0.44, 0.23) | plain | describes the skill's always-loaded scope; harm 0.23 <0.5, no gate — the imperative that follows is a workflow step |
-| c4 | 72 | 1. Run the suite. Green? Refactor. Red? Fix or report the failure first — never re… | MUST (0.55, 0.43) | SHOULD | harm 0.43 <0.5 caps it below MUST (no gate enforces it); the exception is named in step 4 (no test covering the change) |
+| c4 | 72 | 1. Run the suite. Green? Refactor. Red? Fix or report the failure first — never re… | MUST (0.55, 0.43) | SHOULD | harm 0.43 < 0.5 caps it below MUST; no gate enforces it; 'fix or report' is the stated alternative |
 | c5 | 142 | The **principle and the shape** are the point, never the syntax. A snippet in one … | plain (0.80, 0.16) | plain |  |
 | c6 | 153 | \| Rule \| One-line \| Violation signal \| | plain (0.68, 0.23) | plain | table header, not a sentence |
 | c7 | 154 | \|---\|---\|---\| | plain (0.83, 0.16) | plain | table separator, not a sentence |
@@ -123,10 +123,10 @@ Skills appear in rewrite order.
 | c19 | 172 | 5. **Fewer arguments** — 0 is best, 1 good, 2 fine, 3 needs justification. More th… | SHOULD (0.33, 0.31) | SHOULD |  |
 | c20 | 174 | 6. **Command-Query Separation** — change state *or* return a value, not both. | SHOULD (0.32, 0.29) | SHOULD |  |
 | c21 | 178 | Name reveals intent (\`elapsedTimeInDays\`, not \`d\`). | plain (0.75, 0.15) | plain |  |
-| c22 | 179 | Pronounceable and searchable; avoid cryptic abbreviations and disinformation. | SHOULD (0.41, 0.20) | SHOULD |  |
+| c22 | 179 | Pronounceable and searchable; avoid cryptic abbreviations and disinformation. | SHOULD (0.41, 0.20) | plain | style checklist (spec §2: style is plain); uniform with siblings c21/c23/c24 |
 | c23 | 180 | Classes are nouns (\`Customer\`, \`Account\`); methods are verbs (\`postPayment\`, \`save… | plain (0.70, 0.16) | plain |  |
 | c24 | 182 | No type encodings (\`strName\`, \`iCount\`), no noise words (\`theData\`, \`aInfo\`). | plain (0.50, 0.15) | plain |  |
-| c25 | 183 | One word per concept across the codebase — pick \`get\` *or* \`fetch\` *or* \`retrieve… | SHOULD (0.34, 0.19) | SHOULD |  |
+| c25 | 183 | One word per concept across the codebase — pick \`get\` *or* \`fetch\` *or* \`retrieve… | SHOULD (0.34, 0.19) | plain | style checklist (spec §2: style is plain); uniform with siblings c21/c23/c24 |
 | c26 | 188 | A design is simple to the extent that it: | plain (0.94, 0.19) | plain |  |
 | c27 | 189 | 1. **Passes all the tests** — it works, verifiably. | MUST (0.53, 0.51) | plain | defines Kent Beck's four rules descriptively, like siblings c26/c28-31; low confidence (0.53) and no gate enforces this restatement (the project's own test suite already governs whether tests pass) |
 | c28 | 190 | 2. **Reveals intent** — names and structure say what it does. | plain (0.43, 0.25) | plain |  |
@@ -140,7 +140,7 @@ Skills appear in rewrite order.
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 28 | Walk a learner — the user, or an agent onboarding onto an unfamiliar system — thro… | plain (0.69, 0.43) | plain |  |
-| c2 | 36 | **Locating this skill's helpers (do this first).** The steps below run bundled sc… | MUST (0.79, 0.73) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c2 | 36 | **Locating this skill's helpers (do this first).** The steps below run bundled sc… | MUST (0.79, 0.73) | MUST | the SKILL.md \`$SKILL_DIR\` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c3 | 98 | 4. **Check understanding — after the walkthrough, never before.** A few targeted … | plain (0.47, 0.33) | plain | Workflow step 4; out of scope per the spec's "workflow steps stay plain imperatives" |
 | c4 | 136 | **STALE** → the source moved (new commits, revised doc). Say so before relying on… | plain (0.28, 0.53) | plain | "never trips STALE" describes \`okf.py\`'s diff-detection behaviour, not a directive |
 | c5 | 182 | the **reference explainer** — standalone, revisitable, sharable; useful to the le… | plain (0.63, 0.29) | plain | "never saw this session" describes a hypothetical colleague, not a directive |
@@ -149,7 +149,7 @@ Skills appear in rewrite order.
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 14 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.76, 0.78) | MUST | mechanically enforced by \`scripts/gates/asset-paths.sh\` |
+| c1 | 14 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.76, 0.78) | MUST | the SKILL.md \`$SKILL_DIR\` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 45 | **The human never runs a launcher.** The installed zsh hook (\`agent-shell-hook.zs… | plain (0.46, 0.48) | plain |  |
 | c3 | 49 | **Humans use tmux only.** They just run their agent (\`claude\`, \`codex\`, …) in an… | plain (0.28, 0.38) | SHOULD | harm 0.38 <0.5 caps below MUST; a genuine behavioural default keeping the human surface pure tmux (per the skill's own description promise), with an alternative named in the same sentence |
 | c4 | 54 | The cockpit deliberately claims exactly **one** prefix key (\`prefix a\`) and puts … | MUST (0.32, 0.54) | plain | describes the key-table design's non-collision guarantee, not a directive to the agent |
@@ -171,7 +171,7 @@ Skills appear in rewrite order.
 | c9 | 117 | \| \`credential-file\` (.env*/.pem/id_* presence, content never read) \| HIGH \| | MUST (0.61, 0.59) | plain | table row describing the check's behaviour (content never read), not a directive |
 | c10 | 140 | - **Unreadable/malformed manifests** surface as \`parse-error\` entries, never cra… | MUST (0.50, 0.56) | MUST |  |
 
-## base-in-reality (7 candidates · 6 MUST · 1 SHOULD · 0 MAY · 0 plain · 1 departures)
+## base-in-reality (7 candidates · 7 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -179,7 +179,7 @@ Skills appear in rewrite order.
 | c2 | 33 | 1. **Never edit code.** \`--annotate\` inserts comment markers only — never logic.… | MUST (0.89, 0.76) | MUST |  |
 | c3 | 37 | 2. **No fabricated citations.** Cite only URLs/DOIs fetched this session, and pr… | MUST (0.93, 0.82) | MUST |  |
 | c4 | 41 | 3. **Adversarial gate.** No \`VIOLATION\`/\`DEVIATION\` is reported without survivin… | MUST (0.96, 0.73) | MUST |  |
-| c5 | 43 | 4. **No silent truncation.** If \`--max-claims\` caps extraction, list what was dr… | MUST (0.87, 0.44) | SHOULD | harm 0.44 < 0.5 caps it at SHOULD; no gate or test checks that dropped claims are listed (the eval only checks the skeleton has a Dropped-claims log section) |
+| c5 | 43 | 4. **No silent truncation.** If \`--max-claims\` caps extraction, list what was dr… | MUST (0.87, 0.44) | MUST |  |
 | c6 | 74 | - Hand subagents the literal absolute \`$FETCH\` value — never a relative \`assets/… | MUST (0.70, 0.80) | MUST |  |
 | c7 | 112 | 6. **Synthesize.** Before filling the report, lint the merged findings array wit… | MUST (0.68, 0.80) | MUST |  |
 
@@ -196,7 +196,7 @@ Skills appear in rewrite order.
 | c7 | 134 | - **Prove, don't presume.** A rail counts as installed when it was watched faili… | MUST (0.58, 0.55) | MUST |  |
 | c8 | 137 | - **Stay off the style battlefield.** Wire checks for whatever formatter/tooling… | SHOULD (0.29, 0.38) | SHOULD |  |
 
-## agent-ready-rails (7 candidates · 5 MUST · 0 SHOULD · 0 MAY · 2 plain · 2 departures)
+## agent-ready-rails (7 candidates · 4 MUST · 1 SHOULD · 0 MAY · 2 plain · 3 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -206,7 +206,7 @@ Skills appear in rewrite order.
 | c4 | 65 | Follow these steps in order. Steps 1–4 are read-only and always run; step 5 writ… | MUST (0.38, 0.65) | MUST |  |
 | c5 | 79 | It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rai… | MUST (0.86, 0.71) | plain | describes what collect_evidence.py does (collects and flags, never scores; settings-error instead of crashes); not a directive |
 | c6 | 81 | Then, for each rail in scope, verify and extend the collector's leads against th… | MUST (0.95, 0.79) | MUST |  |
-| c7 | 101 | ALWAYS structure the scorecard like this: | MUST (0.73, 0.51) | MUST |  |
+| c7 | 101 | ALWAYS structure the scorecard like this: | MUST (0.73, 0.51) | SHOULD | report format, not machine-consumed; aligned with verifier-installer c4 |
 
 ## context-hygiene-kit (5 candidates · 4 MUST · 0 SHOULD · 0 MAY · 1 plain · 1 departures)
 
@@ -229,7 +229,7 @@ Skills appear in rewrite order.
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 35 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.75, 0.76) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 35 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.75, 0.76) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 50 | - **The bundle is read-only.** The generator never mutates the source bundle. Wh… | MUST (0.60, 0.59) | MUST | |
 | c3 | 53 | - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types… | MUST (0.80, 0.77) | MUST | |
 | c4 | 57 | - **Spec tracking.** The generator targets OKF v0.1. If the spec has moved (che… | MUST (0.38, 0.64) | SHOULD | fix round 1: confidence 0.38 < 0.6, decided ourselves; `references/okf-spec.md:44-51` itself allows generating without updating — "Before generating ... when network access exists — and always when a bundle declares an okf_version other than 0.1, check the spec URL" — and its own invariant is "Never silently emit ... the WARN: report exists so nothing is dropped without a trace", not "always update the generator first". The check is conditional (network access, or a mismatched okf_version), so a blanket MUST would overclaim; SHOULD fits a strong default with that legitimate condition |
@@ -239,7 +239,7 @@ Skills appear in rewrite order.
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 30 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.67, 0.72) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 30 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.67, 0.72) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 45 | - **The spec** — drafted from `references/spec-template.md`. Required sections:… | MUST (0.79, 0.64) | MUST | enforced by `assets/spec_lint.py`'s missing-section FAIL |
 | c3 | 49 | - **The plan** — one or more tasks per requirement, each carrying *what* to cha… | MUST (0.87, 0.70) | MUST | enforced by `assets/spec_to_tasks.py`'s UNCOVERED gate |
 | c4 | 55 | The exact grammar, lint rules, JSON schema, and exit codes live in `references/… | plain (0.32, 0.37) | plain | |
@@ -250,33 +250,33 @@ Skills appear in rewrite order.
 | c9 | 127 | - **Not a code-quality judge.** "How should I structure this service?" asked a… | plain (0.63, 0.27) | plain | |
 | c10 | 94 | 6. **Hand off through skill-contract.** … If it names one, propose the handoff … | not extracted (no never/always, not a hard-rule heading) | MUST / MUST NOT | fix round 1, correcting 0f5e62a: this workflow step directly implements skill-contract commandment 10 ("A producer MUST propose each handoff and wait for a yes") and commandment 8's "MUST NOT fail when none exists"; the earlier commit's rationale for leaving it plain was wrong — the creed's own MUSTs apply here, not just to the `## Contract` section |
 
-## bug-autopsy (4 candidates · 3 MUST · 1 SHOULD · 0 MAY · 0 plain · 2 departures)
+## bug-autopsy (4 candidates · 2 MUST · 1 SHOULD · 0 MAY · 1 plain · 1 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.66, 0.66) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.66, 0.66) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 47 | - **Evidence or inference, labeled.** Every timeline entry and every "why" cite… | MUST (0.36, 0.51) | MUST | confidence 0.36 < 0.6, decided ourselves; mechanically enforced by `assets/postmortem_lint.py`'s evidence-citation FAIL check |
 | c3 | 51 | - **Blameless, structurally.** Root causes are systemic — a missing guardrail,… | plain (0.42, 0.34) | SHOULD | fix round 1: `references/five-whys.md:50` and `references/postmortem-template.md:50` both assert "never a person" as the skill's own standing rule, but `assets/postmortem_lint.py`'s blame-phrasing check is an advisory WARN, not a FAIL — no gate enforces it, so it lands at SHOULD/SHOULD NOT, consistent with knowledge-gardener's c2 |
-| c4 | 55 | - **Boundaries.** This skill explains failures that already happened. Live deb… | plain (0.38, 0.44) | MUST NOT | controller ruling per task brief: "refuses live incidents" is a MUST NOT (this skill's refusal to be used for live debugging/on-call triage) |
+| c4 | 55 | - **Boundaries.** This skill explains failures that already happened. Live deb… | plain (0.38, 0.44) | plain | scope statement; plain like every other skill's boundary (plan ruling reversed at final review) |
 
 ## knowledge-gardener (2 candidates · 1 MUST · 1 SHOULD · 0 MAY · 0 plain · 1 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 31 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.77) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 31 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.77) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 104 | - **Never silently rely on a stale explainer** — the whole point of the pins is… | MUST (0.16, 0.41) | SHOULD NOT | confidence 0.16 < 0.6, decided ourselves; harm 0.41 < 0.5 caps it below MUST — no gate or test can enforce a conversational disclosure step |
 
 ## repo2skill (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 29 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.73) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 29 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.73) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 
 ## ai-migration-operating-model (4 candidates · 3 MUST · 0 SHOULD · 0 MAY · 1 plain · 0 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
-| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.75) | MUST | mechanically enforced by `scripts/gates/asset-paths.sh` |
+| c1 | 32 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.75) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked |
 | c2 | 131 | - **Not the bulk executor.** This skill ends when the machine is built and the … | plain (0.50, 0.49) | plain | describes the skill's scope boundary, not a directive — matches the security-posture-audit/spec-first-planning Boundaries precedent |
 | c3 | 134 | - **Honest about "no".** If no judge can be built, the answer is "don't migrat… | MUST (0.39, 0.63) | MUST | confidence 0.39 < 0.6, decided ourselves; harm 0.63 justifies MUST on its own — a false "go" verdict on an unverifiable migration is the harm this doctrine exists to prevent |
 | c4 | 136 | - **Parity over aesthetics.** For money movement, fees, schedules, reconciliat… | MUST (0.76, 0.85) | MUST | |

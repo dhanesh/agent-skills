@@ -55,8 +55,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
   on "someone made a mistake", it is unfinished: ask why the system let that mistake
   reach users (the translation table is in
   [references/five-whys.md](references/five-whys.md)).
-- **Boundaries.** This skill explains failures that already happened. It MUST NOT be used
-  for live debugging or on-call triage; understanding a healthy system is
+- **Boundaries.** This skill explains failures that already happened. Live debugging and
+  on-call triage are out of scope; understanding a healthy system is
   `feynman-walkthrough`; verifying a codebase's claims against authoritative sources is
   `base-in-reality`.
 

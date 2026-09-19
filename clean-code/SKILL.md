@@ -155,16 +155,16 @@ but every example is **illustrative, not a template**:
 | Rule | One-line | Violation signal |
 |---|---|---|
 | **Meaningful names** | Names SHOULD reveal intent | `d`, `tmp`, `data`, `obj` |
-| **Small functions** | SHOULD do ONE thing, do it well | Function > ~20 lines |
+| **Small functions** | A function SHOULD do ONE thing, and do it well | Function > ~20 lines |
 | **No side effects** | A function either DOES or ANSWERS — it SHOULD NOT do both | Hidden state mutation |
 | **DRY** | You SHOULD NOT repeat yourself | Copy-paste with minor edits |
-| **No magic numbers** | SHOULD name your literals | `if (x > 86400)` |
-| **Fail fast** | SHOULD validate early, throw exceptions not codes | Returning `-1`/`null` on error |
-| **Boy Scout Rule** | SHOULD leave code cleaner than you found it | No cleanup before commit |
+| **No magic numbers** | Literals SHOULD be named | `if (x > 86400)` |
+| **Fail fast** | Code SHOULD validate early and throw exceptions, not codes | Returning `-1`/`null` on error |
+| **Boy Scout Rule** | You SHOULD leave code cleaner than you found it | No cleanup before commit |
 
 ### Function rules
 
-1. **Small** — functions SHOULD rarely exceed ~20 lines; aim for 5–10.
+1. **Small** — functions SHOULD NOT exceed ~20 lines; aim for 5–10.
 2. **A function SHOULD do one thing** — if you can extract a sub-function with
    a name that isn't just a restatement, the original did more than one thing.
 3. **One level of abstraction per function** — you SHOULD NOT mix high-level
@@ -179,13 +179,12 @@ but every example is **illustrative, not a template**:
 ### Naming checklist
 
 - Name reveals intent (`elapsedTimeInDays`, not `d`).
-- Names SHOULD be pronounceable and searchable, and SHOULD avoid cryptic
-  abbreviations and disinformation.
+- Pronounceable and searchable; avoid cryptic abbreviations and disinformation.
 - Classes are nouns (`Customer`, `Account`); methods are verbs (`postPayment`,
   `save`).
 - No type encodings (`strName`, `iCount`), no noise words (`theData`, `aInfo`).
-- One word per concept across the codebase — you SHOULD pick `get` *or* `fetch`
-  *or* `retrieve`, not all three.
+- One word per concept across the codebase — pick `get` *or* `fetch` *or*
+  `retrieve`, not all three.
 
 ### Simple design (Kent Beck's four rules, in priority order)
 

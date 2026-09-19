@@ -100,7 +100,7 @@ After any install, re-run the relevant probes and confirm the rail now scores hi
 
 ## Output template
 
-You MUST structure the scorecard like this:
+You SHOULD structure the scorecard like this:
 
 ```
 ## Agent-readiness: <repo> — Build <t1>/12  (weakest: R<n> <rail>)

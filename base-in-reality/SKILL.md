@@ -42,7 +42,7 @@ domain(s).
    Ungrounded ⇒ `UNCONFIRMED`. See `references/verdict-rubric.md`.
 3. **Adversarial gate.** Every `VIOLATION`/`DEVIATION` MUST survive a
    refutation pass before it is reported.
-4. **No silent truncation.** If `--max-claims` caps extraction, you SHOULD list what was dropped in
+4. **No silent truncation.** If `--max-claims` caps extraction, you MUST list what was dropped in
    the report's Dropped-claims log.
 
 ## Flags

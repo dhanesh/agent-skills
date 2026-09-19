@@ -136,7 +136,7 @@ its own yet: the loop design it produces is prose.
 
 ## Output template
 
-You MUST structure the result like this:
+You SHOULD structure the result like this:
 
 ```
 ## Loop: <one-line goal>
