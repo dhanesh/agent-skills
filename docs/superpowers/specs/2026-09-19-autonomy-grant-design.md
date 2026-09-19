@@ -20,7 +20,7 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 | A4 | **Architecture.** The grant is a skill-contract envelope kind, checked by the reference checker's `check-grant`. The action-class table is normative in SPEC.md. | — | A separate grant skill; a plain policy file |
 | A5 | **The planning method follows manifold:** constrain → tension → anchor (backward reasoning to required truths) → choose, iterated until it converges. | — | — |
 | A6 | **Loop depth follows the mode.** Unattended runs the full loop. Attended runs a light pass, and the user can switch to the full loop, or to unattended, at any point. | 0.96 | The full loop always (owner's first choice, revised after spec review); attended mode unchanged |
-| A7 | **Checker-held floors that no grant can lower** (added 2026-09-19, after Task 1 showed that `require_signature` inside a grant cannot stop a forged grant that omits it): (a) [superseded by A8]; (b) a grant may live at most 7 days, so `expires_at − generatedAtTime > 7d` is INVALID and `expires_at > now + 7d` is ASK; (c) a grant never covers an action on the repo's default branch (from `origin/HEAD`, else `main`/`master`). Unsigned grants still cover `read_only`, `local_reversible`, `push_branch` and `open_pr`. | 0.98 | The same floors but any signature for the irreversible classes; no floors, documented only |
+| A7 | **Checker-held floors that no grant can lower** (added 2026-09-19, after Task 1 showed that `require_signature` inside a grant cannot stop a forged grant that omits it): (a) [superseded by A8]; (b) a grant may live at most 7 days, so `expires_at − generatedAtTime > 7d` is INVALID and `expires_at > now + 7d` is ASK; (c) a grant never covers an action on the repo's default branch (from `origin/HEAD`, else `main`/`master`). Grants cover `read_only`, `local_reversible`, `push_branch` and `open_pr` (see A8). | 0.98 | The same floors but any signature for the irreversible classes; no floors, documented only |
 | A8 | **No signing; irreversible actions are never grantable** (owner, 2026-09-19, superseding A2's optional signing and A7(a)). Task 2 showed that any local signature, including an `sk-` "hardware" key, can be forged by an agent running as the same user, because it can edit the allowed-signers file. The owner judged hardware keys and root-owned setup too complex. A grant is honestly labelled as the user's acceptance, and it can cover only `read_only`, `local_reversible`, `push_branch` and `open_pr`. For `merge`, `deploy`, `spend`, `external_message` and `delete`, any gate other than `ask` makes the grant INVALID, so those actions always ask the human at the moment they happen. The factory runs autonomously up to an open pull request, and the human merges. | 0.74 | Approval through GitHub branch protection; software signing, documented as forgeable |
 
 ## 1. The grant: `autonomy-grant/v1`
@@ -63,6 +63,8 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 
 - A class absent from `gate_policy` is `ask`.
 - `auto` on any class other than `read_only` and `local_reversible` makes the grant INVALID (the table's "most permissive gate" column).
+- A grant must pin at least 2 distinct subjects (the spec and the plan). Names are compared after normalisation.
+- A grant that carries a `require_signature` field is INVALID (A8: no signing, so the field would promise protection that does not exist).
 - Any gate other than `ask` on `merge`, `deploy`, `spend`, `external_message` or `delete` makes the grant INVALID (A8).
 
 ## 3. `contract_check.py check-grant`
@@ -75,18 +77,14 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
 - **It runs these checks in order:**
   1. envelope validity (C3–C6, C9);
   2. human attribution, skipped for a revoked revision;
-  3. the gate-policy floors;
+  3. the gate-policy floors, the ≥ 2 distinct subjects rule, and the lifetime cap (INVALID);
   4. not revoked;
-  5. not superseded, meaning no revision names this grant in `wasRevisionOf`. This stops an explicit path to an old grant from bypassing a revocation;
-  6. not expired;
+  5. not superseded: no revision names this grant in `wasRevisionOf`, so an explicit path to an old grant cannot bypass a revocation;
+  6. not expired, and `expires_at` no more than 7 days after now (ASK `lifetime`);
   7. subjects not stale;
-  8. the current git branch matches `branch_pattern` (the check is skipped outside git);
-  9. the class's gate is `auto` or `grant`.
-
-  **Floors (A7), which no grant can lower:**
-  - a grant living more than 7 days (`expires_at − generatedAtTime`) is INVALID;
-  - a grant whose `expires_at` is more than 7 days after now is ASK with `reason=lifetime`;
-  - a grant is ASK with `reason=default-branch` when the current branch is the repo's default branch (`origin/HEAD`, else `main` or `master`);
+  8. inside a git work tree, the branch must be known (ASK `branch-unknown`) and HEAD must not be detached (ASK `detached`); outside git, steps 8–9 are skipped;
+  9. not the default branch (ASK `default-branch`), and the branch matches `branch_pattern` (ASK `branch`);
+  10. the class's gate is `auto` or `grant` (otherwise ASK `gate-ask`).
 - **Outputs:**
   - `GRANT: COVERED id=… class=… gate=auto|grant`, exit 0;
   - `GRANT: ASK id=… reason=<first failing check>`, exit 3;

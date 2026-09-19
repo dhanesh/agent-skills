@@ -87,7 +87,7 @@ Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X
 - Regenerate: `docs/skill-contract/vectors/` with `python3 build_vectors.py`.
 - Then run `make contract-vendor`, which updates spec-first-planning's and crafting-self-prompting-loops' `assets/contract_check.py`.
 
-**Interfaces:**
+**Interfaces** (signing names below are superseded by A8 and no longer exist):
 - Produces, in `contract_check.py`:
   - `GRANT_KIND: str`
   - `ACTION_CLASSES: tuple[str, ...]`
@@ -537,7 +537,7 @@ Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X"
 
 ---
 
-### Task 2: Reference checker — signature levels
+### Task 2: Reference checker — signature levels (SUPERSEDED by A8: signing dropped; this task delivered detached-HEAD ASK and distinct subjects instead)
 
 **Files:**
 - Modify: `docs/skill-contract/reference/contract_check.py` (replace the `signature_level` stub).
