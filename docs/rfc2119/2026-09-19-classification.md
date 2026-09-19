@@ -205,3 +205,13 @@ Skills appear in rewrite order.
 | c5 | 79 | It walks the target repo read-only and emits sorted JSON evidence per Tier-1 rai… | MUST (0.86, 0.71) | plain | describes what collect_evidence.py does (collects and flags, never scores; settings-error instead of crashes); not a directive |
 | c6 | 81 | Then, for each rail in scope, verify and extend the collector's leads against th… | MUST (0.95, 0.79) | MUST |  |
 | c7 | 101 | ALWAYS structure the scorecard like this: | MUST (0.73, 0.51) | MUST |  |
+
+## context-hygiene-kit (5 candidates · 4 MUST · 0 SHOULD · 0 MAY · 1 plain · 1 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 52 | Memory is **always per-project** — even a global install keeps each repo's \`.con… | MUST (0.43, 0.51) | plain | the always/never sentence describes the kit's per-project storage (memories never bleed across repos); the restart reminder is an ordinary install step |
+| c2 | 85 | 1. **The token budget is a HARD cap (anti-bloat).** \`curate()\` asserts \`hot_toke… | MUST (0.95, 0.82) | MUST |  |
+| c3 | 86 | 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection contr… | MUST (0.94, 0.88) | MUST |  |
+| c4 | 87 | 3. **Deterministic capture only.** No model summarises the session. The harveste… | MUST (0.91, 0.81) | MUST |  |
+| c5 | 98 | Always confirm the gate passed: \`python3 test_context_ledger.py\` (27 tests — bud… | MUST (0.94, 0.84) | MUST |  |
