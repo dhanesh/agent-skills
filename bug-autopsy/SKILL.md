@@ -17,7 +17,7 @@ license: MIT
 compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 
@@ -49,7 +49,10 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 - **Evidence or inference, labeled.** Every timeline entry and every "why" MUST cite its
   evidence — `file:line`, commit sha, CI run, log timestamp, issue comment. Where the
   record is silent, reconstruct by judgment, but the entry MUST be marked *(inference)*;
-  a labeled guess is useful, an unlabeled one poisons the document.
+  a labeled guess is useful, an unlabeled one poisons the document. `evidence: none`,
+  `n/a`, `TBD`, or an unfilled `<...>` template placeholder is not evidence — it is a
+  label wearing the shape of a citation with nothing behind it; with no record, mark the
+  entry *(inference)* instead. A lint PASS means a basis was stated, not that it is true.
 - **Blameless, structurally.** Root causes SHOULD be systemic — a missing guardrail, an
   absent test, a process or design gap — and SHOULD NOT be a person. When a chain lands
   on "someone made a mistake", it is unfinished: ask why the system let that mistake

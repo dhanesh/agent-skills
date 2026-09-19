@@ -184,6 +184,23 @@ We noticed.
               r.returncode == 0 and "WARN: blame-y phrasing" in r.stdout,
               "exit %d" % r.returncode)
 
+        # Negative: `evidence: none`/`n/a`/`TBD` is a label wearing the shape
+        # of a citation with nothing behind it — not evidence.
+        evidence_none = re.sub(r"\(evidence: [^)]+\)", "(evidence: none)", GOOD)
+        r = lint(tmp, "evidence_none.md", evidence_none)
+        check("lint rejects `evidence: none` standing in for a real citation",
+              r.returncode != 0 and "cites evidence - FAIL" in r.stdout,
+              "exit %d" % r.returncode)
+
+        # Negative: an unfilled template placeholder ("<commit sha /
+        # file:line>") left in place of a real citation.
+        evidence_placeholder = re.sub(
+            r"\(evidence: [^)]+\)", "(evidence: <commit sha / file:line>)", GOOD)
+        r = lint(tmp, "evidence_placeholder.md", evidence_placeholder)
+        check("lint rejects an unfilled template placeholder standing in for evidence",
+              r.returncode != 0 and "cites evidence - FAIL" in r.stdout,
+              "exit %d" % r.returncode)
+
         # Template usability: placeholders filled -> lint-clean.
         with open(TEMPLATE, encoding="utf-8") as f:
             template = f.read()
