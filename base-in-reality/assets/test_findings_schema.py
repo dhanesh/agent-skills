@@ -44,6 +44,17 @@ class FindingsSchema(unittest.TestCase):
         cite = self.schema["properties"]["citations"]["items"]
         self.assertIn("url", cite["required"])
 
+    def test_survivors_require_refutation(self):
+        # verdict-rubric.md step 4: VIOLATION/DEVIATION record their votes.
+        rules = [r for r in self.schema.get("allOf", [])
+                 if "refutation" in r.get("then", {}).get("required", [])]
+        self.assertEqual(len(rules), 1, rules)
+        self.assertEqual(set(rules[0]["if"]["properties"]["verdict"]["enum"]),
+                         {"VIOLATION", "DEVIATION"})
+        ref = self.schema["properties"]["refutation"]
+        self.assertEqual(set(ref["required"]), {"refuters", "verdicts"})
+        self.assertGreaterEqual(ref["properties"]["verdicts"]["minItems"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

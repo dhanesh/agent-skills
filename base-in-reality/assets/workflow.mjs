@@ -104,8 +104,25 @@ const results = await pipeline(
         ),
       ),
     ).then((votes) => {
-      const refutes = votes.filter(Boolean).filter((v) => v.refuted).length
-      return refutes >= 2 ? { ...finding, verdict: 'UNCONFIRMED', downgraded: true } : finding
+      // references/verdict-rubric.md step 2: an uncertain refuter refutes, and a
+      // refuter that returned nothing is maximally uncertain, so a crash is a refute.
+      const verdicts = votes.map((v) => (v ? v.refuted !== false : true))
+      const refutes = verdicts.filter(Boolean).length
+      // Step 3: critical/high keep VIOLATION/DEVIATION only on unanimous non-refute;
+      // any other severity is downgraded by >= 2 refutes. Mirrored by
+      // refutation_downgrades() in assets/report_lint.py; keep the two in step.
+      const unanimity = finding.severity === 'critical' || finding.severity === 'high'
+      const downgrade = unanimity ? refutes >= 1 : refutes >= 2
+      // Step 4: record the votes on every finding, so the linter can check them.
+      const refutation = {
+        refuters: votes.length,
+        verdicts,
+        rationale: votes.filter((v) => !v || v.refuted !== false)
+          .map((v) => (v ? v.reason || '' : 'refuter returned nothing')).join(' | '),
+      }
+      return downgrade
+        ? { ...finding, verdict: 'UNCONFIRMED', downgraded: true, refutation }
+        : { ...finding, refutation }
     })
   },
 )

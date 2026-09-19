@@ -10,8 +10,9 @@ assets/report-skeleton.md is checked for the sections stage 6 promises.
 
 Negative fixtures (mandatory): a fabricated-citation report (VIOLATION marked
 verified with no fetched source recorded), a report missing UNCONFIRMED
-handling on a downgrade, and out-of-vocabulary verdict/severity values must
-all be rejected. Offline, deterministic, stdlib-only, tempdir-only writes.
+handling on a downgrade, out-of-vocabulary verdict/severity values, a
+critical VIOLATION kept over a dissenting refuter, and a surviving VIOLATION
+with no recorded refutation must all be rejected. Offline, deterministic, stdlib-only, tempdir-only writes.
 """
 import importlib.util
 import json
@@ -55,6 +56,11 @@ def finding(**over):
             "quote": "the annual percentage rate shall be determined by the periodic rate",
             "fetched": True,
         }],
+        # A survivor records its refutation votes (verdict-rubric.md step 4).
+        # Clean 3-of-3 non-refute, so the positive checks prove a fully
+        # refuted report passes and the negatives fail for their own reason.
+        "refutation": {"refuters": 3, "verdicts": [False, False, False],
+                       "rationale": ""},
     }
     f.update(over)
     return f
@@ -108,6 +114,22 @@ def main():
     check("linter rejects finding missing a schema-required field",
           any("'location'" in e for e in errs))
 
+    # ── Negative: refutation aggregation (verdict-rubric.md step 3) ───────
+    # A critical finding needs unanimous non-refute; one dissent downgrades it.
+    dissent = {"refuters": 3, "verdicts": [True, False, False],
+               "rationale": "applicability lens: source covers a different KDF use"}
+    errs = lint.lint_findings([finding(severity="critical", refutation=dissent)])
+    check("negative: linter rejects a critical VIOLATION kept over a dissenting refuter",
+          any("unanimous" in e for e in errs), "; ".join(errs)[:100])
+    unrefuted = finding()
+    del unrefuted["refutation"]
+    errs = lint.lint_findings([unrefuted])
+    check("negative: linter rejects a VIOLATION with no recorded refutation",
+          any("no recorded refutation" in e for e in errs), "; ".join(errs)[:100])
+    errs = lint.lint_findings([finding(severity="medium", refutation=dissent)])
+    check("a medium VIOLATION with one dissent passes (threshold is severity-aware)",
+          errs == [], "; ".join(errs)[:100])
+
     # ── CLI end-to-end in a tempdir ──────────────────────────────────────
     tmp = tempfile.mkdtemp(prefix="bir-eval-")
     try:
@@ -125,6 +147,13 @@ def main():
                               bad_path], capture_output=True, text=True, timeout=30)
         check("CLI fails the ungrounded report (exit 1, LINT_RESULT: FAIL)",
               bad.returncode == 1 and "LINT_RESULT: FAIL" in bad.stdout)
+        kept_path = os.path.join(tmp, "kept.json")
+        with open(kept_path, "w") as f:
+            json.dump([finding(severity="critical", refutation=dissent)], f)
+        kept = subprocess.run([sys.executable, os.path.join(ASSETS, "report_lint.py"),
+                               kept_path], capture_output=True, text=True, timeout=30)
+        check("negative: CLI fails a critical VIOLATION kept over a 1-of-3 refute (exit 1)",
+              kept.returncode == 1 and "LINT_RESULT: FAIL" in kept.stdout)
 
         # ── NEGATIVE: a fabricated citation flagged `fetched` must not pass ──
         # `fetched: true` is written by the agent about itself. The evidence log
