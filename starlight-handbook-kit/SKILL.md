@@ -6,11 +6,13 @@ compatibility: Requires Node.js 18+ with npm for Astro + Starlight builds; the s
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "astro,starlight,documentation,handbook,scaffold,ci-gates,mdx"
 ---
 
 # starlight-handbook-kit
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Build and grow a decision-oriented engineering handbook: an Astro + Starlight
 static site where every topic is shaped identically (a fixed nine-section
@@ -23,8 +25,8 @@ link all fail loudly instead of shipping.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -110,8 +112,8 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
    `Overview`, `Mental model`, `Types / Variants`, `When to use / When NOT`,
    `Tradeoffs`, `Diagram`, `Try it`, `Real-world examples`, `Further reading`.
    Do not add, remove, rename, or reorder them.
-4. Diagrams: use the `<Mermaid code={\`...\`} />` component. **Never** a fenced
-   ```` ```mermaid ```` block — Starlight renders that as code, not a diagram
+4. Diagrams: use the `<Mermaid code={\`...\`} />` component. A fenced
+   ```` ```mermaid ```` block **MUST NOT** be used — Starlight renders that as code, not a diagram
    (the mermaid gate fails it).
 5. Widgets (optional, in `## Try it`): import from `../../../components/` (three
    levels up from a `<cluster>/<topic>.mdx` page) and pass `client:visible`.

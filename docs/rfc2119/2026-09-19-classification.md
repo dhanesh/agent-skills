@@ -217,3 +217,10 @@ Skills appear in rewrite order.
 | c3 | 86 | 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection contr… | MUST (0.94, 0.88) | MUST |  |
 | c4 | 87 | 3. **Deterministic capture only.** No model summarises the session. The harveste… | MUST (0.91, 0.81) | MUST |  |
 | c5 | 98 | Always confirm the gate passed: \`python3 test_context_ledger.py\` (27 tests — bud… | MUST (0.94, 0.84) | MUST |  |
+
+## starlight-handbook-kit (2 candidates · 2 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 23 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.77, 0.78) | MUST | |
+| c2 | 113 | 4. Diagrams: use the `<Mermaid code={\`...\`} />` component. **Never** a fenced | MUST (0.34, 0.46) | MUST | low confidence (0.34) and harm 0.46 < 0.5, but mechanically enforced by the `verify:mermaid` gate |
