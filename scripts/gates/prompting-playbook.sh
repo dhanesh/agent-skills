@@ -27,6 +27,10 @@
 #   PP-4  Loop eng.    : verification baked in (the body references a
 #                        gate/eval/verify/check mechanism). The generate ->
 #                        evaluate -> repair loop needs an explicit evaluator.
+#   PP-7  Prompt eng.  : BCP 14. Every SKILL.md declares RFC 2119/8174 keywords
+#                        and uses only MUST/MUST NOT/SHOULD/SHOULD NOT/MAY in
+#                        capitals (hard; a declaration with no keyword used is
+#                        an advisory INFO).
 #
 # Advisory checks (report only; promoted to hard with --strict):
 #   PP-5  Prompt eng.  : overcorrection guard. Counts absolutist negative
@@ -133,9 +137,19 @@ fi
 
 # ── PP-5: overcorrection guard (Prompt engineering, advisory) ────────────────
 # Rigid absolutist negatives make a model defensive (the Meridian overcorrection).
-absol="$(printf '%s\n' "$BODY" | grep -oiE '\b(never|always|must not|do not ever|under no circumstances)\b' | wc -l | tr -d ' ')"
+# The BCP 14 declaration names MUST NOT/SHOULD/MAY itself; it is not a directive.
+# Only the declaration *sentence* is dropped: other text on its line is scanned.
+# The sentence has no internal full stop, so [^.]* bounds it to that sentence.
+BCP14_DECL='BCP 14 \(RFC 2119, RFC 8174\)'
+BCP14_SENTENCE="[^.]*${BCP14_DECL}[^.]*all capitals\\.?"
+pp5_text="$(printf '%s\n' "$BODY" | sed -E "s/${BCP14_SENTENCE}//")"
+absol="$(printf '%s\n' "$pp5_text" | grep -oiE '\b(never|always|must not|do not ever|under no circumstances)\b' | wc -l | tr -d ' ')"
 # Escape-hatch / heuristic vocabulary that tempers an absolute into a judgment call.
-hedge="$(printf '%s\n' "$BODY" | grep -ciE '\b(unless|except|prefer|usually|typically|when in doubt|heuristic|judgment|trade-?off|by default|generally)\b' || true)"
+hedge="$(printf '%s\n' "$pp5_text" | grep -ciE '\b(unless|except|prefer|usually|typically|when in doubt|heuristic|judgment|trade-?off|by default|generally)\b' || true)"
+# RFC 2119 defines SHOULD and MAY as defaults with exceptions and options:
+# escape hatches by definition, when written in capitals.
+bcp_hedge="$(printf '%s\n' "$pp5_text" | grep -cE '\b(SHOULD|MAY)\b' || true)"
+hedge=$((hedge + bcp_hedge))
 if [ "$absol" -le 6 ] || [ "$hedge" -ge "$absol" ]; then
     check_pass "PP-5 overcorrection: $absol absolutist directive(s) balanced by $hedge heuristic/escape-hatch cue(s)"
 else
@@ -155,6 +169,40 @@ else
     else
         check_pass "PP-6 lean context: body $body_lines lines (within inline budget)"
     fi
+fi
+
+# ── PP-7: BCP 14 declared and used consistently (Prompt engineering, hard) ───
+# docs/superpowers/specs/2026-09-19-bcp14-skills-design.md §3. Every SKILL.md
+# declares RFC 2119/8174 keywords, and only the five it declares may appear in
+# capitals. Fenced code (``` or ~~~), inline code spans and the declaration
+# sentence itself (not other text on its line) are not scanned: the declaration
+# names every keyword and would satisfy "keywords used" vacuously. A fence
+# closes only on the same character, at least as long as the one that opened
+# it, so a ```` block may wrap ``` lines. A declaration inside a fence does not
+# count.
+bcp14_nofence="$(printf '%s\n' "$BODY" | awk '
+    {
+        if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
+            m = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", m)
+            if (fence == "") { fence = m; next }
+            if (substr(m, 1, 1) == substr(fence, 1, 1) && length(m) >= length(fence)) { fence = ""; next }
+        }
+        if (fence == "") print
+    }')"
+bcp14_scan="$(printf '%s\n' "$bcp14_nofence" | sed -E "s/${BCP14_SENTENCE}//" | sed 's/`[^`]*`//g')"
+if printf '%s\n' "$bcp14_nofence" | grep -qE "$BCP14_DECL.*all capitals"; then
+    undeclared="$(printf '%s\n' "$bcp14_scan" | grep -oE '\b(SHALL NOT|SHALL|NOT RECOMMENDED|RECOMMENDED|REQUIRED|OPTIONAL)\b' | sort -u | tr '\n' ' ' || true)"
+    used="$(printf '%s\n' "$bcp14_scan" | grep -cE '\b(MUST|SHOULD|MAY)\b' || true)"
+    if [ -n "$undeclared" ]; then
+        check_fail "PP-7 BCP 14: undeclared keyword(s) in capitals: ${undeclared}-- the declaration defines only MUST, MUST NOT, SHOULD, SHOULD NOT and MAY"
+    else
+        check_pass "PP-7 BCP 14: declared; $used line(s) use a declared keyword"
+        if [ "$used" -eq 0 ]; then
+            check_advisory "PP-7 BCP 14: declared but no MUST/SHOULD/MAY is used; mark the skill's hard rules (docs/prompting-playbook.md, BCP 14 keywords)"
+        fi
+    fi
+else
+    check_fail "PP-7 BCP 14: no declaration. Add, as its own paragraph under the # title: The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals."
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────

@@ -17,11 +17,13 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "migration,rewrite,port,parity,golden-tests,rulebook,agent-orchestration,phase-gates"
 ---
 
 # AI Migration Operating Model
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 AI makes big migrations cheaper **only when the migration has strong control loops and
 objective verification** — without those, agents just produce plausible-looking code
@@ -32,8 +34,8 @@ tests and diffs as the judge, and repeated failures as reasons to improve the pr
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -131,9 +133,9 @@ phase-gate status and the open gaps (`G<n>` entries still ending in `?`).
 - **Not the bulk executor.** This skill ends when the machine is built and the pilot
   slice passes; large-scale execution belongs to implementing sessions or loops built
   with crafting-self-prompting-loops, which consume the pack.
-- **Honest about "no".** If no judge can be built, the answer is "don't migrate yet" —
-  recommend the precursor work instead of proceeding on vibes.
+- **Honest about "no".** If no judge can be built, the answer MUST be "don't migrate
+  yet" — recommend the precursor work instead of proceeding on vibes.
 - **Parity over aesthetics.** For money movement, fees, schedules, reconciliation, and
-  edge-case state machines, behavioral parity is the bar; clean-looking code proves
-  nothing. Use spec-first-planning when the ask turns out to be new behavior rather
-  than preserved behavior — a migration that changes the contract is a feature.
+  edge-case state machines, behavioral parity MUST be the bar; clean-looking code
+  proves nothing. Use spec-first-planning when the ask turns out to be new behavior
+  rather than preserved behavior — a migration that changes the contract is a feature.

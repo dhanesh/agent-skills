@@ -81,6 +81,8 @@ metadata:
 
 # $name
 
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
+
 TODO(repo2skill): one paragraph stating what this skill does for the agent that loads
 it and the outcome it exists to produce. Write it as a reusable prompt, not
 documentation — a system prompt the agent follows when the skill fires.

@@ -13,12 +13,14 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
 
 # Spec-First Planning
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Turn "we should probably add X" into two mechanically linked artifacts: a **spec** whose every
 requirement is falsifiable, and a **task plan** whose every task names the check that proves it
@@ -30,8 +32,8 @@ refuses to emit a plan with coverage holes.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -42,14 +44,15 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## The contract
 
-- **The spec** — drafted from `references/spec-template.md`. Required sections: Problem, Users,
-  Goals, Non-goals, Requirements (numbered R1..Rn, each a single testable "must" statement),
-  Acceptance criteria (≥1 per requirement, referencing its id, written as a runnable check),
-  Open questions (may be an empty list, but the section exists so unknowns have a home).
+- **The spec** — drafted from `references/spec-template.md`. It MUST include these sections:
+  Problem, Users, Goals, Non-goals, Requirements (numbered R1..Rn, each a single testable
+  "must" statement), Acceptance criteria (≥1 per requirement, referencing its id, written
+  as a runnable check), Open questions (may be an empty list, but the section exists so
+  unknowns have a home).
 - **The plan** — one or more tasks per requirement, each carrying *what* to change, *where*
   (files/areas if known — the spec's `[where: ...]` hints pre-fill this), and *verify* (the
   acceptance criterion turned into a check the implementer can actually run). The
-  requirement↔task coverage map must be total in both directions: every requirement covered,
+  requirement↔task coverage map MUST be total in both directions: every requirement covered,
   every task traceable to a requirement.
 
 The exact grammar, lint rules, JSON schema, and exit codes live in
@@ -89,9 +92,10 @@ The exact grammar, lint rules, JSON schema, and exit codes live in
    `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <path> --root <repo-root>`;
    a failure there is this skill's bug, so fix it before going on. Then look for consumers:
    `python3 "$SKILL_DIR/assets/contract_check.py" discover --kind https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1 --from "$SKILL_DIR"`.
-   If it names one, propose the handoff (the consumer, the envelope path, and each claim's
-   status) and wait for the user's yes before invoking that skill with the envelope path. If it
-   names none (`NO_CONSUMER:`), give the user the envelope path; the plan is still done. Run the
+   If it names one, you MUST propose the handoff (the consumer, the envelope path, and each
+   claim's status) and MUST wait for the user's yes before invoking that skill with the
+   envelope path. If it names none (`NO_CONSUMER:`), you MUST NOT treat that as a failure:
+   give the user the envelope path; the plan is still done. Run the
    checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
    Python 3.10 or newer.
 

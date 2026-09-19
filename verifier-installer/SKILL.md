@@ -15,11 +15,13 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
 
 # verifier-installer
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Stand up the **verify→repair loop** in a repository that doesn't have one: a
 single discoverable command per rail — format, build, test — and a CI workflow
@@ -32,8 +34,8 @@ cannot skip is the single highest-leverage change for agent success.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -88,8 +90,8 @@ rather than inventing config from memory.
 3. **Install per the playbook.** For each approved missing rail, follow the
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
-   and the CI workflow. Extend existing files rather than replacing them, and
-   never add a second workflow when one already exists — extend the existing
+   and the CI workflow. Extend existing files rather than replacing them, and you
+   MUST NOT add a second workflow when one already exists — you MUST extend the existing
    one. Keep the diff small and reviewable.
 4. **Prove the loop (verify and repair).** For each installed rail, run its
    command and record the result. Then follow the prove-the-loop protocol in
@@ -105,7 +107,7 @@ rather than inventing config from memory.
 
 ## Deliverable — the install summary
 
-ALWAYS end with this report:
+You SHOULD end with this report:
 
 ```
 ## Verifier loop installed: <repo>
@@ -128,12 +130,12 @@ change-detecting tests.
 ## Guardrails
 
 - **Read-only until step 2's confirmation** — detection never writes; installs
-  happen only after the user approves the plan.
-- **One ground truth.** Local `verify` and CI run the same commands; when in
+  MUST happen only after the user approves the plan.
+- **One ground truth.** Local `verify` and CI MUST run the same commands; when in
   doubt, make CI call the entrypoint rather than restating commands.
 - **Prove, don't presume.** A rail counts as installed when it was watched
-  failing and recovering, not when its file exists. Leave the tree clean after
+  failing and recovering, not when its file exists. You MUST leave the tree clean after
   the demonstration.
 - **Stay off the style battlefield.** Wire checks for whatever
-  formatter/tooling the repo already implies; propose, never impose, new
+  formatter/tooling the repo already implies; you MAY propose, but SHOULD NOT impose, new
   tools.

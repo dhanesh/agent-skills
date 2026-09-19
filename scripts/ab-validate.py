@@ -180,6 +180,8 @@ SINCE_SKILL_CONTRACT = "1c193d3"  # skill-contract v1: spec-first-planning hands
 # task-plan envelopes that crafting-self-prompting-loops discovers and accepts.
 SINCE_TSN_NODE_FFI = "5d46f99"  # test-safety-net: node 26's new `ffi` builtin
 # is marked (subprocess) and recorded as a guard residual, not left unclassified.
+SINCE_BCP14 = "8179b71"  # BCP 14 across skills: every SKILL.md declares RFC 2119/8174
+# keywords (PP-7) and marks its hard rules with them.
 
 
 def _git_out(*args):
@@ -4424,6 +4426,46 @@ def check_test_safety_net_node_ffi(old, new):
         since=SINCE_TSN_NODE_FFI)
 
 
+# ── BCP 14 across skills (docs/superpowers/specs/2026-09-19-bcp14-skills-design.md) ──
+def check_bcp14(old, new):
+    import re as _re
+    playbook = os.path.join(new, "scripts", "gates", "prompting-playbook.sh")
+    decl = _re.compile(r"BCP 14 \(RFC 2119, RFC 8174\).*all capitals")
+
+    def skills(tree):
+        return sorted(d for d in os.listdir(tree) if os.path.isfile(os.path.join(tree, d, "SKILL.md")))
+
+    def declared(tree):
+        n = 0
+        for d in skills(tree):
+            with open(os.path.join(tree, d, "SKILL.md"), encoding="utf-8") as f:
+                n += 1 if decl.search(f.read()) else 0
+        return n
+
+    def lines(tree, d):
+        r = subprocess.run(["sh", playbook, os.path.join(tree, d)],
+                           capture_output=True, text=True, timeout=120)
+        return r.stdout.splitlines()
+
+    def pp7_failing(tree):
+        return sum(any(ln.startswith("FAIL: PP-7") for ln in lines(tree, d)) for d in skills(tree))
+
+    def pp5_advisories(tree):
+        return sum(any(ln.startswith("INFO: PP-5") for ln in lines(tree, d)) for d in skills(tree))
+
+    a, b = declared(old), declared(new)
+    row("bcp14", "skills declaring BCP 14 (RFC 2119/8174) keywords", a, b, b > a,
+        "no skill said whether a 'never' was a safety rule or a default, so a model could not tell either",
+        since=SINCE_BCP14)
+    a, b = pp7_failing(old), pp7_failing(new)
+    row("bcp14", "skills failing PP-7 (both trees, new checker; lower=better)", a, b, b < a,
+        "PP-7 is new, so the baseline is measured with it: the number is the skills', not the checker's",
+        since=SINCE_BCP14)
+    a, b = pp5_advisories(old), pp5_advisories(new)
+    row("bcp14", "skills with a PP-5 overcorrection advisory (both trees, new checker; must not rise)",
+        a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4488,6 +4530,7 @@ def main():
         check_test_safety_net_rust_r11(old, REPO)
         check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
+        check_bcp14(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

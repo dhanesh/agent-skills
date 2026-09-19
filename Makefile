@@ -155,7 +155,9 @@ readme:
 	@sh $(GATES)/readme-catalog.sh .
 
 # Lint every skill against "The Prompting Playbook" conventions (full output).
-# Promote the two advisories (PP-5/PP-6) to hard failures: make playbook PLAYBOOK_FLAGS=--strict
+# Promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures:
+# make playbook PLAYBOOK_FLAGS=--strict. This fails a fresh repo2skill scaffold
+# by design: its TODO body carries no keyword.
 playbook:
 	@rc=0; for d in $(SKILLS); do \
 		printf '\n=== %s ===\n' "$$d"; \

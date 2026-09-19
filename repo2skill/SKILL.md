@@ -14,11 +14,13 @@ license: MIT
 compatibility: Requires python3 (stdlib only, offline) plus make and a POSIX shell for the gate loop. Built for this repo's layout — the quality gates under scripts/gates were vendored from this skill — but the scaffolder runs anywhere python3 does.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "agent-skills,skill-authoring,scaffolding,prompting-playbook,quality-gates,code-review"
 ---
 
 # repo2skill
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 The authoring skill this repo's quality gates were vendored from. It turns "I want a new
 Agent Skill" into a directory that passes `make gate-skill` — by scaffolding a skeleton
@@ -29,8 +31,8 @@ green, stay green, and let every red check tell you exactly what to fix.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -54,7 +56,7 @@ directory versus this repo's standard.
 `make gate-skill SKILL=<dir>` runs the repo's whole verify loop: structure and
 frontmatter validation (SKILL.md + README.md, kebab `name` ≤ 64, `description` ≤ 1024,
 no dangling `references/`/`assets/` paths, template↔PARAMETERS.md bijection), secret
-scanning, the Prompting Playbook lints (PP-1…PP-6, see `docs/prompting-playbook.md`),
+scanning, the Prompting Playbook lints (PP-1…PP-7, see `docs/prompting-playbook.md`),
 the standard-metadata check, each unit-test suite shipped under `assets/`, and the outcome eval per
 `docs/eval-standard.md`. All of that verifies **presence**. Substance — whether the
 sections are orthogonal, the deliverable is a real contract, each absolute is justified

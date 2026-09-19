@@ -15,11 +15,13 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX shell; git is needed only to check git-pinned sources. Fully offline.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "okf,knowledge,maintenance,drift,staleness,refresh,feynman-walkthrough,okf-site-kit"
 ---
 
 # knowledge-gardener
+
+The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be interpreted as described in BCP 14 (RFC 2119, RFC 8174) when, and only when, they appear in all capitals.
 
 Maintain Open Knowledge Format (OKF v0.1) bundles after they exist. Knowledge pinned to
 a moving source rots quietly: the repo gains commits, the paper gets revised, and the
@@ -31,8 +33,8 @@ them true*: sweep, report drift, refresh only what moved, re-pin, republish.
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
-everywhere — including in any subagent prompt, which must receive the literal absolute
-path, never a relative form:
+everywhere — including in any subagent prompt, which MUST receive the literal absolute
+path, and MUST NOT receive a relative form:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -101,9 +103,9 @@ including a direct fingerprint-agreement test against the sibling tool.
 
 ## How to behave
 
-- **Never silently rely on a stale explainer** — the whole point of the pins is that
-  you can know better. Say "the repo has moved since this was written" before quoting
-  from it, then offer the refresh.
+- **You SHOULD NOT silently rely on a stale explainer** — the whole point of the pins
+  is that you can know better. Say "the repo has moved since this was written" before
+  quoting from it, then offer the refresh.
 - **Prefer surgical edits.** Refreshing is gardening, not replanting: keep prose,
   examples, and FAQ history that the diff didn't touch.
 - **Report before repairing.** The user decides which stale subjects are worth
