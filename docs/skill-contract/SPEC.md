@@ -61,7 +61,8 @@ or `ask`), an optional `require_signature` (action class → `SIGNED` or `SIGNED
 - A class absent from `gate_policy` is `ask`.
 - `auto` is allowed only on `read_only` and `local_reversible`; `auto` on any other class makes
   the grant invalid.
-- A grant MUST pin at least 2 subjects: the spec and the task-plan envelope it was approved for.
+- A grant MUST pin at least 2 distinct subjects: the spec and the task-plan envelope it was
+  approved for. Names that differ only by case or a `./` segment are the same subject.
 - A grant MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human; a
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
@@ -79,6 +80,19 @@ Three floors live in the checker, and no grant can lower them:
   case-insensitively (Unicode NFKC, then case folding), because a case-insensitive filesystem lets
   `Main` advance `main`. When `root` or any parent holds a `.git` directory or file but git cannot
   report the current branch, a receiver MUST treat the grant as not covering anything.
+- A grant MUST NOT cover an action while HEAD is detached (HEAD names a commit but no branch),
+  whatever its `branch_pattern`: a rebase started on the default branch detaches HEAD, and
+  `rebase --continue` then advances that branch.
+
+**The grant signature.** A grant MAY be signed. The signature lives beside the envelope at
+`<id>.json.sig`, made by the user with `ssh-keygen -Y sign -n skill-contract-grant <id>.json`.
+The checker verifies it over the exact bytes it parsed, with `ssh-keygen -Y find-principals` and
+`-Y verify`, against the first of: `$SKILL_CONTRACT_ALLOWED_SIGNERS` (set but missing means no
+signers file, never a fallback); git's global `gpg.ssh.allowedSignersFile` (a repo-local value is
+ignored, because it lives in the tree an agent edits); `~/.config/skill-contract/allowed_signers`.
+The level is `SIGNED_HW` only when ssh-keygen reports an `sk` key type, the signature names an
+`sk-` key, and its user-presence flag is set; `SIGNED` for any other signature that verifies; and
+`UNSIGNED` otherwise, including when `ssh-keygen` is missing or anything fails.
 
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
 name.
@@ -88,18 +102,22 @@ and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
-superseded, not expired, not living past the 7-day floor, subjects not stale, not on a default
-branch, the current git branch matches `branch_pattern` (both branch checks are skipped only when
+superseded, not expired, not living past the 7-day floor, subjects not stale, HEAD not detached, not
+on a default branch, the current git branch matches `branch_pattern` (the branch checks are skipped only when
 no `.git` exists in `root` or any parent), the class's gate is `auto` or `grant`, and the required signature level is met. An `ASK`
 names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `branch-unknown`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
+`stale`, `branch-unknown`, `detached`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 
 *Non-normative.* An agent with a shell on the same machine can write an unsigned grant, or sign one
 with a software key it creates. Only a signature by a hardware-backed (`sk-`) key shows that a
 person physically touched a key. The same limit applies to transcript roles. A `require_signature`
 inside a grant cannot protect against a forged grant, because the forger simply leaves it out;
-that is why the floors above live in the checker rather than in the grant.
+that is why the floors above live in the checker rather than in the grant. `SIGNED_HW` is only as
+strong as the allowed-signers file: the checker cannot tell a real FIDO key from an `sk-` key
+emulated in software, so an agent that can edit that file (or set `$SKILL_CONTRACT_ALLOWED_SIGNERS`,
+or put its own `ssh-keygen` first on `PATH`) can forge any level. Keep the file where the agent
+cannot write, and list only keys generated on hardware.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 

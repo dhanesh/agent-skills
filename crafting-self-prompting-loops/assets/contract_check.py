@@ -26,6 +26,7 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import base64  # noqa: E402
 import unicodedata  # noqa: E402
 import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
@@ -36,6 +37,7 @@ import secrets  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 from datetime import datetime, timedelta, timezone  # noqa: E402
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
@@ -68,6 +70,8 @@ HW_SIGNED_CLASSES = frozenset({"merge", "deploy", "spend", "external_message", "
 MAX_GRANT_LIFETIME = timedelta(days=7)
 FALLBACK_DEFAULT_BRANCHES = frozenset({"main", "master"})
 ENVELOPE_MAX_BYTES = 1024 * 1024
+SIG_MAX_BYTES = 64 * 1024
+DETACHED = "HEAD"  # what current_branch reports for a detached HEAD
 
 
 # ── SKILL.md reading (no YAML library: a line reader is enough) ──────────────
@@ -416,17 +420,25 @@ def check_statement(st):
     return viol
 
 
-def load_envelope(path):
+def read_envelope(path):
+    """(statement, errors, raw bytes). raw is exactly what was parsed (None if unreadable)."""
+    raw = None
     try:
-        with open(path, encoding="utf-8") as f:
-            text = f.read(ENVELOPE_MAX_BYTES + 1)
-        if len(text.encode("utf-8")) > ENVELOPE_MAX_BYTES:
-            return None, [(3, "cannot read the envelope: larger than %d bytes" % ENVELOPE_MAX_BYTES)]
-        return json.loads(text), []
+        with open(path, "rb") as f:
+            raw = f.read(ENVELOPE_MAX_BYTES + 1)
+        if len(raw) > ENVELOPE_MAX_BYTES:
+            return None, [(3, "cannot read the envelope: larger than %d bytes"
+                           % ENVELOPE_MAX_BYTES)], raw
+        return json.loads(raw.decode("utf-8")), [], raw
     except (OSError, ValueError, RecursionError, MemoryError) as exc:
         return None, [(3, "cannot read the envelope: %s" % (exc.__class__.__name__
                                                             if isinstance(exc, (RecursionError, MemoryError))
-                                                            else exc))]
+                                                            else exc))], raw
+
+
+def load_envelope(path):
+    st, err, _raw = read_envelope(path)
+    return st, err
 
 
 # ── Commandment 8: find partners, never require them ────────────────────────
@@ -721,8 +733,12 @@ def grant_violations(st):
         out.append("a grant may live at most 7 days (expires_at - generatedAtTime)")
     if not isinstance(p.get("revoked"), bool):
         out.append("payload.revoked must be a boolean")
-    if not (isinstance(st.get("subject"), list) and len(st["subject"]) >= 2):
-        out.append("a grant must pin at least 2 subjects: the spec and the plan it was approved for")
+    subjects = st.get("subject") if isinstance(st.get("subject"), list) else []
+    names = {_branch_key(os.path.normpath(s["name"])) for s in subjects
+             if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    if len(names) < 2:  # same file twice (or twice by case/`./`) pins only one thing
+        out.append("a grant must pin at least 2 distinct subjects: the spec and the plan it was"
+                   " approved for")
     if p.get("revoked") is not True:
         accepted = [a for a in pred.get("assertions") or [] if a.get("test") == "grant-accepted"]
         if len(accepted) != 1:
@@ -789,7 +805,7 @@ def latest_grant(root):
 
 
 def current_branch(root):
-    """The checked-out branch ("HEAD" when detached), or None when git cannot say.
+    """The checked-out branch (DETACHED when HEAD is detached), or None when git cannot say.
 
     Uses the full ref (refs/heads/<name>), never --abbrev-ref, which answers
     "heads/main" when a tag is also named main.
@@ -803,7 +819,14 @@ def current_branch(root):
     if r.returncode == 0 and ref.startswith("refs/heads/") and len(ref) > len("refs/heads/"):
         return ref[len("refs/heads/"):]
     if r.returncode == 1 and not ref:
-        return "HEAD"  # detached: -q exits 1 silently
+        # -q exits 1 silently when HEAD is not symbolic. It is detached only when HEAD
+        # names a real commit; anything else is git failing, which the caller fails closed on.
+        try:
+            v = subprocess.run(["git", "-C", root, "rev-parse", "-q", "--verify", "HEAD^{commit}"],
+                               capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return DETACHED if v.returncode == 0 else None
     return None
 
 
@@ -838,10 +861,155 @@ def detect_default_branches(root):
     return out
 
 
-def signature_level(path, env=None):
-    """UNSIGNED unless <path>.sig verifies. Verification is not implemented yet, so this
-    always returns UNSIGNED: an unverified .sig file never raises the level."""
-    return "UNSIGNED"
+def allowed_signers_path(env=None):
+    """$SKILL_CONTRACT_ALLOWED_SIGNERS, else the global git gpg.ssh.allowedSignersFile, else
+    ~/.config/skill-contract/allowed_signers. None when the chosen source names no file.
+
+    A set but missing $SKILL_CONTRACT_ALLOWED_SIGNERS never falls back. git is asked for its
+    --global value only: a repo-local setting lives in .git/config, inside the tree an agent
+    edits, so honouring it would let the agent name its own signers file.
+    """
+    use = os.environ if env is None else env
+    p = use.get("SKILL_CONTRACT_ALLOWED_SIGNERS")
+    if p:
+        return p if isinstance(p, str) and os.path.isfile(p) else None
+    home = use.get("HOME")
+    home = home if isinstance(home, str) and home else os.path.expanduser("~")
+    if env is None:
+        genv = dict(os.environ)
+    else:
+        genv = {k: v for k, v in env.items()
+                if k in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL") and isinstance(v, str)}
+        genv.update(HOME=home, PATH=os.environ.get("PATH", os.defpath))
+    try:
+        r = subprocess.run(["git", "config", "--global", "--get", "gpg.ssh.allowedSignersFile"],
+                           capture_output=True, text=True, timeout=10, env=genv,
+                           stdin=subprocess.DEVNULL, cwd=home if os.path.isdir(home) else None)
+        if r.returncode == 0 and r.stdout.strip():
+            cand = r.stdout.strip()
+            if cand == "~" or cand.startswith("~/"):
+                cand = os.path.join(home, cand[2:])
+            return cand if os.path.isabs(cand) and os.path.isfile(cand) else None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    cand = os.path.join(home, ".config", "skill-contract", "allowed_signers")
+    return cand if os.path.isfile(cand) else None
+
+
+def level_for_key_type(key_type):
+    """SIGNED_HW for a FIDO (sk) key type, in either spelling: ssh-keygen's "ED25519-SK" /
+    "ED25519-SK-CERT" or the wire name "sk-ssh-ed25519@openssh.com". SIGNED otherwise."""
+    t = str(key_type).upper()
+    return "SIGNED_HW" if t.startswith("SK-") or "SK" in t.split("-") else "SIGNED"
+
+
+_GOOD_RE = re.compile(r'^Good "(?P<ns>[^"\n]*)" signature for .* with (?P<type>\S+) key \S+$',
+                      re.MULTILINE)
+
+
+def verified_key_type(stdout, namespace=GRANT_NAMESPACE):
+    """The key type from `ssh-keygen -Y verify` output, e.g. 'ED25519-SK', or None.
+
+    OpenSSH prints: Good "<ns>" signature for <principal> with <TYPE> key <fingerprint>.
+    The principal is free text, so the match is greedy: the type is the one right before
+    the fingerprint at the end of the line, never one smuggled into the principal.
+    """
+    for m in _GOOD_RE.finditer(stdout or ""):
+        if m.group("ns") == namespace:
+            return m.group("type")
+    return None
+
+
+def _ssh_strings(buf, n):
+    """Read n SSH wire strings (uint32 length + bytes) from buf; return (strings, rest)."""
+    out, pos = [], 0
+    for _ in range(n):
+        if pos + 4 > len(buf):
+            raise ValueError("truncated")
+        ln = int.from_bytes(buf[pos:pos + 4], "big")
+        if pos + 4 + ln > len(buf):
+            raise ValueError("truncated")
+        out.append(buf[pos + 4:pos + 4 + ln])
+        pos += 4 + ln
+    return out, buf[pos:]
+
+
+def sshsig_info(armored, namespace=GRANT_NAMESPACE):
+    """(signer key type, sk flags or None) from an armored SSHSIG (PROTOCOL.sshsig), or None.
+
+    For an sk signature the flags byte follows the signature; bit 0x01 is user presence
+    (the key was touched).
+    """
+    try:
+        lines = [ln.strip() for ln in str(armored).strip().splitlines()]
+        if len(lines) < 3 or lines[0] != "-----BEGIN SSH SIGNATURE-----" \
+                or lines[-1] != "-----END SSH SIGNATURE-----":
+            return None
+        blob = base64.b64decode("".join(lines[1:-1]), validate=True)
+        if blob[:6] != b"SSHSIG" or int.from_bytes(blob[6:10], "big") != 1:
+            return None
+        (pub, ns, _reserved, _halg, sig), rest = _ssh_strings(blob[10:], 5)
+        if rest or ns != namespace.encode("utf-8"):
+            return None
+        (key_type,), _ = _ssh_strings(pub, 1)
+        (sig_type, _sig), tail = _ssh_strings(sig, 2)
+        key_type, sig_type = key_type.decode("ascii"), sig_type.decode("ascii")
+        if level_for_key_type(sig_type) == "SIGNED_HW":
+            return (key_type, tail[0]) if len(tail) == 5 else None  # flags byte + uint32 counter
+        return (key_type, None) if not tail else None
+    except (ValueError, UnicodeDecodeError, IndexError):
+        return None
+
+
+def signature_level(path, env=None, data=None):
+    """UNSIGNED | SIGNED | SIGNED_HW for <path>.sig over `data` (default: the file's bytes).
+
+    Never raises: any failure is UNSIGNED. SIGNED_HW needs all three of: ssh-keygen reporting
+    an sk key type, the signature blob naming an sk key, and the user-presence flag set.
+    """
+    try:
+        return _signature_level(path, env, data)
+    except Exception:  # noqa: BLE001 - by contract every failure means UNSIGNED
+        return "UNSIGNED"
+
+
+def _signature_level(path, env, data):
+    sig = path + ".sig"
+    keygen = shutil.which("ssh-keygen")
+    if not (keygen and os.path.isfile(sig)):
+        return "UNSIGNED"
+    signers = allowed_signers_path(env)
+    if not signers:
+        return "UNSIGNED"
+    with open(sig, "rb") as f:
+        sig_bytes = f.read(SIG_MAX_BYTES + 1)
+    if data is None:
+        with open(path, "rb") as f:
+            data = f.read(ENVELOPE_MAX_BYTES + 1)
+    if len(sig_bytes) > SIG_MAX_BYTES or len(data) > ENVELOPE_MAX_BYTES:
+        return "UNSIGNED"
+    with tempfile.TemporaryDirectory(prefix="skill-contract-sig-") as tmp:
+        tsig = os.path.join(tmp, "grant.sig")  # verify and parse the very same signature bytes
+        with open(tsig, "wb") as f:
+            f.write(sig_bytes)
+        r = subprocess.run([keygen, "-Y", "find-principals", "-s", tsig, "-f", signers],
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        found = r.stdout.decode("utf-8", "replace").split("\n") if r.returncode == 0 else []
+        principal = next((ln.strip() for ln in found if ln.strip()), None)
+        if not principal:
+            return "UNSIGNED"
+        r = subprocess.run([keygen, "-Y", "verify", "-f", signers, "-I", principal,
+                            "-n", GRANT_NAMESPACE, "-s", tsig],
+                           input=data, capture_output=True, timeout=20)
+    if r.returncode != 0:
+        return "UNSIGNED"
+    out_type = verified_key_type(r.stdout.decode("utf-8", "replace"))
+    info = sshsig_info(sig_bytes.decode("utf-8", "replace"))
+    if (out_type and info and level_for_key_type(out_type) == "SIGNED_HW"
+            and level_for_key_type(info[0]) == "SIGNED_HW"
+            and info[1] is not None and info[1] & 0x01):
+        return "SIGNED_HW"
+    return "SIGNED"
 
 
 def check_grant(root, action, path=None, now=None, branch=None, env=None, default_branches=None):
@@ -860,7 +1028,7 @@ def check_grant(root, action, path=None, now=None, branch=None, env=None, defaul
         rep["reason"] = "no-grant"
         return rep
     rep["path"] = path
-    st, err = load_envelope(path)
+    st, err, raw = read_envelope(path)
     viol = ["C%d: %s" % v for v in (err or check_statement(st))]
     if not viol:
         viol = ["C10: %s" % v for v in grant_violations(st)]
@@ -889,6 +1057,10 @@ def check_grant(root, action, path=None, now=None, branch=None, env=None, defaul
     branch = branch if branch is not None else current_branch(root)
     if branch is None and in_git_work_tree(root):
         return ask("branch-unknown")  # inside git but git cannot answer: fail closed
+    if branch == DETACHED:
+        # A rebase started on the default branch detaches HEAD, and `rebase --continue`
+        # then advances that branch: no pattern, not even "*", covers a detached HEAD.
+        return ask("detached")
     if branch is not None:
         if default_branches is None:
             default_branches = detect_default_branches(root)
@@ -900,7 +1072,7 @@ def check_grant(root, action, path=None, now=None, branch=None, env=None, defaul
     rep["gate"] = gate
     if gate not in ("auto", "grant"):
         return ask("gate-ask")
-    rep["signed"] = signature_level(path, env)
+    rep["signed"] = signature_level(path, env, data=raw)  # the bytes parsed above
     need = [(p.get("require_signature") or {}).get(action) or "UNSIGNED"]
     if action in HW_SIGNED_CLASSES:
         need.append("SIGNED_HW")
