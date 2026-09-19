@@ -15,7 +15,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -481,16 +480,24 @@ class GrantTests(unittest.TestCase):
         rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, env={})
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch-unknown"))
 
-    def test_a_garbage_sig_file_is_unsigned(self):
+    def test_a_sig_file_beside_a_grant_changes_nothing(self):
+        # A8: there is no signing. A .sig next to the grant neither raises nor lowers coverage.
         p = self.put(build_vectors.grant())
-        _write(p + ".sig", "not a signature")
-        self.assertEqual(cc.signature_level(p, env={}), "UNSIGNED")
+        _write(p + ".sig", "-----BEGIN SSH SIGNATURE-----\nAAAA\n-----END SSH SIGNATURE-----\n")
+        self.assertEqual(self.check()["status"], "COVERED")
+        rep = self.check("merge")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "gate-ask"))
+        for name in ("signature_level", "level_for_key_type", "allowed_signers_path",
+                     "sshsig_info", "verified_key_type", "SIG_LEVELS", "GRANT_NAMESPACE",
+                     "HW_SIGNED_CLASSES"):
+            self.assertFalse(hasattr(cc, name), name)
 
-    def test_covered_report_names_gate_and_signature(self):
+    def test_covered_report_names_gate_and_no_signature(self):
         self.put(build_vectors.grant())
         rep = self.check()
-        self.assertEqual((rep["status"], rep["id"], rep["gate"], rep["signed"]),
-                         ("COVERED", build_vectors.GRANT_ID, "grant", "UNSIGNED"))
+        self.assertEqual((rep["status"], rep["id"], rep["gate"]),
+                         ("COVERED", build_vectors.GRANT_ID, "grant"))
+        self.assertNotIn("signed", rep)
 
     def test_invalid_report_carries_violations(self):
         self.put(build_vectors.grant(attributed={"skill": "spec-first-planning"},
@@ -501,22 +508,31 @@ class GrantTests(unittest.TestCase):
         self.assertIn("human", rep["violations"][0])  # attribution is checked before floors
         self.assertIn("merge", rep["violations"][1])
 
-    def test_irreversible_classes_ask_for_signature_even_when_granted(self):
-        policy = {c: "grant" for c in ("merge", "deploy", "spend", "external_message", "delete")}
-        self.put(build_vectors.grant(policy=policy))
-        for c in policy:
+    def test_irreversible_classes_are_ask_only(self):
+        # A8: a grant can never cover merge, deploy, spend, external_message or delete.
+        for c in sorted(cc.IRREVERSIBLE_CLASSES):
+            for gate in ("grant", "auto"):
+                viol = cc.grant_violations(build_vectors.grant(policy={c: gate}))
+                self.assertEqual(len(viol), 1, (c, gate, viol))
+                self.assertIn(c, viol[0])
+            self.assertEqual(cc.grant_violations(build_vectors.grant(policy={c: "ask"})), [])
+        self.put(build_vectors.grant())
+        for c in cc.IRREVERSIBLE_CLASSES:
             rep = self.check(c)
-            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "signature"), c)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "gate-ask"), c)
 
-    def test_signature_floor_is_met_only_by_signed_hw(self):
-        self.put(build_vectors.grant(policy={"merge": "grant"}))
-        orig = cc.signature_level
-        try:
-            for level, want in (("SIGNED", "ASK"), ("SIGNED_HW", "COVERED")):
-                cc.signature_level = lambda path, env=None, level=level, **kw: level
-                self.assertEqual(self.check("merge")["status"], want, level)
-        finally:
-            cc.signature_level = orig
+    def test_irreversible_classes_are_exactly_the_a8_five(self):
+        self.assertEqual(cc.IRREVERSIBLE_CLASSES,
+                         {"merge", "deploy", "spend", "external_message", "delete"})
+        self.assertEqual(set(cc.ACTION_CLASSES) - cc.IRREVERSIBLE_CLASSES,
+                         {"read_only", "local_reversible", "push_branch", "open_pr"})
+
+    def test_a_require_signature_field_makes_the_grant_invalid(self):
+        for req in ({}, {"local_reversible": "SIGNED"}):
+            st = build_vectors.grant()
+            st["predicate"]["payload"]["require_signature"] = req
+            viol = cc.grant_violations(st)
+            self.assertTrue(any("require_signature" in v for v in viol), (req, viol))
 
     def test_lifetime_over_seven_days_is_invalid(self):
         st = build_vectors.grant(expires="2026-09-27T00:00:00Z")
@@ -674,7 +690,7 @@ class GrantTests(unittest.TestCase):
                                  buf.getvalue())
         self.assertEqual(codes["local_reversible"][0], 0)
         self.assertEqual(codes["local_reversible"][1].strip().splitlines()[-1],
-                         "GRANT: COVERED id=%s class=local_reversible gate=grant signed=UNSIGNED"
+                         "GRANT: COVERED id=%s class=local_reversible gate=grant"
                          % build_vectors.GRANT_ID)
         self.assertEqual(codes["merge"][0], 3)
         self.assertIn("GRANT: ASK", codes["merge"][1])
@@ -691,214 +707,6 @@ class GrantTests(unittest.TestCase):
             self.assertEqual(cc.main(["revoke-grant", "--root", self.tmp]), 0)
         self.assertTrue(buf.getvalue().startswith("REVOKED: "))
 
-
-def _ssh_string(b):
-    b = b.encode() if isinstance(b, str) else b
-    return len(b).to_bytes(4, "big") + b
-
-
-def _armored_sshsig(key_type, sig_type=None, flags=None, namespace="skill-contract-grant"):
-    """A structurally valid SSHSIG blob (PROTOCOL.sshsig) with made-up key and signature bytes."""
-    import base64
-    pub = _ssh_string(key_type) + _ssh_string(b"\x01" * 32)
-    sig = _ssh_string(sig_type or key_type) + _ssh_string(b"\x02" * 64)
-    if flags is not None:
-        sig += bytes([flags]) + (7).to_bytes(4, "big")
-    blob = (b"SSHSIG" + (1).to_bytes(4, "big") + _ssh_string(pub) + _ssh_string(namespace)
-            + _ssh_string(b"") + _ssh_string("sha512") + _ssh_string(sig))
-    b64 = base64.b64encode(blob).decode()
-    return ("-----BEGIN SSH SIGNATURE-----\n"
-            + "\n".join(b64[i:i + 70] for i in range(0, len(b64), 70))
-            + "\n-----END SSH SIGNATURE-----\n")
-
-
-GOOD = 'Good "skill-contract-grant" signature for %s with %s key SHA256:abc\n'
-
-
-class SignatureTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="sc-sig-")
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def keypair(self, principal="dana@example", name="k"):
-        key = os.path.join(self.tmp, name)
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", key],
-                       check=True, capture_output=True)
-        with open(key + ".pub", encoding="utf-8") as f:
-            pub = f.read().split()
-        signers = os.path.join(self.tmp, "allowed_signers")
-        with open(signers, "a", encoding="utf-8") as f:
-            f.write("%s %s %s\n" % (principal, pub[0], pub[1]))
-        return key, signers
-
-    def sign(self, key, path, namespace=None):
-        if os.path.exists(path + ".sig"):
-            os.remove(path + ".sig")  # ssh-keygen would prompt before overwriting
-        subprocess.run(["ssh-keygen", "-Y", "sign", "-q", "-f", key,
-                        "-n", namespace or cc.GRANT_NAMESPACE, path],
-                       check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
-
-    def test_key_type_classifier(self):
-        for t in ("ED25519-SK", "ECDSA-SK", "sk-ssh-ed25519@openssh.com",
-                  "sk-ecdsa-sha2-nistp256@openssh.com", "ED25519-SK-CERT",
-                  "sk-ssh-ed25519-cert-v01@openssh.com"):
-            self.assertEqual(cc.level_for_key_type(t), "SIGNED_HW", t)
-        for t in ("ED25519", "RSA", "ECDSA", "ssh-ed25519", "ED25519-CERT", "", "SKX", "RISK"):
-            self.assertEqual(cc.level_for_key_type(t), "SIGNED", t)
-
-    def test_verify_output_parser_takes_the_last_with_key_clause(self):
-        self.assertEqual(cc.verified_key_type(GOOD % ("dana@example", "ED25519")), "ED25519")
-        # A principal cannot smuggle a key type in: the type is the one right before the fingerprint.
-        spoof = GOOD % ("x with ED25519-SK key SHA256:y", "RSA")
-        self.assertEqual(cc.verified_key_type(spoof), "RSA")
-        self.assertIsNone(cc.verified_key_type("Could not verify signature.\n"))
-        self.assertIsNone(cc.verified_key_type('Good "other" signature for a with ED25519-SK key f\n'))
-
-    def test_sshsig_parser_reads_key_type_and_presence_flag(self):
-        info = cc.sshsig_info(_armored_sshsig("sk-ssh-ed25519@openssh.com", flags=0x01))
-        self.assertEqual(info, ("sk-ssh-ed25519@openssh.com", 0x01))
-        info = cc.sshsig_info(_armored_sshsig("ssh-ed25519"))
-        self.assertEqual(info, ("ssh-ed25519", None))
-        self.assertIsNone(cc.sshsig_info("junk"))
-        self.assertIsNone(cc.sshsig_info(_armored_sshsig("ssh-ed25519", namespace="file")))
-
-    def test_no_sig_file_is_unsigned(self):
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, "{}")
-        self.assertEqual(cc.signature_level(p, env={}), "UNSIGNED")
-
-    @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
-    def test_software_key_signature_is_signed_and_tamper_is_unsigned(self):
-        key, signers = self.keypair()
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, '{"grant": 1}\n')
-        self.sign(key, p)
-        with open(p + ".sig", encoding="utf-8") as f:
-            self.assertEqual(cc.sshsig_info(f.read()), ("ssh-ed25519", None))  # a real blob parses
-        env = {"SKILL_CONTRACT_ALLOWED_SIGNERS": signers}
-        self.assertEqual(cc.signature_level(p, env=env), "SIGNED")
-        _write(p, '{"grant": 2}\n')  # tampered after signing
-        self.assertEqual(cc.signature_level(p, env=env), "UNSIGNED")
-
-    @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
-    def test_signature_is_checked_over_the_bytes_the_caller_read(self):
-        key, signers = self.keypair()
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, '{"grant": 1}\n')
-        self.sign(key, p)
-        env = {"SKILL_CONTRACT_ALLOWED_SIGNERS": signers}
-        self.assertEqual(cc.signature_level(p, env=env, data=b'{"grant": 1}\n'), "SIGNED")
-        self.assertEqual(cc.signature_level(p, env=env, data=b'{"grant": 2}\n'), "UNSIGNED")
-
-    @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
-    def test_wrong_namespace_or_unknown_signer_is_unsigned(self):
-        key, signers = self.keypair()
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, '{"grant": 1}\n')
-        self.sign(key, p, namespace="file")
-        env = {"SKILL_CONTRACT_ALLOWED_SIGNERS": signers}
-        self.assertEqual(cc.signature_level(p, env=env), "UNSIGNED")
-        other = os.path.join(self.tmp, "other")
-        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", other],
-                       check=True, capture_output=True)
-        self.sign(other, p)  # overwrites g.json.sig with a key not in allowed_signers
-        self.assertEqual(cc.signature_level(p, env=env), "UNSIGNED")
-
-    def test_an_env_signers_path_that_does_not_exist_does_not_fall_back(self):
-        home = os.path.join(self.tmp, "home")
-        _write(os.path.join(home, ".config", "skill-contract", "allowed_signers"), "x\n")
-        self.assertIsNone(cc.allowed_signers_path(
-            {"SKILL_CONTRACT_ALLOWED_SIGNERS": os.path.join(self.tmp, "nope"), "HOME": home}))
-        self.assertIsNone(cc.allowed_signers_path({"SKILL_CONTRACT_ALLOWED_SIGNERS": 5, "HOME": home}))
-
-    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
-    def test_signers_come_from_global_git_config_then_home_never_the_repo(self):
-        home = os.path.join(self.tmp, "home")
-        os.makedirs(home)
-        fallback = os.path.join(home, ".config", "skill-contract", "allowed_signers")
-        _write(fallback, "x\n")
-        repo = os.path.join(self.tmp, "repo")
-        planted = os.path.join(self.tmp, "planted")
-        _write(planted, "x\n")
-        subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
-        subprocess.run(["git", "-C", repo, "config", "gpg.ssh.allowedSignersFile", planted],
-                       check=True, capture_output=True)
-        cwd = os.getcwd()
-        os.chdir(repo)
-        try:
-            # a repo-local setting lives in the tree the agent edits: never honoured
-            self.assertEqual(cc.allowed_signers_path({"HOME": home}), fallback)
-            configured = os.path.join(self.tmp, "configured")
-            _write(configured, "x\n")
-            _write(os.path.join(home, ".gitconfig"),
-                   "[gpg \"ssh\"]\n\tallowedSignersFile = %s\n" % configured)
-            self.assertEqual(cc.allowed_signers_path({"HOME": home}), configured)
-        finally:
-            os.chdir(cwd)
-
-    def test_missing_ssh_keygen_degrades_to_unsigned(self):
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, "{}")
-        _write(p + ".sig", "x")
-        with mock.patch.object(cc.shutil, "which", return_value=None):
-            self.assertEqual(cc.signature_level(p, env={"SKILL_CONTRACT_ALLOWED_SIGNERS": p}),
-                             "UNSIGNED")
-
-    def test_never_raises(self):
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, "{}")
-        _write(p + ".sig", _armored_sshsig("ssh-ed25519"))
-        env = {"SKILL_CONTRACT_ALLOWED_SIGNERS": p}
-        with mock.patch.object(cc.subprocess, "run", side_effect=RuntimeError("boom")):
-            self.assertEqual(cc.signature_level(p, env=env), "UNSIGNED")
-        self.assertEqual(cc.signature_level(os.path.join(self.tmp, "missing.json"), env=env),
-                         "UNSIGNED")
-        self.assertEqual(cc.signature_level(None, env=env), "UNSIGNED")
-
-    def fake_verify(self, out_type, blob_type, flags):
-        """signature_level with ssh-keygen faked: it 'verifies' and reports out_type."""
-        p = os.path.join(self.tmp, "g.json")
-        _write(p, "{}")
-        _write(p + ".sig", _armored_sshsig(blob_type, flags=flags))
-
-        def run(argv, **kw):
-            out = "dana@example\n" if "find-principals" in argv else GOOD % ("dana@example", out_type)
-            return subprocess.CompletedProcess(argv, 0, out.encode(), b"")
-        with mock.patch.object(cc.subprocess, "run", side_effect=run), \
-                mock.patch.object(cc.shutil, "which", return_value="/usr/bin/ssh-keygen"):
-            return cc.signature_level(p, env={"SKILL_CONTRACT_ALLOWED_SIGNERS": p})
-
-    def test_signed_hw_needs_an_sk_key_in_output_and_blob_and_user_presence(self):
-        sk = "sk-ssh-ed25519@openssh.com"
-        self.assertEqual(self.fake_verify("ED25519-SK", sk, 0x01), "SIGNED_HW")
-        self.assertEqual(self.fake_verify("ED25519-SK", sk, 0x05), "SIGNED_HW")
-        self.assertEqual(self.fake_verify("ED25519-SK", sk, 0x00), "SIGNED")  # no touch
-        self.assertEqual(self.fake_verify("ED25519-SK", "ssh-ed25519", None), "SIGNED")
-        self.assertEqual(self.fake_verify("ED25519", sk, 0x01), "SIGNED")
-        self.assertEqual(self.fake_verify("ED25519", "ssh-ed25519", None), "SIGNED")
-
-    @unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
-    def test_check_grant_reports_a_real_signature_and_keeps_the_hw_floor(self):
-        root = os.path.join(self.tmp, "root")
-        _write(os.path.join(root, "docs", "spec.md"), build_vectors.SPEC)
-        _write(os.path.join(root, "plan.json"), build_vectors.PLAN_TEXT)
-        st = build_vectors.grant(policy={"local_reversible": "grant", "merge": "grant"},
-                                 require={"local_reversible": "SIGNED"})
-        p = os.path.join(cc.envelope_dir(root), st["predicate"]["id"] + ".json")
-        _write(p, json.dumps(st))
-        key, signers = self.keypair()
-        env = {"SKILL_CONTRACT_ALLOWED_SIGNERS": signers}
-        now = datetime(2026, 9, 19, 13, 0, 0, tzinfo=timezone.utc)
-        kw = dict(now=now, branch="factory/x", env=env)
-        rep = cc.check_grant(root, "local_reversible", **kw)
-        self.assertEqual((rep["status"], rep["reason"], rep["signed"]), ("ASK", "signature", "UNSIGNED"))
-        self.sign(key, p)
-        rep = cc.check_grant(root, "local_reversible", **kw)
-        self.assertEqual((rep["status"], rep["signed"]), ("COVERED", "SIGNED"))
-        rep = cc.check_grant(root, "merge", **kw)
-        self.assertEqual((rep["status"], rep["reason"], rep["signed"]), ("ASK", "signature", "SIGNED"))
 
 
 if __name__ == "__main__":

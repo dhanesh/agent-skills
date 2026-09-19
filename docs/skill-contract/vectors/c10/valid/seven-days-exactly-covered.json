@@ -58,7 +58,6 @@
             "local_reversible": "grant",
             "read_only": "auto"
           },
-          "require_signature": {},
           "revoked": false,
           "scope": {
             "branch_pattern": "factory/*",

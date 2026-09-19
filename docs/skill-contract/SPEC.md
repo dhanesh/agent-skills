@@ -43,8 +43,7 @@ here.
 `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1`. Its subjects pin the
 spec and the task-plan envelope it was approved for; its payload carries `scope`
 (`repo`, `branch_pattern`), `decisions`, `defaults`, `gate_policy` (action class → `auto`, `grant`
-or `ask`), an optional `require_signature` (action class → `SIGNED` or `SIGNED_HW`), `budget`,
-`stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `revoked`. The action classes are:
+or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `revoked`. The action classes are:
 
 | Class | Examples | Reversibility | Most permissive gate |
 |---|---|---|---|
@@ -52,26 +51,28 @@ or `ask`), an optional `require_signature` (action class → `SIGNED` or `SIGNED
 | `local_reversible` | edit the working tree, commit on a local branch, hand an envelope to a local skill | local | `auto` |
 | `push_branch` | push a non-default branch | remote, reversible | `grant` |
 | `open_pr` | open or update a pull request | remote, reversible | `grant` |
-| `merge` | merge to a default or protected branch | irreversible or externally visible | `grant`, only if named explicitly |
-| `deploy` | release, publish, deploy | irreversible or externally visible | `grant`, only if named explicitly |
-| `spend` | any paid API or resource beyond the budget | irreversible | `grant`, only if named explicitly |
-| `external_message` | email, chat, issue comments to others | externally visible | `grant`, only if named explicitly |
-| `delete` | delete branches, files outside the working tree, data | irreversible | `grant`, only if named explicitly |
+| `merge` | merge to a default or protected branch | irreversible or externally visible | `ask` only |
+| `deploy` | release, publish, deploy | irreversible or externally visible | `ask` only |
+| `spend` | any paid API or resource beyond the budget | irreversible | `ask` only |
+| `external_message` | email, chat, issue comments to others | externally visible | `ask` only |
+| `delete` | delete branches, files outside the working tree, data | irreversible | `ask` only |
 
 - A class absent from `gate_policy` is `ask`.
 - `auto` is allowed only on `read_only` and `local_reversible`; `auto` on any other class makes
   the grant invalid.
+- A grant MUST NOT cover `merge`, `deploy`, `spend`, `external_message` or `delete`: any gate
+  other than `ask` on one of them makes the grant invalid, so those actions always ask the human
+  when they happen.
+- A grant is never signed. A payload carrying `require_signature` is invalid, and a `.sig` file
+  beside a grant changes nothing.
 - A grant MUST pin at least 2 distinct subjects: the spec and the task-plan envelope it was
   approved for. Names that differ only by case or a `./` segment are the same subject.
 - A grant MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human; a
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
 
-Three floors live in the checker, and no grant can lower them:
+These floors live in the checker, and no grant can lower them:
 
-- A grant MUST NOT cover `merge`, `deploy`, `spend`, `external_message` or `delete` unless its
-  signature level is `SIGNED_HW`. The required level is the higher of the grant's
-  `require_signature` and this floor.
 - A grant MUST NOT live more than 7 days: `expires_at` more than 7 days after `generatedAtTime`
   makes it invalid, and a receiver MUST treat a grant whose `expires_at` is more than 7 days after
   now as not covering anything.
@@ -84,16 +85,6 @@ Three floors live in the checker, and no grant can lower them:
   whatever its `branch_pattern`: a rebase started on the default branch detaches HEAD, and
   `rebase --continue` then advances that branch.
 
-**The grant signature.** A grant MAY be signed. The signature lives beside the envelope at
-`<id>.json.sig`, made by the user with `ssh-keygen -Y sign -n skill-contract-grant <id>.json`.
-The checker verifies it over the exact bytes it parsed, with `ssh-keygen -Y find-principals` and
-`-Y verify`, against the first of: `$SKILL_CONTRACT_ALLOWED_SIGNERS` (set but missing means no
-signers file, never a fallback); git's global `gpg.ssh.allowedSignersFile` (a repo-local value is
-ignored, because it lives in the tree an agent edits); `~/.config/skill-contract/allowed_signers`.
-The level is `SIGNED_HW` only when ssh-keygen reports an `sk` key type, the signature names an
-`sk-` key, and its user-presence flag is set; `SIGNED` for any other signature that verifies; and
-`UNSIGNED` otherwise, including when `ssh-keygen` is missing or anything fails.
-
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
 name.
 
@@ -104,20 +95,19 @@ and whose `assertions` list is empty: it only tightens, so anyone may write it
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
 superseded, not expired, not living past the 7-day floor, subjects not stale, HEAD not detached, not
 on a default branch, the current git branch matches `branch_pattern` (the branch checks are skipped only when
-no `.git` exists in `root` or any parent), the class's gate is `auto` or `grant`, and the required signature level is met. An `ASK`
+no `.git` exists in `root` or any parent), and the class's gate is `auto` or `grant`. An `ASK`
 names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `branch-unknown`, `detached`, `default-branch`, `branch`, `gate-ask` or `signature`). It exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
+`stale`, `branch-unknown`, `detached`, `default-branch`, `branch` or `gate-ask`). It prints
+`GRANT: COVERED id=… class=… gate=auto|grant` on success and exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 
-*Non-normative.* An agent with a shell on the same machine can write an unsigned grant, or sign one
-with a software key it creates. Only a signature by a hardware-backed (`sk-`) key shows that a
-person physically touched a key. The same limit applies to transcript roles. A `require_signature`
-inside a grant cannot protect against a forged grant, because the forger simply leaves it out;
-that is why the floors above live in the checker rather than in the grant. `SIGNED_HW` is only as
-strong as the allowed-signers file: the checker cannot tell a real FIDO key from an `sk-` key
-emulated in software, so an agent that can edit that file (or set `$SKILL_CONTRACT_ALLOWED_SIGNERS`,
-or put its own `ssh-keygen` first on `PATH`) can forge any level. Keep the file where the agent
-cannot write, and list only keys generated on hardware.
+*Non-normative.* A grant is honestly labelled as the user's acceptance, not proven to be one: an
+agent with a shell on the same machine can forge a grant. Signing would not fix that, because the
+same agent can edit whatever list of trusted keys the checker reads, and even an `sk-` "hardware"
+key can be emulated in software. The same limit applies to transcript roles. That is why a grant
+covers only reversible actions (`read_only`, `local_reversible`, `push_branch`, `open_pr`) and why
+the floors live in the checker rather than in the grant: an unattended run goes as far as an open
+pull request, and a human merges.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 

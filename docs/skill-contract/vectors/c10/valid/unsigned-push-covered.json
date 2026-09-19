@@ -58,7 +58,6 @@
             "open_pr": "grant",
             "push_branch": "grant"
           },
-          "require_signature": {},
           "revoked": false,
           "scope": {
             "branch_pattern": "factory/*",

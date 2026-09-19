@@ -57,7 +57,6 @@
           "gate_policy": {
             "merge": "auto"
           },
-          "require_signature": {},
           "revoked": false,
           "scope": {
             "branch_pattern": "factory/*",

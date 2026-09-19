@@ -1,7 +1,6 @@
 {
   "expect": {
-    "reason": "signature",
-    "status": "ASK"
+    "status": "INVALID"
   },
   "input": {
     "action": "local_reversible",

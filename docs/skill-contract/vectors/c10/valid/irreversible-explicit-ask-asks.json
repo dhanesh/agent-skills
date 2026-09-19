@@ -1,6 +1,6 @@
 {
   "expect": {
-    "reason": "signature",
+    "reason": "gate-ask",
     "status": "ASK"
   },
   "input": {
@@ -56,10 +56,8 @@
           "defaults": [],
           "expires_at": "2026-09-20T12:00:00Z",
           "gate_policy": {
-            "delete": "grant"
-          },
-          "require_signature": {
-            "delete": "SIGNED"
+            "delete": "ask",
+            "local_reversible": "grant"
           },
           "revoked": false,
           "scope": {

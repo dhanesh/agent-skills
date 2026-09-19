@@ -1,10 +1,9 @@
 {
   "expect": {
-    "reason": "revoked",
-    "status": "ASK"
+    "status": "INVALID"
   },
   "input": {
-    "action": "local_reversible",
+    "action": "delete",
     "branch": "factory/x",
     "default_branch": "main",
     "files": {
@@ -14,7 +13,31 @@
     "grant": {
       "_type": "https://in-toto.io/Statement/v1",
       "predicate": {
-        "assertions": [],
+        "assertions": [
+          {
+            "assertedBy": {
+              "human": "Dana"
+            },
+            "command": [
+              "{python}",
+              "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+              "--unattended",
+              "docs/spec.md"
+            ],
+            "result": {
+              "outcome": "passed"
+            },
+            "subject": [
+              {
+                "digest": {
+                  "sha256": "41028ddf536e594778c6b23d0a527099836b813c46687c269eff9b980746f34f"
+                },
+                "name": "docs/spec.md"
+              }
+            ],
+            "test": "grant-accepted"
+          }
+        ],
         "generatedAtTime": "2026-09-19T12:00:00Z",
         "id": "autonomy-grant-v1-20260919T120000Z-a1b2c3",
         "payload": {
@@ -32,10 +55,9 @@
           "defaults": [],
           "expires_at": "2026-09-20T12:00:00Z",
           "gate_policy": {
-            "local_reversible": "grant",
-            "read_only": "auto"
+            "delete": "auto"
           },
-          "revoked": true,
+          "revoked": false,
           "scope": {
             "branch_pattern": "factory/*",
             "repo": "."

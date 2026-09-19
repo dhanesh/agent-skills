@@ -1,7 +1,6 @@
 {
   "expect": {
-    "reason": "signature",
-    "status": "ASK"
+    "status": "INVALID"
   },
   "input": {
     "action": "merge",
@@ -58,7 +57,6 @@
           "gate_policy": {
             "merge": "grant"
           },
-          "require_signature": {},
           "revoked": false,
           "scope": {
             "branch_pattern": "factory/*",

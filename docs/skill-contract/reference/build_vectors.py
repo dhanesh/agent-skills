@@ -351,7 +351,7 @@ NOW = "2026-09-19T13:00:00Z"
 
 
 def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00:00Z",
-          require=None, branch_pattern="factory/*", spec_text=SPEC, gid=GRANT_ID, rev=None,
+          branch_pattern="factory/*", spec_text=SPEC, gid=GRANT_ID, rev=None,
           assertions=None, outcome="passed", generated="2026-09-19T12:00:00Z"):
     a = {"test": "grant-accepted", "assertedBy": attributed or {"human": "Dana"},
          "result": {"outcome": outcome},
@@ -363,7 +363,7 @@ def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00
                               "source": "sweep"}],
                "defaults": [], "gate_policy": policy if policy is not None else
                {"read_only": "auto", "local_reversible": "grant"},
-               "require_signature": require or {}, "budget": {"wall_clock_min": 60},
+               "budget": {"wall_clock_min": 60},
                "stop_on": ["new_human_decision"], "expires_at": expires,
                "system_one": {"allowed": False}, "revoked": revoked}
     return {"_type": "https://in-toto.io/Statement/v1",
@@ -409,14 +409,11 @@ def grant_cases():
          grant_vector(g, "local_reversible", "ASK", "superseded",
                       others=[grant(revoked=True, assertions=[], rev=GRANT_ID,
                                     gid="autonomy-grant-v1-20260919T121000Z-d4e5f6")])),
-        ("c10", "valid", "signature-required-asks",
-         grant_vector(grant(require={"local_reversible": "SIGNED"}), "local_reversible",
-                      "ASK", "signature")),
-        ("c10", "valid", "irreversible-needs-hw-signature",
-         grant_vector(grant(policy={"merge": "grant"}), "merge", "ASK", "signature")),
-        ("c10", "valid", "irreversible-floor-beats-require-signature",
-         grant_vector(grant(policy={"delete": "grant"}, require={"delete": "SIGNED"}), "delete",
-                      "ASK", "signature")),
+        ("c10", "valid", "irreversible-absent-asks",
+         grant_vector(g, "merge", "ASK", "gate-ask")),
+        ("c10", "valid", "irreversible-explicit-ask-asks",
+         grant_vector(grant(policy={"local_reversible": "grant", "delete": "ask"}), "delete",
+                      "ASK", "gate-ask")),
         ("c10", "valid", "unsigned-push-covered",
          grant_vector(grant(policy={"push_branch": "grant", "open_pr": "grant"}), "open_pr",
                       "COVERED")),
@@ -444,6 +441,14 @@ def grant_cases():
          grant_vector(grant(expires="2026-09-26T12:00:01Z"), "local_reversible", "INVALID")),
         ("c10", "invalid", "merge-auto",
          grant_vector(grant(policy={"merge": "auto"}), "merge", "INVALID")),
+        ("c10", "invalid", "merge-grant",
+         grant_vector(grant(policy={"merge": "grant"}), "merge", "INVALID")),
+        ("c10", "invalid", "delete-auto",
+         grant_vector(grant(policy={"delete": "auto"}), "delete", "INVALID")),
+        ("c10", "invalid", "require-signature-field",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "require_signature", {"local_reversible": "SIGNED"}), g),
+                      "local_reversible", "INVALID")),
         ("c10", "invalid", "push-auto",
          grant_vector(grant(policy={"push_branch": "auto"}), "push_branch", "INVALID")),
         ("c10", "invalid", "skill-attributed",
