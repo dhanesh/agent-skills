@@ -184,6 +184,9 @@ SINCE_BCP14 = "8179b71"  # BCP 14 across skills: every SKILL.md declares RFC 211
 # keywords (PP-7) and marks its hard rules with them.
 SINCE_FACTORY_TRUST_WM = "391cd4a"  # world-model-ledger: the wm CLI refuses
 # `validate --by human...` and `--assert-valid` records agent_assert, not human.
+SINCE_FACTORY_TRUST_BIR = "fa9556a"  # base-in-reality: refutation follows the
+# rubric (critical/high need unanimous non-refute, a crashed refuter refutes)
+# and report_lint.py requires + checks the recorded `refutation` votes.
 
 
 def _git_out(*args):
@@ -855,7 +858,10 @@ def check_grounding(old, new):
                 "verdict": "VIOLATION", "severity": "high", "recommended_fix": "f",
                 "citations": [{"title": "never retrieved",
                                "url": "https://arxiv.org/abs/2401.99999",
-                               "doi": "10.1234/fabricated", "fetched": True}]}],
+                               "doi": "10.1234/fabricated", "fetched": True}],
+                # clean votes, so this row still fails on fabrication alone and
+                # not on the refutation rule SINCE_FACTORY_TRUST_BIR added
+                "refutation": {"refuters": 3, "verdicts": [False, False, False]}}],
               open(fab, "w"))
 
     def rejected(tree):
@@ -4516,6 +4522,125 @@ def check_bcp14(old, new):
         a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
 
 
+# ── base-in-reality: the refutation vote follows the verdict rubric ─────────
+# A critical finding with one dissenting refuter, or with refuters that
+# crashed, shipped as VIOLATION: the workflow took a flat 2-of-3 majority and
+# dropped missing votes, and the linter never read `refutation`. An unattended
+# run then treats an unchallenged finding as proven.
+_BIR_WORKFLOW_HARNESS = r"""
+import { readFileSync } from 'node:fs'
+const src = readFileSync(process.argv[2], 'utf8').replace('export const meta', 'const meta')
+const AsyncFn = Object.getPrototypeOf(async function () {}).constructor
+const run = new AsyncFn('args', 'agent', 'phase', 'log', 'pipeline', 'parallel', src)
+const cases = [['critical', [true, false, false]], ['high', [false, true, false]],
+               ['critical', [false, null, false]], ['critical', [null, null, null]],
+               ['medium', [true, false, false]], ['critical', [false, false, false]]]
+const out = []
+for (const [severity, votes] of cases) {
+  let i = 0
+  const agent = async (prompt, opts) => {
+    if (opts.label === 'extract') return { domains: ['x'], claims: [{ claim: 'c', layer: 'algo', location: 'a.py:1' }] }
+    if (opts.label.startsWith('verify')) return { claim: 'c', layer: 'algo', location: 'a.py:1', verdict: 'VIOLATION', severity, citations: [{ title: 't', url: 'https://example.org/x', fetched: true }], recommended_fix: 'f' }
+    const v = votes[i++]; return v === null ? null : { refuted: v, reason: 'r' }
+  }
+  const pipeline = async (items, f1, f2) => Promise.all(items.map(async (c) => f2(await f1(c), c)))
+  const parallel = async (fns) => Promise.all(fns.map((f) => f()))
+  const r = await run({}, agent, () => {}, () => {}, pipeline, parallel)
+  out.push({ severity, votes, verdict: r[0].verdict, recorded: !!r[0].refutation })
+}
+console.log(JSON.stringify(out))
+"""
+
+
+def check_factory_trust_bir(old, new):
+    s = "base-in-reality"
+    scratch = tempfile.mkdtemp()
+
+    def finding(severity, verdict="VIOLATION", votes=None):
+        f = {"claim": "c", "layer": "algo", "location": "a.py:1", "verdict": verdict,
+             "severity": severity, "recommended_fix": "f",
+             "citations": [{"title": "t", "url": "https://example.org/x",
+                            "fetched": True}]}
+        if votes is not None:
+            f["refutation"] = {"refuters": len(votes), "verdicts": votes}
+        return f
+
+    def passes(tree, findings):
+        """How many of `findings`, linted one at a time, the tree's linter passes."""
+        lint = os.path.join(tree, s, "assets", "report_lint.py")
+        n = 0
+        for k, f in enumerate(findings):
+            path = os.path.join(scratch, "%s-%d.json" % (os.path.basename(tree), k))
+            with open(path, "w") as fh:
+                json.dump([f], fh)
+            r = subprocess.run([sys.executable, lint, path], capture_output=True,
+                               text=True, timeout=60)
+            n += 1 if r.returncode == 0 else 0
+        return n
+
+    dissent = [finding("critical", votes=[True, False, False]),
+               finding("high", "DEVIATION", votes=[False, True, False]),
+               finding("critical", votes=[False, None, False]),
+               finding("critical", votes=[False, False])]
+    a, b = passes(old, dissent), passes(new, dissent)
+    row(s, "critical/high survivors lint-passed despite a refute or missing vote (lower=better)",
+        a, b, b == 0 and a > 0,
+        "1-of-3 refute, a crashed (null) refuter, and a missing third vote",
+        since=SINCE_FACTORY_TRUST_BIR)
+    bare = [finding("critical"), finding("medium", "DEVIATION")]
+    a, b = passes(old, bare), passes(new, bare)
+    row(s, "VIOLATION/DEVIATION with no `refutation` lint-passed (lower=better)",
+        a, b, b == 0 and a > 0,
+        "\"no refutation recorded\" read the same as \"survived refutation\"",
+        since=SINCE_FACTORY_TRUST_BIR)
+    within = [finding("medium", votes=[True, False, False]),
+              finding("critical", votes=[False, False, False])]
+    a, b = passes(old, within), passes(new, within)
+    row(s, "survivors within the rubric still lint-pass",
+        a, b, a == b == 2,
+        "medium with one dissent, critical with unanimous non-refute", kind="guard")
+
+    if not shutil.which("node"):
+        return          # nothing to measure; a row that cannot run is not a claim
+    harness = os.path.join(scratch, "harness.mjs")
+    with open(harness, "w") as fh:
+        fh.write(_BIR_WORKFLOW_HARNESS)
+
+    def workflow(tree):
+        r = subprocess.run(["node", harness, os.path.join(tree, s, "assets", "workflow.mjs")],
+                           capture_output=True, text=True, timeout=60)
+        try:
+            return json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            PROBE_ERRORS.append((tree, s + "/assets/workflow.mjs",
+                                 (r.stderr or r.stdout).strip()[-300:]))
+            return None
+
+    wa, wb = workflow(old), workflow(new)
+    if wa is None or wb is None:
+        return
+
+    def kept(res):   # the first four cases must be downgraded
+        return sum(1 for x in res[:4] if x["verdict"] != "UNCONFIRMED")
+
+    def unrecorded(res):
+        return sum(1 for x in res if not x["recorded"])
+
+    row(s, "critical/high findings the workflow keeps despite a refute or crashed refuter (lower=better)",
+        kept(wa), kept(wb), kept(wb) == 0 and kept(wa) > 0,
+        "the unmodified workflow.mjs under stubbed agents; null = refuter returned nothing",
+        since=SINCE_FACTORY_TRUST_BIR)
+    row(s, "workflow findings with no `refutation` votes recorded (lower=better)",
+        unrecorded(wa), unrecorded(wb), unrecorded(wb) == 0 and unrecorded(wa) > 0,
+        "verdict-rubric.md step 4: the votes are recorded on every refuted finding",
+        since=SINCE_FACTORY_TRUST_BIR)
+    row(s, "workflow survivors within the rubric kept",
+        [x["verdict"] for x in wa[4:]], [x["verdict"] for x in wb[4:]],
+        [x["verdict"] for x in wa[4:]] == [x["verdict"] for x in wb[4:]]
+        == ["VIOLATION", "VIOLATION"],
+        "medium with one dissent, critical with unanimous non-refute", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4581,6 +4706,7 @@ def main():
         check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
+        check_factory_trust_bir(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
