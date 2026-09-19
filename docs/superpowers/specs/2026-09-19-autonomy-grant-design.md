@@ -20,6 +20,7 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 | A4 | **Architecture.** The grant is a skill-contract envelope kind, checked by the reference checker's `check-grant`. The action-class table is normative in SPEC.md. | — | A separate grant skill; a plain policy file |
 | A5 | **The planning method follows manifold:** constrain → tension → anchor (backward reasoning to required truths) → choose, iterated until it converges. | — | — |
 | A6 | **Loop depth follows the mode.** Unattended runs the full loop. Attended runs a light pass, and the user can switch to the full loop, or to unattended, at any point. | 0.96 | The full loop always (owner's first choice, revised after spec review); attended mode unchanged |
+| A7 | **Checker-held floors that no grant can lower** (added 2026-09-19, after Task 1 showed that `require_signature` inside a grant cannot stop a forged grant that omits it): (a) `merge`, `deploy`, `spend`, `external_message` and `delete` are covered only when the grant is `SIGNED_HW`; (b) a grant may live at most 7 days, so `expires_at − generatedAtTime > 7d` is INVALID and `expires_at > now + 7d` is ASK; (c) a grant never covers an action on the repo's default branch (from `origin/HEAD`, else `main`/`master`). Unsigned grants still cover `read_only`, `local_reversible`, `push_branch` and `open_pr`. | 0.98 | The same floors but any signature for the irreversible classes; no floors, documented only |
 
 ## 1. The grant: `autonomy-grant/v1`
 
@@ -90,7 +91,13 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
   7. subjects not stale;
   8. the current git branch matches `branch_pattern` (the check is skipped outside git);
   9. the class's gate is `auto` or `grant`;
-  10. the required signature level is met.
+  10. the required signature level is met: the higher of the grant's `require_signature` and the checker's floor, which is `SIGNED_HW` for `merge`, `deploy`, `spend`, `external_message` and `delete`.
+
+  **Floors (A7), which no grant can lower:**
+  - a grant living more than 7 days (`expires_at − generatedAtTime`) is INVALID;
+  - a grant whose `expires_at` is more than 7 days after now is ASK with `reason=lifetime`;
+  - a grant is ASK with `reason=default-branch` when the current branch is the repo's default branch (`origin/HEAD`, else `main` or `master`);
+  - the signature floor above gives ASK with `reason=signature`.
 - **Outputs:**
   - `GRANT: COVERED id=… class=… gate=auto|grant signed=UNSIGNED|SIGNED|SIGNED_HW`, exit 0;
   - `GRANT: ASK id=… reason=<first failing check>`, exit 3;
