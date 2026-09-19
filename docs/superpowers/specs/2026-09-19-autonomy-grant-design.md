@@ -19,7 +19,7 @@ The user keeps full control. Unattended mode is always opt-in, and the grant can
 | A3 | **Reach.** spec-first-planning's handoff and the existing human gates in crafting-self-prompting-loops, verifier-installer and test-safety-net honour the grant. | 0.89 | Only spec-first-planning; also build the log, budgets and stop rules now |
 | A4 | **Architecture.** The grant is a skill-contract envelope kind, checked by the reference checker's `check-grant`. The action-class table is normative in SPEC.md. | — | A separate grant skill; a plain policy file |
 | A5 | **The planning method follows manifold:** constrain → tension → anchor (backward reasoning to required truths) → choose, iterated until it converges. | — | — |
-| A6 | **The full planning loop always runs**, in both attended and unattended mode. | Jev preferred full in unattended only (0.96); owner chose always | Full loop only in unattended mode; attended mode unchanged |
+| A6 | **Loop depth follows the mode.** Unattended runs the full loop. Attended runs a light pass, and the user can switch to the full loop, or to unattended, at any point. | 0.96 | The full loop always (owner's first choice, revised after spec review); attended mode unchanged |
 
 ## 1. The grant: `autonomy-grant/v1`
 
@@ -99,7 +99,14 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
 
 ## 4. spec-first-planning 2.0.0
 
-**The planning loop, always on.** The method is manifold's: constrain → tension → anchor → choose. Its terms are used verbatim so the two map one to one.
+**The planning loop.** The method is manifold's: constrain → tension → anchor → choose. Its terms are used verbatim so the two map one to one.
+
+**How deep the loop goes depends on the mode:**
+- **Unattended:** the full loop MUST run. All four steps run, and iteration continues to convergence, because no human will be present during implementation.
+- **Attended:** a light pass by default. Constrain (typed constraints, no pre-mortem) and Anchor (required truths) run once, and the spec carries the Constraints and Required truths sections. Tension and Choose run only when two constraints visibly conflict or there is more than one real option.
+- **Changing course:** in attended mode the skill says which depth it is using, and offers two switches at each checkpoint (after the spec draft and after the plan): *go deeper* (run the full loop) and *go unattended* (run the full loop plus the decision sweep, then the grant). The user can take either switch at any point. Nothing escalates without the user asking.
+
+The steps:
 1. **Constrain.**
    - Typed constraints: `invariant`, `goal` or `boundary`.
    - Categories with ID prefixes: B business, T technical, U UX, S security, O operational.
@@ -119,7 +126,7 @@ contract_check.py check-grant [<grant.json>] --root <repo> --action <class>
    - **The pragmatic rule:** among the options that satisfy every invariant and every RT, pick the lowest complexity, then the most reversible. A tie becomes a Decision.
    - After choosing, validate that the choice reopens no resolved tension.
 
-**Convergence.** The spec has converged when:
+**Convergence** applies to the full loop, so to unattended mode or when the user asks for it. The spec has converged when:
 - every tension is resolved, or accepted as a Decision;
 - every RT is `SPECIFICATION_READY` or `SATISFIED`;
 - every constraint maps to at least one RT, and every RT maps to at least one requirement with a runnable acceptance criterion;
@@ -135,7 +142,7 @@ Each iteration is recorded in an Iterations section. The cap is 5; after that th
 - It then offers the signing command, for the user to run.
 
 **Tooling (stdlib only):**
-- `spec_lint.py` gains the new sections and their traceability rules, plus `--converged` and `--unattended`. `--unattended` fails on any Open question, or on a Decision without an answer.
+- `spec_lint.py` checks the light sections on every spec: typed Constraints and Required truths, and their traceability. `--converged` adds the full-loop rules: Tensions, Solution options, Iterations and convergence. `--unattended` implies `--converged` and also fails on any Open question, or on a Decision without an answer.
 - `spec_to_tasks.py` carries `decisions`, `constraints` and `required_truths` as optional task-plan payload fields. `task-plan/v1` stays v1, because the change is additive.
 - `write_grant.py` builds the grant from the spec, the plan envelope and the user's answers.
 - The template and `references/spec-format.md` are updated.
@@ -190,6 +197,7 @@ crafting-self-prompting-loops, already an adopter, adds `autonomy-grant/v1` to w
   `make contract` passes.
 - **AC2. Signing, end to end.** An integration test with a throwaway ed25519 key yields `SIGNED`. It skips when `ssh-keygen` is absent. The `sk-` classifier is unit-tested, and the docs state that `SIGNED_HW` cannot be tested without hardware.
 - **AC3. spec-first-planning tests.** Unit tests cover every new lint rule, `--converged` and `--unattended`. The eval has negatives for:
+  - an attended spec missing Constraints or Required truths (light-pass rules);
   - an unattended spec with an Open question;
   - a non-converged spec;
   - an RT without a check;
@@ -215,7 +223,7 @@ crafting-self-prompting-loops, already an adopter, adds `autonomy-grant/v1` to w
 - **Grant forgery.** An agent can write an UNSIGNED grant.
   - Mitigations: honest labelling, the per-class `require_signature`, `SIGNED_HW` for high-risk classes, and floors that keep irreversible classes at `ask` unless named explicitly.
   - Residual: unsigned grants are only as trustworthy as the machine.
-- **The full loop always runs, so small changes cost more.** This was the owner's choice. Mitigation: the reference gives a compact form for tiny specs, which still carry the sections, kept short.
+- **The light pass may miss a conflict.** An attended spec that skips Tension can overlook one. Mitigations: the skill names its depth, offers *go deeper* at each checkpoint, and unattended mode always runs the full loop.
 - **Breaking spec format.** Existing specs fail lint. Mitigation: the 2.0.0 bump and the upgrade note.
 - **Vendored checker drift across 4 adopters.** Mitigation: `contract-vendor` plus the byte-identity gate.
 - **Model judgement quality isn't checked.** The linter checks structure only. Mitigations: the model trial protocol (docs) and the review.
