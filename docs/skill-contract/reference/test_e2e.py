@@ -241,10 +241,21 @@ class GrantE2ETests(unittest.TestCase):
                         SKILL_CONTRACT_PYTHON=quoted_python(), PYTHONDONTWRITEBYTECODE="1",
                         SKILL_CONTRACT_ALLOWED_SIGNERS="")
         self.assets = os.path.join(self.universe, PRODUCER, "assets")
-        # so a real .git enclosing the OS tmp dir can never leak into the git probes
-        # the git-dependent tests run directly against self.repo (contract_check's
-        # own git calls already scrub this via git_env()).
-        self.git_env = dict(os.environ, GIT_CEILING_DIRECTORIES=self.tmp)
+        # Make the test repo its own git repo on a non-default branch that matches
+        # ANSWERS' "*" pattern. contract_check.py's git_env() deliberately strips
+        # GIT_CEILING_DIRECTORIES (so a caller can't redirect the branch probe) and
+        # in_git_work_tree() is a plain filesystem walk, so the only reliable way to
+        # keep an enclosing repo from leaking into check-grant's branch probes is for
+        # self.repo to have its own .git: `git -C root ...` then finds it first.
+        if shutil.which("git"):
+            commit_env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                              GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True)
+            # An empty commit so "main" is a real, checkout-able ref (test_f switches
+            # back to it): an unborn branch has no ref at all until the first commit.
+            subprocess.run(["git", "-C", self.repo, "commit", "-q", "--allow-empty", "-m", "x"],
+                           check=True, env=commit_env)
+            subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "factory/x"], check=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -265,8 +276,8 @@ class GrantE2ETests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return [ln[len("GRANT: "):] for ln in r.stdout.splitlines() if ln.startswith("GRANT: ")][0]
 
-    def check(self, action, *extra):
-        r = self.run_py("contract_check.py", "check-grant", *extra, "--root", self.repo,
+    def check(self, action):
+        r = self.run_py("contract_check.py", "check-grant", "--root", self.repo,
                         "--action", action)
         return r.returncode, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
 
@@ -313,9 +324,9 @@ class GrantE2ETests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_e_a_branch_outside_the_pattern_asks(self):
-        subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True, env=self.git_env)
-        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "other/x"], check=True,
-                       env=self.git_env)
+        # setUp already put self.repo on "factory/x"; move to a branch outside the
+        # narrower pattern this test grants against.
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "other/x"], check=True)
         self.grant(dict(ANSWERS, branch_pattern="factory/*"))
         rc, last = self.check("local_reversible")
         self.assertEqual(rc, 3)
@@ -323,7 +334,8 @@ class GrantE2ETests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("git"), "git not installed")
     def test_f_the_default_branch_is_never_covered(self):
-        subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True, env=self.git_env)
+        # setUp already put self.repo on "factory/x"; move back onto the default branch.
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"], check=True)
         self.grant()  # branch_pattern "*" would match main, but the A7 floor wins
         rc, last = self.check("local_reversible")
         self.assertEqual(rc, 3)
@@ -339,6 +351,7 @@ class GrantE2ETests(unittest.TestCase):
                         "--plan", plan, "--answers", ans, "--accepted-by", "Dana")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("REFUSED:", r.stdout)
+        self.assertIn("merge", r.stdout)
 
 
 if __name__ == "__main__":
