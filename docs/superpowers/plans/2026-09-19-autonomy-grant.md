@@ -9,7 +9,7 @@
 - spec-first-planning's `spec_lint.py` gains three levels of rules: light, which always apply; `--converged`; and `--unattended`. A new `write_grant.py` builds the grant.
 - The gated skills call the vendored checker and never parse a grant themselves.
 
-**Tech Stack:** Python 3.10+ stdlib only, POSIX sh gates, `make`. `ssh-keygen` is optional, used for signatures.
+**Tech Stack:** Python 3.10+ stdlib only, POSIX sh gates, `make`. No signing (owner decision A8).
 
 **Spec:** `docs/superpowers/specs/2026-09-19-autonomy-grant-design.md` (read §1–§7 before any task).
 
@@ -34,14 +34,13 @@
 
     They set `generatedAtTime = _now_z()` and `expires_at = _in_one_day()`. `write_grant.py` sets `generatedAtTime` itself.
 - **More A7 floors:**
-  - `merge`, `deploy`, `spend`, `external_message` and `delete` are covered only by a `SIGNED_HW` grant;
+  - **A8:** `merge`, `deploy`, `spend`, `external_message` and `delete` are never grantable; any gate other than `ask` on them makes a grant INVALID. There is no signing: no `require_signature`, no `.sig` and no signature levels;
   - a grant never covers the repo's default branch. Test repos made with `git init -b main` therefore get `reason=default-branch`, so use a non-default branch such as `git checkout -q -b factory/x` whenever a covered result is expected inside git.
 - **Kind URI (verbatim):** `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1`.
 - **Action classes (verbatim, in this order):** `read_only`, `local_reversible`, `push_branch`, `open_pr`, `merge`, `deploy`, `spend`, `external_message`, `delete`.
   - `auto` is allowed only on `read_only` and `local_reversible`.
   - `auto` on any other class makes a grant INVALID.
   - A class absent from `gate_policy` is `ask`.
-- **Signature levels (verbatim):** `UNSIGNED`, `SIGNED`, `SIGNED_HW`.
 - **`check-grant` exit codes:** 0 `COVERED`; 3 `ASK` or `NONE`; 2 `INVALID`; 1 usage error.
 - **SKILL.md files keep their one-line BCP 14 declaration** and pass PP-7.
   - Only MUST, MUST NOT, SHOULD, SHOULD NOT and MAY appear in capitals.
@@ -1095,7 +1094,7 @@ Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X"
   - `branch_pattern` (str, required);
   - `gate_policy` (dict, required);
   - `expires_at` (str, required);
-  - `require_signature`, `budget`, `stop_on`, `defaults` and `system_one` (optional, defaulting to `{}`, `{}`, `[]`, `[]` and `{"allowed": false}`).
+  - `budget`, `stop_on`, `defaults` and `system_one` (optional, defaulting to `{}`, `[]`, `[]` and `{"allowed": false}`).
 
 - [ ] **Step 1: Write the failing tests** in `test_write_grant.py`. Use a temp repo with `docs/spec.md` = Task 4's `FULL` (import it from `test_spec_lint`, or copy the constant) and a plan envelope produced by `spec_to_tasks.write_task_plan_envelope`. Cover these cases:
   1. `build_grant` + write gives an envelope for which `contract_check.check_grant(root, "local_reversible", branch="factory/x")` returns COVERED, with `gate_policy={"read_only": "auto", "local_reversible": "grant"}`, `expires_at=_in_one_day()`, `branch_pattern="factory/*"`.
@@ -1129,7 +1128,6 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
                        "source": d["source"]} for d in spec["decisions"]],
         "defaults": answers.get("defaults", []),
         "gate_policy": answers["gate_policy"],
-        "require_signature": answers.get("require_signature", {}),
         "budget": answers.get("budget", {}),
         "stop_on": answers.get("stop_on", []),
         "expires_at": answers["expires_at"],
@@ -1151,7 +1149,7 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
     return st
 ```
 
-  Import `SKILL_VERSION` from `spec_to_tasks`. `main()` parses the flags, loads the answers JSON, makes `--plan` relative to `--root` (refusing if it is outside the root), calls `build_grant`, then `contract_check.write_envelope`, and prints `GRANT: <path>`. On `GrantRefused` it prints `REFUSED: <reason>` and exits 1. It prints nothing about signing; the SKILL.md tells the user.
+  Import `SKILL_VERSION` from `spec_to_tasks`. `main()` parses the flags, loads the answers JSON, makes `--plan` relative to `--root` (refusing if it is outside the root), calls `build_grant`, then `contract_check.write_envelope`, and prints `GRANT: <path>`. On `GrantRefused` it prints `REFUSED: <reason>` and exits 1.
 
   Update `spec_to_tasks.to_task_plan_payload`: when `spec["constraints"]` is non-empty, add `constraints`; do the same for `required_truths` (all truth fields except `num`) and `decisions`. Add the three optional properties to the schema, with object item schemas that require the fields listed above. Extend `payload_errors` to type-check them when present.
 
@@ -1190,19 +1188,17 @@ Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X"
 4. **Planning loop.** Describe constrain → tension → anchor → choose in 6–10 lines, with the pragmatic rule and convergence. Send the detail to `references/unattended.md` (the decision sweep checklist, the loop and the pre-mortem) and `references/spec-format.md` (the grammar).
    - Lint commands: `spec_lint.py <spec>` (light), `--converged` (full) and `--unattended`.
    - Keep the lint-and-repair rule. After 5 iterations without convergence, the skill MUST stop and ask the user.
-5. **Unattended.** After `TASKS_RESULT: PASS` and the plan envelope, show the grant summary (decisions, gate table, expiry, budget, signature requirements). The skill MUST wait for the user's explicit yes before running `python3 "$SKILL_DIR/assets/write_grant.py" --root <repo> --spec <spec> --plan <envelope> --answers <answers.json> --accepted-by "<user's name>"`. It then offers signing as a command for the user to run with `!`:
-   `ssh-keygen -Y sign -f <their key> -n skill-contract-grant <grant path>`.
-   It explains `SIGNED_HW` (a FIDO `sk-` key), and gives the revoke command: `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`.
+5. **Unattended.** After `TASKS_RESULT: PASS` and the plan envelope, show the grant summary (decisions, gate table, expiry, budget). The skill MUST wait for the user's explicit yes before running `python3 "$SKILL_DIR/assets/write_grant.py" --root <repo> --spec <spec> --plan <envelope> --answers <answers.json> --accepted-by "<user's name>"`. It then gives the revoke command: `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`. It also states, plainly, that merge, deploy, spend, external messages and deletes are never covered by a grant and will always ask.
 6. **Handoff (step 6).** Before proposing, run `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo-root> --action local_reversible`.
    - If it exits 0, you MAY hand off without asking, and you MUST name the grant id and class in your report.
    - Otherwise, the existing rule applies: you MUST propose, and MUST wait for the user's yes.
-7. **Honesty line (plain).** The linter checks structure and traceability, not the quality of the reasoning. A grant proves the user said yes only as far as its signature level shows. An unsigned grant can be forged by an agent with a shell.
+7. **Honesty line (plain).** The linter checks structure and traceability, not the quality of the reasoning. A grant is the user's recorded yes, but an agent with a shell could forge one, which is why grants cover only reversible actions.
 8. **Contract.** Add `autonomy-grant/v1` to `provides` in the `json skill-contract` block, name the grant's claim, and update the sentence about claims.
 9. **Upgrade note (plain).** Specs written for 1.x need Constraints and Required truths sections. Run `spec_lint.py` and add the sections it names.
 10. **Version.** Set `metadata.version` to `"2.0.0"`.
 
 **`references/unattended.md`** holds:
-- the decision-sweep checklist: dependencies; public API and schema/migrations; new services and infra; style/naming defaults; a gate per action class (show the §2 table); expiry; budget; `require_signature` for high-risk classes; System One use and the data it may be sent;
+- the decision-sweep checklist: dependencies; public API and schema/migrations; new services and infra; style/naming defaults; a gate per action class (show the §2 table); expiry; budget; System One use and the data it may be sent;
 - the pre-mortem prompt ("three stories of how this fails");
 - the full loop and convergence criteria;
 - a filled example of `answers.json`.
@@ -1327,7 +1323,7 @@ def _grant_fixture(root, assertedBy):
                                     "decisions": [{"id": "D1", "question": "q", "answer": "a",
                                                    "source": "s"}],
                                     "defaults": [], "gate_policy": {"local_reversible": "grant"},
-                                    "require_signature": {}, "budget": {}, "stop_on": [],
+                                    "budget": {}, "stop_on": [],
                                     "expires_at": _in_one_day(),
                                     "system_one": {"allowed": False}, "revoked": False},
                         "assertions": [{"test": "grant-accepted", "assertedBy": assertedBy,
@@ -1528,11 +1524,16 @@ class GrantE2ETests(unittest.TestCase):
         self.assertEqual(rc, 3)
         self.assertIn("reason=default-branch", last)
 
-    def test_g_merge_needs_a_hardware_signature(self):
-        self.grant(dict(ANSWERS, gate_policy={"local_reversible": "grant", "merge": "grant"}))
-        rc, last = self.check("merge")
-        self.assertEqual(rc, 3)
-        self.assertIn("reason=signature", last)
+    def test_g_a_grant_for_merge_is_refused(self):
+        r = self.run_py("spec_to_tasks.py", self.spec, "--envelope", self.repo)
+        plan = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")][0]
+        ans = os.path.join(self.tmp, "answers.json")
+        with open(ans, "w", encoding="utf-8") as f:
+            json.dump(dict(ANSWERS, gate_policy={"local_reversible": "grant", "merge": "grant"}), f)
+        r = self.run_py("write_grant.py", "--root", self.repo, "--spec", "docs/spec.md",
+                        "--plan", plan, "--answers", ans, "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("REFUSED:", r.stdout)
 ```
 
   `GRANT_SPEC` is Task 4's `FULL` text, verbatim: it passes `spec_lint.py --unattended`.
@@ -1602,7 +1603,7 @@ def check_autonomy_grant(old, new):
                             "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
                                         "decisions": [], "defaults": [],
                                         "gate_policy": {"local_reversible": "grant"},
-                                        "require_signature": {}, "budget": {}, "stop_on": [],
+                                        "budget": {}, "stop_on": [],
                                         "expires_at": _in_one_day(),
                                         "system_one": {"allowed": False}, "revoked": False},
                             "assertions": [{"test": "grant-accepted",
@@ -1639,7 +1640,7 @@ def check_autonomy_grant(old, new):
 - [ ] **Step 2: README.** In the Software factory section, replace the "Unattended mode: not yet" paragraph with an honest status:
   - spec-first-planning 2.0.0 can run unattended planning and write an autonomy grant after your yes;
   - four skills' gates honour it;
-  - signing is optional;
+  - merge, deploy, spend, external messages and deletes always ask you;
   - the conductor that runs a whole plan is still roadmap step 4.
   
   Add a recipe line: `npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops --skill verifier-installer --skill test-safety-net`. Run `make readme`; expected PASS.
@@ -1668,7 +1669,7 @@ def check_autonomy_grant(old, new):
     - AC6: Task 9.
     - AC7: Tasks 5–7.
     - AC8: post-merge (the controller runs Jev; out of plan).
-- **Names used across tasks:** `check_grant`, `grant_violations`, `latest_grant`, `revoke_grant`, `signature_level`, `GRANT_KIND`, `ACTION_CLASSES`, `GRANT_NAMESPACE`, `lint(text, mode=...)`, `parse_spec` keys `constraints`/`truths`/`tensions`/`options`/`recommended`/`iterations`/`decisions`, `build_grant`, `GrantRefused`.
+- **Names used across tasks:** `check_grant`, `grant_violations`, `latest_grant`, `revoke_grant`, `GRANT_KIND`, `ACTION_CLASSES`, `lint(text, mode=...)`, `parse_spec` keys `constraints`/`truths`/`tensions`/`options`/`recommended`/`iterations`/`decisions`, `build_grant`, `GrantRefused`.
 - **Known judgment calls for implementers:**
   - the exact issue wording (tests check ids and keywords, not full sentences);
   - the eval fixture layout in each skill;
