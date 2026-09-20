@@ -888,8 +888,9 @@ def grant_is_tracked(root, path):
               and would otherwise answer "untracked".
       literal so a `*`, `?` or `[` in a caller-supplied name cannot glob.
 
-    All three magic words need git 1.9 or newer. On an older git -- or any other git
-    failure -- the probe returns None, which the caller reads as ASK: it fails closed.
+    Needs git >= 1.9 for `:(top,icase,literal)` pathspec magic; a modern git rejects
+    unknown magic with a fatal error, which this probe treats as ASK, as it does any
+    other git failure.
     """
     real = os.path.realpath(path)
     d = os.path.dirname(real)

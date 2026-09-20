@@ -740,33 +740,47 @@ class GrantTests(unittest.TestCase):
                                   capture_output=True, text=True, env=env)
         return git
 
+    # `git ls-files` pathspecs are case-sensitive even where core.ignorecase is true, so a
+    # grant committed as .Skill-Contract/Envelopes/<id>.json must still count as tracked.
+    # Two shapes, because git derives the pathspec prefix from the directory's on-disk
+    # spelling: the index entry cased while the directory on disk is not (below), and the
+    # directory itself cased, which only a case-folding filesystem can produce.
+
+    CASED_REL = ".Skill-Contract/Envelopes"
+
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
-    def test_a_grant_committed_under_a_differently_cased_path_asks_tracked(self):
-        # `git ls-files` pathspecs are case-sensitive even where core.ignorecase is true,
-        # so a grant committed as .Skill-Contract/Envelopes/<id>.json is the same file the
-        # checker reads and must still count as tracked. Two shapes, because git derives
-        # the pathspec prefix from the directory's on-disk spelling: the directory itself
-        # cased (a checkout of such a commit), and the directory lowercase on disk with
-        # only the index entry cased (`git add` under the other spelling).
+    def test_a_grant_whose_index_entry_is_cased_asks_tracked(self):
+        # The index entry is written straight with `update-index --cacheinfo`, so this
+        # holds the harder shape -- lowercase on disk, cased in the index -- on every
+        # filesystem: the probe reads the index, never the directory listing.
+        git = self._factory_repo()
+        p = self.put(build_vectors.grant(branch_pattern="factory/*"))
+        blob = git("hash-object", "-w", p).stdout.strip()
+        git("update-index", "--add", "--cacheinfo",
+            "100644,%s,%s/%s" % (blob, self.CASED_REL, os.path.basename(p)))
+        git("commit", "-q", "-m", "commit the grant under another case")
+        self.assertEqual(git("ls-files").stdout.split(),
+                         ["%s/%s" % (self.CASED_REL, os.path.basename(p))])
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"), rep)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_grant_under_a_cased_directory_on_disk_asks_tracked(self):
+        # The checkout shape: the directory itself is .Skill-Contract/Envelopes, and the
+        # checker still reads it through the lowercase spelling. Needs a folding disk.
         if not self._case_insensitive_fs():
             self.skipTest("the filesystem is case-sensitive: those are two different files")
-        cased = os.path.join(".Skill-Contract", "Envelopes")
-        plain = os.path.join(".skill-contract", "envelopes")
-        for on_disk, added_as in ((cased, cased), (plain, cased)):
-            with self.subTest(on_disk=on_disk):
-                self.addCleanup(shutil.rmtree, self.tmp, True)  # the one setUp replaces
-                self.setUp()  # a fresh tmp repo per shape
-                git = self._factory_repo()
-                st = build_vectors.grant(branch_pattern="factory/*")
-                name = st["predicate"]["id"] + ".json"
-                _write(os.path.join(self.tmp, on_disk, name), json.dumps(st))
-                found = cc.latest_grant(self.tmp)
-                self.assertEqual(found, os.path.join(cc.envelope_dir(self.tmp), name))
-                self.assertTrue(os.path.isfile(found))  # one file, two spellings
-                git("add", "-f", os.path.join(added_as, name))
-                git("commit", "-q", "-m", "commit the grant under another case")
-                rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
-                self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"), rep)
+        git = self._factory_repo()
+        st = build_vectors.grant(branch_pattern="factory/*")
+        name = st["predicate"]["id"] + ".json"
+        _write(os.path.join(self.tmp, *self.CASED_REL.split("/"), name), json.dumps(st))
+        found = cc.latest_grant(self.tmp)
+        self.assertEqual(found, os.path.join(cc.envelope_dir(self.tmp), name))
+        self.assertTrue(os.path.isfile(found))  # one file, two spellings
+        git("add", "-f", "%s/%s" % (self.CASED_REL, name))
+        git("commit", "-q", "-m", "commit the grant under another case")
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"), rep)
 
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
     def test_a_grant_committed_in_a_nested_repo_asks_tracked(self):

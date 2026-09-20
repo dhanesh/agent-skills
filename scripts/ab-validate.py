@@ -5011,28 +5011,19 @@ def check_autonomy_grant(old, new):
             return 1 if rc == 0 else 0
         return git_probe(tree, "tracked-grant probe", go)
 
-    def _folds_case(root):
-        """True when root's filesystem folds case: create X, look for x."""
-        os.makedirs(os.path.join(root, "CaseProbe"), exist_ok=True)
-        try:
-            return os.path.isdir(os.path.join(root, "caseprobe"))
-        finally:
-            shutil.rmtree(os.path.join(root, "CaseProbe"), ignore_errors=True)
-
     def tracked_cased_covers(tree):
-        """1 if a grant committed under a DIFFERENTLY CASED path still covers
-        local_reversible (bad); else 0. `git ls-files` pathspecs are case-sensitive
-        even where core.ignorecase is true, so .Skill-Contract/Envelopes/<id>.json --
-        the same file the checker reads -- must still count as tracked. 0 on a
-        case-sensitive filesystem, where the two spellings are two files and there is
-        nothing to fold. None (PROBE_ERRORS) if the sanity arm fails."""
+        """1 if a grant whose index entry is CASED still covers local_reversible (bad);
+        else 0. `git ls-files` pathspecs are case-sensitive even where core.ignorecase
+        is true, so .Skill-Contract/Envelopes/<id>.json -- the same file the checker
+        reads on a folding disk -- must still count as tracked. The index entry is
+        written straight with `update-index --cacheinfo`, so the fixture needs no
+        case-folding filesystem: the probe reads the index, never the directory
+        listing. None (PROBE_ERRORS) if the sanity arm fails."""
         if not decides(tree):
             return 0
 
         def go():
             root = build({"human": "Dana"})
-            if not _folds_case(root):
-                return 0
             factory_repo(root)
             rc, _ = run_check(tree, root)
             if rc != 0:
@@ -5041,9 +5032,13 @@ def check_autonomy_grant(old, new):
                     "cased tracked-grant sanity check failed: the untracked grant was "
                     "not COVERED (check-grant exit %d)" % rc))
                 return None
-            commit_file(root, ".Skill-Contract/Envelopes/%s.json" % gid,
-                        open(os.path.join(root, ".skill-contract", "envelopes",
-                                          gid + ".json")).read(), force=True)
+            rel = ".skill-contract/envelopes/%s.json" % gid
+            blob = subprocess.run(["git", "-C", root, "hash-object", "-w", rel],
+                                  check=True, capture_output=True, text=True,
+                                  timeout=60).stdout.strip()
+            git(root, "update-index", "--add", "--cacheinfo",
+                "100644,%s,.Skill-Contract/Envelopes/%s.json" % (blob, gid))
+            git(root, "commit", "-q", "-m", "c")
             rc, _ = run_check(tree, root)
             return 1 if rc == 0 else 0
         return git_probe(tree, "cased tracked-grant probe", go)
@@ -5158,8 +5153,9 @@ def check_autonomy_grant(old, new):
         "`git ls-files` pathspecs are case-sensitive even where core.ignorecase is true, so "
         "a grant committed as .Skill-Contract/Envelopes/<id>.json -- the same file on a "
         "case-folding disk -- must still read as tracked; sanity-checked against the same "
-        "grant untracked, which the new tree's checker DOES cover. Self-skips (0/0) on a "
-        "case-sensitive filesystem, where the two spellings are two files", kind="guard")
+        "grant untracked, which the new tree's checker DOES cover. The index entry is "
+        "written with `update-index --cacheinfo`, so the guard is live on every filesystem",
+        kind="guard")
     a, b = tracked_nested_covers(old), tracked_nested_covers(new)
     row(s, "a grant committed in a nested repo at .skill-contract covers local_reversible",
         a, b, a == 0 and b == 0,
