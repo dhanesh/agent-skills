@@ -873,10 +873,34 @@ def _git(root, *args, stdin=None):
 
 def grant_is_tracked(root, path):
     """True when git tracks (or has staged) the grant file, False when it does not, None
-    when git cannot say. A grant is one person's acceptance: committed, it covers every clone."""
-    r = _git(root, "ls-files", "-z", "--cached", "--", os.path.realpath(path))
+    when git cannot say. A grant is one person's acceptance: committed, it covers every clone.
+
+    The probe runs in the grant's own directory, not in `root`: a grant committed inside a
+    nested repository or a submodule at .skill-contract belongs to that repository's index,
+    which `git -C root` never consults. `--show-prefix` then names that directory as the
+    repository spells it, and the pathspec carries:
+
+      top     so the path is matched from the work-tree root. Without it git prepends the
+              cwd prefix and matches that part literally, which defeats icase.
+      icase   because `git ls-files` pathspecs are case-sensitive even where
+              core.ignorecase is true. On a case-folding filesystem a grant committed as
+              .Skill-Contract/Envelopes/<id>.json is the very file this checker just read,
+              and would otherwise answer "untracked".
+      literal so a `*`, `?` or `[` in a caller-supplied name cannot glob.
+
+    All three magic words need git 1.9 or newer. On an older git -- or any other git
+    failure -- the probe returns None, which the caller reads as ASK: it fails closed.
+    """
+    real = os.path.realpath(path)
+    d = os.path.dirname(real)
+    pre = _git(d, "rev-parse", "--show-prefix")
+    if pre is None or pre.returncode != 0:
+        return None  # includes a grant outside any work tree: git has no index to read
+    prefix = pre.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
+    r = _git(d, "ls-files", "-z", "--cached", "--",
+             ":(top,icase,literal)" + prefix + os.path.basename(real))
     if r is None or r.returncode != 0:
-        return None  # includes a grant outside the work tree: git refuses the pathspec
+        return None
     return bool(r.stdout.strip(b"\0"))
 
 

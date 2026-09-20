@@ -71,7 +71,10 @@ or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `r
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
 - A grant is one user's acceptance and MUST NOT be committed; a receiver MUST treat a tracked
-  grant as not covering anything. Committed, one person's yes would cover every clone. When git
+  grant as not covering anything. Committed, one person's yes would cover every clone. Tracked
+  means tracked by whichever repository holds the grant file — a nested repository or submodule
+  at `.skill-contract` counts — under whatever spelling the path was committed with, since a
+  case-folding filesystem makes `.Skill-Contract/Envelopes/<id>.json` the same file. When git
   cannot say whether the grant is tracked, the grant covers nothing.
 
 These floors live in the checker, and no grant can lower them:

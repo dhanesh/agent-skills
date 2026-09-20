@@ -5011,6 +5011,69 @@ def check_autonomy_grant(old, new):
             return 1 if rc == 0 else 0
         return git_probe(tree, "tracked-grant probe", go)
 
+    def _folds_case(root):
+        """True when root's filesystem folds case: create X, look for x."""
+        os.makedirs(os.path.join(root, "CaseProbe"), exist_ok=True)
+        try:
+            return os.path.isdir(os.path.join(root, "caseprobe"))
+        finally:
+            shutil.rmtree(os.path.join(root, "CaseProbe"), ignore_errors=True)
+
+    def tracked_cased_covers(tree):
+        """1 if a grant committed under a DIFFERENTLY CASED path still covers
+        local_reversible (bad); else 0. `git ls-files` pathspecs are case-sensitive
+        even where core.ignorecase is true, so .Skill-Contract/Envelopes/<id>.json --
+        the same file the checker reads -- must still count as tracked. 0 on a
+        case-sensitive filesystem, where the two spellings are two files and there is
+        nothing to fold. None (PROBE_ERRORS) if the sanity arm fails."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            if not _folds_case(root):
+                return 0
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "cased tracked-grant sanity check failed: the untracked grant was "
+                    "not COVERED (check-grant exit %d)" % rc))
+                return None
+            commit_file(root, ".Skill-Contract/Envelopes/%s.json" % gid,
+                        open(os.path.join(root, ".skill-contract", "envelopes",
+                                          gid + ".json")).read(), force=True)
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "cased tracked-grant probe", go)
+
+    def tracked_nested_covers(tree):
+        """1 if a grant committed in a NESTED repository at .skill-contract still
+        covers local_reversible (bad); else 0. The outer index never holds that grant,
+        but the inner one does, and every clone of it carries one person's yes. None
+        (PROBE_ERRORS) if the sanity arm fails."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "nested tracked-grant sanity check failed: the untracked grant was "
+                    "not COVERED (check-grant exit %d)" % rc))
+                return None
+            inner = os.path.join(root, ".skill-contract")
+            git(inner, "init", "-q", "-b", "main")
+            git(inner, "add", "-f", "envelopes/%s.json" % gid)
+            git(inner, "commit", "-q", "-m", "c")
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "nested tracked-grant probe", go)
+
     def ci_push_refused(tree):
         """1 if check-grant refuses (ASK ci-config) a granted push whose commits add
         a workflow; else 0. None (PROBE_ERRORS) if the sanity arm fails: a push of
@@ -5089,6 +5152,20 @@ def check_autonomy_grant(old, new):
         "a grant is one person's acceptance: committed, it would cover every clone. Built "
         "in a real repo on factory/x with the grant committed; sanity-checked against the "
         "same grant untracked, which the new tree's checker DOES cover", kind="guard")
+    a, b = tracked_cased_covers(old), tracked_cased_covers(new)
+    row(s, "a grant tracked under a differently cased path covers local_reversible", a, b,
+        a == 0 and b == 0,
+        "`git ls-files` pathspecs are case-sensitive even where core.ignorecase is true, so "
+        "a grant committed as .Skill-Contract/Envelopes/<id>.json -- the same file on a "
+        "case-folding disk -- must still read as tracked; sanity-checked against the same "
+        "grant untracked, which the new tree's checker DOES cover. Self-skips (0/0) on a "
+        "case-sensitive filesystem, where the two spellings are two files", kind="guard")
+    a, b = tracked_nested_covers(old), tracked_nested_covers(new)
+    row(s, "a grant committed in a nested repo at .skill-contract covers local_reversible",
+        a, b, a == 0 and b == 0,
+        "the outer index never holds that grant, but the inner repository's does, and every "
+        "clone of it carries one person's yes; sanity-checked against the same grant "
+        "untracked, which the new tree's checker DOES cover", kind="guard")
     a, b = ci_push_refused(old), ci_push_refused(new)
     row(s, "CI-config push under a grant is refused by the checker", a, b, a == 0 and b == 1,
         "a granted push whose commits add .github/workflows/x.yml answers ASK ci-config: CI "

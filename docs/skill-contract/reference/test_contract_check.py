@@ -708,12 +708,93 @@ class GrantTests(unittest.TestCase):
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
     def test_a_grant_path_outside_the_repo_asks_tracked(self):
         self._factory_repo()
-        other = tempfile.mkdtemp(prefix="sc-outside-")
-        self.addCleanup(shutil.rmtree, other, True)
+        other = self._dir_outside_any_work_tree()
         p = os.path.join(other, build_vectors.GRANT_ID + ".json")
         _write(p, json.dumps(build_vectors.grant(branch_pattern="factory/*")))
         rep = cc.check_grant(self.tmp, "local_reversible", path=p, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"))
+
+    def _dir_outside_any_work_tree(self):
+        """A fresh temp directory, skipping the test when TMPDIR itself sits in a repo."""
+        other = tempfile.mkdtemp(prefix="sc-outside-")
+        self.addCleanup(shutil.rmtree, other, True)
+        if cc.in_git_work_tree(other):
+            self.skipTest("the temp directory is inside a git work tree")
+        return other
+
+    def _case_insensitive_fs(self):
+        """True when the temp directory's filesystem folds case: create X, look for x."""
+        probe = os.path.join(self.tmp, "CaseProbe")
+        os.makedirs(probe, exist_ok=True)
+        try:
+            return os.path.isdir(os.path.join(self.tmp, "caseprobe"))
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
+
+    def _git_in(self, cwd):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+        def git(*args):
+            return subprocess.run(["git", "-C", cwd] + list(args), check=True,
+                                  capture_output=True, text=True, env=env)
+        return git
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_grant_committed_under_a_differently_cased_path_asks_tracked(self):
+        # `git ls-files` pathspecs are case-sensitive even where core.ignorecase is true,
+        # so a grant committed as .Skill-Contract/Envelopes/<id>.json is the same file the
+        # checker reads and must still count as tracked. Two shapes, because git derives
+        # the pathspec prefix from the directory's on-disk spelling: the directory itself
+        # cased (a checkout of such a commit), and the directory lowercase on disk with
+        # only the index entry cased (`git add` under the other spelling).
+        if not self._case_insensitive_fs():
+            self.skipTest("the filesystem is case-sensitive: those are two different files")
+        cased = os.path.join(".Skill-Contract", "Envelopes")
+        plain = os.path.join(".skill-contract", "envelopes")
+        for on_disk, added_as in ((cased, cased), (plain, cased)):
+            with self.subTest(on_disk=on_disk):
+                self.addCleanup(shutil.rmtree, self.tmp, True)  # the one setUp replaces
+                self.setUp()  # a fresh tmp repo per shape
+                git = self._factory_repo()
+                st = build_vectors.grant(branch_pattern="factory/*")
+                name = st["predicate"]["id"] + ".json"
+                _write(os.path.join(self.tmp, on_disk, name), json.dumps(st))
+                found = cc.latest_grant(self.tmp)
+                self.assertEqual(found, os.path.join(cc.envelope_dir(self.tmp), name))
+                self.assertTrue(os.path.isfile(found))  # one file, two spellings
+                git("add", "-f", os.path.join(added_as, name))
+                git("commit", "-q", "-m", "commit the grant under another case")
+                rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+                self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"), rep)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_grant_committed_in_a_nested_repo_asks_tracked(self):
+        # .skill-contract can be its own repository or a submodule: the outer index never
+        # holds the grant, but the inner one does, and every clone of it carries that yes.
+        self._factory_repo()
+        p = self.put(build_vectors.grant(branch_pattern="factory/*"))
+        inner = self._git_in(os.path.join(self.tmp, ".skill-contract"))
+        inner("init", "-q", "-b", "main")
+        inner("add", "-f", p)
+        inner("commit", "-q", "-m", "commit the grant in the nested repo")
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "tracked"), rep)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_the_tracked_probe_is_three_valued(self):
+        git = self._factory_repo()
+        p = self.put(build_vectors.grant(branch_pattern="factory/*"))
+        self.assertIs(cc.grant_is_tracked(self.tmp, p), False)  # untracked
+        git("add", "-f", p)
+        self.assertIs(cc.grant_is_tracked(self.tmp, p), True)  # staged
+        git("commit", "-q", "-m", "commit the grant")
+        self.assertIs(cc.grant_is_tracked(self.tmp, p), True)  # committed
+        outside = os.path.join(self._dir_outside_any_work_tree(), os.path.basename(p))
+        shutil.copyfile(p, outside)
+        self.assertIsNone(cc.grant_is_tracked(self.tmp, outside))  # no work tree: cannot say
+        with mock.patch.object(cc.subprocess, "run", side_effect=OSError("no git")):
+            self.assertIsNone(cc.grant_is_tracked(self.tmp, p))  # git will not run
 
     # I2: CI configuration runs with the repository's secrets: pushing it is `deploy`.
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
