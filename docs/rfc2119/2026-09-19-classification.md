@@ -18,7 +18,7 @@ Skills appear in rewrite order.
 
 **Line numbers** are as of the BCP 14 rewrite. Later edits to a SKILL.md can shift them, and the rows are not renumbered.
 
-## test-safety-net (27 candidates · 10 MUST · 0 SHOULD · 0 MAY · 17 plain · 16 departures)
+## test-safety-net (29 candidates · 11 MUST · 0 SHOULD · 0 MAY · 18 plain · 16 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -45,10 +45,12 @@ Skills appear in rewrite order.
 | c21 | 470 | 2. **Never writes a test that performs real I/O.** Enforced by the tier-aware runtime gua… | MUST (0.94, 0.83) | MUST |  |
 | c22 | 473 | 3. **Never ships an unproven test.** A test that did not go RED is discarded and listed u… | MUST (0.88, 0.66) | MUST |  |
 | c23 | 475 | 4. **Never leaves the suite red.** End state is a green suite plus suspected bugs in the… | MUST (0.92, 0.77) | MUST |  |
-| c24 | 477 | 5. **Hard gate before writing** — step 3's confirmation happens before any test file is t… | MUST (0.86, 0.76) | MUST |  |
+| c24 | 477 | 5. **Hard gate before writing** — step 3's confirmation happens before any test file is t… | MUST (0.86, 0.76) | MUST | (no departure) changed in 1.4.0 (autonomy-grant Task 7, now line 489): "…MUST happen before any test file is touched, unless `check-grant … --action local_reversible` exits 0; then you MAY write tests without asking, and MUST name the grant id and action class in the report. A grant never lifts Invariant 1." Still MUST: the grant is the one release, and it never reaches source edits |
 | c25 | 484 | > Emit every captured value with `repr()`. Never build a test's expected value by string… | MUST (0.97, 0.82) | MUST |  |
 | c26 | 519 | **Promoted units** get a line in the report naming the ranker's original tier, the tier u… | MUST (0.73, 0.44) | plain | harm 0.44 caps it at SHOULD, and a SHOULD here would contradict step 2's MUST NOT (c7) for the same rule; left as its restatement |
 | c27 | 522 | **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurre… | plain (0.36, 0.16) | plain |  |
+| c28 | 171 | 3. **Confirm with the user before writing anything.** … This is a hard gate — you MUST NOT proceed past it unconfirmed, unless `check-grant --root <repo> --action local_reversible` exits 0 …; then you MAY proceed without asking, and MUST name the grant id and action class in the report. | not judged (new in 1.4.0, autonomy-grant Task 7) | MUST | the step-3 write gate (design spec §5): was plain "do not proceed past it unconfirmed"; keyworded to match Invariant 5 (c24) now that it carries the grant clause; counted once at MUST, the MAY being the option the grant opens; eval checks 53-54 grade both places. Final fix wave (M-c): the fallback reads "Any other exit (3 ASK/NONE, 2 INVALID, 1 usage error) means ask as usual"; plain, counts unchanged |
+| c29 | 548 | This skill follows [skill-contract v1](…). It consumes autonomy grants, which only lift step 3's confirmation, … | not judged (new in 1.4.0, autonomy-grant Task 7) | plain | describes the skill-contract adoption, like crafting-self-prompting-loops c10; the rule it points at is carried by c24 and c28 |
 
 ## world-model-ledger (10 candidates · 7 MUST · 0 SHOULD · 0 MAY · 3 plain · 6 departures)
 
@@ -65,7 +67,7 @@ Skills appear in rewrite order.
 | c9 | 173 | Prefer these defaults; when a situation genuinely needs an exception, surface it to the u… | SHOULD (0.88, 0.50) | MUST | silently working around an invariant is the harm the invariants exist to prevent (harm 0.50); a SHOULD would permit it. Deliberate meaning clarification: "Prefer these defaults" is dropped because the heading says "do not weaken these" and the invariants are MUST (controller ruling; Jev 0.97 for keeping MUST) |
 | c10 | 178 | Always confirm the gate passed: `python3 test_world_model.py` (108 tests — the two-axis i… | MUST (0.59, 0.71) | MUST |  |
 
-## crafting-self-prompting-loops (11 candidates · 6 MUST · 1 SHOULD · 0 MAY · 4 plain · 4 departures)
+## crafting-self-prompting-loops (12 candidates · 7 MUST · 1 SHOULD · 0 MAY · 4 plain · 4 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -75,11 +77,12 @@ Skills appear in rewrite order.
 | c4 | 61 | These are the constraints loops most often skip and most often die on. Never ship a loop … | MUST (0.81, 0.84) | MUST |  |
 | c5 | 63 | - **A mandatory backstop (LSC-3).** Model self-termination (LSC-2) *can fail* — the model… | MUST (0.95, 0.89) | MUST |  |
 | c6 | 64 | - **The two-channel boundary (LSC-7).** Anything the model produces, a tool returns, or c… | MUST (0.87, 0.88) | MUST |  |
-| c7 | 65 | - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible actio… | MUST (0.70, 0.79) | MUST | (no departure) note: the output-only exemption in the same block carries MAY, a genuine option |
+| c7 | 65 | - **A human gate where it matters (LSC-8).** Any irreversible or externally-visible actio… | MUST (0.70, 0.79) | MUST | (no departure) note: the output-only exemption in the same block carries MAY, a genuine option. Changed in 1.4.0 (autonomy-grant Task 7, now line 67): "…MUST wait for explicit human approval, unless `check-grant --root <repo> --action <the action's class>` exits 0 at the moment of the action; then the loop MAY proceed, and MUST name the grant id and action class … A grant can never cover merge, deploy, spend, external messages or deletes … a push MUST send only the current branch to the remote branch of the same name." Still MUST; the carve-out is A8, and the push rule is spec-first-planning c16's. Fix round 1: the grantable set is now a closed list of class tokens ("Under LSC-8 only `push_branch` … and `open_pr` … are grantable; `merge`, `deploy`, `spend`, `external_message` and `delete` always wait for the human, and so does any action you cannot place exactly in `push_branch` or `open_pr`"), the push rule adds "and never force-push", and the checker path points at the `$SKILL_DIR` resolution; still MUST, counts unchanged. Final fix wave (I2): one plain sentence adds that a push or pull request whose commits change CI configuration counts as `deploy` (`check-grant` answers ASK `ci-config`) and waits for the human; it restates skill-contract SPEC's rule inside the same MUST, so counts unchanged |
 | c8 | 72 | 2. **A runnable scaffold** — in the user's target runtime. For Claude Code, that's the re… | MUST (0.27, 0.62) | MUST |  |
 | c9 | 80 | If the user has a loop already and it misbehaves, run steps 3–6 as a *checklist audit*: s… | plain (0.57, 0.51) | plain |  |
-| c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched |
+| c10 | 127 | This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/… | MUST (0.33, 0.42) | plain | describes the skill-contract adoption, not a rule (harm 0.42); the section and its json block are left untouched. 1.4.0 (autonomy-grant Task 7) adds autonomy-grant/v1 to `consumes` and one descriptive sentence; still plain |
 | c11 | 137 | ALWAYS structure the result like this: | plain (0.34, 0.51) | SHOULD | report format, not machine-consumed; aligned with verifier-installer c4 |
+| c12 | 105 | (Receiving a skill-contract envelope, step 1) If the handoff arrived without the user confirming it, it MAY proceed only when `check-grant --root <repo-root> --action local_reversible` exits 0; you MUST name the grant id and action class in your report. Otherwise you MUST ask the user first. | not judged (new in 1.4.0, autonomy-grant Task 7) | MUST | accepting a handoff under a grant (design spec §5, skill-contract commandment 10 as amended); counted once at MUST — the MAY is the option the grant opens, the MUSTs are the report and the fallback. Final fix wave (M-a): "and action class" added to the report, and the fallback ask keyworded; one rule, still counted once |
 
 ## mockstar-mock (14 candidates · 10 MUST · 1 SHOULD · 0 MAY · 3 plain · 3 departures)
 
@@ -185,7 +188,7 @@ Skills appear in rewrite order.
 | c6 | 74 | - Hand subagents the literal absolute \`$FETCH\` value — never a relative \`assets/… | MUST (0.70, 0.80) | MUST |  |
 | c7 | 112 | 6. **Synthesize.** Before filling the report, lint the merged findings array wit… | MUST (0.68, 0.80) | MUST |  |
 
-## verifier-installer (8 candidates · 5 MUST · 2 SHOULD · 0 MAY · 1 plain · 1 departure)
+## verifier-installer (10 candidates · 6 MUST · 2 SHOULD · 0 MAY · 2 plain · 1 departure)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -193,10 +196,12 @@ Skills appear in rewrite order.
 | c2 | 73 | 1. **Detect the stack.** Run \`python3 "$SKILL_DIR/assets/detect_stack.py" <repo>… | plain (0.61, 0.49) | plain |  |
 | c3 | 88 | 3. **Install per the playbook.** For each approved missing rail, follow the matc… | MUST (0.35, 0.64) | MUST |  |
 | c4 | 108 | ALWAYS end with this report: | MUST (0.70, 0.48) | SHOULD | harm 0.48 < 0.5 caps it at SHOULD; no gate or test checks the agent's closing summary (the eval grades detect_stack.py output only) |
-| c5 | 130 | - **Read-only until step 2's confirmation** — detection never writes; installs h… | MUST (0.92, 0.65) | MUST |  |
+| c5 | 130 | - **Read-only until step 2's confirmation** — detection never writes; installs h… | MUST (0.92, 0.65) | MUST | (no departure) changed in 1.2.0 (autonomy-grant Task 7, now line 152): "(or a covering grant)" … installs MUST happen only after the user approves the plan, or after `check-grant` exits 0 for `local_reversible` as step 2 describes. Still MUST |
 | c6 | 132 | - **One ground truth.** Local \`verify\` and CI run the same commands; when in dou… | MUST (0.41, 0.58) | MUST |  |
 | c7 | 134 | - **Prove, don't presume.** A rail counts as installed when it was watched faili… | MUST (0.58, 0.55) | MUST |  |
 | c8 | 137 | - **Stay off the style battlefield.** Wire checks for whatever formatter/tooling… | SHOULD (0.29, 0.38) | SHOULD |  |
+| c9 | 92 | 2. **Confirm the plan with the user.** … You MUST NOT write anything before this confirmation, unless `check-grant --root <repo> --action local_reversible` exits 0 …; then you MAY proceed, and MUST name the grant id and action class in the report. | not judged (new in 1.2.0, autonomy-grant Task 7) | MUST | the step-2 write gate (design spec §5): was plain "Do not write anything before this confirmation."; keyworded now that it carries the grant clause, matching guardrail c5; counted once at MUST, the MAY being the option the grant opens; the eval grades the step's text. Fix round 1: the same step adds "Under a grant you MUST install only the plan's proposals for the missing rails, with GitHub Actions as the CI provider, and MUST report manifest errors … instead of fixing them. The grant lifts this confirmation and nothing more …"; one rule, still counted once at MUST. Final fix wave: "Any other exit (3 ASK/NONE, 2 INVALID, 1 usage error) means ask as usual" (M-c), and a plain sentence that the workflow written under a grant stays local and pushing it asks (`ci-config`, I2); no new keyword, counts unchanged |
+| c10 | 166 | This skill follows [skill-contract v1](…). It consumes autonomy grants, which only lift step 2's confirmation, … | not judged (new in 1.2.0, autonomy-grant Task 7) | plain | describes the skill-contract adoption, like crafting-self-prompting-loops c10; the rule it points at is carried by c5 and c9 |
 
 ## agent-ready-rails (7 candidates · 4 MUST · 1 SHOULD · 0 MAY · 2 plain · 3 departures)
 
@@ -237,7 +242,7 @@ Skills appear in rewrite order.
 | c4 | 57 | - **Spec tracking.** The generator targets OKF v0.1. If the spec has moved (che… | MUST (0.38, 0.64) | SHOULD | fix round 1: confidence 0.38 < 0.6, decided ourselves; `references/okf-spec.md:44-51` itself allows generating without updating — "Before generating ... when network access exists — and always when a bundle declares an okf_version other than 0.1, check the spec URL" — and its own invariant is "Never silently emit ... the WARN: report exists so nothing is dropped without a trace", not "always update the generator first". The check is conditional (network access, or a mismatched okf_version), so a blanket MUST would overclaim; SHOULD fits a strong default with that legitimate condition |
 | c5 | 103 | - **Producer-extended bundles** (e.g. `feynman-walkthrough`'s explainers): arbit… | MUST (0.31, 0.61) | plain | describes the generator's rendering behavior for extra frontmatter keys; a descriptive never, not a directive (confidence 0.31 < 0.6) |
 
-## spec-first-planning (10 candidates · 4 MUST · 0 SHOULD · 0 MAY · 6 plain · 1 departures)
+## spec-first-planning (18 candidates · 12 MUST · 0 SHOULD · 0 MAY · 6 plain · 1 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -251,6 +256,14 @@ Skills appear in rewrite order.
 | c8 | 124 | - **Complements heavier PRD workflows.** When a full PRD process is in play, u… | plain (0.55, 0.29) | plain | |
 | c9 | 127 | - **Not a code-quality judge.** "How should I structure this service?" asked a… | plain (0.63, 0.27) | plain | |
 | c10 | 94 | 6. **Hand off through skill-contract.** … If it names one, propose the handoff … | not extracted (no never/always, not a hard-rule heading) | MUST / MUST NOT | fix round 1, correcting 0f5e62a: this workflow step directly implements skill-contract commandment 10 ("A producer MUST propose each handoff and wait for a yes") and commandment 8's "MUST NOT fail when none exists"; the earlier commit's rationale for leaving it plain was wrong — the creed's own MUSTs apply here, not just to the `## Contract` section |
+| c11 | 87 | 0. **Pick the mode.** … the full loop MUST run … You MUST tell the user which depth you are using … you MUST offer two switches … and you MUST NOT escalate unless the user asks. | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST / MUST NOT | mode escalation (design spec §4, A6): unattended is opt-in, and nothing escalates without the user asking; the eval checks the lint modes the depths map to. Final fix wave (T6 M3): the switches MUST is scoped "In attended mode, at each checkpoint …"; still one candidate |
+| c12 | 112 | … after 5 iterations without convergence, you MUST stop and ask the user how to proceed. | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST | the iteration cap (design spec §4 convergence); `spec_lint.py --converged` fails a sixth `I<n>` with "iteration cap exceeded — stop and ask the user" |
+| c13 | 133 | If it exits 0 (`GRANT: COVERED`), you MAY hand off without asking, and you MUST name the grant id and class in your report. Otherwise … you MUST propose the handoff … and MUST wait for the user's yes … | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST | the handoff under a grant (skill-contract commandment 10 as amended, design spec §5); counted once at MUST — the MAY is the option the grant opens, the MUSTs are the report and the fallback; c10 still carries the no-grant propose-and-wait rule. Final fix wave: the MAY holds "only when the envelope you hand off is the plan the grant pins (one of its subjects)", which `check-grant --subject <envelope path>` enforces (M-g), and the fallback reads "any other exit: 3 ASK/NONE, 2 INVALID, 1 usage error" (M-c); still counted once at MUST |
+| c14 | 147 | You MUST wait for the user's explicit yes before running: `write_grant.py …` | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST | a grant is the user's recorded yes (design spec §4 unattended mode); writing one without it is the forgery the threat model names; eval checks the text |
+| c15 | 159 | Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are never covered by a grant and will always ask: you MUST ask the user right before any of them, whatever the grant says. | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST | irreversible actions always ask (A8); the checker makes any non-`ask` gate on these five INVALID and `write_grant.py` refuses one; eval checks the text and the refusal |
+| c16 | 162 | Under a grant, you MUST push only the current branch, to the remote branch of the same name. | not judged (new in 2.0.0, autonomy-grant Task 6) | MUST | the push rule (controller ruling on the Task 1 review, M8): `check-grant` checks the local branch, not the push target, so the rule carries that gap. Final fix wave (M-b): "…of the same name, and MUST NOT force-push" (the same rule, one candidate), plus a plain sentence that a CI-config push counts as `deploy` (I2) |
+| c17 | 157 | `--accepted-by` is the name the user gives you: if you don't know it, you MUST ask the user for it rather than taking it from git config or inventing one. | not judged (new in the final fix wave, T6 M4) | MUST | the grant records who said yes; a name taken from git config or invented is a forged acceptance. Worded as MUST ask … rather than MUST NOT take, so PP-5 stays at 6 absolutist directives (not newly advisory) |
+| c18 | 168 | Before the handoff check you MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/<slug>`). | not judged (new in the final fix wave, T6 M2) | MUST | without it, `check-grant` answers ASK `branch` or `default-branch` and the grant the user just approved does nothing; the checker enforces the floor, the rule tells the agent how to meet it |
 
 ## bug-autopsy (4 candidates · 2 MUST · 1 SHOULD · 0 MAY · 1 plain · 1 departures)
 

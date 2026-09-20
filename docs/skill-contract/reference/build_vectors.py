@@ -191,6 +191,10 @@ def envelope_cases():
         ("c4", "invalid", "bad-id", E(mutate(lambda s: P(s).__setitem__("id", "tp-1")), "FAIL", [4])),
         ("c4", "invalid", "id-kind-mismatch",
          E(mutate(lambda s: P(s).__setitem__("id", "loop-spec-v1-20260918T102200Z-a1b2c3")), "FAIL", [4])),
+        ("c4", "invalid", "revision-trailing-newline",
+         E(mutate(lambda s: P(s).__setitem__("wasRevisionOf", ENVELOPE_ID + "\n")), "FAIL", [4])),
+        ("c4", "invalid", "id-trailing-newline",
+         E(mutate(lambda s: P(s).__setitem__("id", ENVELOPE_ID + "\n")), "FAIL", [4])),
         ("c4", "invalid", "bad-revision",
          E(mutate(lambda s: P(s).__setitem__("wasRevisionOf", "nope")), "FAIL", [4])),
         ("c5", "invalid", "no-sha256",
@@ -340,8 +344,141 @@ def claims_cases():
     ]
 
 
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+GRANT_ID = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+PLAN_TEXT = '{"plan": 1}\n'
+NOW = "2026-09-19T13:00:00Z"
+
+
+def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00:00Z",
+          branch_pattern="factory/*", spec_text=SPEC, gid=GRANT_ID, rev=None,
+          assertions=None, outcome="passed", generated="2026-09-19T12:00:00Z"):
+    a = {"test": "grant-accepted", "assertedBy": attributed or {"human": "Dana"},
+         "result": {"outcome": outcome},
+         "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                     "--unattended", "docs/spec.md"],
+         "subject": [{"name": "docs/spec.md", "digest": {"sha256": sha(spec_text)}}]}
+    payload = {"scope": {"repo": ".", "branch_pattern": branch_pattern},
+               "decisions": [{"id": "D1", "question": "Add deps?", "answer": "no",
+                              "source": "sweep"}],
+               "defaults": [], "gate_policy": policy if policy is not None else
+               {"read_only": "auto", "local_reversible": "grant"},
+               "budget": {"wall_clock_min": 60},
+               "stop_on": ["new_human_decision"], "expires_at": expires,
+               "system_one": {"allowed": False}, "revoked": revoked}
+    return {"_type": "https://in-toto.io/Statement/v1",
+            "subject": [{"name": "docs/spec.md", "digest": {"sha256": sha(spec_text)}},
+                        {"name": "plan.json", "digest": {"sha256": sha(PLAN_TEXT)}}],
+            "predicateType": GRANT_KIND,
+            "predicate": {"skillContract": "1", "id": gid,
+                          "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                          "generatedAtTime": generated, "wasRevisionOf": rev,
+                          "payload": payload,
+                          "assertions": [a] if assertions is None else assertions}}
+
+
+def grant_vector(st, action, status, reason=None, files=None, branch="factory/x", others=(),
+                 default_branch="main"):
+    inp = {"type": "grant", "grant": st, "action": action, "now": NOW, "branch": branch,
+           "default_branch": default_branch,
+           "files": files if files is not None else {"docs/spec.md": SPEC, "plan.json": PLAN_TEXT},
+           "others": list(others)}
+    exp = {"status": status}
+    if reason is not None:
+        exp["reason"] = reason
+    return {"input": inp, "expect": exp}
+
+
+def grant_cases():
+    g = grant()
+    acceptance = g["predicate"]["assertions"][0]
+    return [
+        ("c10", "valid", "covered-grant", grant_vector(g, "local_reversible", "COVERED")),
+        ("c10", "valid", "covered-auto", grant_vector(g, "read_only", "COVERED")),
+        ("c10", "valid", "unlisted-class-asks", grant_vector(g, "push_branch", "ASK", "gate-ask")),
+        ("c10", "valid", "expired-asks",
+         grant_vector(grant(expires="2026-09-19T12:30:00Z"), "local_reversible", "ASK", "expired")),
+        ("c10", "valid", "stale-asks",
+         grant_vector(g, "local_reversible", "ASK", "stale",
+                      files={"docs/spec.md": SPEC_EDITED, "plan.json": PLAN_TEXT})),
+        ("c10", "valid", "branch-mismatch-asks",
+         grant_vector(g, "local_reversible", "ASK", "branch", branch="feature/x")),
+        ("c10", "valid", "revoked-asks",
+         grant_vector(grant(revoked=True, assertions=[]), "local_reversible", "ASK", "revoked")),
+        ("c10", "valid", "superseded-asks",
+         grant_vector(g, "local_reversible", "ASK", "superseded",
+                      others=[grant(revoked=True, assertions=[], rev=GRANT_ID,
+                                    gid="autonomy-grant-v1-20260919T121000Z-d4e5f6")])),
+        ("c10", "valid", "irreversible-absent-asks",
+         grant_vector(g, "merge", "ASK", "gate-ask")),
+        ("c10", "valid", "irreversible-explicit-ask-asks",
+         grant_vector(grant(policy={"local_reversible": "grant", "delete": "ask"}), "delete",
+                      "ASK", "gate-ask")),
+        ("c10", "valid", "push-open-pr-covered",
+         grant_vector(grant(policy={"push_branch": "grant", "open_pr": "grant"}), "open_pr",
+                      "COVERED")),
+        ("c10", "valid", "lifetime-asks",
+         grant_vector(grant(generated="2026-09-25T12:00:00Z", expires="2026-09-30T12:00:00Z"),
+                      "local_reversible", "ASK", "lifetime")),
+        ("c10", "valid", "seven-days-exactly-covered",
+         grant_vector(grant(expires="2026-09-26T12:00:00Z"), "local_reversible", "COVERED")),
+        ("c10", "valid", "detached-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "detached",
+                      branch="HEAD")),
+        ("c10", "valid", "default-branch-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
+                      branch="main")),
+        ("c10", "valid", "origin-head-default-branch-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
+                      branch="trunk", default_branch="trunk")),
+        ("c10", "valid", "case-folded-default-branch-asks",
+         grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
+                      branch="Main")),
+        ("c10", "invalid", "one-subject",
+         grant_vector(mutate(lambda s: s.__setitem__("subject", s["subject"][:1]), g),
+                      "local_reversible", "INVALID")),
+        ("c10", "invalid", "duplicate-subject",
+         grant_vector(mutate(lambda s: s.__setitem__("subject", [s["subject"][0]] * 2), g),
+                      "local_reversible", "INVALID")),
+        ("c10", "invalid", "lifetime-over-seven-days",
+         grant_vector(grant(expires="2026-09-26T12:00:01Z"), "local_reversible", "INVALID")),
+        ("c10", "invalid", "require-signature-field",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "require_signature", {"local_reversible": "SIGNED"}), g),
+                      "local_reversible", "INVALID")),
+        ("c10", "invalid", "push-auto",
+         grant_vector(grant(policy={"push_branch": "auto"}), "push_branch", "INVALID")),
+        ("c10", "invalid", "skill-attributed",
+         grant_vector(grant(attributed={"skill": "spec-first-planning"}), "local_reversible",
+                      "INVALID")),
+        ("c10", "invalid", "no-acceptance",
+         grant_vector(grant(assertions=[]), "local_reversible", "INVALID")),
+        ("c10", "invalid", "two-acceptances",
+         grant_vector(grant(assertions=[acceptance, acceptance]), "local_reversible", "INVALID")),
+        ("c10", "invalid", "acceptance-not-passed",
+         grant_vector(grant(outcome="cantTell"), "local_reversible", "INVALID")),
+        ("c10", "invalid", "unknown-gate",
+         grant_vector(grant(policy={"local_reversible": "yes"}), "local_reversible", "INVALID")),
+        ("c10", "invalid", "unknown-class",
+         grant_vector(grant(policy={"launch": "grant"}), "local_reversible", "INVALID")),
+        ("c10", "invalid", "impossible-expiry",
+         grant_vector(grant(expires="2026-13-40T00:00:00Z"), "local_reversible", "INVALID")),
+    ]
+
+
+IRREVERSIBLE = ("merge", "deploy", "spend", "external_message", "delete")
+
+
+def irreversible_cases():
+    """A8: one INVALID vector per irreversible class and non-ask gate (merge-grant, ...)."""
+    return [("c10", "invalid", "%s-%s" % (c.replace("_", "-"), gate),
+             grant_vector(grant(policy={"local_reversible": "grant", c: gate}), c, "INVALID"))
+            for c in IRREVERSIBLE for gate in ("grant", "auto")]
+
+
 def cases():
-    return skill_cases() + envelope_cases() + discovery_cases() + claims_cases()
+    return (skill_cases() + envelope_cases() + discovery_cases() + claims_cases()
+            + grant_cases() + irreversible_cases())
 
 
 def write_all(out_dir):

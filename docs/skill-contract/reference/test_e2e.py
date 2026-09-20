@@ -18,6 +18,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -39,6 +40,14 @@ SPEC = textwrap.dedent(
     ## Non-goals
     - Excel (.xlsx) export
 
+    ## Constraints
+    - B1 [invariant]: No exported row may differ from the on-screen table.
+    - T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.
+
+    ## Required truths
+    - RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: python3 tests/compare_export.py fixtures/report.json export.csv)
+    - RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. (parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)
+
     ## Requirements
     - R1: The report page must offer a "Download CSV" action for every saved report. [where: web/reports/]
     - R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order.
@@ -58,6 +67,14 @@ SPEC = textwrap.dedent(
 
 def quoted_python():
     return subprocess.list2cmdline([sys.executable]) if os.name == "nt" else shlex.quote(sys.executable)
+
+
+def _now_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class HandoffTests(unittest.TestCase):
@@ -122,10 +139,12 @@ class HandoffTests(unittest.TestCase):
         md = os.path.join(self.universe, CONSUMER, "SKILL.md")
         with open(md, encoding="utf-8") as f:
             text = f.read()
-        old = '"consumes": ["%s"]' % KIND
-        self.assertIn(old, text)
+        # Swap only the task-plan/v1 entry: the consumer also consumes other
+        # kinds (autonomy-grant/v1), and those must not make it a v1 consumer.
+        old = '"%s"' % KIND
+        self.assertEqual(text.count(old), 1)
         with open(md, "w", encoding="utf-8") as f:
-            f.write(text.replace(old, '"consumes": ["%s2"]' % KIND[:-1]))
+            f.write(text.replace(old, '"%s2"' % KIND[:-1]))
         self.assertEqual(self.discover()["consumers"], [])
 
     def test_d_a_corrupt_neighbour_is_reported_and_the_consumer_still_found(self):
@@ -154,6 +173,222 @@ class HandoffTests(unittest.TestCase):
         rc, rep = self.checker("check-envelope", path, "--root", self.repo, "--rerun", "--json")
         self.assertEqual(rc, 0, rep)
         self.assertEqual(rep["claims"], {"spec-lint": "PROVEN", "coverage-total": "PROVEN"})
+
+
+GRANT_SPEC = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: python3 -m pytest -k rows)
+- RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: python3 bench.py --max 10)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: run `python3 -m pytest -k rows`, expect exit 0.
+
+## Open questions
+
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+ANSWERS = {"branch_pattern": "*", "gate_policy": {"read_only": "auto", "local_reversible": "grant"},
+           "expires_at": _in_one_day()}
+
+
+class GrantE2ETests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sc-grant-e2e-")
+        self.universe = os.path.join(self.tmp, "skills")
+        for name in (PRODUCER, CONSUMER):
+            shutil.copytree(os.path.join(REPO, name), os.path.join(self.universe, name),
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "eval"))
+        self.repo = os.path.join(self.tmp, "repo")
+        os.makedirs(os.path.join(self.repo, "docs"))
+        self.spec = os.path.join(self.repo, "docs", "spec.md")
+        with open(self.spec, "w", encoding="utf-8", newline="\n") as f:
+            f.write(GRANT_SPEC)
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        self.env = dict(os.environ, SKILL_CONTRACT_PATH=self.universe, HOME=home, USERPROFILE=home,
+                        SKILL_CONTRACT_PYTHON=quoted_python(), PYTHONDONTWRITEBYTECODE="1",
+                        SKILL_CONTRACT_ALLOWED_SIGNERS="")
+        self.assets = os.path.join(self.universe, PRODUCER, "assets")
+        # Make the test repo its own git repo on a non-default branch that matches
+        # ANSWERS' "*" pattern. contract_check.py's git_env() deliberately strips
+        # GIT_CEILING_DIRECTORIES (so a caller can't redirect the branch probe) and
+        # in_git_work_tree() is a plain filesystem walk, so the only reliable way to
+        # keep an enclosing repo from leaking into check-grant's branch probes is for
+        # self.repo to have its own .git: `git -C root ...` then finds it first.
+        if shutil.which("git"):
+            commit_env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                              GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            subprocess.run(["git", "init", "-q", "-b", "main", self.repo], check=True)
+            # An empty commit so "main" is a real, checkout-able ref (test_f switches
+            # back to it): an unborn branch has no ref at all until the first commit.
+            subprocess.run(["git", "-C", self.repo, "commit", "-q", "--allow-empty", "-m", "x"],
+                           check=True, env=commit_env)
+            subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "factory/x"], check=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_py(self, script, *args):
+        return subprocess.run([sys.executable, "-I", os.path.join(self.assets, script), *args],
+                              capture_output=True, text=True, timeout=120, cwd=self.repo, env=self.env)
+
+    def grant(self, answers=None):
+        r = self.run_py("spec_to_tasks.py", self.spec, "--envelope", self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        plan = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")][0]
+        ans = os.path.join(self.tmp, "answers.json")
+        with open(ans, "w", encoding="utf-8") as f:
+            json.dump(answers or ANSWERS, f)
+        r = self.run_py("write_grant.py", "--root", self.repo, "--spec", "docs/spec.md",
+                        "--plan", plan, "--answers", ans, "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return [ln[len("GRANT: "):] for ln in r.stdout.splitlines() if ln.startswith("GRANT: ")][0]
+
+    def check(self, action):
+        r = self.run_py("contract_check.py", "check-grant", "--root", self.repo,
+                        "--action", action)
+        return r.returncode, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+
+    def test_a_grant_covers_the_handoff_class_and_not_merge(self):
+        self.grant()
+        self.assertEqual(self.check("local_reversible")[0], 0)
+        rc, last = self.check("merge")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=gate-ask", last)
+
+    def test_b_revoke_makes_the_same_check_ask(self):
+        self.grant()
+        r = self.run_py("contract_check.py", "revoke-grant", "--root", self.repo)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=revoked", last)
+
+    def test_c_a_skill_attributed_copy_is_invalid(self):
+        path = self.grant()
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+        st["predicate"]["assertions"][0]["assertedBy"] = {"skill": "spec-first-planning"}
+        st["predicate"]["id"] = st["predicate"]["id"][:-6] + "ffffff"
+        forged = os.path.join(os.path.dirname(path), st["predicate"]["id"] + ".json")
+        with open(forged, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        r = self.run_py("contract_check.py", "check-grant", forged, "--root", self.repo,
+                        "--action", "local_reversible")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("GRANT: INVALID", r.stdout.strip().splitlines()[-1])
+        # INVALID because of human attribution specifically, not some other C10 problem:
+        # the copy keeps >= 2 distinct subjects and a valid lifetime, so the only thing
+        # wrong with it is the forged assertedBy.
+        self.assertIn("human", r.stdout)
+
+    def test_d_editing_the_spec_makes_the_grant_stale(self):
+        self.grant()
+        with open(self.spec, "a", encoding="utf-8") as f:
+            f.write("\n<!-- edited after the grant -->\n")
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=stale", last)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_e_a_branch_outside_the_pattern_asks(self):
+        # setUp already put self.repo on "factory/x"; move to a branch outside the
+        # narrower pattern this test grants against.
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "-b", "other/x"], check=True)
+        self.grant(dict(ANSWERS, branch_pattern="factory/*"))
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=branch", last)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_f_the_default_branch_is_never_covered(self):
+        # setUp already put self.repo on "factory/x"; move back onto the default branch.
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "main"], check=True)
+        self.grant()  # branch_pattern "*" would match main, but the A7 floor wins
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=default-branch", last)
+
+    def _commit(self, *paths, force=False):
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "-C", self.repo, "add"] + (["-f"] if force else []) + list(paths),
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.repo, "commit", "-q", "-m", "c"], check=True,
+                       capture_output=True, env=env)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_h_a_committed_grant_asks_tracked(self):
+        path = self.grant()
+        self.assertEqual(self.check("local_reversible")[0], 0)
+        self._commit(path, force=True)  # write_grant excluded it; -f forces it in
+        rc, last = self.check("local_reversible")
+        self.assertEqual(rc, 3)
+        self.assertIn("reason=tracked", last)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_i_a_push_that_changes_ci_config_asks_ci_config(self):
+        self.grant(dict(ANSWERS, gate_policy={"local_reversible": "grant",
+                                              "push_branch": "grant", "open_pr": "grant"}))
+        src = os.path.join(self.repo, "src", "a.py")
+        os.makedirs(os.path.dirname(src))
+        with open(src, "w", encoding="utf-8") as f:
+            f.write("x = 1\n")
+        self._commit("src/a.py")
+        self.assertEqual(self.check("push_branch")[0], 0)
+        wf = os.path.join(self.repo, ".github", "workflows", "x.yml")
+        os.makedirs(os.path.dirname(wf))
+        with open(wf, "w", encoding="utf-8") as f:
+            f.write("on: push\n")
+        self._commit(".github/workflows/x.yml")
+        for action in ("push_branch", "open_pr"):
+            rc, last = self.check(action)
+            self.assertEqual(rc, 3, action)
+            self.assertIn("reason=ci-config", last)
+
+    def test_g_a_grant_for_merge_is_refused(self):
+        r = self.run_py("spec_to_tasks.py", self.spec, "--envelope", self.repo)
+        plan = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines() if ln.startswith("ENVELOPE: ")][0]
+        ans = os.path.join(self.tmp, "answers.json")
+        with open(ans, "w", encoding="utf-8") as f:
+            json.dump(dict(ANSWERS, gate_policy={"local_reversible": "grant", "merge": "grant"}), f)
+        r = self.run_py("write_grant.py", "--root", self.repo, "--spec", "docs/spec.md",
+                        "--plan", plan, "--answers", ans, "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("REFUSED:", r.stdout)
+        self.assertIn("merge", r.stdout)
 
 
 if __name__ == "__main__":

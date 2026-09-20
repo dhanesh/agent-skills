@@ -46,6 +46,7 @@ campaigns without either re-litigating settled work or quietly dropping it.
 Marks: IMPROVED · HELD (guard) · HELD* (landed delta) · UNPROVEN · WORSE.
 UNPROVEN and WORSE both fail.
 """
+import hashlib
 import json
 import os
 import re
@@ -53,8 +54,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _now_z():
+    """RFC 3339 UTC 'now' (runtime grant-fixture helper; global-constraints A7)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    """RFC 3339 UTC one day from now: a valid, well-inside-the-cap expires_at."""
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # The integration branch this work merges into. The default baseline is the
 # MERGE BASE with it, not a fixed commit.
@@ -199,6 +211,9 @@ SINCE_FACTORY_TRUST_BA_R1 = "f8178b8"  # bug-autopsy review round 1 (I2): a
 # deferral word (tbd/todo/unknown/na/-/?) followed by filler prose no longer
 # bypasses the check by failing a whole-value-only comparison — it is now
 # rejected as the value's first normalized token.
+SINCE_AUTONOMY_GRANT = "997f1c9"  # skill-contract commandment 10: the autonomy
+# grant kind and check-grant (Task 1) — a human-accepted grant that four
+# skills' confirmation gates can read instead of asking again.
 
 
 def _git_out(*args):
@@ -955,7 +970,14 @@ def check_spec_planning(old, new):
     # A criterion whose check proves R1 but merely MENTIONS R2 in a filename.
     spec = os.path.join(scratch, "spec.md")
     open(spec, "w").write(
-        "# Spec: importer\n\n## Requirements\n"
+        "# Spec: importer\n\n"
+        "## Constraints\n"
+        "- B1 [invariant]: A row with a missing id is never imported.\n\n"
+        "## Required truths\n"
+        "- RT1 [SPECIFICATION_READY]: Rows with a missing id are rejected and counted. "
+        "(parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; "
+        "check: grep R2 fixtures.txt)\n\n"
+        "## Requirements\n"
         "- R1: The importer must reject a row with a missing id.\n"
         "- R2: The importer must emit a summary count.\n\n"
         "## Acceptance criteria\n"
@@ -4370,7 +4392,18 @@ SC_SPEC = (
     "# Spec: CSV export for saved reports\n\n## Problem\n"
     "Analysts re-type report numbers into spreadsheets by hand.\n\n## Users\n"
     "- Data analysts exporting weekly reports\n\n## Goals\n- Saved reports downloadable as CSV\n\n"
-    "## Non-goals\n- Excel (.xlsx) export\n\n## Requirements\n"
+    "## Non-goals\n- Excel (.xlsx) export\n\n"
+    "## Constraints\n"
+    "- B1 [invariant]: No exported row may differ from the on-screen table.\n"
+    "- T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.\n\n"
+    "## Required truths\n"
+    "- RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. "
+    "(parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; "
+    "check: python3 tests/compare_export.py fixtures/report.json export.csv)\n"
+    "- RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. "
+    "(parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; "
+    "check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)\n\n"
+    "## Requirements\n"
     '- R1: The report page must offer a "Download CSV" action for every saved report. '
     "[where: web/reports/]\n"
     "- R2: The exported CSV must contain the same rows and columns as the on-screen table, "
@@ -4853,6 +4886,289 @@ def check_factory_trust_ba(old, new):
         since=SINCE_FACTORY_TRUST_BA_R1)
 
 
+_AG_SKILLS = ("spec-first-planning", "crafting-self-prompting-loops", "verifier-installer",
+              "test-safety-net")
+
+
+def check_autonomy_grant(old, new):
+    def gates(tree):
+        n = 0
+        for sk in _AG_SKILLS:
+            p = os.path.join(tree, sk, "SKILL.md")
+            if os.path.isfile(p) and "check-grant" in open(p, encoding="utf-8").read():
+                n += 1
+        return n
+
+    def adopters(tree):
+        return sum(1 for d in sorted(os.listdir(tree))
+                   if os.path.isfile(os.path.join(tree, d, "SKILL.md"))
+                   and re.search(r"(?m)^## Contract\s*$",
+                                 open(os.path.join(tree, d, "SKILL.md"), encoding="utf-8").read()))
+
+    def checker(tree):
+        return os.path.join(tree, "docs", "skill-contract", "reference", "contract_check.py")
+
+    def decides(tree):
+        c = checker(tree)
+        return 1 if os.path.isfile(c) and '"check-grant"' in open(c, encoding="utf-8").read() else 0
+
+    gid = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+
+    def build(asserted_by, policy=None):
+        # A plain, non-git temp dir (mirrors docs/skill-contract/reference/
+        # test_e2e.py's GrantE2ETests): in_git_work_tree() walks the
+        # filesystem, never git, so no GIT_CEILING_DIRECTORIES is needed —
+        # there is simply no .git to find above an OS tempdir.
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "docs"))
+        spec = "# Spec\n"
+        open(os.path.join(root, "docs", "spec.md"), "w").write(spec)
+        plan = '{"tasks": []}\n'
+        open(os.path.join(root, "plan.json"), "w").write(plan)
+        st = {"_type": "https://in-toto.io/Statement/v1",
+              "subject": [{"name": "docs/spec.md",
+                           "digest": {"sha256": hashlib.sha256(spec.encode()).hexdigest()}},
+                          {"name": "plan.json",
+                           "digest": {"sha256": hashlib.sha256(plan.encode()).hexdigest()}}],
+              "predicateType": "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1",
+              "predicate": {"skillContract": "1", "id": gid,
+                            "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                            "generatedAtTime": _now_z(), "wasRevisionOf": None,
+                            "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
+                                        "decisions": [], "defaults": [],
+                                        "gate_policy": policy or {"local_reversible": "grant"},
+                                        "budget": {}, "stop_on": [],
+                                        "expires_at": _in_one_day(),
+                                        "system_one": {"allowed": False}, "revoked": False},
+                            "assertions": [{"test": "grant-accepted",
+                                            "assertedBy": asserted_by,
+                                            "result": {"outcome": "passed"},
+                                            "command": ["{python}",
+                                                        "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                                        "--unattended", "docs/spec.md"]}]}}
+        d = os.path.join(root, ".skill-contract", "envelopes")
+        os.makedirs(d)
+        json.dump(st, open(os.path.join(d, gid + ".json"), "w"))
+        return root
+
+    def run_check(tree, root, action="local_reversible"):
+        r = subprocess.run([sys.executable, checker(tree), "check-grant", "--root", root,
+                            "--action", action], capture_output=True, text=True, timeout=60)
+        return r.returncode, r.stdout
+
+    def git(root, *args):
+        subprocess.run(["git", "-C", root, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "-c", "commit.gpgsign=false"] + list(args),
+                       check=True, capture_output=True, timeout=60)
+
+    def factory_repo(root):
+        """root as its own repo: main holds one empty commit, HEAD on factory/x."""
+        git(root, "init", "-q", "-b", "main")
+        git(root, "commit", "-q", "--allow-empty", "-m", "x")
+        git(root, "checkout", "-q", "-b", "factory/x")
+
+    def commit_file(root, rel, text, force=False):
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").write(text)
+        git(root, "add", *(["-f"] if force else []), rel)
+        git(root, "commit", "-q", "-m", "c")
+
+    def git_probe(tree, what, probe_fn):
+        """Run a git-backed probe; any git failure is a PROBE_ERROR, never a pass."""
+        if shutil.which("git") is None:
+            PROBE_ERRORS.append((tree, "docs/skill-contract/reference/contract_check.py",
+                                 "%s needs git, which is not installed" % what))
+            return None
+        try:
+            return probe_fn()
+        except (OSError, subprocess.SubprocessError) as exc:
+            PROBE_ERRORS.append((tree, "docs/skill-contract/reference/contract_check.py",
+                                 "%s: git fixture failed: %s" % (what, exc)))
+            return None
+
+    def tracked_covers(tree):
+        """1 if a COMMITTED grant still covers local_reversible (bad); else 0.
+        None (PROBE_ERRORS) if the sanity arm fails: the same grant, untracked,
+        in the same repo on factory/x MUST be COVERED, or a 0 would prove nothing."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "tracked-grant sanity check failed: the untracked grant was not "
+                    "COVERED (check-grant exit %d)" % rc))
+                return None
+            commit_file(root, ".skill-contract/envelopes/%s.json" % gid,
+                        open(os.path.join(root, ".skill-contract", "envelopes",
+                                          gid + ".json")).read(), force=True)
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "tracked-grant probe", go)
+
+    def tracked_cased_covers(tree):
+        """1 if a grant whose index entry is CASED still covers local_reversible (bad);
+        else 0. `git ls-files` pathspecs are case-sensitive even where core.ignorecase
+        is true, so .Skill-Contract/Envelopes/<id>.json -- the same file the checker
+        reads on a folding disk -- must still count as tracked. The index entry is
+        written straight with `update-index --cacheinfo`, so the fixture needs no
+        case-folding filesystem: the probe reads the index, never the directory
+        listing. None (PROBE_ERRORS) if the sanity arm fails."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "cased tracked-grant sanity check failed: the untracked grant was "
+                    "not COVERED (check-grant exit %d)" % rc))
+                return None
+            rel = ".skill-contract/envelopes/%s.json" % gid
+            blob = subprocess.run(["git", "-C", root, "hash-object", "-w", rel],
+                                  check=True, capture_output=True, text=True,
+                                  timeout=60).stdout.strip()
+            git(root, "update-index", "--add", "--cacheinfo",
+                "100644,%s,.Skill-Contract/Envelopes/%s.json" % (blob, gid))
+            git(root, "commit", "-q", "-m", "c")
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "cased tracked-grant probe", go)
+
+    def tracked_nested_covers(tree):
+        """1 if a grant committed in a NESTED repository at .skill-contract still
+        covers local_reversible (bad); else 0. The outer index never holds that grant,
+        but the inner one does, and every clone of it carries one person's yes. None
+        (PROBE_ERRORS) if the sanity arm fails."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"})
+            factory_repo(root)
+            rc, _ = run_check(tree, root)
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "nested tracked-grant sanity check failed: the untracked grant was "
+                    "not COVERED (check-grant exit %d)" % rc))
+                return None
+            inner = os.path.join(root, ".skill-contract")
+            git(inner, "init", "-q", "-b", "main")
+            git(inner, "add", "-f", "envelopes/%s.json" % gid)
+            git(inner, "commit", "-q", "-m", "c")
+            rc, _ = run_check(tree, root)
+            return 1 if rc == 0 else 0
+        return git_probe(tree, "nested tracked-grant probe", go)
+
+    def ci_push_refused(tree):
+        """1 if check-grant refuses (ASK ci-config) a granted push whose commits add
+        a workflow; else 0. None (PROBE_ERRORS) if the sanity arm fails: a push of
+        a plain source commit under the same grant MUST be COVERED."""
+        if not decides(tree):
+            return 0
+
+        def go():
+            root = build({"human": "Dana"}, {"local_reversible": "grant", "push_branch": "grant"})
+            factory_repo(root)
+            commit_file(root, "src/a.py", "x = 1\n")
+            rc, out = run_check(tree, root, "push_branch")
+            if rc != 0:
+                PROBE_ERRORS.append((
+                    tree, "docs/skill-contract/reference/contract_check.py",
+                    "ci-config sanity check failed: a granted push of src/a.py was not "
+                    "COVERED (check-grant exit %d: %s)" % (rc, out.strip()[-120:])))
+                return None
+            commit_file(root, ".github/workflows/x.yml", "on: push\n")
+            rc, out = run_check(tree, root, "push_branch")
+            return 1 if rc == 3 and "reason=ci-config" in out else 0
+        return git_probe(tree, "ci-config probe", go)
+
+    def forged_accepted(tree):
+        """1 if a SKILL-attributed (self-certified) grant is COVERED (bad); else 0.
+        None if the sanity check below fails (recorded in PROBE_ERRORS instead).
+
+        The fixture must pass every other check so the only thing that can make
+        it fail is the forged attribution — otherwise a rejection would prove
+        nothing. A sanity build of the SAME fixture, human-attributed, must be
+        COVERED, so the guard cannot pass vacuously (e.g. by an unrelated bug
+        that rejects everything). A failed sanity check is routed through
+        PROBE_ERRORS rather than a bare `assert`: an `assert` would crash the
+        whole run with a traceback instead of a report, and disappears under
+        `python3 -O`.
+        """
+        if not decides(tree):
+            return 0
+
+        def check(root):
+            return run_check(tree, root)[0]
+
+        forged_rc = check(build({"skill": "spec-first-planning"}))
+
+        sane_rc = check(build({"human": "Dana"}))
+        if sane_rc != 0:
+            PROBE_ERRORS.append((
+                tree, "docs/skill-contract/reference/contract_check.py",
+                "autonomy-grant sanity check failed: a human-attributed grant of "
+                "the same shape was not COVERED (check-grant exit %d) -- the "
+                "fixture itself is broken, not just the forged attribution"
+                % sane_rc))
+            return None
+
+        return 1 if forged_rc == 0 else 0
+
+    s = "skill-contract"
+    a, b = gates(old), gates(new)
+    row(s, "skills whose human gate calls check-grant", a, b, b == 4 and a == 0,
+        "no skill could proceed past its confirmation under a user-approved grant",
+        since=SINCE_AUTONOMY_GRANT)
+    a, b = adopters(old), adopters(new)
+    row(s, "skill-contract adopters", a, b, b > a,
+        "verifier-installer and test-safety-net adopt the contract to read grants",
+        since=SINCE_AUTONOMY_GRANT)
+    a, b = decides(old), decides(new)
+    row(s, "reference checker decides whether a grant covers an action", a, b, b == 1 and a == 0,
+        "commandment 10's 'unless' had no format or check", since=SINCE_AUTONOMY_GRANT)
+    a, b = forged_accepted(old), forged_accepted(new)
+    row(s, "skill-attributed (self-certified) grants accepted", a, b, a == 0 and b == 0,
+        "a grant only counts when a human accepted it — sanity-checked against "
+        "a human-attributed grant of the same shape, which the new tree's "
+        "checker DOES accept", kind="guard")
+    a, b = tracked_covers(old), tracked_covers(new)
+    row(s, "a committed (tracked) grant covers local_reversible", a, b, a == 0 and b == 0,
+        "a grant is one person's acceptance: committed, it would cover every clone. Built "
+        "in a real repo on factory/x with the grant committed; sanity-checked against the "
+        "same grant untracked, which the new tree's checker DOES cover", kind="guard")
+    a, b = tracked_cased_covers(old), tracked_cased_covers(new)
+    row(s, "a grant tracked under a differently cased path covers local_reversible", a, b,
+        a == 0 and b == 0,
+        "`git ls-files` pathspecs are case-sensitive even where core.ignorecase is true, so "
+        "a grant committed as .Skill-Contract/Envelopes/<id>.json -- the same file on a "
+        "case-folding disk -- must still read as tracked; sanity-checked against the same "
+        "grant untracked, which the new tree's checker DOES cover. The index entry is "
+        "written with `update-index --cacheinfo`, so the guard is live on every filesystem",
+        kind="guard")
+    a, b = tracked_nested_covers(old), tracked_nested_covers(new)
+    row(s, "a grant committed in a nested repo at .skill-contract covers local_reversible",
+        a, b, a == 0 and b == 0,
+        "the outer index never holds that grant, but the inner repository's does, and every "
+        "clone of it carries one person's yes; sanity-checked against the same grant "
+        "untracked, which the new tree's checker DOES cover", kind="guard")
+    a, b = ci_push_refused(old), ci_push_refused(new)
+    row(s, "CI-config push under a grant is refused by the checker", a, b, a == 0 and b == 1,
+        "a granted push whose commits add .github/workflows/x.yml answers ASK ci-config: CI "
+        "runs with the repository's secrets, so that push is deploy (A8); sanity-checked "
+        "against a granted push of src/a.py, which stays COVERED", since=SINCE_AUTONOMY_GRANT)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -4921,6 +5237,7 @@ def main():
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
         check_factory_trust_ba(old, REPO)
+        check_autonomy_grant(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

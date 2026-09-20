@@ -34,6 +34,51 @@
       }
     },
     "coverage": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
-    "uncovered": {"type": "array", "items": {"type": "string"}}
+    "uncovered": {"type": "array", "items": {"type": "string"}},
+    "constraints": {
+      "type": "array",
+      "description": "Optional: the spec's Constrain-step constraints, when it has any (task-plan/v1 stays v1 — additive).",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "text"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[BTUSO][0-9]+$"},
+          "type": {"type": "string", "enum": ["invariant", "goal", "boundary"]},
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "required_truths": {
+      "type": "array",
+      "description": "Optional: the spec's Anchor-step required truths, when it has any.",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "text", "parent", "maps_to", "reqs", "confidence", "check"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^RT[0-9]+$"},
+          "status": {"type": "string", "enum": ["SATISFIED", "PARTIAL", "NOT_SATISFIED", "SPECIFICATION_READY"]},
+          "text": {"type": "string"},
+          "parent": {"type": "string"},
+          "maps_to": {"type": "array", "items": {"type": "string"}},
+          "reqs": {"type": "array", "items": {"type": "integer"}},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "check": {"type": "string"}
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "description": "Optional: the spec's unattended-mode Decisions sweep, when it has any.",
+      "items": {
+        "type": "object",
+        "required": ["id", "question", "answer", "source"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^D[0-9]+$"},
+          "question": {"type": "string"},
+          "answer": {"type": "string"},
+          "source": {"type": "string"}
+        }
+      }
+    }
   }
 }

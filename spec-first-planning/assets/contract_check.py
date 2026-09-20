@@ -9,9 +9,15 @@ byte-identical into their assets/ (`make contract-vendor`).
     contract_check.py check-envelope <file> [--root DIR] [--for SKILL_DIR]
                                             [--rerun] [--json]                 C3-C7, C9
     contract_check.py discover --kind URI [--from SKILL_DIR] [--json]          C8
+    contract_check.py check-grant [FILE] --root DIR --action CLASS
+                                         [--subject PATH] [--json]             C10
+    contract_check.py revoke-grant [ID] --root DIR                             C10
 
 Exit 0 pass, 2 a commandment is violated, 1 usage or internal error. The last
 line is always CONTRACT_RESULT: PASS or CONTRACT_RESULT: FAIL (C<n>, ...).
+
+check-grant exits 0 COVERED, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is GRANT: ...
+A caller proceeds only on exit 0. revoke-grant prints REVOKED: <path> and exits 0.
 """
 import sys
 
@@ -21,6 +27,8 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import unicodedata  # noqa: E402
+import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
@@ -29,26 +37,38 @@ import secrets  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
-from datetime import datetime, timezone  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 CONTRACT_VERSION = "1"
 FENCE_INFO = "json skill-contract"
 KIND_RE = re.compile(
     r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~-]+)*"
-    r"/(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)/v(?P<ver>[1-9][0-9]*)$")
+    r"/(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)/v(?P<ver>[1-9][0-9]*)\Z")
 ID_RE = re.compile(
     r"^(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)-v(?P<ver>[1-9][0-9]*)"
-    r"-(?P<ts>[0-9]{8}T[0-9]{6}Z)-(?P<hex>[0-9a-f]{6})$")
-TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    r"-(?P<ts>[0-9]{8}T[0-9]{6}Z)-(?P<hex>[0-9a-f]{6})\Z")
+TIME_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 ALLOWED_FRONTMATTER = ("name", "description", "license", "compatibility",
                        "metadata", "allowed-tools")
 OUTCOMES = ("passed", "failed", "cantTell", "inapplicable", "untested")
 SKILL_DIR_RE = re.compile(r"^\{skill_dir:(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)\}")
 PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
 BARE_PYTHON_RE = re.compile(r"^(?:python[0-9.]*|py)(?:\.exe)?$", re.IGNORECASE)
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+ACTION_CLASSES = ("read_only", "local_reversible", "push_branch", "open_pr", "merge",
+                  "deploy", "spend", "external_message", "delete")
+LOCAL_CLASSES = frozenset({"read_only", "local_reversible"})
+GATES = ("auto", "grant", "ask")
+# Checker-held floors (A7): no grant can lower these.
+# A8: irreversible or externally visible classes are ask-only; no grant can cover them.
+IRREVERSIBLE_CLASSES = frozenset({"merge", "deploy", "spend", "external_message", "delete"})
+MAX_GRANT_LIFETIME = timedelta(days=7)
+FALLBACK_DEFAULT_BRANCHES = frozenset({"main", "master"})
+ENVELOPE_MAX_BYTES = 1024 * 1024
+DETACHED = "HEAD"  # what current_branch reports for a detached HEAD
 
 
 # ── SKILL.md reading (no YAML library: a line reader is enough) ──────────────
@@ -399,10 +419,16 @@ def check_statement(st):
 
 def load_envelope(path):
     try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f), []
-    except (OSError, ValueError) as exc:
-        return None, [(3, "cannot read the envelope: %s" % exc)]
+        with open(path, "rb") as f:
+            raw = f.read(ENVELOPE_MAX_BYTES + 1)
+        if len(raw) > ENVELOPE_MAX_BYTES:
+            return None, [(3, "cannot read the envelope: larger than %d bytes"
+                           % ENVELOPE_MAX_BYTES)]
+        return json.loads(raw.decode("utf-8")), []
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        return None, [(3, "cannot read the envelope: %s" % (exc.__class__.__name__
+                                                            if isinstance(exc, (RecursionError, MemoryError))
+                                                            else exc))]
 
 
 # ── Commandment 8: find partners, never require them ────────────────────────
@@ -653,6 +679,393 @@ def check_envelope(path, root=None, for_skill=None, rerun=False, env=None):
     return report
 
 
+# ── Commandment 10: the autonomy grant ─────────────────────────────────────
+def _parse_time(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def grant_violations(st):
+    """Grant-specific problems (after check_statement passed). [] = valid.
+
+    Order follows SPEC: the payload's shape, then human attribution (skipped
+    for a revoked revision), then the gate-policy floors.
+    """
+    if not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND:
+        return ["predicateType must be %s" % GRANT_KIND]
+    out = []
+    pred = st["predicate"]
+    p = pred.get("payload") or {}
+    scope = p.get("scope")
+    if not (isinstance(scope, dict) and isinstance(scope.get("repo"), str)
+            and isinstance(scope.get("branch_pattern"), str) and scope["branch_pattern"]):
+        out.append("payload.scope must be {repo, branch_pattern}")
+    for d in p.get("decisions") if isinstance(p.get("decisions"), list) else [None]:
+        if not (isinstance(d, dict) and all(isinstance(d.get(k), str) and d[k].strip()
+                                            for k in ("id", "question", "answer"))):
+            out.append("each decision must carry non-empty id, question and answer")
+            break
+    if "require_signature" in p:  # A8 dropped signing: fail closed rather than ignore it
+        out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
+    try:
+        expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
+                              else "")
+    except ValueError:
+        expires = None
+        out.append("payload.expires_at must be RFC 3339 UTC (YYYY-MM-DDThh:mm:ssZ)")
+    try:
+        generated = _parse_time(pred.get("generatedAtTime"))
+    except (TypeError, ValueError):
+        generated = None
+        out.append("generatedAtTime must be a real date")
+    if expires and generated and expires - generated > MAX_GRANT_LIFETIME:
+        out.append("a grant may live at most 7 days (expires_at - generatedAtTime)")
+    if not isinstance(p.get("revoked"), bool):
+        out.append("payload.revoked must be a boolean")
+    subjects = st.get("subject") if isinstance(st.get("subject"), list) else []
+    names = {_subject_key(s["name"]) for s in subjects
+             if isinstance(s, dict) and isinstance(s.get("name"), str)}
+    if len(names) < 2:  # same file twice (or twice by case/`./`) pins only one thing
+        out.append("a grant must pin at least 2 distinct subjects: the spec and the plan it was"
+                   " approved for")
+    if p.get("revoked") is not True:
+        accepted = [a for a in pred.get("assertions") or [] if a.get("test") == "grant-accepted"]
+        if len(accepted) != 1:
+            out.append("a grant needs exactly one grant-accepted assertion, asserted by a human")
+        elif not (isinstance(accepted[0].get("assertedBy"), dict)
+                  and isinstance(accepted[0]["assertedBy"].get("human"), str)
+                  and accepted[0]["assertedBy"]["human"].strip()
+                  and (accepted[0].get("result") or {}).get("outcome") == "passed"):
+            out.append("grant-accepted must be asserted by a human with outcome passed")
+    policy = p.get("gate_policy")
+    if not isinstance(policy, dict):
+        out.append("payload.gate_policy must be an object")
+        policy = {}
+    for cls, gate in policy.items():
+        if cls not in ACTION_CLASSES:
+            out.append("gate_policy names unknown action class %r" % cls)
+        elif gate not in GATES:
+            out.append("gate_policy[%r] must be one of auto, grant, ask" % cls)
+        elif cls in IRREVERSIBLE_CLASSES and gate != "ask":
+            out.append("gate_policy[%r] must be ask: a grant never covers it (A8)" % cls)
+        elif gate == "auto" and cls not in LOCAL_CLASSES:
+            out.append("gate_policy[%r] may not be auto; at most grant" % cls)
+    return out
+
+
+def _grant_envelopes(root, strict=True):
+    """[(path, statement)] for grant envelopes under root.
+
+    strict=True keeps only statements that pass check_statement (candidates
+    that may cover something). strict=False keeps any JSON object of the grant
+    kind: used for supersession, so a revision fails closed even if malformed.
+    """
+    d = envelope_dir(root)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for f in sorted(os.listdir(d)):
+        if not f.endswith(".json"):
+            continue
+        st, err = load_envelope(os.path.join(d, f))
+        if err or not isinstance(st, dict) or st.get("predicateType") != GRANT_KIND \
+                or not isinstance(st.get("predicate"), dict):
+            continue
+        if strict and (check_statement(st) or st["predicate"].get("id") + ".json" != f):
+            continue  # a candidate must be well-formed and filed under its own id
+        out.append((os.path.join(d, f), st))
+    return out
+
+
+def is_superseded(root, grant_id):
+    """True when any grant envelope under root names grant_id in wasRevisionOf."""
+    return any(_revision_of(st) == grant_id for _, st in _grant_envelopes(root, strict=False))
+
+
+def _revision_of(st):
+    rev = st["predicate"].get("wasRevisionOf")
+    return rev if isinstance(rev, str) else None
+
+
+def latest_grant(root):
+    """The path of the newest valid-shaped grant that no revision supersedes."""
+    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
+    heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
+             for p, st in _grant_envelopes(root) if st["predicate"]["id"] not in revised]
+    return max(heads)[2] if heads else None
+
+
+GIT_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                     "GIT_CEILING_DIRECTORIES")
+
+
+def git_env():
+    """os.environ without the variables that make git look at another repository, so an
+    inherited GIT_DIR cannot redirect the branch probes away from root."""
+    return {k: v for k, v in os.environ.items() if k not in GIT_REDIRECT_VARS}
+
+
+def current_branch(root):
+    """The checked-out branch (DETACHED when HEAD is detached), or None when git cannot say.
+
+    Uses the full ref (refs/heads/<name>), never --abbrev-ref, which answers
+    "heads/main" when a tag is also named main.
+    """
+    try:
+        r = subprocess.run(["git", "-C", root, "symbolic-ref", "-q", "HEAD"],
+                           capture_output=True, text=True, timeout=10, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    ref = r.stdout.strip()
+    if r.returncode == 0 and ref.startswith("refs/heads/") and len(ref) > len("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    if r.returncode == 1 and not ref:
+        # -q exits 1 silently when HEAD is not symbolic. It is detached only when HEAD
+        # names a real commit; anything else is git failing, which the caller fails closed on.
+        try:
+            v = subprocess.run(["git", "-C", root, "rev-parse", "-q", "--verify", "HEAD^{commit}"],
+                               capture_output=True, text=True, timeout=10, env=git_env())
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return DETACHED if v.returncode == 0 else None
+    return None
+
+
+def in_git_work_tree(root):
+    """True when root or any parent holds a .git directory or file."""
+    d = os.path.abspath(root)
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return True
+        parent = os.path.dirname(d)
+        if parent == d:
+            return False
+        d = parent
+
+
+def _branch_key(name):
+    """Compare branch names as a case-insensitive filesystem would (and then some)."""
+    return unicodedata.normalize("NFKC", name).casefold()
+
+
+def detect_default_branches(root):
+    """main, master, and the target of origin/HEAD when there is one."""
+    out = set(FALLBACK_DEFAULT_BRANCHES)
+    try:
+        r = subprocess.run(["git", "-C", root, "symbolic-ref", "refs/remotes/origin/HEAD"],
+                           capture_output=True, text=True, timeout=10, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return out
+    ref = r.stdout.strip() if r.returncode == 0 else ""
+    if ref.startswith("refs/remotes/origin/") and len(ref) > len("refs/remotes/origin/"):
+        out.add(ref[len("refs/remotes/origin/"):])
+    return out
+
+
+def _git(root, *args, stdin=None):
+    """Run git on root with the redirect variables scrubbed; the CompletedProcess, or None
+    when git cannot be run at all."""
+    try:
+        return subprocess.run(["git", "-C", root] + list(args), capture_output=True,
+                              input=stdin, timeout=30, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def grant_is_tracked(root, path):
+    """True when git tracks (or has staged) the grant file, False when it does not, None
+    when git cannot say. A grant is one person's acceptance: committed, it covers every clone.
+
+    The probe runs in the grant's own directory, not in `root`: a grant committed inside a
+    nested repository or a submodule at .skill-contract belongs to that repository's index,
+    which `git -C root` never consults. `--show-prefix` then names that directory as the
+    repository spells it, and the pathspec carries:
+
+      top     so the path is matched from the work-tree root. Without it git prepends the
+              cwd prefix and matches that part literally, which defeats icase.
+      icase   because `git ls-files` pathspecs are case-sensitive even where
+              core.ignorecase is true. On a case-folding filesystem a grant committed as
+              .Skill-Contract/Envelopes/<id>.json is the very file this checker just read,
+              and would otherwise answer "untracked".
+      literal so a `*`, `?` or `[` in a caller-supplied name cannot glob.
+
+    Needs git >= 1.9 for `:(top,icase,literal)` pathspec magic; a modern git rejects
+    unknown magic with a fatal error, which this probe treats as ASK, as it does any
+    other git failure.
+    """
+    real = os.path.realpath(path)
+    d = os.path.dirname(real)
+    pre = _git(d, "rev-parse", "--show-prefix")
+    if pre is None or pre.returncode != 0:
+        return None  # includes a grant outside any work tree: git has no index to read
+    prefix = pre.stdout.decode("utf-8", "surrogateescape").rstrip("\n")
+    r = _git(d, "ls-files", "-z", "--cached", "--",
+             ":(top,icase,literal)" + prefix + os.path.basename(real))
+    if r is None or r.returncode != 0:
+        return None
+    return bool(r.stdout.strip(b"\0"))
+
+
+# CI configuration runs with the repository's secrets, so pushing a change to it is
+# `deploy`, not `push_branch` or `open_pr` (A8). Directories match at the repo top;
+# the file names match at any depth, since Jenkins and GitLab can point anywhere.
+CI_CONFIG_DIRS = (".github/workflows/", ".github/actions/", ".circleci/", ".buildkite/")
+CI_CONFIG_FILES = frozenset({".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile",
+                             "bitbucket-pipelines.yml", ".drone.yml", ".travis.yml"})
+
+
+def is_ci_config(rel):
+    """True when a repo-relative, forward-slash path is CI configuration."""
+    return rel.startswith(CI_CONFIG_DIRS) or rel.rsplit("/", 1)[-1] in CI_CONFIG_FILES
+
+
+def changed_since_default(root, default_branches):
+    """Paths the commits on HEAD change relative to the default branch, or None when git
+    cannot say. Each local or origin ref named like a default branch contributes the diff
+    from its merge base with HEAD; with none, every commit on HEAD counts (the empty tree).
+    Only commits are compared: staged or uncommitted edits cannot be pushed without a
+    commit, and a commit made later is seen by the check that precedes that push."""
+    keys = {_branch_key(b) for b in default_branches}
+    r = _git(root, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin")
+    if r is None or r.returncode != 0:
+        return None
+    refs = []
+    for ref in r.stdout.decode("utf-8", "replace").splitlines():
+        name = ref.split("/", 2)[2] if ref.startswith("refs/heads/") else ref.split("/", 3)[-1]
+        if name != "HEAD" and _branch_key(name) in keys:
+            refs.append(ref)
+    bases = []
+    for ref in refs:
+        m = _git(root, "merge-base", ref, "HEAD")
+        if m is None or m.returncode != 0 or not m.stdout.strip():
+            return None  # unrelated histories or no HEAD: cannot bound the push, fail closed
+        bases.append(m.stdout.strip().decode("ascii", "replace"))
+    if not bases:
+        e = _git(root, "hash-object", "-t", "tree", "--stdin", stdin=b"")
+        if e is None or e.returncode != 0 or not e.stdout.strip():
+            return None
+        bases.append(e.stdout.strip().decode("ascii", "replace"))
+    changed = set()
+    for base in bases:
+        d = _git(root, "-c", "diff.relative=false", "diff", "--no-ext-diff", "--no-renames",
+                 "--name-only", "-z", base, "HEAD", "--")
+        if d is None or d.returncode != 0:
+            return None
+        changed.update(p for p in d.stdout.decode("utf-8", "surrogateescape").split("\0") if p)
+    return changed
+
+
+def _subject_key(name):
+    return _branch_key(os.path.normpath(name))
+
+
+def check_grant(root, action, path=None, now=None, branch=None, default_branches=None,
+                subject=None):
+    """Commandment 10: does a grant cover `action`? First failing check wins.
+
+    subject: an optional path (relative to root, or absolute) that must be one of the
+    grant's subjects, e.g. the plan envelope about to be handed off under the grant.
+
+    default_branches: the repo's default branch names; None detects them
+    (origin/HEAD, else main and master).
+
+    Returns {status: COVERED|ASK|INVALID|NONE, id, reason, gate, path,
+    violations}. A caller proceeds only on COVERED.
+    """
+    rep = {"status": "NONE", "id": None, "reason": None, "gate": None,
+           "path": None, "violations": []}
+    path = path or latest_grant(root)
+    if path is None:
+        rep["reason"] = "no-grant"
+        return rep
+    rep["path"] = path
+    st, err = load_envelope(path)
+    viol = ["C%d: %s" % v for v in (err or check_statement(st))]
+    if not viol:
+        viol = ["C10: %s" % v for v in grant_violations(st)]
+    if viol:
+        rep.update(status="INVALID", reason="invalid", violations=viol)
+        return rep
+    pred, p = st["predicate"], st["predicate"]["payload"]
+    rep["id"] = pred["id"]
+
+    def ask(reason):
+        rep.update(status="ASK", reason=reason)
+        return rep
+
+    if p["revoked"]:
+        return ask("revoked")
+    if is_superseded(root, pred["id"]):
+        return ask("superseded")
+    now = now or utc_now()
+    expires = _parse_time(p["expires_at"])
+    if now >= expires:
+        return ask("expired")
+    if expires > now + MAX_GRANT_LIFETIME:
+        return ask("lifetime")
+    if stale_names(root, st["subject"]):
+        return ask("stale")
+    if subject is not None:
+        rel = (os.path.relpath(os.path.realpath(subject), os.path.realpath(root))
+               if os.path.isabs(subject) else subject)
+        if _subject_key(rel) not in {_subject_key(s["name"]) for s in st["subject"]}:
+            return ask("subject")  # the grant was approved for other files
+    in_git = in_git_work_tree(root)
+    branch = branch if branch is not None else current_branch(root)
+    if branch is None and in_git:
+        return ask("branch-unknown")  # inside git but git cannot answer: fail closed
+    if branch == DETACHED:
+        # A rebase started on the default branch detaches HEAD, and `rebase --continue`
+        # then advances that branch: no pattern, not even "*", covers a detached HEAD.
+        return ask("detached")
+    if branch is not None:
+        if default_branches is None:
+            default_branches = detect_default_branches(root)
+        if _branch_key(branch) in {_branch_key(b) for b in default_branches}:
+            return ask("default-branch")
+        if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
+            return ask("branch")
+    if in_git and grant_is_tracked(root, path) is not False:
+        return ask("tracked")  # committed, staged, or git cannot say: fail closed
+    gate = p["gate_policy"].get(action, "ask")
+    rep["gate"] = gate
+    if gate not in ("auto", "grant"):
+        return ask("gate-ask")
+    if in_git and action in ("push_branch", "open_pr"):
+        if default_branches is None:
+            default_branches = detect_default_branches(root)
+        changed = changed_since_default(root, default_branches)
+        if changed is None or any(is_ci_config(c) for c in changed):
+            return ask("ci-config")  # CI runs with the repo's secrets: that push is deploy
+    rep["status"] = "COVERED"
+    return rep
+
+
+def revoke_grant(root, grant_id=None, now=None):
+    """Write a revision with revoked: true. Tightening is always allowed: no human needed."""
+    if grant_id is None:
+        path = latest_grant(root)
+    elif isinstance(grant_id, str) and ID_RE.match(grant_id):
+        path = os.path.join(envelope_dir(root), grant_id + ".json")
+    else:
+        raise ValueError("%r is not an envelope id" % (grant_id,))
+    st, err = load_envelope(path) if path and os.path.isfile(path) else (None, [(3, "no such grant")])
+    if st is None or err or check_statement(st) or st.get("predicateType") != GRANT_KIND:
+        raise ValueError("no valid grant to revoke under %s" % envelope_dir(root))
+    if grant_id is not None and st["predicate"]["id"] != grant_id:
+        raise ValueError("%s.json holds grant %s, not %s" % (grant_id, st["predicate"]["id"], grant_id))
+    if is_superseded(root, st["predicate"]["id"]):
+        raise ValueError("%s is superseded; revoke the newest revision" % st["predicate"]["id"])
+    now = now or utc_now()
+    pred = st["predicate"]
+    payload = dict(pred["payload"], revoked=True)
+    rev = {"_type": STATEMENT_TYPE, "subject": st["subject"], "predicateType": GRANT_KIND,
+           "predicate": {"skillContract": CONTRACT_VERSION, "id": new_id(GRANT_KIND, now),
+                         "wasAttributedTo": pred["wasAttributedTo"],
+                         "generatedAtTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "wasRevisionOf": pred["id"], "payload": payload, "assertions": []}}
+    return write_envelope(root, rev)
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 def finish(violations, lines=()):
     for ln in lines:
@@ -684,6 +1097,15 @@ def build_parser():
     p.add_argument("--kind", required=True)
     p.add_argument("--from", dest="from_dir")
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("check-grant", help="commandment 10: does a grant cover this action")
+    p.add_argument("file", nargs="?")
+    p.add_argument("--root", required=True)
+    p.add_argument("--action", required=True)
+    p.add_argument("--subject", help="a path the grant must pin (e.g. the plan being handed off)")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("revoke-grant", help="commandment 10: revoke the newest (or named) grant")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--root", required=True)
     return ap
 
 
@@ -728,6 +1150,33 @@ def main(argv=None):
             lines.append("NO_CONSUMER: no installed skill consumes %s; give the envelope to the user"
                          % a.kind)
         return finish([], lines)
+    if a.cmd == "check-grant":
+        if a.action not in ACTION_CLASSES:
+            print("usage: --action must be one of %s" % ", ".join(ACTION_CLASSES), file=sys.stderr)
+            return 1
+        rep = check_grant(a.root, a.action, path=a.file, subject=a.subject)
+        if a.json:
+            print(json.dumps(rep, sort_keys=True))
+        for v in rep["violations"]:
+            print("FAIL: %s" % v)
+        if rep["status"] == "COVERED":
+            print("GRANT: COVERED id=%s class=%s gate=%s" % (rep["id"], a.action, rep["gate"]))
+            return 0
+        if rep["status"] == "INVALID":
+            print("GRANT: INVALID %s" % (rep["path"],))
+            return 2
+        if rep["status"] == "NONE":
+            print("GRANT: NONE")
+            return 3
+        print("GRANT: ASK id=%s reason=%s" % (rep["id"], rep["reason"]))
+        return 3
+    if a.cmd == "revoke-grant":
+        try:
+            print("REVOKED: %s" % revoke_grant(a.root, a.id))
+            return 0
+        except (ValueError, OSError) as exc:
+            print("ERROR: %s" % exc, file=sys.stderr)
+            return 1
     return 1
 
 

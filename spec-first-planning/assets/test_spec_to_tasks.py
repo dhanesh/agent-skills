@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_to_tasks  # noqa: E402
 import contract_check  # noqa: E402
+from test_spec_lint import FULL  # noqa: E402
 
 GOOD = textwrap.dedent(
     """\
@@ -32,6 +33,14 @@ GOOD = textwrap.dedent(
 
     ## Non-goals
     - Excel (.xlsx) export
+
+    ## Constraints
+    - B1 [invariant]: No exported row may differ from the on-screen table.
+    - T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.
+
+    ## Required truths
+    - RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: python3 tests/compare_export.py fixtures/report.json export.csv)
+    - RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. (parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)
 
     ## Requirements
     - R1: The report page must offer a "Download CSV" action for every saved report. [where: web/reports/]
@@ -312,6 +321,105 @@ class TestEnvelope(unittest.TestCase):
     def test_skill_version_matches_skill_md(self):
         with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
+
+    def test_skill_version_is_2_0_0(self):
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.0.0")
+
+
+class TestOptionalPayloadFields(unittest.TestCase):
+    def test_full_spec_payload_carries_constraints_truths_decisions(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(FULL), "docs/spec.md")
+        self.assertEqual(len(payload["constraints"]), 2)
+        self.assertEqual(len(payload["required_truths"]), 2)
+        self.assertEqual(len(payload["decisions"]), 1)
+        self.assertEqual(payload["decisions"][0]["id"], "D1")
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_spec_without_decisions_has_no_decisions_key(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(GOOD), "docs/spec.md")
+        self.assertNotIn("decisions", payload)
+        self.assertEqual(len(payload["constraints"]), 2)
+        self.assertEqual(len(payload["required_truths"]), 2)
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_required_truths_drop_the_num_field(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(FULL), "docs/spec.md")
+        for t in payload["required_truths"]:
+            self.assertNotIn("num", t)
+            self.assertIn("id", t)
+            self.assertIn("status", t)
+            self.assertIn("check", t)
+
+
+class TestRequiredTruthsWellFormed(unittest.TestCase):
+    """Fix round 1, item 3: a malformed confidence must not leak into the payload — or into
+    its JSON (a bare NaN is not valid JSON)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, "docs"))
+        self.spec = os.path.join(self.root, "docs", "spec.md")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _write(self, text):
+        with open(self.spec, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_unparsable_confidence_omits_required_truths(self):
+        bad = GOOD.replace("confidence: 0.8", "confidence: high")
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(bad), "docs/spec.md")
+        self.assertNotIn("required_truths", payload)
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_unparsable_confidence_still_writes_an_envelope_with_a_failed_spec_lint_claim(self):
+        bad = GOOD.replace("confidence: 0.8", "confidence: high")
+        self._write(bad)
+        plan = spec_to_tasks.derive_plan(bad)
+        path = spec_to_tasks.write_task_plan_envelope(plan, self.spec, self.root)
+        rep = contract_check.check_envelope(path, root=self.root)
+        self.assertEqual(rep["violations"], [])
+        self.assertEqual(rep["claims"]["spec-lint"], "FAILED")
+
+    def test_nan_confidence_omits_required_truths(self):
+        bad = GOOD.replace("confidence: 0.8", "confidence: nan")
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(bad), "docs/spec.md")
+        self.assertNotIn("required_truths", payload)
+
+    def test_nan_confidence_produces_no_nan_in_json(self):
+        bad = GOOD.replace("confidence: 0.8", "confidence: nan")
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(bad), "docs/spec.md")
+        self.assertNotIn("NaN", json.dumps(payload))
+
+    def test_out_of_range_confidence_omits_required_truths(self):
+        bad = GOOD.replace("confidence: 0.8", "confidence: 1.5")
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(bad), "docs/spec.md")
+        self.assertNotIn("required_truths", payload)
+
+    def test_well_formed_truths_are_unaffected(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(GOOD), "docs/spec.md")
+        self.assertEqual(len(payload["required_truths"]), 2)
+
+    def _truth(self, **overrides):
+        t = {"id": "RT1", "status": "SATISFIED", "text": "t", "parent": "OUTCOME",
+             "maps_to": [], "reqs": [], "confidence": 0.5, "check": "true"}
+        t.update(overrides)
+        return {"title": "x", "spec": "s", "coverage": {}, "uncovered": [], "tasks": [],
+               "required_truths": [t]}
+
+    def test_payload_errors_rejects_nan_confidence(self):
+        self.assertTrue(spec_to_tasks.payload_errors(self._truth(confidence=float("nan"))))
+
+    def test_payload_errors_rejects_infinite_confidence(self):
+        self.assertTrue(spec_to_tasks.payload_errors(self._truth(confidence=float("inf"))))
+
+    def test_payload_errors_rejects_out_of_range_confidence(self):
+        self.assertTrue(spec_to_tasks.payload_errors(self._truth(confidence=1.5)))
+        self.assertTrue(spec_to_tasks.payload_errors(self._truth(confidence=-0.1)))
+
+    def test_payload_errors_accepts_a_well_formed_truth(self):
+        self.assertEqual(spec_to_tasks.payload_errors(self._truth()), [])
 
 
 if __name__ == "__main__":

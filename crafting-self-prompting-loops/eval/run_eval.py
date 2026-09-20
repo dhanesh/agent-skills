@@ -20,8 +20,15 @@ removed from PARAMETERS.md must FAIL the replay; loop-spec fixtures with any
 safety section stripped must be flagged; and a schema DECLARED but never
 enforced must not pass as typed state.
 
+Autonomy grant arm: against the vendored checker, no grant asks, a human grant
+covers local_reversible and a skill-attributed one is INVALID; a grant is checked
+per action class at the moment of the action (push_branch covered, an absent
+open_pr asks), an irreversible class (merge) set to `grant` is INVALID (A8), and
+SKILL.md wires check-grant into the intake and the LSC-8 principle.
+
 Offline, deterministic, stdlib-only; all scratch under tempfile.mkdtemp().
 """
+import hashlib
 import json
 import os
 import re
@@ -29,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -106,6 +114,136 @@ def grade_intake(text):
     end = text.find("\n## ", start + len(INTAKE_HEADING))
     section = text[start:end if end > 0 else len(text)]
     missing = [m for m in INTAKE_MARKERS if m not in section]
+    return not missing, missing
+
+
+# ── Autonomy grant (skill-contract autonomy-grant/v1) ───────────────────────
+# Fixtures build a grant at run time, so they MUST satisfy the checker's floors:
+# at least 2 distinct subjects, a lifetime of at most 7 days (A7), no
+# require_signature, and no gate other than `ask` on an irreversible class (A8).
+# The temp dirs sit outside any git repo, so the default-branch floor skips.
+GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
+GRANT_ID = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
+CONTRACT_CHECKER = os.path.join(SKILL, "assets", "contract_check.py")
+
+
+def _now_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _in_one_day():
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _grant_fixture(root, asserted_by, gate_policy=None):
+    """Write a spec, a plan and a grant pinning both (sha256) under `root`."""
+    subjects = []
+    for rel, content in (("docs/spec.md", "# Spec\n"),
+                         ("docs/plan.json", '{"tasks": []}\n')):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        subjects.append({"name": rel,
+                         "digest": {"sha256": hashlib.sha256(content.encode()).hexdigest()}})
+    st = {"_type": "https://in-toto.io/Statement/v1",
+          "subject": subjects,
+          "predicateType": GRANT_KIND,
+          "predicate": {"skillContract": "1", "id": GRANT_ID,
+                        "wasAttributedTo": {"skill": "spec-first-planning", "version": "2.0.0"},
+                        "generatedAtTime": _now_z(), "wasRevisionOf": None,
+                        "payload": {"scope": {"repo": ".", "branch_pattern": "*"},
+                                    "decisions": [{"id": "D1", "question": "q", "answer": "a",
+                                                   "source": "s"}],
+                                    "defaults": [],
+                                    "gate_policy": gate_policy or {"local_reversible": "grant"},
+                                    "budget": {}, "stop_on": [],
+                                    "expires_at": _in_one_day(),
+                                    "system_one": {"allowed": False}, "revoked": False},
+                        "assertions": [{"test": "grant-accepted", "assertedBy": asserted_by,
+                                        "result": {"outcome": "passed"},
+                                        "command": ["{python}",
+                                                    "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                                                    "--unattended", "docs/spec.md"]}]}}
+    d = os.path.join(root, ".skill-contract", "envelopes")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, GRANT_ID + ".json"), "w", encoding="utf-8") as f:
+        json.dump(st, f)
+
+
+def _git_repo(root):
+    """Make root its own git repo on a non-default branch (main holds one empty commit,
+    HEAD is on factory/x), so check-grant's branch probes find root's .git rather than
+    any repo enclosing TMPDIR. Without git, root stays a plain directory, which
+    check-grant treats as outside git."""
+    if shutil.which("git") is None:
+        return
+    for args in (["init", "-q", "-b", "main"],
+                 ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                  "commit", "-q", "--allow-empty", "-m", "x"],
+                 ["checkout", "-q", "-b", "factory/x"]):
+        subprocess.run(["git", "-C", root] + args, check=True, capture_output=True, timeout=60)
+
+
+def _check_grant(root, action="local_reversible"):
+    r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-grant", "--root", root,
+                        "--action", action], capture_output=True, text=True, timeout=60)
+    return r.returncode, r.stdout.strip()
+
+
+def grant_checks(labels=("", "", "")):
+    """The write gate's grant arm: NONE asks, a human grant covers, a skill one is INVALID."""
+    with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
+        rc, out = _check_grant(t)
+        check(labels[0] + "NEGATIVE: no grant -> check-grant exits 3 and the gate must ask",
+              rc == 3 and "GRANT: NONE" in out, f"rc={rc} {out[-160:]}")
+    with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
+        _grant_fixture(t, {"human": "Dana"})
+        rc, out = _check_grant(t)
+        check(labels[1] + "a human-accepted grant covers local_reversible and names its id",
+              rc == 0 and "GRANT: COVERED" in out and GRANT_ID in out,
+              f"rc={rc} {out[-160:]}")
+    with tempfile.TemporaryDirectory() as t:
+        _git_repo(t)
+        _grant_fixture(t, {"skill": "spec-first-planning"})
+        rc, out = _check_grant(t)
+        check(labels[2] + "NEGATIVE: a skill-attributed grant is INVALID (exit 2)",
+              rc == 2 and "GRANT: INVALID" in out, f"rc={rc} {out[-160:]}")
+
+
+# The grantable set is a CLOSED list of class tokens: the model is not left to
+# judge reversibility (a tag push, a release or a comment is not push_branch).
+A8_CLOSED_LIST = ("Under LSC-8 only `push_branch` (pushing the current non-default branch) and "
+                  "`open_pr` (opening or updating a pull request) are grantable; `merge`, "
+                  "`deploy`, `spend`, `external_message` and `delete` always wait for the human")
+
+# The LSC-8 principle and the intake must both wire the grant in; the principle
+# must keep the irreversible classes out of any grant's reach (A8).
+LSC8_MARKERS = ("MUST wait for explicit human approval",
+                "check-grant --root <repo> --action <the action's class>",
+                "at the moment of the action",
+                "resolve `$SKILL_DIR` as in \"Receiving a skill-contract envelope\"",
+                "write the absolute checker path into the loop's scaffold",
+                "MUST name the grant id and action class",
+                A8_CLOSED_LIST,
+                "and so does any action you cannot place exactly in `push_branch` or `open_pr`",
+                "never force-push")
+INTAKE_GRANT_MARKERS = ("check-grant --root <repo-root> --action local_reversible",
+                        "exits 0", "MAY", "MUST name the grant id",
+                        "or a grant covered it")
+
+
+def grade_grant_text(text):
+    start = text.find("- **A human gate where it matters (LSC-8).**")
+    end = text.find("\n", start)
+    lsc8 = " ".join(text[start:end].split()) if start >= 0 else ""
+    i0 = text.find(INTAKE_HEADING)
+    i1 = text.find("\n## ", i0 + len(INTAKE_HEADING)) if i0 >= 0 else -1
+    intake = " ".join(text[i0:i1].split()) if i0 >= 0 and i1 > i0 else ""
+    missing = (["LSC-8:" + m for m in LSC8_MARKERS if m not in lsc8]
+               + ["intake:" + m for m in INTAKE_GRANT_MARKERS if m not in intake])
     return not missing, missing
 
 
@@ -282,6 +420,49 @@ def main():
         stripped = "\n".join(ln for ln in skill_text.splitlines() if "LSC-7" not in ln)
         check("negative: grader flags an intake section with the LSC-7 mapping stripped",
               not grade_intake(stripped)[0])
+
+        # ── Autonomy grant arm ──────────────────────────────────────────────
+        grant_checks()
+        with tempfile.TemporaryDirectory() as t:
+            _git_repo(t)
+            _grant_fixture(t, {"human": "Dana"},
+                           {"local_reversible": "grant", "push_branch": "grant"})
+            rc, out = _check_grant(t, "push_branch")
+            check("a grant is checked per class at the action: push_branch covered",
+                  rc == 0 and "class=push_branch" in out, f"rc={rc} {out[-160:]}")
+            rc, out = _check_grant(t, "open_pr")
+            check("NEGATIVE: a class the grant leaves out (open_pr) asks (exit 3)",
+                  rc == 3 and "GRANT: ASK" in out, f"rc={rc} {out[-160:]}")
+            # The checker is the gate for EVERY envelope it is handed, so the
+            # grant must also pass check-envelope --for this skill (consumes).
+            r = subprocess.run([sys.executable, "-I", CONTRACT_CHECKER, "check-envelope",
+                                os.path.join(t, ".skill-contract", "envelopes", GRANT_ID + ".json"),
+                                "--root", t, "--for", SKILL],
+                               capture_output=True, text=True, timeout=60)
+            check("an autonomy-grant envelope is accepted for this skill (--for)",
+                  r.returncode == 0, (r.stdout + r.stderr).strip()[-200:])
+        with tempfile.TemporaryDirectory() as t:
+            _git_repo(t)
+            _grant_fixture(t, {"human": "Dana"},
+                           {"local_reversible": "grant", "merge": "grant"})
+            rc, out = _check_grant(t, "merge")
+            check("NEGATIVE: a grant setting merge to `grant` is INVALID (A8)",
+                  rc == 2 and "GRANT: INVALID" in out, f"rc={rc} {out[-160:]}")
+        ok, missing = grade_grant_text(skill_text)
+        check("SKILL.md wires check-grant into the intake and the LSC-8 principle",
+              ok, f"missing: {missing}")
+        check("negative: grader flags an LSC-8 principle with the A8 closed list stripped",
+              not grade_grant_text(skill_text.replace(A8_CLOSED_LIST, "some actions"))[0])
+        check("negative: grader flags an LSC-8 principle with the catch-all stripped",
+              not grade_grant_text(skill_text.replace(
+                  "and so does any action you cannot place exactly", "and so do some"))[0])
+        check("negative: grader flags an LSC-8 principle with the force-push ban stripped",
+              not grade_grant_text(skill_text.replace("never force-push", "push"))[0])
+        compat = re.search(r"^compatibility:(.*)$", skill_text, re.M)
+        check("compatibility says python validates handoffs AND checks grants",
+              compat is not None and "check grants" in compat.group(1)
+              and "validate skill-contract handoffs" in compat.group(1),
+              compat.group(1).strip()[-120:] if compat else "no compatibility line")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -14,6 +14,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import spec_lint  # noqa: E402
 
+SPEC_LINT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spec_lint.py")
+
 GOOD = textwrap.dedent(
     """\
     # Spec: CSV export for saved reports
@@ -31,6 +33,14 @@ GOOD = textwrap.dedent(
     ## Non-goals
     - Excel (.xlsx) export
     - Scheduled email delivery
+
+    ## Constraints
+    - B1 [invariant]: No exported row may differ from the on-screen table.
+    - T1 [boundary]: Export of a 10000-row report finishes within 5 seconds.
+
+    ## Required truths
+    - RT1 [SPECIFICATION_READY]: The CSV writer reproduces every row and column exactly. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: python3 tests/compare_export.py fixtures/report.json export.csv)
+    - RT2 [SPECIFICATION_READY]: The export path stays within the time budget at scale. (parent: RT1; maps_to: T1; reqs: R3; confidence: 0.7; check: python3 tests/bench_export.py --rows 10000 --max-seconds 5)
 
     ## Requirements
     - R1: The report page must offer a "Download CSV" action for every saved report.
@@ -154,6 +164,200 @@ class TestLint(unittest.TestCase):
         self.assertEqual(spec_lint.lint(bad), spec_lint.lint(bad))
 
 
+LIGHT = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: python3 -m pytest -k rows)
+- RT2 [NOT_SATISFIED]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: python3 bench.py --max 10)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: run `python3 -m pytest -k rows`, expect exit 0.
+
+## Open questions
+"""
+
+# I3: RT1 and RT2 parent each other (a cycle); RT3 anchors on OUTCOME.
+CYCLE = """# Spec: Cycle
+
+## Problem
+p
+
+## Users
+- u
+
+## Goals
+- g
+
+## Non-goals
+- n
+
+## Constraints
+- B1 [invariant]: c1
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: t1 (parent: RT2; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT2 [SPECIFICATION_READY]: t2 (parent: RT1; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT3 [SPECIFICATION_READY]: t3 (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+
+## Requirements
+- R1: The thing must happen.
+
+## Acceptance criteria
+- R1: run true, expect exit 0.
+
+## Open questions
+"""
+
+# I3: a two-level chain RT2 -> RT1 -> OUTCOME reaches the root and is clean.
+CHAIN = """# Spec: Chain
+
+## Problem
+p
+
+## Users
+- u
+
+## Goals
+- g
+
+## Non-goals
+- n
+
+## Constraints
+- B1 [invariant]: c1
+- T1 [boundary]: c2
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: t1 (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.5; check: true)
+- RT2 [SPECIFICATION_READY]: t2 (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.5; check: true)
+
+## Requirements
+- R1: The thing must happen.
+
+## Acceptance criteria
+- R1: run true, expect exit 0.
+
+## Open questions
+"""
+
+
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
+class LightRules(unittest.TestCase):
+    def issues(self, text):
+        return spec_lint.lint(text)
+
+    def test_light_spec_is_clean(self):
+        self.assertEqual(self.issues(LIGHT), [])
+
+    def test_missing_constraints_section_fails(self):
+        t = LIGHT.replace("## Constraints\n- B1 [invariant]: No row is lost.\n- T1 [boundary]: Export finishes within 10 s for 10000 rows.\n\n", "")
+        self.assertTrue(any("Constraints" in i for i in self.issues(t)))
+
+    def test_bad_constraint_type_fails(self):
+        t = LIGHT.replace("B1 [invariant]", "B1 [wish]")
+        self.assertTrue(any("B1" in i and "type" in i for i in self.issues(t)))
+
+    def test_unmapped_constraint_fails(self):
+        t = LIGHT.replace("maps_to: T1;", "maps_to: B1;")
+        self.assertTrue(any("T1" in i and "no required truth" in i for i in self.issues(t)))
+
+    def test_truth_unknown_constraint_fails(self):
+        t = LIGHT.replace("maps_to: B1;", "maps_to: B9;")
+        self.assertTrue(any("RT1" in i and "B9" in i for i in self.issues(t)))
+
+    def test_truth_unknown_requirement_fails(self):
+        t = LIGHT.replace("reqs: R1; confidence: 0.8", "reqs: R7; confidence: 0.8")
+        self.assertTrue(any("RT1" in i and "R7" in i for i in self.issues(t)))
+
+    def test_truth_without_check_fails(self):
+        t = LIGHT.replace("; check: python3 -m pytest -k rows)", ")")
+        self.assertTrue(any("RT1" in i and "check" in i for i in self.issues(t)))
+
+    def test_bad_parent_fails(self):
+        t = LIGHT.replace("parent: RT1;", "parent: RT5;")
+        self.assertTrue(any("RT2" in i and "parent" in i for i in self.issues(t)))
+
+    def test_no_outcome_root_fails(self):
+        t = LIGHT.replace("parent: OUTCOME;", "parent: RT2;")
+        self.assertTrue(any("OUTCOME" in i for i in self.issues(t)))
+
+    def test_confidence_out_of_range_fails(self):
+        t = LIGHT.replace("confidence: 0.8", "confidence: 1.4")
+        self.assertTrue(any("RT1" in i and "confidence" in i for i in self.issues(t)))
+
+    def test_bad_status_fails(self):
+        t = LIGHT.replace("RT1 [SPECIFICATION_READY]", "RT1 [DONE]")
+        self.assertTrue(any("RT1" in i and "status" in i for i in self.issues(t)))
+
+    # I1: parentheses inside a required-truth statement used to be where the
+    # lazy split landed, corrupting the field parse.
+    def test_truth_statement_with_parentheses_parses_correctly(self):
+        t = LIGHT.replace(
+            "RT1 [SPECIFICATION_READY]: Every row reaches the file.",
+            "RT1 [SPECIFICATION_READY]: Every row (including duplicates) reaches the file.",
+        )
+        self.assertEqual(self.issues(t), [])
+
+    def test_truth_without_field_list_is_malformed(self):
+        t = LIGHT.replace(
+            "## Required truths\n",
+            "## Required truths\n- RT9 [SATISFIED]: No field list at all.\n",
+        )
+        issues = self.issues(t)
+        self.assertTrue(any("RT9" in i and "Required truths bullet is not" in i for i in issues))
+
+    # Minor: duplicate RT ids get their own message (mirrors the constraint one).
+    def test_duplicate_truth_id_fails(self):
+        t = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT1 [NOT_SATISFIED]")
+        self.assertTrue(any("required truth RT1 is defined twice" in i for i in self.issues(t)))
+
+    # I3: every RT must trace back to OUTCOME through parent links, not just
+    # have a non-dangling immediate parent — a cycle among RTs must be caught.
+    def test_cycle_does_not_trace_to_outcome(self):
+        issues = self.issues(CYCLE)
+        self.assertTrue(any("RT1" in i and "does not trace back to OUTCOME" in i for i in issues))
+        self.assertTrue(any("RT2" in i and "does not trace back to OUTCOME" in i for i in issues))
+        self.assertFalse(any("RT3" in i and "does not trace back to OUTCOME" in i for i in issues))
+
+    def test_chain_reaches_outcome_is_clean(self):
+        self.assertEqual(self.issues(CHAIN), [])
+
+
 class TestCli(unittest.TestCase):
     def _run(self, content):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,6 +392,90 @@ class TestCli(unittest.TestCase):
             [sys.executable, script], capture_output=True, text=True, timeout=30
         )
         self.assertEqual(r.returncode, 2)
+
+
+class ConvergedRules(unittest.TestCase):
+    def lint(self, t, mode):
+        return spec_lint.lint(t, mode=mode)
+
+    def test_full_spec_converges_and_is_unattended_ready(self):
+        self.assertEqual(self.lint(FULL, "converged"), [])
+        self.assertEqual(self.lint(FULL, "unattended"), [])
+
+    def test_light_spec_does_not_converge(self):
+        self.assertTrue(self.lint(LIGHT, "converged"))
+
+    def test_not_ready_truth_blocks_convergence(self):
+        t = FULL.replace("RT2 [SPECIFICATION_READY]", "RT2 [PARTIAL]")
+        self.assertTrue(any("RT2" in i for i in self.lint(t, "converged")))
+
+    def test_unresolved_tension_without_decision_fails(self):
+        t = FULL.replace("status: resolved; strategy: Partition", "status: accepted; strategy: Accept")
+        self.assertTrue(any("TN1" in i and "decision" in i for i in self.lint(t, "converged")))
+
+    def test_recommending_the_less_pragmatic_option_fails(self):
+        t = FULL.replace("OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)",
+                         "OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1, RT2)")
+        t = t.replace("Recommended: OPT-A", "Recommended: OPT-B")
+        self.assertTrue(any("OPT-A" in i and "pragmatic" in i for i in self.lint(t, "converged")))
+
+    def test_recommended_must_satisfy_every_truth(self):
+        t = FULL.replace("Recommended: OPT-A", "Recommended: OPT-B")
+        self.assertTrue(any("OPT-B" in i and "RT2" in i for i in self.lint(t, "converged")))
+
+    def test_tie_needs_a_decision(self):
+        t = FULL.replace("(complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)",
+                         "(complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)")
+        self.assertTrue(any("tie" in i for i in self.lint(t, "converged")))
+        t2 = t.replace("at the lowest complexity.", "at the lowest complexity. (decision: D1)")
+        self.assertEqual(self.lint(t2, "converged"), [])
+
+    def test_iteration_cap(self):
+        extra = "".join("- I%d: again\n" % n for n in range(2, 7))
+        t = FULL.replace("- I1: constrained, tensioned, anchored; chose OPT-A.\n",
+                         "- I1: constrained, tensioned, anchored; chose OPT-A.\n" + extra)
+        self.assertTrue(any("iteration cap" in i for i in self.lint(t, "converged")))
+
+    def test_open_question_blocks_convergence(self):
+        t = FULL.replace("## Open questions\n", "## Open questions\n- Which delimiter?\n")
+        self.assertTrue(any("Open questions" in i for i in self.lint(t, "converged")))
+
+    def test_unattended_needs_answered_decisions(self):
+        t = FULL.replace("-> no (source: sweep)", "-> (source: sweep)")
+        self.assertTrue(any("D1" in i for i in self.lint(t, "unattended")))
+        t2 = FULL.split("## Decisions")[0]
+        self.assertTrue(any("Decisions" in i for i in self.lint(t2, "unattended")))
+
+    def test_unknown_decision_reference_fails(self):
+        t = FULL.replace("strategy: Partition)", "strategy: Partition; decision: D9)")
+        self.assertTrue(any("D9" in i for i in self.lint(t, "converged")))
+
+    def test_option_satisfying_an_unknown_truth_fails(self):
+        t = FULL.replace("satisfies: RT1)", "satisfies: RT1, RT9)")
+        issues = self.lint(t, "converged")
+        self.assertIn("OPT-B satisfies unknown truth RT9", issues)
+        self.assertEqual(self.lint(FULL, "converged"), [])
+
+    def test_cli_help_prints_usage_and_exits_0(self):
+        for flag in ("-h", "--help"):
+            r = subprocess.run([sys.executable, SPEC_LINT, flag], capture_output=True,
+                               text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, flag)
+            self.assertIn("usage: spec_lint.py [--converged|--unattended] <spec.md>", r.stdout)
+
+    def test_docstring_names_the_modes(self):
+        self.assertIn("[--converged|--unattended]", spec_lint.__doc__)
+
+    def test_cli_modes(self):
+        import subprocess, sys, tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.md")
+            with open(p, "w") as f:
+                f.write(LIGHT)
+            run = lambda *a: subprocess.run([sys.executable, SPEC_LINT, *a, p], capture_output=True, text=True)
+            self.assertEqual(run().returncode, 0)
+            self.assertEqual(run("--converged").returncode, 1)
+            self.assertEqual(run("--unattended").returncode, 1)
 
 
 if __name__ == "__main__":
