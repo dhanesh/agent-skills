@@ -58,8 +58,20 @@ class PlanError(Exception):
     """The plan cannot be scheduled: a cycle, or a dependency that does not exist."""
 
 
+class StateError(Exception):
+    """state.json is unreadable or does not have the shape of a run's state."""
+
+
+REQUIRED_KEYS = ("root", "run_id", "plan_envelope", "plan_sha256", "grant_id",
+                 "run_branch", "base_branch", "created_at", "tasks", "order")
+
+
 def waves(tasks):
     """Group task ids into waves. Every id in a wave is independent of the others."""
+    for k, t in tasks.items():
+        deps = t.get("depends_on") or []
+        if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+            raise PlanError("task %s: depends_on must be a list of task id strings" % k)
     unknown = {d for t in tasks.values() for d in t.get("depends_on") or []} - set(tasks)
     if unknown:
         raise PlanError("depends_on names unknown task(s): %s" % ", ".join(sorted(unknown)))
@@ -87,7 +99,10 @@ def _rfc3339(when):
 
 def new_run_id(now=None):
     """A fresh run id: run-<yyyymmddThhmmssZ>-<6 hex>."""
-    when = (now or _now()).astimezone(_dt.timezone.utc)
+    when = now or _now()
+    if when.tzinfo is None:  # a naive datetime is taken as UTC, not local time
+        when = when.replace(tzinfo=_dt.timezone.utc)
+    when = when.astimezone(_dt.timezone.utc)
     return "run-%s-%s" % (when.strftime("%Y%m%dT%H%M%SZ"), secrets.token_hex(3))
 
 
@@ -129,6 +144,7 @@ class State:
         self.dispatches = data.get("dispatches", 0)
         self.stopped = data.get("stopped")
         self.tasks = data["tasks"]
+        self.order = list(data["order"])
 
     @property
     def state_path(self):
@@ -141,31 +157,63 @@ class State:
     @classmethod
     def new(cls, root, run_id, plan, plan_envelope, plan_sha256, grant_id,
             run_branch, base_branch, budget):
-        """Create the run directory, write state.json and open the log."""
-        plan_tasks = {t["id"]: t for t in plan.get("tasks") or []}
-        waves({k: {"depends_on": t.get("depends_on") or []} for k, t in plan_tasks.items()})
+        """Validate the plan, create the run directory, write state.json and log `init`.
+
+        Raises PlanError on a malformed plan, before anything is written."""
+        order, plan_tasks = _plan_tasks(plan)
+        schedule = waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
+        budget = dict(budget or {})
+        mp = budget.get("max_parallel")
+        if mp is not None and (not isinstance(mp, int) or isinstance(mp, bool) or mp < 1):
+            raise PlanError("budget.max_parallel must be an integer >= 1, got %r" % (mp,))
         tasks = {}
-        for tid, t in plan_tasks.items():
-            tasks[tid] = {"status": "pending", "depends_on": list(t.get("depends_on") or []),
+        for tid in order:
+            t = plan_tasks[tid]
+            tasks[tid] = {"status": "pending", "depends_on": list(t["depends_on"]),
                           "verify": t.get("verify"), "repairs": 0, "branch": None,
                           "worktree": None, "verify_runs": [], "review": None,
                           "merge_commit": None, "park_reason": None}
+        root = os.path.abspath(root)
         directory = run_dir(root, run_id)
         os.makedirs(directory, exist_ok=False)
         st = cls({"root": root, "run_id": run_id, "plan_envelope": plan_envelope,
                   "plan_sha256": plan_sha256, "grant_id": grant_id,
                   "run_branch": run_branch, "base_branch": base_branch,
                   "created_at": _rfc3339(_now()), "budget": budget, "dispatches": 0,
-                  "stopped": None, "tasks": tasks}, directory)
+                  "stopped": None, "tasks": tasks, "order": order}, directory)
         st.save()
-        open(st.log_path, "a", encoding="utf-8").close()
+        st.log("init", run=run_id, plan=plan_envelope, plan_sha256=plan_sha256,
+               waves=schedule)
         return st
 
     @classmethod
     def load(cls, path):
-        """Rebuild a State from its state.json."""
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        """Rebuild a State from its state.json. Raises StateError on any bad shape."""
+        try:
+            with open(path, "rb") as f:
+                data = json.loads(f.read().decode("utf-8"))
+        except (OSError, ValueError) as e:  # ValueError covers JSON and UTF-8 errors
+            raise StateError(str(e)) from e
+        if not isinstance(data, dict):
+            raise StateError("top level is %s, not an object" % type(data).__name__)
+        missing = [k for k in REQUIRED_KEYS if k not in data]
+        if missing:
+            raise StateError("missing key(s): %s" % ", ".join(missing))
+        if not isinstance(data["run_id"], str) or not re.match(RUN_ID_RE, data["run_id"]):
+            raise StateError("run_id is not a run id: %r" % (data["run_id"],))
+        tasks, order = data["tasks"], data["order"]
+        if not isinstance(tasks, dict):
+            raise StateError("tasks is %s, not an object" % type(tasks).__name__)
+        if not isinstance(order, list) or sorted(order, key=str) != sorted(tasks):
+            raise StateError("order does not list exactly the task ids")
+        for tid, t in tasks.items():
+            if not isinstance(t, dict) or t.get("status") not in STATUSES:
+                raise StateError("task %s has no valid status" % tid)
+            deps = t.get("depends_on")
+            if not isinstance(deps, list) or any(d not in tasks for d in deps):
+                raise StateError("task %s has an invalid depends_on" % tid)
+        if data.get("budget") is not None and not isinstance(data["budget"], dict):
+            raise StateError("budget is not an object")
         return cls(data, os.path.dirname(os.path.abspath(path)))
 
     def to_dict(self):
@@ -174,7 +222,7 @@ class State:
                 "grant_id": self.grant_id, "run_branch": self.run_branch,
                 "base_branch": self.base_branch, "created_at": self.created_at,
                 "budget": self.budget, "dispatches": self.dispatches,
-                "stopped": self.stopped, "tasks": self.tasks}
+                "stopped": self.stopped, "tasks": self.tasks, "order": self.order}
 
     def save(self):
         """Write state.json atomically: a temp file in the same directory, then os.replace."""
@@ -192,6 +240,7 @@ class State:
             except FileNotFoundError:
                 pass
             raise
+        _fsync_dir(self.dir)
 
     def log(self, event, **fields):
         """Append one event to autonomy-log.jsonl. The log is never rewritten."""
@@ -199,8 +248,15 @@ class State:
             raise ValueError("log fields must not override 'at' or 'event'")
         record = {"at": _rfc3339(_now()), "event": event}
         record.update(fields)
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, sort_keys=True) + "\n")
+        line = json.dumps(record, sort_keys=True, allow_nan=False) + "\n"
+        with open(self.log_path, "a+b") as f:
+            # A torn last line (a crash mid-write) is closed off, never rewritten,
+            # so it cannot swallow this event.
+            if f.seek(0, os.SEEK_END) > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.write(b"\n")
+            f.write(line.encode("utf-8"))
             f.flush()
             os.fsync(f.fileno())
         return record
@@ -239,8 +295,8 @@ class State:
         out, frontier = set(), [task]
         while frontier:
             cur = frontier.pop()
-            for tid, t in self.tasks.items():
-                if cur in (t.get("depends_on") or []) and tid not in out:
+            for tid in self.order:
+                if cur in self.tasks[tid]["depends_on"] and tid not in out:
                     out.add(tid)
                     frontier.append(tid)
         return out
@@ -251,7 +307,8 @@ class State:
         active = sum(1 for t in self.tasks.values() if t["status"] in ACTIVE)
         slots = max(0, max_parallel - active)
         out = []
-        for tid, t in self.tasks.items():
+        for tid in self.order:
+            t = self.tasks[tid]
             if len(out) >= slots:
                 break
             if t["status"] == "pending" and all(
@@ -260,7 +317,61 @@ class State:
         return out
 
     def max_parallel(self):
-        return int(self.budget.get("max_parallel") or DEFAULT_PARALLEL)
+        mp = self.budget.get("max_parallel")
+        return DEFAULT_PARALLEL if mp is None else int(mp)
+
+
+def _plan_tasks(plan):
+    """Check a plan payload's tasks; return (ids in plan order, {id: task}).
+
+    Raises PlanError on a non-object task, a non-string id, a duplicate id, or a
+    depends_on that is not a list of strings."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("tasks"), list):
+        raise PlanError("plan has no tasks list")
+    order, seen, dup = [], {}, []
+    for i, t in enumerate(plan["tasks"]):
+        if not isinstance(t, dict):
+            raise PlanError("task #%d is not an object" % (i + 1))
+        tid = t.get("id")
+        if not isinstance(tid, str) or not tid:
+            raise PlanError("task #%d has no string id" % (i + 1))
+        deps = t.get("depends_on", [])
+        if deps is None:
+            deps = []
+        if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+            raise PlanError("task %s: depends_on must be a list of task id strings" % tid)
+        if tid in seen:
+            dup.append(tid)
+            continue
+        seen[tid] = dict(t, depends_on=deps)
+        order.append(tid)
+    if dup:
+        raise PlanError("duplicate task id(s): %s" % ", ".join(sorted(set(dup))))
+    return order, seen
+
+
+def _fsync_dir(path):
+    """Make a rename in path durable. Best effort where directories cannot be opened."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _positive_int(text):
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not an integer: %r" % text)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be >= 1, got %d" % n)
+    return n
 
 
 def _slug(text):
@@ -273,7 +384,12 @@ def _load_current(root):
     if d is None:
         sys.stderr.write("no run found under %s\n" % os.path.join(root, RUNS_DIR))
         return None
-    return State.load(os.path.join(d, STATE_FILE))
+    path = os.path.join(d, STATE_FILE)
+    try:
+        return State.load(path)
+    except StateError as e:
+        sys.stderr.write("cannot load run state %s: %s\n" % (path, e))
+        return None
 
 
 def cmd_init(args):
@@ -285,10 +401,11 @@ def cmd_init(args):
     except (OSError, ValueError) as e:
         sys.stderr.write("cannot read plan %s: %s\n" % (args.plan, e))
         return 2
-    if not isinstance(plan, dict) or not isinstance(plan.get("tasks"), list):
-        sys.stderr.write("plan %s has no tasks list\n" % args.plan)
+    if not isinstance(plan, dict):
+        sys.stderr.write("invalid plan: %s is not a JSON object\n" % args.plan)
         return 2
-    budget = {"max_parallel": args.max_parallel or DEFAULT_PARALLEL}
+    budget = {"max_parallel": DEFAULT_PARALLEL if args.max_parallel is None
+              else args.max_parallel}
     try:
         st = State.new(root=args.root, run_id=new_run_id(), plan=plan,
                        plan_envelope=args.plan,
@@ -296,11 +413,12 @@ def cmd_init(args):
                        grant_id=args.grant_id,
                        run_branch=args.run_branch or "factory/%s" % _slug(plan.get("title")),
                        base_branch=args.base_branch, budget=budget)
-    except (PlanError, KeyError, TypeError) as e:
+    except PlanError as e:
         sys.stderr.write("invalid plan: %s\n" % e)
         return 2
-    st.log("init", run=st.run_id, plan=st.plan_envelope, plan_sha256=st.plan_sha256,
-           waves=waves({k: t for k, t in st.tasks.items()}))
+    except OSError as e:
+        sys.stderr.write("cannot create run under %s: %s\n" % (args.root, e))
+        return 2
     print("RUN: %s" % st.run_id)
     return 0
 
@@ -310,7 +428,7 @@ def cmd_next(args):
     st = _load_current(args.root)
     if st is None:
         return 2
-    ready = st.ready(args.max or st.max_parallel())
+    ready = st.ready(st.max_parallel() if args.max is None else args.max)
     if ready:
         print("READY: %s" % " ".join(ready))
     return 0
@@ -321,7 +439,8 @@ def cmd_status(args):
     st = _load_current(args.root)
     if st is None:
         return 2
-    for tid, t in st.tasks.items():
+    for tid in st.order:
+        t = st.tasks[tid]
         line = "STATUS: %s %s" % (tid, t["status"])
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
@@ -336,9 +455,10 @@ def cmd_resume(args):
         return 2
     last = st.last_event()
     if last:
-        print("STATUS: run %s last_event=%s at=%s" % (st.run_id, last.get("event"), last.get("at")))
+        print("STATUS: run=%s last_event=%s at=%s"
+              % (st.run_id, last.get("event"), last.get("at")))
     else:
-        print("STATUS: run %s last_event=none" % st.run_id)
+        print("STATUS: run=%s last_event=none" % st.run_id)
     ready = st.ready(st.max_parallel())
     print("READY: %s" % " ".join(ready) if ready else "READY:")
     st.log("resume", run=st.run_id, last_event=last.get("event") if last else None)
@@ -354,11 +474,11 @@ def main(argv=None):
     s.add_argument("--grant-id", default=None)
     s.add_argument("--run-branch", default=None)
     s.add_argument("--base-branch", default="main")
-    s.add_argument("--max-parallel", type=int, default=None)
+    s.add_argument("--max-parallel", type=_positive_int, default=None)
     s.set_defaults(fn=cmd_init)
     s = sub.add_parser("next")
     s.add_argument("--root", default=".")
-    s.add_argument("--max", type=int, default=None)
+    s.add_argument("--max", type=_positive_int, default=None)
     s.set_defaults(fn=cmd_next)
     for name, fn in (("status", cmd_status), ("resume", cmd_resume)):
         s = sub.add_parser(name)
