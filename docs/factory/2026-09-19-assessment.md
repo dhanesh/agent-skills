@@ -50,6 +50,17 @@ carries unit tests, eval negatives and an A/B row:
   new user know which skills to install' P(yes) 0.09 → 0.63; the section judged honest P=0.97.
 - **Step 3A (autonomy grant) landed:** grant kind + `check-grant`; spec-first-planning 2.0.0;
   4 adopters; Q3 to be re-judged by Jev after merge.
+- **Step 3A re-judged by Jev after merge:** Q1 partly (0.64), Q2 yes (0.74), Q3 partly (0.64);
+  "the skills ask every question that needs a human decision upfront" P(yes)=0.72;
+  "implementation then runs end to end without the human" P(yes)=0.13 — the grant existed but
+  nothing yet ran a plan under it, which is exactly the gap Step 4 closes.
+- **Step 4 (factory-conductor) landed:** `factory-conductor` runs an approved `task-plan/v1`
+  envelope, under a covering `autonomy-grant/v1`, from its first task to a pushed branch and an
+  open PR — a fresh executor per task and a fresh reviewer per finished task, wave scheduling
+  from `depends_on`, each task's own verify commands re-run as the proof, merge only on a passing
+  verify and review, wall-clock/dispatch/repair/parallel budgets enforced (tokens and dollars
+  recorded, not enforced), and a `run-result/v1` envelope on finish. skill-contract adopters: 5.
+  Jev re-judgement: to be re-judged after merge.
 
 Nothing else in this document has been re-measured since.
 
