@@ -452,6 +452,29 @@ class FinishTests(unittest.TestCase):
         self.assertIn("T1", err)
         self.assertNotIn("FINISH:", out)
 
+    def test_a_stopped_run_parks_in_flight_tasks_and_finishes(self):
+        self.root = repo()
+        st, self.plan = new_run(self.root, plan_payload(), budget={"wall_clock_min": 1})
+        self.st_path = st.state_path
+        self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        st = C.State.load(self.st_path)
+        st.created_at = "2000-01-01T00:00:00Z"
+        st.save()
+        rc, out = self.out(["next", "--root", self.root])
+        self.assertIn("STOP: budget_wall_clock", out)
+        rc, out = self.finish()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("PARK: T1 in_flight_at_stop", out)
+        st = C.State.load(self.st_path)
+        self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
+                         ("parked", "in_flight_at_stop"))
+        _, doc = self.envelope(out)
+        t1 = [t for t in doc["predicate"]["payload"]["tasks"] if t["id"] == "T1"][0]
+        self.assertEqual((t1["status"], t1["park_reason"]), ("parked", "in_flight_at_stop"))
+        parks = [e for e in self.log_events() if e["event"] == "park"]
+        self.assertEqual([(e["task"], e["reason"]) for e in parks],
+                         [("T1", "in_flight_at_stop")])
+
     def test_a_finished_run_refuses_further_steps(self):
         self.run_plan(stop=False)
         rc, out = self.finish()

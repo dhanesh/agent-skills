@@ -82,8 +82,10 @@ objects/info/alternates (N3), and committed code that reads the executor's
 uncommitted files by path (N11), are not caught here; CI re-running the checks on
 the pushed branch is the independent re-check.
 
-Finish. `finish` ends a run, stopped or not, once no task is running, verifying or
-reviewing (park an in-flight task first). It writes a run-result/v1 envelope under
+Finish. `finish` ends a run, stopped or not. On a stopped run it first parks every
+running, verifying or reviewing task with in_flight_at_stop (a stopped run takes no
+further step, so they could never finish); on a run that is not stopped it refuses
+while a task is in flight. It writes a run-result/v1 envelope under
 .skill-contract/envelopes/ (a local write: local_reversible) and prints FINISH: <path>.
 The envelope's subjects pin the plan envelope and the grant read at init; its payload
 carries each task's status, verify re-runs (commands in the plan's {python} form),
@@ -1941,8 +1943,9 @@ def cmd_finish(args):
     """Write the run-result/v1 envelope (FINISH: <path>), then push the run branch and open
     the PR, each only when its gate is COVERED.
 
-    Works on a stopped run: it is how a run ends. Refuses (2) while a task is running,
-    verifying or reviewing. Once an envelope exists, a plain `finish` prints that FINISH:
+    Works on a stopped run: it is how a run ends, and it parks the stopped run's
+    running, verifying or reviewing tasks with in_flight_at_stop first. On a run that is
+    not stopped it refuses (2) while a task is in flight. Once an envelope exists, a plain `finish` prints that FINISH:
     line and exits 0 when both remote steps completed; otherwise it also prints
     REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and runs the
     steps still pending. Exit 0 when the envelope is written and both remote steps ran;
@@ -1967,7 +1970,7 @@ def cmd_finish(args):
         sys.stderr.write("nothing to retry: this run has no run-result envelope; run finish\n")
         return 2
     busy = _in_flight_ids(st)
-    if busy:
+    if busy and not st.stopped:
         sys.stderr.write("cannot finish: task(s) %s are still running, verifying or reviewing;"
                          " finish them, or park them (park <task> --reason ...)\n"
                          % ", ".join(busy))
@@ -1981,6 +1984,10 @@ def cmd_finish(args):
         sys.stderr.write("cannot finish: the run's grant %s is not under %s\n"
                          % (st.grant_id, CC.envelope_dir(st.root)))
         return 2
+    # A stopped run takes no further step, so its in-flight tasks can never finish:
+    # park them (their dependents become blocked) so an unattended run can still end.
+    for tid in busy:
+        _park(st, tid, "in_flight_at_stop")
     payload = run_result_payload(st, plan_doc)
     statement = CC.build_statement(RUN_RESULT_KIND, CONDUCTOR_SKILL, CONDUCTOR_VERSION, st.root,
                                    [plan_subject(st), _grant_rel(st)], payload,
