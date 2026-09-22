@@ -148,7 +148,8 @@ command as the plan wrote it and pinning the plan envelope; parked and blocked t
 Those assertions record the conductor re-running the executor's own checks: the conductor did not
 write the code it checked. The envelope names the conductor as both producer and asserter, so
 under commandment 7 the checker reads each one as `CLAIMED` until a receiver re-runs it, and as
-`PROVEN` once it has.
+`PROVEN` once it has, or once CI reports the check on the pushed run branch (an assertion that
+carries a `run_url`).
 The payload schema is `factory-conductor/assets/schemas/run-result.v1.json`.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:

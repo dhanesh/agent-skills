@@ -58,10 +58,11 @@
         "required": ["id", "status", "verify", "review", "merge_commit", "park_reason"],
         "properties": {
           "id": {"type": "string"},
+          "title": {"type": ["string", "null"], "description": "The plan's task title (untrusted text)."},
           "status": {"type": "string", "enum": ["pending", "running", "verifying", "reviewing", "proven", "parked", "blocked"]},
           "verify": {
             "type": "array",
-            "description": "The conductor's last re-run of the task's verify commands, as resolved argv.",
+            "description": "The conductor's last re-run of the task's verify commands; each command in the plan's own form ({python}, {skill_dir:<name>}).",
             "items": {
               "type": "object",
               "required": ["command", "ok", "returncode"],

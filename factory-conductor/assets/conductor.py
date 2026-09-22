@@ -23,7 +23,7 @@ Usage:
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
     python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
-    python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON]
+    python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]
                                                                        # FINISH: <envelope path>
 
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
@@ -82,23 +82,36 @@ objects/info/alternates (N3), and committed code that reads the executor's
 uncommitted files by path (N11), are not caught here; CI re-running the checks on
 the pushed branch is the independent re-check.
 
-Finish. `finish` ends a run, stopped or not. It writes a run-result/v1 envelope under
+Finish. `finish` ends a run, stopped or not, once no task is running, verifying or
+reviewing (park an in-flight task first). It writes a run-result/v1 envelope under
 .skill-contract/envelopes/ (a local write: local_reversible) and prints FINISH: <path>.
 The envelope's subjects pin the plan envelope and the grant read at init; its payload
-carries each task's status, verify re-runs, review, merge commit and park reason, the
-stop, the budget (max_tokens and max_usd recorded, not enforced), and the worktrees a
-merge-conflict park kept (never deleted here). Its assertions are one passed
-`verify:<task>` per proven task, carrying the task's first verify command as the plan
-wrote it. log_sha256 is the sha256 of the log's first log_bytes bytes, which end with
-the `finish` event: the log is append-only, so the gate, push and pr events after it
-never change that prefix. Then `gate push_branch`, and on COVERED the --push-cmd
-(default: git push -u origin <run_branch>; never a force-push, and only while the root
-is on the run branch); then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr
-create --title <plan title> --body-file <tmp>), the body built from the payload. The
-commands are JSON argv lists; a token that is exactly {run_branch}, {base_branch},
-{title} or {body_file} is replaced. The first ASK prints GATE: ASK, skips the rest and
-exits 3 (the run's recorded stop is left as it was); a failed step exits 3 too. A second
-`finish` prints the same FINISH: line and does nothing else.
+carries each task's status, verify re-runs (commands in the plan's {python} form),
+review, merge commit and park reason, the stop, the budget (max_tokens and max_usd
+recorded, not enforced), and the worktrees a merge-conflict park kept (never deleted
+here). Its assertions are one passed `verify:<task>` per proven task, carrying the
+task's first verify command as the plan wrote it; `init` refuses a plan whose verify
+commands break the checker's C6 command rule, so that assertion is always valid.
+log_sha256 is the sha256 of the log's first log_bytes bytes, which end with the `finish`
+event: the log is append-only, so the gate, push and pr events after it never change
+that prefix. A crash between logging `finish` and saving state leaves the run
+unfinished; a re-run writes a second finish event and a second envelope (a new id,
+nothing overwritten), which is harmless.
+Then `gate push_branch`, and on COVERED the --push-cmd (default: git push -u origin
+<run_branch>), only while the root is on the run branch. The push command must be
+`git push [--set-upstream|--porcelain|--quiet|-u|-q] <remote> <run_branch>`: no force,
+no refspec, no other branch or option. Like every conductor git call it runs with
+core.hooksPath=/dev/null (spec section 7a), so the user's own pre-push hooks do NOT run.
+Then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr create --title <plan
+title> --base <base branch> --body-file <tmp>), the body built from the payload with all
+plan, park and review text inside inline code spans. The commands are JSON argv lists; a
+token that is exactly {run_branch}, {base_branch}, {title} or {body_file} is replaced.
+The first ASK prints GATE: ASK, skips the rest and exits 3 (the run's recorded stop is
+left as it was); a failed step exits 3 too. Completed steps are recorded (finished.pushed,
+finished.pr). A later `finish` prints the same FINISH: line; while a step is pending it
+also prints REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and
+runs just the pending steps. Once finished, next, resume, start, verify, review, merge,
+park and decision refuse with exit 2 ("run finished").
 
 Run id grammar: run-<yyyymmddThhmmssZ>-<6 hex>.
 Exit 0 success; 2 usage or invalid input; 3 the run must stop.
@@ -152,7 +165,8 @@ BUDGET_NOTE = "STATUS: budget " + BUDGET_NOTE_TEXT
 # finish's remote steps. Each is an argv list (never a shell); a token that is exactly
 # {run_branch}, {base_branch}, {title} or {body_file} is replaced (see expand_cmd).
 DEFAULT_PUSH_CMD = ["git", "push", "-u", "origin", "{run_branch}"]
-DEFAULT_PR_CMD = ["gh", "pr", "create", "--title", "{title}", "--body-file", "{body_file}"]
+DEFAULT_PR_CMD = ["gh", "pr", "create", "--title", "{title}", "--base", "{base_branch}",
+                  "--body-file", "{body_file}"]
 REMOTE_TIMEOUT = 300
 RUNS_DIR = os.path.join(".skill-contract", "runs")
 STATE_FILE = "state.json"
@@ -835,6 +849,13 @@ def cmd_init(args):
         waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
     except PlanError as e:
         return _init_fail("invalid plan: %s" % e)
+    bad = verify_command_problems(plan)
+    if bad:
+        for tid, cmd, why in bad:
+            sys.stderr.write("FAIL: C6: task %s verify %s: %s\n" % (tid, json.dumps(cmd), why))
+        return _init_fail("invalid plan: every verify command must follow the skill-contract "
+                          "command rule: start with {python} (not python3) or a bare program "
+                          "name, and use no absolute paths; see the lines above")
     base = CC.current_branch(root)
     if base is None:
         return _init_fail("%s is not a git work tree, or git cannot say which branch is "
@@ -908,6 +929,8 @@ def cmd_next(args):
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     if _stopped(st):
         return 3
     reason = check_stop(st)
@@ -950,6 +973,8 @@ def cmd_resume(args):
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     last = st.last_event()
     if last:
         print("STATUS: run=%s last_event=%s at=%s"
@@ -974,6 +999,17 @@ def cmd_resume(args):
     st.log("resume", run=st.run_id, last_event=last.get("event") if last else None,
            lifted_stop=lifted)
     return 0
+
+
+def _finished(st):
+    """True (with a message) once `finish` has written the run-result envelope: the
+    evidence is final, so no step may change the run after it (only finish runs)."""
+    if not st.finished:
+        return False
+    sys.stderr.write("run finished: %s; start a new run with init\n"
+                     % (st.finished.get("envelope") if isinstance(st.finished, dict)
+                        else st.finished))
+    return True
 
 
 def _stopped(st):
@@ -1027,6 +1063,8 @@ def cmd_start(args):
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     if _stopped(st):
         return 3
     st, t = _load_task(args, ("pending",))
@@ -1077,26 +1115,27 @@ def _tail(text):
     return (text or "")[-TAIL:]
 
 
-def _run_verify(argv, cwd):
+def _run_verify(argv, cwd, env=None, timeout=None):
     """Run one verify argv (no shell, no stdin) in cwd, in its own session and process
     group. (returncode or None, stdout, stderr). When the command ends or times out
     its process group is killed, so an ordinary backgrounded child cannot outlive the
     proof. A child that calls setsid() leaves the group and is NOT killed."""
+    timeout = VERIFY_TIMEOUT if timeout is None else timeout
     try:
         p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, errors="replace",
-                             env=git_env(), start_new_session=True)
+                             env=env or git_env(), start_new_session=True)
     except OSError as e:
         return None, "", "cannot run: %s" % e
     try:
-        out, err = p.communicate(timeout=VERIFY_TIMEOUT)
+        out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_group(p)
         try:
             out, _ = p.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             out = ""
-        return None, out or "", "timed out after %ds" % VERIFY_TIMEOUT
+        return None, out or "", "timed out after %ds" % timeout
     # Kill the group after every command, not only on timeout: a child that detached
     # its stdio would otherwise outlive a passing verify (unless it setsid()s away).
     _kill_group(p)
@@ -1251,6 +1290,8 @@ def cmd_verify(args):
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     if _stopped(st):
         return 3
     st, t = _load_task(args, ("running", "verifying"))
@@ -1396,6 +1437,8 @@ def cmd_review(args):
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     if _stopped(st):
         return 3
     st, t = _load_task(args, ("reviewing",))
@@ -1424,6 +1467,8 @@ def cmd_merge(args):
     """Merge the task branch into the run branch (--no-ff), then drop the worktree."""
     st = _load_current(args.root)
     if st is None:
+        return 2
+    if _finished(st):
         return 2
     if _stopped(st):
         return 3
@@ -1580,6 +1625,8 @@ def cmd_park(args):
     st, t = _load_task(args, STATUSES)
     if st is None:
         return 2
+    if _finished(st):
+        return 2
     if t["status"] == "proven":
         sys.stderr.write("task %s is proven and merged; it cannot be parked\n" % args.task)
         return 2
@@ -1595,6 +1642,8 @@ def cmd_decision(args):
     recorded; the task's dependents become blocked and the run goes on (exit 0)."""
     st, t = _load_task(args, STATUSES)
     if st is None:
+        return 2
+    if _finished(st):
         return 2
     if t["status"] == "proven":
         sys.stderr.write("task %s is proven and merged; it cannot be parked\n" % args.task)
@@ -1623,12 +1672,35 @@ def _plan_payload(doc):
     return plan if isinstance(plan, dict) else {}
 
 
+def _plan_tasks_by_id(plan):
+    """{task id: the plan's task object}, as the plan wrote them."""
+    return {t["id"]: t for t in plan.get("tasks") or []
+            if isinstance(t, dict) and isinstance(t.get("id"), str)}
+
+
 def _plan_steps(plan):
     """{task id: verify list} from a plan payload, as the plan wrote them."""
-    out = {}
-    for t in plan.get("tasks") or []:
-        if isinstance(t, dict) and isinstance(t.get("id"), str):
-            out[t["id"]] = t.get("verify") if isinstance(t.get("verify"), list) else []
+    return {tid: (t.get("verify") if isinstance(t.get("verify"), list) else [])
+            for tid, t in _plan_tasks_by_id(plan).items()}
+
+
+def verify_command_problems(plan):
+    """[(task id, command, why)] for every non-null verify command that breaks the
+    skill-contract command rule (commandment 6: {python} rather than an interpreter name,
+    no absolute paths, no other placeholders). The rule is the vendored checker's own
+    (`_check_command`, a private name: there is no public one for a bare command).
+
+    A proven task's first command becomes a run-result assertion, so a plan that breaks
+    C6 could never be finished; init refuses it instead."""
+    out = []
+    for tid, steps in _plan_steps(plan).items():
+        for step in steps:
+            cmd = step.get("command") if isinstance(step, dict) else None
+            if cmd is None:
+                continue  # an unrunnable verify parks the task; it is never asserted
+            viol = []
+            CC._check_command(cmd, viol)
+            out += [(tid, cmd, detail) for _, detail in viol]
     return out
 
 
@@ -1644,6 +1716,18 @@ def _leftover_worktrees(st):
     return out
 
 
+def _plan_form(runs, steps):
+    """The verify runs with each command in the plan's own form ({python},
+    {skill_dir:…}), not the resolved absolute argv the conductor ran. verify re-reads the
+    steps from the pinned plan, so run i is step i."""
+    out = []
+    for i, r in enumerate(runs):
+        step = steps[i] if i < len(steps) and isinstance(steps[i], dict) else {}
+        out.append({"command": step.get("command", r.get("command")), "ok": bool(r.get("ok")),
+                    "returncode": r.get("returncode")})
+    return out
+
+
 def run_result_payload(st, plan_doc=None):
     """The run-result/v1 payload for a run. `log_sha256` and `log_bytes` are None here:
     finish sets them once the `finish` event is the log's last line.
@@ -1655,15 +1739,18 @@ def run_result_payload(st, plan_doc=None):
         if why:
             raise ValueError(why)
     plan = _plan_payload(plan_doc)
+    plan_tasks = _plan_tasks_by_id(plan)
+    steps = _plan_steps(plan)
     pred = plan_doc.get("predicate") if isinstance(plan_doc, dict) else {}
     tasks = []
     for tid in st.order:
         t = st.tasks[tid]
         review = t.get("review")
+        title = (plan_tasks.get(tid) or {}).get("title")
         tasks.append({
-            "id": tid, "status": t["status"],
-            "verify": [{"command": r.get("command"), "ok": bool(r.get("ok")),
-                        "returncode": r.get("returncode")} for r in t.get("verify_runs") or []],
+            "id": tid, "title": title if isinstance(title, str) else None,
+            "status": t["status"],
+            "verify": _plan_form(t.get("verify_runs") or [], steps.get(tid) or []),
             "verified_head": t.get("verified_head"),
             "review": ({"verdict": review.get("verdict"), "detail": review.get("detail")}
                        if isinstance(review, dict) else None),
@@ -1706,46 +1793,71 @@ def _run_result_assertions(st, plan_doc):
     return out
 
 
+def one_line(text):
+    """text with every run of whitespace (newlines included) collapsed to one space."""
+    return " ".join(str(text if text is not None else "").split())
+
+
+def code(text):
+    """Untrusted text as one inline code span: newlines collapsed, and a backtick fence
+    longer than any backtick run inside, so it cannot open a heading, list or link, and
+    GitHub does not turn @mentions or closing keywords ("Closes #1") in it into actions."""
+    s = one_line(text)
+    runs = [len(m) for m in re.findall(r"`+", s)]
+    fence = "`" * (max(runs) + 1 if runs else 1)
+    pad = " " if s.startswith("`") or s.endswith("`") or not s else ""
+    return "%s%s%s%s%s" % (fence, pad, s, pad, fence)
+
+
 def pr_body(payload, envelope_rel):
-    """The pull request body, built only from the run-result payload."""
+    """The pull request body, built only from the run-result payload. Every string that
+    came from the plan, a reviewer or a parker is untrusted and rendered through code()."""
     tasks = payload["tasks"]
     by = {s: [t for t in tasks if t["status"] == s] for s in STATUSES}
     title = payload["plan"].get("title") or payload["plan"].get("path")
-    lines = ["## factory-conductor run `%s`" % payload["run_id"], "",
-             "Plan: %s (`%s`), run branch `%s`." % (title, payload["plan"].get("path"),
-                                                    payload["run_branch"]), "",
+
+    def name(t):
+        return "%s %s" % (code(t["id"]), code(t["title"])) if t.get("title") else code(t["id"])
+
+    lines = ["## factory-conductor run %s" % code(payload["run_id"]), "",
+             "Plan: %s (%s), run branch %s." % (code(title), code(payload["plan"].get("path")),
+                                                code(payload["run_branch"])), "",
              "Proven: %d of %d tasks." % (len(by["proven"]), len(tasks)), ""]
     stopped = payload.get("stopped") or {}
-    lines += ["Stopped: %s%s." % (stopped.get("reason") or "not stopped (finished by hand)",
-                                  " at %s" % stopped["at"] if stopped.get("at") else ""), ""]
+    lines += ["Stopped: %s%s." % (code(stopped["reason"]) if stopped.get("reason")
+                                  else "not stopped (finished by hand)",
+                                  " at %s" % code(stopped["at"]) if stopped.get("at") else ""),
+              ""]
     lines.append("### Proven (%d)" % len(by["proven"]))
     for t in by["proven"]:
         ok = sum(1 for v in t["verify"] if v["ok"])
         lines.append("- %s: merged %s; verify %d/%d passed; review %s"
-                     % (t["id"], (t["merge_commit"] or "")[:12], ok, len(t["verify"]),
-                        (t["review"] or {}).get("verdict")))
+                     % (name(t), code((t["merge_commit"] or "")[:12]), ok, len(t["verify"]),
+                        code((t["review"] or {}).get("verdict"))))
     lines += ["", "### Parked (%d)" % len(by["parked"])]
     for t in by["parked"]:
-        q = " (question: %s)" % t["question"] if t.get("question") else ""
-        lines.append("- %s: %s%s" % (t["id"], t["park_reason"], q))
+        q = " (question: %s)" % code(t["question"]) if t.get("question") else ""
+        lines.append("- %s: %s%s" % (name(t), code(t["park_reason"]), q))
     lines += ["", "### Blocked (%d)" % len(by["blocked"])]
     for t in by["blocked"]:
-        lines.append("- %s: depends on %s" % (t["id"], ", ".join(t["depends_on"]) or "-"))
+        lines.append("- %s: depends on %s" % (
+            name(t), ", ".join(code(d) for d in t["depends_on"]) or "-"))
     rest = [t for t in tasks if t["status"] not in ("proven", "parked", "blocked")]
     if rest:
         lines += ["", "### Not finished (%d)" % len(rest)]
-        lines += ["- %s: %s" % (t["id"], t["status"]) for t in rest]
+        lines += ["- %s: %s" % (name(t), code(t["status"])) for t in rest]
     if payload["leftover_worktrees"]:
         lines += ["", "### Worktrees kept for a human (%d)" % len(payload["leftover_worktrees"])]
-        lines += ["- %s: `%s` (%s)" % (w["task"], w["path"], w["reason"])
+        lines += ["- %s: %s (%s)" % (code(w["task"]), code(w["path"]), code(w["reason"]))
                   for w in payload["leftover_worktrees"]]
     lines += ["", "### Budget",
-              "Dispatches: %d; budget: `%s`." % (payload["dispatches"],
-                                                 json.dumps(payload["budget"], sort_keys=True)),
+              "Dispatches: %d; budget: %s." % (payload["dispatches"],
+                                               code(json.dumps(payload["budget"],
+                                                               sort_keys=True))),
               "Budget note: %s." % payload["budget_note"], "",
-              "Evidence: `%s` (run-result/v1). Every proven task was re-run by the conductor "
+              "Evidence: %s (run-result/v1). Every proven task was re-run by the conductor "
               "and reviewed before it merged; a human merges this pull request."
-              % envelope_rel, ""]
+              % code(envelope_rel), ""]
     return "\n".join(lines)
 
 
@@ -1769,52 +1881,96 @@ def _cmd_arg(text, default, flag):
     return cmd
 
 
-def _is_force_push(cmd):
-    """A grant never covers a force-push (SPEC: push only the current branch, never force)."""
-    return any(a in ("-f", "--force", "--mirror", "--delete", "-d")
-               or a.startswith("--force-with-lease") or a.startswith("--force-if-includes")
-               or (a.startswith("+") and len(a) > 1) for a in cmd[1:])
+PUSH_LONG_OPTIONS = frozenset({"--set-upstream", "--porcelain", "--quiet"})
+PUSH_SHORT_FLAGS = frozenset("uq")
+REMOTE_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z"
+
+
+def push_cmd_problem(argv, run_branch):
+    """None when argv (placeholders already expanded) is a push the grant can cover, else
+    why not. A grant covers pushing the current branch to the remote branch of the same
+    name, never a force-push (SPEC, commandment 10), so the only shape allowed is
+
+        git push [--set-upstream|--porcelain|--quiet|-u|-q|-uq ...] <remote> <run_branch>
+
+    with <remote> a remote name (not a URL or path) and no refspec syntax (':' or '+')."""
+    if argv[:2] != ["git", "push"]:
+        return "the push command must start with exactly: git push"
+    positionals = []
+    for a in argv[2:]:
+        if a.startswith("--"):
+            if a not in PUSH_LONG_OPTIONS:
+                return "option %r is not allowed (allowed: %s, -u, -q)" % (
+                    a, ", ".join(sorted(PUSH_LONG_OPTIONS)))
+        elif a.startswith("-") and len(a) > 1:
+            if not set(a[1:]) <= PUSH_SHORT_FLAGS:
+                return "short option %r is not allowed (only -u and -q)" % a
+        else:
+            positionals.append(a)
+    if len(positionals) != 2:
+        return "the push must name exactly <remote> <run_branch>, got %r" % (positionals,)
+    remote, ref = positionals
+    if not re.match(REMOTE_NAME_RE, remote):
+        return "the remote %r must be a remote name" % remote
+    if ref != run_branch or ":" in ref or ref.startswith("+"):
+        return "the push may only name the run branch %s, got %r" % (run_branch, ref)
+    return None
 
 
 def _run_remote(st, event, argv):
-    """Run one remote step (no shell, no stdin) in the root; log it as `event`. ok?"""
-    try:
-        r = subprocess.run(argv, cwd=st.root, stdin=subprocess.DEVNULL, capture_output=True,
-                           text=True, errors="replace", timeout=REMOTE_TIMEOUT,
-                           env=safe_config_env())
-        rc, out, err = r.returncode, r.stdout, r.stderr
-    except subprocess.TimeoutExpired as e:
-        rc, out, err = None, "", "timed out after %ds: %s" % (REMOTE_TIMEOUT, e)
-    except OSError as e:
-        rc, out, err = None, "", "cannot run: %s" % e
+    """Run one remote step (no shell, no stdin) in the root, in its own process group,
+    killed when it ends or times out, as verify does. Log it as `event`. (ok?, stdout)"""
+    rc, out, err = _run_verify(argv, st.root, env=safe_config_env(), timeout=REMOTE_TIMEOUT)
     st.log(event, command=argv, returncode=rc, stdout_tail=_tail(out), stderr_tail=_tail(err))
     if rc != 0:
         sys.stderr.write("%s failed (exit %s): %s\n" % (event, rc, _tail(err).strip()))
-    return rc == 0
+    return rc == 0, out
+
+
+def _in_flight_ids(st):
+    return [tid for tid in st.order if st.tasks[tid]["status"] in ACTIVE]
+
+
+def _pending_remote(st):
+    """The remote steps of a finished run that have not completed: a subset of push, pr."""
+    fin = st.finished if isinstance(st.finished, dict) else {}
+    return [k for k, done in (("push", fin.get("pushed")), ("pr", fin.get("pr"))) if not done]
 
 
 def cmd_finish(args):
     """Write the run-result/v1 envelope (FINISH: <path>), then push the run branch and open
     the PR, each only when its gate is COVERED.
 
-    Works on a stopped run: it is how a run ends. Idempotent: once an envelope exists, it
-    prints that FINISH: line and does nothing else. Exit 0 when the envelope is written and
-    both remote steps ran; 3 when a gate asked (GATE: ASK, the remaining remote steps are
-    skipped) or a remote step failed; 2 on invalid input (no envelope is written)."""
+    Works on a stopped run: it is how a run ends. Refuses (2) while a task is running,
+    verifying or reviewing. Once an envelope exists, a plain `finish` prints that FINISH:
+    line and exits 0 when both remote steps completed; otherwise it also prints
+    REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and runs the
+    steps still pending. Exit 0 when the envelope is written and both remote steps ran;
+    3 when a gate asked (GATE: ASK, the remaining remote steps are skipped) or a remote
+    step failed; 2 on invalid input (no envelope is written)."""
     st = _load_current(args.root)
     if st is None:
         return 2
-    if isinstance(st.finished, dict) and st.finished.get("envelope"):
-        print("FINISH: %s" % st.finished["envelope"])
-        return 0
     try:
         push_cmd = _cmd_arg(args.push_cmd, DEFAULT_PUSH_CMD, "--push-cmd")
         pr_cmd = _cmd_arg(args.pr_cmd, DEFAULT_PR_CMD, "--pr-cmd")
     except ValueError as e:  # JSONDecodeError is a ValueError
         sys.stderr.write("invalid command: %s\n" % e)
         return 2
-    if _is_force_push(push_cmd):
-        sys.stderr.write("--push-cmd would force-push or delete; a grant never covers that\n")
+    why = push_cmd_problem(expand_cmd(push_cmd, {"run_branch": st.run_branch}), st.run_branch)
+    if why:
+        sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
+        return 2
+    if isinstance(st.finished, dict) and st.finished.get("envelope"):
+        return _finish_again(st, args, push_cmd, pr_cmd)
+    if args.retry_remote:
+        sys.stderr.write("nothing to retry: this run has no run-result envelope; run finish\n")
+        return 2
+    busy = _in_flight_ids(st)
+    if busy:
+        sys.stderr.write("cannot finish: task(s) %s are still running, verifying or reviewing;"
+                         " finish them, or park them (park <task> --reason ...)\n"
+                         % ", ".join(busy))
         return 2
     plan_doc, why = _pinned_plan(st)
     if why:
@@ -1841,7 +1997,9 @@ def cmd_finish(args):
           for s in ("proven", "parked", "blocked")}
     # The finish event is the last line the digest covers. The log is append-only, so
     # the first log_bytes bytes never change; the gate, push and pr events that follow
-    # are after that prefix.
+    # are after that prefix. A crash between this event and st.save() below leaves no
+    # finished record, so a re-run writes a second finish event and a second envelope
+    # (a new id, never an overwrite); that is harmless.
     record = st.log("finish", id=eid, envelope=env_rel,
                     stopped=(payload["stopped"] or {}).get("reason"), **by)
     line = (json.dumps(record, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
@@ -1854,44 +2012,74 @@ def cmd_finish(args):
     payload["log_sha256"] = hashlib.sha256(prefix).hexdigest()
     payload["log_bytes"] = len(prefix)
     path = CC.write_envelope(st.root, statement)
-    st.finished = {"envelope": path, "id": eid, "at": _rfc3339(_now())}
+    st.finished = {"envelope": path, "id": eid, "at": _rfc3339(_now()),
+                   "pushed": False, "pr": False}
     st.save()
     print("FINISH: %s" % path)
     return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
 
 
+def _finish_again(st, args, push_cmd, pr_cmd):
+    """finish on a run that already has its envelope: report it, and with --retry-remote
+    re-gate and run the remote steps still pending."""
+    path = st.finished["envelope"]
+    print("FINISH: %s" % path)
+    pending = _pending_remote(st)
+    if not pending:
+        return 0
+    if not args.retry_remote:
+        print("REMOTE: pending %s (run finish --retry-remote)" % " ".join(pending))
+        return 3
+    doc, err = CC.load_envelope(path)
+    if err or not isinstance(doc, dict) or doc.get("predicateType") != RUN_RESULT_KIND:
+        sys.stderr.write("cannot read the run-result envelope %s: %s\n" % (path, err))
+        return 2
+    payload = doc["predicate"]["payload"]
+    return _finish_remote(st, payload, _rel(st, path), push_cmd, pr_cmd)
+
+
 def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
-    """gate push_branch -> push -> gate open_pr -> PR. The first ASK or failure ends it (3)."""
+    """gate push_branch -> push -> gate open_pr -> PR, skipping a step already recorded
+    as done in st.finished. The first ASK or failure ends it (3)."""
     values = {"run_branch": st.run_branch, "base_branch": st.base_branch,
-              "title": payload["plan"].get("title") or st.run_branch}
-    ok, _ = _gate_logged(st, "push_branch")
-    if not ok:
-        return 3
-    here = CC.current_branch(st.root)
-    if here != st.run_branch:
-        # A grant covers pushing the current branch only.
-        line = "GATE: ASK reason=branch (%s is on %s, not the run branch %s)" % (
-            st.root, here, st.run_branch)
-        st.log("gate", action="push_branch", ok=False, result=line, exit=3)
-        print(line)
-        return 3
-    if not _run_remote(st, "push", expand_cmd(push_cmd, values)):
-        return 3
-    ok, _ = _gate_logged(st, "open_pr")
-    if not ok:
-        return 3
-    fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(pr_body(payload, env_rel))
-        values["body_file"] = body_path
-        ok = _run_remote(st, "pr", expand_cmd(pr_cmd, values))
-    finally:
+              "title": one_line(payload["plan"].get("title") or st.run_branch)}
+    if not st.finished.get("pushed"):
+        ok, _ = _gate_logged(st, "push_branch")
+        if not ok:
+            return 3
+        here = CC.current_branch(st.root)
+        if here != st.run_branch:
+            # A grant covers pushing the current branch only.
+            line = "GATE: ASK reason=branch (%s is on %s, not the run branch %s)" % (
+                st.root, here, st.run_branch)
+            st.log("gate", action="push_branch", ok=False, result=line, exit=3)
+            print(line)
+            return 3
+        ok, out = _run_remote(st, "push", expand_cmd(push_cmd, values))
+        if not ok:
+            return 3
+        st.finished["pushed"] = _tail(out).strip() or True
+        st.save()
+    if not st.finished.get("pr"):
+        ok, _ = _gate_logged(st, "open_pr")
+        if not ok:
+            return 3
+        fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
         try:
-            os.unlink(body_path)
-        except FileNotFoundError:
-            pass
-    return 0 if ok else 3
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(pr_body(payload, env_rel))
+            values["body_file"] = body_path
+            ok, out = _run_remote(st, "pr", expand_cmd(pr_cmd, values))
+        finally:
+            try:
+                os.unlink(body_path)
+            except FileNotFoundError:
+                pass
+        if not ok:
+            return 3
+        st.finished["pr"] = _tail(out).strip() or True
+        st.save()
+    return 0
 
 
 def main(argv=None):
@@ -1918,6 +2106,7 @@ def main(argv=None):
     s.add_argument("--root", default=".")
     s.add_argument("--push-cmd", default=None)
     s.add_argument("--pr-cmd", default=None)
+    s.add_argument("--retry-remote", action="store_true")
     s.set_defaults(fn=cmd_finish)
     for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
                      ("merge", cmd_merge), ("park", cmd_park), ("decision", cmd_decision)):

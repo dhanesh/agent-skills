@@ -1,9 +1,10 @@
 """finish: the run-result/v1 envelope, then push and PR when the grant covers them."""
-import contextlib, hashlib, io, json, os, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 import contract_check as CC
-from conductor_testkit import GIT, repo, new_run, revoke
+from conductor_testkit import GIT, repo, new_run, revoke, write_grant, write_plan_envelope
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRST_T1 = ["{python}", "-c", "pass"]
@@ -17,6 +18,7 @@ if "--body-file" in rest:
 with open(record, "a", encoding="utf-8") as f:
     f.write(json.dumps(entry) + "\n")
 print("stub %s done" % what)
+sys.exit(1 if "broken-remote" in rest else 0)
 '''
 
 
@@ -48,6 +50,16 @@ class FinishTests(unittest.TestCase):
         with open(self.stub, "w") as f:
             f.write(STUB)
         self.record = os.path.join(self.tmp, "record.jsonl")
+        # A `git` on PATH that records `git push ...` and passes everything else to git,
+        # so the push command stays a real `git push` argv the allowlist accepts.
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        wrapper = os.path.join(self.bin, "git")
+        with open(wrapper, "w") as f:
+            f.write('#!/bin/sh\nif [ "$1" = push ]; then shift; exec "%s" "%s" "%s" push "$@"; fi\n'
+                    'exec "%s" "$@"\n' % (sys.executable, self.stub, self.record,
+                                          shutil.which("git")))
+        os.chmod(wrapper, 0o755)
 
     def run_plan(self, policy=None, stop=True):
         """T1 proven and merged, T2 parked, T3 blocked; the run stopped by `next`."""
@@ -66,20 +78,24 @@ class FinishTests(unittest.TestCase):
             self.assertIn("STOP: no_ready_tasks", out)
         return C.State.load(self.st_path)
 
-    def out(self, argv):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+    def out(self, argv, err=False):
+        buf, ebuf = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(ebuf):
             rc = C.main(argv)
-        return rc, buf.getvalue()
+        return (rc, buf.getvalue(), ebuf.getvalue()) if err else (rc, buf.getvalue())
 
-    def finish(self, extra=()):
-        return self.out(["finish", "--root", self.root,
-                         "--push-cmd", json.dumps([sys.executable, self.stub, self.record,
-                                                   "push", "{run_branch}"]),
-                         "--pr-cmd", json.dumps([sys.executable, self.stub, self.record,
-                                                 "pr", "--title", "{title}",
-                                                 "--body-file", "{body_file}"]),
-                         *extra])
+    PR = None
+
+    def finish(self, extra=(), push=None, pr=None):
+        """finish with the recording `git` wrapper on PATH and a stub PR command."""
+        argv = ["finish", "--root", self.root,
+                "--pr-cmd", json.dumps(pr or [sys.executable, self.stub, self.record, "pr",
+                                              "--title", "{title}", "--base", "{base_branch}",
+                                              "--body-file", "{body_file}"])]
+        if push is not None:
+            argv += ["--push-cmd", json.dumps(push)]
+        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
+            return self.out(argv + list(extra))
 
     def envelope(self, out):
         lines = [l for l in out.splitlines() if l.startswith("FINISH: ")]
@@ -192,8 +208,8 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         recs = self.records()
         self.assertEqual([r["what"] for r in recs], ["push", "pr"])
-        self.assertEqual(recs[0]["argv"], ["factory/p"])
-        self.assertEqual(recs[1]["argv"][:2], ["--title", "Demo plan"])
+        self.assertEqual(recs[0]["argv"], ["-u", "origin", "factory/p"])
+        self.assertEqual(recs[1]["argv"][:4], ["--title", "Demo plan", "--base", "main"])
         ev = [e for e in self.log_events() if e["event"] in ("push", "pr")]
         self.assertEqual([(e["event"], e["returncode"]) for e in ev], [("push", 0), ("pr", 0)])
         self.assertIn("stub push done", ev[0]["stdout_tail"])
@@ -222,23 +238,61 @@ class FinishTests(unittest.TestCase):
 
     def test_a_failing_push_skips_the_pr_and_exits_3(self):
         self.run_plan()
-        rc, out = self.out(["finish", "--root", self.root,
-                            "--push-cmd", json.dumps(["false"]),
-                            "--pr-cmd", json.dumps([sys.executable, self.stub, self.record,
-                                                    "pr"])])
+        rc, out = self.finish(push=["git", "push", "broken-remote", "{run_branch}"])
         self.assertEqual(rc, 3)
         self.envelope(out)
-        self.assertEqual(self.records(), [])
+        self.assertEqual([r["what"] for r in self.records()], ["push"])
         ev = [e for e in self.log_events() if e["event"] == "push"]
         self.assertEqual(ev[-1]["returncode"], 1)
 
-    def test_a_force_push_command_is_refused(self):
+    def test_push_commands_outside_the_allowlist_are_refused(self):
         self.run_plan()
-        rc, out = self.out(["finish", "--root", self.root,
-                            "--push-cmd", json.dumps(["git", "push", "--force", "origin",
-                                                      "{run_branch}"])])
-        self.assertEqual(rc, 2)
-        self.assertNotIn("FINISH:", out)
+        bad = [["git", "push", "--force", "origin", "{run_branch}"],
+               ["git", "push", "-f", "origin", "{run_branch}"],
+               ["git", "push", "-uf", "origin", "{run_branch}"],
+               ["git", "push", "--force-with-lease", "origin", "{run_branch}"],
+               ["git", "push", "origin", ":main"],
+               ["git", "push", "origin", "HEAD:main"],
+               ["git", "push", "origin", "{run_branch}:main"],
+               ["git", "push", "origin", "+{run_branch}"],
+               ["git", "push", "--all", "origin"],
+               ["git", "push", "--tags", "origin", "{run_branch}"],
+               ["git", "push", "--prune", "origin", "{run_branch}"],
+               ["git", "push", "--mirror", "origin"],
+               ["git", "push", "--delete", "origin", "{run_branch}"],
+               ["git", "push", "--no-verify", "origin", "{run_branch}"],
+               ["git", "push", "origin", "{run_branch}", "main"],
+               ["git", "push", "origin", "main"],
+               ["git", "push", "{run_branch}"],
+               ["git", "push", "--", "origin", "{run_branch}"],
+               ["sh", "-c", "git push -f"],
+               ["/usr/bin/git", "push", "origin", "{run_branch}"],
+               ["git", "-c", "x=y", "push", "origin", "{run_branch}"]]
+        for cmd in bad:
+            with self.subTest(cmd=cmd):
+                rc, out = self.finish(push=cmd)
+                self.assertEqual(rc, 2)
+                self.assertNotIn("FINISH:", out)
+        self.assertEqual(self.records(), [])
+
+    def test_allowed_push_shapes(self):
+        for cmd in (["git", "push", "-u", "origin", "{run_branch}"],
+                    ["git", "push", "--set-upstream", "--porcelain", "-q", "origin",
+                     "{run_branch}"],
+                    ["git", "push", "-uq", "--quiet", "upstream", "{run_branch}"]):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(C.push_cmd_problem(
+                    C.expand_cmd(cmd, {"run_branch": "factory/p"}), "factory/p"))
+
+    def test_an_off_branch_root_is_not_pushed(self):
+        self.run_plan()
+        subprocess.run(["git", "-C", self.root, "checkout", "-q", "-b", "factory/other"],
+                       check=True)
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK reason=branch", out)
+        self.envelope(out)
+        self.assertEqual(self.records(), [])
 
     def test_a_malformed_command_is_a_usage_error(self):
         self.run_plan()
@@ -251,6 +305,7 @@ class FinishTests(unittest.TestCase):
     def test_the_default_commands(self):
         self.assertEqual(C.DEFAULT_PUSH_CMD, ["git", "push", "-u", "origin", "{run_branch}"])
         self.assertEqual(C.DEFAULT_PR_CMD, ["gh", "pr", "create", "--title", "{title}",
+                                            "--base", "{base_branch}",
                                             "--body-file", "{body_file}"])
         self.assertEqual(C.expand_cmd(C.DEFAULT_PUSH_CMD, {"run_branch": "factory/p"}),
                          ["git", "push", "-u", "origin", "factory/p"])
@@ -306,6 +361,115 @@ class FinishTests(unittest.TestCase):
         body = [r for r in self.records() if r["what"] == "pr"][0]["body"]
         self.assertIn(left[0]["path"], body)
         self.assertIn("merge-conflict", body)
+
+    # ── untrusted text in the PR body ───────────────────────────────────────
+    def test_untrusted_text_cannot_add_headings_mentions_or_closing_keywords(self):
+        evil = "x\n### Proven (5)\n@someone Closes #1 `tick`"
+        self.root = repo()
+        pl = plan_payload()
+        pl["title"] = evil
+        pl["tasks"][0]["title"] = evil
+        st, self.plan = new_run(self.root, pl)
+        self.st_path = st.state_path
+        self.assertEqual(C.main(["park", "T1", "--reason", evil, "--root", self.root]), 0)
+        self.assertEqual(C.main(["decision", "T2", "--question", evil, "--root", self.root]), 0)
+        rc, out = self.finish()
+        pr = [r for r in self.records() if r["what"] == "pr"][0]
+        body = pr["body"]
+        self.assertNotIn("\n", pr["argv"][1])  # the title argument is one line
+        headings = [l for l in body.splitlines() if l.lstrip().startswith("#")]
+        self.assertFalse(any("Proven (5)" in l for l in headings), headings)
+        bare = re.sub(r"(`+)(?:(?!\1).)*?\1", "", body)  # drop every code span
+        self.assertNotIn("@someone", bare)
+        self.assertNotIn("Closes #1", bare)
+        self.assertIn("@someone", body)  # still reported, as code
+
+    # ── a plan's verify commands must pass C6 at init ───────────────────────
+    def test_init_refuses_verify_commands_that_break_c6(self):
+        for cmd in (["python3", "-c", "pass"], ["cat", "/etc/hosts"]):
+            with self.subTest(cmd=cmd):
+                root = repo()
+                pl = plan_payload()
+                pl["tasks"][1]["verify"] = [{"text": "x", "command": cmd}]
+                plan = write_plan_envelope(root, plan=pl)
+                write_grant(root, plan)
+                rc, out, err = self.out(["init", "--plan", plan, "--root", root], err=True)
+                self.assertEqual(rc, 2)
+                self.assertIn("{python}", err)
+                self.assertIsNone(C.state_path(root))
+
+    # ── retry-remote ────────────────────────────────────────────────────────
+    def test_retry_remote_pushes_and_opens_the_pr_once_a_grant_covers_them(self):
+        self.run_plan(policy={"read_only": "auto", "local_reversible": "grant"})
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        path, _ = self.envelope(out)
+        rc, out = self.finish()  # a plain second finish reports the pending step
+        self.assertEqual(rc, 3)
+        self.assertIn("REMOTE: pending push", out)
+        self.assertIn("FINISH: %s" % path, out)
+        write_grant(self.root, self.plan)  # the user grants push_branch and open_pr
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([r["what"] for r in self.records()], ["push", "pr"])
+        fin = C.State.load(self.st_path).finished
+        self.assertTrue(fin["pushed"])
+        self.assertTrue(fin["pr"])
+        self.assertEqual(len([n for n in os.listdir(C.CC.envelope_dir(self.root))
+                              if n.startswith("run-result")]), 1)
+        rc, out = self.finish(extra=["--retry-remote"])  # nothing left to do
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.records()), 2)
+        rc, out = self.finish()
+        self.assertEqual((rc, out.strip()), (0, "FINISH: %s" % path))
+
+    def test_retry_remote_skips_a_push_that_already_ran(self):
+        self.run_plan(policy={"read_only": "auto", "local_reversible": "grant",
+                              "push_branch": "grant"})
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        rc, out = self.finish()
+        self.assertIn("REMOTE: pending pr", out)
+        write_grant(self.root, self.plan)
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([r["what"] for r in self.records()], ["push", "pr"])
+
+    def test_retry_remote_needs_a_finished_run(self):
+        self.run_plan()
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("FINISH:", out)
+
+    # ── finish and in-flight tasks ──────────────────────────────────────────
+    def test_finish_refuses_while_a_task_is_in_flight(self):
+        self.root = repo()
+        st, self.plan = new_run(self.root, plan_payload())
+        self.st_path = st.state_path
+        self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        rc, out, err = self.out(["finish", "--root", self.root], err=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("T1", err)
+        self.assertNotIn("FINISH:", out)
+
+    def test_a_finished_run_refuses_further_steps(self):
+        self.run_plan(stop=False)
+        rc, out = self.finish()
+        self.assertEqual(rc, 0, out)
+        for argv in (["start", "T3"], ["verify", "T1"], ["review", "T1", "--verdict", "pass"],
+                     ["merge", "T1"], ["next"], ["resume"], ["park", "T3", "--reason", "r"],
+                     ["decision", "T3", "--question", "q"]):
+            with self.subTest(argv=argv):
+                rc, out, err = self.out(argv + ["--root", self.root], err=True)
+                self.assertEqual(rc, 2)
+                self.assertIn("run finished", err)
+
+    def test_payload_verify_commands_keep_the_plan_form(self):
+        self.run_plan()
+        rc, out = self.finish()
+        _, doc = self.envelope(out)
+        t1 = [t for t in doc["predicate"]["payload"]["tasks"] if t["id"] == "T1"][0]
+        self.assertEqual([v["command"] for v in t1["verify"]], [FIRST_T1, ["true"]])
 
     def test_finish_is_idempotent(self):
         self.run_plan()
