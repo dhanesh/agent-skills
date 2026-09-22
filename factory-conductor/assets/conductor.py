@@ -17,6 +17,20 @@ Usage:
     python3 conductor.py next [--root <repo>] [--max N]                # prints READY: T1 T2
     python3 conductor.py status [--root <repo>]                        # one STATUS: line per task
     python3 conductor.py resume [--root <repo>]                        # last step + READY:
+    python3 conductor.py start <task> [--root <repo>]                  # START: <task> <worktree>
+    python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass|fail
+    python3 conductor.py review <task> --verdict pass|fail [--detail T] [--root <repo>]
+    python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
+    python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
+
+Each task runs in its own git worktree, <run>/wt/<task>, on the task branch
+<run_branch>--<task>. (Not <run_branch>/<task>: git cannot keep a ref
+refs/heads/factory/p/T1 beside the run branch refs/heads/factory/p.) `verify`
+re-runs the task's verify commands there, as argv lists, never through a shell;
+that re-run is the proof. `merge` needs a passing verify and a passing review,
+merges with --no-ff into the run branch (which MUST be checked out at --root),
+then removes the worktree and deletes the task branch. A conflict is aborted,
+leaving the run branch clean, and parks the task.
 
 `init` takes a task-plan payload file for now; it will take the task-plan
 envelope and check the grant once gating exists.
@@ -38,7 +52,11 @@ import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import subprocess  # noqa: E402
 import tempfile  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contract_check as CC  # noqa: E402  (the vendored skill-contract checker, same dir)
 
 RUN_ID_RE = r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z"
 STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", "blocked")
@@ -52,6 +70,13 @@ TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree"
 RUNS_DIR = os.path.join(".skill-contract", "runs")
 STATE_FILE = "state.json"
 LOG_FILE = "autonomy-log.jsonl"
+WT_DIR = "wt"
+TASK_BRANCH_SEP = "--"
+TASK_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z"
+VERIFY_TIMEOUT = 600
+TAIL = 2000
+GIT_SCRUB = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+             "GIT_CEILING_DIRECTORIES")
 
 
 class PlanError(Exception):
@@ -176,6 +201,7 @@ class State:
         root = os.path.abspath(root)
         directory = run_dir(root, run_id)
         os.makedirs(directory, exist_ok=False)
+        _ignore_runs_dir(os.path.dirname(directory))
         st = cls({"root": root, "run_id": run_id, "plan_envelope": plan_envelope,
                   "plan_sha256": plan_sha256, "grant_id": grant_id,
                   "run_branch": run_branch, "base_branch": base_branch,
@@ -350,6 +376,44 @@ def _plan_tasks(plan):
     return order, seen
 
 
+def _ignore_runs_dir(base):
+    """Make the runs directory ignore itself, so a run (and its worktrees) never
+    dirties the repository even where the repo's .gitignore does not list it."""
+    path = os.path.join(base, ".gitignore")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# written by factory-conductor: run state is local, never committed\n*\n")
+
+
+def git_env():
+    """os.environ without the variables that point git at another repository."""
+    env = dict(os.environ)
+    for k in GIT_SCRUB:
+        env.pop(k, None)
+    return env
+
+
+def git(root, *args, check=False):
+    """Run git in `root`. Returns the CompletedProcess, or None when git is unusable."""
+    try:
+        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
+                           timeout=300, env=git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if check and r.returncode != 0:
+        raise RuntimeError("git %s failed: %s" % (" ".join(args), r.stderr.strip()))
+    return r
+
+
+def _git_ok(root, *args):
+    r = git(root, *args)
+    return r is not None and r.returncode == 0, r
+
+
+def _git_err(r):
+    return "git is not runnable" if r is None else (r.stderr or r.stdout).strip()
+
+
 def _fsync_dir(path):
     """Make a rename in path durable. Best effort where directories cannot be opened."""
     try:
@@ -465,6 +529,189 @@ def cmd_resume(args):
     return 0
 
 
+def _load_task(args, allowed):
+    """(state, task) when the run loads and the task is in one of `allowed`, else (None, None)."""
+    st = _load_current(args.root)
+    if st is None:
+        return None, None
+    t = st.tasks.get(args.task)
+    if t is None:
+        sys.stderr.write("unknown task: %s\n" % args.task)
+        return None, None
+    if t["status"] not in allowed:
+        sys.stderr.write("task %s is %s; this needs %s\n"
+                         % (args.task, t["status"], " or ".join(allowed)))
+        return None, None
+    return st, t
+
+
+def _park(st, task, reason):
+    st.set_status(task, "parked", park_reason=reason)
+    st.save()
+    st.log("park", task=task, reason=reason)
+    print("PARK: %s %s" % (task, reason))
+
+
+def cmd_start(args):
+    """Create <run>/wt/<task> on the task branch, cut from the run branch."""
+    st, t = _load_task(args, ("pending",))
+    if st is None:
+        return 2
+    if not re.match(TASK_ID_RE, args.task):
+        sys.stderr.write("task id %r cannot name a branch or a directory\n" % args.task)
+        return 2
+    if args.task not in st.ready(len(st.tasks)):
+        sys.stderr.write("task %s is not ready: a dependency is not proven\n" % args.task)
+        return 2
+    wt = os.path.join(st.dir, WT_DIR, args.task)
+    branch = st.run_branch + TASK_BRANCH_SEP + args.task
+    ok, r = _git_ok(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
+    if not ok:
+        sys.stderr.write("cannot create worktree for %s: %s\n" % (args.task, _git_err(r)))
+        return 2
+    st.set_status(args.task, "running", worktree=wt, branch=branch)
+    st.dispatches += 1
+    st.save()
+    st.log("dispatch", task=args.task, branch=branch, worktree=wt, dispatches=st.dispatches)
+    print("START: %s %s" % (args.task, wt))
+    return 0
+
+
+def _tail(text):
+    return (text or "")[-TAIL:]
+
+
+def _run_verify(argv, cwd):
+    """Run one verify argv (no shell) in cwd. (returncode or None, stdout, stderr)."""
+    try:
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace",
+                           timeout=VERIFY_TIMEOUT, env=git_env())
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else e.stdout
+        return None, out or "", "timed out after %ds" % VERIFY_TIMEOUT
+    except OSError as e:
+        return None, "", "cannot run: %s" % e
+    return r.returncode, r.stdout, r.stderr
+
+
+def cmd_verify(args):
+    """Re-run every verify command of the task in its worktree. This run is the proof."""
+    st, t = _load_task(args, ("running", "verifying"))
+    if st is None:
+        return 2
+    steps = t.get("verify") or []
+    if not isinstance(steps, list) or not steps or any(
+            not isinstance(v, dict) or v.get("command") is None for v in steps):
+        _park(st, args.task, "unrunnable-verify")
+        return 3
+    if not t.get("worktree") or not os.path.isdir(t["worktree"]):
+        sys.stderr.write("task %s has no worktree at %s\n" % (args.task, t.get("worktree")))
+        return 2
+    python_argv = CC.resolve_python()
+    skill_dirs = CC.skill_index(cwd=st.root)
+    runs = []
+    for v in steps:
+        cmd = v["command"]
+        if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
+            rc, out, err, argv = None, "", "command is not a non-empty list of strings", cmd
+        else:
+            try:
+                argv = CC.resolve_command(cmd, python_argv, skill_dirs)
+            except LookupError as e:
+                rc, out, err, argv = None, "", "cannot resolve: %s" % e, cmd
+            else:
+                rc, out, err = _run_verify(argv, t["worktree"])
+        ok = rc == 0
+        runs.append({"command": argv, "ok": ok, "returncode": rc,
+                     "stdout_tail": _tail(out), "stderr_tail": _tail(err)})
+        print("VERIFY: %s %s %s" % (args.task, "ok" if ok else "fail",
+                                    " ".join(str(a) for a in argv)))
+    passed = all(r["ok"] for r in runs)
+    # A fresh proof replaces any earlier verdict: the reviewer judges this state.
+    st.set_status(args.task, "reviewing" if passed else "verifying",
+                  verify_runs=runs, review=None)
+    st.save()
+    st.log("verify", task=args.task, passed=passed,
+           commands=[{"command": r["command"], "ok": r["ok"], "returncode": r["returncode"]}
+                     for r in runs])
+    print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
+    return 0 if passed else 3
+
+
+def cmd_review(args):
+    """Record the reviewer's verdict. A fail sends the task back for repair and re-verify."""
+    st, t = _load_task(args, ("reviewing",))
+    if st is None:
+        return 2
+    review = {"verdict": args.verdict, "detail": args.detail, "at": _rfc3339(_now())}
+    st.set_status(args.task, "reviewing" if args.verdict == "pass" else "verifying",
+                  review=review)
+    st.save()
+    st.log("review", task=args.task, verdict=args.verdict, detail=args.detail)
+    print("REVIEW: %s %s" % (args.task, args.verdict))
+    return 0 if args.verdict == "pass" else 3
+
+
+def cmd_merge(args):
+    """Merge the task branch into the run branch (--no-ff), then drop the worktree."""
+    st, t = _load_task(args, ("reviewing",))
+    if st is None:
+        return 2
+    runs = t.get("verify_runs") or []
+    if not runs or not all(r.get("ok") for r in runs):
+        sys.stderr.write("task %s has no passing verify\n" % args.task)
+        return 2
+    if (t.get("review") or {}).get("verdict") != "pass":
+        sys.stderr.write("task %s has no passing review\n" % args.task)
+        return 2
+    here = CC.current_branch(st.root)
+    if here != st.run_branch:
+        sys.stderr.write("%s is on %s, not the run branch %s\n" % (st.root, here, st.run_branch))
+        return 2
+    ok, r = _git_ok(st.root, "merge", "--no-ff", "--no-edit", t["branch"],
+                    "-m", "conductor: %s" % args.task)
+    if not ok:
+        detail = _git_err(r)
+        started, _ = _git_ok(st.root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        if not started:  # git refused before merging (e.g. a dirty tree): not a conflict
+            sys.stderr.write("git merge did not start: %s\n" % detail)
+            return 2
+        aborted, ar = _git_ok(st.root, "merge", "--abort")
+        st.log("merge", task=args.task, ok=False, detail=detail[-TAIL:],
+               aborted=aborted)
+        if not aborted:
+            sys.stderr.write("git merge --abort failed: %s\n" % _git_err(ar))
+        _park(st, args.task, "merge-conflict")
+        return 3
+    ok, r = _git_ok(st.root, "rev-parse", "HEAD")
+    sha = r.stdout.strip() if ok else None
+    st.set_status(args.task, "proven", merge_commit=sha)
+    st.save()
+    st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"])
+    cleaned, r = _git_ok(st.root, "worktree", "remove", "--force", t["worktree"])
+    if cleaned:
+        cleaned, r = _git_ok(st.root, "branch", "-D", t["branch"])
+    if not cleaned:
+        sys.stderr.write("merged, but cleanup failed: %s\n" % _git_err(r))
+    print("MERGE: %s %s" % (args.task, sha))
+    return 0
+
+
+def cmd_park(args):
+    """Park a task with a reason. Its dependents become blocked; the run goes on."""
+    st, t = _load_task(args, STATUSES)
+    if st is None:
+        return 2
+    if t["status"] == "proven":
+        sys.stderr.write("task %s is proven and merged; it cannot be parked\n" % args.task)
+        return 2
+    if not args.reason.strip():
+        sys.stderr.write("--reason must not be empty\n")
+        return 2
+    _park(st, args.task, args.reason)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -483,6 +730,17 @@ def main(argv=None):
     for name, fn in (("status", cmd_status), ("resume", cmd_resume)):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
+        s.set_defaults(fn=fn)
+    for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
+                     ("merge", cmd_merge), ("park", cmd_park)):
+        s = sub.add_parser(name)
+        s.add_argument("task")
+        s.add_argument("--root", default=".")
+        if name == "review":
+            s.add_argument("--verdict", required=True, choices=("pass", "fail"))
+            s.add_argument("--detail", default="")
+        if name == "park":
+            s.add_argument("--reason", required=True)
         s.set_defaults(fn=fn)
     try:
         args = p.parse_args(argv)
