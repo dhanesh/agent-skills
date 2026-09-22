@@ -448,24 +448,187 @@ git commit -m "feat(factory-conductor): worktrees, verify re-runs, review and me
   - Every command that changes the repository calls `gate` first and returns 3 on ASK.
 - `cmd_init` takes `--plan <envelope path>`, `--root <repo>` and optional `--budget <json>`; the budget merges over the grant's `budget` payload, and `max_parallel` defaults to 2.
 
-- [ ] **Step 1: Write the failing tests** in `test_conductor_policy.py`. Build a real repo with a real grant, using the vendored checker's helpers (`build_statement`, `write_envelope`, `pin`) so the fixtures stay valid:
+- [ ] **Step 1: Write the failing tests** in `test_conductor_policy.py`:
 
 ```python
-def make_grant(root, policy=None, minutes=60):
-    """A human-accepted grant pinning docs/spec.md and plan.json, valid for `minutes`."""
-    # generatedAtTime = now, expires_at = now + minutes (A7 caps the lifetime at 7 days)
+import json, os, subprocess, sys, tempfile, time, unittest
+from datetime import datetime, timedelta, timezone
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import conductor as C
+import contract_check as CC
+
+GIT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+
+
+def _z(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def repo_with_plan():
+    """A git repo on factory/p holding docs/spec.md and plan.json, plus a task-plan envelope."""
+    d = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+    os.makedirs(os.path.join(d, "docs"))
+    open(os.path.join(d, "docs", "spec.md"), "w").write("# Spec\n")
+    open(os.path.join(d, "plan.json"), "w").write('{"plan": 1}\n')
+    subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", d, "commit", "-q", "-m", "x"], check=True,
+                   env=dict(os.environ, **GIT))
+    subprocess.run(["git", "-C", d, "checkout", "-q", "-b", "factory/p"], check=True)
+    return d
+
+
+def payload(tasks):
+    return {"title": "T", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+            "tasks": [{"id": i, "requirement_ids": ["R1"], "title": i,
+                       "verify": v, "depends_on": dep} for i, (dep, v) in tasks.items()]}
+
+
+def write_plan_envelope(root, tasks):
+    st = CC.build_statement(
+        "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+        "spec-first-planning", "2.1.0", root, ["docs/spec.md"], payload(tasks))
+    return CC.write_envelope(root, st)
+
+
+def write_grant(root, policy=None, minutes=60, now=None):
+    """A human-accepted grant pinning the spec and plan.json. A7 caps the lifetime at 7 days."""
+    now = now or CC.utc_now()
+    pay = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
+           "decisions": [{"id": "D1", "question": "deps?", "answer": "no", "source": "sweep"}],
+           "defaults": [], "gate_policy": policy or {"read_only": "auto",
+                                                     "local_reversible": "grant",
+                                                     "push_branch": "grant",
+                                                     "open_pr": "grant"},
+           "budget": {}, "stop_on": [], "expires_at": _z(now + timedelta(minutes=minutes)),
+           "system_one": {"allowed": False}, "revoked": False}
+    a = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
+         "result": {"outcome": "passed"},
+         "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                     "--unattended", "docs/spec.md"],
+         "subject": [CC.pin(root, "docs/spec.md")]}
+    st = CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0", root,
+                            ["docs/spec.md", "plan.json"], pay, [a], now=now)
+    return CC.write_envelope(root, st)
+
+
+ONE_OK = {"T1": ([], [{"text": "ok", "command": ["true"]}])}
+ONE_BAD = {"T1": ([], [{"text": "bad", "command": ["false"]}])}
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class PolicyTests(unittest.TestCase):
+    def init(self, tasks=None, grant=True, budget=None, minutes=60):
+        self.root = repo_with_plan()
+        self.plan = write_plan_envelope(self.root, tasks or ONE_OK)
+        if grant:
+            write_grant(self.root, minutes=minutes)
+        argv = ["init", "--plan", self.plan, "--root", self.root]
+        if budget is not None:
+            argv += ["--budget", json.dumps(budget)]
+        return C.main(argv)
+
+    def out(self, argv):
+        """Run a command, returning (exit code, stdout)."""
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = C.main(argv)
+        return rc, buf.getvalue()
+
+    def test_init_refuses_without_a_covering_grant(self):
+        rc = self.init(grant=False)
+        self.assertEqual(rc, 3)
+
+    def test_init_creates_the_run_branch_and_state(self):
+        self.root = repo_with_plan()
+        self.plan = write_plan_envelope(self.root, ONE_OK)
+        write_grant(self.root)
+        rc, out = self.out(["init", "--plan", self.plan, "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn("RUN: run-", out)
+        self.assertTrue(os.path.isfile(C.state_path(self.root)))
+
+    def test_start_is_gated_by_the_grant(self):
+        self.assertEqual(self.init(), 0)
+        subprocess.run([sys.executable, "-I",
+                        os.path.join(os.path.dirname(C.__file__), "contract_check.py"),
+                        "revoke-grant", "--root", self.root], check=True, capture_output=True)
+        rc, out = self.out(["start", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK", out)
+        self.assertIn("revoked", out)
+
+    def test_wall_clock_budget_stops_the_run(self):
+        self.assertEqual(self.init(budget={"wall_clock_min": 0}), 0)
+        st = C.State.load(C.state_path(self.root))
+        st.created_at = _z(CC.utc_now() - timedelta(minutes=5))
+        st.save()
+        rc, out = self.out(["next", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: budget_wall_clock", out)
+
+    def test_dispatch_budget_stops_the_run(self):
+        self.assertEqual(self.init(tasks={"T1": ([], [{"text": "ok", "command": ["true"]}]),
+                                          "T2": ([], [{"text": "ok", "command": ["true"]}])},
+                                   budget={"max_dispatches": 1}), 0)
+        self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        rc, out = self.out(["start", "T2", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: budget_dispatches", out)
+
+    def test_repairs_budget_parks_the_task(self):
+        self.assertEqual(self.init(tasks=ONE_BAD, budget={"max_repairs_per_task": 1}), 0)
+        C.main(["start", "T1", "--root", self.root])
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+        rc, out = self.out(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("PARK: T1 verify_red_after_repairs", out)
+
+    def test_no_ready_tasks_stops_the_run(self):
+        self.assertEqual(self.init(), 0)
+        C.main(["park", "T1", "--reason", "by hand", "--root", self.root])
+        rc, out = self.out(["next", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: no_ready_tasks", out)
+
+    def test_token_and_dollar_budgets_are_recorded_not_enforced(self):
+        self.assertEqual(self.init(budget={"max_tokens": 1, "max_usd": 0}), 0)
+        rc, out = self.out(["status", "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn("recorded, not enforced", out)
+        self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+
+    def test_a_new_human_decision_parks_and_the_run_continues(self):
+        self.assertEqual(self.init(tasks={"T1": ([], [{"text": "ok", "command": ["true"]}]),
+                                          "T2": ([], [{"text": "ok", "command": ["true"]}])}), 0)
+        rc, out = self.out(["decision", "T1", "--question", "which CI provider?",
+                            "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn("PARK: T1 new_human_decision", out)
+        rc, out = self.out(["next", "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn("READY: T2", out)
+
+    def test_an_expired_grant_stops_the_next_gate(self):
+        self.assertEqual(self.init(minutes=1), 0)
+        st = C.State.load(C.state_path(self.root))
+        st.created_at = st.created_at  # unchanged; the grant is what expires
+        # Rewrite the grant with an expiry in the past, then gate.
+        write_grant(self.root, minutes=-1)
+        rc, out = self.out(["start", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
 ```
 
-  The cases:
-  - `test_init_refuses_without_a_covering_grant`: no grant gives `GATE: ASK` and exit 3.
-  - `test_init_creates_the_run_branch_and_state`: with a grant, exit 0 and `RUN:`.
-  - `test_start_is_gated`: revoke the grant, then `start` gives exit 3 and `GATE: ASK id=… reason=revoked`.
-  - `test_wall_clock_budget_stops_the_run`: set `wall_clock_min: 0` and backdate `created_at`; `next` prints `STOP: budget_wall_clock` and exits 3.
-  - `test_dispatch_budget_stops_the_run`: `max_dispatches: 1`; the second `start` gives `STOP: budget_dispatches` and exit 3.
-  - `test_repairs_budget_parks_the_task`: `max_repairs_per_task: 1`; a second failing verify parks with `verify_red_after_repairs`.
-  - `test_no_ready_tasks_stops_the_run`: with every task parked, `next` prints `STOP: no_ready_tasks` and exits 3.
-  - `test_token_and_dollar_budgets_are_recorded_not_enforced`: a state with `max_tokens: 1` and `max_usd: 0` still runs; `status` prints a line saying both are recorded, not enforced.
-  - `test_a_new_human_decision_parks_and_the_run_continues`: `conductor decision T1 --question "…"` parks T1 with `new_human_decision`, and `next` still offers the independent task T2.
+  Notes for the implementer:
+  - `write_grant` with `minutes=-1` writes an already-expired grant, which `check-grant` refuses with `reason=expired`. A later grant supersedes an earlier one, and the newest head wins, which is what the expiry test relies on.
+  - Add `state_path(root)` to `conductor.py` — the newest run's `state.json` — since the tests use it.
 
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -637,10 +800,117 @@ git commit -m "test(factory-conductor): end-to-end run and the outcome eval"
 
 **Interfaces:** consumes the finished skill.
 
-- [ ] **Step 1: Add the rows.** A new `SINCE_FACTORY_CONDUCTOR`, pinned to the Task 1 commit (`git log --format=%h --grep="run state, wave scheduling" -1`), and `check_factory_conductor(old, new)` called after the other `check_*` functions:
-  - **claim:** "plans a conductor can run end to end", 0 → 1, measured by running the Task 7 fixture through `init`…`finish` in a temp repo and counting a validating `run-result/v1` envelope (0 in the old tree, which has no conductor);
-  - **claim:** "skill-contract adopters", 4 → 5;
-  - **guard:** "tasks merged with a failing verify", 0 → 0, measured by running a failing-verify fixture and checking the run branch for that task's commit. The guard needs a sanity arm: the same fixture with a passing verify MUST merge, or the row reports through `PROBE_ERRORS`.
+- [ ] **Step 1: Add the rows.** Set `SINCE_FACTORY_CONDUCTOR` to the Task 1 commit (`git log --format=%h --grep="run state, wave scheduling" -1`), beside the other `SINCE_*` constants. Add this after the other `check_*` functions, and call `check_factory_conductor(old, REPO)` from `main()` after them:
+
+```python
+_FC_TASKS_OK = {"T1": ([], [{"text": "ok", "command": ["true"]}])}
+_FC_TASKS_BAD = {"T1": ([], [{"text": "bad", "command": ["false"]}])}
+
+
+def _fc_run(tree, tasks):
+    """Run a fixture plan through a tree's conductor. Returns (envelope_ok, merged_ids).
+
+    A tree without the skill scores (0, set()) — that is how the old arm reads.
+    """
+    conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+    if not os.path.isfile(conductor):
+        return 0, set()
+    sys.path.insert(0, os.path.join(tree, "factory-conductor", "assets"))
+    try:
+        import importlib
+        CC = importlib.import_module("contract_check")
+        importlib.reload(CC)
+    finally:
+        sys.path.pop(0)
+    root = tempfile.mkdtemp()
+    genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    os.makedirs(os.path.join(root, "docs"))
+    open(os.path.join(root, "docs", "spec.md"), "w").write("# Spec\n")
+    open(os.path.join(root, "plan.json"), "w").write('{"plan": 1}\n')
+    for argv in (["init", "-q", "-b", "main", root],):
+        subprocess.run(["git", *argv], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True, env=genv)
+    subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/p"], check=True,
+                   capture_output=True)
+    plan_payload = {"title": "T", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+                    "tasks": [{"id": i, "requirement_ids": ["R1"], "title": i,
+                               "verify": v, "depends_on": dep}
+                              for i, (dep, v) in tasks.items()]}
+    plan_env = CC.write_envelope(root, CC.build_statement(
+        "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+        "spec-first-planning", "2.1.0", root, ["docs/spec.md"], plan_payload))
+    now = CC.utc_now()
+    grant_payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
+                     "decisions": [{"id": "D1", "question": "q", "answer": "a",
+                                    "source": "sweep"}],
+                     "defaults": [], "gate_policy": {"read_only": "auto",
+                                                     "local_reversible": "grant"},
+                     "budget": {}, "stop_on": [],
+                     "expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "system_one": {"allowed": False}, "revoked": False}
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                            "--unattended", "docs/spec.md"],
+                "subject": [CC.pin(root, "docs/spec.md")]}
+    CC.write_envelope(root, CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0",
+                                               root, ["docs/spec.md", "plan.json"],
+                                               grant_payload, [accepted], now=now))
+
+    def run(*argv):
+        return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                              capture_output=True, text=True, timeout=300)
+
+    run("init", "--plan", plan_env)
+    for tid in tasks:
+        run("start", tid)
+        if run("verify", tid).returncode == 0:
+            run("review", tid, "--verdict", "pass")
+            run("merge", tid)
+    fin = run("finish", "--push-cmd", '["true"]', "--pr-cmd", '["true"]')
+    envelope_ok = 1 if "FINISH:" in fin.stdout else 0
+    log = subprocess.run(["git", "-C", root, "log", "--format=%s"], capture_output=True,
+                         text=True).stdout
+    merged = {t for t in tasks if ("conductor: %s" % t) in log}
+    return envelope_ok, merged
+
+
+def check_factory_conductor(old, new):
+    s = "factory-conductor"
+    a_ok, _ = _fc_run(old, _FC_TASKS_OK)
+    b_ok, b_merged = _fc_run(new, _FC_TASKS_OK)
+    row(s, "plans a conductor can run end to end (init..finish, validating run-result)",
+        a_ok, b_ok, b_ok == 1 and a_ok == 0,
+        "nothing ran a plan end to end: every task needed the human to dispatch, verify and merge it",
+        since=SINCE_FACTORY_CONDUCTOR)
+
+    def adopters(tree):
+        return sum(1 for d in sorted(os.listdir(tree))
+                   if os.path.isfile(os.path.join(tree, d, "SKILL.md"))
+                   and re.search(r"(?m)^## Contract\s*$",
+                                 open(os.path.join(tree, d, "SKILL.md"), encoding="utf-8").read()))
+
+    a, b = adopters(old), adopters(new)
+    row(s, "skill-contract adopters", a, b, b > a,
+        "factory-conductor consumes task-plan/v1 and autonomy-grant/v1 and provides run-result/v1",
+        since=SINCE_FACTORY_CONDUCTOR)
+
+    def merged_with_failing_verify(tree):
+        ok, merged = _fc_run(tree, _FC_TASKS_BAD)
+        return 1 if "T1" in merged else 0
+
+    a, b = merged_with_failing_verify(old), merged_with_failing_verify(new)
+    row(s, "tasks merged despite a failing verify", a, b, a == 0 and b == 0,
+        "a task is merged only after the conductor itself re-ran its verify commands — "
+        "sanity-checked against the same fixture with a passing verify, which DOES merge",
+        kind="guard")
+```
+
+  **The sanity arm is required, exactly as `check_autonomy_grant` does it.** Inside `merged_with_failing_verify`, run the passing fixture too; if it does not merge, append to `PROBE_ERRORS` and return `None`, so the row fails rather than passing vacuously. Check that `subprocess`, `sys`, `tempfile`, `re` and `timedelta` are imported at the top of `ab-validate.py`; add any that are missing.
+
 - [ ] **Step 2: Update the docs.** In the root README's Software factory section, say that an approved plan can now run to an open PR, with the limits (irreversible actions still ask; tokens and dollars are not capped). Add the step-4 bullet to the assessment doc, and record Jev's post-merge re-judgement placeholder as "to be re-judged after merge".
 - [ ] **Step 3: Verify.** Run `make gate` to completion (redirect to a scratch log), then `make ab-validate` and `make readme`. All must pass, with 0 worse and 0 unproven.
 - [ ] **Step 4: Commit.**
