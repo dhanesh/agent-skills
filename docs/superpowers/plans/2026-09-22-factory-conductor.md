@@ -249,7 +249,7 @@ git commit -m "feat(factory-conductor): run state, wave scheduling and the appen
 - Consumes: `State`, `waves`, `run_dir` from Task 1.
 - Produces:
   - `git(root, *args) -> subprocess.CompletedProcess | None`, which scrubs `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR` and `GIT_CEILING_DIRECTORIES`
-  - `cmd_start(args)`: creates `<run>/wt/<task>` on branch `<run_branch>/<task>` from the run branch; prints `START: <task> <worktree>`
+  - `cmd_start(args)`: creates `<run>/wt/<task>` on branch `<run_branch>--<task>` from the run branch (git cannot nest a ref under an existing branch name); prints `START: <task> <worktree>`
   - `cmd_verify(args)`: re-runs every verify command for the task in its worktree; prints one `VERIFY: <task> <ok|fail> <command…>` line per command, then `VERIFY: <task> pass|fail`
   - `cmd_review(args)`: records `--verdict pass|fail` and `--detail`; prints `REVIEW: <task> <verdict>`
   - `cmd_merge(args)`: merges the task branch into the run branch with `--no-ff`; prints `MERGE: <task> <sha>`; on conflict runs `git merge --abort`, parks the task and prints `PARK: <task> merge-conflict`
@@ -298,7 +298,7 @@ class GitTests(unittest.TestCase):
         st = C.State.load(st.state_path)
         self.assertTrue(os.path.isdir(st.tasks["T1"]["worktree"]))
         r = C.git(st.tasks["T1"]["worktree"], "rev-parse", "--abbrev-ref", "HEAD")
-        self.assertEqual(r.stdout.strip(), "factory/p/T1")
+        self.assertEqual(r.stdout.strip(), "factory/p--T1")
 
     def test_verify_passes_and_records_each_command(self):
         st = self.state(verify=[{"text": "true", "command": ["true"]},
@@ -413,7 +413,7 @@ def git(root, *args, check=False):
     return r
 ```
 
-  - `cmd_start`: refuse unless the task is `pending` and ready (exit 2). Run `git worktree add <run>/wt/<task> -b <run_branch>/<task> <run_branch>`. Record `worktree` and `branch`, set the status `running`, count a dispatch, log `start`, print `START: …`.
+  - `cmd_start`: refuse unless the task is `pending` and ready (exit 2). Run `git worktree add <run>/wt/<task> -b <run_branch>--<task> <run_branch>`. Record `worktree` and `branch`, set the status `running`, count a dispatch, log `dispatch`, print `START: …`.
   - `cmd_verify`: require `running` or `verifying`. If any step's `command` is null, park with `unrunnable-verify` and return 3. Otherwise resolve each command through the vendored checker's `resolve_command(cmd, resolve_python(env), skill_index(cwd=root))`, run it in the worktree with a 600s timeout, and record `{command, ok, returncode, stdout_tail, stderr_tail}` (the last 2000 characters of each stream). All pass → status `reviewing`, print `VERIFY: <task> pass`, return 0. Any fail → status `verifying`, print `VERIFY: <task> fail`, return 3.
   - `cmd_review`: require `reviewing`. Record the verdict and detail. `pass` keeps `reviewing` and returns 0; `fail` returns 3.
   - `cmd_merge`: require `reviewing` with a passing verify and a passing review, else exit 2. Run `git merge --no-ff <branch> -m "conductor: <task>"` in the run branch. On failure run `git merge --abort`, park with `merge-conflict`, return 3. On success record `merge_commit` from `git rev-parse HEAD`, set `proven`, run `git worktree remove --force <wt>`, delete the task branch, print `MERGE: …`, return 0.
