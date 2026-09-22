@@ -32,7 +32,8 @@ that re-run is the proof. The commands are re-read from the pinned plan file
 be clean, and the commit proven is recorded as verified_head. The commands run
 in a fresh detached checkout of that commit (<run>/verify/<task>-<sha>), removed
 afterwards, so files the worktree ignores cannot make a verify pass; each
-command's process group is killed when it ends. A stopped run refuses start,
+command's process group is killed when it ends (a child that calls setsid()
+escapes that). A stopped run refuses start,
 verify, review and merge with STOP: <reason>. `merge` merges
 that pinned sha, never the branch name, and refuses if the branch has moved. `merge` needs a passing verify and a passing review,
 merges with --no-ff into the run branch (which MUST be checked out at --root),
@@ -412,11 +413,25 @@ def git_env():
     return env
 
 
-def git(root, *args, check=False):
-    """Run git in `root`. Returns the CompletedProcess, or None when git is unusable."""
+# The shared git dir is writable by the executor, so it is hostile: every conductor
+# git call switches off hooks and fsmonitor, the two config keys that run a program
+# on an ordinary status/merge/worktree call.
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
+def isolated_env(**extra):
+    """git_env() that also ignores the global and system config (for the verify clone)."""
+    env = git_env()
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", **extra)
+    return env
+
+
+def git(root, *args, check=False, env=None):
+    """Run git in `root` with hooks and fsmonitor off. Returns the CompletedProcess,
+    or None when git is unusable."""
     try:
-        r = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
-                           timeout=300, env=git_env())
+        r = subprocess.run(["git", "-C", root, *GIT_SAFE, *args], capture_output=True,
+                           text=True, timeout=300, env=env or git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if check and r.returncode != 0:
@@ -424,15 +439,9 @@ def git(root, *args, check=False):
     return r
 
 
-def _git_ok(root, *args):
-    r = git(root, *args)
+def _git_ok(root, *args, env=None):
+    r = git(root, *args, env=env)
     return r is not None and r.returncode == 0, r
-
-
-def _git_nohooks(root, *args):
-    """_git_ok for the conductor's own consequential git calls: hooks are switched off,
-    so a hook an executor planted in the shared git dir never runs under the conductor."""
-    return _git_ok(root, "-c", "core.hooksPath=/dev/null", *args)
 
 
 def _git_err(r):
@@ -618,7 +627,7 @@ def cmd_start(args):
         return 2
     wt = os.path.join(st.dir, WT_DIR, args.task)
     branch = st.run_branch + TASK_BRANCH_SEP + args.task
-    ok, r = _git_nohooks(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
+    ok, r = _git_ok(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
     if not ok:
         sys.stderr.write("cannot create worktree for %s: %s\n" % (args.task, _git_err(r)))
         return 2
@@ -635,9 +644,10 @@ def _tail(text):
 
 
 def _run_verify(argv, cwd):
-    """Run one verify argv (no shell, no stdin) in cwd, in its own process group.
-    (returncode or None, stdout, stderr). On timeout the whole group is killed, so a
-    backgrounded child cannot outlive the proof."""
+    """Run one verify argv (no shell, no stdin) in cwd, in its own session and process
+    group. (returncode or None, stdout, stderr). When the command ends or times out
+    its process group is killed, so an ordinary backgrounded child cannot outlive the
+    proof. A child that calls setsid() leaves the group and is NOT killed."""
     try:
         p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, errors="replace",
@@ -654,13 +664,13 @@ def _run_verify(argv, cwd):
             out = ""
         return None, out or "", "timed out after %ds" % VERIFY_TIMEOUT
     # Kill the group after every command, not only on timeout: a child that detached
-    # its stdio would otherwise outlive a passing verify.
+    # its stdio would otherwise outlive a passing verify (unless it setsid()s away).
     _kill_group(p)
     return p.returncode, out, err
 
 
 def _kill_group(p):
-    """SIGKILL the command's process group (its session). Idempotent."""
+    """SIGKILL the command's process group. Idempotent. Misses a child that setsid()s."""
     try:
         os.killpg(p.pid, signal.SIGKILL)
     except (OSError, AttributeError):  # group already empty, or no process groups (Windows)
@@ -706,13 +716,23 @@ def _pinned_verify(st, task):
 def _add_verify_checkout(st, task, sha):
     """A fresh, conductor-owned, detached checkout of sha: (path, None) or (None, why).
 
-    Only committed content is there: files the executor's worktree ignores
-    (info/exclude, .gitignore) cannot make the verify pass."""
-    path = os.path.join(st.dir, VERIFY_DIR, "%s-%s" % (task, sha[:12]))
-    if os.path.lexists(path):
-        _remove_verify_checkout(st, path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    ok, r = _git_nohooks(st.root, "worktree", "add", "-q", "--detach", path, sha)
+    It is a new `git clone --shared --no-checkout` of the root, checked out with the
+    global and system config ignored. It inherits nothing from the shared git dir
+    (no config, no info/attributes, no info/exclude, no hooks), so only committed
+    bytes are there: an ignored file, a smudge filter or a planted hook in the
+    executor's repository cannot make the verify pass."""
+    base = os.path.join(st.dir, VERIFY_DIR)
+    if os.path.islink(base) or (os.path.lexists(base) and not os.path.isdir(base)):
+        os.unlink(base)
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, "%s-%s" % (task, sha[:12]))
+    _remove_verify_checkout(st, path)
+    # The ceiling keeps git from discovering the root repository (and its config)
+    # above `base` while it runs the clone.
+    ok, r = _git_ok(base, "clone", "-q", "--shared", "--no-checkout", st.root, path,
+                    env=isolated_env(GIT_CEILING_DIRECTORIES=base))
+    if ok:
+        ok, r = _git_ok(path, "checkout", "-q", "--detach", sha, env=isolated_env())
     if not ok:
         _remove_verify_checkout(st, path)
         return None, _git_err(r)
@@ -720,11 +740,44 @@ def _add_verify_checkout(st, task, sha):
 
 
 def _remove_verify_checkout(st, path):
-    """Remove a verify checkout: git worktree remove, then the directory and a prune."""
-    _git_nohooks(st.root, "worktree", "remove", "--force", path)
-    if os.path.lexists(path):
+    """Remove a verify checkout, or whatever a crash or an executor left at its path.
+
+    A symlink is unlinked, never followed. A leftover registered worktree (even a
+    locked one) is removed with `worktree remove -f -f`, then pruned."""
+    if os.path.islink(path):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        if os.path.exists(os.path.join(path, ".git")) and os.path.isfile(
+                os.path.join(path, ".git")):
+            _git_ok(st.root, "worktree", "remove", "-f", "-f", path)
         shutil.rmtree(path, ignore_errors=True)
-    _git_nohooks(st.root, "worktree", "prune")
+    elif os.path.lexists(path):
+        os.unlink(path)
+    _git_ok(st.root, "worktree", "prune")
+
+
+def _escaping_symlinks(checkout):
+    """[(path, target)] for every committed symlink (mode 120000) in checkout whose
+    target is absolute or resolves outside the checkout. None when git cannot list."""
+    ok, r = _git_ok(checkout, "ls-tree", "-r", "-z", "--full-tree", "HEAD", env=isolated_env())
+    if not ok:
+        return None
+    top = os.path.realpath(checkout)
+    bad = []
+    for entry in r.stdout.split("\0"):
+        meta, _, name = entry.partition("\t")
+        if not name or not meta.startswith("120000 "):
+            continue
+        on_disk = os.path.join(checkout, name)
+        if os.path.islink(on_disk):
+            target = os.readlink(on_disk)
+        else:  # core.symlinks=false: git wrote the target as a plain file
+            ok, blob = _git_ok(checkout, "cat-file", "blob", meta.split()[2], env=isolated_env())
+            target = blob.stdout if ok else ""
+        real = os.path.realpath(os.path.join(os.path.dirname(on_disk), target))
+        if os.path.isabs(target) or os.path.commonpath([top, real]) != top:
+            bad.append((name, target))
+    return bad
 
 
 def _worktree_state(wt):
@@ -764,21 +817,25 @@ def cmd_verify(args):
         return 2
     if not clean:
         # Only committed work can be merged, so only committed work is proven.
-        st.set_status(args.task, "verifying", verify_runs=[], verified_head=None, review=None)
-        st.save()
-        st.log("verify", task=args.task, passed=False, reason="uncommitted changes", commands=[])
-        sys.stderr.write("task %s: uncommitted changes in %s; commit them first\n"
-                         % (args.task, wt))
-        print("VERIFY: %s fail" % args.task)
-        return 3
+        return _verify_refused(st, args.task, "uncommitted changes in %s; commit them first"
+                               % wt, "uncommitted changes")
     checkout, why = _add_verify_checkout(st, args.task, head)
     if checkout is None:
         sys.stderr.write("cannot check out %s for verify: %s\n" % (head, why))
         return 2
     try:
-        runs = _run_steps(args.task, steps, checkout)
+        escapes = _escaping_symlinks(checkout)
+        if not escapes:
+            runs = _run_steps(args.task, steps, checkout)
     finally:
         _remove_verify_checkout(st, checkout)
+    if escapes is None:
+        sys.stderr.write("cannot list the tree of %s\n" % head)
+        return 2
+    if escapes:
+        # A link out of the checkout lets uncommitted bytes into the proof.
+        return _verify_refused(st, args.task, "symlink(s) leave the checkout: %s" % ", ".join(
+            "%s -> %s" % e for e in escapes), "symlink escapes the checkout")
     passed = all(r["ok"] for r in runs)
     after, _ = _worktree_state(wt)
     if passed and after != head:
@@ -794,6 +851,16 @@ def cmd_verify(args):
                      for r in runs])
     print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
     return 0 if passed else 3
+
+
+def _verify_refused(st, task, message, reason):
+    """Fail a verify before any command runs. Returns 3."""
+    st.set_status(task, "verifying", verify_runs=[], verified_head=None, review=None)
+    st.save()
+    st.log("verify", task=task, passed=False, reason=reason, commands=[])
+    sys.stderr.write("task %s: %s\n" % (task, message))
+    print("VERIFY: %s fail" % task)
+    return 3
 
 
 def _run_steps(task, steps, checkout):
@@ -887,8 +954,14 @@ def cmd_merge(args):
         sys.stderr.write("cannot read the run branch head: %s\n" % _git_err(r))
         return 2
     before = r.stdout.strip()
+    pending, _ = _git_ok(st.root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+    if pending:
+        # Not ours to abort: a human or a crash left it, and it has no stop record.
+        sys.stderr.write("a merge is already in progress in %s; finish or abort it by hand, "
+                         "then run merge again\n" % st.root)
+        return 2
     # Merge the pinned sha, never the branch name: exactly the commit that was proven.
-    ok, r = _git_nohooks(st.root, "merge", "--no-ff", "--no-edit",
+    ok, r = _git_ok(st.root, "merge", "--no-ff", "--no-edit",
                          "-m", "conductor: %s" % args.task, pinned)
     if not ok:
         detail = _git_err(r)
@@ -896,7 +969,7 @@ def cmd_merge(args):
         if not started:  # git refused before merging (e.g. a dirty tree): not a conflict
             sys.stderr.write("git merge did not start: %s\n" % detail)
             return 2
-        aborted, ar = _git_nohooks(st.root, "merge", "--abort")
+        aborted, ar = _git_ok(st.root, "merge", "--abort")
         st.log("merge", task=args.task, ok=False, detail=detail[-TAIL:], aborted=aborted)
         if aborted:
             _park(st, args.task, "merge-conflict")
@@ -918,9 +991,9 @@ def cmd_merge(args):
     st.save()
     st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"],
            verified_head=pinned)
-    cleaned, r = _git_nohooks(st.root, "worktree", "remove", "--force", t["worktree"])
+    cleaned, r = _git_ok(st.root, "worktree", "remove", "--force", t["worktree"])
     if cleaned:
-        cleaned, r = _git_nohooks(st.root, "branch", "-D", t["branch"])
+        cleaned, r = _git_ok(st.root, "branch", "-D", t["branch"])
     if not cleaned:
         sys.stderr.write("merged, but cleanup failed: %s\n" % _git_err(r))
     print("MERGE: %s %s" % (args.task, sha))

@@ -562,5 +562,133 @@ class GitTests(unittest.TestCase):
         self.assertEqual(st.stopped["detail"], "merge-inconsistent")
 
 
+    # --- fix round 3 ---
+
+    def common_dir(self, wt):
+        cd = C.git(wt, "rev-parse", "--git-common-dir").stdout.strip()
+        return cd if os.path.isabs(cd) else os.path.join(wt, cd)
+
+    def test_a_smudge_filter_in_the_shared_config_does_not_reach_the_verify(self):
+        st = self.state(verify=[{"text": "helper", "command":
+                                 ["sh", "-c", ". ./helper.sh && test \"$X\" = 1"]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "helper.sh", "X=0\n")
+        subprocess.run(["git", "-C", wt, "config", "filter.ev.smudge", "sed s/X=0/X=1/"],
+                       check=True)
+        subprocess.run(["git", "-C", wt, "config", "filter.ev.clean", "cat"], check=True)
+        info = os.path.join(self.common_dir(wt), "info")
+        os.makedirs(info, exist_ok=True)
+        with open(os.path.join(info, "attributes"), "a") as f:
+            f.write("helper.sh filter=ev\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+
+    def test_a_planted_fsmonitor_never_runs_under_the_conductor(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "b.txt", "b\n")
+        m = self.marker()
+        script = os.path.join(tempfile.mkdtemp(), "fsmon.sh")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\ntouch %s\nexit 1\n" % m)
+        os.chmod(script, 0o755)
+        subprocess.run(["git", "-C", wt, "config", "core.fsmonitor", script], check=True)
+        self.through_review(st)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        self.assertFalse(os.path.exists(m), "the planted fsmonitor ran")
+
+    def test_a_relative_symlink_that_escapes_the_checkout_fails_the_verify(self):
+        st = self.state(verify=[{"text": "t", "command": ["touch", self.marker()]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        with open(os.path.join(self.common_dir(wt), "info", "exclude"), "a") as f:
+            f.write("helper.sh\n")
+        with open(os.path.join(wt, "helper.sh"), "w") as f:
+            f.write("X=1\n")
+        os.symlink("../../wt/T1/helper.sh", os.path.join(wt, "link.sh"))
+        C.git(wt, "add", "link.sh")
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "l"], check=True,
+                       env=dict(os.environ, **GIT))
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+        self.assertFalse(os.path.exists(self._marker), "a command ran")
+        self.assertEqual(self.task(st)["status"], "verifying")
+
+    def test_an_absolute_symlink_fails_the_verify(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        os.symlink("/etc/hosts", os.path.join(wt, "abs.lnk"))
+        C.git(wt, "add", "abs.lnk")
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "l"], check=True,
+                       env=dict(os.environ, **GIT))
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+
+    def test_an_in_tree_relative_symlink_still_verifies(self):
+        st = self.state(verify=[{"text": "t", "command": ["sh", "-c", "test \"$(cat sub/l)\" = x"]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        os.makedirs(os.path.join(wt, "sub"))
+        with open(os.path.join(wt, "t.txt"), "w") as f:
+            f.write("x")
+        os.symlink("../t.txt", os.path.join(wt, "sub", "l"))
+        C.git(wt, "add", "-A")
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "l"], check=True,
+                       env=dict(os.environ, **GIT))
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+
+    def test_merge_refuses_a_pending_merge_it_did_not_record(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "a.txt", "task\n")
+        self.through_review(st)
+        # a human (or a crash) left a conflicted merge of another branch in the root
+        C.git(self.root, "checkout", "-q", "-b", "other", "main")
+        commit_in(self.root, "a.txt", "other\n")
+        C.git(self.root, "checkout", "-q", "factory/p")
+        commit_in(self.root, "a.txt", "run\n")
+        C.git(self.root, "merge", "other")
+        self.assertEqual(C.git(self.root, "rev-parse", "-q", "--verify",
+                               "MERGE_HEAD").returncode, 0)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
+        self.assertEqual(C.git(self.root, "rev-parse", "-q", "--verify",
+                               "MERGE_HEAD").returncode, 0, "the pending merge was aborted")
+        self.assertEqual(self.task(st)["status"], "reviewing")
+        C.git(self.root, "merge", "--abort")
+
+    def test_a_leftover_locked_checkout_from_a_crash_is_replaced(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "b.txt", "b\n")
+        head = C.git(wt, "rev-parse", "HEAD").stdout.strip()
+        p = os.path.join(st.dir, "verify", "T1-" + head[:12])
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        C.git(self.root, "worktree", "add", "-q", "--detach", p, head)
+        C.git(self.root, "worktree", "lock", "--reason", "initializing", p)
+        with open(os.path.join(p, "junk"), "w") as f:
+            f.write("j")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        self.assertEqual(self.verify_dirs(st), [])
+        self.assertNotIn(os.sep + "verify" + os.sep,
+                         C.git(self.root, "worktree", "list").stdout)
+
+    def test_a_symlink_planted_at_the_verify_path_is_not_followed(self):
+        st = self.state(verify=[{"text": "t", "command": ["true"]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "b.txt", "b\n")
+        head = C.git(wt, "rev-parse", "HEAD").stdout.strip()
+        evil = tempfile.mkdtemp()
+        with open(os.path.join(evil, "keep"), "w") as f:
+            f.write("k")
+        p = os.path.join(st.dir, "verify", "T1-" + head[:12])
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        os.symlink(evil, p)
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        self.assertEqual(os.listdir(evil), ["keep"])
+        self.assertEqual(self.verify_dirs(st), [])
+
+
 if __name__ == "__main__":
     unittest.main()
