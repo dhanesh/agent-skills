@@ -59,6 +59,7 @@ def commit_in(directory, name, text):
 class EndToEndTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.stub = os.path.join(self.tmp, "stub.py")
         with open(self.stub, "w") as f:
             f.write(PUSH_PR_STUB)
@@ -89,6 +90,7 @@ class EndToEndTests(unittest.TestCase):
 
     def test_full_run_two_proven_one_parked(self):
         root = repo()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         # The grant MUST pin the plan envelope itself, not a stand-in (Task 3's note):
         # the conductor's gate passes --subject <plan envelope>.
         plan_env = write_plan_envelope(root, plan=plan_payload())

@@ -12,10 +12,15 @@ One shared three-task run (dep_order_and_finish_arm) carries three assertions at
 a dependency runs in the right order, `finish` writes an envelope check-envelope
 validates, and a task whose verify never passes is never merged — because driving it
 once covers all three (see docs/eval-standard.md: "share one fixture setup where you
-can"). Five more short scenarios each isolate one negative requirement: a decision
-parks a task without stopping the run, an expired grant stops the run at the next gate,
-max_dispatches: 1 stops the run, a merge conflict parks the task and leaves the run
-branch clean, and a null verify command parks a task without ever merging it.
+can"). Six more short scenarios each isolate one negative requirement: a decision parks
+a task without stopping the run; a REVOKED grant stops the run at the next gate
+(GATE: ASK reason=revoked) and, as its own separate fixture, an EXPIRED grant does too
+(GATE: ASK reason=expired) — these are distinct check-grant outcomes, kept as distinct
+checks rather than one merged "expired/revoked" check; max_dispatches: 1 stops the run;
+a merge conflict parks the task and leaves the run branch clean; a task whose status
+is not `reviewing` (built white-box, through conductor.State) is refused by `merge`
+without touching the run branch; and a null verify command parks a task without ever
+merging it.
 """
 import contextlib
 import hashlib
@@ -181,7 +186,7 @@ def decision_parks_and_run_continues_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def expired_grant_stops_at_next_gate_arm():
+def revoked_grant_stops_at_next_gate_arm():
     root = TK.repo()
     try:
         plan_env = TK.write_plan_envelope(root, plan=plan(task("T1", [], ["true"])))
@@ -189,9 +194,32 @@ def expired_grant_stops_at_next_gate_arm():
         run(["init", "--plan", plan_env, "--root", root])
         TK.revoke(root)  # the newest grant is gone; the next gated step must ask
         rc, out, err = run(["start", "T1", "--root", root])
-        check("NEGATIVE: an expired/revoked grant stops the run at the next gate "
-              "(GATE: ASK, grant_ask)",
-              rc == 3 and "GATE: ASK" in out and status(root, "T1") == "pending"
+        check("NEGATIVE: a revoked grant stops the run at the next gate "
+              "(GATE: ASK reason=revoked, grant_ask)",
+              rc == 3 and "GATE: ASK" in out and "reason=revoked" in out
+              and status(root, "T1") == "pending"
+              and C.State.load(C.state_path(root)).stopped["reason"] == "grant_ask",
+              out.strip()[-160:])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def expired_grant_stops_at_next_gate_arm():
+    """Distinct from revocation: the newest grant for this plan is simply past its own
+    expires_at (test_conductor_policy.py's test_an_expired_grant_stops_the_next_gate
+    pattern — init under a valid grant, then write a NEWER grant whose expiry is
+    already in the past, so it is still the newest head check-grant reads)."""
+    root = TK.repo()
+    try:
+        plan_env = TK.write_plan_envelope(root, plan=plan(task("T1", [], ["true"])))
+        TK.write_grant(root, plan_env, minutes=1)  # a valid grant to init under
+        run(["init", "--plan", plan_env, "--root", root])
+        TK.write_grant(root, plan_env, minutes=-1)  # a newer grant, already expired
+        rc, out, err = run(["start", "T1", "--root", root])
+        check("NEGATIVE: an expired grant stops the run at the next gate "
+              "(GATE: ASK reason=expired, grant_ask)",
+              rc == 3 and "GATE: ASK" in out and "reason=expired" in out
+              and status(root, "T1") == "pending"
               and C.State.load(C.state_path(root)).stopped["reason"] == "grant_ask",
               out.strip()[-160:])
     finally:
@@ -239,6 +267,44 @@ def merge_conflict_parks_and_run_branch_stays_clean_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def merge_refuses_a_task_not_in_reviewing_status_arm():
+    """Isolates conductor.py's status guard in cmd_merge (`_load_task(args,
+    ("reviewing",))`) from every OTHER merge precondition: after a real passing verify
+    and a real passing review, the task's status is moved off `reviewing` — white-box,
+    through conductor.State, the pattern test_conductor_git.py uses — while
+    verify_runs, verified_head and the review verdict are left exactly as recorded.
+    Widening that status guard to accept the mutated status would let this task merge
+    anyway (every other precondition still holds), so this check is the one thing in
+    the eval that goes red under that specific mutation."""
+    root = TK.repo()
+    try:
+        plan_env = TK.write_plan_envelope(root, plan=plan(task("T1", [], ["true"])))
+        TK.write_grant(root, plan_env)
+        run(["init", "--plan", plan_env, "--root", root])
+        run(["start", "T1", "--root", root])
+        commit_in(wt(root, "T1"), "t1.txt", "one\n")
+        run(["verify", "T1", "--root", root])
+        run(["review", "T1", "--verdict", "pass", "--root", root])
+        before = C.git(root, "rev-parse", "HEAD").stdout.strip()
+
+        st = C.State.load(C.state_path(root))
+        if st.tasks["T1"]["status"] != "reviewing":
+            check("merge refuses a task not in reviewing status", False,
+                  "setup failed: status is %r, not reviewing" % st.tasks["T1"]["status"])
+            return
+        st.set_status("T1", "running")  # every other merge precondition still holds
+        st.save()
+
+        rc, out, err = run(["merge", "T1", "--root", root])
+        after = C.git(root, "rev-parse", "HEAD").stdout.strip()
+        check("NEGATIVE: merge refuses a task whose status is not `reviewing`, even "
+              "with a passing verify and review already recorded, and leaves the run "
+              "branch unchanged",
+              rc == 2 and status(root, "T1") == "running" and after == before, out.strip())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def null_verify_parks_and_is_never_merged_arm():
     root = TK.repo()
     try:
@@ -267,9 +333,11 @@ def null_verify_parks_and_is_never_merged_arm():
 def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
+    revoked_grant_stops_at_next_gate_arm()
     expired_grant_stops_at_next_gate_arm()
     max_dispatches_one_stops_the_run_arm()
     merge_conflict_parks_and_run_branch_stays_clean_arm()
+    merge_refuses_a_task_not_in_reviewing_status_arm()
     null_verify_parks_and_is_never_merged_arm()
 
     n, k = len(_checks), sum(_checks)
