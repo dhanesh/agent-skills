@@ -760,6 +760,8 @@ git commit -m "feat(factory-conductor): the skill — run protocol, briefs, cont
 
 ### Task 7: The eval and the end-to-end test
 
+> **Note (from Task 3):** build every grant with `conductor_testkit.write_grant(root, plan_env)`. The conductor's gate passes `--subject <plan envelope>`, so a grant MUST pin the plan envelope itself (not a `plan.json` stand-in), or `init` gets `ASK reason=subject`.
+
 **Files:**
 - Modify: `factory-conductor/eval/run_eval.py`
 - Create: `factory-conductor/assets/test_conductor_e2e.py`
@@ -857,7 +859,8 @@ def _fc_run(tree, tasks):
                             "--unattended", "docs/spec.md"],
                 "subject": [CC.pin(root, "docs/spec.md")]}
     CC.write_envelope(root, CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0",
-                                               root, ["docs/spec.md", "plan.json"],
+                                               root, ["docs/spec.md",
+                                                      os.path.relpath(plan_env, root).replace(os.sep, "/")],
                                                grant_payload, [accepted], now=now))
 
     def run(*argv):
