@@ -29,7 +29,7 @@
 - **BCP 14:** SKILL.md carries the one-line declaration, passes PP-7, keeps PP-5 non-advisory, and every hard rule gets a row in `docs/rfc2119/2026-09-19-classification.md`.
 - Every commit message ends with exactly:
 ```
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01X7cbN5bQsCx5HyMdb8Lo7X
 ```
 
