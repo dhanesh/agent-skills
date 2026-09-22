@@ -1,6 +1,8 @@
 import contextlib, io, json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
+from conductor_testkit import repo, write_plan_envelope, write_grant
+HAVE_GIT = __import__("shutil").which("git") is not None
 
 
 def plan(tasks):
@@ -87,14 +89,36 @@ class StateTests(unittest.TestCase):
         self.assertEqual(again.tasks["T1"]["status"], "running")
         self.assertEqual(again.run_id, self.st.run_id)
 
-    def test_resume_reports_the_last_step_and_keeps_the_log(self):
+    def test_resume_without_a_grant_asks_and_keeps_the_log(self):
+        # resume re-checks the grant (spec section 6): with none, it asks and stops.
         self.st.log("start", task="T1")
         self.st.set_status("T1", "running")
         self.st.save()
         before = open(self.st.log_path, encoding="utf-8").read()
-        rc = C.main(["resume", "--root", self.tmp])
-        self.assertEqual(rc, 0)
+        rc, out, _ = run_main(["resume", "--root", self.tmp])
+        self.assertEqual(rc, 3)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "STATUS: run=run-20260922T120000Z-a1b2c3 last_event=start at=%s"
+                         % json.loads(before.splitlines()[-1])["at"])
+        self.assertIn("GATE: ASK reason=no-grant", lines)
+        self.assertNotIn("READY:", out)
         self.assertTrue(open(self.st.log_path, encoding="utf-8").read().startswith(before))
+
+    @unittest.skipUnless(HAVE_GIT, "git not installed")
+    def test_resume_with_a_grant_reports_the_last_step_and_keeps_the_log(self):
+        root = repo()
+        env = write_plan_envelope(root, plan=plan({"T1": [], "T2": ["T1"]}))
+        write_grant(root, env)
+        self.assertEqual(run_main(["init", "--plan", env, "--root", root])[0], 0)
+        st = C.State.load(C.state_path(root))
+        st.log("start", task="T1")
+        st.set_status("T1", "running")
+        st.save()
+        before = open(st.log_path, encoding="utf-8").read()
+        rc, out, _ = run_main(["resume", "--root", root])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.splitlines()[-1], "READY:")  # T1 running, T2 waits on it
+        self.assertTrue(open(st.log_path, encoding="utf-8").read().startswith(before))
 
 
 class RunIdTests(unittest.TestCase):
@@ -259,7 +283,11 @@ class Order(unittest.TestCase):
         self.assertEqual(again.ready(3), ["T1", "T2", "T10"])
         rc, out, _ = run_main(["status", "--root", tmp])
         self.assertEqual(rc, 0)
-        self.assertEqual([l.split()[1] for l in out.splitlines()], ["T1", "T2", "T10"])
+        lines = out.splitlines()
+        # one line per task, in plan order, then the budget line and the budget note
+        self.assertEqual([l.split()[1] for l in lines[:-2]], ["T1", "T2", "T10"])
+        self.assertTrue(lines[-2].startswith("STATUS: budget "), lines[-2])
+        self.assertEqual(lines[-1], C.BUDGET_NOTE)
         rc, out, _ = run_main(["next", "--root", tmp])
         self.assertEqual(out.strip(), "READY: T1 T2 T10")
 
@@ -300,36 +328,42 @@ class RunDirTests(unittest.TestCase):
                 C.run_dir("/r", rid)
 
 
+@unittest.skipUnless(HAVE_GIT, "git not installed")
 class Cli(unittest.TestCase):
+    """init takes a task-plan envelope and needs a covering grant (Task 3)."""
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.plan_path = os.path.join(self.tmp, "plan.json")
-        with open(self.plan_path, "w", encoding="utf-8") as f:
-            json.dump(plan({"T1": [], "T2": ["T1"]}), f)
+        self.root = repo()
+        self.plan_path = write_plan_envelope(self.root, plan=plan({"T1": [], "T2": ["T1"]}))
+        write_grant(self.root, self.plan_path)
 
     def test_resume_output(self):
-        root = os.path.join(self.tmp, "r")
+        root = self.root
         self.assertEqual(run_main(["init", "--plan", self.plan_path, "--root", root])[0], 0)
         rc, out, _ = run_main(["resume", "--root", root])
         self.assertEqual(rc, 0)
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"^STATUS: run=run-\S+ last_event=init at=\S+Z$")
+        self.assertRegex(lines[0], r"^STATUS: run=run-\S+ last_event=\S+ at=\S+Z$")
         self.assertEqual(lines[1], "READY: T1")
         st = C.State.load(os.path.join(C.current_run(root), "state.json"))
         self.assertEqual(st.last_event()["event"], "resume")
+        # the last step before resume is init's gate decision, logged after init
+        self.assertEqual([json.loads(l)["event"] for l in open(st.log_path)],
+                         ["init", "gate", "gate", "resume"])
+        self.assertIn("last_event=gate ", lines[0])
 
     def test_parallel_values_below_one_exit_2(self):
-        root = os.path.join(self.tmp, "r")
-        for v in ("0", "-1", "x"):
+        root = self.root
+        for v in ("0", "-1", '"x"', "1.5"):
             self.assertEqual(run_main(["init", "--plan", self.plan_path, "--root", root,
-                                       "--max-parallel", v])[0], 2, v)
+                                       "--budget", '{"max_parallel": %s}' % v])[0], 2, v)
         self.assertIsNone(C.current_run(root))
         self.assertEqual(run_main(["init", "--plan", self.plan_path, "--root", root])[0], 0)
         self.assertEqual(run_main(["next", "--root", root, "--max", "0"])[0], 2)
 
     def test_budget_max_parallel_below_one_is_rejected(self):
         with self.assertRaises(C.PlanError):
-            new_state(self.tmp, {"T1": []}, budget={"max_parallel": 0})
+            new_state(tempfile.mkdtemp(), {"T1": []}, budget={"max_parallel": 0})
 
     def test_init_on_a_root_that_is_a_file_exits_2(self):
         rc, _, err = run_main(["init", "--plan", self.plan_path, "--root", self.plan_path])
@@ -337,12 +371,13 @@ class Cli(unittest.TestCase):
         self.assertTrue(err)
 
     def test_init_with_bad_depends_on_exits_2(self):
-        bad = os.path.join(self.tmp, "bad.json")
-        with open(bad, "w", encoding="utf-8") as f:
-            json.dump({"title": "T", "tasks": [{"id": "T1", "depends_on": 5}]}, f)
-        rc, _, err = run_main(["init", "--plan", bad, "--root", os.path.join(self.tmp, "r")])
+        bad = write_plan_envelope(self.root, plan={"title": "T", "tasks": [
+            {"id": "T1", "depends_on": 5}]})
+        write_grant(self.root, bad)
+        rc, _, err = run_main(["init", "--plan", bad, "--root", self.root])
         self.assertEqual(rc, 2)
         self.assertIn("depends_on", err)
+        self.assertIsNone(C.current_run(self.root))
 
 
 class Hardening(unittest.TestCase):

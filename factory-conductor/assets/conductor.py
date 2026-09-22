@@ -11,17 +11,37 @@ JSON object per line, each with `at` in RFC 3339 UTC and `event`). It is
 git-ignored and never committed.
 
 Usage:
-    python3 conductor.py init --plan <payload.json> [--root <repo>]    # prints RUN: <id>
-                              [--grant-id ID] [--run-branch B]
-                              [--base-branch B] [--max-parallel N]
-    python3 conductor.py next [--root <repo>] [--max N]                # prints READY: T1 T2
+    python3 conductor.py init --plan <task-plan envelope> [--root <repo>] [--budget JSON]
+                                                                       # prints RUN: <id>
+    python3 conductor.py gate --action <class> [--root <repo>]         # GATE: COVERED|ASK
+    python3 conductor.py next [--root <repo>] [--max N]                # READY: T1 T2 | STOP:
     python3 conductor.py status [--root <repo>]                        # one STATUS: line per task
-    python3 conductor.py resume [--root <repo>]                        # last step + READY:
+    python3 conductor.py resume [--root <repo>]                        # last step, gate, READY:
     python3 conductor.py start <task> [--root <repo>]                  # START: <task> <worktree>
     python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass|fail
     python3 conductor.py review <task> --verdict pass|fail [--detail T] [--root <repo>]
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
+    python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
+
+Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
+fresh subjects, a schedulable plan), then requires `check-grant` to cover
+local_reversible for that plan (`--subject <plan envelope>`, so a grant covers only the
+plan it pins) on the current branch, which must match the grant's branch_pattern and
+not be the default branch. It cuts factory/<plan-slug> from the current branch (that
+name must match branch_pattern too), checks it out in the root and writes the state.
+`start`, `merge` and `resume` re-run check-grant before they act and proceed ONLY on
+exit 0; an ASK prints GATE: ASK <reason>, stops the run with grant_ask and exits 3.
+`resume` lifts a grant_ask stop once a grant covers the run again; no other stop.
+
+Budgets (the grant's `budget`, overridden key by key by --budget): wall_clock_min
+(from init), max_dispatches (a cap on starts; tasks in flight may still finish),
+max_repairs_per_task (every failing verify after the first is a repair; at the cap the
+task parks with verify_red_after_repairs) and max_parallel (default 2) are enforced.
+max_tokens and max_usd are recorded and reported, not enforced: the runtime does not
+expose usage to this tool. `next` stops the run (STOP: <reason>, exit 3) on, in order,
+budget_wall_clock, budget_dispatches, no_ready_tasks. `decision` parks a task with
+new_human_decision and the run goes on.
 
 Each task runs in its own git worktree, <run>/wt/<task>, on the task branch
 <run_branch>--<task>. (Not <run_branch>/<task>: git cannot keep a ref
@@ -51,9 +71,6 @@ objects/info/alternates (N3), and committed code that reads the executor's
 uncommitted files by path (N11), are not caught here; CI re-running the checks on
 the pushed branch is the independent re-check.
 
-`init` takes a task-plan payload file for now; it will take the task-plan
-envelope and check the grant once gating exists.
-
 Run id grammar: run-<yyyymmddThhmmssZ>-<6 hex>.
 Exit 0 success; 2 usage or invalid input; 3 the run must stop.
 """
@@ -66,8 +83,10 @@ if sys.version_info < (3, 10):
 
 import argparse  # noqa: E402
 import datetime as _dt  # noqa: E402
+import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
@@ -84,10 +103,19 @@ STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", 
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
                 "new_human_decision", "verify_red_after_repairs", "no_ready_tasks")
 DEFAULT_PARALLEL = 2
+TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 
 ACTIVE = ("running", "verifying", "reviewing")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
-               "verify_runs", "verified_head", "review", "merge_commit", "park_reason")
+               "verify_runs", "verified_head", "review", "merge_commit", "park_reason",
+               "verify_failures", "question")
+# Budget keys and the values each accepts. max_tokens and max_usd are recorded and
+# reported, never enforced: the runtime does not expose usage to this tool.
+BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
+               "max_repairs_per_task": "count", "max_parallel": "positive",
+               "max_tokens": "count", "max_usd": "number"}
+BUDGET_NOTE = ("STATUS: budget max_tokens/max_usd recorded, not enforced "
+               "(the runtime does not expose usage)")
 RUNS_DIR = os.path.join(".skill-contract", "runs")
 STATE_FILE = "state.json"
 LOG_FILE = "autonomy-log.jsonl"
@@ -211,9 +239,7 @@ class State:
         order, plan_tasks = _plan_tasks(plan)
         schedule = waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
         budget = dict(budget or {})
-        mp = budget.get("max_parallel")
-        if mp is not None and (not isinstance(mp, int) or isinstance(mp, bool) or mp < 1):
-            raise PlanError("budget.max_parallel must be an integer >= 1, got %r" % (mp,))
+        check_budget(budget)
         tasks = {}
         for tid in order:
             t = plan_tasks[tid]
@@ -370,6 +396,31 @@ class State:
         return DEFAULT_PARALLEL if mp is None else int(mp)
 
 
+def check_budget(budget):
+    """Raise PlanError unless budget is an object of known keys with sane values.
+
+    An unknown key fails rather than being ignored: a misspelled budget would
+    otherwise silently go unenforced."""
+    if not isinstance(budget, dict):
+        raise PlanError("budget must be a JSON object, got %s" % type(budget).__name__)
+    unknown = sorted(set(budget) - set(BUDGET_KEYS))
+    if unknown:
+        raise PlanError("budget has unknown key(s): %s (known: %s)"
+                        % (", ".join(unknown), ", ".join(sorted(BUDGET_KEYS))))
+    for key, value in budget.items():
+        kind = BUDGET_KEYS[key]
+        is_int = isinstance(value, int) and not isinstance(value, bool)
+        if kind == "positive":
+            if not is_int or value < 1:
+                raise PlanError("budget.%s must be an integer >= 1, got %r" % (key, value))
+        elif kind == "count":
+            if not is_int or value < 0:
+                raise PlanError("budget.%s must be an integer >= 0, got %r" % (key, value))
+        elif not ((is_int or isinstance(value, float)) and math.isfinite(value)
+                  and value >= 0):
+            raise PlanError("budget.%s must be a number >= 0, got %r" % (key, value))
+
+
 def _plan_tasks(plan):
     """Check a plan payload's tasks; return (ids in plan order, {id: task}).
 
@@ -437,6 +488,20 @@ GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
             "-c", "core.commitGraph=false")
 
 
+def safe_config_env():
+    """git_env() that also carries GIT_SAFE as GIT_CONFIG_COUNT/KEY/VALUE (git >= 2.31), so
+    git calls the conductor does not spell itself (the vendored checker's) ignore hooks,
+    fsmonitor and the commit-graph too. Environment config ranks with `-c`, above the
+    repository's own config."""
+    env = git_env()
+    pairs = [GIT_SAFE[i + 1].split("=", 1) for i in range(0, len(GIT_SAFE), 2)]
+    env["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for i, (key, value) in enumerate(pairs):
+        env["GIT_CONFIG_KEY_%d" % i] = key
+        env["GIT_CONFIG_VALUE_%d" % i] = value
+    return env
+
+
 def isolated_env(**extra):
     """git_env() that also ignores the global and system config (for the verify clone)."""
     env = git_env()
@@ -490,6 +555,12 @@ def _positive_int(text):
     return n
 
 
+def state_path(root):
+    """The newest run's state.json under root, or None when there is no run."""
+    d = current_run(root)
+    return None if d is None else os.path.join(d, STATE_FILE)
+
+
 def _slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return s or "plan"
@@ -508,50 +579,260 @@ def _load_current(root):
         return None
 
 
+# ── Gates: every consequential action asks the vendored checker first ───────
+def gate(root, action, subject=None):
+    """Run the vendored `contract_check.py check-grant --root <root> --action <action>`
+    (and `--subject <subject>` when given). Returns (exit code, last stdout line).
+
+    A caller proceeds ONLY on exit 0. A checker that cannot run is an ASK."""
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract_check.py")
+    argv = [sys.executable, "-I", checker, "check-grant", "--root", root, "--action", action]
+    if subject is not None:
+        argv += ["--subject", subject]
+    try:
+        # The checker's own git calls (branch, tracked-grant and CI-config probes) run in
+        # the executor-writable repository: give them the same hardening as ours.
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                           env=safe_config_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 3, "GRANT: ASK reason=checker-unavailable (%s)" % exc
+    last = (r.stdout.strip().splitlines() or [""])[-1]
+    return r.returncode, last
+
+
+def gate_line(rc, last):
+    """(covered?, the GATE: line) for a gate() result. Covered needs exit 0 AND the
+    checker's COVERED line; anything else (ASK, NONE, INVALID, an error) is an ASK."""
+    body = last[len("GRANT: "):] if last.startswith("GRANT: ") else last
+    if rc == 0 and body.startswith("COVERED "):
+        return True, "GATE: " + body
+    if body.startswith("ASK "):
+        rest = body[len("ASK "):]
+    elif body == "NONE":
+        rest = "reason=no-grant"
+    elif body.startswith("INVALID"):
+        rest = ("reason=invalid " + body[len("INVALID"):].strip()).strip()
+    else:
+        rest = "reason=checker-error (exit %d) %s" % (rc, body)
+    return False, ("GATE: ASK " + rest).strip()
+
+
+def plan_subject(st):
+    """The run's plan envelope as a path relative to its root, for check-grant --subject:
+    a grant covers only the plan it pins."""
+    p = st.plan_envelope
+    if not os.path.isabs(p):
+        return p
+    rel = os.path.relpath(os.path.realpath(p), os.path.realpath(st.root))
+    return rel.replace(os.sep, "/")
+
+
+def _gated(st, action):
+    """True when the grant covers `action` for this run. Every decision is logged as
+    `gate`. On ASK: print the GATE: line and stop the run with grant_ask (resume lifts
+    that stop once a grant covers the run again)."""
+    rc, last = gate(st.root, action, plan_subject(st))
+    ok, line = gate_line(rc, last)
+    st.log("gate", action=action, ok=ok, result=last, exit=rc)
+    if ok:
+        return True
+    print(line)
+    _record_stop(st, "grant_ask", detail=line)
+    return False
+
+
+def cmd_gate(args):
+    """Print GATE: COVERED … (exit 0) or GATE: ASK <reason> (exit 3) for one action class.
+    With a run under --root, its plan envelope is the subject the grant must pin."""
+    root = os.path.abspath(args.root)
+    subject = None
+    path = state_path(root)
+    if path is not None:
+        try:
+            subject = plan_subject(State.load(path))
+        except StateError as e:
+            sys.stderr.write("cannot load run state %s: %s\n" % (path, e))
+            return 2
+    ok, line = gate_line(*gate(root, args.action, subject))
+    print(line)
+    return 0 if ok else 3
+
+
+# ── Stop rules ──────────────────────────────────────────────────────────────
+def _wall_clock_stop(st):
+    """budget_wall_clock once wall_clock_min minutes have passed since init, else None.
+    An unreadable created_at counts as exhausted (fail closed)."""
+    limit = st.budget.get("wall_clock_min")
+    if limit is None:
+        return None
+    try:
+        created = _dt.datetime.strptime(st.created_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc)
+    except (TypeError, ValueError):
+        return "budget_wall_clock"
+    if (_now() - created).total_seconds() >= limit * 60:
+        return "budget_wall_clock"
+    return None
+
+
+def _in_flight(st):
+    return any(t["status"] in ACTIVE for t in st.tasks.values())
+
+
+def _dispatches_left(st):
+    """How many more tasks may be dispatched, or None when max_dispatches is unset."""
+    cap = st.budget.get("max_dispatches")
+    return None if cap is None else max(0, cap - st.dispatches)
+
+
+def check_stop(st):
+    """The stop reason that ends the run now, or None. In order:
+
+    budget_wall_clock  wall_clock_min has passed since init (in-flight work included);
+    budget_dispatches  max_dispatches is spent, a task is ready, and nothing is in
+                       flight (in-flight work may still verify, review and merge);
+    no_ready_tasks     nothing is ready and nothing is in flight."""
+    reason = _wall_clock_stop(st)
+    if reason:
+        return reason
+    ready = st.ready(len(st.tasks))
+    busy = _in_flight(st)
+    if ready and not busy and _dispatches_left(st) == 0:
+        return "budget_dispatches"
+    if not ready and not busy:
+        return "no_ready_tasks"
+    return None
+
+
+def _record_stop(st, reason, **detail):
+    """Record the run as stopped, log `stop`, print STOP: <reason>. Returns 3."""
+    st.stopped = dict(detail, reason=reason, at=_rfc3339(_now()))
+    st.save()
+    st.log("stop", reason=reason, **detail)
+    print("STOP: %s" % reason)
+    return 3
+
+
+def _init_fail(message, code=2):
+    sys.stderr.write(message.rstrip("\n") + "\n")
+    return code
+
+
 def cmd_init(args):
-    """Build a run from a task-plan payload file and print RUN: <id>."""
+    """Start a run from a task-plan/v1 envelope under a covering grant; print RUN: <id>.
+
+    Validates the envelope (C3-C7, fresh subjects, the task-plan kind, a schedulable
+    plan), requires check-grant to cover local_reversible for this plan on the current
+    branch, then cuts factory/<plan-slug> from the current branch, checks it out in the
+    root and writes the run state. Exit 2 on invalid input, 3 when the grant asks."""
+    root = os.path.abspath(args.root)
+    if not os.path.isdir(root):
+        return _init_fail("root %s is not a directory" % root)
     try:
-        with open(args.plan, "rb") as f:
-            raw = f.read()
-        plan = json.loads(raw)
-    except (OSError, ValueError) as e:
-        sys.stderr.write("cannot read plan %s: %s\n" % (args.plan, e))
-        return 2
-    if not isinstance(plan, dict):
-        sys.stderr.write("invalid plan: %s is not a JSON object\n" % args.plan)
-        return 2
-    budget = {"max_parallel": DEFAULT_PARALLEL if args.max_parallel is None
-              else args.max_parallel}
-    try:
-        st = State.new(root=args.root, run_id=new_run_id(), plan=plan,
-                       plan_envelope=os.path.abspath(args.plan),
-                       plan_sha256=hashlib.sha256(raw).hexdigest(),
-                       grant_id=args.grant_id,
-                       run_branch=args.run_branch or "factory/%s" % _slug(plan.get("title")),
-                       base_branch=args.base_branch, budget=budget)
+        extra = json.loads(args.budget) if args.budget is not None else {}
+        check_budget(extra)
+    except ValueError as e:  # JSONDecodeError is a ValueError
+        return _init_fail("invalid --budget: %s" % e)
     except PlanError as e:
-        sys.stderr.write("invalid plan: %s\n" % e)
-        return 2
+        return _init_fail("invalid --budget: %s" % e)
+    plan_path = os.path.abspath(args.plan)
+    try:
+        with open(plan_path, "rb") as f:
+            raw = f.read()
     except OSError as e:
-        sys.stderr.write("cannot create run under %s: %s\n" % (args.root, e))
-        return 2
+        return _init_fail("cannot read plan %s: %s" % (plan_path, e))
+    rep = CC.check_envelope(plan_path, root=root)
+    if rep["violations"]:
+        for n, detail in rep["violations"]:
+            sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
+        return _init_fail("invalid plan envelope %s" % plan_path)
+    if rep["stale"]:
+        return _init_fail("the plan %s is stale: %s changed since it was written"
+                          % (plan_path, ", ".join(rep["stale"])))
+    doc = json.loads(raw)
+    if doc.get("predicateType") != TASK_PLAN_KIND:
+        return _init_fail("%s is a %s envelope, not task-plan/v1 (%s)"
+                          % (plan_path, doc.get("predicateType"), TASK_PLAN_KIND))
+    plan = doc["predicate"]["payload"]
+    try:
+        _, plan_tasks = _plan_tasks(plan)
+        waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
+    except PlanError as e:
+        return _init_fail("invalid plan: %s" % e)
+    base = CC.current_branch(root)
+    if base is None:
+        return _init_fail("%s is not a git work tree, or git cannot say which branch is "
+                          "checked out" % root)
+    subject = os.path.relpath(os.path.realpath(plan_path), os.path.realpath(root))
+    rc, last = gate(root, "local_reversible", subject.replace(os.sep, "/"))
+    ok, line = gate_line(rc, last)
+    if not ok:
+        print(line)
+        return 3
+    m = re.search(r"\bid=(\S+)", last)
+    gid = m.group(1) if m else None
+    gdoc, err = (CC.load_envelope(os.path.join(CC.envelope_dir(root), gid + ".json"))
+                 if gid and CC.ID_RE.match(gid) else (None, ["no grant id"]))
+    if err or not isinstance(gdoc, dict):
+        print("GATE: ASK reason=grant-unreadable")
+        return _init_fail("cannot read the covering grant %s" % gid, 3)
+    grant = gdoc["predicate"]["payload"]
+    run_branch = "factory/%s" % _slug(plan.get("title"))
+    pattern = grant["scope"]["branch_pattern"]
+    if not fnmatch.fnmatchcase(run_branch, pattern):
+        print("GATE: ASK id=%s reason=run-branch" % gid)
+        return _init_fail("the run branch %s would not match the grant's branch_pattern %r;"
+                          " the grant does not cover this run" % (run_branch, pattern), 3)
+    budget = {"max_parallel": DEFAULT_PARALLEL}
+    try:
+        check_budget(grant.get("budget") or {})
+        budget.update(grant.get("budget") or {})
+        budget.update(extra)
+        check_budget(budget)
+    except PlanError as e:
+        return _init_fail("invalid budget: %s" % e)
+    exists, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % run_branch)
+    if exists:
+        return _init_fail("the run branch %s already exists; finish or delete it first"
+                          % run_branch)
+    ok, r = _git_ok(root, "checkout", "-q", "-b", run_branch)
+    if not ok:
+        return _init_fail("cannot create the run branch %s: %s" % (run_branch, _git_err(r)))
+    try:
+        st = State.new(root=root, run_id=new_run_id(), plan=plan, plan_envelope=plan_path,
+                       plan_sha256=hashlib.sha256(raw).hexdigest(), grant_id=gid,
+                       run_branch=run_branch, base_branch=base, budget=budget)
+    except (PlanError, OSError) as e:
+        _git_ok(root, "checkout", "-q", base)
+        _git_ok(root, "branch", "-D", run_branch)
+        return _init_fail("cannot create the run under %s: %s" % (root, e))
+    st.log("gate", action="local_reversible", ok=True, result=last, exit=rc)
     print("RUN: %s" % st.run_id)
     return 0
 
 
 def cmd_next(args):
-    """Print READY: <ids> for the tasks that can start now (nothing when none can)."""
+    """Print READY: <ids> for the tasks that can start now (nothing when none can), or
+    STOP: <reason> (exit 3) when a stop rule fires; the stop is recorded."""
     st = _load_current(args.root)
     if st is None:
         return 2
+    if _stopped(st):
+        return 3
+    reason = check_stop(st)
+    if reason:
+        return _record_stop(st, reason)
     ready = st.ready(st.max_parallel() if args.max is None else args.max)
+    left = _dispatches_left(st)
+    if left is not None:
+        ready = ready[:left]
     if ready:
         print("READY: %s" % " ".join(ready))
     return 0
 
 
 def cmd_status(args):
-    """Print one STATUS: line per task."""
+    """Print one STATUS: line per task, then the budget and the max_tokens/max_usd note."""
     st = _load_current(args.root)
     if st is None:
         return 2
@@ -560,12 +841,20 @@ def cmd_status(args):
         line = "STATUS: %s %s" % (tid, t["status"])
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
+        if t.get("question"):
+            line += " question=%s" % json.dumps(t["question"])
         print(line)
+    print("STATUS: budget %s dispatches=%d" % (json.dumps(st.budget, sort_keys=True),
+                                               st.dispatches))
+    print(BUDGET_NOTE)
     return 0
 
 
 def cmd_resume(args):
-    """Report the last recorded step and the ready set. The log is only appended to."""
+    """Report the last recorded step, re-check the grant, then the ready set.
+
+    A run stopped by grant_ask resumes once a grant covers it again; a run stopped for
+    any other reason stays stopped. The log is only appended to."""
     st = _load_current(args.root)
     if st is None:
         return 2
@@ -575,16 +864,30 @@ def cmd_resume(args):
               % (st.run_id, last.get("event"), last.get("at")))
     else:
         print("STATUS: run=%s last_event=none" % st.run_id)
+    if st.stopped and (st.stopped.get("reason") if isinstance(st.stopped, dict)
+                       else st.stopped) != "grant_ask":
+        _stopped(st)
+        return 3
+    if not _gated(st, "local_reversible"):
+        return 3
+    lifted = st.stopped
+    if lifted:
+        st.stopped = None
+        st.save()
     ready = st.ready(st.max_parallel())
+    left = _dispatches_left(st)
+    if left is not None:
+        ready = ready[:left]
     print("READY: %s" % " ".join(ready) if ready else "READY:")
-    st.log("resume", run=st.run_id, last_event=last.get("event") if last else None)
+    st.log("resume", run=st.run_id, last_event=last.get("event") if last else None,
+           lifted_stop=lifted)
     return 0
 
 
 def _stopped(st):
     """Print STOP: <reason> and return True when the run has been stopped.
 
-    A stopped run takes no further consequential step (start, verify, review, merge):
+    A stopped run takes no further consequential step (next, start, verify, review, merge):
     in particular a merge left pending for a human is never touched again."""
     if not st.stopped:
         return False
@@ -610,8 +913,8 @@ def _load_task(args, allowed):
     return st, t
 
 
-def _park(st, task, reason):
-    st.set_status(task, "parked", park_reason=reason)
+def _park(st, task, reason, **fields):
+    st.set_status(task, "parked", park_reason=reason, **fields)
     st.save()
     st.log("park", task=task, reason=reason)
     print("PARK: %s %s" % (task, reason))
@@ -643,6 +946,21 @@ def cmd_start(args):
     if args.task not in st.ready(len(st.tasks)):
         sys.stderr.write("task %s is not ready: a dependency is not proven\n" % args.task)
         return 2
+    reason = _wall_clock_stop(st)
+    if reason:
+        return _record_stop(st, reason)
+    if _dispatches_left(st) == 0:
+        if not _in_flight(st):
+            return _record_stop(st, "budget_dispatches")
+        # Tasks in flight may still verify, review and merge: refuse only this dispatch.
+        sys.stderr.write("the dispatch budget (%d) is spent; %s is not started, and the tasks "
+                         "in flight may still finish\n" % (st.budget["max_dispatches"], args.task))
+        st.log("dispatch_refused", task=args.task, reason="budget_dispatches",
+               dispatches=st.dispatches)
+        print("STOP: budget_dispatches")
+        return 3
+    if not _gated(st, "local_reversible"):
+        return 3
     wt = os.path.join(st.dir, WT_DIR, args.task)
     branch = st.run_branch + TASK_BRANCH_SEP + args.task
     ok, r = _git_ok(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
@@ -878,22 +1196,45 @@ def cmd_verify(args):
     # A fresh proof replaces any earlier verdict: the reviewer judges this state.
     st.set_status(args.task, "reviewing" if passed else "verifying", verify_runs=runs,
                   verified_head=head if passed else None, review=None)
+    if not passed:
+        _count_failure(st, args.task)
     st.save()
     st.log("verify", task=args.task, passed=passed, head=head,
            commands=[{"command": r["command"], "ok": r["ok"], "returncode": r["returncode"]}
                      for r in runs])
     print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
+    if not passed:
+        _park_if_out_of_repairs(st, args.task)
     return 0 if passed else 3
 
 
 def _verify_refused(st, task, message, reason):
-    """Fail a verify before any command runs. Returns 3."""
+    """Fail a verify before any command runs. Counts as a failing verify. Returns 3."""
     st.set_status(task, "verifying", verify_runs=[], verified_head=None, review=None)
+    _count_failure(st, task)
     st.save()
     st.log("verify", task=task, passed=False, reason=reason, commands=[])
     sys.stderr.write("task %s: %s\n" % (task, message))
     print("VERIFY: %s fail" % task)
+    _park_if_out_of_repairs(st, task)
     return 3
+
+
+def _count_failure(st, task):
+    """Count one failing verify. The first failure sends the task to its executor; each
+    failure after it is a repair that did not turn the verify green."""
+    t = st.tasks[task]
+    failures = int(t.get("verify_failures") or 0) + 1
+    t["verify_failures"] = failures
+    t["repairs"] = max(0, failures - 1)
+
+
+def _park_if_out_of_repairs(st, task):
+    """Park with verify_red_after_repairs once repairs reach max_repairs_per_task.
+    Parking never stops the run."""
+    cap = st.budget.get("max_repairs_per_task")
+    if cap is not None and st.tasks[task]["repairs"] >= cap:
+        _park(st, task, "verify_red_after_repairs")
 
 
 def _run_steps(task, steps, checkout):
@@ -994,6 +1335,8 @@ def cmd_merge(args):
         sys.stderr.write("the run branch in %s has uncommitted changes: %s\n"
                          % (st.root, _git_err(r) if not ok else r.stdout.strip()))
         return 2
+    if not _gated(st, "local_reversible"):
+        return 3
     # The merge itself runs in an isolated clone (no shared config, attributes, merge
     # drivers or grafts), and the root only fast-forwards to its result.
     clone, why = _isolated_clone(st, MERGE_DIR, "%s-%s" % (args.task, pinned[:12]),
@@ -1107,17 +1450,35 @@ def cmd_park(args):
     return 0
 
 
+def cmd_decision(args):
+    """Park a task that needs a human decision the grant does not cover. The question is
+    recorded; the task's dependents become blocked and the run goes on (exit 0)."""
+    st, t = _load_task(args, STATUSES)
+    if st is None:
+        return 2
+    if t["status"] == "proven":
+        sys.stderr.write("task %s is proven and merged; it cannot be parked\n" % args.task)
+        return 2
+    if not args.question.strip():
+        sys.stderr.write("--question must not be empty\n")
+        return 2
+    st.log("decision", task=args.task, question=args.question)
+    _park(st, args.task, "new_human_decision", question=args.question)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("init")
     s.add_argument("--plan", required=True)
     s.add_argument("--root", default=".")
-    s.add_argument("--grant-id", default=None)
-    s.add_argument("--run-branch", default=None)
-    s.add_argument("--base-branch", default="main")
-    s.add_argument("--max-parallel", type=_positive_int, default=None)
+    s.add_argument("--budget", default=None)
     s.set_defaults(fn=cmd_init)
+    s = sub.add_parser("gate")
+    s.add_argument("--action", required=True, choices=CC.ACTION_CLASSES)
+    s.add_argument("--root", default=".")
+    s.set_defaults(fn=cmd_gate)
     s = sub.add_parser("next")
     s.add_argument("--root", default=".")
     s.add_argument("--max", type=_positive_int, default=None)
@@ -1127,7 +1488,7 @@ def main(argv=None):
         s.add_argument("--root", default=".")
         s.set_defaults(fn=fn)
     for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
-                     ("merge", cmd_merge), ("park", cmd_park)):
+                     ("merge", cmd_merge), ("park", cmd_park), ("decision", cmd_decision)):
         s = sub.add_parser(name)
         s.add_argument("task")
         s.add_argument("--root", default=".")
@@ -1136,6 +1497,8 @@ def main(argv=None):
             s.add_argument("--detail", default="")
         if name == "park":
             s.add_argument("--reason", required=True)
+        if name == "decision":
+            s.add_argument("--question", required=True)
         s.set_defaults(fn=fn)
     try:
         args = p.parse_args(argv)

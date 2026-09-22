@@ -1,20 +1,9 @@
 import contextlib, hashlib, io, json, os, subprocess, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
-
-GIT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
-
-
-def repo():
-    d = tempfile.mkdtemp()
-    subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
-    open(os.path.join(d, "a.txt"), "w").write("a\n")
-    subprocess.run(["git", "-C", d, "add", "-A"], check=True)
-    subprocess.run(["git", "-C", d, "commit", "-q", "-m", "x"], check=True,
-                   env=dict(os.environ, **GIT))
-    subprocess.run(["git", "-C", d, "checkout", "-q", "-b", "factory/p"], check=True)
-    return d
+# start and merge are gated (Task 3): every run here has a real task-plan envelope and
+# a human-accepted grant that pins it. repo() is on factory/p, cut from main.
+from conductor_testkit import GIT, repo, new_run
 
 
 def commit_in(d, name, text, msg="c"):
@@ -26,15 +15,6 @@ def commit_in(d, name, text, msg="c"):
                    env=dict(os.environ, **GIT))
 
 
-def write_plan(tasks):
-    """Write the plan outside the repo; (absolute path, sha256 of its bytes)."""
-    path = os.path.join(tempfile.mkdtemp(), "plan.json")
-    raw = json.dumps(tasks).encode("utf-8")
-    with open(path, "wb") as f:
-        f.write(raw)
-    return path, hashlib.sha256(raw).hexdigest()
-
-
 @unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
 class GitTests(unittest.TestCase):
     def state(self, verify=None):
@@ -43,11 +23,9 @@ class GitTests(unittest.TestCase):
                  "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "one",
                             "verify": verify or [{"text": "t", "command": ["true"]}],
                             "depends_on": []}]}
-        # verify re-reads the verify list from the pinned plan file, so it must exist
-        self.plan_path, sha = write_plan(tasks)
-        return C.State.new(root=self.root, run_id=C.new_run_id(), plan=tasks,
-                           plan_envelope=self.plan_path, plan_sha256=sha, grant_id="g",
-                           run_branch="factory/p", base_branch="main", budget={})
+        # verify re-reads the verify list from the pinned plan envelope, so it must exist
+        st, self.plan_path = new_run(self.root, tasks)
+        return st
 
     def marker(self):
         """An absolute path outside every checkout, for a child process to touch."""
@@ -162,9 +140,7 @@ class GitTests(unittest.TestCase):
                            "depends_on": []},
                           {"id": "T2", "verify": [{"text": "t", "command": ["true"]}],
                            "depends_on": ["T1"]}]}
-        C.State.new(root=self.root, run_id=C.new_run_id(), plan=plan, plan_envelope="e.json",
-                    plan_sha256="0" * 64, grant_id="g", run_branch="factory/p",
-                    base_branch="main", budget={})
+        new_run(self.root, plan)
         self.assertEqual(C.main(["start", "T2", "--root", self.root]), 2)
         self.assertEqual(C.main(["start", "T9", "--root", self.root]), 2)
         self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
@@ -308,7 +284,8 @@ class GitTests(unittest.TestCase):
         C.main(["start", "T1", "--root", self.root])
         with open(self.plan_path) as f:
             plan = json.load(f)
-        plan["tasks"][0]["verify"] = [{"text": "x", "command": ["echo", "tampered"]}]
+        plan["predicate"]["payload"]["tasks"][0]["verify"] = [
+            {"text": "x", "command": ["echo", "tampered"]}]
         with open(self.plan_path, "w") as f:
             json.dump(plan, f)
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 2)
@@ -318,10 +295,11 @@ class GitTests(unittest.TestCase):
         self.root = repo()
         payload = {"tasks": [{"id": "T1", "verify": [{"text": "x", "command": ["true"]}],
                               "depends_on": []}]}
-        path, sha = write_plan({"_type": "x", "predicate": {"payload": payload}})
-        st = C.State.new(root=self.root, run_id=C.new_run_id(), plan=payload,
-                         plan_envelope=path, plan_sha256=sha, grant_id="g",
-                         run_branch="factory/p", base_branch="main", budget={})
+        st, path = new_run(self.root, payload)
+        with open(path) as f:  # a real task-plan/v1 envelope: the tasks are in its payload
+            doc = json.load(f)
+        self.assertEqual(doc["predicateType"], C.TASK_PLAN_KIND)
+        self.assertNotIn("tasks", doc)
         C.main(["start", "T1", "--root", self.root])
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
         self.assertEqual(self.task(st)["verify_runs"][0]["command"], ["true"])
