@@ -33,7 +33,7 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `merge <task>` | `MERGE: <task> <sha>` | 0; 3 conflict or no commits (parked), or stop; 2 refused |
 | `park <task> --reason R` | `PARK: <task> <reason>` | 0; 2 refused |
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
-| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [reason=…] [question=…]` per task, the budget line, the budget note | 0 |
+| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review), the budget line, the budget note | 0 |
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then `READY: <ids>` | 0; 3 still stopped or gate asks; 2 finished |
 | `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `FINISH: <envelope>`, then any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 a remote step asked, failed or is pending; 2 refused |
 
@@ -108,7 +108,9 @@ sha256 recorded at `init`; state.json is never the source of the commands. Then:
 
 A pass prints `VERIFY: <task> pass <verified_head>`, records that sha, moves the task to
 `reviewing` and spends a reviewer dispatch. The reviewer must judge exactly that commit:
-`git -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv <run_branch>...<verified_head>`. A
+`git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<verified_head>`.
+Those flags neutralise the known config, attribute and replace-ref tricks; the §7a assumptions
+still apply, because the repository it reads is the executor's. A
 fail spends a repair dispatch, or parks the task (`verify_red_after_repairs`,
 `budget_dispatches`). A task with no runnable command parks with `unrunnable-verify`.
 
@@ -124,7 +126,10 @@ that sha (otherwise the task goes back to `verifying`, exit 2), and the root on 
 clean, with no merge in progress. The `--no-ff` merge of the pinned sha runs in an isolated
 clone; the root then fetches the merge commit and fast-forwards to it. On success the worktree
 and task branch are removed. A task whose verified commit adds nothing to the run branch parks
-`no-commits` (exit 3), because retrying could not change that. A conflict parks the task `merge-conflict`, leaves the root
+`no-commits` (exit 3), because retrying could not change that. If a merge commit whose second
+parent is the pinned sha is already on the run branch's first-parent line (a crash hit between
+the root's fast-forward and saving state), `merge` records that commit, logs `merge` with
+`recovered: true`, removes the worktree and exits 0. A conflict parks the task `merge-conflict`, leaves the root
 untouched and keeps the worktree. A root that moved during the merge, or a merge that is not a
 two-parent merge of the expected commits, parks `merge-inconsistent` and stops the run with
 `new_human_decision`.
@@ -150,7 +155,10 @@ with its `STOP:` line. It logs a `resume` event.
   (`assets/schemas/run-result.v1.json`) carries each task's status, verify runs in the plan's own
   `{python}` form, review, merge commit, park reason and question, plus the stop, the budget and
   its note, and the worktrees kept for a human. `log_sha256` is the digest of the log's first
-  `log_bytes` bytes, which end with the `finish` event. There is one passed `verify:<task>`
+  `log_bytes` bytes, which end with the `finish` event. An exit 2 here writes nothing: the plan
+  envelope no longer matches its pinned sha256, the grant file is gone, or a task is in flight
+  on a run that is not stopped. Report it and stop; a human must restore the plan or the
+  grant. There is one passed `verify:<task>`
   assertion per proven task, carrying that task's first verify command.
 - **Push.** It gates `push_branch`, then runs `--push-cmd`, by default
   `["git","push","-u","origin","{run_branch}"]`, only while the root is on the run branch. The
@@ -222,9 +230,9 @@ after its grant expired asks and stays stopped until a new grant covers it, or e
 | Status | What to do |
 |---|---|
 | `running` | dispatch the executor brief again into the existing worktree; do not run `start` |
-| `verifying` | `conductor verify <task>` |
+| `verifying` | a repair was in flight: read `state.json` without writing it. If `tasks.<task>.review.verdict` is `fail`, send the executor `tasks.<task>.review.detail`; otherwise send the failing commands and tails from `tasks.<task>.verify_runs`. Dispatch it into the existing worktree, then `conductor verify <task>` on its report |
 | `reviewing`, `tasks.<task>.review` null | dispatch a reviewer on the `verified_head` that `status` shows |
-| `reviewing`, review pass recorded | `conductor merge <task>` |
+| `reviewing`, review pass recorded | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
 
 These re-dispatches are not counted in `max_dispatches`: the tool counts only the dispatches
 that `start`, `verify` and `review` record. A task that stays stuck after that is parked

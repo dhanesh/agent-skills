@@ -862,6 +862,17 @@ class Task6FixTests(unittest.TestCase):
         _, out, _ = self.run_main(["status", "--root", self.root])
         self.assertIn("STATUS: T1 reviewing verified_head=%s" % head, out.splitlines())
 
+    def test_status_hides_a_sha_the_reviewer_rejected(self):
+        # round 2, N5: verified_head= means "the commit to review", so only reviewing shows it
+        self.assertEqual(self.make()[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        self.run_main(["verify", "T1", "--root", self.root])
+        self.run_main(["review", "T1", "--verdict", "fail", "--root", self.root])
+        _, out, _ = self.run_main(["status", "--root", self.root])
+        self.assertIn("STATUS: T1 verifying", out.splitlines())
+        self.assertNotIn("verified_head=", out)
+
     def test_repairs_default_to_two_and_status_shows_it(self):
         self.assertEqual(self.make()[0], 0)
         self.assertEqual(self.st().budget["max_repairs_per_task"], 2)

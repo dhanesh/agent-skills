@@ -69,7 +69,9 @@ escapes that). A stopped run refuses start,
 verify, review and merge with STOP: <reason>. `merge` merges
 that pinned sha, never the branch name, and refuses if the branch has moved. `merge` needs a passing verify and a passing review,
 and the run branch checked out, clean, at --root. A task with no commit of its own parks
-with no-commits (exit 3): retrying could never change that. The --no-ff merge runs in an
+with no-commits (exit 3): retrying could never change that. A merge of the pinned sha already on
+the run branch's first-parent line (a crash between the root's fast-forward and saving state)
+is recorded as proven, logged with recovered: true, and exits 0. The --no-ff merge runs in an
 isolated clone (<run>/merge/<task>-<sha>, no inherited config, attributes, merge
 drivers or hooks); the root then fetches that merge commit and fast-forwards to
 it, and merge_commit records that sha. It then removes the worktree and deletes
@@ -975,7 +977,8 @@ def cmd_status(args):
     for tid in st.order:
         t = st.tasks[tid]
         line = "STATUS: %s %s" % (tid, t["status"])
-        if t.get("verified_head") and t["status"] != "proven":
+        # Only the commit awaiting review: a rejected or parked sha is not shown.
+        if t.get("verified_head") and t["status"] == "reviewing":
             line += " verified_head=%s" % t["verified_head"]
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
@@ -1545,6 +1548,11 @@ def cmd_merge(args):
         return 2
     if not _gated(st, "local_reversible"):
         return 3
+    recovered = _existing_merge(st, before, pinned)
+    if recovered:
+        # A crash between the root's fast-forward and st.save() left this task's merge in
+        # the run branch: record it rather than merging again (or parking no-commits).
+        return _merged(st, args.task, t, recovered, pinned, recovered=True)
     # The merge itself runs in an isolated clone (no shared config, attributes, merge
     # drivers or grafts), and the root only fast-forwards to its result.
     clone, why = _isolated_clone(st, MERGE_DIR, "%s-%s" % (args.task, pinned[:12]),
@@ -1576,17 +1584,38 @@ def cmd_merge(args):
             return _park_and_stop(st, args.task, "merge-inconsistent")
     finally:
         _remove_clone(st, clone)
-    st.set_status(args.task, "proven", merge_commit=sha)
+    return _merged(st, args.task, t, sha, pinned)
+
+
+def _merged(st, task, t, sha, pinned, recovered=False):
+    """Record task as proven by merge commit sha, log it, drop its worktree and branch."""
+    st.set_status(task, "proven", merge_commit=sha)
     st.save()
-    st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"],
-           verified_head=pinned)
+    extra = {"recovered": True} if recovered else {}
+    st.log("merge", task=task, ok=True, commit=sha, branch=t["branch"],
+           verified_head=pinned, **extra)
     cleaned, r = _git_ok(st.root, "worktree", "remove", "--force", t["worktree"])
     if cleaned:
         cleaned, r = _git_ok(st.root, "branch", "-D", t["branch"])
     if not cleaned:
         sys.stderr.write("merged, but cleanup failed: %s\n" % _git_err(r))
-    print("MERGE: %s %s" % (args.task, sha))
+    print("MERGE: %s %s" % (task, sha))
     return 0
+
+
+def _existing_merge(st, head, pinned):
+    """The merge commit on the run branch's first-parent line (from head) whose second
+    parent is pinned, or None. It exists only when an earlier merge of this task reached
+    the root and the conductor crashed before recording it. A task with no commits of its
+    own has pinned on the first-parent line itself, never as a second parent."""
+    ok, r = _git_ok(st.root, "rev-list", "--first-parent", "--merges", "--parents", head)
+    if not ok:
+        return None
+    for line in r.stdout.splitlines():
+        shas = line.split()
+        if len(shas) == 3 and shas[2] == pinned:
+            return shas[0]
+    return None
 
 
 def _merge_identity(root):

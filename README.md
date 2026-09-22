@@ -124,7 +124,7 @@ skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked enve
 covers chosen action classes, on branches matching a pattern, for at most 7 days. Five skills honour it:
 `spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
 `test-safety-net` each call `check-grant` before falling back to their own ask, and
-`factory-conductor` calls it before every step of an unattended run.
+`factory-conductor` calls it before every consequential step of an unattended run.
 
 What a grant can and cannot do:
 

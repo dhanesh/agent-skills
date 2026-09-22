@@ -141,7 +141,9 @@ then run `conductor finish`: it is how a stopped run ends, and it parks any task
 as `in_flight_at_stop`. A `GATE: ASK`, or `REMOTE: pending …` (exit 3), means the grant does
 not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
 steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line means the push or
-the PR command failed: report its stderr, and retry at most once. Once finished, the run is
+the PR command failed: report its stderr, and retry at most once. An exit 2 from `finish` (for
+example, the plan envelope was edited after `init`, or the grant file is gone) means report its
+stderr and stop: a human must restore the plan or the grant. Once finished, the run is
 final: `finish` reprints its `FINISH:` line, `--retry-remote` still runs pending steps, every
 other command except `status` and `gate` refuses (exit 2), and `init` starts a new run.
 
@@ -158,10 +160,16 @@ the run again, and no other stop. Then run `conductor status` and pick up each i
 by its status:
 
 - `running`: dispatch the executor brief again into the existing worktree; do not run `start`;
-- `verifying`: run `conductor verify <task>`;
+- `verifying`: a verify or review failed and a repair was in flight. Read `state.json`
+  (read only): if `tasks.<task>.review.verdict` is `fail`, the last failure was the review,
+  so send the executor `tasks.<task>.review.detail`; otherwise send it the failing commands and
+  the `stdout_tail`/`stderr_tail` from `tasks.<task>.verify_runs`. Dispatch the executor with
+  that into the existing worktree, then run `conductor verify <task>` on its report;
 - `reviewing` with no review recorded (`tasks.<task>.review` is null in `state.json`):
   dispatch a reviewer on the `verified_head` that `status` shows;
-- `reviewing` with a review pass recorded: run `conductor merge <task>`.
+- `reviewing` with a review pass recorded: run `conductor merge <task>`. If a crash hit
+  after the merge reached the run branch, `merge` finds that merge, records the task as proven
+  and prints `MERGE:` as usual.
 
 These re-dispatches are not counted in `max_dispatches`: the tool counts only what `start`,
 `verify` and `review` record.
@@ -196,9 +204,11 @@ Concerns: <none, or one line each; for NEEDS_DECISION the question; for BLOCKED 
 
 ## The reviewer brief
 
-`<sha>` is the commit from `VERIFY: <task> pass <sha>`. The diff command switches off external
-diff drivers, text conversion, fsmonitor and hooks, so settings planted in the shared git config
-cannot change what the reviewer reads.
+`<sha>` is the commit from `VERIFY: <task> pass <sha>`. The diff command ignores replace refs
+and switches off external diff drivers, text conversion, binary attributes, colour, fsmonitor
+and hooks. That neutralises the known config, attribute and replace-ref tricks an executor could
+plant in the shared git directory; the §7a assumptions in "What the proof is worth" still
+apply.
 
 ```text
 You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
@@ -206,7 +216,7 @@ dispatch subagents or edit any file.
 
 Task: <title>; requirement: <requirement text>
 Constraints: <the plan's constraints; the grant's decisions and defaults>
-Diff: <output of git -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv <run_branch>...<sha>>
+Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>>
 
 Answer two questions about the diff:
 1. Does it satisfy the requirement?
@@ -277,8 +287,8 @@ tamper with the git object store, commit code that reads its uncommitted files b
 from outside the verify checkout, or leave a process running after a verify by escaping its
 process group with `setsid()`. Push-destination settings in the shared git config can redirect
 where a push goes, though not which branch it updates, and the push is not forced. The
-reviewer's diff runs under the same assumptions: its flags close the known config tricks, but
-the repository it reads is the executor's. The conductor closes the cheap routes: verify and
+reviewer's diff runs under the same assumptions: its flags neutralise the known config,
+attribute and replace-ref tricks, but the repository it reads is the executor's. The conductor closes the cheap routes: verify and
 merge run in isolated clones without the repository's config, hooks or filters, and every
 conductor git call runs with hooks switched off, so the user's own pre-push hooks do not run on
 the push either. The rest is covered by the independent reviewer and by CI re-running the checks

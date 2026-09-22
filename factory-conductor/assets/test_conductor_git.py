@@ -254,6 +254,31 @@ class GitTests(unittest.TestCase):
         self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), before)
         self.assertTrue(os.path.isdir(self.wt(st)))
 
+    def test_a_crash_after_the_root_fast_forward_is_recovered_as_proven(self):
+        # Task 6 round 2, N4: merge fast-forwards the root, then saves state. A crash
+        # between the two leaves the merge in the run branch and the task reviewing;
+        # the next merge must record that merge, not park the work as no-commits.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        pinned = self.task(st)["verified_head"]
+        subprocess.run(["git", "-C", self.root, "merge", "-q", "--no-ff", "--no-edit", pinned],
+                       check=True, env=dict(os.environ, **GIT))
+        crashed = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        self.assertIn("MERGE: T1 %s" % crashed, out.getvalue())
+        t = self.task(st)
+        self.assertEqual((t["status"], t["merge_commit"], t["park_reason"]),
+                         ("proven", crashed, None))
+        self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), crashed)
+        self.assertFalse(os.path.isdir(t["worktree"]))
+        ev = [json.loads(l) for l in open(st.log_path) if '"merge"' in l]
+        self.assertTrue(ev[-1].get("recovered"))
+        self.assertEqual(ev[-1]["commit"], crashed)
+
     def test_merge_is_a_two_parent_commit_of_the_verified_head(self):
         st = self.state()
         C.main(["start", "T1", "--root", self.root])
