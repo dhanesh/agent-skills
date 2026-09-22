@@ -202,6 +202,10 @@ REQUIRED_KEYS = ("root", "run_id", "plan_envelope", "plan_sha256", "grant_id",
                  "run_branch", "base_branch", "created_at", "tasks", "order")
 
 
+# Copied (not imported — skills stay self-contained) into
+# spec-first-planning/assets/spec_to_tasks.py's own waves(), for that skill's
+# --waves output. That copy sorts task ids numerically (key=lambda t: int(t[1:]),
+# so T10 sorts after T2); this one still uses a plain sorted() below.
 def waves(tasks):
     """Group task ids into waves. Every id in a wave is independent of the others."""
     for k, t in tasks.items():

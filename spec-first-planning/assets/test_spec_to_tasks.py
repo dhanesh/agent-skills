@@ -66,6 +66,26 @@ UNCOVERED = GOOD.replace(
     "",
 )
 
+# R1 -> T1 (no deps); R2, R3 both [after: R1] -> T2, T3; R4 [after: R2, R3] -> T4.
+# A diamond: wave 1 = [T1], wave 2 = [T2, T3], wave 3 = [T4].
+DIAMOND = textwrap.dedent(
+    """\
+    # Spec: diamond
+
+    ## Requirements
+    - R1: The base step must run first.
+    - R2: The second step must run after the base step. [after: R1]
+    - R3: The third step must run after the base step. [after: R1]
+    - R4: The final step must run after both prior steps. [after: R2, R3]
+
+    ## Acceptance criteria
+    - R1: run `true`, expect exit 0.
+    - R2: run `true`, expect exit 0.
+    - R3: run `true`, expect exit 0.
+    - R4: run `true`, expect exit 0.
+    """
+)
+
 
 class TestDerivePlan(unittest.TestCase):
     def test_full_coverage(self):
@@ -322,8 +342,8 @@ class TestEnvelope(unittest.TestCase):
         with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
 
-    def test_skill_version_is_2_0_0(self):
-        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.0.0")
+    def test_skill_version_is_2_1_0(self):
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.1.0")
 
 
 class TestOptionalPayloadFields(unittest.TestCase):
@@ -420,6 +440,112 @@ class TestRequiredTruthsWellFormed(unittest.TestCase):
 
     def test_payload_errors_accepts_a_well_formed_truth(self):
         self.assertEqual(spec_to_tasks.payload_errors(self._truth()), [])
+
+
+class TestDependsOn(unittest.TestCase):
+    def test_after_hint_becomes_depends_on_mapped_to_covering_task(self):
+        plan = spec_to_tasks.derive_plan(DIAMOND)
+        t2 = [t for t in plan["tasks"] if t["id"] == "T2"][0]
+        t4 = [t for t in plan["tasks"] if t["id"] == "T4"][0]
+        self.assertEqual(t2["depends_on"], ["T1"])
+        self.assertEqual(t4["depends_on"], ["T2", "T3"])
+
+    def test_after_hint_stripped_from_title(self):
+        plan = spec_to_tasks.derive_plan(DIAMOND)
+        t2 = [t for t in plan["tasks"] if t["id"] == "T2"][0]
+        self.assertNotIn("[after:", t2["title"])
+        self.assertIn("second step", t2["title"])
+
+    def test_no_hints_omits_depends_on(self):
+        plan = spec_to_tasks.derive_plan(GOOD)
+        for t in plan["tasks"]:
+            self.assertNotIn("depends_on", t)
+
+    def test_existing_fixture_json_is_byte_identical(self):
+        # depends_on is omitted whenever a requirement carries no [after:] hint,
+        # which keeps a plan derived from a pre-existing spec byte-identical.
+        out = spec_to_tasks.to_json(spec_to_tasks.derive_plan(GOOD))
+        self.assertEqual(
+            sorted(out["tasks"][0].keys()),
+            ["id", "requirement_ids", "title", "verify", "where"],
+        )
+
+    def test_json_output_carries_depends_on(self):
+        out = spec_to_tasks.to_json(spec_to_tasks.derive_plan(DIAMOND))
+        t2 = [t for t in out["tasks"] if t["id"] == "T2"][0]
+        self.assertEqual(t2["depends_on"], ["T1"])
+
+    def test_payload_carries_depends_on_and_is_valid(self):
+        payload = spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(DIAMOND), "docs/spec.md")
+        t4 = [t for t in payload["tasks"] if t["id"] == "T4"][0]
+        self.assertEqual(t4["depends_on"], ["T2", "T3"])
+        self.assertEqual(spec_to_tasks.payload_errors(payload), [])
+
+    def test_payload_errors_flags_bad_depends_on(self):
+        bad = {"title": "x", "spec": "s", "coverage": {}, "uncovered": [],
+               "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "t",
+                          "verify": [{"text": "x", "command": None}], "depends_on": "T0"}]}
+        self.assertTrue(spec_to_tasks.payload_errors(bad))
+
+
+class TestWaves(unittest.TestCase):
+    def test_diamond_gives_three_waves(self):
+        plan = spec_to_tasks.derive_plan(DIAMOND)
+        tasks_by_id = {t["id"]: {"depends_on": t.get("depends_on") or []} for t in plan["tasks"]}
+        self.assertEqual(spec_to_tasks.waves(tasks_by_id), [["T1"], ["T2", "T3"], ["T4"]])
+
+    def test_no_hints_gives_one_wave(self):
+        plan = spec_to_tasks.derive_plan(GOOD)
+        tasks_by_id = {t["id"]: {"depends_on": t.get("depends_on") or []} for t in plan["tasks"]}
+        self.assertEqual(spec_to_tasks.waves(tasks_by_id), [["T1", "T2", "T3"]])
+
+    def test_waves_orders_ids_numerically_not_lexicographically(self):
+        tasks = {"T2": {"depends_on": []}, "T10": {"depends_on": []}}
+        self.assertEqual(spec_to_tasks.waves(tasks), [["T2", "T10"]])
+
+    def test_waves_raises_planerror_on_cycle(self):
+        tasks = {"T1": {"depends_on": ["T2"]}, "T2": {"depends_on": ["T1"]}}
+        with self.assertRaises(spec_to_tasks.PlanError):
+            spec_to_tasks.waves(tasks)
+
+    def test_critical_path_diamond(self):
+        plan = spec_to_tasks.derive_plan(DIAMOND)
+        tasks_by_id = {t["id"]: {"depends_on": t.get("depends_on") or []} for t in plan["tasks"]}
+        self.assertEqual(spec_to_tasks.critical_path(tasks_by_id), ["T1", "T2", "T4"])
+
+    def test_critical_path_with_no_dependencies_is_a_single_task(self):
+        plan = spec_to_tasks.derive_plan(GOOD)
+        tasks_by_id = {t["id"]: {"depends_on": t.get("depends_on") or []} for t in plan["tasks"]}
+        self.assertEqual(spec_to_tasks.critical_path(tasks_by_id), ["T1"])
+
+
+class TestWavesCli(unittest.TestCase):
+    def _run(self, content, *flags):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "spec.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spec_to_tasks.py")
+            return subprocess.run([sys.executable, script, path, *flags],
+                                  capture_output=True, text=True, timeout=30)
+
+    def test_waves_prints_lines_and_exits_0(self):
+        r = self._run(DIAMOND, "--waves")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WAVE 1: T1", r.stdout)
+        self.assertIn("WAVE 2: T2 T3", r.stdout)
+        self.assertIn("WAVE 3: T4", r.stdout)
+        self.assertIn("CRITICAL_PATH: T1 -> T2 -> T4", r.stdout)
+        self.assertIn("WAVES_RESULT: PASS (3 wave(s))", r.stdout)
+
+    def test_waves_cycle_exits_nonzero(self):
+        # R2 after R1 AND R4, while R4 is after R2 and R3: T2 <-> T4 is a real
+        # depends_on cycle (spec_lint's own [after:] cycle rule would also
+        # reject this spec at lint time, but --waves never calls the linter).
+        cyclic = DIAMOND.replace("[after: R1]", "[after: R1, R4]", 1)
+        r = self._run(cyclic, "--waves")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("ERROR:", r.stderr)
 
 
 if __name__ == "__main__":

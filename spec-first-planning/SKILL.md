@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.0.0"
+  version: "2.1.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -58,7 +58,10 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
   Decisions; those are required only when that loop runs.
 - **The plan** — one or more tasks per requirement, each carrying *what* to change, *where*
   (files/areas if known — the spec's `[where: ...]` hints pre-fill this), and *verify* (the
-  acceptance criterion turned into a check the implementer can actually run). The
+  acceptance criterion turned into a check the implementer can actually run). A requirement
+  can also carry `[after: R2, R3]`, naming the other requirements it must follow; the
+  compiler turns that into the task's `depends_on` and can schedule the whole plan into
+  waves with `--waves`. The
   requirement↔task coverage map MUST be total in both directions: every requirement covered,
   every task traceable to a requirement.
 
@@ -116,7 +119,12 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    machine-readable handoff). The compiler seeds one task per requirement with its verify
    steps attached. Now review with the user: split tasks that are too big (keep them pointing
    at their requirement id), fill in the Where fields you know, and order tasks by
-   dependency — the compiler emits requirement order, which is rarely build order.
+   dependency — the compiler emits requirement order, which is rarely build order. Where you
+   already know the build order, put it in the spec as `[after: R2, R3]` hints instead of
+   ordering by hand: the compiler turns them into each task's `depends_on`, and
+   `python3 "$SKILL_DIR/assets/spec_to_tasks.py" <spec.md> --waves` prints the resulting
+   waves and the critical path — feed either straight to factory-conductor or a loop built
+   with crafting-self-prompting-loops.
 5. **Verify coverage, then hand off.** The compiler's coverage map is the gate: any
    `UNCOVERED:` line or non-zero exit means a requirement has no task that proves it — repair
    the spec (usually a missing acceptance criterion) or the plan and re-derive until

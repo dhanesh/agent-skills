@@ -16,6 +16,10 @@ references/spec-template.md. This linter enforces the mechanical half of
      bound like <= / >=).
   5. Every requirement has at least one acceptance criterion referencing
      its id; criteria may not reference unknown ids.
+  5a. An optional trailing `[after: Rn, ...]` hint on a requirement must
+      name known requirement ids, and the after-hints as a whole must not
+      contain a cycle (message: "after: hints have a cycle"). spec_to_tasks.py
+      turns a clean hint into the derived task's `depends_on`.
   6-9. (always on, the Constrain + Anchor light pass) Constraints are typed
      bullets; every required truth has a known status, parent, constraint
      mapping, requirements and a runnable check, and traces back to OUTCOME;
@@ -131,6 +135,11 @@ _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
 _RID_PREFIX_RE = re.compile(r"^(?:\*\*)?R(\d+)(?:\*\*)?\s*[:.]\s*(.*)$")
 _RID_REF_RE = re.compile(r"\bR(\d+)\b")
+
+# A requirement's optional "[after: R2, R3]" hint: which other requirements it
+# must follow. spec_to_tasks.py maps this to the derived task's depends_on.
+AFTER_RE = re.compile(r"\[after:\s*([^\]]+)\]")
+_AFTER_ID_RE = re.compile(r"[Rr](\d+)")
 
 
 def _fields(raw):
@@ -475,6 +484,10 @@ def parse_spec(text):
       sections                -- OrderedDict of raw heading -> list of body lines
       requirements            -- list of (number:int, text:str) in document order
       malformed_requirements  -- bullets in Requirements without an R<n> prefix
+      after                   -- dict of number:int -> [number:int, ...], the
+                                  requirement numbers named in that requirement's
+                                  optional "[after: Rn, ...]" hint (empty list when
+                                  the requirement carries no hint)
       criteria                -- list of (text:str, [referenced numbers]) in order
       constraints             -- list of {id, type, text} from ## Constraints
       malformed_constraints   -- bullets in Constraints not matching the grammar
@@ -520,6 +533,11 @@ def parse_spec(text):
         else:
             malformed.append(bullet)
 
+    after = {}
+    for num, rtext in requirements:
+        am = AFTER_RE.search(rtext)
+        after[num] = [int(n) for n in _AFTER_ID_RE.findall(am.group(1))] if am else []
+
     # A criterion is OWNED by the requirement in its leading `R<n>:` prefix.
     # `_RID_REF_RE` matches an R<n> token anywhere — in a filename, a command,
     # or prose — so a criterion reading "R1: run `grep R2 fixtures.txt`" used to
@@ -548,6 +566,7 @@ def parse_spec(text):
         "sections": sections,
         "requirements": requirements,
         "malformed_requirements": malformed,
+        "after": after,
         "criteria": criteria,
         "constraints": constraints,
         "malformed_constraints": bad_c,
@@ -583,6 +602,27 @@ def _section_bullets(sections, name):
         if m:
             out.append(m.group(1))
     return out
+
+
+def _after_cycle(after):
+    """True iff the `after` graph (requirement number -> the numbers it must
+    follow) contains a cycle. An id that is not a key of `after` (unknown to
+    the spec) is skipped here — that gets its own issue from the unknown-id
+    check in `lint`, not a cycle report."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in after}
+
+    def visit(n):
+        color[n] = GRAY
+        for m in after.get(n, ()):
+            if m not in color:
+                continue
+            if color[m] == GRAY or (color[m] == WHITE and visit(m)):
+                return True
+        color[n] = BLACK
+        return False
+
+    return any(color[n] == WHITE and visit(n) for n in after)
 
 
 def lint(text, mode="light"):
@@ -671,6 +711,18 @@ def lint(text, mode="light"):
                 "R%d has no acceptance criterion — add at least one "
                 "'- R%d: <runnable check>' line" % (num, num)
             )
+
+    # 5a. [after: ...] hints: every id named must be a known requirement, and
+    # the after-graph among requirements must not contain a cycle.
+    after = spec["after"]
+    for num, refs in after.items():
+        for ref in refs:
+            if ref not in known:
+                issues.append(
+                    "R%d [after: ...] names unknown requirement R%d" % (num, ref)
+                )
+    if _after_cycle(after):
+        issues.append("after: hints have a cycle")
 
     # 6-9. Constrain + Anchor light pass: typed constraints, required truths,
     # and traceability from constraint to RT to requirement (always on).

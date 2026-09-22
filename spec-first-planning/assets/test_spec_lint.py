@@ -69,6 +69,34 @@ class TestParse(unittest.TestCase):
         self.assertEqual(len(spec["criteria"]), 3)
         self.assertEqual(spec["criteria"][1][1], [2])
 
+    def test_no_after_hint_gives_empty_lists(self):
+        spec = spec_lint.parse_spec(GOOD)
+        self.assertEqual(spec["after"], {1: [], 2: [], 3: []})
+
+    def test_after_hint_parses_to_ints(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+
+    def test_after_hint_comma_separated_list_parses_in_order(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R1, R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [1, 2])
+
+    def test_after_hint_matches_r_case_insensitively(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: r2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+
 
 class TestLint(unittest.TestCase):
     def assertIssue(self, issues, needle):
@@ -162,6 +190,30 @@ class TestLint(unittest.TestCase):
     def test_deterministic_issue_order(self):
         bad = GOOD.replace("must offer", "offers").replace("must contain", "contains")
         self.assertEqual(spec_lint.lint(bad), spec_lint.lint(bad))
+
+    def test_after_hint_valid_is_clean(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2]",
+        )
+        self.assertEqual(spec_lint.lint(ok), [])
+
+    def test_after_hint_unknown_requirement_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R9]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "unknown requirement R9")
+
+    def test_after_hint_cycle_fails(self):
+        bad = GOOD.replace(
+            '- R1: The report page must offer a "Download CSV" action for every saved report.',
+            '- R1: The report page must offer a "Download CSV" action for every saved report. [after: R2]',
+        ).replace(
+            "- R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order.",
+            "- R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order. [after: R1]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "after: hints have a cycle")
 
 
 LIGHT = """# Spec: Export
