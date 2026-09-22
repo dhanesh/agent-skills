@@ -33,11 +33,20 @@ name must match branch_pattern too), checks it out in the root and writes the st
 `start`, `merge` and `resume` re-run check-grant before they act and proceed ONLY on
 exit 0; an ASK prints GATE: ASK <reason>, stops the run with grant_ask and exits 3.
 `resume` lifts a grant_ask stop once a grant covers the run again; no other stop.
+`verify` is gated too. Later gates ask whether *some* grant covers this plan now: they
+do not pin the grant id read at `init`, so a newer grant a same-user process writes for
+the same plan would cover the run (a residual under spec section 7a). A git older than
+2.31 fails every gate closed (GATE: ASK reason=git-too-old).
 
-Budgets (the grant's `budget`, overridden key by key by --budget): wall_clock_min
-(from init), max_dispatches (a cap on starts; tasks in flight may still finish),
-max_repairs_per_task (every failing verify after the first is a repair; at the cap the
-task parks with verify_red_after_repairs) and max_parallel (default 2) are enforced.
+Budgets (the grant's `budget`; --budget may only tighten a key the grant sets, or add
+one it does not; unknown keys in the grant are warned about, logged and dropped):
+wall_clock_min (from init; checked by next, start, verify, review and merge),
+max_dispatches (one per executor start, per repair send-back after a failing verify or
+review, and per reviewer after a passing verify; a task that needs a dispatch past the
+cap parks with budget_dispatches), max_repairs_per_task (every failing verify or review
+after the first is a repair; at the cap the task parks with verify_red_after_repairs)
+and max_parallel (default 2; start refuses past it, next --max is clamped to it) are
+enforced.
 max_tokens and max_usd are recorded and reported, not enforced: the runtime does not
 expose usage to this tool. `next` stops the run (STOP: <reason>, exit 3) on, in order,
 budget_wall_clock, budget_dispatches, no_ready_tasks. `decision` parks a task with
@@ -108,7 +117,7 @@ TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-pl
 ACTIVE = ("running", "verifying", "reviewing")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
                "verify_runs", "verified_head", "review", "merge_commit", "park_reason",
-               "verify_failures", "question")
+               "failures", "question")
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported, never enforced: the runtime does not expose usage to this tool.
 BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
@@ -580,11 +589,39 @@ def _load_current(root):
 
 
 # ── Gates: every consequential action asks the vendored checker first ───────
+MIN_GIT = (2, 31)  # GIT_CONFIG_COUNT, which carries the hardening into the checker's git
+_GIT_VERSION = []
+
+
+def parse_git_version(text):
+    """(major, minor, patch) from `git --version` output, or None."""
+    m = re.search(r"\bgit version (\d+)\.(\d+)(?:\.(\d+))?", text or "")
+    return None if not m else (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def git_version():
+    """The installed git's version, read once per process; None when unknown."""
+    if not _GIT_VERSION:
+        try:
+            r = subprocess.run(["git", "--version"], capture_output=True, text=True,
+                               timeout=30, env=git_env())
+            _GIT_VERSION.append(parse_git_version(r.stdout))
+        except (OSError, subprocess.SubprocessError):
+            _GIT_VERSION.append(None)
+    return _GIT_VERSION[0]
+
+
 def gate(root, action, subject=None):
     """Run the vendored `contract_check.py check-grant --root <root> --action <action>`
     (and `--subject <subject>` when given). Returns (exit code, last stdout line).
 
-    A caller proceeds ONLY on exit 0. A checker that cannot run is an ASK."""
+    A caller proceeds ONLY on exit 0. A checker that cannot run is an ASK, and so is a
+    git older than 2.31 (or of unknown version): it would silently ignore the
+    GIT_CONFIG_COUNT hardening the checker's own git calls rely on."""
+    v = git_version()
+    if v is None or v < MIN_GIT:
+        return 3, "GRANT: ASK reason=git-too-old (need git >= %d.%d, found %s)" % (
+            MIN_GIT + (".".join(map(str, v)) if v else "unknown",))
     checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "contract_check.py")
     argv = [sys.executable, "-I", checker, "check-grant", "--root", root, "--action", action]
     if subject is not None:
@@ -783,14 +820,27 @@ def cmd_init(args):
         print("GATE: ASK id=%s reason=run-branch" % gid)
         return _init_fail("the run branch %s would not match the grant's branch_pattern %r;"
                           " the grant does not cover this run" % (run_branch, pattern), 3)
-    budget = {"max_parallel": DEFAULT_PARALLEL}
+    granted = grant.get("budget") or {}
+    if not isinstance(granted, dict):
+        return _init_fail("invalid budget: the grant's budget is not an object")
+    # An unknown key in the human-approved grant is warned about, logged and dropped (a
+    # grant written by another tool may carry more); a known key with a bad value fails.
+    unknown = sorted(set(granted) - set(BUDGET_KEYS))
+    granted = {k: v for k, v in granted.items() if k in BUDGET_KEYS}
+    if unknown:
+        sys.stderr.write("warning: the grant's budget has unknown key(s) %s; they are ignored\n"
+                         % ", ".join(unknown))
     try:
-        check_budget(grant.get("budget") or {})
-        budget.update(grant.get("budget") or {})
-        budget.update(extra)
-        check_budget(budget)
+        check_budget(granted)  # before comparing: a bad grant value fails, never raises
+        looser = sorted(k for k in extra if k in granted and extra[k] > granted[k])
+        if looser:
+            raise PlanError("--budget cannot loosen the grant's budget: %s" % ", ".join(
+                "%s %r > %r" % (k, extra[k], granted[k]) for k in looser))
     except PlanError as e:
         return _init_fail("invalid budget: %s" % e)
+    budget = {"max_parallel": DEFAULT_PARALLEL}
+    budget.update(granted)
+    budget.update(extra)  # only ever tighter than the grant, or a key it does not set
     exists, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % run_branch)
     if exists:
         return _init_fail("the run branch %s already exists; finish or delete it first"
@@ -807,6 +857,8 @@ def cmd_init(args):
         _git_ok(root, "branch", "-D", run_branch)
         return _init_fail("cannot create the run under %s: %s" % (root, e))
     st.log("gate", action="local_reversible", ok=True, result=last, exit=rc)
+    if unknown:
+        st.log("budget_warning", grant=gid, unknown_keys=unknown)
     print("RUN: %s" % st.run_id)
     return 0
 
@@ -822,7 +874,8 @@ def cmd_next(args):
     reason = check_stop(st)
     if reason:
         return _record_stop(st, reason)
-    ready = st.ready(st.max_parallel() if args.max is None else args.max)
+    cap = st.max_parallel() if args.max is None else min(args.max, st.max_parallel())
+    ready = st.ready(cap)
     left = _dispatches_left(st)
     if left is not None:
         ready = ready[:left]
@@ -946,19 +999,24 @@ def cmd_start(args):
     if args.task not in st.ready(len(st.tasks)):
         sys.stderr.write("task %s is not ready: a dependency is not proven\n" % args.task)
         return 2
+    active = sum(1 for x in st.tasks.values() if x["status"] in ACTIVE)
+    if active >= st.max_parallel():
+        sys.stderr.write("parallel limit reached: %d task(s) in flight, max_parallel is %d; "
+                         "%s is not started\n" % (active, st.max_parallel(), args.task))
+        return 2
     reason = _wall_clock_stop(st)
     if reason:
         return _record_stop(st, reason)
     if _dispatches_left(st) == 0:
         if not _in_flight(st):
             return _record_stop(st, "budget_dispatches")
-        # Tasks in flight may still verify, review and merge: refuse only this dispatch.
-        sys.stderr.write("the dispatch budget (%d) is spent; %s is not started, and the tasks "
-                         "in flight may still finish\n" % (st.budget["max_dispatches"], args.task))
+        # Tasks in flight may still verify, review and merge: refuse only this dispatch;
+        # `next` records the stop once nothing is in flight.
+        sys.stderr.write("dispatch budget spent; finish in-flight tasks (max_dispatches %d); "
+                         "%s is not started\n" % (st.budget["max_dispatches"], args.task))
         st.log("dispatch_refused", task=args.task, reason="budget_dispatches",
                dispatches=st.dispatches)
-        print("STOP: budget_dispatches")
-        return 3
+        return 2
     if not _gated(st, "local_reversible"):
         return 3
     wt = os.path.join(st.dir, WT_DIR, args.task)
@@ -970,7 +1028,8 @@ def cmd_start(args):
     st.set_status(args.task, "running", worktree=wt, branch=branch)
     st.dispatches += 1
     st.save()
-    st.log("dispatch", task=args.task, branch=branch, worktree=wt, dispatches=st.dispatches)
+    st.log("dispatch", task=args.task, kind="executor", branch=branch, worktree=wt,
+           dispatches=st.dispatches)
     print("START: %s %s" % (args.task, wt))
     return 0
 
@@ -1150,10 +1209,15 @@ def cmd_verify(args):
     st, t = _load_task(args, ("running", "verifying"))
     if st is None:
         return 2
+    reason = _wall_clock_stop(st)
+    if reason:
+        return _record_stop(st, reason)
     steps, why = _pinned_verify(st, args.task)
     if why:
         sys.stderr.write("cannot verify %s: %s\n" % (args.task, why))
         return 2
+    if not _gated(st, "local_reversible"):
+        return 3
     if not isinstance(steps, list) or not steps or any(
             not isinstance(v, dict) or v.get("command") is None for v in steps):
         _park(st, args.task, "unrunnable-verify")
@@ -1204,8 +1268,9 @@ def cmd_verify(args):
                      for r in runs])
     print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
     if not passed:
-        _park_if_out_of_repairs(st, args.task)
-    return 0 if passed else 3
+        _send_back(st, args.task)
+        return 3
+    return 0 if _dispatch(st, args.task, "reviewer") else 3
 
 
 def _verify_refused(st, task, message, reason):
@@ -1216,25 +1281,42 @@ def _verify_refused(st, task, message, reason):
     st.log("verify", task=task, passed=False, reason=reason, commands=[])
     sys.stderr.write("task %s: %s\n" % (task, message))
     print("VERIFY: %s fail" % task)
-    _park_if_out_of_repairs(st, task)
+    _send_back(st, task)
     return 3
 
 
 def _count_failure(st, task):
-    """Count one failing verify. The first failure sends the task to its executor; each
-    failure after it is a repair that did not turn the verify green."""
+    """Count one failing verify or review. The first failure sends the task to its
+    executor; each failure after it is a repair that did not make the task pass."""
     t = st.tasks[task]
-    failures = int(t.get("verify_failures") or 0) + 1
-    t["verify_failures"] = failures
+    failures = int(t.get("failures") or 0) + 1
+    t["failures"] = failures
     t["repairs"] = max(0, failures - 1)
 
 
-def _park_if_out_of_repairs(st, task):
-    """Park with verify_red_after_repairs once repairs reach max_repairs_per_task.
-    Parking never stops the run."""
+def _dispatch(st, task, kind):
+    """Spend one dispatch (kind: executor, repair or reviewer) and log it. When
+    max_dispatches is spent the task parks with budget_dispatches instead: False."""
+    if _dispatches_left(st) == 0:
+        sys.stderr.write("dispatch budget spent (max_dispatches %d): %s needs a %s dispatch\n"
+                         % (st.budget["max_dispatches"], task, kind))
+        _park(st, task, "budget_dispatches")
+        return False
+    st.dispatches += 1
+    st.save()
+    st.log("dispatch", task=task, kind=kind, dispatches=st.dispatches)
+    return True
+
+
+def _send_back(st, task):
+    """After a failing verify or review: park with verify_red_after_repairs once repairs
+    reach max_repairs_per_task, else spend a repair dispatch (parking with
+    budget_dispatches when none is left). Parking never stops the run."""
     cap = st.budget.get("max_repairs_per_task")
     if cap is not None and st.tasks[task]["repairs"] >= cap:
         _park(st, task, "verify_red_after_repairs")
+        return
+    _dispatch(st, task, "repair")
 
 
 def _run_steps(task, steps, checkout):
@@ -1272,15 +1354,23 @@ def cmd_review(args):
     st, t = _load_task(args, ("reviewing",))
     if st is None:
         return 2
+    reason = _wall_clock_stop(st)
+    if reason:
+        return _record_stop(st, reason)
     review = {"verdict": args.verdict, "detail": args.detail, "at": _rfc3339(_now()),
               "verified_head": t.get("verified_head")}
     st.set_status(args.task, "reviewing" if args.verdict == "pass" else "verifying",
                   review=review)
+    if args.verdict != "pass":
+        _count_failure(st, args.task)  # spec section 2.5: the same repair budget
     st.save()
     st.log("review", task=args.task, verdict=args.verdict, detail=args.detail,
            verified_head=t.get("verified_head"))
     print("REVIEW: %s %s" % (args.task, args.verdict))
-    return 0 if args.verdict == "pass" else 3
+    if args.verdict != "pass":
+        _send_back(st, args.task)
+        return 3
+    return 0
 
 
 def cmd_merge(args):
@@ -1293,6 +1383,9 @@ def cmd_merge(args):
     st, t = _load_task(args, ("reviewing",))
     if st is None:
         return 2
+    reason = _wall_clock_stop(st)
+    if reason:
+        return _record_stop(st, reason)
     runs = t.get("verify_runs") or []
     if not runs or not all(r.get("ok") for r in runs):
         sys.stderr.write("task %s has no passing verify\n" % args.task)

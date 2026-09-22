@@ -124,10 +124,16 @@ def write_grant(root, plan, policy=None, minutes=60, now=None, budget=None,
 
 
 def revoke(root):
-    """Revoke the newest grant through the vendored checker's CLI."""
-    subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(C.__file__),
-                                                       "contract_check.py"),
-                    "revoke-grant", "--root", root], check=True, capture_output=True)
+    """Revoke the newest grant (the checker's revoke_grant, as `revoke-grant` runs it).
+
+    The revision is stamped at least one second after the newest grant under root, so
+    a same-second tie with a grant this kit bumped forward can never make ordering
+    depend on the random id."""
+    now = CC.utc_now()
+    newest = _newest_grant_time(root)
+    if newest is not None and newest >= now:
+        now = newest + timedelta(seconds=1)
+    return CC.revoke_grant(root, now=now)
 
 
 def new_run(root, plan, run_branch="factory/p", base_branch="main", budget=None, grant=True):

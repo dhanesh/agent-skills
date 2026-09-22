@@ -67,7 +67,13 @@ class PolicyTests(unittest.TestCase):
     def test_dispatch_budget_stops_the_run(self):
         self.assertEqual(self.init(tasks=TWO_OK, budget={"max_dispatches": 1}), 0)
         self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        # Fix round 1 (M3): with T1 in flight, start refuses (exit 2) without stopping the run
         rc, out = self.out(["start", "T2", "--root", self.root])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("STOP:", out)
+        # once nothing is in flight, next records the stop
+        C.main(["park", "T1", "--reason", "by hand", "--root", self.root])
+        rc, out = self.out(["next", "--root", self.root])
         self.assertEqual(rc, 3)
         self.assertIn("STOP: budget_dispatches", out)
 
@@ -489,20 +495,31 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual(st.stopped["reason"], "budget_wall_clock")
 
     def test_the_dispatch_cap_lets_in_flight_work_finish_then_stops(self):
-        st = self.make({"T1": [], "T2": []}, budget={"max_dispatches": 1})
+        # executor start + reviewer dispatch = 2: T1 can finish, T2 cannot start
+        st = self.make({"T1": [], "T2": []}, budget={"max_dispatches": 2})
         rc, out = self.out(["next", "--root", self.root])
-        self.assertEqual((rc, out.strip()), (0, "READY: T1"))  # capped by the budget left
+        self.assertEqual((rc, out.strip()), (0, "READY: T1 T2"))
         self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        wt = C.State.load(st.state_path).tasks["T1"]["worktree"]
+        with open(os.path.join(wt, "b.txt"), "w") as f:
+            f.write("b\n")
+        C.git(wt, "add", "-A")
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "t"], check=True,
+                       env=dict(os.environ, **GIT))
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)  # reviewer: 2
         rc, out = self.out(["next", "--root", self.root])
         self.assertEqual((rc, out.strip()), (0, ""))  # T1 in flight, nothing more to start
-        rc, out = self.out(["start", "T2", "--root", self.root])
-        self.assertEqual(rc, 3)
-        self.assertIn("STOP: budget_dispatches", out)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.out(["start", "T2", "--root", self.root])
+        self.assertEqual(rc, 2)
+        self.assertNotIn("STOP:", out)
+        self.assertIn("dispatch budget spent; finish in-flight tasks", err.getvalue())
         st = C.State.load(st.state_path)
-        self.assertIsNone(st.stopped)  # T1 may still be verified, reviewed and merged
-        self.assertEqual(st.tasks["T2"]["status"], "pending")
-        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
-        C.main(["park", "T1", "--reason", "x", "--root", self.root])
+        self.assertIsNone(st.stopped)
+        self.assertEqual((st.tasks["T2"]["status"], st.dispatches), ("pending", 2))
+        self.assertEqual(C.main(["review", "T1", "--verdict", "pass", "--root", self.root]), 0)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
         rc, out = self.out(["next", "--root", self.root])
         self.assertEqual((rc, out.strip()), (3, "STOP: budget_dispatches"))
         self.assertEqual(C.State.load(st.state_path).stopped["reason"], "budget_dispatches")
@@ -586,6 +603,227 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("STATUS: budget max_tokens/max_usd recorded, not enforced "
                       "(the runtime does not expose usage)", out.splitlines())
+
+
+def _commit(wt, name="b.txt"):
+    with open(os.path.join(wt, name), "w") as f:
+        f.write("x\n")
+    C.git(wt, "add", "-A")
+    subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "c"], check=True,
+                   env=dict(os.environ, **GIT))
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class FixRound1Tests(unittest.TestCase):
+    """Budgets enforced, not only recorded (Task 3 review, fix round 1)."""
+
+    def make(self, verify=None, n=1, budget=None, grant_budget=None):
+        self.root = repo_with_plan()
+        tasks = {"T%d" % i: ([], verify or [{"text": "ok", "command": ["true"]}])
+                 for i in range(1, n + 1)}
+        self.plan = write_plan_envelope(self.root, tasks)
+        write_grant(self.root, self.plan, budget=grant_budget)
+        argv = ["init", "--plan", self.plan, "--root", self.root]
+        if budget is not None:
+            argv += ["--budget", json.dumps(budget)]
+        return self.run_main(argv)
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = C.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def st(self):
+        return C.State.load(C.state_path(self.root))
+
+    def wt(self, task="T1"):
+        return self.st().tasks[task]["worktree"]
+
+    def events(self, name):
+        with open(self.st().log_path) as f:
+            return [e for e in map(json.loads, f) if e["event"] == name]
+
+    # I1
+    def test_start_refuses_past_max_parallel(self):
+        self.assertEqual(self.make(n=3, budget={"max_parallel": 1})[0], 0)
+        self.assertEqual(self.run_main(["start", "T1", "--root", self.root])[0], 0)
+        rc, out, err = self.run_main(["start", "T2", "--root", self.root])
+        self.assertEqual(rc, 2)
+        self.assertIn("parallel limit reached", err)
+        self.assertNotIn("START:", out)
+        st = self.st()
+        self.assertEqual((st.tasks["T2"]["status"], st.dispatches), ("pending", 1))
+
+    def test_next_max_is_clamped_to_max_parallel(self):
+        self.assertEqual(self.make(n=3, budget={"max_parallel": 1})[0], 0)
+        rc, out, _ = self.run_main(["next", "--root", self.root, "--max", "3"])
+        self.assertEqual((rc, out.strip()), (0, "READY: T1"))
+        rc, out, _ = self.run_main(["next", "--root", self.root, "--max", "1"])
+        self.assertEqual(out.strip(), "READY: T1")
+
+    # I2
+    def test_executor_repairs_and_reviewer_each_spend_a_dispatch(self):
+        v = [{"text": "needs ok.txt", "command": ["test", "-f", "ok.txt"]}]
+        self.assertEqual(self.make(verify=v)[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])                  # executor: 1
+        self.assertEqual(self.st().dispatches, 1)
+        self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 3)  # 2
+        self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 3)  # 3
+        self.assertEqual(self.st().dispatches, 3)
+        _commit(self.wt(), "ok.txt")
+        self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 0)  # reviewer 4
+        self.assertEqual(self.st().dispatches, 4)
+        self.assertEqual(self.run_main(["review", "T1", "--verdict", "fail",
+                                        "--root", self.root])[0], 3)          # repair: 5
+        self.assertEqual(self.st().dispatches, 5)
+        self.assertEqual([e["kind"] for e in self.events("dispatch")],
+                         ["executor", "repair", "repair", "reviewer", "repair"])
+
+    def test_a_repair_after_the_cap_parks_with_budget_dispatches(self):
+        self.assertEqual(self.make(verify=[{"text": "bad", "command": ["false"]}],
+                                   budget={"max_dispatches": 1})[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("PARK: T1 budget_dispatches", out)
+        st = self.st()
+        self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"],
+                          st.dispatches), ("parked", "budget_dispatches", 1))
+
+    def test_a_reviewer_after_the_cap_parks_with_budget_dispatches(self):
+        self.assertEqual(self.make(budget={"max_dispatches": 1})[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("VERIFY: T1 pass", out)
+        self.assertIn("PARK: T1 budget_dispatches", out)
+        self.assertEqual(self.st().dispatches, 1)
+
+    # I3
+    def test_a_failed_review_spends_a_repair_and_parks_at_the_cap(self):
+        self.assertEqual(self.make(budget={"max_repairs_per_task": 1})[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 0)
+        rc, out, _ = self.run_main(["review", "T1", "--verdict", "fail", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertEqual((self.st().tasks["T1"]["status"], self.st().tasks["T1"]["repairs"]),
+                         ("verifying", 0))
+        self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 0)
+        rc, out, _ = self.run_main(["review", "T1", "--verdict", "fail", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("PARK: T1 verify_red_after_repairs", out)
+        t = self.st().tasks["T1"]
+        self.assertEqual((t["status"], t["repairs"]), ("parked", 1))
+
+    # I4
+    def test_unknown_keys_in_the_grant_budget_are_warned_logged_and_dropped(self):
+        rc, _, err = self.make(grant_budget={"max_dispach": 1, "max_parallel": 1})
+        self.assertEqual(rc, 0)
+        self.assertIn("max_dispach", err)
+        self.assertEqual(self.st().budget, {"max_parallel": 1})
+        warn = self.events("budget_warning")
+        self.assertEqual([w["unknown_keys"] for w in warn], [["max_dispach"]])
+
+    def test_a_bad_value_in_the_grant_budget_is_still_fatal(self):
+        rc, _, err = self.make(grant_budget={"max_parallel": 0})
+        self.assertEqual(rc, 2)
+        self.assertIn("max_parallel", err)
+        self.assertIsNone(C.current_run(self.root))
+
+    def test_a_bad_grant_value_beside_an_override_exits_2_not_a_traceback(self):
+        rc, _, err = self.make(grant_budget={"max_dispatches": "5"},
+                               budget={"max_dispatches": 3})
+        self.assertEqual(rc, 2)
+        self.assertIn("max_dispatches", err)
+
+    def test_the_override_still_refuses_unknown_keys(self):
+        rc, _, err = self.make(budget={"max_dispach": 1})
+        self.assertEqual(rc, 2)
+        self.assertIsNone(C.current_run(self.root))
+
+    # I5
+    def test_the_override_may_tighten_the_grant_budget(self):
+        rc, _, _ = self.make(grant_budget={"max_dispatches": 5, "wall_clock_min": 30},
+                             budget={"max_dispatches": 3, "max_repairs_per_task": 2})
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.st().budget, {"max_parallel": 2, "max_dispatches": 3,
+                                            "wall_clock_min": 30, "max_repairs_per_task": 2})
+
+    def test_the_override_cannot_loosen_the_grant_budget(self):
+        for loose in ({"max_dispatches": 6}, {"wall_clock_min": 31}, {"max_parallel": 3}):
+            self.root = None
+            rc, _, err = self.make(grant_budget={"max_dispatches": 5, "wall_clock_min": 30,
+                                                 "max_parallel": 2}, budget=loose)
+            self.assertEqual(rc, 2, loose)
+            self.assertIn("cannot loosen the grant's budget", err)
+            self.assertIsNone(C.current_run(self.root))
+
+    # M1
+    def test_verify_is_gated(self):
+        self.assertEqual(self.make()[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        revoke(self.root)
+        rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK", out)
+        self.assertNotIn("VERIFY:", out)
+        t = self.st().tasks["T1"]
+        self.assertEqual((t["status"], t["verify_runs"]), ("running", []))
+
+    # M2
+    def expire_wall_clock(self):
+        st = self.st()
+        st.created_at = _z(CC.utc_now() - timedelta(minutes=120))
+        st.save()
+
+    def test_verify_review_and_merge_honour_the_wall_clock(self):
+        for step in ("verify", "review", "merge"):
+            self.assertEqual(self.make(budget={"wall_clock_min": 60})[0], 0)
+            self.run_main(["start", "T1", "--root", self.root])
+            _commit(self.wt())
+            if step != "verify":
+                self.run_main(["verify", "T1", "--root", self.root])
+            if step == "merge":
+                self.run_main(["review", "T1", "--verdict", "pass", "--root", self.root])
+            before = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+            status = self.st().tasks["T1"]["status"]
+            self.expire_wall_clock()
+            argv = [step, "T1", "--root", self.root] + (
+                ["--verdict", "pass"] if step == "review" else [])
+            rc, out, _ = self.run_main(argv)
+            self.assertEqual(rc, 3, step)
+            self.assertIn("STOP: budget_wall_clock", out, step)
+            self.assertEqual(self.st().stopped["reason"], "budget_wall_clock", step)
+            self.assertEqual(self.st().tasks["T1"]["status"], status, step)
+            self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), before)
+
+    # M5
+    def test_an_old_git_fails_the_gate_closed(self):
+        self.assertEqual(self.make()[0], 0)
+        real = C.git_version
+        C.git_version = lambda: (2, 30, 0)
+        try:
+            rc, last = C.gate(self.root, "local_reversible")
+            self.assertEqual(rc, 3)
+            self.assertEqual(C.gate_line(rc, last)[1].split()[:3],
+                             ["GATE:", "ASK", "reason=git-too-old"])
+            C.git_version = lambda: None  # unparseable: also closed
+            self.assertEqual(C.gate(self.root, "local_reversible")[0], 3)
+        finally:
+            C.git_version = real
+        self.assertEqual(C.gate(self.root, "local_reversible")[0], 0)
+
+    def test_git_version_parses_real_output(self):
+        v = C.git_version()
+        self.assertIsInstance(v, tuple)
+        self.assertGreaterEqual(v, (2, 31))
+        self.assertEqual(C.parse_git_version("git version 2.54.0 (Apple Git-157)"), (2, 54, 0))
+        self.assertEqual(C.parse_git_version("git version 2.30.1.windows.1"), (2, 30, 1))
+        self.assertIsNone(C.parse_git_version("nonsense"))
 
 
 class NonGitStopTests(unittest.TestCase):
