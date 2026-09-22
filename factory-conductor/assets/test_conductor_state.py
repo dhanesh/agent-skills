@@ -211,6 +211,13 @@ class PlanValidation(unittest.TestCase):
         self.assertIn("duplicate task id(s): T1", str(e.exception))
         self.assertFalse(os.path.exists(C.run_dir(self.tmp, RID % 0)))
 
+    def test_ids_that_collide_case_insensitively_raise(self):
+        # Worktree dirs and branch refs live on case-insensitive filesystems too.
+        with self.assertRaises(C.PlanError) as e:
+            self.make([{"id": "T1", "depends_on": []}, {"id": "t1", "depends_on": []}])
+        self.assertIn("collide case-insensitively: T1, t1", str(e.exception))
+        self.assertFalse(os.path.exists(C.run_dir(self.tmp, RID % 0)))
+
     def test_depends_on_must_be_a_list_of_strings(self):
         for bad in ("T1", 5, [1], [["T1"]]):
             with self.assertRaises(C.PlanError, msg=repr(bad)) as e:

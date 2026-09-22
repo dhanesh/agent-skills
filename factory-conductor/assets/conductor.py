@@ -27,7 +27,10 @@ Each task runs in its own git worktree, <run>/wt/<task>, on the task branch
 <run_branch>--<task>. (Not <run_branch>/<task>: git cannot keep a ref
 refs/heads/factory/p/T1 beside the run branch refs/heads/factory/p.) `verify`
 re-runs the task's verify commands there, as argv lists, never through a shell;
-that re-run is the proof. `merge` needs a passing verify and a passing review,
+that re-run is the proof. The commands are re-read from the pinned plan file
+(which must still match plan_sha256), never from state.json; the worktree must
+be clean, and the commit proven is recorded as verified_head. `merge` merges
+that pinned sha, never the branch name, and refuses if the branch has moved. `merge` needs a passing verify and a passing review,
 merges with --no-ff into the run branch (which MUST be checked out at --root),
 then removes the worktree and deletes the task branch. A conflict is aborted,
 leaving the run branch clean, and parks the task.
@@ -52,6 +55,7 @@ import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
+import signal  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 
@@ -66,7 +70,7 @@ DEFAULT_PARALLEL = 2
 
 ACTIVE = ("running", "verifying", "reviewing")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
-               "verify_runs", "review", "merge_commit", "park_reason")
+               "verify_runs", "verified_head", "review", "merge_commit", "park_reason")
 RUNS_DIR = os.path.join(".skill-contract", "runs")
 STATE_FILE = "state.json"
 LOG_FILE = "autonomy-log.jsonl"
@@ -197,7 +201,7 @@ class State:
             tasks[tid] = {"status": "pending", "depends_on": list(t["depends_on"]),
                           "verify": t.get("verify"), "repairs": 0, "branch": None,
                           "worktree": None, "verify_runs": [], "review": None,
-                          "merge_commit": None, "park_reason": None}
+                          "verified_head": None, "merge_commit": None, "park_reason": None}
         root = os.path.abspath(root)
         directory = run_dir(root, run_id)
         os.makedirs(directory, exist_ok=False)
@@ -373,6 +377,15 @@ def _plan_tasks(plan):
         order.append(tid)
     if dup:
         raise PlanError("duplicate task id(s): %s" % ", ".join(sorted(set(dup))))
+    folded = {}
+    for tid in order:
+        folded.setdefault(tid.casefold(), []).append(tid)
+    clash = [ids for ids in folded.values() if len(ids) > 1]
+    if clash:
+        # Each id names a worktree directory and a branch ref, and both live on
+        # case-insensitive filesystems (macOS, Windows) where T1 and t1 are one path.
+        raise PlanError("task ids collide case-insensitively: %s"
+                        % "; ".join(", ".join(ids) for ids in clash))
     return order, seen
 
 
@@ -408,6 +421,12 @@ def git(root, *args, check=False):
 def _git_ok(root, *args):
     r = git(root, *args)
     return r is not None and r.returncode == 0, r
+
+
+def _git_nohooks(root, *args):
+    """_git_ok for the conductor's own consequential git calls: hooks are switched off,
+    so a hook an executor planted in the shared git dir never runs under the conductor."""
+    return _git_ok(root, "-c", "core.hooksPath=/dev/null", *args)
 
 
 def _git_err(r):
@@ -472,7 +491,7 @@ def cmd_init(args):
               else args.max_parallel}
     try:
         st = State.new(root=args.root, run_id=new_run_id(), plan=plan,
-                       plan_envelope=args.plan,
+                       plan_envelope=os.path.abspath(args.plan),
                        plan_sha256=hashlib.sha256(raw).hexdigest(),
                        grant_id=args.grant_id,
                        run_branch=args.run_branch or "factory/%s" % _slug(plan.get("title")),
@@ -565,7 +584,7 @@ def cmd_start(args):
         return 2
     wt = os.path.join(st.dir, WT_DIR, args.task)
     branch = st.run_branch + TASK_BRANCH_SEP + args.task
-    ok, r = _git_ok(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
+    ok, r = _git_nohooks(st.root, "worktree", "add", "-q", wt, "-b", branch, st.run_branch)
     if not ok:
         sys.stderr.write("cannot create worktree for %s: %s\n" % (args.task, _git_err(r)))
         return 2
@@ -582,16 +601,74 @@ def _tail(text):
 
 
 def _run_verify(argv, cwd):
-    """Run one verify argv (no shell) in cwd. (returncode or None, stdout, stderr)."""
+    """Run one verify argv (no shell, no stdin) in cwd, in its own process group.
+    (returncode or None, stdout, stderr). On timeout the whole group is killed, so a
+    backgrounded child cannot outlive the proof."""
     try:
-        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, errors="replace",
-                           timeout=VERIFY_TIMEOUT, env=git_env())
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else e.stdout
-        return None, out or "", "timed out after %ds" % VERIFY_TIMEOUT
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, errors="replace",
+                             env=git_env(), start_new_session=True)
     except OSError as e:
         return None, "", "cannot run: %s" % e
-    return r.returncode, r.stdout, r.stderr
+    try:
+        out, err = p.communicate(timeout=VERIFY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_group(p)
+        try:
+            out, _ = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out = ""
+        return None, out or "", "timed out after %ds" % VERIFY_TIMEOUT
+    return p.returncode, out, err
+
+
+def _kill_group(p):
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (OSError, AttributeError):  # already gone, or no process groups (Windows)
+        p.kill()
+
+
+def _pinned_verify(st, task):
+    """(verify steps, None) read from the pinned plan file, or (None, why).
+
+    state.json is not the source of the commands: the plan file is re-read and must
+    still hash to plan_sha256, so neither file can be edited to change the proof."""
+    path = st.plan_envelope
+    if not isinstance(path, str) or not path:
+        return None, "the run has no plan file"
+    if not os.path.isabs(path):
+        path = os.path.join(st.root, path)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        return None, "cannot read the plan %s: %s" % (path, e)
+    if hashlib.sha256(raw).hexdigest() != st.plan_sha256:
+        return None, "the plan %s no longer matches its pinned sha256" % path
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return None, "the plan %s is not JSON: %s" % (path, e)
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    if not isinstance(tasks, list):
+        return None, "the plan %s has no tasks list" % path
+    for t in tasks:
+        if isinstance(t, dict) and t.get("id") == task:
+            steps = t.get("verify")
+            return (steps if steps is not None else []), None
+    return None, "the plan %s has no task %s" % (path, task)
+
+
+def _worktree_state(wt):
+    """(HEAD sha, clean?) for a worktree, or (None, None) when git cannot say."""
+    ok, r = _git_ok(wt, "status", "--porcelain", "--untracked-files=all")
+    ok2, h = _git_ok(wt, "rev-parse", "--verify", "HEAD^{commit}")
+    if not (ok and ok2):
+        return None, None
+    return h.stdout.strip(), r.stdout.strip() == ""
 
 
 def cmd_verify(args):
@@ -599,7 +676,10 @@ def cmd_verify(args):
     st, t = _load_task(args, ("running", "verifying"))
     if st is None:
         return 2
-    steps = t.get("verify") or []
+    steps, why = _pinned_verify(st, args.task)
+    if why:
+        sys.stderr.write("cannot verify %s: %s\n" % (args.task, why))
+        return 2
     if not isinstance(steps, list) or not steps or any(
             not isinstance(v, dict) or v.get("command") is None for v in steps):
         _park(st, args.task, "unrunnable-verify")
@@ -607,13 +687,28 @@ def cmd_verify(args):
     if not t.get("worktree") or not os.path.isdir(t["worktree"]):
         sys.stderr.write("task %s has no worktree at %s\n" % (args.task, t.get("worktree")))
         return 2
+    wt = t["worktree"]
+    head, clean = _worktree_state(wt)
+    if head is None:
+        sys.stderr.write("cannot read git state of worktree %s\n" % wt)
+        return 2
+    if not clean:
+        # Only committed work can be merged, so only committed work is proven.
+        st.set_status(args.task, "verifying", verify_runs=[], verified_head=None, review=None)
+        st.save()
+        st.log("verify", task=args.task, passed=False, reason="uncommitted changes", commands=[])
+        sys.stderr.write("task %s: uncommitted changes in %s; commit them first\n"
+                         % (args.task, wt))
+        print("VERIFY: %s fail" % args.task)
+        return 3
     python_argv = CC.resolve_python()
-    skill_dirs = CC.skill_index(cwd=st.root)
+    skill_dirs = CC.skill_index(cwd=wt)  # the task's own copy of a project skill
     runs = []
     for v in steps:
         cmd = v["command"]
         if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) for a in cmd):
-            rc, out, err, argv = None, "", "command is not a non-empty list of strings", cmd
+            rc, out, err, argv = (None, "", "command is not a non-empty list of strings: %r"
+                                  % (cmd,), cmd)
         else:
             try:
                 argv = CC.resolve_command(cmd, python_argv, skill_dirs)
@@ -624,14 +719,19 @@ def cmd_verify(args):
         ok = rc == 0
         runs.append({"command": argv, "ok": ok, "returncode": rc,
                      "stdout_tail": _tail(out), "stderr_tail": _tail(err)})
-        print("VERIFY: %s %s %s" % (args.task, "ok" if ok else "fail",
-                                    " ".join(str(a) for a in argv)))
+        shown = " ".join(str(a) for a in argv) if isinstance(argv, list) else repr(argv)
+        print("VERIFY: %s %s %s" % (args.task, "ok" if ok else "fail", shown))
     passed = all(r["ok"] for r in runs)
+    after, clean = _worktree_state(wt)
+    if passed and (after != head or not clean):
+        # The commands moved HEAD or left changes: what was tested is not what is there.
+        sys.stderr.write("task %s: verify changed the worktree; not proven\n" % args.task)
+        passed = False
     # A fresh proof replaces any earlier verdict: the reviewer judges this state.
-    st.set_status(args.task, "reviewing" if passed else "verifying",
-                  verify_runs=runs, review=None)
+    st.set_status(args.task, "reviewing" if passed else "verifying", verify_runs=runs,
+                  verified_head=head if passed else None, review=None)
     st.save()
-    st.log("verify", task=args.task, passed=passed,
+    st.log("verify", task=args.task, passed=passed, head=head,
            commands=[{"command": r["command"], "ok": r["ok"], "returncode": r["returncode"]}
                      for r in runs])
     print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
@@ -643,11 +743,13 @@ def cmd_review(args):
     st, t = _load_task(args, ("reviewing",))
     if st is None:
         return 2
-    review = {"verdict": args.verdict, "detail": args.detail, "at": _rfc3339(_now())}
+    review = {"verdict": args.verdict, "detail": args.detail, "at": _rfc3339(_now()),
+              "verified_head": t.get("verified_head")}
     st.set_status(args.task, "reviewing" if args.verdict == "pass" else "verifying",
                   review=review)
     st.save()
-    st.log("review", task=args.task, verdict=args.verdict, detail=args.detail)
+    st.log("review", task=args.task, verdict=args.verdict, detail=args.detail,
+           verified_head=t.get("verified_head"))
     print("REVIEW: %s %s" % (args.task, args.verdict))
     return 0 if args.verdict == "pass" else 3
 
@@ -664,33 +766,73 @@ def cmd_merge(args):
     if (t.get("review") or {}).get("verdict") != "pass":
         sys.stderr.write("task %s has no passing review\n" % args.task)
         return 2
+    pinned = t.get("verified_head")
+    if not pinned or (t.get("review") or {}).get("verified_head") != pinned:
+        sys.stderr.write("task %s: the review does not cover the verified commit\n" % args.task)
+        return 2
     here = CC.current_branch(st.root)
     if here != st.run_branch:
         sys.stderr.write("%s is on %s, not the run branch %s\n" % (st.root, here, st.run_branch))
         return 2
-    ok, r = _git_ok(st.root, "merge", "--no-ff", "--no-edit", t["branch"],
-                    "-m", "conductor: %s" % args.task)
+    ok, r = _git_ok(st.root, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % t["branch"])
+    tip = r.stdout.strip() if ok else None
+    if tip != pinned:
+        # Something was committed (or the branch moved) after the proof: prove it again.
+        st.set_status(args.task, "verifying", review=None)
+        st.save()
+        st.log("merge", task=args.task, ok=False, reason="branch moved after verify",
+               verified_head=pinned, branch_head=tip)
+        sys.stderr.write("task %s: %s is at %s, but %s was verified; verify again\n"
+                         % (args.task, t["branch"], tip, pinned))
+        return 2
+    ok, r = _git_ok(st.root, "rev-list", "--count", "%s..%s" % (st.run_branch, pinned))
+    if not ok or not r.stdout.strip().isdigit() or int(r.stdout.strip()) == 0:
+        sys.stderr.write("task %s: no committed work to merge\n" % args.task)
+        return 2
+    ok, r = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
+    if not ok:
+        sys.stderr.write("cannot read the run branch head: %s\n" % _git_err(r))
+        return 2
+    before = r.stdout.strip()
+    # Merge the pinned sha, never the branch name: exactly the commit that was proven.
+    ok, r = _git_nohooks(st.root, "merge", "--no-ff", "--no-edit",
+                         "-m", "conductor: %s" % args.task, pinned)
     if not ok:
         detail = _git_err(r)
         started, _ = _git_ok(st.root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
         if not started:  # git refused before merging (e.g. a dirty tree): not a conflict
             sys.stderr.write("git merge did not start: %s\n" % detail)
             return 2
-        aborted, ar = _git_ok(st.root, "merge", "--abort")
-        st.log("merge", task=args.task, ok=False, detail=detail[-TAIL:],
-               aborted=aborted)
-        if not aborted:
-            sys.stderr.write("git merge --abort failed: %s\n" % _git_err(ar))
-        _park(st, args.task, "merge-conflict")
+        aborted, ar = _git_nohooks(st.root, "merge", "--abort")
+        st.log("merge", task=args.task, ok=False, detail=detail[-TAIL:], aborted=aborted)
+        if aborted:
+            _park(st, args.task, "merge-conflict")
+            return 3
+        # The run branch is left mid-merge: nothing more may run on it without a human.
+        sys.stderr.write("git merge --abort failed: %s\n" % _git_err(ar))
+        st.stopped = {"reason": "new_human_decision", "detail": "merge-conflict-unaborted",
+                      "task": args.task, "at": _rfc3339(_now())}
+        _park(st, args.task, "merge-conflict-unaborted")
+        st.log("stop", reason="new_human_decision", detail="merge-conflict-unaborted",
+               task=args.task)
+        print("STOP: new_human_decision")
         return 3
-    ok, r = _git_ok(st.root, "rev-parse", "HEAD")
-    sha = r.stdout.strip() if ok else None
+    ok, r = _git_ok(st.root, "rev-list", "--parents", "-n", "1", "HEAD")
+    line = r.stdout.split() if ok else []
+    if len(line) != 3 or line[1] != before or line[2] != pinned:
+        sys.stderr.write("task %s: HEAD is not a two-parent merge of %s into %s: %s\n"
+                         % (args.task, pinned, before, " ".join(line) or _git_err(r)))
+        st.log("merge", task=args.task, ok=False, reason="not a two-parent merge",
+               head=line)
+        return 2
+    sha = line[0]
     st.set_status(args.task, "proven", merge_commit=sha)
     st.save()
-    st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"])
-    cleaned, r = _git_ok(st.root, "worktree", "remove", "--force", t["worktree"])
+    st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"],
+           verified_head=pinned)
+    cleaned, r = _git_nohooks(st.root, "worktree", "remove", "--force", t["worktree"])
     if cleaned:
-        cleaned, r = _git_ok(st.root, "branch", "-D", t["branch"])
+        cleaned, r = _git_nohooks(st.root, "branch", "-D", t["branch"])
     if not cleaned:
         sys.stderr.write("merged, but cleanup failed: %s\n" % _git_err(r))
     print("MERGE: %s %s" % (args.task, sha))
