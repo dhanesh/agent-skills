@@ -83,7 +83,7 @@ The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 ## 4. The log and the evidence
 
 - **`autonomy-log.jsonl`** is append-only, one JSON object per event: `init`, `dispatch`, `verify` (with each command and outcome), `review`, `merge`, `gate`, `park`, `stop`, `finish`. It stays local and is never committed.
-- **`run-result/v1`**, a new kind, is written by `finish`. Per task: status (`proven`, `parked`, `blocked`), the verify commands with outcomes, the review verdict, the merge commit and the park reason. It pins the plan envelope, the grant and the log's sha256. Its assertions carry each verify command, `assertedBy` the conductor skill; under C7 they read as PROVEN because the conductor is not the producer of the code.
+- **`run-result/v1`**, a new kind, is written by `finish`. Per task: status (`proven`, `parked`, `blocked`), the verify commands with outcomes, the review verdict, the merge commit and the park reason. It pins the plan envelope, the grant and the log's sha256. Its assertions carry each verify command, `assertedBy` the conductor skill. Under C7 a receiver reads them as CLAIMED, because the conductor produced the envelope; they become PROVEN when a receiver re-runs them (`check-envelope --rerun`) or when CI on the pushed branch reports them (`run_url`). Inside the run, the conductor's own re-run is what licenses each merge.
 - **The PR body** lists proven tasks, parked tasks with reasons, the stop rule that ended the run, and the budget note from C5.
 
 ## 5. Scheduling (3B)
