@@ -36,9 +36,20 @@ command's process group is killed when it ends (a child that calls setsid()
 escapes that). A stopped run refuses start,
 verify, review and merge with STOP: <reason>. `merge` merges
 that pinned sha, never the branch name, and refuses if the branch has moved. `merge` needs a passing verify and a passing review,
-merges with --no-ff into the run branch (which MUST be checked out at --root),
-then removes the worktree and deletes the task branch. A conflict is aborted,
-leaving the run branch clean, and parks the task.
+and the run branch checked out, clean, at --root. The --no-ff merge runs in an
+isolated clone (<run>/merge/<task>-<sha>, no inherited config, attributes, merge
+drivers or hooks); the root then fetches that merge commit and fast-forwards to
+it, and merge_commit records that sha. It then removes the worktree and deletes
+the task branch. A conflict parks the task and never touches the root; a root that
+moved meanwhile, or a failed fast-forward, parks it and stops the run. Every
+conductor git call ignores hooks, fsmonitor, replace refs, grafts and the
+commit-graph.
+
+Accepted residuals (spec section 7a, a hostile executor running as the same user):
+tampering with loose objects in the shared object store (N2) or planting
+objects/info/alternates (N3), and committed code that reads the executor's
+uncommitted files by path (N11), are not caught here; CI re-running the checks on
+the pushed branch is the independent re-check.
 
 `init` takes a task-plan payload file for now; it will take the task-plan
 envelope and check the grant once gating exists.
@@ -82,6 +93,7 @@ STATE_FILE = "state.json"
 LOG_FILE = "autonomy-log.jsonl"
 WT_DIR = "wt"
 VERIFY_DIR = "verify"
+MERGE_DIR = "merge"
 TASK_BRANCH_SEP = "--"
 TASK_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z"
 VERIFY_TIMEOUT = 600
@@ -406,17 +418,23 @@ def _ignore_runs_dir(base):
 
 
 def git_env():
-    """os.environ without the variables that point git at another repository."""
+    """os.environ without the variables that point git at another repository, and with
+    replace objects and grafts switched off (see GIT_SAFE)."""
     env = dict(os.environ)
     for k in GIT_SCRUB:
         env.pop(k, None)
+    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
     return env
 
 
 # The shared git dir is writable by the executor, so it is hostile: every conductor
 # git call switches off hooks and fsmonitor, the two config keys that run a program
-# on an ordinary status/merge/worktree call.
-GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+# on an ordinary status/merge/worktree call. It also ignores the commit-graph, and
+# (through git_env) replace refs and info/grafts: each of those can make git see a
+# commit other than the one a sha names (refs/replace/<P> -> E merges E's tree under
+# P's name; a graft or a forged commit-graph moves the merge base).
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "core.commitGraph=false")
 
 
 def isolated_env(**extra):
@@ -713,34 +731,49 @@ def _pinned_verify(st, task):
     return None, "the plan %s has no task %s" % (path, task)
 
 
-def _add_verify_checkout(st, task, sha):
-    """A fresh, conductor-owned, detached checkout of sha: (path, None) or (None, why).
+def _isolated_clone(st, subdir, name, *clone_args):
+    """A fresh, conductor-owned clone of the root at <run>/<subdir>/<name>: (path, None)
+    or (None, why). The path is cleared first (a symlink there is unlinked, never
+    followed).
 
-    It is a new `git clone --shared --no-checkout` of the root, checked out with the
-    global and system config ignored. It inherits nothing from the shared git dir
-    (no config, no info/attributes, no info/exclude, no hooks), so only committed
-    bytes are there: an ignored file, a smudge filter or a planted hook in the
-    executor's repository cannot make the verify pass."""
-    base = os.path.join(st.dir, VERIFY_DIR)
+    It is `git clone --shared --template=` run with the global and system config
+    ignored and a ceiling above it, so it inherits nothing from the shared git dir:
+    no config (filters, merge drivers, templateDir), no info/attributes or
+    info/exclude, no hooks, no replace refs or grafts."""
+    base = os.path.join(st.dir, subdir)
     if os.path.islink(base) or (os.path.lexists(base) and not os.path.isdir(base)):
         os.unlink(base)
     os.makedirs(base, exist_ok=True)
-    path = os.path.join(base, "%s-%s" % (task, sha[:12]))
-    _remove_verify_checkout(st, path)
+    path = os.path.join(base, name)
+    _remove_clone(st, path)
     # The ceiling keeps git from discovering the root repository (and its config)
     # above `base` while it runs the clone.
-    ok, r = _git_ok(base, "clone", "-q", "--shared", "--no-checkout", st.root, path,
-                    env=isolated_env(GIT_CEILING_DIRECTORIES=base))
-    if ok:
-        ok, r = _git_ok(path, "checkout", "-q", "--detach", sha, env=isolated_env())
+    ok, r = _git_ok(base, "clone", "-q", "--shared", "--template=", *clone_args, st.root,
+                    path, env=isolated_env(GIT_CEILING_DIRECTORIES=base))
     if not ok:
-        _remove_verify_checkout(st, path)
+        _remove_clone(st, path)
         return None, _git_err(r)
     return path, None
 
 
-def _remove_verify_checkout(st, path):
-    """Remove a verify checkout, or whatever a crash or an executor left at its path.
+def _add_verify_checkout(st, task, sha):
+    """A fresh, conductor-owned, detached checkout of sha: (path, None) or (None, why).
+
+    An _isolated_clone, checked out with the global and system config ignored, so only
+    committed bytes are there: an ignored file, a smudge filter or a planted hook in
+    the executor's repository cannot make the verify pass."""
+    path, why = _isolated_clone(st, VERIFY_DIR, "%s-%s" % (task, sha[:12]), "--no-checkout")
+    if path is None:
+        return None, why
+    ok, r = _git_ok(path, "checkout", "-q", "--detach", sha, env=isolated_env())
+    if not ok:
+        _remove_clone(st, path)
+        return None, _git_err(r)
+    return path, None
+
+
+def _remove_clone(st, path):
+    """Remove a verify or merge clone, or whatever a crash or an executor left at its path.
 
     A symlink is unlinked, never followed. A leftover registered worktree (even a
     locked one) is removed with `worktree remove -f -f`, then pruned."""
@@ -828,7 +861,7 @@ def cmd_verify(args):
         if not escapes:
             runs = _run_steps(args.task, steps, checkout)
     finally:
-        _remove_verify_checkout(st, checkout)
+        _remove_clone(st, checkout)
     if escapes is None:
         sys.stderr.write("cannot list the tree of %s\n" % head)
         return 2
@@ -945,10 +978,6 @@ def cmd_merge(args):
         sys.stderr.write("task %s: %s is at %s, but %s was verified; verify again\n"
                          % (args.task, t["branch"], tip, pinned))
         return 2
-    ok, r = _git_ok(st.root, "rev-list", "--count", "%s..%s" % (st.run_branch, pinned))
-    if not ok or not r.stdout.strip().isdigit() or int(r.stdout.strip()) == 0:
-        sys.stderr.write("task %s: no committed work to merge\n" % args.task)
-        return 2
     ok, r = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
     if not ok:
         sys.stderr.write("cannot read the run branch head: %s\n" % _git_err(r))
@@ -960,33 +989,42 @@ def cmd_merge(args):
         sys.stderr.write("a merge is already in progress in %s; finish or abort it by hand, "
                          "then run merge again\n" % st.root)
         return 2
-    # Merge the pinned sha, never the branch name: exactly the commit that was proven.
-    ok, r = _git_ok(st.root, "merge", "--no-ff", "--no-edit",
-                         "-m", "conductor: %s" % args.task, pinned)
-    if not ok:
-        detail = _git_err(r)
-        started, _ = _git_ok(st.root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
-        if not started:  # git refused before merging (e.g. a dirty tree): not a conflict
-            sys.stderr.write("git merge did not start: %s\n" % detail)
-            return 2
-        aborted, ar = _git_ok(st.root, "merge", "--abort")
-        st.log("merge", task=args.task, ok=False, detail=detail[-TAIL:], aborted=aborted)
-        if aborted:
-            _park(st, args.task, "merge-conflict")
-            return 3
-        # The run branch is left mid-merge: nothing more may run on it without a human.
-        sys.stderr.write("git merge --abort failed: %s\n" % _git_err(ar))
-        return _park_and_stop(st, args.task, "merge-conflict-unaborted")
-    ok, r = _git_ok(st.root, "rev-list", "--parents", "-n", "1", "HEAD")
-    line = r.stdout.split() if ok else []
-    if len(line) != 3 or line[1] != before or line[2] != pinned:
-        sys.stderr.write("task %s: HEAD is not a two-parent merge of %s into %s: %s\n"
-                         % (args.task, pinned, before, " ".join(line) or _git_err(r)))
-        st.log("merge", task=args.task, ok=False, reason="not a two-parent merge",
-               head=line)
-        # A commit may already sit on the run branch: never leave this retryable.
-        return _park_and_stop(st, args.task, "merge-inconsistent")
-    sha = line[0]
+    ok, r = _git_ok(st.root, "status", "--porcelain", "--untracked-files=no")
+    if not ok or r.stdout.strip():
+        sys.stderr.write("the run branch in %s has uncommitted changes: %s\n"
+                         % (st.root, _git_err(r) if not ok else r.stdout.strip()))
+        return 2
+    # The merge itself runs in an isolated clone (no shared config, attributes, merge
+    # drivers or grafts), and the root only fast-forwards to its result.
+    clone, why = _isolated_clone(st, MERGE_DIR, "%s-%s" % (args.task, pinned[:12]),
+                                 "--no-checkout", "-b", st.run_branch)
+    if clone is None:
+        sys.stderr.write("cannot clone the run branch for the merge: %s\n" % why)
+        return 2
+    try:
+        rc, sha = _merge_in_clone(st, args.task, clone, before, pinned)
+        if rc is not None:
+            return rc
+        # Bring the clone's merge into the root: fetch it, then fast-forward only.
+        ok, r = _git_ok(st.root, "fetch", "-q", "--no-tags", clone, sha)
+        ok2, h = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
+        if not (ok and ok2) or h.stdout.strip() != before:
+            sys.stderr.write("task %s: the run branch moved during the merge, or the fetch "
+                             "failed: %s\n" % (args.task, _git_err(r) if not ok else
+                                                (h.stdout.strip() if ok2 else _git_err(h))))
+            st.log("merge", task=args.task, ok=False, reason="run branch moved or fetch "
+                   "failed", before=before, merge=sha)
+            return _park_and_stop(st, args.task, "merge-inconsistent")
+        ok, r = _git_ok(st.root, "merge", "-q", "--ff-only", sha)
+        ok2, h = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
+        if not (ok and ok2) or h.stdout.strip() != sha:
+            sys.stderr.write("task %s: the run branch did not fast-forward to %s: %s\n"
+                             % (args.task, sha, _git_err(r)))
+            st.log("merge", task=args.task, ok=False, reason="fast-forward failed",
+                   before=before, merge=sha)
+            return _park_and_stop(st, args.task, "merge-inconsistent")
+    finally:
+        _remove_clone(st, clone)
     st.set_status(args.task, "proven", merge_commit=sha)
     st.save()
     st.log("merge", task=args.task, ok=True, commit=sha, branch=t["branch"],
@@ -998,6 +1036,60 @@ def cmd_merge(args):
         sys.stderr.write("merged, but cleanup failed: %s\n" % _git_err(r))
     print("MERGE: %s %s" % (args.task, sha))
     return 0
+
+
+def _merge_identity(root):
+    """Author and committer env for the conductor's merge commit: the root's effective
+    user.name/user.email when set, else factory-conductor."""
+    ok, n = _git_ok(root, "config", "user.name")
+    ok2, e = _git_ok(root, "config", "user.email")
+    name = n.stdout.strip() if ok and n.stdout.strip() else "factory-conductor"
+    email = e.stdout.strip() if ok2 and e.stdout.strip() else "factory-conductor@localhost"
+    return {"GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
+
+
+def _merge_in_clone(st, task, clone, before, pinned):
+    """Merge pinned into before inside the isolated merge clone.
+
+    (None, merge sha) on success; (exit code, None) when the merge must not reach the
+    root: 2 for no committed work or a git refusal, 3 for a conflict (parked) or a
+    result that is not a two-parent merge of before and pinned (parked, stopped)."""
+    env = isolated_env()
+    ok, r = _git_ok(clone, "checkout", "-q", "--detach", before, env=env)
+    if ok:
+        ok, r = _git_ok(clone, "fetch", "-q", "--no-tags", st.root, pinned, env=env)
+    if ok:
+        ok, r = _git_ok(clone, "rev-parse", "-q", "--verify", "%s^{commit}" % pinned, env=env)
+        ok = ok and r.stdout.strip() == pinned
+    if not ok:
+        sys.stderr.write("cannot prepare the merge clone: %s\n" % _git_err(r))
+        return 2, None
+    ok, r = _git_ok(clone, "rev-list", "--count", "HEAD..%s" % pinned, env=env)
+    if not ok or not r.stdout.strip().isdigit() or int(r.stdout.strip()) == 0:
+        sys.stderr.write("task %s: no committed work to merge\n" % task)
+        return 2, None
+    # Merge the pinned sha, never the branch name: exactly the commit that was proven.
+    ok, r = _git_ok(clone, "merge", "--no-ff", "--no-edit", "-m", "conductor: %s" % task,
+                    pinned, env=isolated_env(**_merge_identity(st.root)))
+    if not ok:
+        detail = _git_err(r)
+        started, _ = _git_ok(clone, "rev-parse", "-q", "--verify", "MERGE_HEAD", env=env)
+        if not started:  # git refused before merging: not a conflict
+            sys.stderr.write("git merge did not start: %s\n" % detail)
+            return 2, None
+        # The conflict stays in the clone, which is removed: the root is untouched.
+        st.log("merge", task=task, ok=False, detail=detail[-TAIL:])
+        _park(st, task, "merge-conflict")
+        return 3, None
+    ok, r = _git_ok(clone, "rev-list", "--parents", "-n", "1", "HEAD", env=env)
+    line = r.stdout.split() if ok else []
+    if len(line) != 3 or line[1] != before or line[2] != pinned:
+        sys.stderr.write("task %s: the merge is not a two-parent merge of %s into %s: %s\n"
+                         % (task, pinned, before, " ".join(line) or _git_err(r)))
+        st.log("merge", task=task, ok=False, reason="not a two-parent merge", head=line)
+        return _park_and_stop(st, task, "merge-inconsistent"), None
+    return None, line[0]
 
 
 def cmd_park(args):

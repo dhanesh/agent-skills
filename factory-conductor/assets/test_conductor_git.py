@@ -395,7 +395,10 @@ class GitTests(unittest.TestCase):
         self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
         self.assertEqual([n for n in os.listdir(self.root) if n.startswith("HOOK_")], [])
 
-    def test_a_merge_that_cannot_be_aborted_stops_the_run(self):
+    def test_a_conflict_needs_no_abort_and_a_stopped_run_leaves_a_pending_merge_alone(self):
+        # Fix round 4: the merge runs in a throwaway clone, so a conflict is never
+        # aborted in the root and the old "merge-conflict-unaborted" state cannot arise.
+        # Even with every `merge --abort` failing, the root is left clean.
         st = self.state()
         C.main(["start", "T1", "--root", self.root])
         wt = self.wt(st)
@@ -403,9 +406,11 @@ class GitTests(unittest.TestCase):
         commit_in(self.root, "a.txt", "run\n")
         self.through_review(st)
         real = C.git
+        aborts = []
 
         def fake(root, *args, **kw):
             if "--abort" in args:
+                aborts.append(args)
                 return subprocess.CompletedProcess(args, 128, "", "cannot abort")
             return real(root, *args, **kw)
         C.git = fake
@@ -413,11 +418,21 @@ class GitTests(unittest.TestCase):
             self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 3)
         finally:
             C.git = real
+        self.assertEqual(aborts, [])
         st = C.State.load(st.state_path)
         self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
-                         ("parked", "merge-conflict-unaborted"))
-        self.assertIsNotNone(st.stopped)
-        # B7: the run is stopped; a second merge MUST NOT touch the pending merge
+                         ("parked", "merge-conflict"))
+        self.assertNotEqual(C.git(self.root, "rev-parse", "-q", "--verify",
+                                  "MERGE_HEAD").returncode, 0)
+        self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
+        # B7: a stopped run MUST NOT touch a merge pending in the root
+        C.git(self.root, "checkout", "-q", "-b", "other", "main")
+        commit_in(self.root, "a.txt", "other\n")
+        C.git(self.root, "checkout", "-q", "factory/p")
+        C.git(self.root, "merge", "other")
+        st.stopped = {"reason": "new_human_decision", "detail": "x", "at": "t"}
+        st.set_status("T1", "reviewing")
+        st.save()
         calls = []
 
         def spy(root, *args, **kw):
@@ -688,6 +703,127 @@ class GitTests(unittest.TestCase):
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
         self.assertEqual(os.listdir(evil), ["keep"])
         self.assertEqual(self.verify_dirs(st), [])
+
+    # --- fix round 4 ---
+
+    def merge_dirs(self, st):
+        d = os.path.join(st.dir, "merge")
+        return os.listdir(d) if os.path.isdir(d) else []
+
+    def tree_of(self, rev="HEAD"):
+        """{path: bytes} of rev in the root, read with replace objects and grafts off."""
+        env = dict(os.environ, GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+        names = subprocess.run(["git", "-C", self.root, "-c", "core.commitGraph=false",
+                                "ls-tree", "-r", "--name-only", rev], env=env,
+                               capture_output=True, text=True, check=True).stdout.split()
+        return {n: subprocess.run(["git", "-C", self.root, "-c", "core.commitGraph=false",
+                                   "show", "%s:%s" % (rev, n)], env=env, capture_output=True,
+                                  text=True, check=True).stdout for n in names}
+
+    def diverged(self, st):
+        """T1 changes line 1 of f.txt, the run branch changes line 7: a clean 3-way merge."""
+        commit_in(self.root, "f.txt", "1\n2\n3\n4\n5\n6\n7\n", "base f")
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "f.txt", "ONE\n2\n3\n4\n5\n6\n7\n", "task")
+        commit_in(self.root, "f.txt", "1\n2\n3\n4\n5\n6\nSEVEN\n", "run")
+        self.through_review(st)
+        return wt
+
+    def test_every_conductor_git_call_ignores_replace_objects_grafts_and_commit_graph(self):
+        self.root = repo()
+        env = C.git_env()
+        self.assertEqual(env.get("GIT_NO_REPLACE_OBJECTS"), "1")
+        self.assertEqual(env.get("GIT_GRAFT_FILE"), os.devnull)
+        self.assertEqual(C.git(self.root, "config", "core.commitGraph").stdout.strip(), "false")
+        self.assertEqual(C.isolated_env().get("GIT_NO_REPLACE_OBJECTS"), "1")
+
+    def test_a_replace_ref_planted_after_review_does_not_change_what_is_merged(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "helper.sh", "X=1\n")
+        pinned = C.git(wt, "rev-parse", "HEAD").stdout.strip()
+        self.through_review(st)
+        # an evil sibling commit E, then refs/replace/<pinned> -> E
+        C.git(wt, "checkout", "-q", "--detach", "HEAD~1")
+        commit_in(wt, "helper.sh", "X=0\n")
+        commit_in(wt, "evil.txt", "evil\n")
+        evil = C.git(wt, "rev-parse", "HEAD").stdout.strip()
+        C.git(wt, "checkout", "-q", pinned)
+        subprocess.run(["git", "-C", wt, "replace", pinned, evil], check=True)
+        rc = C.main(["merge", "T1", "--root", self.root])
+        tree = self.tree_of()
+        self.assertNotIn("evil.txt", tree, "E's content was merged under P's name")
+        if rc == 0:
+            self.assertEqual(tree.get("helper.sh"), "X=1\n")
+            self.assertEqual(self.tree_of(pinned), self.tree_of("HEAD^2"))
+
+    def test_a_planted_merge_driver_does_not_rewrite_the_merged_bytes(self):
+        st = self.state()
+        wt = self.diverged(st)
+        subprocess.run(["git", "-C", wt, "config", "merge.evil.driver",
+                        "sh -c 'printf PWNED > %A'"], check=True)
+        with open(os.path.join(self.common_dir(wt), "info", "attributes"), "a") as f:
+            f.write("f.txt merge=evil\n")
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        self.assertEqual(self.tree_of()["f.txt"], "ONE\n2\n3\n4\n5\n6\nSEVEN\n")
+        self.assertEqual(self.merge_dirs(st), [])
+
+    def test_a_planted_graft_does_not_move_the_merge_base(self):
+        st = self.state()
+        wt = self.diverged(st)
+        pinned = self.task(st)["verified_head"]
+        run_head = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        # graft: the task commit now claims the run branch head as its only parent,
+        # which would make the merge "revert" SEVEN
+        with open(os.path.join(self.common_dir(wt), "info", "grafts"), "w") as f:
+            f.write("%s %s\n" % (pinned, run_head))
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        self.assertEqual(self.tree_of()["f.txt"], "ONE\n2\n3\n4\n5\n6\nSEVEN\n")
+
+    def test_the_merge_happens_in_a_clone_and_the_root_fast_forwards_to_it(self):
+        st = self.state()
+        self.diverged(st)
+        before = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        pinned = self.task(st)["verified_head"]
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        line = C.git(self.root, "rev-list", "--parents", "-n", "1", "HEAD").stdout.split()
+        self.assertEqual(line[1:], [before, pinned])
+        self.assertEqual(C.current_branch(self.root) if hasattr(C, "current_branch")
+                         else C.CC.current_branch(self.root), "factory/p")
+        self.assertEqual(self.task(st)["merge_commit"], line[0])
+        self.assertEqual(self.merge_dirs(st), [])
+        self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
+        self.assertEqual(open(os.path.join(self.root, "f.txt")).read(),
+                         "ONE\n2\n3\n4\n5\n6\nSEVEN\n")
+
+    def test_a_conflict_in_the_merge_clone_never_touches_the_root(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "a.txt", "task\n")
+        commit_in(self.root, "a.txt", "run\n")
+        self.through_review(st)
+        before = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        calls = []
+        real = C.git
+
+        def spy(root, *args, **kw):
+            if os.path.realpath(root) == os.path.realpath(self.root):
+                calls.append(args)
+            return real(root, *args, **kw)
+        C.git = spy
+        try:
+            self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 3)
+        finally:
+            C.git = real
+        self.assertFalse([a for a in calls if "merge" in a], "a merge ran in the root")
+        self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), before)
+        self.assertNotEqual(C.git(self.root, "rev-parse", "-q", "--verify",
+                                  "MERGE_HEAD").returncode, 0)
+        self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
+        self.assertEqual(self.task(st)["park_reason"], "merge-conflict")
+        self.assertEqual(self.merge_dirs(st), [])
 
 
 if __name__ == "__main__":
