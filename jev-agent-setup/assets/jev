@@ -1,0 +1,293 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["typesafe-sdk>=0.7"]
+# ///
+"""jev — call TypeSafe's Jev (System One) from any agent's shell, and review past calls.
+
+  jev [FILE|-]            ask: JSON request on stdin (or FILE) → typed answers on stdout
+  jev log [options]       show this project's logged requests/responses in the terminal
+
+Request JSON:
+  {"state": {...},
+   "questions": {
+     "safe":   {"type": "noul",   "instructions": "...", "criteria": {"true": "...", "false": "..."}},
+     "route":  {"type": "choice", "instructions": "...", "criteria": {"a": "...", "b": "..."}},
+     "rank_1": {"type": "score",  "instructions": "...", "criteria": ["level 0", "level 1", "level 2"]}},
+   "model": "jev-latest"}                       # optional
+
+Answers: {"<id>": {"type": "noul", "noul": 0.93} | {"type": "choice", "choice": "a", "confidence": 0.8,
+          "probabilities": {...}} | {"type": "score", "score": 1.7, "confidence": 0.9, ...}}
+
+Every call is appended to a per-project JSONL log (0600) at
+  ${JEV_LOG_DIR:-${XDG_STATE_HOME:-~/.local/state}/jev}/projects/<name>-<hash>.jsonl
+where the project is the git root of the current directory (else the directory itself).
+Set JEV_LOG=0 to disable. The log holds the state you sent, so treat it like the payload.
+
+Key: TYPESAFE_API_KEY, else ~/.config/typesafe/env. Exit codes — any non-zero exit means "no Jev
+verdict", never a yes or a no:
+  2  bad input JSON or no API key (fix the caller)
+  3  unavailable: timeout, connection error, 429 or 5xx — retryable after a backoff
+  4  rejected: TypeSafe refused the request (400/401/403/404/422, e.g. unknown model or a
+     malformed question) — retrying unchanged will fail again
+"""
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+# ── project log ──────────────────────────────────────────────────────────────
+
+def project_root(cwd: Path) -> Path:
+    try:
+        out = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return Path(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return cwd
+
+
+def log_dir() -> Path:
+    if os.environ.get("JEV_LOG_DIR"):
+        return Path(os.environ["JEV_LOG_DIR"]).expanduser()
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return base / "jev"
+
+
+def log_path(root: Path) -> Path:
+    digest = hashlib.sha1(str(root).encode()).hexdigest()[:8]
+    return log_dir() / "projects" / f"{root.name or 'root'}-{digest}.jsonl"
+
+
+def append_log(record: dict) -> None:
+    if os.environ.get("JEV_LOG", "1") == "0":
+        return
+    try:
+        path = log_path(Path(record["project"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as e:  # logging must never change the verdict
+        print(f"jev: could not write log: {e}", file=sys.stderr)
+
+
+# ── failure classification ───────────────────────────────────────────────────
+
+EXIT_UNAVAILABLE, EXIT_REJECTED = 3, 4
+
+
+def classify(exc: BaseException) -> dict:
+    """Map an SDK exception to exit code and log fields. HTTP errors carry `.status`;
+    connection errors and timeouts have none. 429 and 5xx are transient; other 4xx are not."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and 400 <= status < 500 and status != 429:
+        exit_code, kind = EXIT_REJECTED, "rejected"
+    else:
+        exit_code, kind = EXIT_UNAVAILABLE, "unavailable"
+    info = {"exit": exit_code, "error_kind": kind, "retryable": exit_code == EXIT_UNAVAILABLE,
+            "error": str(exc) or type(exc).__name__}
+    if isinstance(status, int):
+        info["status"] = status
+    rid = getattr(exc, "request_id", None)
+    if isinstance(rid, str):
+        info["request_id"] = rid
+    retry_after = getattr(exc, "retry_after_ms", None)
+    if isinstance(retry_after, (int, float)):
+        info["retry_after_ms"] = retry_after
+    return info
+
+
+# ── ask ──────────────────────────────────────────────────────────────────────
+
+def load_key() -> bool:
+    if os.environ.get("TYPESAFE_API_KEY"):
+        return True
+    env = Path.home() / ".config/typesafe/env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith("TYPESAFE_API_KEY="):
+                val = line.split("=", 1)[1].strip().strip('"\'')
+                if val and val != "replace-me":
+                    os.environ["TYPESAFE_API_KEY"] = val
+    return bool(os.environ.get("TYPESAFE_API_KEY"))
+
+
+def ask(src: str) -> int:
+    raw = Path(src).read_text() if src != "-" else sys.stdin.read()
+    try:
+        req = json.loads(raw)
+        state, questions = req["state"], req["questions"]
+        assert isinstance(questions, dict) and questions
+    except (json.JSONDecodeError, KeyError, AssertionError, TypeError) as e:
+        print(f"jev: expected {{\"state\": ..., \"questions\": {{id: question}}}} ({e})", file=sys.stderr)
+        return 2
+    cwd = Path.cwd()
+    record = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+              "project": str(project_root(cwd)), "cwd": str(cwd),
+              "model": req.get("model", "jev-latest"), "state": state, "questions": questions}
+    if not load_key():
+        print("jev: TYPESAFE_API_KEY not set and ~/.config/typesafe/env has none", file=sys.stderr)
+        append_log({**record, "exit": 2, "error": "no API key"})
+        return 2
+    from typesafe_sdk import TypeSafeClient
+
+    t0 = time.monotonic()
+    try:
+        with TypeSafeClient() as client:
+            answers = client.system_one(model=record["model"], state=state, questions=questions).answers
+    except Exception as e:  # any service failure = no verdict
+        info = classify(e)
+        hint = "retryable" if info["retryable"] else "not retryable unchanged"
+        print(f"jev: request {info['error_kind']} ({hint}): {info['error']}", file=sys.stderr)
+        append_log({**record, **info, "latency_ms": round((time.monotonic() - t0) * 1000)})
+        return info["exit"]
+    out = {k: v.model_dump() for k, v in answers.items()}
+    append_log({**record, "exit": 0, "answers": out, "latency_ms": round((time.monotonic() - t0) * 1000)})
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+# ── log viewer ───────────────────────────────────────────────────────────────
+
+def _c(code: str, s: str) -> str:
+    return f"\033[{code}m{s}\033[0m" if sys.stdout.isatty() and not os.environ.get("NO_COLOR") else s
+
+
+def _answer_str(a: dict) -> str:
+    t = a.get("type")
+    if t == "noul":
+        p = a["noul"]
+        col = "32" if p >= 0.7 else "31" if p <= 0.3 else "33"
+        return _c(col, f"{p:.2f}") + " " + ("█" * round(p * 10)).ljust(10, "·")
+    if t == "choice":
+        return _c("36", a["choice"]) + f"  conf {a.get('confidence', 0):.2f}"
+    if t == "score":
+        top = max(len(a.get("legend") or {}) - 1, 0)
+        return _c("35", f"{a['score']:.2f}") + f"/{top}  conf {a.get('confidence', 0):.2f}"
+    return json.dumps(a)
+
+
+def _question_text(q) -> str:
+    text = q.get("instructions", "") if isinstance(q, dict) else q
+    text = text if isinstance(text, str) else json.dumps(text)
+    return " ".join(text.split())
+
+
+def render(rec: dict, verbose: bool) -> str:
+    ts = rec.get("ts", "")[:19].replace("T", " ")
+    if rec.get("exit") == 0:
+        status = _c("32", "ok")
+    else:
+        kind = rec.get("error_kind") or ("bad input" if rec.get("exit") == 2 else "")
+        retry = " · retryable" if rec.get("retryable") else ""
+        status = _c("31", f"exit {rec.get('exit')}" + (f" {kind}" if kind else "")) + _c("2", retry)
+    lat = f"{rec['latency_ms']}ms" if "latency_ms" in rec else ""
+    lines = [_c("1", f"── {ts}  {rec.get('model', '')}  {status}  {lat}  {rec.get('cwd', '')}")]
+    answers = rec.get("answers") or {}
+    for qid, q in (rec.get("questions") or {}).items():
+        a = answers.get(qid)
+        qt = q.get("type", "?") if isinstance(q, dict) else "?"
+        lines.append(f"  {qid:<22} {qt:<6} {_answer_str(a) if a else _c('2', '—')}")
+        if verbose:
+            lines.append(_c("2", f"      {_question_text(q)[:200]}"))
+    if rec.get("error"):
+        lines.append(_c("31", f"  error: {rec['error']}"))
+    if verbose:
+        lines.append(_c("2", "  state: " + json.dumps(rec.get("state"), ensure_ascii=False)[:400]))
+    return "\n".join(lines)
+
+
+def read_records(path: Path) -> list[dict]:
+    recs = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                recs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return recs
+
+
+def summary(recs: list[dict]) -> str:
+    if not recs:
+        return "no calls logged"
+    ok = sum(r.get("exit") == 0 for r in recs)
+    lats = sorted(r["latency_ms"] for r in recs if "latency_ms" in r)
+    p50 = lats[len(lats) // 2] if lats else 0
+    nq = sum(len(r.get("questions") or {}) for r in recs)
+    return f"{len(recs)} calls · {nq} questions · {ok} ok / {len(recs) - ok} failed · p50 {p50}ms"
+
+
+def log_cmd(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="jev log", description="Show logged Jev calls for a project.")
+    ap.add_argument("-n", "--tail", type=int, default=20, help="show the last N calls (0 = all)")
+    ap.add_argument("-p", "--project", type=Path, help="project dir (default: git root of cwd)")
+    ap.add_argument("-v", "--verbose", action="store_true", help="include question text and state")
+    ap.add_argument("-f", "--follow", action="store_true", help="keep printing new calls")
+    ap.add_argument("--failed", action="store_true", help="only calls that exited non-zero")
+    ap.add_argument("--json", action="store_true", help="print raw JSONL records")
+    ap.add_argument("--projects", action="store_true", help="list every project with a log")
+    ap.add_argument("--path", action="store_true", help="print this project's log path and exit")
+    a = ap.parse_args(argv)
+
+    if a.projects:
+        for p in sorted((log_dir() / "projects").glob("*.jsonl")):
+            recs = read_records(p)
+            proj = recs[-1].get("project", "?") if recs else "?"
+            last = recs[-1].get("ts", "")[:19].replace("T", " ") if recs else ""
+            print(f"{proj:<50} {len(recs):>6} calls  last {last}  {p}")
+        return 0
+    root = project_root((a.project or Path.cwd()).expanduser().resolve())
+    path = log_path(root)
+    if a.path:
+        print(path)
+        return 0
+
+    def keep(r):
+        return not a.failed or r.get("exit") != 0
+
+    def show(r):
+        print(json.dumps(r, ensure_ascii=False) if a.json else render(r, a.verbose), flush=True)
+
+    recs = read_records(path)
+    if not a.json:
+        print(_c("1", str(root)) + _c("2", f"  ({summary(recs)})"))
+    kept = [r for r in recs if keep(r)]
+    for r in (kept[-a.tail:] if a.tail else kept):
+        show(r)
+    if not a.follow:
+        return 0
+    seen = len(recs)
+    try:
+        while True:
+            time.sleep(1)
+            recs = read_records(path)
+            for r in recs[seen:]:
+                if keep(r):
+                    show(r)
+            seen = len(recs)
+    except KeyboardInterrupt:
+        return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args and args[0] == "log":
+        return log_cmd(args[1:])
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    return ask(args[0] if args else "-")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
