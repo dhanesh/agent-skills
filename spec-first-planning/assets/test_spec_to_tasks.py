@@ -342,8 +342,78 @@ class TestEnvelope(unittest.TestCase):
         with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
 
-    def test_skill_version_is_2_1_0(self):
-        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.1.0")
+    def test_skill_version_is_2_2_0(self):
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.2.0")
+
+
+# C1: GOOD with a [cmd: ...] hint on R1's criterion and on one of R2's two.
+WITH_CMDS = GOOD.replace(
+    "clicking it downloads a .csv file.",
+    "clicking it downloads a .csv file. [cmd: {python} -m pytest -k download]").replace(
+    "exits 0 (row/column parity).",
+    'exits 0 (row/column parity). [cmd: {python} tests/compare_export.py "fixtures/report.json" export.csv]')
+
+
+class TestCmdHint(unittest.TestCase):
+    def payload(self, text=WITH_CMDS):
+        return spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(text), "docs/spec.md")
+
+    def test_the_hint_becomes_the_command_and_is_stripped_from_the_text(self):
+        t1, t2, _ = self.payload()["tasks"]
+        self.assertEqual(t1["verify"], [{
+            "text": "Open any saved report; the page shows a Download CSV control and "
+                    "clicking it downloads a .csv file.",
+            "command": ["{python}", "-m", "pytest", "-k", "download"]}])
+        self.assertEqual(t2["verify"][0]["command"],
+                         ["{python}", "tests/compare_export.py", "fixtures/report.json",
+                          "export.csv"])
+        self.assertNotIn("[cmd:", t2["verify"][0]["text"])
+
+    def test_a_criterion_without_a_hint_still_gives_a_null_command(self):
+        _, t2, t3 = self.payload()["tasks"]
+        self.assertIsNone(t2["verify"][1]["command"])
+        self.assertIsNone(t3["verify"][0]["command"])
+        self.assertTrue(all(v["command"] is None for t in self.payload(GOOD)["tasks"]
+                            for v in t["verify"]))
+
+    def test_json_shows_the_commands_and_stays_unchanged_without_hints(self):
+        out = spec_to_tasks.to_json(spec_to_tasks.derive_plan(WITH_CMDS))
+        self.assertEqual(out["tasks"][0]["verify_commands"],
+                         [["{python}", "-m", "pytest", "-k", "download"]])
+        self.assertEqual(out["tasks"][1]["verify_commands"][1], None)
+        self.assertNotIn("[cmd:", out["tasks"][0]["verify"])
+        self.assertNotIn("verify_commands", out["tasks"][2])
+        plain = spec_to_tasks.to_json(spec_to_tasks.derive_plan(GOOD))
+        self.assertTrue(all("verify_commands" not in t for t in plain["tasks"]))
+
+    def test_markdown_shows_the_command(self):
+        md = spec_to_tasks.render_markdown(spec_to_tasks.derive_plan(WITH_CMDS), "spec.md")
+        self.assertIn("clicking it downloads a .csv file. "
+                      "(cmd: `{python} -m pytest -k download`)", md)
+        self.assertNotIn("[cmd:", md)
+
+    def test_an_envelope_built_from_a_spec_with_commands_passes_check_envelope(self):
+        root = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(root, "docs"))
+            spec = os.path.join(root, "docs", "spec.md")
+            with open(spec, "w", encoding="utf-8") as f:
+                f.write(WITH_CMDS)
+            r = subprocess.run([sys.executable, _SCRIPT, spec, "--envelope", root],
+                               capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            path = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines()
+                    if ln.startswith("ENVELOPE: ")][0]
+            chk = subprocess.run([sys.executable, os.path.join(_HERE, "contract_check.py"),
+                                  "check-envelope", path, "--root", root],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual(chk.returncode, 0, chk.stdout + chk.stderr)
+            with open(path, encoding="utf-8") as f:
+                tasks = json.load(f)["predicate"]["payload"]["tasks"]
+            self.assertEqual(tasks[0]["verify"][0]["command"],
+                             ["{python}", "-m", "pytest", "-k", "download"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class TestOptionalPayloadFields(unittest.TestCase):

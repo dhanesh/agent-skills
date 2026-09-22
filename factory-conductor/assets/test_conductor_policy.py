@@ -244,6 +244,47 @@ class InitTests(unittest.TestCase):
         self.assertEqual(rc, 2)  # invalid input, even with no grant
         self.assertIn("cycle", err)
 
+    def test_init_refuses_a_verify_step_with_no_command(self):
+        # C1: a plan whose verify step has a null or empty command could only ever park
+        # at verify, so init refuses it outright (exit 2), before any gate or branch.
+        for steps, n in (([{"text": "by hand", "command": None}], 1),
+                         ([{"text": "ok", "command": ["true"]}, {"text": "by hand"}], 2),
+                         ([{"text": "empty", "command": []}], 1)):
+            plan = write_plan_envelope(self.root, {"T1": ([], steps)})
+            write_grant(self.root, plan)
+            rc, _, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+            self.assertEqual(rc, 2, steps)
+            self.assertIn("FAIL: task T1 verify step %d has no command" % n, err)
+            self.assertEqual(self.head(), "factory/p")
+            self.assertIsNone(C.current_run(self.root))
+
+    def test_init_refuses_a_task_with_no_verify_step(self):
+        plan = write_plan_envelope(self.root, {"T1": ([], [])})
+        write_grant(self.root, plan)
+        rc, _, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+        self.assertEqual(rc, 2)
+        self.assertIn("FAIL: task T1 has no verify step", err)
+        self.assertIsNone(C.current_run(self.root))
+
+    def test_init_warns_when_the_base_branch_is_not_on_origin(self):
+        # I2: the default PR's --base is the base branch, which the conductor never
+        # pushes; init says so when origin has no copy of it.
+        plan = write_plan_envelope(self.root, ONE_OK)
+        write_grant(self.root, plan)
+        rc, _, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn("warning: refs/remotes/origin/factory/p", err)
+        self.assertIn("git push -u origin factory/p", err)
+
+    def test_init_does_not_warn_when_origin_has_the_base_branch(self):
+        plan = write_plan_envelope(self.root, ONE_OK)
+        write_grant(self.root, plan)
+        head = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        C.git(self.root, "update-ref", "refs/remotes/origin/factory/p", head, check=True)
+        rc, _, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("warning:", err)
+
     def test_init_refuses_an_existing_run_branch(self):
         plan = write_plan_envelope(self.root, ONE_OK)
         write_grant(self.root, plan)

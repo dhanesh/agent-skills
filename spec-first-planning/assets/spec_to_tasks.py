@@ -18,7 +18,8 @@ Usage:
 
 JSON shape:
     {"tasks":    [{"id": "T1", "requirement_ids": ["R1"],
-                   "title": "...", "verify": "...", "depends_on": ["T0"]}, ...],
+                   "title": "...", "verify": "...", "depends_on": ["T0"],
+                   "verify_commands": [["{python}", "-m", "pytest"], null]}, ...],
      "coverage": {"R1": ["T1"], ...},
      "uncovered": []}
 
@@ -28,6 +29,12 @@ lifted into the task's Where field (and a "where" key in JSON). An optional
 the task(s) that cover R2 and R3 — and is stripped from the title exactly
 like "[where: ...]" is. depends_on is omitted from a task with no hint, so a
 spec with no hints derives a byte-identical plan to before this existed.
+
+An optional trailing "[cmd: <argv>]" hint on an acceptance criterion (see
+spec_lint.py) is split off the step's text and becomes that verify step's
+"command" in the task-plan/v1 envelope; a criterion without one gets
+"command": null. --json lists the commands as "verify_commands" (aligned with
+the steps; omitted when no step has one) and markdown shows each after its step.
 
 --waves groups the derived tasks into waves from their depends_on and prints
 "WAVE <n>: <ids>" lines (one per wave, ids sorted numerically — T10 after
@@ -46,6 +53,7 @@ import json
 import math
 import os
 import re
+import shlex
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -56,7 +64,7 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
-SKILL_VERSION = "2.1.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
+SKILL_VERSION = "2.2.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
 USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
@@ -138,7 +146,10 @@ def derive_plan(text):
     """Derive the task plan structure from spec markdown."""
     spec = spec_lint.parse_spec(text)
     crit_by_req = {}
-    for ctext, refs, owner in spec["criteria"]:
+    for (ctext, refs, owner), raw in zip(spec["criteria"], spec["commands"]):
+        # A [cmd: ...] hint is the step's command; one that does not parse is left
+        # null here (spec_lint reports it, and the envelope's spec-lint claim fails).
+        cmd = spec_lint.command_argv(raw)[0] if raw is not None else None
         # Ownership drives coverage: a criterion belongs to the requirement in
         # its leading `R<n>:` prefix, not to every R<n> token that happens to
         # appear in it. Without this, "R1: run `grep R2 fixtures.txt`" reported
@@ -148,7 +159,7 @@ def derive_plan(text):
         targets = [owner] if owner is not None else refs
         for ref in dict.fromkeys(targets):
             cleaned = re.sub(r"^(?:\*\*)?R%d(?:\*\*)?\s*[:.]\s*" % ref, "", ctext)
-            crit_by_req.setdefault(ref, []).append(cleaned)
+            crit_by_req.setdefault(ref, []).append((cleaned, cmd))
 
     tasks = []
     coverage = {}
@@ -156,7 +167,8 @@ def derive_plan(text):
     tnum = 0
     for num, rtext in spec["requirements"]:
         rid = "R%d" % num
-        steps = crit_by_req.get(num, [])
+        pairs = crit_by_req.get(num, [])
+        steps = [text for text, _ in pairs]
         if not steps:
             coverage[rid] = []
             uncovered.append(rid)
@@ -174,6 +186,7 @@ def derive_plan(text):
                 "title": title,
                 "verify": "; ".join(steps),
                 "_verify_steps": steps,
+                "_verify_cmds": [cmd for _, cmd in pairs],
                 "_where": where_m.group(1).strip() if where_m else "",
                 "_after": spec["after"].get(num, []),
             }
@@ -217,6 +230,8 @@ def to_json(plan):
             jt["where"] = t["_where"]
         if t.get("depends_on"):
             jt["depends_on"] = t["depends_on"]
+        if any(c is not None for c in t["_verify_cmds"]):
+            jt["verify_commands"] = t["_verify_cmds"]
         out_tasks.append(jt)
     return {
         "tasks": out_tasks,
@@ -250,6 +265,9 @@ def _truth_well_formed(t):
 def to_task_plan_payload(plan, spec_rel):
     """The task-plan/v1 payload (assets/schemas/task-plan.v1.json): verify steps stay a list.
 
+    Each step's `command` is its criterion's `[cmd: ...]` argv, or null when the criterion
+    has none (factory-conductor refuses a plan with a null command at init).
+
     `constraints`, `required_truths` and `decisions` are optional (task-plan/v1 stays v1: the
     change is additive) and are added only when the spec the plan was derived from has them.
     `required_truths` is added only when every truth is well formed (see
@@ -260,7 +278,8 @@ def to_task_plan_payload(plan, spec_rel):
     tasks = []
     for t in plan["tasks"]:
         jt = {"id": t["id"], "requirement_ids": t["requirement_ids"], "title": t["title"],
-              "verify": [{"text": s, "command": None} for s in t["_verify_steps"]]}
+              "verify": [{"text": s, "command": c}
+                         for s, c in zip(t["_verify_steps"], t["_verify_cmds"])]}
         if t["_where"]:
             jt["where"] = t["_where"]
         if t.get("depends_on"):
@@ -377,6 +396,13 @@ def write_task_plan_envelope(plan, spec_path, root):
     return contract_check.write_envelope(root, statement)
 
 
+def show_command(argv):
+    """argv as one shell-style line: an argument is quoted only when it needs it, so
+    {python} and {skill_dir:...} placeholders read as the spec wrote them."""
+    return " ".join(a if re.fullmatch(r"[\w@%+=:,./{}-]+", a) else shlex.quote(a)
+                    for a in argv)
+
+
 def render_markdown(plan, spec_name):
     lines = []
     lines.append("# Task plan — %s" % (plan["title"] or spec_name))
@@ -395,8 +421,9 @@ def render_markdown(plan, spec_name):
             % (t["_where"] or "unspecified — fill in during plan review")
         )
         lines.append("- Verify:")
-        for step in t["_verify_steps"]:
-            lines.append("  - [ ] %s" % step)
+        for step, cmd in zip(t["_verify_steps"], t["_verify_cmds"]):
+            shown = " (cmd: `%s`)" % show_command(cmd) if cmd is not None else ""
+            lines.append("  - [ ] %s%s" % (step, shown))
     lines.append("")
     lines.append("## Coverage")
     lines.append("")

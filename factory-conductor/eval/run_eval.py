@@ -19,8 +19,8 @@ a task without stopping the run; a REVOKED grant stops the run at the next gate
 checks rather than one merged "expired/revoked" check; max_dispatches: 1 stops the run;
 a merge conflict parks the task and leaves the run branch clean; a task whose status
 is not `reviewing` (built white-box, through conductor.State) is refused by `merge`
-without touching the run branch; and a null verify command parks a task without ever
-merging it.
+without touching the run branch; and `init` refuses a plan with a null verify command
+(exit 2, no run), so such a task is never started or merged.
 """
 import contextlib
 import hashlib
@@ -305,27 +305,20 @@ def merge_refuses_a_task_not_in_reviewing_status_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def null_verify_parks_and_is_never_merged_arm():
+def null_verify_is_refused_at_init_arm():
     root = TK.repo()
     try:
         t1 = task("T1", [], ["true"])
         t1["verify"] = [{"text": "by hand", "command": None}]  # the verify command is null
         plan_env = TK.write_plan_envelope(root, plan=plan(t1))
         TK.write_grant(root, plan_env)
+        before = C.git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         rc, out, err = run(["init", "--plan", plan_env, "--root", root])
-        if rc != 0:
-            check("init accepts a null verify command (it parks the task later, at verify)",
-                  False, err.strip()[-160:])
-            return
-        run(["start", "T1", "--root", root])
-        commit_in(wt(root, "T1"), "t1.txt", "one\n")  # real work; still unrunnable to verify
-        rc, out, err = run(["verify", "T1", "--root", root])
-        parked = rc == 3 and status(root, "T1") == "parked"
-        merge_refused = run(["merge", "T1", "--root", root])[0] == 2  # not a mergeable status
-        check("NEGATIVE: a task with a null verify command is parked and never merged",
-              parked and C.State.load(C.state_path(root)).tasks["T1"]["park_reason"]
-              == "unrunnable-verify" and merge_refused and status(root, "T1") != "proven",
-              out.strip())
+        after = C.git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        check("NEGATIVE: init refuses a plan whose verify command is null (exit 2, no run, "
+              "no run branch), so such a task can never be started or merged",
+              rc == 2 and "FAIL: task T1 verify step 1 has no command" in err
+              and C.current_run(root) is None and after == before, err.strip()[-160:])
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -338,7 +331,7 @@ def main():
     max_dispatches_one_stops_the_run_arm()
     merge_conflict_parks_and_run_branch_stays_clean_arm()
     merge_refuses_a_task_not_in_reviewing_status_arm()
-    null_verify_parks_and_is_never_merged_arm()
+    null_verify_is_refused_at_init_arm()
 
     n, k = len(_checks), sum(_checks)
     ok = k == n

@@ -117,7 +117,9 @@ Users cannot export rows.
 ## Open questions
 """
 
-FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+# FULL ends its criterion with a [cmd: ...] hint: --unattended needs one on every criterion.
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]").replace(
+    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n") + """
 ## Tensions
 - TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
 
@@ -352,6 +354,31 @@ def grant_arm():
     check("NEGATIVE: the light pass (LIGHT) is not converged",
           lint(LIGHT) == 0 and lint(LIGHT, "--converged") == 1, "")
     check("FULL is unattended-ready", lint(FULL, "--unattended") == 0, "")
+    no_cmd = FULL.replace(" [cmd: {python} -m pytest -k rows]", "")
+    check("NEGATIVE: a criterion without a [cmd: ...] hint blocks --unattended "
+          "(it still converges)",
+          lint(no_cmd, "--unattended") == 1 and lint(no_cmd, "--converged") == 0, "")
+    r = _lint(FULL.replace("[cmd: {python} -m", "[cmd: python3 -m"))
+    check("NEGATIVE: a [cmd: ...] hint that breaks the command rule (python3) fails the lint",
+          r.returncode == 1 and "(C6)" in r.stdout, r.stdout.strip()[-120:])
+    r = _lint(FULL.replace("[cmd: {python} -m pytest -k rows]", '[cmd: {python} -c "oops]'))
+    check("NEGATIVE: a [cmd: ...] hint that does not parse fails the lint",
+          r.returncode == 1 and "does not parse" in r.stdout, r.stdout.strip()[-120:])
+    repo = fresh_repo()
+    try:
+        r = subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "spec_to_tasks.py"),
+                            os.path.join(repo, "docs", "spec.md"), "--envelope", repo],
+                           capture_output=True, text=True, timeout=60)
+        paths = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines()
+                 if ln.startswith("ENVELOPE: ")]
+        cmd = None
+        if r.returncode == 0 and paths:
+            with open(paths[0], encoding="utf-8") as f:
+                cmd = json.load(f)["predicate"]["payload"]["tasks"][0]["verify"][0]["command"]
+        check("the [cmd: ...] hint becomes the task-plan verify step's command",
+              cmd == ["{python}", "-m", "pytest", "-k", "rows"], "command=%s" % (cmd,))
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
 
     for policy, want in (({"merge": "auto"}, 1), ({"merge": "grant"}, 1),
                          ({"local_reversible": "grant"}, 0)):

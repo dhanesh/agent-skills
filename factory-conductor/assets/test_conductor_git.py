@@ -74,6 +74,8 @@ class GitTests(unittest.TestCase):
         self.assertFalse(st.tasks["T1"]["verify_runs"][0]["ok"])
 
     def test_a_task_with_an_unrunnable_verify_is_parked(self):
+        # White-box: init refuses a null command, so this state is built with
+        # new_run (no init) to reach verify's defence-in-depth park.
         st = self.state(verify=[{"text": "by hand", "command": None}])
         C.main(["start", "T1", "--root", self.root])
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)

@@ -27,7 +27,9 @@ Usage:
                                                                        # FINISH: <envelope path>
 
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
-fresh subjects, a schedulable plan), then requires `check-grant` to cover
+fresh subjects, a schedulable plan, and a runnable command on every verify step: a task
+with no verify step, or a step whose command is null or empty, is refused with
+FAIL: task <id> verify step <n> has no command, exit 2), then requires `check-grant` to cover
 local_reversible for that plan (`--subject <plan envelope>`, so a grant covers only the
 plan it pins) on the current branch, which must match the grant's branch_pattern and
 not be the default branch. It cuts factory/<plan-slug> from the current branch (that
@@ -872,6 +874,13 @@ def cmd_init(args):
         waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
     except PlanError as e:
         return _init_fail("invalid plan: %s" % e)
+    missing = missing_commands(plan)
+    if missing:
+        for why in missing:
+            sys.stderr.write("FAIL: %s\n" % why)
+        return _init_fail("invalid plan: every task needs at least one verify step, and every "
+                          "verify step a command the conductor can run (a spec criterion's "
+                          "[cmd: ...] hint); see the lines above")
     bad = verify_command_problems(plan)
     if bad:
         for tid, cmd, why in bad:
@@ -942,6 +951,13 @@ def cmd_init(args):
     st.log("gate", action="local_reversible", ok=True, result=last, exit=rc)
     if unknown:
         st.log("budget_warning", grant=gid, unknown_keys=unknown)
+    has_base, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/remotes/origin/%s" % base)
+    if not has_base:
+        # finish's default PR names the base branch as --base, and the conductor never
+        # pushes it: a PR against a branch the remote lacks fails.
+        sys.stderr.write("warning: refs/remotes/origin/%s is absent: the pull request finish "
+                         "opens targets %s, which the conductor never pushes; push it first "
+                         "(git push -u origin %s)\n" % (base, base, base))
     print("RUN: %s" % st.run_id)
     return 0
 
@@ -1334,6 +1350,8 @@ def cmd_verify(args):
         return 3
     if not isinstance(steps, list) or not steps or any(
             not isinstance(v, dict) or v.get("command") is None for v in steps):
+        # Defence in depth: init refuses such a plan, so only a state built without
+        # init (or a plan read some other way) reaches this.
         _park(st, args.task, "unrunnable-verify")
         return 3
     if not t.get("worktree") or not os.path.isdir(t["worktree"]):
@@ -1743,6 +1761,23 @@ def _plan_steps(plan):
             for tid, t in _plan_tasks_by_id(plan).items()}
 
 
+def missing_commands(plan):
+    """["task <id> has no verify step" | "task <id> verify step <n> has no command"] for
+    every task with no verify step, and every verify step whose command is null or empty
+    (n counts from 1). Such a task could never be proven, so init refuses the plan."""
+    out = []
+    for tid, t in _plan_tasks_by_id(plan).items():
+        steps = t.get("verify")
+        if not isinstance(steps, list) or not steps:
+            out.append("task %s has no verify step" % tid)
+            continue
+        for n, step in enumerate(steps, 1):
+            cmd = step.get("command") if isinstance(step, dict) else None
+            if cmd is None or cmd == []:
+                out.append("task %s verify step %d has no command" % (tid, n))
+    return out
+
+
 def verify_command_problems(plan):
     """[(task id, command, why)] for every non-null verify command that breaks the
     skill-contract command rule (commandment 6: {python} rather than an interpreter name,
@@ -1756,7 +1791,7 @@ def verify_command_problems(plan):
         for step in steps:
             cmd = step.get("command") if isinstance(step, dict) else None
             if cmd is None:
-                continue  # an unrunnable verify parks the task; it is never asserted
+                continue  # missing_commands reports it (init refuses the plan first)
             viol = []
             CC._check_command(cmd, viol)
             out += [(tid, cmd, detail) for _, detail in viol]

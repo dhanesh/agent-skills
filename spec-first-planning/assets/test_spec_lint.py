@@ -366,7 +366,10 @@ p
 """
 
 
-FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+# FULL carries a [cmd: ...] hint on its criterion: --unattended requires one on every
+# acceptance criterion (a grant exists only for machine-proven runs).
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]").replace(
+    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n") + """
 ## Tensions
 - TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
 
@@ -500,6 +503,55 @@ class TestCli(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class CmdHint(unittest.TestCase):
+    """C1: an acceptance criterion may end with [cmd: <argv>], the command that proves it."""
+
+    def spec(self, crit):
+        return GOOD.replace(
+            "- R3: Timing the export endpoint with a 10000-row fixture reports under 5 seconds.",
+            "- R3: Timing the export endpoint with a 10000-row fixture reports under 5 seconds." + crit)
+
+    def test_a_hint_parses_to_an_argv_and_is_stripped_from_the_text(self):
+        spec = spec_lint.parse_spec(self.spec(' [cmd: {python} tests/bench.py --rows "10 000"]'))
+        self.assertEqual(spec["criteria"][2][0],
+                         "R3: Timing the export endpoint with a 10000-row fixture reports "
+                         "under 5 seconds.")
+        self.assertEqual(spec["commands"], [None, None,
+                                            '{python} tests/bench.py --rows "10 000"'])
+        self.assertEqual(spec_lint.command_argv(spec["commands"][2]),
+                         (["{python}", "tests/bench.py", "--rows", "10 000"], None))
+
+    def test_a_clean_hint_lints_clean_and_the_keyword_is_case_insensitive(self):
+        self.assertEqual(spec_lint.lint(self.spec(" [cmd: {python} -m pytest -k export]")), [])
+        self.assertEqual(spec_lint.lint(self.spec(" [CMD: make bench]")), [])
+
+    def test_a_command_token_is_not_a_requirement_reference(self):
+        self.assertEqual(spec_lint.lint(self.spec(" [cmd: grep R9 fixtures.txt]")), [])
+
+    def test_an_unparsable_argv_fails(self):
+        issues = spec_lint.lint(self.spec(' [cmd: {python} -c "unterminated]'))
+        self.assertTrue(any("[cmd:" in i and "parse" in i for i in issues), issues)
+
+    def test_an_empty_argv_fails(self):
+        issues = spec_lint.lint(self.spec(" [cmd:   ]"))
+        self.assertTrue(any("[cmd:" in i and "empty" in i for i in issues), issues)
+
+    def test_an_argv_that_breaks_c6_fails(self):
+        for bad in (" [cmd: python3 -m pytest]", " [cmd: /usr/bin/make test]",
+                    " [cmd: make -C /abs/path]", " [cmd: {node} x.js]"):
+            issues = spec_lint.lint(self.spec(bad))
+            self.assertTrue(any("[cmd:" in i and "C6" in i for i in issues), (bad, issues))
+
+    def test_a_hint_that_is_not_trailing_fails(self):
+        issues = spec_lint.lint(self.spec(" [cmd: make bench] then read the log"))
+        self.assertTrue(any("[cmd:" in i and "end" in i for i in issues), issues)
+
+    def test_light_and_converged_keep_the_hint_optional(self):
+        self.assertEqual(spec_lint.lint(GOOD), [])
+        self.assertEqual(spec_lint.lint(FULL.replace(" [cmd: {python} -m pytest -k rows]", ""),
+                                        mode="converged"), [])
+
+
 class ConvergedRules(unittest.TestCase):
     def lint(self, t, mode):
         return spec_lint.lint(t, mode=mode)
@@ -571,6 +623,12 @@ class ConvergedRules(unittest.TestCase):
 
     def test_docstring_names_the_modes(self):
         self.assertIn("[--converged|--unattended]", spec_lint.__doc__)
+
+    def test_unattended_needs_a_cmd_hint_on_every_criterion(self):
+        t = FULL.replace(" [cmd: {python} -m pytest -k rows]", "")
+        self.assertEqual(self.lint(t, "converged"), [])
+        issues = self.lint(t, "unattended")
+        self.assertTrue(any("[cmd:" in i and "unattended" in i for i in issues), issues)
 
     def test_cli_modes(self):
         import subprocess, sys, tempfile, os
