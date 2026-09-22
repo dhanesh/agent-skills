@@ -52,7 +52,7 @@ approve or override a permission decision.
    harmless Noul (`echo '{"state":{"x":"sky is blue"},"questions":{"q":{"type":"noul","instructions":"Is x true?"}}}' | jev`).
    On a `STALE`/`MISSING` line, re-run the install for that target. On exit 3 (malformed
    markers), show the user the file and fix the markers by hand. On a smoke-test exit 2 or 3,
-   report "key or network missing" and stop. Show the user `jev log` so they know where
+   report "key or network missing" and stop; on exit 4, report the `jev` error line (the request was rejected, usually a bad key or model name). Show the user `jev log` so they know where
    calls are recorded (per project under `~/.local/state/jev/`).
 
 ## Deliverable

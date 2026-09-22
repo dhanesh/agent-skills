@@ -145,6 +145,49 @@ class CliInputTest(unittest.TestCase):
         self.assertEqual(self._run_cli('{"state": {}, "questions": {}}'), 2)
 
 
+class _FakeAPIError(Exception):
+    def __init__(self, status=None, request_id=None, retry_after_ms=None):
+        super().__init__(f"{status} boom")
+        self.status, self.request_id, self.retry_after_ms = status, request_id, retry_after_ms
+
+
+class _FakeTimeout(Exception):
+    pass
+
+
+class ClassifyTest(unittest.TestCase):
+    """Rejected (fix the request) vs unavailable (retry later) — decided without the SDK installed."""
+
+    def setUp(self):
+        self.classify = runpy.run_path(str(HERE / "jev"))["classify"]
+
+    def test_client_errors_are_rejected_not_retryable(self):
+        for status in (400, 401, 403, 404, 422):
+            info = self.classify(_FakeAPIError(status, request_id="req_1"))
+            self.assertEqual((info["exit"], info["error_kind"], info["retryable"]), (4, "rejected", False), status)
+            self.assertEqual((info["status"], info["request_id"]), (status, "req_1"))
+
+    def test_rate_limit_and_server_errors_are_retryable(self):
+        for status in (429, 500, 502, 503):
+            info = self.classify(_FakeAPIError(status))
+            self.assertEqual((info["exit"], info["retryable"]), (3, True), status)
+        self.assertEqual(self.classify(_FakeAPIError(429, retry_after_ms=1500))["retry_after_ms"], 1500)
+
+    def test_no_status_means_unavailable(self):
+        info = self.classify(_FakeTimeout())
+        self.assertEqual((info["exit"], info["error_kind"], info["error"]), (3, "unavailable", "_FakeTimeout"))
+        self.assertNotIn("status", info)
+
+    def test_viewer_labels_failure_kind(self):
+        render = runpy.run_path(str(HERE / "jev"))["render"]
+        os.environ["NO_COLOR"] = "1"
+        rej = render({"exit": 4, "error_kind": "rejected", "retryable": False, "questions": {}}, False)
+        una = render({"exit": 3, "error_kind": "unavailable", "retryable": True, "questions": {}}, False)
+        self.assertIn("exit 4 rejected", rej)
+        self.assertNotIn("retryable", rej)
+        self.assertIn("exit 3 unavailable · retryable", una)
+
+
 class CliLogTest(unittest.TestCase):
     """Per-project JSONL logging and the `jev log` viewer, exercised offline via the no-key path."""
 

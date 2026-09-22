@@ -26,9 +26,9 @@ python3 <skill-dir>/assets/install_jev_setup.py --uninstall
 
 | Piece | Where | Notes |
 |---|---|---|
-| `jev` CLI | `~/.local/bin/jev` | PEP 723 script run by `uv`; JSON in → typed answers out. Exit 2 = bad input or no key, 3 = service failure, so callers can treat failure as "no verdict" |
+| `jev` CLI | `~/.local/bin/jev` | PEP 723 script run by `uv`; JSON in → typed answers out. Exit 2 = bad input or no key, 3 = unavailable (timeout/429/5xx, retryable), 4 = rejected by TypeSafe (400/401/403/404/422, fix the request). Any non-zero exit is "no verdict" |
 | Jev instruction block (BCP 14) | `~/.claude/CLAUDE.md`, `~/.agents/AGENTS.md`, `$CODEX_HOME/AGENTS.md`, `~/.gemini/GEMINI.md` | Between `BEGIN/END jev-agent-setup` markers; content outside them is never touched; the first modification backs the file up to `*.bak-jev-agent-setup` |
-| Per-project call log | `~/.local/state/jev/projects/<repo>-<hash>.jsonl` (0600) | Written by `jev` on every call: request state, questions, answers or error, exit, latency. Keyed by git root; kept outside the repo so it can't be committed. `JEV_LOG=0` disables; `JEV_LOG_DIR` relocates |
+| Per-project call log | `~/.local/state/jev/projects/<repo>-<hash>.jsonl` (0600) | Written by `jev` on every call: request state, questions, answers or error (with HTTP status, `error_kind`, `retryable`, TypeSafe `request_id`), exit, latency. Keyed by git root; kept outside the repo so it can't be committed. `JEV_LOG=0` disables; `JEV_LOG_DIR` relocates |
 | Key placeholder | `~/.config/typesafe/env` (0600) | Created only if missing. The installer never prints or writes a real key |
 
 Re-running is idempotent. Malformed markers (a BEGIN without an END, or duplicates) make the

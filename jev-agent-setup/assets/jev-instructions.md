@@ -32,8 +32,10 @@ triage, gating, review).
 4. Each question MUST carry enough state to be answered (the command, cwd, task, diff,
    evidence) and describe both outcomes in `criteria`. Question IDs are not sent to the
    model, so the question text MUST be self-contained.
-5. A Jev failure (non-zero exit, timeout, missing key) MUST be treated as "no verdict", never
-   as yes or no. The agent then falls back to its normal behaviour.
+5. A Jev failure (any non-zero exit) MUST be treated as "no verdict", never as yes or no; the
+   agent then falls back to its normal behaviour. Exit 3 (unavailable) MAY be retried once
+   after a backoff. Exit 2 (bad input) and exit 4 (rejected by TypeSafe) MUST NOT be retried
+   unchanged; fix the request first.
 6. Jev outputs are decision *inputs*, not approvals. Uncertain results (Noul in 0.3–0.7, or
    Choice/Score confidence < 0.6) SHOULD be escalated to the user or a reasoning pass rather
    than acted on.
@@ -43,7 +45,8 @@ triage, gating, review).
 ## Calling Jev from an agent
 
 The `jev` CLI (on `PATH`, default `~/.local/bin/jev`; a PEP 723 script run by `uv`) takes
-JSON on stdin and prints typed answers. Exit 2 = bad input or no key, 3 = service failure.
+JSON on stdin and prints typed answers. Exit 2 = bad input or no key, 3 = unavailable
+(retryable), 4 = rejected by TypeSafe (not retryable unchanged).
 Every call is logged per project; the user reviews them with `jev log` (`-v` for state and
 questions, `-f` to follow).
 

@@ -24,8 +24,12 @@ Every call is appended to a per-project JSONL log (0600) at
 where the project is the git root of the current directory (else the directory itself).
 Set JEV_LOG=0 to disable. The log holds the state you sent, so treat it like the payload.
 
-Key: TYPESAFE_API_KEY, else ~/.config/typesafe/env. Exit 2 on missing key/bad input, 3 on API
-failure — callers must treat a non-zero exit as "no Jev verdict", never as a yes or a no.
+Key: TYPESAFE_API_KEY, else ~/.config/typesafe/env. Exit codes — any non-zero exit means "no Jev
+verdict", never a yes or a no:
+  2  bad input JSON or no API key (fix the caller)
+  3  unavailable: timeout, connection error, 429 or 5xx — retryable after a backoff
+  4  rejected: TypeSafe refused the request (400/401/403/404/422, e.g. unknown model or a
+     malformed question) — retrying unchanged will fail again
 """
 import argparse
 import hashlib
@@ -76,6 +80,32 @@ def append_log(record: dict) -> None:
         print(f"jev: could not write log: {e}", file=sys.stderr)
 
 
+# ── failure classification ───────────────────────────────────────────────────
+
+EXIT_UNAVAILABLE, EXIT_REJECTED = 3, 4
+
+
+def classify(exc: BaseException) -> dict:
+    """Map an SDK exception to exit code and log fields. HTTP errors carry `.status`;
+    connection errors and timeouts have none. 429 and 5xx are transient; other 4xx are not."""
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and 400 <= status < 500 and status != 429:
+        exit_code, kind = EXIT_REJECTED, "rejected"
+    else:
+        exit_code, kind = EXIT_UNAVAILABLE, "unavailable"
+    info = {"exit": exit_code, "error_kind": kind, "retryable": exit_code == EXIT_UNAVAILABLE,
+            "error": str(exc) or type(exc).__name__}
+    if isinstance(status, int):
+        info["status"] = status
+    rid = getattr(exc, "request_id", None)
+    if isinstance(rid, str):
+        info["request_id"] = rid
+    retry_after = getattr(exc, "retry_after_ms", None)
+    if isinstance(retry_after, (int, float)):
+        info["retry_after_ms"] = retry_after
+    return info
+
+
 # ── ask ──────────────────────────────────────────────────────────────────────
 
 def load_key() -> bool:
@@ -115,9 +145,11 @@ def ask(src: str) -> int:
         with TypeSafeClient() as client:
             answers = client.system_one(model=record["model"], state=state, questions=questions).answers
     except Exception as e:  # any service failure = no verdict
-        print(f"jev: request failed: {e}", file=sys.stderr)
-        append_log({**record, "exit": 3, "error": str(e), "latency_ms": round((time.monotonic() - t0) * 1000)})
-        return 3
+        info = classify(e)
+        hint = "retryable" if info["retryable"] else "not retryable unchanged"
+        print(f"jev: request {info['error_kind']} ({hint}): {info['error']}", file=sys.stderr)
+        append_log({**record, **info, "latency_ms": round((time.monotonic() - t0) * 1000)})
+        return info["exit"]
     out = {k: v.model_dump() for k, v in answers.items()}
     append_log({**record, "exit": 0, "answers": out, "latency_ms": round((time.monotonic() - t0) * 1000)})
     print(json.dumps(out, indent=2))
@@ -152,7 +184,12 @@ def _question_text(q) -> str:
 
 def render(rec: dict, verbose: bool) -> str:
     ts = rec.get("ts", "")[:19].replace("T", " ")
-    status = _c("32", "ok") if rec.get("exit") == 0 else _c("31", f"exit {rec.get('exit')}")
+    if rec.get("exit") == 0:
+        status = _c("32", "ok")
+    else:
+        kind = rec.get("error_kind") or ("bad input" if rec.get("exit") == 2 else "")
+        retry = " · retryable" if rec.get("retryable") else ""
+        status = _c("31", f"exit {rec.get('exit')}" + (f" {kind}" if kind else "")) + _c("2", retry)
     lat = f"{rec['latency_ms']}ms" if "latency_ms" in rec else ""
     lines = [_c("1", f"── {ts}  {rec.get('model', '')}  {status}  {lat}  {rec.get('cwd', '')}")]
     answers = rec.get("answers") or {}
