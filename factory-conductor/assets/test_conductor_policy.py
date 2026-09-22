@@ -153,7 +153,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual(st.plan_envelope, os.path.abspath(plan))
         import hashlib
         self.assertEqual(st.plan_sha256, hashlib.sha256(open(plan, "rb").read()).hexdigest())
-        self.assertEqual(st.budget, {"max_parallel": 2})
+        self.assertEqual(st.budget, {"max_parallel": 2, "max_repairs_per_task": 2})
         self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
 
     def test_init_without_a_grant_prints_gate_ask_and_changes_nothing(self):
@@ -278,7 +278,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(C.State.load(C.state_path(self.root)).budget,
                          {"max_dispatches": 5, "max_parallel": 1, "wall_clock_min": 30,
-                          "max_usd": 2.5})
+                          "max_usd": 2.5, "max_repairs_per_task": 2})
 
     def test_bad_budgets_exit_2_and_create_nothing(self):
         plan = write_plan_envelope(self.root, ONE_OK)
@@ -559,16 +559,22 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual(rc, 3)
         self.assertIn("PARK: T1 verify_red_after_repairs", out)
 
-    def test_without_a_repair_budget_verify_never_parks(self):
+    def test_without_a_repair_budget_the_default_of_two_parks(self):
+        # Ruling D (Task 6 review): an unset max_repairs_per_task defaults to 2, so a
+        # task that stays red parks instead of repairing forever.
         st = self.make({"T1": []})
         C.main(["start", "T1", "--root", self.root])
         wt = C.State.load(st.state_path).tasks["T1"]["worktree"]
         with open(os.path.join(wt, "dirty.txt"), "w") as f:
             f.write("x")
-        for _ in range(3):
+        for _ in range(2):
             self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
         t = C.State.load(st.state_path).tasks["T1"]
-        self.assertEqual((t["status"], t["repairs"]), ("verifying", 2))
+        self.assertEqual((t["status"], t["repairs"]), ("verifying", 1))
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+        t = C.State.load(st.state_path).tasks["T1"]
+        self.assertEqual((t["status"], t["repairs"], t["park_reason"]),
+                         ("parked", 2, "verify_red_after_repairs"))
 
     def test_decision_records_the_question_and_blocks_dependents(self):
         st = self.make({"T1": [], "T2": ["T1"], "T3": []})
@@ -665,7 +671,8 @@ class FixRound1Tests(unittest.TestCase):
     # I2
     def test_executor_repairs_and_reviewer_each_spend_a_dispatch(self):
         v = [{"text": "needs ok.txt", "command": ["test", "-f", "ok.txt"]}]
-        self.assertEqual(self.make(verify=v)[0], 0)
+        # a repair cap above the default of 2, so every send-back here is a dispatch
+        self.assertEqual(self.make(verify=v, budget={"max_repairs_per_task": 5})[0], 0)
         self.run_main(["start", "T1", "--root", self.root])                  # executor: 1
         self.assertEqual(self.st().dispatches, 1)
         self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 3)  # 2
@@ -723,7 +730,7 @@ class FixRound1Tests(unittest.TestCase):
         rc, _, err = self.make(grant_budget={"max_dispach": 1, "max_parallel": 1})
         self.assertEqual(rc, 0)
         self.assertIn("max_dispach", err)
-        self.assertEqual(self.st().budget, {"max_parallel": 1})
+        self.assertEqual(self.st().budget, {"max_parallel": 1, "max_repairs_per_task": 2})
         warn = self.events("budget_warning")
         self.assertEqual([w["unknown_keys"] for w in warn], [["max_dispach"]])
 
@@ -824,6 +831,74 @@ class FixRound1Tests(unittest.TestCase):
         self.assertEqual(C.parse_git_version("git version 2.54.0 (Apple Git-157)"), (2, 54, 0))
         self.assertEqual(C.parse_git_version("git version 2.30.1.windows.1"), (2, 30, 1))
         self.assertIsNone(C.parse_git_version("nonsense"))
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class Task6FixTests(unittest.TestCase):
+    """Task 6 review, fix round 1: the verified head on the VERIFY: and STATUS: lines
+    (I2a), and a default repair budget of 2 (ruling D)."""
+
+    make = FixRound1Tests.make
+    run_main = FixRound1Tests.run_main
+    st = FixRound1Tests.st
+    wt = FixRound1Tests.wt
+
+    def test_the_verify_pass_line_names_the_verified_head(self):
+        self.assertEqual(self.make()[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 0)
+        head = self.st().tasks["T1"]["verified_head"]
+        self.assertRegex(head, r"^[0-9a-f]{40}$")
+        self.assertIn("VERIFY: T1 pass %s" % head, out.splitlines())
+
+    def test_status_shows_the_verified_head(self):
+        self.assertEqual(self.make()[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        self.run_main(["verify", "T1", "--root", self.root])
+        head = self.st().tasks["T1"]["verified_head"]
+        _, out, _ = self.run_main(["status", "--root", self.root])
+        self.assertIn("STATUS: T1 reviewing verified_head=%s" % head, out.splitlines())
+
+    def test_repairs_default_to_two_and_status_shows_it(self):
+        self.assertEqual(self.make()[0], 0)
+        self.assertEqual(self.st().budget["max_repairs_per_task"], 2)
+        _, out, _ = self.run_main(["status", "--root", self.root])
+        self.assertIn('"max_repairs_per_task": 2', out)
+
+    def test_the_grant_repair_budget_replaces_the_default(self):
+        self.assertEqual(self.make(grant_budget={"max_repairs_per_task": 5})[0], 0)
+        self.assertEqual(self.st().budget["max_repairs_per_task"], 5)
+
+    def test_the_default_parks_a_task_after_two_repairs(self):
+        self.assertEqual(self.make(verify=[{"text": "no", "command": ["false"]}])[0], 0)
+        self.run_main(["start", "T1", "--root", self.root])
+        _commit(self.wt())
+        for _ in range(2):
+            rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+            self.assertEqual(rc, 3)
+            self.assertNotIn("PARK:", out)
+        rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertIn("PARK: T1 verify_red_after_repairs", out)
+        t = self.st().tasks["T1"]
+        self.assertEqual((t["status"], t["repairs"]), ("parked", 2))
+
+    def test_a_state_without_a_repair_budget_uses_the_default(self):
+        root = repo_with_plan()
+        plan = {"title": "T", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+                "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "one",
+                           "verify": [{"text": "no", "command": ["false"]}],
+                           "depends_on": []}]}
+        st, _ = new_run(root, plan)
+        self.assertNotIn("max_repairs_per_task", st.budget)
+        self.root = root
+        self.run_main(["start", "T1", "--root", root])
+        _commit(self.wt())
+        outs = [self.run_main(["verify", "T1", "--root", root])[1] for _ in range(3)]
+        self.assertNotIn("PARK:", outs[1])
+        self.assertIn("PARK: T1 verify_red_after_repairs", outs[2])
 
 
 class NonGitStopTests(unittest.TestCase):

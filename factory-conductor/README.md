@@ -25,7 +25,9 @@ Install it next to `spec-first-planning`, which produces what it consumes.
    and, after your explicit yes, an `autonomy-grant/v1` covering `local_reversible` (and
    `push_branch` and `open_pr` if you want the run to reach a PR). Verify commands must use
    `{python}`, not `python3`, and no absolute paths.
-2. Switch to a branch the grant covers, such as `factory/<slug>` (never the default branch).
+2. Switch to a branch the grant covers that is not the default branch and not the run branch
+   the conductor will create (`factory/<plan-slug>`, from the plan title), for example
+   `factory/base`.
 3. Ask the agent to "run the plan unattended". It runs `conductor init`, then loops
    `next` → `start` → executor → `verify` → reviewer → `review` → `merge` until `next` stops,
    then `finish`.
@@ -37,17 +39,22 @@ You can stop a run at any time by revoking the grant
 
 ## What it enforces, and what it does not
 
-- **Enforced:** wall clock, dispatches (executor, repair and reviewer), repairs per task and
-  parallelism, from the grant's `budget`. `init --budget` can only tighten them.
+- **Enforced:** repairs per task (2 by default) and parallelism (2 by default) always; wall
+  clock and dispatches (executor, repair and reviewer, as the tool records them) when the grant
+  or `init --budget` sets them. Set both for an unattended run. `--budget` can only tighten a
+  limit the grant sets.
 - **Recorded, not enforced:** `max_tokens` and `max_usd`. The runtime does not expose usage to
   the tool, so dispatch count is the real cost limit.
-- **The proof is only as good as the checks.** The conductor proves exactly what a task's verify
-  commands prove, on exactly the commit it merged. The independent reviewer looks past them.
+- **The proof is per task, and only as good as the checks.** The conductor proves that a task's
+  verify commands passed on that task's own commit, before it was merged. It does not re-verify
+  the merged run branch, so two tasks that each pass alone can still break each other; CI on
+  the pushed branch is what catches that. The independent reviewer looks past weak checks.
 - **Claims, not proof, to a receiver.** The run result's assertions read as CLAIMED to anyone
   else until they re-run them (`check-envelope --rerun`) or CI on the pushed branch reports them.
 - **Same-user residuals.** A hostile executor running as your OS user could forge the run's
-  state or log, tamper with the git object store, or redirect where a push goes through git
-  config. The reviewer, CI on the pushed branch and your own merge are the defence.
+  state or log, tamper with the git object store, read files outside the verify checkout by
+  absolute path, leave a process running past a verify, or redirect where a push goes through
+  git config. The reviewer, CI on the pushed branch and your own merge are the defence.
 
 ## Layout
 

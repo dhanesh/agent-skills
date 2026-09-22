@@ -121,9 +121,10 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site
 
 `spec-first-planning` 2.x can plan unattended, and — after you say yes — write a
 skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope that
-covers chosen action classes, on branches matching a pattern, for at most 7 days. Four skills' confirmation gates honour it:
+covers chosen action classes, on branches matching a pattern, for at most 7 days. Five skills honour it:
 `spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
-`test-safety-net` each call `check-grant` before falling back to their own ask.
+`test-safety-net` each call `check-grant` before falling back to their own ask, and
+`factory-conductor` calls it before every step of an unattended run.
 
 What a grant can and cannot do:
 
@@ -144,10 +145,13 @@ merges only what passed both into one `factory/<plan-slug>` run branch, and ends
 that branch and opening one PR. A failing or undecidable task is parked with its reason and the
 rest of the plan goes on. Its limits:
 
-- the proof is only as strong as each task's verify commands; the reviewer is the one check
-  that looks past them;
-- wall clock, dispatches, repairs per task and parallelism are enforced; tokens and dollars are
-  recorded, not enforced, because the runtime does not expose usage;
+- the proof is only as strong as each task's verify commands, and it is per task: the merged
+  run branch is not re-verified, so tasks that each pass alone can break each other, and only
+  CI on the pushed branch catches that; the reviewer is the one check that looks past weak
+  verify commands;
+- repairs per task and parallelism are enforced (2 each by default), and wall clock and
+  dispatches when the grant sets them; tokens and dollars are recorded, not enforced, because
+  the runtime does not expose usage;
 - a question the grant does not answer parks that task for you: the conductor does not answer it
   itself;
 - to anyone receiving the run result, its per-task proofs read as claims until they re-run them

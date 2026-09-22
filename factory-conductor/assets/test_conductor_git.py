@@ -237,12 +237,20 @@ class GitTests(unittest.TestCase):
         self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
 
     def test_a_task_with_no_committed_work_is_not_merged(self):
+        # Task 6 review C1: exit 2 left the task `reviewing` forever and hung the run;
+        # it now parks no-commits (exit 3), so the run can go on and finish.
         st = self.state()
         C.main(["start", "T1", "--root", self.root])
         self.through_review(st)
         before = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
-        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
-        self.assertNotEqual(self.task(st)["status"], "proven")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 3)
+        self.assertIn("PARK: T1 no-commits", out.getvalue())
+        self.assertNotIn("MERGE:", out.getvalue())
+        self.assertEqual((self.task(st)["status"], self.task(st)["park_reason"]),
+                         ("parked", "no-commits"))
+        self.assertIsNone(self.task(st)["merge_commit"])
         self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), before)
         self.assertTrue(os.path.isdir(self.wt(st)))
 

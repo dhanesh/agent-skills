@@ -18,7 +18,7 @@ Usage:
     python3 conductor.py status [--root <repo>]                        # one STATUS: line per task
     python3 conductor.py resume [--root <repo>]                        # last step, gate, READY:
     python3 conductor.py start <task> [--root <repo>]                  # START: <task> <worktree>
-    python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass|fail
+    python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass <sha>|fail
     python3 conductor.py review <task> --verdict pass|fail [--detail T] [--root <repo>]
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
@@ -46,7 +46,8 @@ wall_clock_min (from init; checked by next, start, verify, review and merge),
 max_dispatches (one per executor start, per repair send-back after a failing verify or
 review, and per reviewer after a passing verify; a task that needs a dispatch past the
 cap parks with budget_dispatches), max_repairs_per_task (every failing verify or review
-after the first is a repair; at the cap the task parks with verify_red_after_repairs)
+after the first is a repair; at the cap the task parks with verify_red_after_repairs;
+DEFAULT_REPAIRS = 2 when neither the grant nor --budget sets it, recorded in the state)
 and max_parallel (default 2; start refuses past it, next --max is clamped to it) are
 enforced.
 max_tokens and max_usd are recorded and reported, not enforced: the runtime does not
@@ -67,7 +68,8 @@ command's process group is killed when it ends (a child that calls setsid()
 escapes that). A stopped run refuses start,
 verify, review and merge with STOP: <reason>. `merge` merges
 that pinned sha, never the branch name, and refuses if the branch has moved. `merge` needs a passing verify and a passing review,
-and the run branch checked out, clean, at --root. The --no-ff merge runs in an
+and the run branch checked out, clean, at --root. A task with no commit of its own parks
+with no-commits (exit 3): retrying could never change that. The --no-ff merge runs in an
 isolated clone (<run>/merge/<task>-<sha>, no inherited config, attributes, merge
 drivers or hooks); the root then fetches that merge commit and fast-forwards to
 it, and merge_commit records that sha. It then removes the worktree and deletes
@@ -153,6 +155,7 @@ STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", 
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
                 "new_human_decision", "verify_red_after_repairs", "no_ready_tasks")
 DEFAULT_PARALLEL = 2
+DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
@@ -460,6 +463,12 @@ class State:
     def max_parallel(self):
         mp = self.budget.get("max_parallel")
         return DEFAULT_PARALLEL if mp is None else int(mp)
+
+    def max_repairs(self):
+        """max_repairs_per_task, or DEFAULT_REPAIRS when the budget does not set it
+        (init records the effective value; this covers a state built without init)."""
+        cap = self.budget.get("max_repairs_per_task")
+        return DEFAULT_REPAIRS if cap is None else int(cap)
 
 
 def check_budget(budget):
@@ -910,7 +919,7 @@ def cmd_init(args):
                 "%s %r > %r" % (k, extra[k], granted[k]) for k in looser))
     except PlanError as e:
         return _init_fail("invalid budget: %s" % e)
-    budget = {"max_parallel": DEFAULT_PARALLEL}
+    budget = {"max_parallel": DEFAULT_PARALLEL, "max_repairs_per_task": DEFAULT_REPAIRS}
     budget.update(granted)
     budget.update(extra)  # only ever tighter than the grant, or a key it does not set
     exists, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % run_branch)
@@ -966,6 +975,8 @@ def cmd_status(args):
     for tid in st.order:
         t = st.tasks[tid]
         line = "STATUS: %s %s" % (tid, t["status"])
+        if t.get("verified_head") and t["status"] != "proven":
+            line += " verified_head=%s" % t["verified_head"]
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
         if t.get("question"):
@@ -1366,7 +1377,8 @@ def cmd_verify(args):
     st.log("verify", task=args.task, passed=passed, head=head,
            commands=[{"command": r["command"], "ok": r["ok"], "returncode": r["returncode"]}
                      for r in runs])
-    print("VERIFY: %s %s" % (args.task, "pass" if passed else "fail"))
+    # The pass line names the proven commit: the reviewer must judge exactly that one.
+    print("VERIFY: %s pass %s" % (args.task, head) if passed else "VERIFY: %s fail" % args.task)
     if not passed:
         _send_back(st, args.task)
         return 3
@@ -1412,8 +1424,7 @@ def _send_back(st, task):
     """After a failing verify or review: park with verify_red_after_repairs once repairs
     reach max_repairs_per_task, else spend a repair dispatch (parking with
     budget_dispatches when none is left). Parking never stops the run."""
-    cap = st.budget.get("max_repairs_per_task")
-    if cap is not None and st.tasks[task]["repairs"] >= cap:
+    if st.tasks[task]["repairs"] >= st.max_repairs():
         _park(st, task, "verify_red_after_repairs")
         return
     _dispatch(st, task, "repair")
@@ -1606,9 +1617,16 @@ def _merge_in_clone(st, task, clone, before, pinned):
         sys.stderr.write("cannot prepare the merge clone: %s\n" % _git_err(r))
         return 2, None
     ok, r = _git_ok(clone, "rev-list", "--count", "HEAD..%s" % pinned, env=env)
-    if not ok or not r.stdout.strip().isdigit() or int(r.stdout.strip()) == 0:
-        sys.stderr.write("task %s: no committed work to merge\n" % task)
+    if not ok or not r.stdout.strip().isdigit():
+        sys.stderr.write("cannot count the task's commits: %s\n" % _git_err(r))
         return 2, None
+    if int(r.stdout.strip()) == 0:
+        # Nothing to merge will never change by retrying: park it so the run goes on
+        # (an exit 2 left the task reviewing and the run with no way to end).
+        sys.stderr.write("task %s: no committed work to merge\n" % task)
+        st.log("merge", task=task, ok=False, reason="no commits", verified_head=pinned)
+        _park(st, task, "no-commits")
+        return 3, None
     # Merge the pinned sha, never the branch name: exactly the commit that was proven.
     ok, r = _git_ok(clone, "merge", "--no-ff", "--no-edit", "-m", "conductor: %s" % task,
                     pinned, env=isolated_env(**_merge_identity(st.root)))
