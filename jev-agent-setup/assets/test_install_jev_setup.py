@@ -95,6 +95,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("System One Decisioning", agents)  # claude's block is mirrored
         self.assertEqual(agents.count(inst.BEGIN), 1)  # nested markers stripped
         self.assertIn("@RTK.md", c.read_text())  # claude keeps its imports
+        self.assertIn("RTK rules here\n\n", agents)  # sections stay separated
 
     def test_uninstall_restores_foreign_content(self):
         codex = self.paths["codex"]

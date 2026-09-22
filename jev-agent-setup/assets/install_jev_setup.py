@@ -37,7 +37,7 @@ BEGIN = "<!-- BEGIN jev-agent-setup (managed by the jev-agent-setup skill; re-ru
 END = "<!-- END jev-agent-setup -->"
 BEGIN_RE = re.compile(r"^<!-- BEGIN jev-agent-setup\b.*-->$", re.M)
 END_RE = re.compile(r"^<!-- END jev-agent-setup -->$", re.M)
-IMPORT_RE = re.compile(r"^@(\S+)\s*$", re.M)
+IMPORT_RE = re.compile(r"^@(\S+)[ \t]*$", re.M)
 TARGETS = ("claude", "agents", "codex", "gemini")
 ENV_PLACEHOLDER = (
     "# TypeSafe (Jev) API key: https://console.typesafe.ai/\n"
@@ -101,7 +101,7 @@ def inline_imports(text: str, base: Path, seen: frozenset = frozenset()) -> str:
 
 def mirror_body(claude_text: str, claude_base: Path) -> str:
     before, body, after = split_managed(claude_text)
-    flat = before + ("\n" + body + "\n" if body else "") + after
+    flat = "\n\n".join(x.strip("\n") for x in (before, body or "", after) if x.strip())
     header = ("This is a managed mirror of ~/.claude/CLAUDE.md for non-Claude agents; "
               "@imports are inlined. Change CLAUDE.md, then re-run the jev-agent-setup installer.")
     return header + "\n\n" + inline_imports(flat, claude_base).strip()
