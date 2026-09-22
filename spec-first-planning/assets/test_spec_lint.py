@@ -215,6 +215,60 @@ class TestLint(unittest.TestCase):
         )
         self.assertIssue(spec_lint.lint(bad), "after: hints have a cycle")
 
+    def test_after_hint_malformed_token_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: foo]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id 'foo'")
+
+    def test_after_hint_partial_id_fails(self):
+        # "R22x" used to be silently read as R22 (findall grabbed the digits
+        # and ignored the trailing garbage) — it must now be rejected outright.
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R22x]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id 'R22x'")
+
+    def test_after_hint_empty_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: ]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id ''")
+
+    def test_after_hint_trailing_comma_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2,]",
+        )
+        issues = spec_lint.lint(bad)
+        self.assertIssue(issues, "R3 [after: ...] has a malformed id ''")
+        # R2 itself is still a well-formed, known id and must not also be
+        # reported as unknown.
+        self.assertFalse(any("unknown requirement R2" in i for i in issues))
+
+    def test_after_hint_malformed_token_is_not_silently_dropped(self):
+        # Before this fix, "[after: foo]" parsed to an empty id list with no
+        # diagnostic at all — parse_spec must now surface it in malformed_after.
+        ok_looking = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: foo]",
+        )
+        spec = spec_lint.parse_spec(ok_looking)
+        self.assertEqual(spec["after"][3], [])
+        self.assertEqual(spec["malformed_after"], [(3, "foo")])
+
+    def test_after_hint_keyword_matches_case_insensitively(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [AFTER: R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+        self.assertEqual(spec_lint.lint(ok), [])
+
 
 LIGHT = """# Spec: Export
 

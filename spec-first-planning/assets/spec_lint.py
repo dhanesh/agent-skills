@@ -16,10 +16,12 @@ references/spec-template.md. This linter enforces the mechanical half of
      bound like <= / >=).
   5. Every requirement has at least one acceptance criterion referencing
      its id; criteria may not reference unknown ids.
-  5a. An optional trailing `[after: Rn, ...]` hint on a requirement must
-      name known requirement ids, and the after-hints as a whole must not
-      contain a cycle (message: "after: hints have a cycle"). spec_to_tasks.py
-      turns a clean hint into the derived task's `depends_on`.
+  5a. An optional trailing `[after: Rn, ...]` hint on a requirement: every
+      comma-separated token must fully match `R<n>` (no prose, no partial id
+      like "R22x", no blank from an empty/trailing comma), every id named must
+      be a known requirement, and the after-hints as a whole must not contain
+      a cycle (message: "after: hints have a cycle"). spec_to_tasks.py turns a
+      clean hint into the derived task's `depends_on`.
   6-9. (always on, the Constrain + Anchor light pass) Constraints are typed
      bullets; every required truth has a known status, parent, constraint
      mapping, requirements and a runnable check, and traces back to OUTCOME;
@@ -138,8 +140,12 @@ _RID_REF_RE = re.compile(r"\bR(\d+)\b")
 
 # A requirement's optional "[after: R2, R3]" hint: which other requirements it
 # must follow. spec_to_tasks.py maps this to the derived task's depends_on.
-AFTER_RE = re.compile(r"\[after:\s*([^\]]+)\]")
-_AFTER_ID_RE = re.compile(r"[Rr](\d+)")
+# "after" is matched case-insensitively, same as WHERE_RE in spec_to_tasks.py.
+AFTER_RE = re.compile(r"\[after:\s*([^\]]+)\]", re.IGNORECASE)
+# A single after-hint token must fully match this (case-insensitive R/r, then
+# digits, nothing else) — checked with .match() against an already-anchored
+# pattern, i.e. equivalent to fullmatch.
+_AFTER_ID_RE = re.compile(r"^[Rr](\d+)$")
 
 
 def _fields(raw):
@@ -485,9 +491,13 @@ def parse_spec(text):
       requirements            -- list of (number:int, text:str) in document order
       malformed_requirements  -- bullets in Requirements without an R<n> prefix
       after                   -- dict of number:int -> [number:int, ...], the
-                                  requirement numbers named in that requirement's
-                                  optional "[after: Rn, ...]" hint (empty list when
-                                  the requirement carries no hint)
+                                  well-formed requirement numbers named in that
+                                  requirement's optional "[after: Rn, ...]" hint
+                                  (empty list when the requirement carries no hint,
+                                  or every token in it was malformed)
+      malformed_after         -- list of (number:int, token:str) for each
+                                  after-hint token that isn't a bare "R<n>" id
+                                  (typo, blank from an empty/trailing comma, ...)
       criteria                -- list of (text:str, [referenced numbers]) in order
       constraints             -- list of {id, type, text} from ## Constraints
       malformed_constraints   -- bullets in Constraints not matching the grammar
@@ -533,10 +543,26 @@ def parse_spec(text):
         else:
             malformed.append(bullet)
 
+    # Each after-hint is split on commas; every resulting token must fully
+    # match _AFTER_ID_RE (an id, nothing else — no prose, no partial id like
+    # "R22x", no blank left by an empty or trailing comma). A token that
+    # doesn't is recorded in malformed_after rather than silently dropped, so
+    # a typo shows up as a lint failure instead of a hint that just does
+    # nothing.
     after = {}
+    malformed_after = []
     for num, rtext in requirements:
         am = AFTER_RE.search(rtext)
-        after[num] = [int(n) for n in _AFTER_ID_RE.findall(am.group(1))] if am else []
+        ids = []
+        if am:
+            for token in am.group(1).split(","):
+                token = token.strip()
+                idm = _AFTER_ID_RE.match(token)
+                if idm:
+                    ids.append(int(idm.group(1)))
+                else:
+                    malformed_after.append((num, token))
+        after[num] = ids
 
     # A criterion is OWNED by the requirement in its leading `R<n>:` prefix.
     # `_RID_REF_RE` matches an R<n> token anywhere — in a filename, a command,
@@ -567,6 +593,7 @@ def parse_spec(text):
         "requirements": requirements,
         "malformed_requirements": malformed,
         "after": after,
+        "malformed_after": malformed_after,
         "criteria": criteria,
         "constraints": constraints,
         "malformed_constraints": bad_c,
@@ -712,8 +739,13 @@ def lint(text, mode="light"):
                 "'- R%d: <runnable check>' line" % (num, num)
             )
 
-    # 5a. [after: ...] hints: every id named must be a known requirement, and
-    # the after-graph among requirements must not contain a cycle.
+    # 5a. [after: ...] hints: every token must be a well-formed id, every id
+    # named must be a known requirement, and the after-graph among
+    # requirements must not contain a cycle.
+    for num, token in spec["malformed_after"]:
+        issues.append(
+            "R%d [after: ...] has a malformed id '%s'" % (num, token)
+        )
     after = spec["after"]
     for num, refs in after.items():
         for ref in refs:

@@ -11,8 +11,12 @@ with a non-zero exit; the shipped spec template, filled with fixture
 content, produces a lint-clean spec. The autonomy-grant arm (2.0.0) runs the
 lint modes, write_grant.py, check-grant and revoke-grant on NEGATIVE and
 positive fixtures, validates references/unattended.md's answers.json example
-against write_grant.py, and checks the SKILL.md gate text. Stdlib-only,
-offline, no repo writes.
+against write_grant.py, and checks the SKILL.md gate text. The waves arm
+(2.1.0) runs a diamond [after: ...] spec through spec_to_tasks.py --waves
+(3 waves, the right critical path) and its --envelope payload (T4's
+depends_on), then checks that a cycle, an unknown id, and a malformed id
+in an [after: ...] hint each fail spec_lint.py with the specific message
+(NEGATIVE fixtures). Stdlib-only, offline, no repo writes.
 """
 
 import json
@@ -129,6 +133,27 @@ Recommended: OPT-A — satisfies every RT at the lowest complexity.
 - D1: May the export add a dependency? -> no (source: sweep)
 """
 
+# R1 -> T1 (no deps); R2, R3 both [after: R1] -> T2, T3; R4 [after: R2, R3] -> T4.
+# A diamond: wave 1 = [T1], wave 2 = [T2, T3], wave 3 = [T4], critical path
+# T1 -> T2 -> T4 (tied with T1 -> T3 -> T4; T2 sorts first numerically).
+# Deliberately minimal (just Requirements + Acceptance criteria): --waves and
+# --envelope don't call spec_lint.lint, so the other required sections aren't
+# needed here — see spec_to_tasks.py's derive_plan.
+DIAMOND = """# Spec: pipeline
+
+## Requirements
+- R1: The base step must run first.
+- R2: The second step must run after the base step. [after: R1]
+- R3: The third step must run after the base step. [after: R1]
+- R4: The final step must run after both prior steps. [after: R2, R3]
+
+## Acceptance criteria
+- R1: run `true`, expect exit 0.
+- R2: run `true`, expect exit 0.
+- R3: run `true`, expect exit 0.
+- R4: run `true`, expect exit 0.
+"""
+
 
 def _now_z():
     """RFC 3339 UTC 'now', to the second (runtime fixture helper)."""
@@ -232,6 +257,87 @@ def fresh_repo():
     with open(os.path.join(repo, "docs", "spec.md"), "w", encoding="utf-8") as f:
         f.write(FULL)
     return repo
+
+
+def _lint(text, *flags):
+    """Like the module-level `lint()` below but returns the full CompletedProcess,
+    not just the exit code — the waves-arm NEGATIVE checks need to confirm the
+    specific FAIL message fired, not just that *some* issue was found (DIAMOND
+    is missing sections other than Requirements/Acceptance criteria, so it would
+    fail lint for unrelated reasons too)."""
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "spec.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(text)
+        return subprocess.run([sys.executable, "-I", os.path.join(ASSETS, "spec_lint.py"), *flags, p],
+                              capture_output=True, text=True, timeout=60)
+
+
+def waves_arm():
+    """[after: ...] / depends_on / --waves outcome checks (2.1.0): a diamond spec
+    schedules into 3 waves with the right critical path and depends_on in the
+    task-plan payload; a cyclic, unknown-id, or malformed-id [after: ...] hint
+    each fail spec_lint.py with the specific message (NEGATIVE fixtures)."""
+    tasks_py = os.path.join(ASSETS, "spec_to_tasks.py")
+
+    with tempfile.TemporaryDirectory() as d:
+        spec_path = os.path.join(d, "spec.md")
+        with open(spec_path, "w", encoding="utf-8") as f:
+            f.write(DIAMOND)
+        r = subprocess.run([sys.executable, "-I", tasks_py, spec_path, "--waves"],
+                           capture_output=True, text=True, timeout=30)
+        check("--waves schedules a diamond [after: ...] spec into 3 waves with "
+              "the right critical path",
+              r.returncode == 0
+              and "WAVE 1: T1" in r.stdout and "WAVE 2: T2 T3" in r.stdout
+              and "WAVE 3: T4" in r.stdout and "CRITICAL_PATH: T1 -> T2 -> T4" in r.stdout
+              and "WAVES_RESULT: PASS (3 wave(s))" in r.stdout,
+              r.stdout.strip()[-160:])
+
+    repo = tempfile.mkdtemp(prefix="sfp-waves-")
+    try:
+        os.makedirs(os.path.join(repo, "docs"))
+        with open(os.path.join(repo, "docs", "spec.md"), "w", encoding="utf-8") as f:
+            f.write(DIAMOND)
+        r = subprocess.run([sys.executable, "-I", tasks_py, os.path.join(repo, "docs", "spec.md"),
+                            "--envelope", repo], capture_output=True, text=True, timeout=30)
+        env_paths = [ln[len("ENVELOPE: "):] for ln in r.stdout.splitlines()
+                     if ln.startswith("ENVELOPE: ")]
+        depends_on = None
+        if r.returncode == 0 and env_paths and os.path.isfile(env_paths[0]):
+            with open(env_paths[0], encoding="utf-8") as f:
+                statement = json.load(f)
+            payload_tasks = statement.get("predicate", {}).get("payload", {}).get("tasks", [])
+            t4 = next((t for t in payload_tasks if t.get("id") == "T4"), None)
+            depends_on = t4.get("depends_on") if t4 else None
+        check("the task-plan envelope's payload carries T4's depends_on (T2, T3)",
+              depends_on == ["T2", "T3"], "depends_on=%s" % depends_on)
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
+    cyclic = DIAMOND.replace("[after: R1]", "[after: R1, R4]", 1)
+    r = _lint(cyclic)
+    check("NEGATIVE: a cycle among [after: ...] hints fails spec_lint.py",
+          r.returncode != 0 and "after: hints have a cycle" in r.stdout,
+          r.stdout.strip()[-100:])
+
+    unknown = DIAMOND.replace(
+        "- R4: The final step must run after both prior steps. [after: R2, R3]",
+        "- R4: The final step must run after both prior steps. [after: R2, R9]",
+    )
+    r = _lint(unknown)
+    check("NEGATIVE: an [after: ...] hint naming an unknown requirement fails spec_lint.py",
+          r.returncode != 0 and "unknown requirement R9" in r.stdout,
+          r.stdout.strip()[-100:])
+
+    malformed = DIAMOND.replace(
+        "- R4: The final step must run after both prior steps. [after: R2, R3]",
+        "- R4: The final step must run after both prior steps. [after: R2, R3x]",
+    )
+    r = _lint(malformed)
+    check("NEGATIVE: a malformed [after: ...] id fails spec_lint.py",
+          r.returncode != 0 and "malformed id 'R3x'" in r.stdout,
+          r.stdout.strip()[-100:])
 
 
 def grant_arm():
@@ -525,6 +631,7 @@ def main():
               grammar_issues == [], "issues=%s" % grammar_issues)
 
         grant_arm()
+        waves_arm()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

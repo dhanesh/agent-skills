@@ -487,6 +487,46 @@ class TestDependsOn(unittest.TestCase):
                           "verify": [{"text": "x", "command": None}], "depends_on": "T0"}]}
         self.assertTrue(spec_to_tasks.payload_errors(bad))
 
+    def test_after_hint_keyword_is_case_insensitive_and_stripped_from_title(self):
+        spec = textwrap.dedent(
+            """\
+            # Spec: shout
+
+            ## Requirements
+            - R1: The base step must run first.
+            - R2: The second step must run after the base step. [AFTER: R1]
+
+            ## Acceptance criteria
+            - R1: run `true`, expect exit 0.
+            - R2: run `true`, expect exit 0.
+            """
+        )
+        plan = spec_to_tasks.derive_plan(spec)
+        t2 = [t for t in plan["tasks"] if t["requirement_ids"] == ["R2"]][0]
+        self.assertEqual(t2["depends_on"], ["T1"])
+        self.assertNotIn("[AFTER:", t2["title"])
+        self.assertIn("second step", t2["title"])
+
+    def test_after_hint_referencing_an_uncovered_requirement_has_no_depends_on(self):
+        # R1 has no acceptance criterion, so it derives no task at all; R2's
+        # [after: R1] hint then resolves to zero covering tasks.
+        spec = textwrap.dedent(
+            """\
+            # Spec: gap
+
+            ## Requirements
+            - R1: The upstream step must happen.
+            - R2: The downstream step must happen after the upstream step. [after: R1]
+
+            ## Acceptance criteria
+            - R2: run `true`, expect exit 0.
+            """
+        )
+        plan = spec_to_tasks.derive_plan(spec)
+        self.assertEqual(plan["uncovered"], ["R1"])
+        t = [t for t in plan["tasks"] if t["requirement_ids"] == ["R2"]][0]
+        self.assertNotIn("depends_on", t)
+
 
 class TestWaves(unittest.TestCase):
     def test_diamond_gives_three_waves(self):

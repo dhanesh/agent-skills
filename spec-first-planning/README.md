@@ -21,13 +21,16 @@ those seams mechanically:
   answered).
 - `assets/spec_to_tasks.py` — compiles a lint-clean spec into a task plan (markdown + JSON):
   one task per requirement, verify steps lifted from the acceptance criteria, a coverage map,
-  and a non-zero exit if any requirement has no task that proves it.
+  and a non-zero exit if any requirement has no task that proves it. A requirement can carry
+  `[after: R2, R3]`, naming the other requirements it must follow; the compiler turns a clean
+  hint into the task's `depends_on`, and `--waves` schedules the whole plan into waves and
+  prints the critical path.
 - `assets/write_grant.py` — after the user's explicit yes, writes an `autonomy-grant/v1`
   envelope from the spec, the plan envelope and the user's answers.
 
 All are stdlib-only python3, offline, deterministic.
 
-## Planning loop and modes (2.0.0)
+## Planning loop and modes (2.1.0)
 
 Planning follows manifold's loop: constrain → tension → anchor → choose. Attended mode (the
 default) runs a light pass. The skill says which depth it is using, and after the spec draft
@@ -41,6 +44,14 @@ pushing a work branch, opening a pull request), lasts at most 7 days, and never 
 default branch or a detached HEAD, so work on a branch such as `factory/*`. `merge`, `deploy`, `spend`, `external_message` and `delete` always ask. Revoke
 it with `python3 assets/contract_check.py revoke-grant --root <repo>`. Details:
 `references/unattended.md`.
+
+**Task ordering (2.1.0).** A requirement's optional `[after: R2, R3]` hint (`R` matched
+case-insensitively; every requirement it names must exist, and the hints as a whole must not
+form a cycle — `spec_lint.py` rejects both) becomes the derived task's `depends_on`, mapped to
+the task(s) that cover each id. `spec_to_tasks.py my-feature.spec.md --waves` groups the plan
+into waves — every task in a wave is independent of the others — and prints the critical path
+(the longest `depends_on` chain), ready to hand to `factory-conductor` or a loop built with
+`crafting-self-prompting-loops`.
 
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
@@ -63,6 +74,7 @@ python3 assets/spec_lint.py my-feature.spec.md          # FAIL lines + LINT_RESU
 python3 assets/spec_lint.py --converged my-feature.spec.md   # full-loop rules too
 python3 assets/spec_to_tasks.py my-feature.spec.md      # markdown plan + coverage map
 python3 assets/spec_to_tasks.py my-feature.spec.md --json   # machine handoff
+python3 assets/spec_to_tasks.py my-feature.spec.md --waves   # WAVE/CRITICAL_PATH lines
 ```
 
 Format details: `references/spec-format.md`. Spec skeleton: `references/spec-template.md`.
