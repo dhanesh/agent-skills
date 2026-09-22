@@ -110,6 +110,15 @@ The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 - **AC7.** BCP 14: the declaration, PP-7 passing, PP-5 not newly advisory, and a classification row for every hard rule. The skill ships a README and an eval, and `make gate` is green.
 - **AC8.** After merge, Jev re-judges Q3 and "implementation runs end to end without the human", and the result goes into the assessment doc.
 
+## 7a. Threat model (added 2026-09-23, from the Task 2 reviews)
+
+The conductor's proof ("this run of the task's own checks passed on exactly the commit that was merged") is defended against two kinds of executor:
+
+- **Honest but sloppy (MUST be caught):** uncommitted or untracked work, files present only because they are git-ignored or excluded, commits made after verify, amends and resets, branches moved or deleted, a merge left pending, crash leftovers, and verify commands that write caches. Each of these fails verify or refuses the merge.
+- **Deliberately hostile, same OS user (stated residual):** an executor that rewrites git internals or the conductor's own files — forging `state.json` or the log, tampering with loose objects or alternates in the shared object store, or racing writes into the conductor's scratch clones. Such an executor already has the power to forge the conductor's state, so no in-process check can be a real boundary against it. The mitigations are the independent reviewer, and CI re-running the checks on the pushed branch outside this machine, which counts as proof under C7.
+
+Cheap hardening that removes whole classes of silent tampering is still applied: verify and merge run in isolated clones with no inherited config, attributes, hooks, filters, merge drivers or fsmonitor; replace objects, grafts and the commit-graph are ignored for every conductor git call; symlinks that escape the tree fail verify.
+
 ## 8. Risks
 
 - **Model quality bounds everything.** The conductor proves what a task's verify commands prove. A plan with weak checks yields weak proof. The SKILL.md states this, as spec-first-planning states that its linter checks structure and not reasoning.
