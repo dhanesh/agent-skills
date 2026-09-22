@@ -1,4 +1,4 @@
-import hashlib, json, os, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, io, json, os, subprocess, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 
@@ -48,6 +48,11 @@ class GitTests(unittest.TestCase):
         return C.State.new(root=self.root, run_id=C.new_run_id(), plan=tasks,
                            plan_envelope=self.plan_path, plan_sha256=sha, grant_id="g",
                            run_branch="factory/p", base_branch="main", budget={})
+
+    def marker(self):
+        """An absolute path outside every checkout, for a child process to touch."""
+        self._marker = os.path.join(tempfile.mkdtemp(), "late")
+        return self._marker
 
     def wt(self, st):
         return C.State.load(st.state_path).tasks["T1"]["worktree"]
@@ -333,8 +338,10 @@ class GitTests(unittest.TestCase):
         commit_in(sd, "x.py", "print('ok')\n")
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
         run = self.task(st)["verify_runs"][0]
-        self.assertTrue(run["command"][-1].startswith(os.path.realpath(wt))
-                        or run["command"][-1].startswith(wt), run["command"])
+        # resolved inside the conductor's detached checkout of the task's commit
+        self.assertIn(os.sep + os.path.join("verify", "T1-"), run["command"][-1])
+        self.assertTrue(run["command"][-1].endswith(
+            os.path.join(".claude", "skills", "probe-skill", "x.py")), run["command"])
 
     def test_an_unresolvable_placeholder_is_recorded_as_a_failure(self):
         st = self.state(verify=[{"text": "x", "command":
@@ -353,7 +360,7 @@ class GitTests(unittest.TestCase):
 
     def test_a_verify_that_times_out_fails_and_its_process_group_is_killed(self):
         st = self.state(verify=[{"text": "x", "command":
-                                 ["sh", "-c", "(sleep 2; touch late) & sleep 30"]}])
+                                 ["sh", "-c", "(sleep 2; touch %s) & sleep 30" % self.marker()]}])
         C.main(["start", "T1", "--root", self.root])
         old = C.VERIFY_TIMEOUT
         C.VERIFY_TIMEOUT = 1
@@ -369,8 +376,8 @@ class GitTests(unittest.TestCase):
         run = self.task(st)["verify_runs"][0]
         self.assertEqual((run["ok"], run["returncode"]), (False, None))
         self.assertIn("timed out", run["stderr_tail"])
-        time.sleep(3)  # a surviving background child would have written `late` by now
-        self.assertFalse(os.path.exists(os.path.join(self.wt(st), "late")))
+        time.sleep(3)  # a surviving background child would have written the marker by now
+        self.assertFalse(os.path.exists(self._marker))
 
     def test_hooks_planted_by_the_executor_do_not_run_in_conductor_git_calls(self):
         st = self.state()
@@ -410,7 +417,149 @@ class GitTests(unittest.TestCase):
         self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
                          ("parked", "merge-conflict-unaborted"))
         self.assertIsNotNone(st.stopped)
+        # B7: the run is stopped; a second merge MUST NOT touch the pending merge
+        calls = []
+
+        def spy(root, *args, **kw):
+            calls.append(args)
+            return real(root, *args, **kw)
+        C.git = spy
+        try:
+            self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 3)
+        finally:
+            C.git = real
+        self.assertFalse([a for a in calls if "merge" in a], calls)
+        self.assertEqual(C.git(self.root, "rev-parse", "-q", "--verify",
+                               "MERGE_HEAD").returncode, 0)
         C.git(self.root, "merge", "--abort")
+
+    # --- fix round 2 ---
+
+    def verify_dirs(self, st):
+        d = os.path.join(st.dir, "verify")
+        return os.listdir(d) if os.path.isdir(d) else []
+
+    def test_an_excluded_helper_the_verify_needs_fails_the_verify(self):
+        st = self.state(verify=[{"text": "helper", "command":
+                                 ["sh", "-c", ". ./helper.sh && test \"$X\" = 1"]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, "uses.txt", "needs helper\n")
+        with open(os.path.join(self.root, ".git", "info", "exclude"), "a") as f:
+            f.write("helper.sh\n")
+        with open(os.path.join(wt, "helper.sh"), "w") as f:
+            f.write("X=1\n")
+        self.assertEqual(C.git(wt, "status", "--porcelain", "--untracked-files=all")
+                         .stdout.strip(), "")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+        self.assertEqual(self.task(st)["status"], "verifying")
+
+    def test_a_gitignored_generated_file_fails_the_verify(self):
+        st = self.state(verify=[{"text": "gen", "command": ["test", "-f", "gen/out.bin"]}])
+        C.main(["start", "T1", "--root", self.root])
+        wt = self.wt(st)
+        commit_in(wt, ".gitignore", "gen/\n")
+        os.makedirs(os.path.join(wt, "gen"))
+        with open(os.path.join(wt, "gen", "out.bin"), "wb") as f:
+            f.write(b"\0")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+
+    def test_a_verify_that_writes_pycache_passes(self):
+        st = self.state(verify=[{"text": "import", "command": ["{python}", "-c", "import m"]}])
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "m.py", "X = 1\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 2)  # now reviewing
+
+    def test_the_verify_checkout_is_removed_after_a_pass_and_a_fail(self):
+        for cmd, rc in ((["true"], 0), (["false"], 3)):
+            st = self.state(verify=[{"text": "x", "command": cmd}])
+            C.main(["start", "T1", "--root", self.root])
+            commit_in(self.wt(st), "b.txt", "b\n")
+            self.assertEqual(C.main(["verify", "T1", "--root", self.root]), rc)
+            self.assertEqual(self.verify_dirs(st), [])
+            self.assertNotIn(os.sep + "verify" + os.sep,
+                             C.git(self.root, "worktree", "list").stdout)
+
+    def test_verify_runs_the_pinned_commit_in_a_detached_checkout(self):
+        st = self.state(verify=[{"text": "x", "command":
+                                 ["sh", "-c", "git rev-parse HEAD > %s && git symbolic-ref "
+                                  "-q HEAD >> %s || true" % (self.marker(), self._marker)]}])
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        with open(self._marker) as f:
+            lines = f.read().split()
+        self.assertEqual(lines, [self.task(st)["verified_head"]])  # detached: no symbolic ref
+
+    def test_a_child_with_detached_stdio_does_not_outlive_a_passing_command(self):
+        m = self.marker()
+        st = self.state(verify=[{"text": "x", "command":
+                                 ["sh", "-c", "(sleep 2; touch %s) </dev/null >/dev/null "
+                                  "2>&1 & exit 0" % m]}])
+        C.main(["start", "T1", "--root", self.root])
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        time.sleep(3)
+        self.assertFalse(os.path.exists(m), "the background child survived the verify")
+
+    def test_a_stopped_run_refuses_start_verify_review_and_merge(self):
+        st = self.state()
+        s = C.State.load(st.state_path)
+        s.stopped = {"reason": "new_human_decision", "detail": "x", "at": "t"}
+        s.save()
+        for cmd in (["start", "T1"], ["verify", "T1"], ["review", "T1", "--verdict", "pass"],
+                    ["merge", "T1"]):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(C.main(cmd + ["--root", self.root]), 3, cmd)
+            self.assertIn("STOP: new_human_decision", out.getvalue(), cmd)
+        self.assertEqual(self.task(st)["status"], "pending")
+
+    def _merge_with(self, st, fake_factory):
+        real = C.git
+        C.git = fake_factory(real)
+        try:
+            return C.main(["merge", "T1", "--root", self.root])
+        finally:
+            C.git = real
+
+    def test_a_merge_that_is_not_two_parent_parks_and_stops(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+
+        def factory(real):
+            def fake(root, *args, **kw):
+                if "--parents" in args:
+                    return subprocess.CompletedProcess(args, 0, "a" * 40 + " " + "b" * 40 + "\n", "")
+                return real(root, *args, **kw)
+            return fake
+        self.assertEqual(self._merge_with(st, factory), 3)
+        st = C.State.load(st.state_path)
+        self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
+                         ("parked", "merge-inconsistent"))
+        self.assertEqual((st.stopped["reason"], st.stopped["detail"]),
+                         ("new_human_decision", "merge-inconsistent"))
+
+    def test_a_run_branch_that_moves_during_merge_parks_and_stops(self):
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        root = self.root
+
+        def factory(real):
+            def fake(r, *args, **kw):
+                if "merge" in args and "--no-ff" in args:
+                    commit_in(root, "race.txt", "r\n", "race")  # lands between checks
+                return real(r, *args, **kw)
+            return fake
+        self.assertEqual(self._merge_with(st, factory), 3)
+        st = C.State.load(st.state_path)
+        self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
+                         ("parked", "merge-inconsistent"))
+        self.assertEqual(st.stopped["detail"], "merge-inconsistent")
 
 
 if __name__ == "__main__":
