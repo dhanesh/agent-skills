@@ -208,7 +208,9 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         recs = self.records()
         self.assertEqual([r["what"] for r in recs], ["push", "pr"])
-        self.assertEqual(recs[0]["argv"], ["-u", "origin", "factory/p"])
+        # the run branch goes out as an explicit, non-forced refspec (never remapped)
+        self.assertEqual(recs[0]["argv"],
+                         ["-u", "origin", "refs/heads/factory/p:refs/heads/factory/p"])
         self.assertEqual(recs[1]["argv"][:4], ["--title", "Demo plan", "--base", "main"])
         ev = [e for e in self.log_events() if e["event"] in ("push", "pr")]
         self.assertEqual([(e["event"], e["returncode"]) for e in ev], [("push", 0), ("pr", 0)])
@@ -274,6 +276,31 @@ class FinishTests(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertNotIn("FINISH:", out)
         self.assertEqual(self.records(), [])
+
+    def test_a_push_refspec_in_the_shared_config_cannot_retarget_or_force(self):
+        """N1: an executor can write remote.origin.push into the shared .git/config; a bare
+        `git push origin <rb>` would map through it (and its + would force)."""
+        self.run_plan()
+        bare = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "push", "-q", "origin", "main"], check=True)
+        main_before = C.git(bare, "rev-parse", "refs/heads/main").stdout.strip()
+        subprocess.run(["git", "-C", self.root, "config", "remote.origin.push",
+                        "+refs/heads/factory/p:refs/heads/main"], check=True)
+        head = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
+            [sys.executable, self.stub, self.record, "pr", "--body-file", "{body_file}"])])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(C.git(bare, "rev-parse", "refs/heads/main").stdout.strip(),
+                         main_before)
+        self.assertEqual(C.git(bare, "rev-parse", "refs/heads/factory/p").stdout.strip(), head)
+
+    def test_explicit_push_rewrites_only_the_run_branch(self):
+        self.assertEqual(C.explicit_push(["git", "push", "-u", "origin", "factory/p"],
+                                         "factory/p"),
+                         ["git", "push", "-u", "origin",
+                          "refs/heads/factory/p:refs/heads/factory/p"])
 
     def test_allowed_push_shapes(self):
         for cmd in (["git", "push", "-u", "origin", "{run_branch}"],
@@ -434,6 +461,18 @@ class FinishTests(unittest.TestCase):
         rc, out = self.finish(extra=["--retry-remote"])
         self.assertEqual(rc, 0, out)
         self.assertEqual([r["what"] for r in self.records()], ["push", "pr"])
+
+    def test_retry_remote_refuses_an_envelope_changed_since_finish(self):
+        self.run_plan(policy={"read_only": "auto", "local_reversible": "grant"})
+        rc, out = self.finish()
+        path, _ = self.envelope(out)
+        self.assertEqual(C.State.load(self.st_path).finished["sha256"], CC.sha256_file(path))
+        with open(path, "a") as f:
+            f.write(" ")
+        write_grant(self.root, self.plan)
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.records(), [])
 
     def test_retry_remote_needs_a_finished_run(self):
         self.run_plan()

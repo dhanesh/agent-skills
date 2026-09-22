@@ -102,15 +102,21 @@ nothing overwritten), which is harmless.
 Then `gate push_branch`, and on COVERED the --push-cmd (default: git push -u origin
 <run_branch>), only while the root is on the run branch. The push command must be
 `git push [--set-upstream|--porcelain|--quiet|-u|-q] <remote> <run_branch>`: no force,
-no refspec, no other branch or option. Like every conductor git call it runs with
-core.hooksPath=/dev/null (spec section 7a), so the user's own pre-push hooks do NOT run.
+no refspec, no other branch or option. The conductor then rewrites the run branch to the
+explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>, so a remote.<name>.push
+mapping planted in the shared .git/config cannot retarget or force it. Residual (spec
+section 7a, hostile same-user config): pushurl, url.<base>.pushInsteadOf, receivepack and
+core.sshCommand can redirect WHERE the push goes, but cannot force it or change which
+branch it updates. Like every conductor git call it runs with core.hooksPath=/dev/null
+(spec section 7a), so the user's own pre-push hooks do NOT run.
 Then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr create --title <plan
 title> --base <base branch> --body-file <tmp>), the body built from the payload with all
 plan, park and review text inside inline code spans. The commands are JSON argv lists; a
 token that is exactly {run_branch}, {base_branch}, {title} or {body_file} is replaced.
 The first ASK prints GATE: ASK, skips the rest and exits 3 (the run's recorded stop is
 left as it was); a failed step exits 3 too. Completed steps are recorded (finished.pushed,
-finished.pr). A later `finish` prints the same FINISH: line; while a step is pending it
+finished.pr, with the envelope's sha256: --retry-remote refuses, exit 2, an envelope
+that changed since). A later `finish` prints the same FINISH: line; while a step is pending it
 also prints REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and
 runs just the pending steps. Once finished, next, resume, start, verify, review, merge,
 park and decision refuse with exit 2 ("run finished").
@@ -1919,6 +1925,22 @@ def push_cmd_problem(argv, run_branch):
     return None
 
 
+def explicit_push(argv, run_branch):
+    """An allowlisted push argv with its run-branch positional (the last one) rewritten to
+    the explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>. A refspec with no
+    ':' is mapped through remote.<name>.push, which the executor can write in the shared
+    .git/config (`+refs/heads/<rb>:refs/heads/main` would force-update main); git never
+    remaps a refspec that has a ':', and with no '+' the push is never forced."""
+    out = list(argv)
+    for i in range(len(out) - 1, 1, -1):
+        if not out[i].startswith("-"):
+            if out[i] != run_branch:
+                raise ValueError("the last positional is not the run branch: %r" % out[i])
+            out[i] = "refs/heads/%s:refs/heads/%s" % (run_branch, run_branch)
+            return out
+    raise ValueError("the push names no run branch")
+
+
 def _run_remote(st, event, argv):
     """Run one remote step (no shell, no stdin) in the root, in its own process group,
     killed when it ends or times out, as verify does. Log it as `event`. (ok?, stdout)"""
@@ -2019,8 +2041,8 @@ def cmd_finish(args):
     payload["log_sha256"] = hashlib.sha256(prefix).hexdigest()
     payload["log_bytes"] = len(prefix)
     path = CC.write_envelope(st.root, statement)
-    st.finished = {"envelope": path, "id": eid, "at": _rfc3339(_now()),
-                   "pushed": False, "pr": False}
+    st.finished = {"envelope": path, "id": eid, "sha256": CC.sha256_file(path),
+                   "at": _rfc3339(_now()), "pushed": False, "pr": False}
     st.save()
     print("FINISH: %s" % path)
     return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
@@ -2037,6 +2059,16 @@ def _finish_again(st, args, push_cmd, pr_cmd):
     if not args.retry_remote:
         print("REMOTE: pending %s (run finish --retry-remote)" % " ".join(pending))
         return 3
+    want = st.finished.get("sha256")
+    try:
+        got = CC.sha256_file(path)
+    except OSError as e:
+        got = None
+        sys.stderr.write("cannot read the run-result envelope %s: %s\n" % (path, e))
+    if not want or got != want:
+        sys.stderr.write("the run-result envelope %s changed since finish wrote it "
+                         "(sha256 %s, recorded %s); not retrying\n" % (path, got, want))
+        return 2
     doc, err = CC.load_envelope(path)
     if err or not isinstance(doc, dict) or doc.get("predicateType") != RUN_RESULT_KIND:
         sys.stderr.write("cannot read the run-result envelope %s: %s\n" % (path, err))
@@ -2062,7 +2094,12 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
             st.log("gate", action="push_branch", ok=False, result=line, exit=3)
             print(line)
             return 3
-        ok, out = _run_remote(st, "push", expand_cmd(push_cmd, values))
+        argv = expand_cmd(push_cmd, values)
+        why = push_cmd_problem(argv, st.run_branch)  # checked again, right before it runs
+        if why:
+            sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
+            return 2
+        ok, out = _run_remote(st, "push", explicit_push(argv, st.run_branch))
         if not ok:
             return 3
         st.finished["pushed"] = _tail(out).strip() or True
