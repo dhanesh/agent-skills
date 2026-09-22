@@ -23,6 +23,8 @@ Usage:
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
     python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
+    python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON]
+                                                                       # FINISH: <envelope path>
 
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
 fresh subjects, a schedulable plan), then requires `check-grant` to cover
@@ -80,6 +82,24 @@ objects/info/alternates (N3), and committed code that reads the executor's
 uncommitted files by path (N11), are not caught here; CI re-running the checks on
 the pushed branch is the independent re-check.
 
+Finish. `finish` ends a run, stopped or not. It writes a run-result/v1 envelope under
+.skill-contract/envelopes/ (a local write: local_reversible) and prints FINISH: <path>.
+The envelope's subjects pin the plan envelope and the grant read at init; its payload
+carries each task's status, verify re-runs, review, merge commit and park reason, the
+stop, the budget (max_tokens and max_usd recorded, not enforced), and the worktrees a
+merge-conflict park kept (never deleted here). Its assertions are one passed
+`verify:<task>` per proven task, carrying the task's first verify command as the plan
+wrote it. log_sha256 is the sha256 of the log's first log_bytes bytes, which end with
+the `finish` event: the log is append-only, so the gate, push and pr events after it
+never change that prefix. Then `gate push_branch`, and on COVERED the --push-cmd
+(default: git push -u origin <run_branch>; never a force-push, and only while the root
+is on the run branch); then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr
+create --title <plan title> --body-file <tmp>), the body built from the payload. The
+commands are JSON argv lists; a token that is exactly {run_branch}, {base_branch},
+{title} or {body_file} is replaced. The first ASK prints GATE: ASK, skips the rest and
+exits 3 (the run's recorded stop is left as it was); a failed step exits 3 too. A second
+`finish` prints the same FINISH: line and does nothing else.
+
 Run id grammar: run-<yyyymmddThhmmssZ>-<6 hex>.
 Exit 0 success; 2 usage or invalid input; 3 the run must stop.
 """
@@ -113,6 +133,9 @@ STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
                 "new_human_decision", "verify_red_after_repairs", "no_ready_tasks")
 DEFAULT_PARALLEL = 2
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
+RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
+CONDUCTOR_SKILL = "factory-conductor"
+CONDUCTOR_VERSION = "1.0.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
@@ -123,8 +146,14 @@ TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree"
 BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
                "max_repairs_per_task": "count", "max_parallel": "positive",
                "max_tokens": "count", "max_usd": "number"}
-BUDGET_NOTE = ("STATUS: budget max_tokens/max_usd recorded, not enforced "
-               "(the runtime does not expose usage)")
+BUDGET_NOTE_TEXT = ("max_tokens/max_usd recorded, not enforced "
+                    "(the runtime does not expose usage)")
+BUDGET_NOTE = "STATUS: budget " + BUDGET_NOTE_TEXT
+# finish's remote steps. Each is an argv list (never a shell); a token that is exactly
+# {run_branch}, {base_branch}, {title} or {body_file} is replaced (see expand_cmd).
+DEFAULT_PUSH_CMD = ["git", "push", "-u", "origin", "{run_branch}"]
+DEFAULT_PR_CMD = ["gh", "pr", "create", "--title", "{title}", "--body-file", "{body_file}"]
+REMOTE_TIMEOUT = 300
 RUNS_DIR = os.path.join(".skill-contract", "runs")
 STATE_FILE = "state.json"
 LOG_FILE = "autonomy-log.jsonl"
@@ -228,6 +257,7 @@ class State:
         self.budget = dict(data.get("budget") or {})
         self.dispatches = data.get("dispatches", 0)
         self.stopped = data.get("stopped")
+        self.finished = data.get("finished")
         self.tasks = data["tasks"]
         self.order = list(data["order"])
 
@@ -306,7 +336,8 @@ class State:
                 "grant_id": self.grant_id, "run_branch": self.run_branch,
                 "base_branch": self.base_branch, "created_at": self.created_at,
                 "budget": self.budget, "dispatches": self.dispatches,
-                "stopped": self.stopped, "tasks": self.tasks, "order": self.order}
+                "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
+                "order": self.order}
 
     def save(self):
         """Write state.json atomically: a temp file in the same directory, then os.replace."""
@@ -668,14 +699,22 @@ def _gated(st, action):
     """True when the grant covers `action` for this run. Every decision is logged as
     `gate`. On ASK: print the GATE: line and stop the run with grant_ask (resume lifts
     that stop once a grant covers the run again)."""
+    ok, line = _gate_logged(st, action)
+    if ok:
+        return True
+    _record_stop(st, "grant_ask", detail=line)
+    return False
+
+
+def _gate_logged(st, action):
+    """(covered?, the GATE: line) for `action` on this run; the decision is logged as
+    `gate` and an ASK line is printed. It records no stop (finish uses it directly)."""
     rc, last = gate(st.root, action, plan_subject(st))
     ok, line = gate_line(rc, last)
     st.log("gate", action=action, ok=ok, result=last, exit=rc)
-    if ok:
-        return True
-    print(line)
-    _record_stop(st, "grant_ask", detail=line)
-    return False
+    if not ok:
+        print(line)
+    return ok, line
 
 
 def cmd_gate(args):
@@ -1080,6 +1119,24 @@ def _pinned_verify(st, task):
 
     state.json is not the source of the commands: the plan file is re-read and must
     still hash to plan_sha256, so neither file can be edited to change the proof."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return None, why
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    if not isinstance(tasks, list):
+        return None, "the plan %s has no tasks list" % st.plan_envelope
+    for t in tasks:
+        if isinstance(t, dict) and t.get("id") == task:
+            steps = t.get("verify")
+            return (steps if steps is not None else []), None
+    return None, "the plan %s has no task %s" % (st.plan_envelope, task)
+
+
+def _pinned_plan(st):
+    """(the plan file's parsed JSON, None), or (None, why). The file must still hash to
+    plan_sha256: a plan edited after init is not the plan this run ran."""
     path = st.plan_envelope
     if not isinstance(path, str) or not path:
         return None, "the run has no plan file"
@@ -1093,19 +1150,9 @@ def _pinned_verify(st, task):
     if hashlib.sha256(raw).hexdigest() != st.plan_sha256:
         return None, "the plan %s no longer matches its pinned sha256" % path
     try:
-        doc = json.loads(raw)
+        return json.loads(raw), None
     except ValueError as e:
         return None, "the plan %s is not JSON: %s" % (path, e)
-    pred = doc.get("predicate") if isinstance(doc, dict) else None
-    plan = pred.get("payload") if isinstance(pred, dict) else doc
-    tasks = plan.get("tasks") if isinstance(plan, dict) else None
-    if not isinstance(tasks, list):
-        return None, "the plan %s has no tasks list" % path
-    for t in tasks:
-        if isinstance(t, dict) and t.get("id") == task:
-            steps = t.get("verify")
-            return (steps if steps is not None else []), None
-    return None, "the plan %s has no task %s" % (path, task)
 
 
 def _isolated_clone(st, subdir, name, *clone_args):
@@ -1560,6 +1607,293 @@ def cmd_decision(args):
     return 0
 
 
+# ── finish: the run-result/v1 envelope, then push and PR ─────────────────────
+def _rel(st, path):
+    """path relative to the run's root, with forward slashes."""
+    return os.path.relpath(os.path.realpath(path), os.path.realpath(st.root)).replace(os.sep, "/")
+
+
+def _grant_rel(st):
+    return ".skill-contract/envelopes/%s.json" % st.grant_id
+
+
+def _plan_payload(doc):
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else None
+    return plan if isinstance(plan, dict) else {}
+
+
+def _plan_steps(plan):
+    """{task id: verify list} from a plan payload, as the plan wrote them."""
+    out = {}
+    for t in plan.get("tasks") or []:
+        if isinstance(t, dict) and isinstance(t.get("id"), str):
+            out[t["id"]] = t.get("verify") if isinstance(t.get("verify"), list) else []
+    return out
+
+
+def _leftover_worktrees(st):
+    """[{task, path, reason}] for every unproven task whose worktree is still on disk
+    (a merge-conflict park keeps it for a human). finish never deletes them."""
+    out = []
+    for tid in st.order:
+        t = st.tasks[tid]
+        wt = t.get("worktree")
+        if t["status"] != "proven" and isinstance(wt, str) and os.path.isdir(wt):
+            out.append({"task": tid, "path": _rel(st, wt), "reason": t.get("park_reason")})
+    return out
+
+
+def run_result_payload(st, plan_doc=None):
+    """The run-result/v1 payload for a run. `log_sha256` and `log_bytes` are None here:
+    finish sets them once the `finish` event is the log's last line.
+
+    plan_doc is the parsed plan envelope; None re-reads the pinned plan file (a plan
+    that no longer matches plan_sha256 raises ValueError)."""
+    if plan_doc is None:
+        plan_doc, why = _pinned_plan(st)
+        if why:
+            raise ValueError(why)
+    plan = _plan_payload(plan_doc)
+    pred = plan_doc.get("predicate") if isinstance(plan_doc, dict) else {}
+    tasks = []
+    for tid in st.order:
+        t = st.tasks[tid]
+        review = t.get("review")
+        tasks.append({
+            "id": tid, "status": t["status"],
+            "verify": [{"command": r.get("command"), "ok": bool(r.get("ok")),
+                        "returncode": r.get("returncode")} for r in t.get("verify_runs") or []],
+            "verified_head": t.get("verified_head"),
+            "review": ({"verdict": review.get("verdict"), "detail": review.get("detail")}
+                       if isinstance(review, dict) else None),
+            "merge_commit": t.get("merge_commit"), "park_reason": t.get("park_reason"),
+            "question": t.get("question"), "depends_on": list(t.get("depends_on") or [])})
+    stopped = None
+    if st.stopped:
+        s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
+        stopped = {k: s[k] for k in ("reason", "at", "detail", "task") if k in s}
+    grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
+    return {
+        "run_id": st.run_id,
+        "plan": {"id": (pred or {}).get("id"), "path": plan_subject(st),
+                 "sha256": st.plan_sha256, "title": plan.get("title")},
+        "grant": ({"id": st.grant_id, "path": _grant_rel(st),
+                   "sha256": CC.sha256_file(grant_path)}
+                  if grant_path and os.path.isfile(grant_path) else None),
+        "run_branch": st.run_branch, "base_branch": st.base_branch,
+        "created_at": st.created_at, "stopped": stopped,
+        "log": _rel(st, st.log_path), "log_sha256": None, "log_bytes": None,
+        "budget": dict(st.budget), "dispatches": st.dispatches,
+        "budget_note": BUDGET_NOTE_TEXT,
+        "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st)}
+
+
+def _run_result_assertions(st, plan_doc):
+    """One passed `verify:<task>` assertion per proven task, carrying that task's first
+    verify command exactly as the plan wrote it, its subject the plan envelope."""
+    steps = _plan_steps(_plan_payload(plan_doc))
+    plan_pin = CC.pin(st.root, plan_subject(st))
+    out = []
+    for tid in st.order:
+        if st.tasks[tid]["status"] != "proven":
+            continue
+        first = (steps.get(tid) or [{}])[0]
+        cmd = first.get("command") if isinstance(first, dict) else None
+        out.append({"test": "verify:%s" % tid, "assertedBy": {"skill": CONDUCTOR_SKILL},
+                    "result": {"outcome": "passed"}, "command": cmd,
+                    "subject": [dict(plan_pin)]})
+    return out
+
+
+def pr_body(payload, envelope_rel):
+    """The pull request body, built only from the run-result payload."""
+    tasks = payload["tasks"]
+    by = {s: [t for t in tasks if t["status"] == s] for s in STATUSES}
+    title = payload["plan"].get("title") or payload["plan"].get("path")
+    lines = ["## factory-conductor run `%s`" % payload["run_id"], "",
+             "Plan: %s (`%s`), run branch `%s`." % (title, payload["plan"].get("path"),
+                                                    payload["run_branch"]), "",
+             "Proven: %d of %d tasks." % (len(by["proven"]), len(tasks)), ""]
+    stopped = payload.get("stopped") or {}
+    lines += ["Stopped: %s%s." % (stopped.get("reason") or "not stopped (finished by hand)",
+                                  " at %s" % stopped["at"] if stopped.get("at") else ""), ""]
+    lines.append("### Proven (%d)" % len(by["proven"]))
+    for t in by["proven"]:
+        ok = sum(1 for v in t["verify"] if v["ok"])
+        lines.append("- %s: merged %s; verify %d/%d passed; review %s"
+                     % (t["id"], (t["merge_commit"] or "")[:12], ok, len(t["verify"]),
+                        (t["review"] or {}).get("verdict")))
+    lines += ["", "### Parked (%d)" % len(by["parked"])]
+    for t in by["parked"]:
+        q = " (question: %s)" % t["question"] if t.get("question") else ""
+        lines.append("- %s: %s%s" % (t["id"], t["park_reason"], q))
+    lines += ["", "### Blocked (%d)" % len(by["blocked"])]
+    for t in by["blocked"]:
+        lines.append("- %s: depends on %s" % (t["id"], ", ".join(t["depends_on"]) or "-"))
+    rest = [t for t in tasks if t["status"] not in ("proven", "parked", "blocked")]
+    if rest:
+        lines += ["", "### Not finished (%d)" % len(rest)]
+        lines += ["- %s: %s" % (t["id"], t["status"]) for t in rest]
+    if payload["leftover_worktrees"]:
+        lines += ["", "### Worktrees kept for a human (%d)" % len(payload["leftover_worktrees"])]
+        lines += ["- %s: `%s` (%s)" % (w["task"], w["path"], w["reason"])
+                  for w in payload["leftover_worktrees"]]
+    lines += ["", "### Budget",
+              "Dispatches: %d; budget: `%s`." % (payload["dispatches"],
+                                                 json.dumps(payload["budget"], sort_keys=True)),
+              "Budget note: %s." % payload["budget_note"], "",
+              "Evidence: `%s` (run-result/v1). Every proven task was re-run by the conductor "
+              "and reviewed before it merged; a human merges this pull request."
+              % envelope_rel, ""]
+    return "\n".join(lines)
+
+
+def expand_cmd(argv, values):
+    """argv with each token that is exactly {name} (name in values) replaced."""
+    out = []
+    for a in argv:
+        m = re.match(r"^\{([a-z_]+)\}\Z", a)
+        out.append(str(values[m.group(1)]) if m and m.group(1) in values else a)
+    return out
+
+
+def _cmd_arg(text, default, flag):
+    """The argv list a --push-cmd/--pr-cmd JSON names (default when None). ValueError
+    when it is not a non-empty list of strings."""
+    if text is None:
+        return list(default)
+    cmd = json.loads(text)
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) and a for a in cmd):
+        raise ValueError("%s must be a JSON list of non-empty strings" % flag)
+    return cmd
+
+
+def _is_force_push(cmd):
+    """A grant never covers a force-push (SPEC: push only the current branch, never force)."""
+    return any(a in ("-f", "--force", "--mirror", "--delete", "-d")
+               or a.startswith("--force-with-lease") or a.startswith("--force-if-includes")
+               or (a.startswith("+") and len(a) > 1) for a in cmd[1:])
+
+
+def _run_remote(st, event, argv):
+    """Run one remote step (no shell, no stdin) in the root; log it as `event`. ok?"""
+    try:
+        r = subprocess.run(argv, cwd=st.root, stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, errors="replace", timeout=REMOTE_TIMEOUT,
+                           env=safe_config_env())
+        rc, out, err = r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired as e:
+        rc, out, err = None, "", "timed out after %ds: %s" % (REMOTE_TIMEOUT, e)
+    except OSError as e:
+        rc, out, err = None, "", "cannot run: %s" % e
+    st.log(event, command=argv, returncode=rc, stdout_tail=_tail(out), stderr_tail=_tail(err))
+    if rc != 0:
+        sys.stderr.write("%s failed (exit %s): %s\n" % (event, rc, _tail(err).strip()))
+    return rc == 0
+
+
+def cmd_finish(args):
+    """Write the run-result/v1 envelope (FINISH: <path>), then push the run branch and open
+    the PR, each only when its gate is COVERED.
+
+    Works on a stopped run: it is how a run ends. Idempotent: once an envelope exists, it
+    prints that FINISH: line and does nothing else. Exit 0 when the envelope is written and
+    both remote steps ran; 3 when a gate asked (GATE: ASK, the remaining remote steps are
+    skipped) or a remote step failed; 2 on invalid input (no envelope is written)."""
+    st = _load_current(args.root)
+    if st is None:
+        return 2
+    if isinstance(st.finished, dict) and st.finished.get("envelope"):
+        print("FINISH: %s" % st.finished["envelope"])
+        return 0
+    try:
+        push_cmd = _cmd_arg(args.push_cmd, DEFAULT_PUSH_CMD, "--push-cmd")
+        pr_cmd = _cmd_arg(args.pr_cmd, DEFAULT_PR_CMD, "--pr-cmd")
+    except ValueError as e:  # JSONDecodeError is a ValueError
+        sys.stderr.write("invalid command: %s\n" % e)
+        return 2
+    if _is_force_push(push_cmd):
+        sys.stderr.write("--push-cmd would force-push or delete; a grant never covers that\n")
+        return 2
+    plan_doc, why = _pinned_plan(st)
+    if why:
+        sys.stderr.write("cannot finish: %s\n" % why)
+        return 2
+    if not (isinstance(st.grant_id, str) and CC.ID_RE.match(st.grant_id)
+            and os.path.isfile(os.path.join(st.root, *_grant_rel(st).split("/")))):
+        sys.stderr.write("cannot finish: the run's grant %s is not under %s\n"
+                         % (st.grant_id, CC.envelope_dir(st.root)))
+        return 2
+    payload = run_result_payload(st, plan_doc)
+    statement = CC.build_statement(RUN_RESULT_KIND, CONDUCTOR_SKILL, CONDUCTOR_VERSION, st.root,
+                                   [plan_subject(st), _grant_rel(st)], payload,
+                                   _run_result_assertions(st, plan_doc))
+    payload["log_sha256"], payload["log_bytes"] = "0" * 64, 0  # shape only, for the check
+    viol = CC.check_statement(statement)
+    if viol:
+        for n, detail in viol:
+            sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
+        return _init_fail("cannot finish: the run-result envelope would be invalid")
+    eid = statement["predicate"]["id"]
+    env_rel = ".skill-contract/envelopes/%s.json" % eid
+    by = {s: [t["id"] for t in payload["tasks"] if t["status"] == s]
+          for s in ("proven", "parked", "blocked")}
+    # The finish event is the last line the digest covers. The log is append-only, so
+    # the first log_bytes bytes never change; the gate, push and pr events that follow
+    # are after that prefix.
+    record = st.log("finish", id=eid, envelope=env_rel,
+                    stopped=(payload["stopped"] or {}).get("reason"), **by)
+    line = (json.dumps(record, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    with open(st.log_path, "rb") as f:
+        data = f.read()
+    end = data.find(line)
+    if end < 0:
+        return _init_fail("cannot finish: the finish event is not in %s" % st.log_path)
+    prefix = data[:end + len(line)]
+    payload["log_sha256"] = hashlib.sha256(prefix).hexdigest()
+    payload["log_bytes"] = len(prefix)
+    path = CC.write_envelope(st.root, statement)
+    st.finished = {"envelope": path, "id": eid, "at": _rfc3339(_now())}
+    st.save()
+    print("FINISH: %s" % path)
+    return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
+
+
+def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
+    """gate push_branch -> push -> gate open_pr -> PR. The first ASK or failure ends it (3)."""
+    values = {"run_branch": st.run_branch, "base_branch": st.base_branch,
+              "title": payload["plan"].get("title") or st.run_branch}
+    ok, _ = _gate_logged(st, "push_branch")
+    if not ok:
+        return 3
+    here = CC.current_branch(st.root)
+    if here != st.run_branch:
+        # A grant covers pushing the current branch only.
+        line = "GATE: ASK reason=branch (%s is on %s, not the run branch %s)" % (
+            st.root, here, st.run_branch)
+        st.log("gate", action="push_branch", ok=False, result=line, exit=3)
+        print(line)
+        return 3
+    if not _run_remote(st, "push", expand_cmd(push_cmd, values)):
+        return 3
+    ok, _ = _gate_logged(st, "open_pr")
+    if not ok:
+        return 3
+    fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(pr_body(payload, env_rel))
+        values["body_file"] = body_path
+        ok = _run_remote(st, "pr", expand_cmd(pr_cmd, values))
+    finally:
+        try:
+            os.unlink(body_path)
+        except FileNotFoundError:
+            pass
+    return 0 if ok else 3
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1580,6 +1914,11 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("finish")
+    s.add_argument("--root", default=".")
+    s.add_argument("--push-cmd", default=None)
+    s.add_argument("--pr-cmd", default=None)
+    s.set_defaults(fn=cmd_finish)
     for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
                      ("merge", cmd_merge), ("park", cmd_park), ("decision", cmd_decision)):
         s = sub.add_parser(name)

@@ -136,15 +136,17 @@ def revoke(root):
     return CC.revoke_grant(root, now=now)
 
 
-def new_run(root, plan, run_branch="factory/p", base_branch="main", budget=None, grant=True):
+def new_run(root, plan, run_branch="factory/p", base_branch="main", budget=None, grant=True,
+            policy=None):
     """A State over a real task-plan envelope (holding the payload `plan`) and, unless
-    grant=False, a covering grant. Returns (state, plan envelope path)."""
+    grant=False, a covering grant (its gate_policy is `policy`, DEFAULT_POLICY when None).
+    Returns (state, plan envelope path)."""
     path = write_plan_envelope(root, plan=plan)
     with open(path, "rb") as f:
         sha = hashlib.sha256(f.read()).hexdigest()
     gid = None
     if grant:
-        g = write_grant(root, path)
+        g = write_grant(root, path, policy=policy)
         gid = os.path.basename(g)[:-len(".json")]
     st = C.State.new(root=root, run_id=C.new_run_id(), plan=plan, plan_envelope=path,
                      plan_sha256=sha, grant_id=gid, run_branch=run_branch,
