@@ -1399,7 +1399,7 @@ def cmd_verify(args):
         # The reviewer already rejected this very commit: proving it again proves
         # nothing new. It counts as a failure, so the repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the review failed",
-                               "unchanged since failed review")
+                               "unchanged since failed review", keep_review=True)
     if not clean:
         # Only committed work can be merged, so only committed work is proven.
         return _verify_refused(st, args.task, "uncommitted changes in %s; commit them first"
@@ -1444,9 +1444,14 @@ def cmd_verify(args):
     return 0 if _dispatch(st, args.task, "reviewer") else 3
 
 
-def _verify_refused(st, task, message, reason):
-    """Fail a verify before any command runs. Counts as a failing verify. Returns 3."""
-    st.set_status(task, "verifying", verify_runs=[], verified_head=None, review=None)
+def _verify_refused(st, task, message, reason, keep_review=False):
+    """Fail a verify before any command runs. Counts as a failing verify. Returns 3.
+
+    keep_review keeps a failed review in place, so the repair still carries the
+    reviewer's detail and the same rejected commit stays refused on every retry.
+    """
+    fields = {} if keep_review else {"review": None}
+    st.set_status(task, "verifying", verify_runs=[], verified_head=None, **fields)
     _count_failure(st, task)
     st.save()
     st.log("verify", task=task, passed=False, reason=reason, commands=[])

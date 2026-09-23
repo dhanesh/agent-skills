@@ -937,6 +937,9 @@ class GitTests(unittest.TestCase):
         # Item 13: re-verifying the very commit the reviewer failed is a failure (it
         # counts), so a fail-review / re-verify loop with no new work stays bounded.
         st = self.state()
+        s = C.State.load(st.state_path)  # room for two refusals before the repair cap
+        s.budget["max_repairs_per_task"] = 5
+        s.save()
         C.main(["start", "T1", "--root", self.root])
         commit_in(self.wt(st), "b.txt", "b\n")
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
@@ -951,6 +954,12 @@ class GitTests(unittest.TestCase):
         with open(self.st_now(st).log_path, encoding="utf-8") as f:
             ev = [json.loads(l) for l in f if '"verify"' in l]
         self.assertEqual(ev[-1]["reason"], "unchanged since failed review")
+        # the refusal keeps the review, so the repair still has its detail and the
+        # guard still holds on a second try with the same commit
+        self.assertEqual(self.task(st)["review"]["detail"], "no")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
+        self.assertNotEqual(self.task(st)["status"], "reviewing")
         # a new commit is verified as usual
         commit_in(self.wt(st), "c.txt", "c\n")
         self.assertIn(C.main(["verify", "T1", "--root", self.root]), (0, 3))
