@@ -23,8 +23,11 @@ Install it next to `spec-first-planning`, which produces what it consumes.
 
 1. Plan with `spec-first-planning` in unattended mode. It writes a `task-plan/v1` envelope
    and, after your explicit yes, an `autonomy-grant/v1` covering `local_reversible` (and
-   `push_branch` and `open_pr` if you want the run to reach a PR). Verify commands must use
-   `{python}`, not `python3`, and no absolute paths.
+   `push_branch` and `open_pr` if you want the run to reach a PR). End every acceptance
+   criterion in the spec with `[cmd: <argv>]`, the command that proves it: that becomes the
+   task's verify command (unattended mode requires one, and `conductor init` refuses a plan
+   with a missing command). Commands must use `{python}`, not `python3`, and no absolute
+   paths.
 2. Switch to a branch the grant covers that is not the default branch and not the run branch
    the conductor will create (`factory/<plan-slug>`, from the plan title), for example
    `factory/base`.

@@ -71,7 +71,12 @@ hold:
 - a `Recommended:` option exists, with a rationale, and it is the pragmatic choice.
 
 For unattended mode, `spec_lint.py --unattended` adds the decision sweep: a non-empty
-`## Decisions` section, and an answer on every decision.
+`## Decisions` section, and an answer on every decision. It also needs a `[cmd: <argv>]`
+hint at the end of every acceptance criterion: the command a machine runs to prove it
+(`{python}` rather than `python3`, a bare program name, no absolute paths; see
+`references/spec-format.md`). A grant exists only for runs a machine can prove, so a
+criterion only a person can check (clicking through a page) is not ready for unattended
+mode: find a command that checks it, or move the requirement to attended work.
 
 The linter checks structure and traceability. It does not judge whether the reasoning
 is any good. A spec can pass with weak constraints or a lazy pre-mortem, so the loop is
@@ -106,14 +111,20 @@ and skip what the conversation has already answered:
    `ask`. A class you leave out is `ask`.
 6. **Expiry.** When the grant ends. It must be 7 days or less from now (see the floors
    below). One working day is a sensible default.
-7. **Budget.** Wall-clock minutes, tokens, dollars, and repair attempts per task.
-   Also, which events should stop the run (`stop_on`). Both are recorded now and
-   enforced by the future conductor.
+7. **Budget.** Ask for `wall_clock_min` (minutes from the start of the run),
+   `max_dispatches` (how many agent dispatches the run may make: executors, repairs and
+   reviewers; this is the only real cost cap), `max_repairs_per_task` (default 2) and
+   `max_parallel` (tasks in flight at once, default 2). Tokens and dollars
+   (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
+   usage. Also ask which events should stop the run (`stop_on`): it is recorded but not
+   enforced by factory-conductor 1.0.0, whose own stop rules apply.
 8. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
 9. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
-   glob such as `factory/*`, and start the run on a branch that matches it.
+   glob such as `factory/*`, and start the run on a branch that matches it, e.g.
+   `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
+   factory-conductor creates as its run branch.
 
 ### Action classes and their gates
 
@@ -157,7 +168,7 @@ After `TASKS_RESULT: PASS` and the plan envelope, show the user one screen:
 - the decisions (D1..Dn), one line each;
 - the gate table, with each class and its gate;
 - the branch pattern and the expiry, as a date and time;
-- the budget and the stop rules;
+- the budget (and which parts are only recorded: tokens, dollars and `stop_on`);
 - the System One setting;
 - the line: "`merge`, `deploy`, `spend`, `external_message` and `delete` are never
   covered by a grant; I will always ask you before any of them";
@@ -189,6 +200,7 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
   "expires_at": "2026-09-21T18:00:00Z",
   "budget": {
     "wall_clock_min": 240,
+    "max_dispatches": 40,
     "max_tokens": 2000000,
     "max_usd": 25,
     "max_repairs_per_task": 3

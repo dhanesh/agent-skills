@@ -18,13 +18,14 @@ those seams mechanically:
   Constraints and Required truths that trace to each other. `--converged` adds the full-loop
   rules (tensions resolved, truths ready, a pragmatic recommended option, at most 5
   iterations); `--unattended` adds the decision sweep (no open questions, every decision
-  answered).
+  answered) and a `[cmd: ...]` command on every acceptance criterion.
 - `assets/spec_to_tasks.py` — compiles a lint-clean spec into a task plan (markdown + JSON):
   one task per requirement, verify steps lifted from the acceptance criteria, a coverage map,
   and a non-zero exit if any requirement has no task that proves it. A requirement can carry
   `[after: R2, R3]`, naming the other requirements it must follow; the compiler turns a clean
   hint into the task's `depends_on`, and `--waves` schedules the whole plan into waves and
-  prints the critical path.
+  prints the critical path. A criterion's `[cmd: <argv>]` hint becomes its verify step's
+  command.
 - `assets/write_grant.py` — after the user's explicit yes, writes an `autonomy-grant/v1`
   envelope from the spec, the plan envelope and the user's answers.
 
@@ -52,6 +53,15 @@ the task(s) that cover each id. `spec_to_tasks.py my-feature.spec.md --waves` gr
 into waves — every task in a wave is independent of the others — and prints the critical path
 (the longest `depends_on` chain), ready to hand to `factory-conductor` or a loop built with
 `crafting-self-prompting-loops`.
+
+**Verify commands (2.2.0).** An acceptance criterion can end with `[cmd: <argv>]`, the
+command that proves it, e.g. `- R1: every row is exported. [cmd: {python} -m pytest -k rows]`.
+`spec_lint.py` checks that it parses (shell-style splitting; it runs as an argv, never
+through a shell), is non-empty and follows the skill-contract command rule (`{python}` rather
+than `python3`, a bare program name, no absolute paths). The compiler writes it into the
+task-plan envelope as the verify step's `command`; a criterion without one gets `null`, which
+factory-conductor refuses. So `--unattended` requires the hint on every criterion: a grant
+exists only for runs a machine can prove.
 
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.

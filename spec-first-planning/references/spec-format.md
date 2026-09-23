@@ -37,7 +37,18 @@ A spec is one markdown file:
   At least one per requirement; a criterion may mention several ids
   (`covers R1 and R2`), and every id it mentions must exist. Write each
   check as something runnable: a command plus expected exit code/output, or
-  an observation an outside party could make.
+  an observation an outside party could make. Optional trailing hint
+  `[cmd: <argv>]` (keyword matched case-insensitively): the command that
+  proves the criterion, split like a shell line (`shlex`) but run as an argv,
+  never through a shell. It must be the last thing on the bullet, parse, be
+  non-empty, and follow the skill-contract command rule (C6): start with
+  `{python}` rather than `python3`, or with a bare program name; no absolute
+  paths; no placeholder but a leading `{python}` or `{skill_dir:<name>}`.
+  It becomes the derived verify step's `command` and is stripped from its
+  text; a token inside it (`grep R9 x`) is not a requirement reference.
+  Example: `- R2: row parity holds. [cmd: {python} tests/compare_export.py fixtures/report.json]`.
+  Optional in light and converged mode; `--unattended` requires it on every
+  criterion.
 - **Open questions**: the section must exist; its list may be empty.
 
 **Full-loop sections** (Tension + Choose; required only under `--converged` /
@@ -73,6 +84,7 @@ pre-mortem and the decision sweep are in `references/unattended.md`:
 | 4 | Vague term with no metric in the same statement | unfalsifiable adjective ("fast", "robust", "user-friendly", "simple", "reliable", "scalable", "efficient", "seamless", "responsive", ...). A digit, `%`, `<=`, `>=`, `≤`, or `≥` in the statement licenses the word |
 | 5 | Every requirement referenced by ≥1 criterion; no criterion references an unknown id | a requirement nothing can prove; a check proving nothing |
 | 5a | Every id in a requirement's `[after: ...]` hint names a known requirement; the after-hints as a whole contain no cycle (message: "after: hints have a cycle") | a task ordered after a requirement that doesn't exist, or a dependency loop no schedule can satisfy |
+| 5b | A criterion's `[cmd: ...]` hint ends the criterion, parses with `shlex`, is non-empty, and passes the C6 command rule (the vendored `contract_check`) | a command no machine can run, or one that names an interpreter or an absolute path |
 | 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
 | 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
 | 8 | Traceability: every constraint is named in some RT's `maps_to`; every RT names ≥1 known constraint and ≥1 known requirement (`reqs:`); every RT's `parent` is `OUTCOME` or another RT in this spec, and not itself | a constraint nobody anchors; a truth that traces to nothing |
@@ -104,7 +116,9 @@ Recommended line's `(decision: ...)`) must name a decision that exists in
 
 Runs every `--converged` rule above, plus: `## Decisions` is present,
 non-empty, its grammar is well-formed, and every decision's answer is
-non-empty.
+non-empty; and every acceptance criterion carries a `[cmd: ...]` hint. A
+grant exists only for runs a machine can prove: factory-conductor refuses a
+plan with a null verify command at `init`.
 
 Output: one `FAIL: ...` line per issue, final `LINT_RESULT: PASS (...,
 mode=<mode>)` or `LINT_RESULT: FAIL (n issue(s), mode=<mode>)`. Exit 0 iff
@@ -140,7 +154,8 @@ TASKS_RESULT: PASS|FAIL (k/n requirements covered by m task(s))
   "tasks": [
     {"id": "T1", "requirement_ids": ["R1"], "title": "...",
      "verify": "criterion 1; criterion 2", "where": "web/reports/",
-     "depends_on": ["T0"]}
+     "depends_on": ["T0"],
+     "verify_commands": [["{python}", "-m", "pytest", "-k", "rows"], null]}
   ],
   "coverage": {"R1": ["T1"], "R2": []},
   "uncovered": ["R2"]
@@ -149,7 +164,10 @@ TASKS_RESULT: PASS|FAIL (k/n requirements covered by m task(s))
 
 `where` appears only when the requirement carried a `[where: ...]` hint;
 `depends_on` appears only when it carried an `[after: ...]` hint that
-resolved to at least one covering task. A requirement with no hints derives
+resolved to at least one covering task; `verify_commands` (one argv or
+`null` per verify step, in step order) only when at least one of its
+criteria carried a `[cmd: ...]` hint. The markdown plan shows each command
+after its step as ``(cmd: `...`)``. A requirement with no hints derives
 a plan byte-identical to one from before `[after: ...]` existed.
 Deterministic: same spec in, byte-identical plan out.
 
@@ -194,7 +212,9 @@ skill-contract `task-plan/v1` envelope under
 payload is the JSON plan above plus `title` and `spec`, and three optional
 fields lifted from the spec when present: `constraints` (`{id, type, text}`),
 `required_truths` (only when every truth is well formed) and `decisions`
-(`{id, question, answer, source}`). `task-plan/v1` stays v1 because the
+(`{id, question, answer, source}`). Each task's `verify` is a list of
+`{text, command}`: `command` is the criterion's `[cmd: ...]` argv, or `null`
+when it has none. `task-plan/v1` stays v1 because the
 fields are additive. The schema is `assets/schemas/task-plan.v1.json`.
 
 In unattended mode this envelope is the plan a grant pins:

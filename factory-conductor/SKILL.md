@@ -66,10 +66,13 @@ writes the grant only after their yes.
 You MUST have all three before you run `conductor init`:
 
 1. **A validated plan.** A `task-plan/v1` envelope that passes
-   `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <plan> --root <repo>`. Its
-   verify commands follow skill-contract C6: they start with `{python}` or a bare program name
-   and use no absolute paths. `init` refuses (exit 2) a plan that breaks C6, a plan whose
-   `depends_on` has a cycle or names an unknown task, and a stale plan.
+   `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <plan> --root <repo>`. Every
+   task has at least one verify step, and every step a command: spec-first-planning writes it
+   from the criterion's `[cmd: …]` hint. The commands follow skill-contract C6: they start with
+   `{python}` or a bare program name and use no absolute paths. `init` refuses (exit 2) a step
+   with a null or empty command (`FAIL: task <id> verify step <n> has no command`), a plan
+   that breaks C6, a plan whose `depends_on` has a cycle or names an unknown task, and a stale
+   plan.
 2. **A grant that covers this plan.**
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible --subject <plan path relative to the root>`
    exits 0 (`GRANT: COVERED`). The subject is what makes it this plan's grant.

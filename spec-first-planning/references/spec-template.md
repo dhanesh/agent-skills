@@ -53,8 +53,11 @@ not the solution.>
      runnable check: a command plus its expected exit code or output, or a
      concrete observation an outside party could make without asking you.
      If you cannot write one, the requirement is not ready — move it to
-     Open questions. -->
-- R1: <runnable check that proves R1>
+     Open questions. Optional: end the criterion with "[cmd: <argv>]", the
+     command that proves it ({python} rather than python3, a bare program
+     name, no absolute paths); it becomes the task's verify command.
+     Unattended mode requires one on every criterion. -->
+- R1: <runnable check that proves R1> [cmd: <argv that runs the check>]
 - R2: <runnable check that proves R2>
 
 ## Open questions

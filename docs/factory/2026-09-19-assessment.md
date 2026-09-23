@@ -60,7 +60,11 @@ carries unit tests, eval negatives and an A/B row:
   from `depends_on`, each task's own verify commands re-run as the proof, merge only on a passing
   verify and review, wall-clock/dispatch/repair/parallel budgets enforced (tokens and dollars
   recorded, not enforced), and a `run-result/v1` envelope on finish. skill-contract adopters: 5.
-  Jev re-judgement: to be re-judged after merge.
+  The documented path now runs end to end: spec-first-planning 2.2.0 turns an acceptance
+  criterion's `[cmd: <argv>]` hint into the task's verify command (`--unattended` requires one
+  on every criterion), and `conductor init` refuses a plan with a null command. Before that,
+  every planner-derived task had a null command and parked at verify, so only hand-built plans
+  reached `proven`. Jev re-judgement: to be re-judged after merge.
 
 Nothing else in this document has been re-measured since.
 

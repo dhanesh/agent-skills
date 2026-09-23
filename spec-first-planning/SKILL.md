@@ -7,8 +7,8 @@ description: >-
   by default, the full loop to convergence on request. Use when the user says "plan this
   feature", "write a spec for X", "break this down into tasks", "what would done look like", or
   hands over a vague idea that needs requirements before code. Opt-in unattended mode asks
-  every human decision upfront and, after the user's explicit yes, writes an autonomy grant
-  that covers only reversible work. Ships a deterministic spec linter and a spec→tasks compiler
+  every human decision upfront and, after the user's explicit yes, writes an autonomy-grant
+  envelope that covers only reversible work. Ships a deterministic spec linter and a spec→tasks compiler
   that reports the requirement↔task coverage map. Not the executor — hands a skill-contract
   task-plan envelope to the implementing session or a loop built with
   crafting-self-prompting-loops; not a project-management tracker; complements, not replaces,
@@ -103,13 +103,17 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    mode's depth. Write each requirement as one testable "must" statement — if a sentence
    bundles two obligations, split it into two ids. Write each acceptance criterion as
    something runnable: a command plus expected exit code/output, or an observation an
-   outside party could make. When you can't write the
+   outside party could make. When a machine can run the check, end the criterion with
+   `[cmd: <argv>]`, the command that proves it (`{python}` rather than `python3`, a bare
+   program name, no absolute paths): it becomes the task's verify command. Unattended mode
+   needs one on every criterion. When you can't write the
    check, the requirement isn't ready — park it in Open questions instead of faking one.
 3. **Lint and repair** with `python3 "$SKILL_DIR/assets/spec_lint.py" <spec.md>` for the
    light pass. Add `--converged` before the path for the full loop, or `--unattended` in
    unattended mode. Fix every `FAIL:` line (each names the requirement and the defect:
    missing section, id gap, missing modal, vague term with no metric, requirement with no
-   criterion, a constraint no truth maps to) and rerun until it prints `LINT_RESULT: PASS`.
+   criterion, a constraint no truth maps to, a `[cmd: ...]` that does not parse or breaks
+   the command rule) and rerun until it prints `LINT_RESULT: PASS`.
    Repair by making statements more checkable, not by deleting the inconvenient ones — if a
    requirement truly can't be kept, move it to Non-goals or Open questions so the decision
    stays visible. Each pass of the full loop adds one line to the
@@ -137,7 +141,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <path> --root <repo-root>`;
    a failure there is this skill's bug, so fix it before going on. Then look for consumers:
    `python3 "$SKILL_DIR/assets/contract_check.py" discover --kind https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1 --from "$SKILL_DIR"`.
-   If it names one, run this before proposing:
+   In unattended mode, when factory-conductor is among the consumers, hand off to it;
+   otherwise propose the choice. If it names one, run this before proposing:
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo-root> --action local_reversible --subject <envelope path>`.
    If it exits 0 (`GRANT: COVERED`), you MAY hand off without asking, but only when the
    envelope you hand off is the plan the grant pins (one of its subjects, which `--subject`
@@ -173,7 +178,8 @@ Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `d
 never covered by a grant and will always ask: you MUST ask the user right before any of them,
 whatever the grant says. A grant lasts 7 days at most and does not cover the default
 branch or a detached HEAD, so work on a branch such as `factory/*`. Before the handoff check you
-MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/<slug>`).
+MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/work` — any
+name but `factory/<plan-slug>`, which factory-conductor creates as its run branch).
 Under a grant, you MUST push only the current branch, to the remote branch of the same name,
 and MUST NOT force-push. A push or pull request whose commits change CI configuration (such as
 `.github/workflows/`) counts as `deploy`: `check-grant` answers ASK `ci-config`, so ask first.

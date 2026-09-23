@@ -218,6 +218,9 @@ SINCE_FACTORY_CONDUCTOR = "e3c9f85"  # factory-conductor Task 1: run state, wave
 # scheduling and the append-only log — the earliest point the conductor tool
 # existed, and the pin for the whole campaign that lets it run a plan end to
 # end (init..finish, a validating run-result/v1 envelope).
+SINCE_FACTORY_PLANNER_CMD = "2ab10ce"  # spec-first-planning 2.2.0: a criterion's
+# [cmd: <argv>] hint becomes the task-plan verify command, and the conductor's
+# init refuses a null one — so a plan the real planner derives can be proven.
 
 
 def _git_out(*args):
@@ -5135,7 +5138,9 @@ def check_autonomy_grant(old, new):
         "no skill could proceed past its confirmation under a user-approved grant",
         since=SINCE_AUTONOMY_GRANT)
     a, b = adopters(old), adopters(new)
-    row(s, "skill-contract adopters", a, b, b > a,
+    # b >= 4, not b > a: that campaign brought the count to 4. A later adopter
+    # (factory-conductor, 4 -> 5) is credited by its own row, not this one again.
+    row(s, "skill-contract adopters", a, b, b >= 4,
         "verifier-installer and test-safety-net adopt the contract to read grants",
         since=SINCE_AUTONOMY_GRANT)
     a, b = decides(old), decides(new)
@@ -5205,8 +5210,51 @@ def _fc_run(tree, tasks):
     finally:
         sys.path.pop(0)
     root = tempfile.mkdtemp()
-    genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+    try:
+        return _fc_run_in(tree, tasks, conductor, CC, root)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_FC_GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                 GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+
+def _fc_status_proven(run, ids):
+    """The task ids among `ids` that the conductor's `status` reports as proven."""
+    merged = set()
+    for line in run("status").stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == "STATUS:" and parts[1] in ids \
+                and parts[2] == "proven":
+            merged.add(parts[1])
+    return merged
+
+
+def _fc_drive(run, ids):
+    """start, commit real work, verify, review and merge each task in turn."""
+    for tid in ids:
+        started = run("start", tid)
+        wt = None
+        for line in started.stdout.splitlines():
+            if line.startswith("START: %s " % tid):
+                wt = line.split(" ", 2)[2].strip()
+        if wt and os.path.isdir(wt):
+            # merge parks a task with no commits (no-commits, exit 3); commit a real
+            # file in the task's worktree so there is something for verify to prove
+            # and merge to bring in.
+            with open(os.path.join(wt, "%s.txt" % tid.lower()), "w") as f:
+                f.write("done\n")
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        if run("verify", tid).returncode == 0:
+            run("review", tid, "--verdict", "pass")
+            run("merge", tid)
+
+
+def _fc_run_in(tree, tasks, conductor, CC, root):
+    genv = _FC_GENV
     subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
     os.makedirs(os.path.join(root, "docs"))
     open(os.path.join(root, "docs", "spec.md"), "w").write("# Spec\n")
@@ -5246,24 +5294,7 @@ def _fc_run(tree, tasks):
                               capture_output=True, text=True, timeout=300)
 
     run("init", "--plan", plan_env)
-    for tid in tasks:
-        started = run("start", tid)
-        wt = None
-        for line in started.stdout.splitlines():
-            if line.startswith("START: %s " % tid):
-                wt = line.split(" ", 2)[2].strip()
-        if wt and os.path.isdir(wt):
-            # merge parks a task with no commits (no-commits, exit 3); commit a real
-            # file in the task's worktree so there is something for verify to prove
-            # and merge to bring in.
-            with open(os.path.join(wt, "%s.txt" % tid.lower()), "w") as f:
-                f.write("done\n")
-            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
-            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
-                           capture_output=True, env=genv)
-        if run("verify", tid).returncode == 0:
-            run("review", tid, "--verdict", "pass")
-            run("merge", tid)
+    _fc_drive(run, tasks)
     fin = run("finish")
     envelope_ok = 0
     for line in fin.stdout.splitlines():
@@ -5271,14 +5302,123 @@ def _fc_run(tree, tasks):
             env_path = line[len("FINISH: "):].strip()
             rep = CC.check_envelope(env_path, root=root)
             envelope_ok = 1 if not rep.get("violations") else 0
-    status = run("status")
-    merged = set()
-    for line in status.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0] == "STATUS:" and parts[1] in tasks \
-                and parts[2] == "proven":
-            merged.add(parts[1])
-    return envelope_ok, merged
+    return envelope_ok, _fc_status_proven(run, tasks)
+
+
+# A real spec, as spec-first-planning's unattended mode leaves it: converged,
+# decision-closed, and every criterion carrying the [cmd: ...] that proves it. The
+# task's work is t1.txt (see _fc_drive), so `test -f t1.txt` passes only on its commit.
+_FC_PLANNER_SPEC = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: test -f t1.txt)
+- RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: test -f t1.txt)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: the exported file exists. [cmd: test -f t1.txt]
+
+## Open questions
+
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
+def _fc_planner_run(tree):
+    """1 when a plan the tree's own planner derives is proven end to end by the tree's
+    conductor, else 0: a real spec -> spec_to_tasks.py --envelope -> write_grant.py ->
+    conductor init, start, verify, review, merge, finish, with at least one task
+    `proven` in the `status` lines. A tree without the conductor scores 0.
+
+    None (PROBE_ERRORS) when the planner or write_grant itself fails in a tree that has
+    the conductor: a broken fixture must not read as an honest 0."""
+    conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+    if not os.path.isfile(conductor):
+        return 0
+    assets = os.path.join(tree, "spec-first-planning", "assets")
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True,
+                       capture_output=True)
+        os.makedirs(os.path.join(root, "docs"))
+        with open(os.path.join(root, "docs", "spec.md"), "w", encoding="utf-8") as f:
+            f.write(_FC_PLANNER_SPEC)
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "commit", "-q", "-m", "spec"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/work"],
+                       check=True, capture_output=True)
+        r = subprocess.run([sys.executable, "-I", os.path.join(assets, "spec_to_tasks.py"),
+                            os.path.join(root, "docs", "spec.md"), "--envelope", root],
+                           capture_output=True, text=True, timeout=120)
+        env = [ln[len("ENVELOPE: "):].strip() for ln in r.stdout.splitlines()
+               if ln.startswith("ENVELOPE: ")]
+        if r.returncode != 0 or not env:
+            PROBE_ERRORS.append((tree, "spec-first-planning/assets/spec_to_tasks.py",
+                                 "planner-derived run: spec_to_tasks --envelope failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+        answers = os.path.join(tmp, "answers.json")
+        with open(answers, "w", encoding="utf-8") as f:
+            json.dump({"branch_pattern": "factory/*",
+                       "gate_policy": {"read_only": "auto", "local_reversible": "grant"},
+                       "expires_at": (datetime.now(timezone.utc) + timedelta(days=1))
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "budget": {"max_dispatches": 10}}, f)
+        r = subprocess.run([sys.executable, "-I", os.path.join(assets, "write_grant.py"),
+                            "--root", root, "--spec", "docs/spec.md", "--plan", env[0],
+                            "--answers", answers, "--accepted-by", "Dana"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            PROBE_ERRORS.append((tree, "spec-first-planning/assets/write_grant.py",
+                                 "planner-derived run: write_grant failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        with open(env[0], encoding="utf-8") as f:
+            ids = [t["id"] for t in json.load(f)["predicate"]["payload"]["tasks"]]
+        run("init", "--plan", env[0])
+        _fc_drive(run, ids)
+        proven = _fc_status_proven(run, ids)
+        run("finish")
+        return 1 if proven else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def check_factory_conductor(old, new):
@@ -5320,6 +5460,32 @@ def check_factory_conductor(old, new):
             return None
         _, bad_merged = _fc_run(tree, _FC_TASKS_BAD)
         return 1 if "T1" in bad_merged else 0
+
+    def planner_proven(tree, ok_merged=None):
+        """_fc_planner_run, with a sanity arm: in a tree that has the conductor, the
+        hand-built passing fixture MUST prove T1, so a 0 here is the planner's plan
+        failing to prove, never a broken conductor fixture (PROBE_ERRORS, None)."""
+        conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+        if not os.path.isfile(conductor):
+            return 0
+        if ok_merged is None:
+            _, ok_merged = _fc_run(tree, _FC_TASKS_OK)
+        if "T1" not in ok_merged:
+            PROBE_ERRORS.append((
+                tree, "factory-conductor/assets/conductor.py",
+                "planner-derived sanity check failed: the hand-built passing fixture "
+                "did not prove T1 in this tree"))
+            return None
+        return _fc_planner_run(tree)
+
+    a, b = planner_proven(old), planner_proven(new, b_merged)
+    row(s, "plans derived by spec-first-planning that the conductor proves end to end",
+        a, b, a == 0 and b == 1,
+        "spec_to_tasks emitted a null verify command, so every planner-derived task parked "
+        "unrunnable-verify; a criterion's [cmd: ...] is now the command. Driven as a real "
+        "spec -> spec_to_tasks --envelope -> write_grant -> init..finish, read from the "
+        "`status` lines; sanity-checked against the hand-built passing fixture, which DOES "
+        "prove T1", since=SINCE_FACTORY_PLANNER_CMD)
 
     a = merged_with_failing_verify(old)
     b = merged_with_failing_verify(new, b_merged)
