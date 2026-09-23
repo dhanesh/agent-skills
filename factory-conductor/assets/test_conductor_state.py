@@ -1,7 +1,7 @@
 import contextlib, io, json, os, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
-from conductor_testkit import repo, write_plan_envelope, write_grant
+from conductor_testkit import read_text, repo, tmpdir, write_plan_envelope, write_grant
 HAVE_GIT = __import__("shutil").which("git") is not None
 
 
@@ -40,7 +40,7 @@ class Waves(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
         self.st = C.State.new(root=self.tmp, run_id="run-20260922T120000Z-a1b2c3",
                               plan=plan({"T1": [], "T2": ["T1"]}), plan_envelope="e.json",
                               plan_sha256="0" * 64, grant_id="autonomy-grant-v1-x",
@@ -77,7 +77,7 @@ class StateTests(unittest.TestCase):
         # State.new logs the run's own init event first (fix round 1, item 9).
         self.st.log("init", run="x")
         self.st.log("start", task="T1")
-        lines = open(self.st.log_path, encoding="utf-8").read().strip().splitlines()
+        lines = read_text(self.st.log_path).strip().splitlines()
         self.assertEqual(len(lines), 3)
         self.assertEqual([json.loads(l)["event"] for l in lines], ["init", "init", "start"])
         self.assertTrue(all(json.loads(l)["at"].endswith("Z") for l in lines))
@@ -94,7 +94,7 @@ class StateTests(unittest.TestCase):
         self.st.log("start", task="T1")
         self.st.set_status("T1", "running")
         self.st.save()
-        before = open(self.st.log_path, encoding="utf-8").read()
+        before = read_text(self.st.log_path)
         rc, out, _ = run_main(["resume", "--root", self.tmp])
         self.assertEqual(rc, 3)
         lines = out.splitlines()
@@ -102,7 +102,7 @@ class StateTests(unittest.TestCase):
                          % json.loads(before.splitlines()[-1])["at"])
         self.assertIn("GATE: ASK reason=no-grant", lines)
         self.assertNotIn("READY:", out)
-        self.assertTrue(open(self.st.log_path, encoding="utf-8").read().startswith(before))
+        self.assertTrue(read_text(self.st.log_path).startswith(before))
 
     @unittest.skipUnless(HAVE_GIT, "git not installed")
     def test_resume_with_a_grant_reports_the_last_step_and_keeps_the_log(self):
@@ -114,11 +114,11 @@ class StateTests(unittest.TestCase):
         st.log("start", task="T1")
         st.set_status("T1", "running")
         st.save()
-        before = open(st.log_path, encoding="utf-8").read()
+        before = read_text(st.log_path)
         rc, out, _ = run_main(["resume", "--root", root])
         self.assertEqual(rc, 0)
         self.assertEqual(out.splitlines()[-1], "READY:")  # T1 running, T2 waits on it
-        self.assertTrue(open(st.log_path, encoding="utf-8").read().startswith(before))
+        self.assertTrue(read_text(st.log_path).startswith(before))
 
 
 class RunIdTests(unittest.TestCase):
@@ -152,7 +152,7 @@ class CorruptState(unittest.TestCase):
     """Fix round 1, item 1: a bad state.json is a StateError and exit 2, never a traceback."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
         self.st = new_state(self.tmp, {"T1": []})
 
     def plant(self, raw):
@@ -186,14 +186,14 @@ class CorruptState(unittest.TestCase):
         self.check(json.dumps(data).encode())
 
     def test_missing_state_on_resume_exits_2(self):
-        rc, _, err = run_main(["resume", "--root", tempfile.mkdtemp()])
+        rc, _, err = run_main(["resume", "--root", tmpdir()])
         self.assertEqual(rc, 2)
         self.assertIn("no run found", err)
 
 
 class LogRobustness(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
         self.st = new_state(self.tmp, {"T1": []})
 
     def test_torn_line_does_not_swallow_the_next_event(self):
@@ -221,7 +221,7 @@ class LogRobustness(unittest.TestCase):
 
 class PlanValidation(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
 
     def make(self, tasks):
         return C.State.new(root=self.tmp, run_id=RID % 0,
@@ -275,7 +275,7 @@ class Order(unittest.TestCase):
     """Fix round 1, item 4: plan order survives a save and load (T10 after T2)."""
 
     def test_round_trip_keeps_plan_order(self):
-        tmp = tempfile.mkdtemp()
+        tmp = tmpdir()
         st = new_state(tmp, {"T1": [], "T2": [], "T10": []}, budget={"max_parallel": 3})
         st.save()
         again = C.State.load(st.state_path)
@@ -294,7 +294,7 @@ class Order(unittest.TestCase):
 
 class Blocking(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
 
     def test_transitive_dependents_are_blocked(self):
         st = new_state(self.tmp, {"T1": [], "T2": ["T1"], "T3": ["T2"], "T4": []})
@@ -348,7 +348,7 @@ class Cli(unittest.TestCase):
         st = C.State.load(os.path.join(C.current_run(root), "state.json"))
         self.assertEqual(st.last_event()["event"], "resume")
         # the last step before resume is init's gate decision, logged after init
-        self.assertEqual([json.loads(l)["event"] for l in open(st.log_path)],
+        self.assertEqual([json.loads(l)["event"] for l in read_text(st.log_path).splitlines()],
                          ["init", "gate", "gate", "resume"])
         self.assertIn("last_event=gate ", lines[0])
 
@@ -363,7 +363,7 @@ class Cli(unittest.TestCase):
 
     def test_budget_max_parallel_below_one_is_rejected(self):
         with self.assertRaises(C.PlanError):
-            new_state(tempfile.mkdtemp(), {"T1": []}, budget={"max_parallel": 0})
+            new_state(tmpdir(), {"T1": []}, budget={"max_parallel": 0})
 
     def test_init_on_a_root_that_is_a_file_exits_2(self):
         rc, _, err = run_main(["init", "--plan", self.plan_path, "--root", self.plan_path])

@@ -4,7 +4,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 import contract_check as CC
-from conductor_testkit import GIT, repo, new_run, revoke, write_grant, write_plan_envelope
+from conductor_testkit import GIT, repo, new_run, revoke, tmpdir, write_grant, write_plan_envelope
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRST_T1 = ["{python}", "-c", "pass"]
@@ -45,7 +45,7 @@ def commit_in(d, name, text):
 @unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
 class FinishTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
         self.stub = os.path.join(self.tmp, "stub.py")
         with open(self.stub, "w") as f:
             f.write(STUB)
@@ -281,7 +281,7 @@ class FinishTests(unittest.TestCase):
         """N1: an executor can write remote.origin.push into the shared .git/config; a bare
         `git push origin <rb>` would map through it (and its + would force)."""
         self.run_plan()
-        bare = tempfile.mkdtemp()
+        bare = tmpdir()
         subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
         subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
         subprocess.run(["git", "-C", self.root, "push", "-q", "origin", "main"], check=True)
@@ -313,6 +313,36 @@ class FinishTests(unittest.TestCase):
         self.assertFalse(os.path.exists(mark), "the planted ext:: command ran")
         self.assertEqual(rc, 3, out)
         self.assertFalse(C.State.load(self.st_path).finished["pushed"])
+
+    def test_a_run_branch_that_changes_ci_config_is_not_pushed(self):
+        """I1 (the reviewer's probe2): a task commits .github/workflows/x.yml and goes
+        through verify, review and merge; finish asks on push_branch with ci-config
+        (CI runs with the repository's secrets, so that push is deploy) and exits 3,
+        and nothing is pushed or opened."""
+        self.root = repo()
+        bare = os.path.join(self.tmp, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "push", "-q", "origin", "main"], check=True)
+        st, self.plan = new_run(self.root, {
+            "title": "CI", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+            "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "ci",
+                       "verify": [{"text": "ok", "command": ["true"]}], "depends_on": []}]})
+        self.st_path = st.state_path
+        self.assertEqual(C.main(["start", "T1", "--root", self.root]), 0)
+        wt = C.State.load(self.st_path).tasks["T1"]["worktree"]
+        os.makedirs(os.path.join(wt, ".github", "workflows"))
+        commit_in(wt, os.path.join(".github", "workflows", "x.yml"), "on: push\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        self.assertEqual(C.main(["review", "T1", "--verdict", "pass", "--root", self.root]), 0)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        rc, out = self.finish()
+        self.assertEqual(rc, 3, out)
+        self.assertTrue(re.search(r"^GATE: ASK .*reason=ci-config", out, re.M), out)
+        self.assertEqual(self.records(), [], "a push or a PR ran")
+        self.assertFalse(C.State.load(self.st_path).finished["pushed"])
+        remote = C.git(bare, "branch", "--list", "factory/*").stdout.strip()
+        self.assertEqual(remote, "")
 
     def test_explicit_push_rewrites_only_the_run_branch(self):
         self.assertEqual(C.explicit_push(["git", "push", "-u", "origin", "factory/p"],

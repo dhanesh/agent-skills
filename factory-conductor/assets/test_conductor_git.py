@@ -3,7 +3,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 # start and merge are gated (Task 3): every run here has a real task-plan envelope and
 # a human-accepted grant that pins it. repo() is on factory/p, cut from main.
-from conductor_testkit import GIT, repo, new_run
+from conductor_testkit import GIT, read_text, repo, new_run, tmpdir, write_text
 
 
 def commit_in(d, name, text, msg="c"):
@@ -29,7 +29,7 @@ class GitTests(unittest.TestCase):
 
     def marker(self):
         """An absolute path outside every checkout, for a child process to touch."""
-        self._marker = os.path.join(tempfile.mkdtemp(), "late")
+        self._marker = os.path.join(tmpdir(), "late")
         return self._marker
 
     def wt(self, st):
@@ -88,7 +88,7 @@ class GitTests(unittest.TestCase):
         C.main(["start", "T1", "--root", self.root])
         st = C.State.load(st.state_path)
         wt = st.tasks["T1"]["worktree"]
-        open(os.path.join(wt, "b.txt"), "w").write("b\n")
+        write_text(os.path.join(wt, "b.txt"), "b\n")
         C.git(wt, "add", "-A")
         subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "task"], check=True,
                        env=dict(os.environ, **GIT))
@@ -110,11 +110,11 @@ class GitTests(unittest.TestCase):
         C.main(["start", "T1", "--root", self.root])
         st = C.State.load(st.state_path)
         wt = st.tasks["T1"]["worktree"]
-        open(os.path.join(wt, "a.txt"), "w").write("task\n")
+        write_text(os.path.join(wt, "a.txt"), "task\n")
         C.git(wt, "add", "-A")
         subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "task"], check=True,
                        env=dict(os.environ, **GIT))
-        open(os.path.join(self.root, "a.txt"), "w").write("run\n")
+        write_text(os.path.join(self.root, "a.txt"), "run\n")
         C.git(self.root, "add", "-A")
         subprocess.run(["git", "-C", self.root, "commit", "-q", "-m", "run"], check=True,
                        env=dict(os.environ, **GIT))
@@ -186,12 +186,12 @@ class GitTests(unittest.TestCase):
         self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
                          ("parked", "out of scope"))
         self.assertIn("park", [e["event"] for e in map(__import__("json").loads,
-                                                       open(st.log_path))])
+                                                       read_text(st.log_path).splitlines())])
 
     def test_git_ignores_an_inherited_git_dir(self):
         self.root = repo()
         old = os.environ.get("GIT_DIR")
-        os.environ["GIT_DIR"] = os.path.join(tempfile.mkdtemp(), "nowhere")
+        os.environ["GIT_DIR"] = os.path.join(tmpdir(), "nowhere")
         try:
             r = C.git(self.root, "rev-parse", "--abbrev-ref", "HEAD")
         finally:
@@ -230,7 +230,7 @@ class GitTests(unittest.TestCase):
         st = self.state(verify=[{"text": "marker", "command": ["touch", "ran"]}])
         C.main(["start", "T1", "--root", self.root])
         wt = self.wt(st)
-        open(os.path.join(wt, "feature.txt"), "w").write("f\n")
+        write_text(os.path.join(wt, "feature.txt"), "f\n")
         self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 3)
         self.assertFalse(os.path.exists(os.path.join(wt, "ran")), "a command ran")
         t = self.task(st)
@@ -277,7 +277,7 @@ class GitTests(unittest.TestCase):
                          ("proven", crashed, None))
         self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), crashed)
         self.assertFalse(os.path.isdir(t["worktree"]))
-        ev = [json.loads(l) for l in open(st.log_path) if '"merge"' in l]
+        ev = [json.loads(l) for l in read_text(st.log_path).splitlines() if '"merge"' in l]
         self.assertTrue(ev[-1].get("recovered"))
         self.assertEqual(ev[-1]["commit"], crashed)
 
@@ -617,7 +617,7 @@ class GitTests(unittest.TestCase):
         wt = self.wt(st)
         commit_in(wt, "b.txt", "b\n")
         m = self.marker()
-        script = os.path.join(tempfile.mkdtemp(), "fsmon.sh")
+        script = os.path.join(tmpdir(), "fsmon.sh")
         with open(script, "w") as f:
             f.write("#!/bin/sh\ntouch %s\nexit 1\n" % m)
         os.chmod(script, 0o755)
@@ -707,7 +707,7 @@ class GitTests(unittest.TestCase):
         wt = self.wt(st)
         commit_in(wt, "b.txt", "b\n")
         head = C.git(wt, "rev-parse", "HEAD").stdout.strip()
-        evil = tempfile.mkdtemp()
+        evil = tmpdir()
         with open(os.path.join(evil, "keep"), "w") as f:
             f.write("k")
         p = os.path.join(st.dir, "verify", "T1-" + head[:12])
@@ -808,7 +808,7 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.task(st)["merge_commit"], line[0])
         self.assertEqual(self.merge_dirs(st), [])
         self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
-        self.assertEqual(open(os.path.join(self.root, "f.txt")).read(),
+        self.assertEqual(read_text(os.path.join(self.root, "f.txt")),
                          "ONE\n2\n3\n4\n5\n6\nSEVEN\n")
 
     def test_a_conflict_in_the_merge_clone_never_touches_the_root(self):

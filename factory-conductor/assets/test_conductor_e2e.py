@@ -24,7 +24,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 import contract_check as CC  # noqa: E402
-from conductor_testkit import GIT, repo, write_grant, write_plan_envelope  # noqa: E402
+from conductor_testkit import GIT, repo, tmpdir, write_grant, write_plan_envelope  # noqa: E402
 
 PUSH_PR_STUB = r'''
 import json, sys
@@ -58,7 +58,7 @@ def commit_in(directory, name, text):
 @unittest.skipUnless(shutil.which("git"), "git not installed")
 class EndToEndTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = tmpdir()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.stub = os.path.join(self.tmp, "stub.py")
         with open(self.stub, "w") as f:

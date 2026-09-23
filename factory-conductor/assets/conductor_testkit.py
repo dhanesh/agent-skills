@@ -6,15 +6,19 @@ Builds what a real run needs, through the vendored skill-contract checker:
 - write_grant(): a human-accepted autonomy grant pinning docs/spec.md and the plan
   envelope, so check-grant --subject <plan envelope> covers exactly that plan;
 - new_run(): a State over a real plan envelope and grant, for suites that drive
-  start/verify/review/merge directly without going through init.
+  start/verify/review/merge directly without going through init;
+- tmpdir(): a temporary directory that is removed when the process exits. repo() uses
+  it too, so a suite run leaves nothing behind in tempfile.gettempdir().
 
 Grants are written with generatedAtTime = now (never earlier than the newest grant
 already under the root, so the newest head always wins) and a lifetime of at most
 7 days, as the checker requires (A7).
 """
+import atexit
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +36,33 @@ DEFAULT_POLICY = {"read_only": "auto", "local_reversible": "grant",
                   "push_branch": "grant", "open_pr": "grant"}
 
 
+_TMPDIRS = []
+
+
+def tmpdir(**kw):
+    """tempfile.mkdtemp(**kw), removed (with everything under it) at process exit."""
+    d = tempfile.mkdtemp(**kw)
+    _TMPDIRS.append(d)
+    return d
+
+
+@atexit.register
+def _remove_tmpdirs():
+    while _TMPDIRS:
+        shutil.rmtree(_TMPDIRS.pop(), ignore_errors=True)
+
+
+def read_text(path, mode="r"):
+    """The whole of path, the file closed at once (no ResourceWarning)."""
+    with open(path, mode) as f:
+        return f.read()
+
+
+def write_text(path, text):
+    with open(path, "w") as f:
+        f.write(text)
+
+
 def z(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -42,7 +73,7 @@ def repo():
     .skill-contract/envelopes/ is excluded (.git/info/exclude), so the plan and the
     grant written there never show in `git status` and the grant stays untracked,
     as check-grant requires."""
-    d = tempfile.mkdtemp()
+    d = tmpdir()
     subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
     with open(os.path.join(d, "a.txt"), "w") as f:
         f.write("a\n")

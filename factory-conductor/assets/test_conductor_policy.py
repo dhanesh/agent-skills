@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C
 import contract_check as CC
-from conductor_testkit import (GIT, repo_with_plan, payload, write_plan_envelope,
+from conductor_testkit import (GIT, repo_with_plan, payload, read_text, tmpdir, write_plan_envelope,
                                write_grant, revoke, new_run, z as _z)
 
 
@@ -152,7 +152,7 @@ class InitTests(unittest.TestCase):
         self.assertEqual(st.grant_id, os.path.basename(grant)[:-len(".json")])
         self.assertEqual(st.plan_envelope, os.path.abspath(plan))
         import hashlib
-        self.assertEqual(st.plan_sha256, hashlib.sha256(open(plan, "rb").read()).hexdigest())
+        self.assertEqual(st.plan_sha256, hashlib.sha256(read_text(plan, "rb")).hexdigest())
         self.assertEqual(st.budget, {"max_parallel": 2, "max_repairs_per_task": 2})
         self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
 
@@ -296,7 +296,7 @@ class InitTests(unittest.TestCase):
         self.assertIsNone(C.current_run(self.root))
 
     def test_init_outside_git_exits_2(self):
-        d = tempfile.mkdtemp()
+        d = tmpdir()
         os.makedirs(os.path.join(d, "docs"))
         with open(os.path.join(d, "docs", "spec.md"), "w") as f:
             f.write("# Spec\n")
@@ -365,8 +365,8 @@ class GateTests(unittest.TestCase):
 
     def test_a_planted_fsmonitor_never_runs_under_the_gate(self):
         # The vendored checker runs its own git probes in the executor-writable repo.
-        m = os.path.join(tempfile.mkdtemp(), "ran")
-        script = os.path.join(tempfile.mkdtemp(), "fsmon.sh")
+        m = os.path.join(tmpdir(), "ran")
+        script = os.path.join(tmpdir(), "fsmon.sh")
         with open(script, "w") as f:
             f.write("#!/bin/sh\ntouch %s\nexit 1\n" % m)
         os.chmod(script, 0o755)
@@ -518,7 +518,7 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual((rc, out.strip()), (3, "STOP: budget_wall_clock"))
         st = C.State.load(st.state_path)
         self.assertEqual(st.stopped["reason"], "budget_wall_clock")
-        self.assertIn("stop", [json.loads(l)["event"] for l in open(st.log_path)])
+        self.assertIn("stop", [json.loads(l)["event"] for l in read_text(st.log_path).splitlines()])
         rc, out = self.out(["start", "T1", "--root", self.root])
         self.assertEqual(rc, 3)
         self.assertIn("STOP: budget_wall_clock", out)
@@ -628,7 +628,7 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual(st.tasks["T1"]["question"], "Postgres or SQLite?")
         self.assertEqual(st.tasks["T2"]["status"], "blocked")
         self.assertIsNone(st.stopped)
-        ev = [json.loads(l) for l in open(st.log_path)]
+        ev = [json.loads(l) for l in read_text(st.log_path).splitlines()]
         self.assertIn({"task": "T1", "question": "Postgres or SQLite?"},
                       [{k: e[k] for k in ("task", "question")} for e in ev
                        if e["event"] == "decision"])
@@ -650,6 +650,70 @@ class StopRuleTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("STATUS: budget max_tokens/max_usd recorded, not enforced "
                       "(the runtime does not expose usage)", out.splitlines())
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class ResumeWalkTests(unittest.TestCase):
+    """I5: a crash at each in-flight status. `resume` exits 0 and only appends to the log;
+    then the run-protocol's next command for that status succeeds, ending in MERGE:."""
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = C.main(argv)
+        return rc, out.getvalue()
+
+    def resume_keeps_the_log(self):
+        with open(C.State.load(C.state_path(self.root)).log_path, "rb") as f:
+            before = f.read()
+        rc, out = self.run_main(["resume", "--root", self.root])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("READY:", out)
+        with open(C.State.load(C.state_path(self.root)).log_path, "rb") as f:
+            self.assertTrue(f.read().startswith(before))
+
+    def status_line(self):
+        _, out = self.run_main(["status", "--root", self.root])
+        return [l for l in out.splitlines() if l.startswith("STATUS: T1 ")][0]
+
+    def test_resume_at_every_in_flight_status_then_the_protocol_step_succeeds(self):
+        self.root = repo_with_plan()
+        plan = write_plan_envelope(self.root, {"T1": ([], [
+            {"text": "work exists", "command": ["test", "-f", "b.txt"]}])})
+        write_grant(self.root, plan)
+        self.assertEqual(self.run_main(["init", "--plan", plan, "--root", self.root])[0], 0)
+        self.assertEqual(self.run_main(["start", "T1", "--root", self.root])[0], 0)
+        wt = C.State.load(C.state_path(self.root)).tasks["T1"]["worktree"]
+
+        # 1. running: the executor is re-dispatched into the worktree, then verify
+        #    (here its first attempt committed nothing that passes)
+        self.assertEqual(self.status_line(), "STATUS: T1 running")
+        self.resume_keeps_the_log()
+        _commit(wt, "other.txt")
+        rc, out = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("VERIFY: T1 fail", out)
+
+        # 2. verifying after a failing verify: repair, then verify
+        self.assertEqual(self.status_line(), "STATUS: T1 verifying")
+        self.resume_keeps_the_log()
+        _commit(wt, "b.txt")
+        rc, out = self.run_main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 0, out)
+
+        # 3. reviewing with no review recorded: dispatch a reviewer, record it
+        self.assertTrue(self.status_line().startswith("STATUS: T1 reviewing verified_head="))
+        self.assertNotIn("review=", self.status_line())
+        self.resume_keeps_the_log()
+        self.assertEqual(self.run_main(["review", "T1", "--verdict", "pass",
+                                        "--root", self.root])[0], 0)
+
+        # 4. reviewing with a review pass recorded: merge
+        self.assertIn("review=pass", self.status_line())
+        self.resume_keeps_the_log()
+        rc, out = self.run_main(["merge", "T1", "--root", self.root])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(out.strip().splitlines()[-1].startswith("MERGE: T1 "), out)
 
 
 def _commit(wt, name="b.txt"):
@@ -958,7 +1022,7 @@ class NonGitStopTests(unittest.TestCase):
     """check_stop is pure: it needs no git and no grant."""
 
     def test_state_path_is_the_newest_runs_state(self):
-        tmp = tempfile.mkdtemp()
+        tmp = tmpdir()
         self.assertIsNone(C.state_path(tmp))
         plan = {"tasks": [{"id": "T1", "depends_on": []}]}
         a = C.State.new(root=tmp, run_id="run-20260101T000000Z-000001", plan=plan,
@@ -971,7 +1035,7 @@ class NonGitStopTests(unittest.TestCase):
         self.assertEqual(C.state_path(tmp), b.state_path)
 
     def test_state_new_rejects_a_bad_budget(self):
-        tmp = tempfile.mkdtemp()
+        tmp = tmpdir()
         for bad in ({"max_dispatches": -1}, {"nope": 1}, {"wall_clock_min": "5"}):
             with self.assertRaises(C.PlanError, msg=repr(bad)):
                 C.State.new(root=tmp, run_id=C.new_run_id(),
