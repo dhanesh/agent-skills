@@ -56,12 +56,12 @@ class InstallerTest(unittest.TestCase):
     def test_preserves_foreign_content_and_backs_up_once(self):
         codex = self.paths["codex"]
         codex.parent.mkdir(parents=True)
-        codex.write_text("# Manifold Schema\n\nkeep me\n")
+        codex.write_text("# House Rules\n\nkeep me\n")
         run(self.home)
         text = codex.read_text()
-        self.assertTrue(text.startswith("# Manifold Schema\n\nkeep me\n"))
+        self.assertTrue(text.startswith("# House Rules\n\nkeep me\n"))
         bak = codex.with_name("AGENTS.md.bak-jev-agent-setup")
-        self.assertEqual(bak.read_text(), "# Manifold Schema\n\nkeep me\n")
+        self.assertEqual(bak.read_text(), "# House Rules\n\nkeep me\n")
 
     def test_updates_stale_block_in_place(self):
         g = self.paths["gemini"]
@@ -86,16 +86,16 @@ class InstallerTest(unittest.TestCase):
     def test_mirror_inlines_imports_and_flags_unresolved(self):
         c = self.paths["claude"]
         c.parent.mkdir(parents=True)
-        (c.parent / "RTK.md").write_text("RTK rules here")
-        c.write_text("# Mine\n\n@RTK.md\n\n@missing.md\n")
+        (c.parent / "STYLE.md").write_text("Imported style rules")
+        c.write_text("# Mine\n\n@STYLE.md\n\n@missing.md\n")
         run(self.home, "--mode", "mirror")
         agents = self.paths["agents"].read_text()
-        self.assertIn("RTK rules here", agents)
+        self.assertIn("Imported style rules", agents)
         self.assertIn("<!-- unresolved import: missing.md -->", agents)
         self.assertIn("System One Decisioning", agents)  # claude's block is mirrored
         self.assertEqual(agents.count(inst.BEGIN), 1)  # nested markers stripped
-        self.assertIn("@RTK.md", c.read_text())  # claude keeps its imports
-        self.assertIn("RTK rules here\n\n", agents)  # sections stay separated
+        self.assertIn("@STYLE.md", c.read_text())  # claude keeps its imports
+        self.assertIn("Imported style rules\n\n", agents)  # sections stay separated
 
     def test_uninstall_restores_foreign_content(self):
         codex = self.paths["codex"]

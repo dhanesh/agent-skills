@@ -20,7 +20,7 @@ SKILL = Path(__file__).resolve().parent.parent
 INSTALLER = SKILL / "assets" / "install_jev_setup.py"
 BEGIN = "<!-- BEGIN jev-agent-setup"
 END = "<!-- END jev-agent-setup -->"
-CODEX_ORIGINAL = "# Manifold Schema Quick Reference\n\n| Phase | INITIALIZED |\n"
+CODEX_ORIGINAL = "# House Rules\n\n| Setting | Value |\n"
 
 _checks = []
 
@@ -39,8 +39,8 @@ def installer(home, *args):
 
 def harness(home):
     (home / ".claude").mkdir(parents=True)
-    (home / ".claude" / "RTK.md").write_text("Use rtk for token-optimised commands.\n")
-    (home / ".claude" / "CLAUDE.md").write_text("# Response Style\n\n- Lead with the answer.\n\n@RTK.md\n")
+    (home / ".claude" / "STYLE.md").write_text("Imported style rules.\n")
+    (home / ".claude" / "CLAUDE.md").write_text("# Response Style\n\n- Lead with the answer.\n\n@STYLE.md\n")
     (home / ".codex").mkdir()
     (home / ".codex" / "AGENTS.md").write_text(CODEX_ORIGINAL)
 
@@ -76,9 +76,9 @@ def grade_install(home):
             errs.append("codex: mirror of CLAUDE.md missing")
     if files["agents"].exists():
         a = files["agents"].read_text()
-        if "Use rtk for token-optimised commands." not in a or "@RTK.md" in a:
+        if "Imported style rules." not in a or "@STYLE.md" in a:
             errs.append("agents: @import not inlined")
-    if "@RTK.md" not in files["claude"].read_text():
+    if "@STYLE.md" not in files["claude"].read_text():
         errs.append("claude: own @import was rewritten")
     cli = home / ".local/bin/jev"
     if not cli.exists() or not os.access(cli, os.X_OK):
