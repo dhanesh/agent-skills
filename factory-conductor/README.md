@@ -30,7 +30,9 @@ Install it next to `spec-first-planning`, which produces what it consumes.
    paths.
 2. Switch to a branch the grant covers that is not the default branch and not the run branch
    the conductor will create (`factory/<plan-slug>`, from the plan title), for example
-   `factory/base`.
+   `factory/base`, and push it: `git push -u origin factory/base`. The PR the run opens
+   targets that branch, and the conductor pushes only its own run branch (`init` warns when
+   `origin` has no copy of the base).
 3. Ask the agent to "run the plan unattended". It runs `conductor init`, then loops
    `next` → `start` → executor → `verify` → reviewer → `review` → `merge` until `next` stops,
    then `finish`.
@@ -47,7 +49,8 @@ You can stop a run at any time by revoking the grant
   or `init --budget` sets them. Set both for an unattended run. `--budget` can only tighten a
   limit the grant sets.
 - **Recorded, not enforced:** `max_tokens` and `max_usd`. The runtime does not expose usage to
-  the tool, so dispatch count is the real cost limit.
+  the tool, so dispatch count is the real cost limit. The grant's `stop_on` list is recorded
+  too, but not enforced: the conductor's own stop rules apply.
 - **The proof is per task, and only as good as the checks.** The conductor proves that a task's
   verify commands passed on that task's own commit, before it was merged. It does not re-verify
   the merged run branch, so two tasks that each pass alone can still break each other; CI on

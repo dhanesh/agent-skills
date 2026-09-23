@@ -74,9 +74,15 @@ The grant is re-checked before each action, so an expiry, a revocation, a change
 **Stop rules.** The run stops, then `finish`es with whatever is proven:
 - a budget is exhausted (wall clock or dispatches);
 - the grant expired, was revoked, or its subjects went stale;
-- a task needs a human decision that the grant's `decisions` and `defaults` do not cover;
-- verify stays red after `max_repairs_per_task`;
 - every remaining task is parked or blocked.
+
+Two events PARK the task instead of stopping the run (amended in the final fix wave,
+2026-09-23): a task that needs a human decision the grant's `decisions` and `defaults` do not
+cover parks with `new_human_decision`, and a verify that stays red after `max_repairs_per_task`
+parks with `verify_red_after_repairs`. Their dependents become `blocked`, and every other ready
+task goes on. (A `merge-inconsistent` park, where the root moved during a merge, does stop the
+run with `new_human_decision`.) The grant's `stop_on` list is recorded but not enforced by
+factory-conductor 1.0.0; these rules apply.
 
 The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 
@@ -92,10 +98,17 @@ The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 - **The plan payload** gains an optional `depends_on: ["T1", …]` per task. It is additive, so `task-plan/v1` stays v1.
 - **`spec_to_tasks.py --waves`** prints the wave grouping and the critical path. A cycle, or a dependency on an unknown task, fails with a non-zero exit.
 - **A plan with no `depends_on`** is one wave, and the conductor runs it up to `max_parallel`.
+- **Verify commands** (amended in the final fix wave, 2026-09-23). An acceptance criterion may
+  end with `[cmd: <argv>]`, the command that proves it, split with `shlex` and checked against
+  C6 by `spec_lint.py`; `spec_to_tasks.py` writes it as the verify step's `command`, and
+  `--unattended` requires one on every criterion. `conductor init` refuses a plan with a null
+  or empty command (exit 2). Without this, every planner-derived task carried
+  `"command": null` and parked at verify, so only hand-built plans could be proven.
 
 ## 6. Notifications, resume and packaging
 
-- **While running:** one line per event on stdout, plus the log. When tmux-agent-herdr-lite is installed, a parked task sets the pane's `blocked` marker, which its notifications and its jump-to-blocked key already watch for. Its absence changes nothing.
+- **While running:** one line per event on stdout, plus the log.
+- **tmux `blocked` marker: a documented follow-up** (amended in the final fix wave, 2026-09-23). The earlier text had a parked task set tmux-agent-herdr-lite's pane `blocked` marker. A park does not block the run, whose other tasks go on, so marking the pane blocked would mislabel it; a marker for a run that stopped for a human is the follow-up. No code ships for it.
 - **Resume:** `conductor resume` reads `state.json`, re-checks the grant and continues. A run resumed after expiry stops instead.
 - **Packaging:** an ordinary skill. The executor and reviewer are subagents the session dispatches. A Claude Code plugin that restricts their tools is a documented follow-up, not part of this spec.
 
@@ -125,7 +138,7 @@ Cheap hardening that removes whole classes of silent tampering is still applied:
 - **Parallel merges conflict.** Mitigations: waves keep dependents apart, worktrees isolate, and a conflict parks rather than forcing.
 - **A long run drifts from the spec.** Mitigations: staleness is checked at every gate, and the 7-day grant lifetime caps a run.
 - **Cost.** Only dispatch counts and wall clock bound it. This is stated, not hidden.
-- **A parked task can be missed.** Mitigations: the PR body, the run report and the tmux `blocked` marker.
+- **A parked task can be missed.** Mitigations: the PR body and the run report.
 
 ## Out of scope
 

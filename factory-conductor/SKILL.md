@@ -78,11 +78,14 @@ You MUST have all three before you run `conductor init`:
    exits 0 (`GRANT: COVERED`). The subject is what makes it this plan's grant.
 3. **The right branch.** The current branch matches the grant's `branch_pattern` and is not
    the default branch. The run branch `init` creates, `factory/<plan-slug>`, has to match the
-   pattern too, and cannot exist yet, so do not start from a branch of that name.
+   pattern too, and cannot exist yet, so do not start from a branch of that name. Push the
+   current (base) branch first, `git push -u origin <base>`: the default PR targets it and the
+   conductor pushes only the run branch. `init` prints a `warning:` when `origin` lacks it.
 
 If any of them fails, stop and tell the user which one and why; do not repair a plan or a grant
 yourself. Read the grant's `budget` too: `max_repairs_per_task` defaults to 2 and
-`max_parallel` to 2, but `max_dispatches` and `wall_clock_min` are enforced only when set. When
+`max_parallel` to 2, but `max_dispatches` and `wall_clock_min` are enforced only when set, and
+the grant's `stop_on` is not enforced (the conductor's own stop rules below apply). When
 the grant sets no `max_dispatches`, you SHOULD tell the user the run's cost is unbounded and
 SHOULD suggest a cap through `init --budget`.
 
@@ -113,12 +116,15 @@ Each step is one command. Read its output lines, not just the exit code.
    pass line. The reviewer MUST be a fresh subagent, not the executor that wrote the code.
    Record its answer with `conductor review <task> --verdict pass|fail --detail "<one line>"`.
    A `fail` (exit 3) goes back to the executor with the reviewer's detail, on the same repair
-   budget, then through verify and review again.
+   budget, then through verify and review again. The repair has to be a new commit: `verify`
+   fails the commit the reviewer rejected.
 7. **Merge.** `conductor merge <task>` needs a pass from both verify and review on the same
    pinned commit. It prints `MERGE: <task> <sha>`. A conflict prints
    `PARK: <task> merge-conflict`, and a task with no commit of its own
    `PARK: <task> no-commits` (both exit 3); the run goes on. Exit 2 with "verify again" means
-   the branch moved after the proof: verify again.
+   the branch moved after the proof: verify again. Exit 2 with "run merge again" means git
+   refused the fast-forward and the run branch is unchanged (an untracked file in the way, say):
+   the task stays `reviewing`, so park it with that line unless the cause is plainly transient.
 8. **Repeat** from step 2 until the run stops.
 9. **Finish.** `conductor finish` writes the `run-result/v1` envelope (`FINISH: <path>`), then
    gates `push_branch` and pushes, then gates `open_pr` and opens the PR against the base
@@ -151,7 +157,9 @@ final: `finish` reprints its `FINISH:` line, `--retry-remote` still runs pending
 other command except `status` and `gate` refuses (exit 2), and `init` starts a new run.
 
 **Hands off.** Every step goes through `conductor`: you MUST NOT merge, push, force-push, open
-the PR or edit code yourself, even when a gate asks. You MUST NOT edit, delete or recreate
+the PR or edit code yourself, even when a gate asks. You MUST NOT pass a `--pr-cmd` or
+`--push-cmd` that does anything but push the run branch or open the PR; they exist for stubs
+and for hosts without `gh`, so by default pass neither. You MUST NOT edit, delete or recreate
 `state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`; report a mismatch
 instead.
 
@@ -163,14 +171,15 @@ the run again, and no other stop. Then run `conductor status` and pick up each i
 by its status:
 
 - `running`: dispatch the executor brief again into the existing worktree; do not run `start`;
-- `verifying`: a verify or review failed and a repair was in flight. Read `state.json`
-  (read only): if `tasks.<task>.review.verdict` is `fail`, the last failure was the review,
-  so send the executor `tasks.<task>.review.detail`; otherwise send it the failing commands and
-  the `stdout_tail`/`stderr_tail` from `tasks.<task>.verify_runs`. Dispatch the executor with
-  that into the existing worktree, then run `conductor verify <task>` on its report;
-- `reviewing` with no review recorded (`tasks.<task>.review` is null in `state.json`):
-  dispatch a reviewer on the `verified_head` that `status` shows;
-- `reviewing` with a review pass recorded: run `conductor merge <task>`. If a crash hit
+- `verifying`: a verify or review failed and a repair was in flight. If `status` shows
+  `review=fail`, the last failure was the review, so send the executor
+  `tasks.<task>.review.detail` from `state.json` (read only); otherwise send it the failing
+  commands and the `stdout_tail`/`stderr_tail` from `tasks.<task>.verify_runs`. Dispatch the
+  executor with that into the existing worktree, then run `conductor verify <task>` on its
+  report;
+- `reviewing` with no `review=` in `status`: dispatch a reviewer on the `verified_head` that
+  `status` shows;
+- `reviewing` with `review=pass` in `status`: run `conductor merge <task>`. If a crash hit
   after the merge reached the run branch, `merge` finds that merge, records the task as proven
   and prints `MERGE:` as usual.
 
@@ -271,7 +280,10 @@ envelope is a conductor bug: report it rather than editing state.
 
 The conductor proves that each task's verify commands passed on that task's own commit, cut
 from the run branch as it stood when the task started, and that a reviewer passed the same
-commit. It does not re-verify the merged result or the final run branch: two tasks that each
+commit. The commands run in a clone under `<root>/.skill-contract/runs/…/verify/` that holds
+only committed files: dependency directories such as `node_modules` or `.venv` are absent, so a
+command must install its dependencies or use tooling installed globally, and a lookup that
+walks up parent directories can reach the root's own files. It does not re-verify the merged result or the final run branch: two tasks that each
 pass alone can break each other once merged, and only CI on the pushed branch catches that. A
 plan with weak checks gets weak proof, and the reviewer is the only thing that looks past them.
 
