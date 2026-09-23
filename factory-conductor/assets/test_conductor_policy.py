@@ -759,6 +759,7 @@ class FixRound1Tests(unittest.TestCase):
         self.assertEqual(rc, 3)
         self.assertEqual((self.st().tasks["T1"]["status"], self.st().tasks["T1"]["repairs"]),
                          ("verifying", 0))
+        _commit(self.wt(), "repair.txt")  # a repair is a new commit: verify refuses the rejected one
         self.assertEqual(self.run_main(["verify", "T1", "--root", self.root])[0], 0)
         rc, out, _ = self.run_main(["review", "T1", "--verdict", "fail", "--root", self.root])
         self.assertEqual(rc, 3)
@@ -911,7 +912,7 @@ class Task6FixTests(unittest.TestCase):
         self.run_main(["verify", "T1", "--root", self.root])
         self.run_main(["review", "T1", "--verdict", "fail", "--root", self.root])
         _, out, _ = self.run_main(["status", "--root", self.root])
-        self.assertIn("STATUS: T1 verifying", out.splitlines())
+        self.assertIn("STATUS: T1 verifying review=fail", out.splitlines())
         self.assertNotIn("verified_head=", out)
 
     def test_repairs_default_to_two_and_status_shows_it(self):

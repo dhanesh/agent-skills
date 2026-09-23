@@ -747,7 +747,7 @@ class GitTests(unittest.TestCase):
         self.root = repo()
         env = C.git_env()
         self.assertEqual(env.get("GIT_NO_REPLACE_OBJECTS"), "1")
-        self.assertEqual(env.get("GIT_GRAFT_FILE"), os.devnull)
+        self.assertEqual(env.get("GIT_GRAFT_FILE"), os.path.join(os.devnull, "none"))
         self.assertEqual(C.git(self.root, "config", "core.commitGraph").stdout.strip(), "false")
         self.assertEqual(C.isolated_env().get("GIT_NO_REPLACE_OBJECTS"), "1")
 
@@ -837,6 +837,124 @@ class GitTests(unittest.TestCase):
         self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
         self.assertEqual(self.task(st)["park_reason"], "merge-conflict")
         self.assertEqual(self.merge_dirs(st), [])
+
+
+    # --- final fix wave ---
+
+    def st_now(self, st):
+        return C.State.load(st.state_path)
+
+    def test_an_ext_url_planted_for_the_merge_fetch_never_runs(self):
+        # Deferred 1: the root's fetch of the merge clone runs with
+        # GIT_ALLOW_PROTOCOL=file, so a planted url.<ext::...>.insteadOf plus
+        # protocol.ext.allow=always cannot turn it into a command.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        mark = self.marker()
+        cfg = os.path.join(self.root, ".git", "config")
+        subprocess.run(["git", "config", "-f", cfg, "protocol.ext.allow", "always"], check=True)
+        subprocess.run(["git", "config", "-f", cfg,
+                        # "% " is ext's escaped space; the "#" comments out the rest of
+                        # the clone path that git appends after the rewritten prefix
+                        "url.ext::sh -c touch%% %s%% #.insteadOf" % mark,
+                        os.path.join(st.dir, C.MERGE_DIR)], check=True)
+        C.main(["merge", "T1", "--root", self.root])
+        self.assertFalse(os.path.exists(mark), "the planted ext:: command ran")
+
+    def test_conductor_git_and_verify_output_carry_no_grafts_hint(self):
+        # Deferred 2: GIT_GRAFT_FILE=/dev/null makes git 2.54 print a deprecation hint
+        # about info/grafts; /dev/null/none is silent and still names no graft.
+        st = self.state(verify=[{"text": "log", "command": ["git", "log", "-1"]}])
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.assertNotIn("grafts", C.git(self.root, "log", "-1").stderr)
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        run = self.task(st)["verify_runs"][0]
+        self.assertNotIn("grafts", run["stderr_tail"] + run["stdout_tail"])
+
+    def test_verify_commands_do_not_inherit_the_conductors_git_switches(self):
+        # Deferred 5: verify commands run with os.environ minus the GIT scrub set,
+        # not git_env(): GIT_NO_REPLACE_OBJECTS and GIT_GRAFT_FILE are the
+        # conductor's own switches (the clone copies no replace refs or grafts).
+        st = self.state(verify=[{"text": "env", "command":
+                                 ["sh", "-c", 'test -z "$GIT_NO_REPLACE_OBJECTS$GIT_GRAFT_FILE"']}])
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+
+    def test_a_tracked_edit_in_the_root_refuses_merge_and_keeps_the_task_reviewing(self):
+        # Deferred 4a.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        with open(os.path.join(self.root, "a.txt"), "w") as f:
+            f.write("edited\n")
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
+        now = self.st_now(st)
+        self.assertEqual(now.tasks["T1"]["status"], "reviewing")
+        self.assertIsNone(now.stopped)
+
+    def test_an_untracked_obstacle_refuses_the_fast_forward_without_stopping(self):
+        # Deferred 3 and 4b: a fast-forward git refuses while the root HEAD is still
+        # where it was is a retryable exit 2, not a park and a stop.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        before = C.git(self.root, "rev-parse", "HEAD").stdout.strip()
+        obstacle = os.path.join(self.root, "b.txt")
+        with open(obstacle, "w") as f:
+            f.write("in the way\n")
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
+        now = self.st_now(st)
+        self.assertEqual(now.tasks["T1"]["status"], "reviewing")
+        self.assertIsNone(now.stopped)
+        self.assertEqual(C.git(self.root, "rev-parse", "HEAD").stdout.strip(), before)
+        with open(now.log_path, encoding="utf-8") as f:
+            ev = [json.loads(l) for l in f if '"merge"' in l]
+        self.assertEqual((ev[-1]["ok"], ev[-1]["reason"]), (False, "fast-forward refused"))
+        os.unlink(obstacle)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        self.assertEqual(self.task(st)["status"], "proven")
+
+    def test_status_shows_the_review_verdict(self):
+        # Item 12.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        C.main(["verify", "T1", "--root", self.root])
+        C.main(["review", "T1", "--verdict", "fail", "--detail", "no", "--root", self.root])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            C.main(["status", "--root", self.root])
+        line = [l for l in buf.getvalue().splitlines() if l.startswith("STATUS: T1 ")][0]
+        self.assertIn("review=fail", line)
+
+    def test_verify_refuses_the_commit_a_failed_review_rejected(self):
+        # Item 13: re-verifying the very commit the reviewer failed is a failure (it
+        # counts), so a fail-review / re-verify loop with no new work stays bounded.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+        C.main(["review", "T1", "--verdict", "fail", "--detail", "no", "--root", self.root])
+        failures = self.task(st)["failures"]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = C.main(["verify", "T1", "--root", self.root])
+        self.assertEqual(rc, 3)
+        self.assertIn("VERIFY: T1 fail", buf.getvalue())
+        self.assertEqual(self.task(st)["failures"], failures + 1)
+        with open(self.st_now(st).log_path, encoding="utf-8") as f:
+            ev = [json.loads(l) for l in f if '"verify"' in l]
+        self.assertEqual(ev[-1]["reason"], "unchanged since failed review")
+        # a new commit is verified as usual
+        commit_in(self.wt(st), "c.txt", "c\n")
+        self.assertIn(C.main(["verify", "T1", "--root", self.root]), (0, 3))
+        self.assertIn(self.task(st)["status"], ("reviewing", "parked"))
 
 
 if __name__ == "__main__":

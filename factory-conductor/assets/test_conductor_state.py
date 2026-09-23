@@ -386,6 +386,15 @@ class Hardening(unittest.TestCase):
             with self.assertRaises(C.PlanError, msg=repr(bad)):
                 C.waves({"T1": {"depends_on": []}, "T2": {"depends_on": bad}})
 
+    def test_verify_red_after_repairs_is_a_park_reason_not_a_stop_reason(self):
+        # Item 11: a verify red after max_repairs parks the task; the run goes on.
+        self.assertNotIn("verify_red_after_repairs", C.STOP_REASONS)
+        with open(os.path.join(os.path.dirname(os.path.abspath(C.__file__)), "schemas",
+                               "run-result.v1.json"), encoding="utf-8") as f:
+            schema = json.load(f)
+        enum = schema["properties"]["stopped"]["oneOf"][1]["properties"]["reason"]["enum"]
+        self.assertEqual(enum, list(C.STOP_REASONS))
+
     def test_naive_datetime_is_read_as_utc(self):
         import datetime as dt
         rid = C.new_run_id(dt.datetime(2026, 1, 1, 12, 0, 0))

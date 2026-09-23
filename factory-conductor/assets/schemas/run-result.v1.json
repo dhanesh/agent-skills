@@ -37,7 +37,7 @@
           "type": "object",
           "required": ["reason"],
           "properties": {
-            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "verify_red_after_repairs", "no_ready_tasks"]},
+            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks"]},
             "at": {"type": "string"},
             "detail": {"type": "string"},
             "task": {"type": "string"}

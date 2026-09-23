@@ -296,6 +296,24 @@ class FinishTests(unittest.TestCase):
                          main_before)
         self.assertEqual(C.git(bare, "rev-parse", "refs/heads/factory/p").stdout.strip(), head)
 
+    def test_an_ext_url_planted_for_the_push_never_runs(self):
+        """Deferred 1: the push runs with GIT_ALLOW_PROTOCOL=file:git:http:https:ssh, so a
+        url.<ext::...>.insteadOf planted with protocol.ext.allow=always is refused."""
+        self.run_plan()
+        bare = os.path.join(self.tmp, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
+        mark = os.path.join(self.tmp, "ext-ran")
+        subprocess.run(["git", "-C", self.root, "config", "protocol.ext.allow", "always"],
+                       check=True)
+        subprocess.run(["git", "-C", self.root, "config",
+                        "url.ext::sh -c touch%% %s%% #.insteadOf" % mark, bare], check=True)
+        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
+            [sys.executable, self.stub, self.record, "pr", "--body-file", "{body_file}"])])
+        self.assertFalse(os.path.exists(mark), "the planted ext:: command ran")
+        self.assertEqual(rc, 3, out)
+        self.assertFalse(C.State.load(self.st_path).finished["pushed"])
+
     def test_explicit_push_rewrites_only_the_run_branch(self):
         self.assertEqual(C.explicit_push(["git", "push", "-u", "origin", "factory/p"],
                                          "factory/p"),

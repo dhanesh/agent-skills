@@ -48,7 +48,8 @@ wall_clock_min (from init; checked by next, start, verify, review and merge),
 max_dispatches (one per executor start, per repair send-back after a failing verify or
 review, and per reviewer after a passing verify; a task that needs a dispatch past the
 cap parks with budget_dispatches), max_repairs_per_task (every failing verify or review
-after the first is a repair; at the cap the task parks with verify_red_after_repairs;
+after the first is a repair; at the cap the task parks with verify_red_after_repairs, and
+the run goes on;
 DEFAULT_REPAIRS = 2 when neither the grant nor --budget sets it, recorded in the state)
 and max_parallel (default 2; start refuses past it, next --max is clamped to it) are
 enforced.
@@ -75,10 +76,13 @@ with no-commits (exit 3): retrying could never change that. A merge of the pinne
 the run branch's first-parent line (a crash between the root's fast-forward and saving state)
 is recorded as proven, logged with recovered: true, and exits 0. The --no-ff merge runs in an
 isolated clone (<run>/merge/<task>-<sha>, no inherited config, attributes, merge
-drivers or hooks); the root then fetches that merge commit and fast-forwards to
-it, and merge_commit records that sha. It then removes the worktree and deletes
+drivers or hooks); the root then fetches that merge commit (GIT_ALLOW_PROTOCOL=file)
+and fast-forwards to it, and merge_commit records that sha. A fast-forward git refuses while
+the root HEAD has not moved (an untracked file in the way) exits 2 and leaves the task
+reviewing, so merge can run again. It then removes the worktree and deletes
 the task branch. A conflict parks the task and never touches the root; a root that
-moved meanwhile, or a failed fast-forward, parks it and stops the run. Every
+moved meanwhile, or a fast-forward that left HEAD anywhere but where it was, parks it and
+stops the run. Every
 conductor git call ignores hooks, fsmonitor, replace refs, grafts and the
 commit-graph.
 
@@ -92,7 +96,9 @@ Finish. `finish` ends a run, stopped or not. On a stopped run it first parks eve
 running, verifying or reviewing task with in_flight_at_stop (a stopped run takes no
 further step, so they could never finish); on a run that is not stopped it refuses
 while a task is in flight. It writes a run-result/v1 envelope under
-.skill-contract/envelopes/ (a local write: local_reversible) and prints FINISH: <path>.
+.skill-contract/envelopes/ and prints FINISH: <path>. That local write is deliberately not
+gated (no check-grant for local_reversible): a revoked or expired grant must still let a
+run end and report what it did.
 The envelope's subjects pin the plan envelope and the grant read at init; its payload
 carries each task's status, verify re-runs (commands in the plan's {python} form),
 review, merge commit and park reason, the stop, the budget (max_tokens and max_usd
@@ -113,7 +119,8 @@ explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>, so a remote.<name>
 mapping planted in the shared .git/config cannot retarget or force it. Residual (spec
 section 7a, hostile same-user config): pushurl, url.<base>.pushInsteadOf, receivepack and
 core.sshCommand can redirect WHERE the push goes, but cannot force it or change which
-branch it updates. Like every conductor git call it runs with core.hooksPath=/dev/null
+branch it updates. It runs with GIT_ALLOW_PROTOCOL=file:git:http:https:ssh, so a planted
+url.<x>.insteadOf cannot turn it into an ext:: command. Like every conductor git call it runs with core.hooksPath=/dev/null
 (spec section 7a), so the user's own pre-push hooks do NOT run.
 Then `gate open_pr`, and on COVERED the --pr-cmd (default: gh pr create --title <plan
 title> --base <base branch> --body-file <tmp>), the body built from the payload with all
@@ -156,8 +163,9 @@ import contract_check as CC  # noqa: E402  (the vendored skill-contract checker,
 
 RUN_ID_RE = r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z"
 STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", "blocked")
+# verify_red_after_repairs is a park reason, not a stop: parking never stops the run.
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
-                "new_human_decision", "verify_red_after_repairs", "no_ready_tasks")
+                "new_human_decision", "no_ready_tasks")
 DEFAULT_PARALLEL = 2
 DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
@@ -553,8 +561,29 @@ def git_env():
     env = dict(os.environ)
     for k in GIT_SCRUB:
         env.pop(k, None)
-    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+    # /dev/null/none, not /dev/null: git >= 2.54 prints a deprecation hint about
+    # info/grafts when GIT_GRAFT_FILE names a file that exists; a missing one is silent
+    # and still names no graft.
+    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.path.join(os.devnull, "none"))
     return env
+
+
+def verify_env():
+    """The environment a verify command runs in: os.environ without the variables that
+    point git at another repository. Not git_env(): GIT_NO_REPLACE_OBJECTS and
+    GIT_GRAFT_FILE are the conductor's own switches, and the verify clone copies no
+    replace refs or grafts for them to guard against."""
+    env = dict(os.environ)
+    for k in GIT_SCRUB:
+        env.pop(k, None)
+    return env
+
+
+# Transports a conductor git call that reaches another repository may use. A url.<x>.
+# insteadOf planted in the shared .git/config (with protocol.ext.allow=always) could
+# otherwise turn the fetch or the push into an ext:: command.
+FETCH_PROTOCOLS = "file"
+PUSH_PROTOCOLS = "file:git:http:https:ssh"
 
 
 # The shared git dir is writable by the executor, so it is hostile: every conductor
@@ -996,6 +1025,8 @@ def cmd_status(args):
         # Only the commit awaiting review: a rejected or parked sha is not shown.
         if t.get("verified_head") and t["status"] == "reviewing":
             line += " verified_head=%s" % t["verified_head"]
+        if isinstance(t.get("review"), dict):
+            line += " review=%s" % t["review"].get("verdict")
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
         if t.get("question"):
@@ -1362,6 +1393,13 @@ def cmd_verify(args):
     if head is None:
         sys.stderr.write("cannot read git state of worktree %s\n" % wt)
         return 2
+    review = t.get("review")
+    if isinstance(review, dict) and review.get("verdict") == "fail" \
+            and review.get("verified_head") == head:
+        # The reviewer already rejected this very commit: proving it again proves
+        # nothing new. It counts as a failure, so the repair loop stays bounded.
+        return _verify_refused(st, args.task, "no new commit since the review failed",
+                               "unchanged since failed review")
     if not clean:
         # Only committed work can be merged, so only committed work is proven.
         return _verify_refused(st, args.task, "uncommitted changes in %s; commit them first"
@@ -1467,7 +1505,7 @@ def _run_steps(task, steps, checkout):
             except LookupError as e:
                 rc, out, err, argv = None, "", "cannot resolve: %s" % e, cmd
             else:
-                rc, out, err = _run_verify(argv, checkout)
+                rc, out, err = _run_verify(argv, checkout, env=verify_env())
         ok = rc == 0
         runs.append({"command": argv, "ok": ok, "returncode": rc,
                      "stdout_tail": _tail(out), "stderr_tail": _tail(err)})
@@ -1583,7 +1621,8 @@ def cmd_merge(args):
         if rc is not None:
             return rc
         # Bring the clone's merge into the root: fetch it, then fast-forward only.
-        ok, r = _git_ok(st.root, "fetch", "-q", "--no-tags", clone, sha)
+        ok, r = _git_ok(st.root, "fetch", "-q", "--no-tags", clone, sha,
+                        env=dict(git_env(), GIT_ALLOW_PROTOCOL=FETCH_PROTOCOLS))
         ok2, h = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
         if not (ok and ok2) or h.stdout.strip() != before:
             sys.stderr.write("task %s: the run branch moved during the merge, or the fetch "
@@ -1595,6 +1634,15 @@ def cmd_merge(args):
         ok, r = _git_ok(st.root, "merge", "-q", "--ff-only", sha)
         ok2, h = _git_ok(st.root, "rev-parse", "--verify", "HEAD^{commit}")
         if not (ok and ok2) or h.stdout.strip() != sha:
+            if ok2 and h.stdout.strip() == before:
+                # git refused and nothing moved (an untracked file in the way, say): the
+                # task stays reviewing, and merge can simply run again once it is cleared.
+                sys.stderr.write("task %s: the run branch did not fast-forward to %s; it is "
+                                 "unchanged, so fix the cause and run merge again: %s\n"
+                                 % (args.task, sha, _git_err(r)))
+                st.log("merge", task=args.task, ok=False, reason="fast-forward refused",
+                       before=before, merge=sha, detail=_git_err(r)[-TAIL:])
+                return 2
             sys.stderr.write("task %s: the run branch did not fast-forward to %s: %s\n"
                              % (args.task, sha, _git_err(r)))
             st.log("merge", task=args.task, ok=False, reason="fast-forward failed",
@@ -2027,10 +2075,15 @@ def explicit_push(argv, run_branch):
     raise ValueError("the push names no run branch")
 
 
-def _run_remote(st, event, argv):
+def _run_remote(st, event, argv, protocols=None):
     """Run one remote step (no shell, no stdin) in the root, in its own process group,
-    killed when it ends or times out, as verify does. Log it as `event`. (ok?, stdout)"""
-    rc, out, err = _run_verify(argv, st.root, env=safe_config_env(), timeout=REMOTE_TIMEOUT)
+    killed when it ends or times out, as verify does. Log it as `event`. (ok?, stdout)
+
+    protocols, when given, is the GIT_ALLOW_PROTOCOL list git may use (the push)."""
+    env = safe_config_env()
+    if protocols:
+        env["GIT_ALLOW_PROTOCOL"] = protocols
+    rc, out, err = _run_verify(argv, st.root, env=env, timeout=REMOTE_TIMEOUT)
     st.log(event, command=argv, returncode=rc, stdout_tail=_tail(out), stderr_tail=_tail(err))
     if rc != 0:
         sys.stderr.write("%s failed (exit %s): %s\n" % (event, rc, _tail(err).strip()))
@@ -2185,7 +2238,8 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if why:
             sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
             return 2
-        ok, out = _run_remote(st, "push", explicit_push(argv, st.run_branch))
+        ok, out = _run_remote(st, "push", explicit_push(argv, st.run_branch),
+                              protocols=PUSH_PROTOCOLS)
         if not ok:
             return 3
         st.finished["pushed"] = _tail(out).strip() or True
