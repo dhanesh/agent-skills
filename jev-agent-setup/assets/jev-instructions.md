@@ -17,7 +17,7 @@ triage, gating, review).
 | Decision shape | Primitive | Examples in an agent cycle |
 |---|---|---|
 | Degree / "which option is better" | **Score** (ordered levels) | Rank candidate approaches, fixes, libraries, search hits, PR risk; one comparable Score per option, code picks the max |
-| One of a set | **Choice** | Classify a task, route to a skill/subagent/handler, pick a file/doc/queue, categorise a failure |
+| One of a set | **Choice** | Classify a task, route to a skill/subagent/handler, pick the model a subagent runs on, pick a file/doc/queue, categorise a failure |
 | Yes / no | **Noul** (probability of yes) | "Is this in scope?", "does X affect Y?", "is this test failure related?", "does this claim match its evidence?" |
 
 ## Rules
@@ -38,7 +38,9 @@ triage, gating, review).
    unchanged; fix the request first.
 6. Jev outputs are decision *inputs*, not approvals. Uncertain results (Noul in 0.3–0.7, or
    Choice/Score confidence < 0.6) SHOULD be escalated to the user or a reasoning pass rather
-   than acted on.
+   than acted on. Exception: where the options form an ordered ladder (model tiers, severity
+   levels), read the probabilities instead — mass split between two adjacent options means
+   either is acceptable, not that the answer is unusable. See "Choosing a model for a subagent".
 7. Jev MUST NOT be used to approve, override, or re-litigate a permission decision made by the
    user or the harness. Permission systems stay authoritative.
 
@@ -67,6 +69,32 @@ When building features, agents MUST load the `typesafe-ai` skill (if installed) 
 live docs (https://docs.typesafe.ai/llms.txt) first. Python code MUST add `typesafe-sdk`
 via `uv add` or PEP 723 metadata. The key lives in `TYPESAFE_API_KEY` (fallback
 `~/.config/typesafe/env`); it MUST stay server-side and MUST NOT be committed.
+
+## Choosing a model for a subagent
+
+Picking which model runs a subagent, a background task, or a fan-out leg is a Choice, and it
+MUST be made with Jev rather than by habit or by always reaching for the strongest model.
+
+1. The caller MUST enumerate the models the harness can actually dispatch right now, one short
+   line each on capability, cost and latency, and pass them as state. A model that is not
+   dispatchable MUST NOT be offered as an option.
+2. One Choice ("which model should run `task`?") MUST be batched with a Score for task
+   difficulty; the Choice's probabilities already rank every candidate, so one question per
+   candidate MUST NOT be used.
+3. Policy stays in code: budget ceilings, approved models, and per-repo defaults are applied to
+   Jev's answer, not delegated to it.
+4. The Choice's **probabilities**, not its `confidence`, decide the pick: models form an ordered
+   ladder, so probability mass splitting between two adjacent tiers is normal and MUST NOT be
+   read as an unusable answer. Take the top two options; when they are adjacent, the difficulty
+   Score breaks the tie (≥ 1.5 take the more capable, ≤ 0.5 take the cheaper, otherwise the
+   higher-probability one). A model with probability 0 MUST NOT be dispatched.
+5. The session default MUST be used, with one line saying so, only when the distribution is flat
+   (top probability < 0.4) or `jev` exits non-zero.
+6. Jev MAY be skipped when the answer is already fixed — the user named a model, config pins
+   one, or only one is available.
+
+The worked request, the escalation rule for hard tasks, and the failure modes are in this
+skill's `references/model-routing.md`.
 
 ## Data and regulated-domain guardrails
 

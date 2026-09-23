@@ -67,6 +67,8 @@ def grade_install(home):
             errs.append("%s: no BCP 14 declaration" % name)
         if "MUST NOT be used to approve, override, or re-litigate a permission decision" not in t:
             errs.append("%s: permission guardrail missing" % name)
+        if "## Choosing a model for a subagent" not in t:
+            errs.append("%s: subagent model-routing rule missing" % name)
     if files["codex"].exists():
         if not files["codex"].read_text().startswith(CODEX_ORIGINAL):
             errs.append("codex: foreign content not preserved")

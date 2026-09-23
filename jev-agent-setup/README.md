@@ -34,6 +34,13 @@ python3 <skill-dir>/assets/install_jev_setup.py --uninstall
 Re-running is idempotent. Malformed markers (a BEGIN without an END, or duplicates) make the
 installer refuse with exit 3 before writing anything.
 
+## Picking a model for a subagent
+
+The installed rules also cover model routing: when an agent dispatches a subagent, background
+task or fan-out leg, it asks Jev which of the models the harness can actually dispatch should
+run it, batched with a difficulty score, and applies budget and policy in code.
+`references/model-routing.md` has the worked request and the escalation rule.
+
 ## Reviewing Jev calls in the terminal
 
 ```bash

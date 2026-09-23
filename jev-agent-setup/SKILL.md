@@ -1,6 +1,6 @@
 ---
 name: jev-agent-setup
-description: "Install and verify a machine-wide Jev (TypeSafe System One) setup for coding agents: the `jev` CLI plus a managed BCP 14 instruction block in the global files of Claude Code, Codex, Gemini CLI and ~/.agents/AGENTS.md, so every agent offloads its rank/classify/yes-no decisions to Jev. Use when the user says 'set up Jev for my agents', 'install the jev CLI', 'make Codex and Gemini use Jev too', 'replicate my Jev setup on this machine', or 'check my Jev setup for drift'. Not for designing Jev judgments inside an application — use typesafe-ai for that."
+description: "Install and verify a machine-wide Jev (TypeSafe System One) setup for coding agents: the `jev` CLI plus a managed BCP 14 instruction block in the global files of Claude Code, Codex, Gemini CLI and ~/.agents/AGENTS.md, so every agent offloads its rank/classify/yes-no decisions to Jev. Use when the user says 'set up Jev for my agents', 'install the jev CLI', 'make Codex and Gemini use Jev too', 'replicate my Jev setup on this machine', or 'check my Jev setup for drift'. Also consult it when picking which model a subagent, background task or fan-out leg should run on — 'which model should this subagent use', 'should this be haiku or opus' — the routing recipe is in references/model-routing.md. Not for designing Jev judgments inside an application — use typesafe-ai for that."
 license: MIT
 compatibility: python3 stdlib for the installer; uv plus network and a TypeSafe API key when the jev CLI runs; macOS or Linux home-directory layout.
 metadata:
@@ -25,6 +25,14 @@ Use this skill for machine-level setup: a new laptop, a newly installed agent, a
 teach how to design questions for an application; that is the `typesafe-ai` skill, which the
 installed block tells agents to load. The block governs decisions only. It never lets Jev
 approve or override a permission decision.
+
+## Consulted at decision time: model routing
+
+When the question is which model a subagent should run on, you do not need to install anything.
+Follow [references/model-routing.md](references/model-routing.md): enumerate the models this
+harness can dispatch, batch one Choice (which model) with one Score (task difficulty) in a
+single `jev` call, then apply budget and policy in your own code. On low confidence or any
+non-zero exit, use the session default and say so.
 
 ## Workflow
 

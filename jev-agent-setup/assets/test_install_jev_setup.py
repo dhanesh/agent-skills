@@ -116,6 +116,16 @@ class InstallerTest(unittest.TestCase):
     def test_unknown_target_is_usage_error(self):
         self.assertEqual(run(self.home, "--targets", "cursor")[0], 2)
 
+    def test_block_routes_subagent_model_choice_through_jev(self):
+        block = inst.BLOCK_SRC.read_text()
+        self.assertIn("## Choosing a model for a subagent", block)
+        for rule in ("MUST NOT be offered as an option",   # no undispatchable candidates
+                     "one question per\n   candidate MUST NOT be used",  # one Choice ranks them all
+                     "top probability < 0.4",              # flat distribution, not low confidence
+                     "MUST NOT be dispatched"):            # never pick a zero-probability model
+            self.assertIn(rule, block)
+        self.assertTrue((Path(inst.ASSETS).parent / "references/model-routing.md").is_file())
+
     def test_block_is_bcp14_and_never_overrides_permissions(self):
         block = inst.BLOCK_SRC.read_text()
         self.assertIn("BCP 14 [RFC 2119] [RFC 8174]", block)
