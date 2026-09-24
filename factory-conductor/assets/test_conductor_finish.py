@@ -212,9 +212,11 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         recs = self.records()
         self.assertEqual([r["what"] for r in recs], ["push", "pr"])
-        # the run branch goes out as an explicit, non-forced refspec (never remapped)
+        # the run branch goes out as an explicit, non-forced refspec (never remapped), its
+        # source pinned to the head the integration re-run verified (C1)
+        head = C.State.load(self.st_path).finished["integration"]["head"]
         self.assertEqual(recs[0]["argv"],
-                         ["-u", "origin", "refs/heads/factory/p:refs/heads/factory/p"])
+                         ["-u", "origin", "%s:refs/heads/factory/p" % head])
         self.assertEqual(recs[1]["argv"][:4], ["--title", "Demo plan", "--base", "main"])
         ev = [e for e in self.log_events() if e["event"] in ("push", "pr")]
         self.assertEqual([(e["event"], e["returncode"]) for e in ev], [("push", 0), ("pr", 0)])
@@ -353,6 +355,10 @@ class FinishTests(unittest.TestCase):
                                          "factory/p"),
                          ["git", "push", "-u", "origin",
                           "refs/heads/factory/p:refs/heads/factory/p"])
+        sha = "a" * 40
+        self.assertEqual(C.explicit_push(["git", "push", "-u", "origin", "factory/p"],
+                                         "factory/p", sha),
+                         ["git", "push", "-u", "origin", "%s:refs/heads/factory/p" % sha])
 
     def test_allowed_push_shapes(self):
         for cmd in (["git", "push", "-u", "origin", "{run_branch}"],
@@ -499,8 +505,10 @@ class FinishTests(unittest.TestCase):
         rc, out = self.finish(extra=["--retry-remote"])  # nothing left to do
         self.assertEqual(rc, 0)
         self.assertEqual(len(self.records()), 2)
-        rc, out = self.finish()
-        self.assertEqual((rc, out.strip()), (0, "FINISH: %s" % path))
+        rc, out = self.finish()  # the recorded integration line, then FINISH: (M8)
+        head = C.State.load(self.st_path).finished["integration"]["head"]
+        self.assertEqual((rc, out.strip().splitlines()),
+                         (0, ["INTEGRATION: pass %s" % head, "FINISH: %s" % path]))
 
     def test_retry_remote_skips_a_push_that_already_ran(self):
         self.run_plan(policy={"read_only": "auto", "local_reversible": "grant",
@@ -595,7 +603,9 @@ class FinishTests(unittest.TestCase):
         n_rec = len(self.records())
         rc, out2 = self.finish()
         self.assertEqual(rc, 0)
-        self.assertEqual(out2.strip(), "FINISH: %s" % path)
+        head = C.State.load(self.st_path).finished["integration"]["head"]
+        self.assertEqual(out2.strip().splitlines(),
+                         ["INTEGRATION: pass %s" % head, "FINISH: %s" % path])
         self.assertEqual(len(os.listdir(CC.envelope_dir(self.root))), n_env)
         with open(C.State.load(self.st_path).log_path, "rb") as f:
             self.assertEqual(f.read(), log)
@@ -781,6 +791,149 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("integration", schema["required"])
         self.assertEqual(sorted(schema["properties"]["integration"]["required"]),
                          ["head", "passed", "runs"])
+
+
+
+LOCAL_ONLY = {"read_only": "auto", "local_reversible": "grant", "push_branch": "ask",
+              "open_pr": "ask"}
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class ReviewFixTests(unittest.TestCase):
+    """Review of the Q3 commits: the push is pinned to the verified head (C1), the
+    integration re-run is gated (I2), a passing re-run restores the earlier stop (M3),
+    budget_derived is in the payload (M5)."""
+
+    setUp = FinishTests.setUp
+    run_plan = FinishTests.run_plan
+    out = FinishTests.out
+    finish = FinishTests.finish
+    envelope = FinishTests.envelope
+    records = FinishTests.records
+    log_events = FinishTests.log_events
+
+    def st(self):
+        return C.State.load(self.st_path)
+
+    # C1
+    def test_a_branch_moved_before_retry_remote_is_not_pushed(self):
+        self.run_plan(policy=LOCAL_ONLY)
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK", out)
+        verified = self.st().finished["integration"]["head"]
+        commit_in(self.root, "late.txt", "moved\n")  # the run branch moves after integration
+        write_grant(self.root, self.plan)  # now push and PR are covered
+        rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote", "--pr-cmd",
+                                 json.dumps([sys.executable, self.stub, self.record, "pr"])],
+                                err=True)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("moved since the integration re-run", err)
+        self.assertIn(verified, err)
+        self.assertEqual(self.records(), [])
+        self.assertFalse(self.st().finished["pushed"])
+
+    def test_a_branch_moved_between_integration_and_the_first_push_is_not_pushed(self):
+        self.run_plan()
+        real = C._gate_logged
+
+        def moving_gate(st, action):
+            if action == "push_branch":
+                commit_in(self.root, "late.txt", "moved\n")
+            return real(st, action)
+
+        with mock.patch.object(C, "_gate_logged", moving_gate):
+            rc, out, err = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
+                [sys.executable, self.stub, self.record, "pr"])], err=True)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("moved since the integration re-run", err)
+        self.assertEqual(self.records(), [])
+
+    def test_the_real_push_sends_exactly_the_verified_head(self):
+        self.run_plan()
+        bare = tmpdir()
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", bare], check=True)
+        rc, out = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
+            [sys.executable, "-c", "pass"])])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(C.git(bare, "rev-parse", "refs/heads/factory/p").stdout.strip(),
+                         self.st().finished["integration"]["head"])
+
+    # I2
+    def test_an_expired_grant_at_finish_runs_no_integration_command_and_never_pushes(self):
+        self.run_plan()
+        write_grant(self.root, self.plan, minutes=-5)  # the newest grant is expired
+        with mock.patch.object(C, "_run_steps", side_effect=AssertionError("ran a command")):
+            rc, out = self.finish()
+        self.assertEqual(rc, 3, out)
+        lines = out.splitlines()
+        self.assertTrue(any(l.startswith("GATE: ASK") and "expired" in l for l in lines), out)
+        self.assertIn("INTEGRATION: skipped grant_ask", lines)
+        self.assertEqual(lines[-1], "STOP: grant_ask")
+        self.assertEqual(self.records(), [])
+        path, doc = self.envelope(out)
+        rep = CC.check_envelope(path, root=self.root)
+        self.assertEqual((rep["violations"], rep["stale"]), ([], []))
+        pay = doc["predicate"]["payload"]
+        integ = pay["integration"]
+        self.assertEqual((integ["passed"], integ["runs"]), (False, []))
+        self.assertIn("expired", integ["skipped"])
+        self.assertEqual(pay["stopped"]["reason"], "grant_ask")
+        self.assertEqual(pay["stopped"]["previous"], "no_ready_tasks")
+        a = [x for x in doc["predicate"]["assertions"] if x["test"].startswith("integration:")]
+        self.assertEqual([x["result"] for x in a], [{"outcome": "untested"}])
+        self.assertEqual(a[0]["command"], FIRST_T1)
+        gates = [e for e in self.log_events() if e["event"] == "gate"]
+        self.assertEqual((gates[-1]["action"], gates[-1]["ok"]), ("local_reversible", False))
+        # a second finish and --retry-remote read the recorded result; nothing is pushed
+        rc, out2 = self.finish()
+        self.assertEqual((rc, out2.splitlines()[-1]), (3, "STOP: grant_ask"))
+        write_grant(self.root, self.plan)
+        rc, out3 = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.records(), [])
+
+    # M3
+    def test_a_passing_rerun_after_a_recorded_red_restores_the_earlier_stop(self):
+        self.run_plan()
+        st = self.st()
+        prior = dict(st.stopped)
+        # a crash after the red integration was recorded but before finish was
+        st.stopped = {"reason": "integration_red", "at": "t", "detail": "T1 x",
+                      "previous": prior["reason"], "prior": prior}
+        st.save()
+        rc, out = self.finish()
+        self.assertEqual(rc, 0, out)
+        _, doc = self.envelope(out)
+        self.assertEqual(doc["predicate"]["payload"]["stopped"]["reason"], "no_ready_tasks")
+        self.assertNotIn("previous", doc["predicate"]["payload"]["stopped"])
+        self.assertEqual(self.st().stopped, prior)
+
+    def test_a_passing_rerun_clears_a_red_that_had_no_earlier_stop(self):
+        self.run_plan(stop=False)
+        st = self.st()
+        st.stopped = {"reason": "integration_red", "at": "t", "detail": "T1 x",
+                      "previous": None, "prior": None}
+        st.save()
+        rc, out = self.finish()
+        self.assertEqual(rc, 0, out)
+        _, doc = self.envelope(out)
+        self.assertIsNone(doc["predicate"]["payload"]["stopped"])
+        self.assertIsNone(self.st().stopped)
+
+    # M5
+    def test_the_payload_carries_budget_derived(self):
+        self.run_plan()
+        rc, out = self.finish()
+        _, doc = self.envelope(out)
+        self.assertEqual(doc["predicate"]["payload"]["budget_derived"], [])
+        with open(os.path.join(HERE, "schemas", "run-result.v1.json"), encoding="utf-8") as f:
+            schema = json.load(f)
+        self.assertIn("budget_derived", schema["required"])
+        self.assertEqual(schema["properties"]["budget_derived"]["type"], "array")
+        integ = schema["properties"]["integration"]["properties"]
+        self.assertEqual(integ["skipped"]["type"], "string")
 
 
 if __name__ == "__main__":

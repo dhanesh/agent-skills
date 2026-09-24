@@ -4,7 +4,7 @@
   "title": "skill-contract run-result/v1 payload",
   "description": "The predicate.payload of a run-result/v1 envelope written by conductor.py finish. The envelope's subjects pin the task-plan envelope and the autonomy grant the run ran under; its assertions are one passed verify:<task> per proven task, carrying that task's first verify command from the plan, and, when the integration re-run ran any command, one integration:<head, 12 chars> assertion, passed or failed.",
   "type": "object",
-  "required": ["run_id", "plan", "grant", "run_branch", "base_branch", "created_at", "stopped", "log", "log_sha256", "log_bytes", "budget", "dispatches", "budget_note", "integration", "tasks", "leftover_worktrees"],
+  "required": ["run_id", "plan", "grant", "run_branch", "base_branch", "created_at", "stopped", "log", "log_sha256", "log_bytes", "budget", "budget_derived", "dispatches", "budget_note", "integration", "tasks", "leftover_worktrees"],
   "properties": {
     "run_id": {"type": "string", "pattern": "^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$"},
     "plan": {
@@ -50,6 +50,7 @@
     "log_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the log's first log_bytes bytes, which end with the finish event. The log is append-only, so events after it (the push and PR gates and steps) never change that prefix."},
     "log_bytes": {"type": "integer", "minimum": 1},
     "budget": {"type": "object", "description": "The run's budget as enforced, plus max_tokens/max_usd, which are recorded, not enforced."},
+    "budget_derived": {"type": "array", "items": {"type": "string"}, "description": "The budget keys init derived rather than read from the grant or --budget (max_dispatches when neither set it)."},
     "dispatches": {"type": "integer", "minimum": 0},
     "budget_note": {"type": "string", "description": "Says that max_tokens and max_usd are recorded, not enforced: the runtime does not expose usage."},
     "integration": {
@@ -59,6 +60,7 @@
       "properties": {
         "head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$", "description": "The run-branch commit the commands ran on."},
         "passed": {"type": "boolean"},
+        "skipped": {"type": "string", "description": "Present when the local_reversible gate asked at finish, so no command ran: the gate's line. passed is false, runs is empty, and the run stopped with grant_ask."},
         "runs": {
           "type": "array",
           "items": {

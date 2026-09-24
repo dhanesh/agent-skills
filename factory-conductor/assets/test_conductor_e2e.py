@@ -214,6 +214,9 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(pay["integration"]["head"], head)
         self.assertIs(pay["integration"]["passed"], True)
         self.assertEqual([r["task"] for r in pay["integration"]["runs"]], ["T1", "T2"])
+        # init derived the dispatch cap (the grant sets none): 3 x 2 x (1 + 1)
+        self.assertEqual((pay["budget"]["max_dispatches"], pay["budget_derived"]),
+                         (12, ["max_dispatches"]))
         asserts = {a["test"] for a in doc["predicate"]["assertions"]}
         self.assertEqual(asserts, {"verify:T1", "verify:T2", "integration:" + head[:12]})
 

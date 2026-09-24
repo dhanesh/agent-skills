@@ -2004,7 +2004,8 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "run_branch": st.run_branch, "base_branch": st.base_branch,
         "created_at": st.created_at, "stopped": stopped,
         "log": _rel(st, st.log_path), "log_sha256": None, "log_bytes": None,
-        "budget": dict(st.budget), "dispatches": st.dispatches,
+        "budget": dict(st.budget), "budget_derived": list(st.budget_derived),
+        "dispatches": st.dispatches,
         "budget_note": BUDGET_NOTE_TEXT, "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st)}
 
@@ -2026,7 +2027,16 @@ def _run_result_assertions(st, plan_doc, integration=None):
                     "result": {"outcome": "passed"}, "command": cmd,
                     "subject": [dict(plan_pin)]})
     runs = (integration or {}).get("runs") or []
-    if runs:
+    if integration and integration.get("skipped"):
+        # The gate asked, so nothing ran: untested, carrying the first proven task's check.
+        proven = [t for t in st.order if st.tasks[t]["status"] == "proven"]
+        cmd = ((steps.get(proven[0]) or [{}])[0] or {}).get("command") if proven else None
+        if cmd:
+            out.append({"test": "integration:%s" % (integration["head"] or "")[:12],
+                        "assertedBy": {"skill": CONDUCTOR_SKILL},
+                        "result": {"outcome": "untested"}, "command": cmd,
+                        "subject": [dict(plan_pin)]})
+    elif runs:
         passed = bool(integration["passed"])
         first = runs[0] if passed else next(r for r in runs if not r["ok"])
         cmd = first["command"]
@@ -2039,6 +2049,23 @@ def _run_result_assertions(st, plan_doc, integration=None):
     return out
 
 
+def _run_branch_head(st):
+    """(the run branch's commit sha, None) or (None, why)."""
+    ok, r = _git_ok(st.root, "rev-parse", "-q", "--verify",
+                    "refs/heads/%s^{commit}" % st.run_branch)
+    if not ok:
+        return None, "cannot read the run branch %s: %s" % (st.run_branch, _git_err(r))
+    return r.stdout.strip(), None
+
+
+def _integration_stop(integration):
+    """The stop an integration result records: None when it passed, grant_ask when the
+    gate asked and nothing ran (skipped), else integration_red."""
+    if integration.get("passed"):
+        return None
+    return "grant_ask" if integration.get("skipped") else "integration_red"
+
+
 def _integration(st, plan_doc):
     """Re-run every proven task's verify commands on the run branch's head: ({head,
     passed, runs: [{task, command, ok, returncode}]}, None) or (None, why).
@@ -2048,11 +2075,9 @@ def _integration(st, plan_doc):
     symlink check, verify_env() and VERIFY_TIMEOUT. Commands are recorded in the plan's
     own form. Two tasks that each pass alone can break each other once merged; this is
     where that shows, before anything is pushed."""
-    ok, r = _git_ok(st.root, "rev-parse", "-q", "--verify",
-                    "refs/heads/%s^{commit}" % st.run_branch)
-    if not ok:
-        return None, "cannot read the run branch %s: %s" % (st.run_branch, _git_err(r))
-    head = r.stdout.strip()
+    head, why = _run_branch_head(st)
+    if why:
+        return None, why
     steps_by = _plan_steps(_plan_payload(plan_doc))
     runs = []
     for tid in st.order:
@@ -2077,7 +2102,11 @@ def _integration(st, plan_doc):
 
 
 def _print_integration(integration):
-    """INTEGRATION: pass <sha>, or one INTEGRATION: fail <task> <command> per failing run."""
+    """INTEGRATION: pass <sha>, INTEGRATION: skipped grant_ask, or one
+    INTEGRATION: fail <task> <command> per failing run."""
+    if integration.get("skipped"):
+        print("INTEGRATION: skipped grant_ask")
+        return
     if integration["passed"]:
         print("INTEGRATION: pass %s" % integration["head"])
         return
@@ -2216,18 +2245,19 @@ def push_cmd_problem(argv, run_branch):
     return None
 
 
-def explicit_push(argv, run_branch):
+def explicit_push(argv, run_branch, sha=None):
     """An allowlisted push argv with its run-branch positional (the last one) rewritten to
     the explicit, non-forced refspec refs/heads/<rb>:refs/heads/<rb>. A refspec with no
     ':' is mapped through remote.<name>.push, which the executor can write in the shared
     .git/config (`+refs/heads/<rb>:refs/heads/main` would force-update main); git never
-    remaps a refspec that has a ':', and with no '+' the push is never forced."""
+    remaps a refspec that has a ':', and with no '+' the push is never forced. With sha,
+    the source is that commit (the head the integration re-run verified), not the branch."""
     out = list(argv)
     for i in range(len(out) - 1, 1, -1):
         if not out[i].startswith("-"):
             if out[i] != run_branch:
                 raise ValueError("the last positional is not the run branch: %r" % out[i])
-            out[i] = "refs/heads/%s:refs/heads/%s" % (run_branch, run_branch)
+            out[i] = "%s:refs/heads/%s" % (sha or "refs/heads/" + run_branch, run_branch)
             return out
     raise ValueError("the push names no run branch")
 
@@ -2308,26 +2338,41 @@ def cmd_finish(args):
     # park them (their dependents become blocked) so an unattended run can still end.
     for tid in busy:
         _park(st, tid, "in_flight_at_stop")
-    # Re-verify the merged result before the envelope and before any remote step. The
+    # A stop an earlier, crashed finish recorded (integration_red, or grant_ask over another
+    # stop) is undone first: this attempt judges the run branch afresh.
+    if isinstance(st.stopped, dict) and "prior" in st.stopped:
+        st.stopped = st.stopped["prior"]
+        st.save()
+    # Re-verify the merged result before the envelope and before any remote step. It runs
+    # the repository's code, so it is gated like verify; on an ASK nothing runs. The
     # integration and any stop are logged before `finish`, so log_sha256 covers them.
-    integration, why = _integration(st, plan_doc)
+    covered, gline = _gate_logged(st, "local_reversible")
+    if covered:
+        integration, why = _integration(st, plan_doc)
+    else:
+        head, why = _run_branch_head(st)
+        integration = {"head": head, "passed": False, "skipped": gline, "runs": []}
     if why:
         sys.stderr.write("cannot finish: %s\n" % why)
         return 2
     st.log("integration", **integration)
     _print_integration(integration)
-    if not integration["passed"]:
-        prev = st.stopped if isinstance(st.stopped, dict) else (
-            {"reason": st.stopped} if st.stopped else {})
-        previous = (prev.get("previous") if prev.get("reason") == "integration_red"
-                    else prev.get("reason"))
-        bad = next(x for x in integration["runs"] if not x["ok"])
-        detail = "%s %s" % (bad["task"], _shown(bad["command"]) if bad["command"]
-                            else "symlink(s) leave the checkout")
-        st.stopped = {"reason": "integration_red", "at": _rfc3339(_now()), "detail": detail,
-                      "previous": previous}
-        st.save()
-        st.log("stop", reason="integration_red", detail=detail, previous=previous)
+    stop_reason = _integration_stop(integration)
+    if stop_reason:
+        prior = st.stopped if isinstance(st.stopped, dict) else (
+            {"reason": st.stopped} if st.stopped else None)
+        if not (stop_reason == "grant_ask" and prior and prior.get("reason") == "grant_ask"):
+            if integration.get("skipped"):
+                detail = integration["skipped"]
+            else:
+                bad = next(x for x in integration["runs"] if not x["ok"])
+                detail = "%s %s" % (bad["task"], _shown(bad["command"]) if bad["command"]
+                                    else "symlink(s) leave the checkout")
+            previous = prior.get("reason") if prior else None
+            st.stopped = {"reason": stop_reason, "at": _rfc3339(_now()), "detail": detail,
+                          "previous": previous, "prior": prior}
+            st.save()
+            st.log("stop", reason=stop_reason, detail=detail, previous=previous)
     payload = run_result_payload(st, plan_doc, integration)
     statement = CC.build_statement(RUN_RESULT_KIND, CONDUCTOR_SKILL, CONDUCTOR_VERSION, st.root,
                                    [plan_subject(st), _grant_rel(st)], payload,
@@ -2364,10 +2409,11 @@ def cmd_finish(args):
                    "integration": integration}
     st.save()
     print("FINISH: %s" % path)
-    if not integration["passed"]:
-        # The envelope is honest evidence and is written; the red merged result is never
-        # pushed and no PR is opened. A human fixes the run branch.
-        print("STOP: integration_red")
+    if stop_reason:
+        # The envelope is honest evidence and is written; a merged result that is red, or
+        # that could not be re-verified because the grant asked, is never pushed and no PR
+        # is opened.
+        print("STOP: %s" % stop_reason)
         return 3
     return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
 
@@ -2377,17 +2423,20 @@ def _finish_again(st, args, push_cmd, pr_cmd):
     re-gate and run the remote steps still pending."""
     path = st.finished["envelope"]
     integration = st.finished.get("integration")
-    red = isinstance(integration, dict) and integration.get("passed") is False
-    if red:
+    stop_reason = _integration_stop(integration) if isinstance(integration, dict) else None
+    if isinstance(integration, dict):
         _print_integration(integration)  # the recorded result: integration never re-runs
     print("FINISH: %s" % path)
-    if red:
+    if stop_reason:
         if args.retry_remote:
-            sys.stderr.write("the merged run branch failed integration at %s; it is never "
-                             "pushed and no PR is opened: a human must fix the run branch; "
-                             "not retrying\n" % integration.get("head"))
+            why = ("the grant asked, so the merged run branch was never re-verified"
+                   if stop_reason == "grant_ask" else
+                   "the merged run branch failed its integration re-run")
+            sys.stderr.write("%s at %s; it is never pushed and no PR is opened: a human must "
+                             "fix or re-run it; not retrying\n"
+                             % (why, integration.get("head")))
             return 2
-        print("STOP: integration_red")
+        print("STOP: %s" % stop_reason)
         return 3
     pending = _pending_remote(st)
     if not pending:
@@ -2435,7 +2484,18 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
         if why:
             sys.stderr.write("--push-cmd is not a push a grant covers: %s\n" % why)
             return 2
-        ok, out = _run_remote(st, "push", explicit_push(argv, st.run_branch),
+        # Push exactly the commit the integration re-run verified, and only while the run
+        # branch still points at it (C1): a commit added since was never re-verified.
+        want = (st.finished.get("integration") or {}).get("head")
+        now, _ = _run_branch_head(st)
+        if want and now != want:
+            sys.stderr.write("the run branch %s moved since the integration re-run verified %s "
+                             "(it is at %s); not pushing: a human must check the new commits\n"
+                             % (st.run_branch, want, now))
+            st.log("push_refused", reason="run branch moved since integration",
+                   verified=want, head=now)
+            return 2
+        ok, out = _run_remote(st, "push", explicit_push(argv, st.run_branch, want),
                               protocols=PUSH_PROTOCOLS)
         if not ok:
             return 3
