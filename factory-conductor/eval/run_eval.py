@@ -19,8 +19,11 @@ a task without stopping the run; a REVOKED grant stops the run at the next gate
 checks rather than one merged "expired/revoked" check; max_dispatches: 1 stops the run;
 a merge conflict parks the task and leaves the run branch clean; a task whose status
 is not `reviewing` (built white-box, through conductor.State) is refused by `merge`
-without touching the run branch; and `init` refuses a plan with a null verify command
-(exit 2, no run), so such a task is never started or merged.
+without touching the run branch; `init` refuses a plan with a null verify command
+(exit 2, no run), so such a task is never started or merged; and two tasks that each
+pass alone but break each other once merged are never pushed (finish re-verifies the
+merged run branch first), sanity-checked against the same fixture with a check the
+merged result passes, which DOES push to the scratch bare origin.
 """
 import contextlib
 import hashlib
@@ -323,6 +326,66 @@ def null_verify_is_refused_at_init_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
+# Each task adds one file to d/ (which holds base.txt): alone each sees two files, merged
+# the run branch holds three.
+EXACTLY_TWO = ["{python}", "-c", "import os,sys; sys.exit(0 if len(os.listdir('d')) == 2 else 1)"]
+AT_LEAST_TWO = ["{python}", "-c", "import os,sys; sys.exit(0 if len(os.listdir('d')) >= 2 else 1)"]
+
+
+def _pair_run_pushed(cmd):
+    """Drive T1 and T2 (each proven by `cmd`, both started from the same run branch) to
+    finish under a grant that covers the push, with a scratch bare repo as origin.
+    Returns (finish exit, finish stdout, envelope payload or None, pushed?)."""
+    root = TK.repo()
+    origin = TK.tmpdir()
+    try:
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True)
+        os.makedirs(os.path.join(root, "d"))
+        commit_in(root, os.path.join("d", "base.txt"), "base\n")
+        plan_env = TK.write_plan_envelope(root, plan=plan(task("T1", [], cmd),
+                                                          task("T2", [], cmd), title="Pair"))
+        TK.write_grant(root, plan_env)  # covers local_reversible, push_branch and open_pr
+        run(["init", "--plan", plan_env, "--root", root])
+        for t in ("T1", "T2"):
+            run(["start", t, "--root", root])
+        for t in ("T1", "T2"):
+            commit_in(wt(root, t), os.path.join("d", t.lower() + ".txt"), t + "\n")
+        for t in ("T1", "T2"):
+            run(["verify", t, "--root", root])
+            run(["review", t, "--verdict", "pass", "--root", root])
+        for t in ("T1", "T2"):
+            run(["merge", t, "--root", root])
+        run(["next", "--root", root])
+        rc, out, err = run(["finish", "--root", root, "--pr-cmd",
+                            json.dumps([sys.executable, "-c", "pass"])])
+        pay = None
+        for line in out.splitlines():
+            if line.startswith("FINISH: "):
+                with open(line[len("FINISH: "):], encoding="utf-8") as f:
+                    pay = json.load(f)["predicate"]["payload"]
+        pushed = subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
+                                 "refs/heads/factory/pair"],
+                                capture_output=True).returncode == 0
+        return rc, out, pay, pushed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(origin, ignore_errors=True)
+
+
+def integration_red_is_never_pushed_arm():
+    rc, out, pay, pushed = _pair_run_pushed(EXACTLY_TWO)
+    g_rc, g_out, g_pay, g_pushed = _pair_run_pushed(AT_LEAST_TWO)  # sanity: this one pushes
+    check("NEGATIVE: a run whose merged result fails a proven task's own checks is never "
+          "pushed (INTEGRATION: fail, STOP: integration_red, integration.passed false), while "
+          "the same fixture with a check the merged result passes is pushed",
+          rc == 3 and "STOP: integration_red" in out.splitlines() and not pushed
+          and pay is not None and pay["integration"]["passed"] is False
+          and g_rc == 0 and g_pushed and g_pay is not None
+          and g_pay["integration"]["passed"] is True,
+          "red: rc=%r pushed=%r; green: rc=%r pushed=%r" % (rc, pushed, g_rc, g_pushed))
+
+
 def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
@@ -332,6 +395,7 @@ def main():
     merge_conflict_parks_and_run_branch_stays_clean_arm()
     merge_refuses_a_task_not_in_reviewing_status_arm()
     null_verify_is_refused_at_init_arm()
+    integration_red_is_never_pushed_arm()
 
     n, k = len(_checks), sum(_checks)
     ok = k == n

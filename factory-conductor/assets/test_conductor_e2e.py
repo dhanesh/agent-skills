@@ -208,8 +208,14 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(tasks["T1"]["merge_commit"], merge_sha_t1)
         self.assertEqual(tasks["T2"]["merge_commit"], merge_sha_t2)
 
+        # Before any push, finish re-ran the proven tasks' checks on the merged run branch.
+        head = C.git(root, "rev-parse", "refs/heads/%s" % pay["run_branch"]).stdout.strip()
+        self.assertIn("INTEGRATION: pass %s" % head, out.splitlines())
+        self.assertEqual(pay["integration"]["head"], head)
+        self.assertIs(pay["integration"]["passed"], True)
+        self.assertEqual([r["task"] for r in pay["integration"]["runs"]], ["T1", "T2"])
         asserts = {a["test"] for a in doc["predicate"]["assertions"]}
-        self.assertEqual(asserts, {"verify:T1", "verify:T2"})
+        self.assertEqual(asserts, {"verify:T1", "verify:T2", "integration:" + head[:12]})
 
         with open(C.State.load(C.state_path(root)).log_path, "rb") as f:
             data = f.read()

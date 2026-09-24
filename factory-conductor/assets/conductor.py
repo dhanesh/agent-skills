@@ -98,7 +98,15 @@ the pushed branch is the independent re-check.
 Finish. `finish` ends a run, stopped or not. On a stopped run it first parks every
 running, verifying or reviewing task with in_flight_at_stop (a stopped run takes no
 further step, so they could never finish); on a run that is not stopped it refuses
-while a task is in flight. It writes a run-result/v1 envelope under
+while a task is in flight. Then, before the envelope and before any remote step, it
+re-runs every proven task's verify commands on the run branch's head (the integration
+re-run: the same isolated checkout, symlink check, env and timeout verify uses), logs an
+`integration` event and prints INTEGRATION: pass <sha> or one INTEGRATION: fail <task>
+<command> per failing command. A failing re-run records the stop integration_red (the
+earlier reason kept as `previous`), still writes the envelope as evidence, prints
+STOP: integration_red after FINISH: and exits 3: the red run branch is never pushed and no
+PR is opened, and `--retry-remote` refuses it (exit 2). A later `finish` reads the recorded
+result and never re-runs it. It writes a run-result/v1 envelope under
 .skill-contract/envelopes/ and prints FINISH: <path>. That local write is deliberately not
 gated (no check-grant for local_reversible): a revoked or expired grant must still let a
 run end and report what it did.
@@ -106,8 +114,9 @@ The envelope's subjects pin the plan envelope and the grant read at init; its pa
 carries each task's status, verify re-runs (commands in the plan's {python} form),
 review, merge commit and park reason, the stop, the budget (max_tokens and max_usd
 recorded, not enforced), and the worktrees a merge-conflict park kept (never deleted
-here). Its assertions are one passed `verify:<task>` per proven task, carrying the
-task's first verify command as the plan wrote it; `init` refuses a plan whose verify
+here), and the integration result. Its assertions are one passed `verify:<task>` per
+proven task, carrying the task's first verify command as the plan wrote it, plus one
+`integration:<head, 12 chars>`, passed or failed, when the integration re-run ran anything; `init` refuses a plan whose verify
 commands break the checker's C6 command rule, so that assertion is always valid.
 log_sha256 is the sha256 of the log's first log_bytes bytes, which end with the `finish`
 event: the log is append-only, so the gate, push and pr events after it never change
@@ -167,8 +176,10 @@ import contract_check as CC  # noqa: E402  (the vendored skill-contract checker,
 RUN_ID_RE = r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z"
 STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", "blocked")
 # verify_red_after_repairs is a park reason, not a stop: parking never stops the run.
+# integration_red is recorded by finish: the merged run branch failed a proven task's
+# own checks, so it is never pushed.
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
-                "new_human_decision", "no_ready_tasks")
+                "new_human_decision", "no_ready_tasks", "integration_red")
 DEFAULT_PARALLEL = 2
 DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
@@ -1562,8 +1573,9 @@ def _send_back(st, task):
     _dispatch(st, task, "repair")
 
 
-def _run_steps(task, steps, checkout):
-    """Run each verify step in checkout; one record per step, printing VERIFY: lines."""
+def _run_steps(task, steps, checkout, quiet=False):
+    """Run each verify step in checkout; one record per step, printing VERIFY: lines
+    (none when quiet: finish's integration re-run prints its own INTEGRATION: lines)."""
     python_argv = CC.resolve_python()
     skill_dirs = CC.skill_index(cwd=checkout)  # the task's own copy of a project skill
     runs = []
@@ -1582,9 +1594,13 @@ def _run_steps(task, steps, checkout):
         ok = rc == 0
         runs.append({"command": argv, "ok": ok, "returncode": rc,
                      "stdout_tail": _tail(out), "stderr_tail": _tail(err)})
-        shown = " ".join(str(a) for a in argv) if isinstance(argv, list) else repr(argv)
-        print("VERIFY: %s %s %s" % (task, "ok" if ok else "fail", shown))
+        if not quiet:
+            print("VERIFY: %s %s %s" % (task, "ok" if ok else "fail", _shown(argv)))
     return runs
+
+
+def _shown(argv):
+    return " ".join(str(a) for a in argv) if isinstance(argv, list) else repr(argv)
 
 
 def cmd_review(args):
@@ -1943,9 +1959,11 @@ def _plan_form(runs, steps):
     return out
 
 
-def run_result_payload(st, plan_doc=None):
+def run_result_payload(st, plan_doc=None, integration=None):
     """The run-result/v1 payload for a run. `log_sha256` and `log_bytes` are None here:
-    finish sets them once the `finish` event is the log's last line.
+    finish sets them once the `finish` event is the log's last line. `integration` is
+    finish's re-run of the proven tasks' checks on the merged run branch
+    ({head, passed, runs}); None when it has not run.
 
     plan_doc is the parsed plan envelope; None re-reads the pinned plan file (a plan
     that no longer matches plan_sha256 raises ValueError)."""
@@ -1974,7 +1992,7 @@ def run_result_payload(st, plan_doc=None):
     stopped = None
     if st.stopped:
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
-        stopped = {k: s[k] for k in ("reason", "at", "detail", "task") if k in s}
+        stopped = {k: s[k] for k in ("reason", "at", "detail", "task", "previous") if k in s}
     grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
     return {
         "run_id": st.run_id,
@@ -1987,13 +2005,15 @@ def run_result_payload(st, plan_doc=None):
         "created_at": st.created_at, "stopped": stopped,
         "log": _rel(st, st.log_path), "log_sha256": None, "log_bytes": None,
         "budget": dict(st.budget), "dispatches": st.dispatches,
-        "budget_note": BUDGET_NOTE_TEXT,
+        "budget_note": BUDGET_NOTE_TEXT, "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st)}
 
 
-def _run_result_assertions(st, plan_doc):
+def _run_result_assertions(st, plan_doc, integration=None):
     """One passed `verify:<task>` assertion per proven task, carrying that task's first
-    verify command exactly as the plan wrote it, its subject the plan envelope."""
+    verify command exactly as the plan wrote it, its subject the plan envelope. Then, when
+    the integration re-run ran any command, one `integration:<head, 12 chars>` assertion,
+    passed or failed, carrying its first failing command (its first command on a pass)."""
     steps = _plan_steps(_plan_payload(plan_doc))
     plan_pin = CC.pin(st.root, plan_subject(st))
     out = []
@@ -2005,7 +2025,66 @@ def _run_result_assertions(st, plan_doc):
         out.append({"test": "verify:%s" % tid, "assertedBy": {"skill": CONDUCTOR_SKILL},
                     "result": {"outcome": "passed"}, "command": cmd,
                     "subject": [dict(plan_pin)]})
+    runs = (integration or {}).get("runs") or []
+    if runs:
+        passed = bool(integration["passed"])
+        first = runs[0] if passed else next(r for r in runs if not r["ok"])
+        cmd = first["command"]
+        if not cmd:  # a symlink that escapes the checkout ran nothing: the task's own check
+            cmd = ((steps.get(first["task"]) or [{}])[0] or {}).get("command")
+        out.append({"test": "integration:%s" % integration["head"][:12],
+                    "assertedBy": {"skill": CONDUCTOR_SKILL},
+                    "result": {"outcome": "passed" if passed else "failed"}, "command": cmd,
+                    "subject": [dict(plan_pin)]})
     return out
+
+
+def _integration(st, plan_doc):
+    """Re-run every proven task's verify commands on the run branch's head: ({head,
+    passed, runs: [{task, command, ok, returncode}]}, None) or (None, why).
+
+    Each task's commands run as verify runs them, and through the same functions: a
+    fresh isolated detached checkout of that head (removed afterwards), the escaping-
+    symlink check, verify_env() and VERIFY_TIMEOUT. Commands are recorded in the plan's
+    own form. Two tasks that each pass alone can break each other once merged; this is
+    where that shows, before anything is pushed."""
+    ok, r = _git_ok(st.root, "rev-parse", "-q", "--verify",
+                    "refs/heads/%s^{commit}" % st.run_branch)
+    if not ok:
+        return None, "cannot read the run branch %s: %s" % (st.run_branch, _git_err(r))
+    head = r.stdout.strip()
+    steps_by = _plan_steps(_plan_payload(plan_doc))
+    runs = []
+    for tid in st.order:
+        if st.tasks[tid]["status"] != "proven":
+            continue
+        steps = steps_by.get(tid) or []
+        checkout, why = _add_verify_checkout(st, "integration-" + tid, head)
+        if checkout is None:
+            return None, "cannot check out %s for the integration re-run: %s" % (head, why)
+        try:
+            escapes = _escaping_symlinks(checkout)
+            done = [] if escapes else _run_steps(tid, steps, checkout, quiet=True)
+        finally:
+            _remove_clone(st, checkout)
+        if escapes is None:
+            return None, "cannot list the tree of %s" % head
+        if escapes:
+            runs.append({"task": tid, "command": None, "ok": False, "returncode": None})
+            continue
+        runs += [dict(task=tid, **rec) for rec in _plan_form(done, steps)]
+    return {"head": head, "passed": all(x["ok"] for x in runs), "runs": runs}, None
+
+
+def _print_integration(integration):
+    """INTEGRATION: pass <sha>, or one INTEGRATION: fail <task> <command> per failing run."""
+    if integration["passed"]:
+        print("INTEGRATION: pass %s" % integration["head"])
+        return
+    for x in integration["runs"]:
+        if not x["ok"]:
+            print("INTEGRATION: fail %s %s" % (x["task"], _shown(x["command"]) if x["command"]
+                                               else "symlink(s) leave the checkout"))
 
 
 def one_line(text):
@@ -2065,6 +2144,11 @@ def pr_body(payload, envelope_rel):
         lines += ["", "### Worktrees kept for a human (%d)" % len(payload["leftover_worktrees"])]
         lines += ["- %s: %s (%s)" % (code(w["task"]), code(w["path"]), code(w["reason"]))
                   for w in payload["leftover_worktrees"]]
+    integ = payload.get("integration")
+    if isinstance(integ, dict):
+        lines += ["", "Integration: every proven task's verify commands re-ran on the merged "
+                  "run branch %s: %s." % (code((integ.get("head") or "")[:12]),
+                                          "passed" if integ.get("passed") else "failed")]
     lines += ["", "### Budget",
               "Dispatches: %d; budget: %s." % (payload["dispatches"],
                                                code(json.dumps(payload["budget"],
@@ -2178,7 +2262,9 @@ def cmd_finish(args):
     the PR, each only when its gate is COVERED.
 
     Works on a stopped run: it is how a run ends, and it parks the stopped run's
-    running, verifying or reviewing tasks with in_flight_at_stop first. On a run that is
+    running, verifying or reviewing tasks with in_flight_at_stop first. Before the
+    envelope it re-verifies the merged run branch (INTEGRATION:); a red result is written
+    into the envelope, stops the run with integration_red (exit 3) and is never pushed. On a run that is
     not stopped it refuses (2) while a task is in flight. Once an envelope exists, a plain `finish` prints that FINISH:
     line and exits 0 when both remote steps completed; otherwise it also prints
     REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and runs the
@@ -2222,10 +2308,30 @@ def cmd_finish(args):
     # park them (their dependents become blocked) so an unattended run can still end.
     for tid in busy:
         _park(st, tid, "in_flight_at_stop")
-    payload = run_result_payload(st, plan_doc)
+    # Re-verify the merged result before the envelope and before any remote step. The
+    # integration and any stop are logged before `finish`, so log_sha256 covers them.
+    integration, why = _integration(st, plan_doc)
+    if why:
+        sys.stderr.write("cannot finish: %s\n" % why)
+        return 2
+    st.log("integration", **integration)
+    _print_integration(integration)
+    if not integration["passed"]:
+        prev = st.stopped if isinstance(st.stopped, dict) else (
+            {"reason": st.stopped} if st.stopped else {})
+        previous = (prev.get("previous") if prev.get("reason") == "integration_red"
+                    else prev.get("reason"))
+        bad = next(x for x in integration["runs"] if not x["ok"])
+        detail = "%s %s" % (bad["task"], _shown(bad["command"]) if bad["command"]
+                            else "symlink(s) leave the checkout")
+        st.stopped = {"reason": "integration_red", "at": _rfc3339(_now()), "detail": detail,
+                      "previous": previous}
+        st.save()
+        st.log("stop", reason="integration_red", detail=detail, previous=previous)
+    payload = run_result_payload(st, plan_doc, integration)
     statement = CC.build_statement(RUN_RESULT_KIND, CONDUCTOR_SKILL, CONDUCTOR_VERSION, st.root,
                                    [plan_subject(st), _grant_rel(st)], payload,
-                                   _run_result_assertions(st, plan_doc))
+                                   _run_result_assertions(st, plan_doc, integration))
     payload["log_sha256"], payload["log_bytes"] = "0" * 64, 0  # shape only, for the check
     viol = CC.check_statement(statement)
     if viol:
@@ -2254,9 +2360,15 @@ def cmd_finish(args):
     payload["log_bytes"] = len(prefix)
     path = CC.write_envelope(st.root, statement)
     st.finished = {"envelope": path, "id": eid, "sha256": CC.sha256_file(path),
-                   "at": _rfc3339(_now()), "pushed": False, "pr": False}
+                   "at": _rfc3339(_now()), "pushed": False, "pr": False,
+                   "integration": integration}
     st.save()
     print("FINISH: %s" % path)
+    if not integration["passed"]:
+        # The envelope is honest evidence and is written; the red merged result is never
+        # pushed and no PR is opened. A human fixes the run branch.
+        print("STOP: integration_red")
+        return 3
     return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
 
 
@@ -2264,7 +2376,19 @@ def _finish_again(st, args, push_cmd, pr_cmd):
     """finish on a run that already has its envelope: report it, and with --retry-remote
     re-gate and run the remote steps still pending."""
     path = st.finished["envelope"]
+    integration = st.finished.get("integration")
+    red = isinstance(integration, dict) and integration.get("passed") is False
+    if red:
+        _print_integration(integration)  # the recorded result: integration never re-runs
     print("FINISH: %s" % path)
+    if red:
+        if args.retry_remote:
+            sys.stderr.write("the merged run branch failed integration at %s; it is never "
+                             "pushed and no PR is opened: a human must fix the run branch; "
+                             "not retrying\n" % integration.get("head"))
+            return 2
+        print("STOP: integration_red")
+        return 3
     pending = _pending_remote(st)
     if not pending:
         return 0

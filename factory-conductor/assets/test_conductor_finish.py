@@ -158,7 +158,10 @@ class FinishTests(unittest.TestCase):
         rc, out = self.finish()
         path, doc = self.envelope(out)
         asserts = doc["predicate"]["assertions"]
-        self.assertEqual([a["test"] for a in asserts], ["verify:T1"])
+        head = doc["predicate"]["payload"]["integration"]["head"]
+        # verify:T1, then the integration re-run on the merged head (G3)
+        self.assertEqual([a["test"] for a in asserts], ["verify:T1", "integration:" + head[:12]])
+        self.assertEqual(asserts[1]["command"], FIRST_T1)
         a = asserts[0]
         self.assertEqual(a["assertedBy"], {"skill": "factory-conductor"})
         self.assertEqual(a["result"], {"outcome": "passed"})
@@ -168,7 +171,8 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(a["subject"], [CC.pin(self.root, plan_rel)])
         # A receiver that re-runs the assertion proves it (commandment 7).
         rep = CC.check_envelope(path, root=self.root, rerun=True)
-        self.assertEqual(rep["claims"], {"verify:T1": "PROVEN"})
+        self.assertEqual(rep["claims"], {"verify:T1": "PROVEN",
+                                         "integration:" + head[:12]: "PROVEN"})
 
     def test_parked_and_blocked_tasks_carry_their_reasons_and_no_assertion(self):
         self.run_plan()
@@ -611,6 +615,172 @@ class FinishTests(unittest.TestCase):
         pay = C.run_result_payload(st)
         self.assertEqual([t["id"] for t in pay["tasks"]], ["T1", "T2", "T3"])
         self.assertIsNone(pay["log_sha256"])  # set by finish once the log is final
+
+
+
+# Each task adds one file to d/, which holds base.txt: alone, each sees exactly two files;
+# merged, the run branch holds three, so both tasks' own checks fail there.
+EXACTLY_TWO = ["{python}", "-c", "import os,sys; sys.exit(0 if len(os.listdir('d')) == 2 else 1)"]
+AT_LEAST_TWO = ["{python}", "-c", "import os,sys; sys.exit(0 if len(os.listdir('d')) >= 2 else 1)"]
+
+
+def pair_plan(cmd):
+    """T1 and T2, independent, each proven by `cmd`."""
+    def task(tid):
+        return {"id": tid, "requirement_ids": ["R1"], "title": "task " + tid,
+                "verify": [{"text": "d has its files", "command": cmd}], "depends_on": []}
+    return {"title": "Pair plan", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+            "tasks": [task("T1"), task("T2")]}
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class IntegrationTests(unittest.TestCase):
+    """G3: finish re-runs every proven task's verify commands on the merged run-branch
+    head before any remote step, and never pushes a merged result that fails them."""
+
+    setUp = FinishTests.setUp
+    out = FinishTests.out
+    finish = FinishTests.finish
+    envelope = FinishTests.envelope
+    records = FinishTests.records
+    log_events = FinishTests.log_events
+
+    def run_pair(self, cmd):
+        """T1 and T2 both started from the same run branch, each proven alone, both
+        merged; the run stopped by `next` (no_ready_tasks)."""
+        self.root = repo()
+        os.makedirs(os.path.join(self.root, "d"))
+        commit_in(self.root, os.path.join("d", "base.txt"), "base\n")
+        st, self.plan = new_run(self.root, pair_plan(cmd))
+        self.st_path = st.state_path
+        for t in ("T1", "T2"):
+            self.assertEqual(C.main(["start", t, "--root", self.root]), 0)
+        for t in ("T1", "T2"):
+            commit_in(C.State.load(self.st_path).tasks[t]["worktree"],
+                      os.path.join("d", "%s.txt" % t.lower()), t + "\n")
+        for t in ("T1", "T2"):
+            rc, out = self.out(["verify", t, "--root", self.root])
+            self.assertEqual(rc, 0, out)  # each passes alone
+            self.assertEqual(C.main(["review", t, "--verdict", "pass", "--root", self.root]), 0)
+        for t in ("T1", "T2"):
+            self.assertEqual(C.main(["merge", t, "--root", self.root]), 0)
+        rc, out = self.out(["next", "--root", self.root])
+        self.assertIn("STOP: no_ready_tasks", out)
+        return C.git(self.root, "rev-parse", "refs/heads/factory/p").stdout.strip()
+
+    def test_tasks_that_break_each_other_are_never_pushed(self):
+        head = self.run_pair(EXACTLY_TWO)
+        with mock.patch.dict(os.environ, {"PATH": self.bin + os.pathsep + os.environ["PATH"]}):
+            rc, out, err = self.out(["finish", "--root", self.root, "--pr-cmd", json.dumps(
+                [sys.executable, self.stub, self.record, "pr"])], err=True)
+        self.assertEqual(rc, 3, err)
+        lines = out.splitlines()
+        shown = " ".join(EXACTLY_TWO)
+        self.assertIn("INTEGRATION: fail T1 %s" % shown, lines)
+        self.assertIn("INTEGRATION: fail T2 %s" % shown, lines)
+        self.assertEqual(lines[-1], "STOP: integration_red")
+        self.assertEqual(self.records(), [])  # no push, no PR
+        self.assertNotIn("push", [e["event"] for e in self.log_events()])
+        path, doc = self.envelope(out)
+        rep = CC.check_envelope(path, root=self.root)
+        self.assertEqual((rep["violations"], rep["stale"]), ([], []))
+        pay = doc["predicate"]["payload"]
+        self.assertEqual(pay["integration"]["head"], head)
+        self.assertIs(pay["integration"]["passed"], False)
+        self.assertEqual(pay["integration"]["runs"], [
+            {"task": "T1", "command": EXACTLY_TWO, "ok": False, "returncode": 1},
+            {"task": "T2", "command": EXACTLY_TWO, "ok": False, "returncode": 1}])
+        self.assertEqual(pay["stopped"]["reason"], "integration_red")
+        self.assertEqual(pay["stopped"]["previous"], "no_ready_tasks")
+        a = [x for x in doc["predicate"]["assertions"] if x["test"].startswith("integration:")]
+        self.assertEqual([x["test"] for x in a], ["integration:%s" % head[:12]])
+        self.assertEqual(a[0]["result"], {"outcome": "failed"})
+        self.assertEqual(a[0]["command"], EXACTLY_TWO)
+        self.assertEqual(rep["claims"]["integration:%s" % head[:12]], "FAILED")
+        st = C.State.load(self.st_path)
+        self.assertEqual(st.stopped["reason"], "integration_red")
+        self.assertIs(st.finished["integration"]["passed"], False)
+
+    def test_the_merged_result_passing_prints_pass_and_pushes(self):
+        head = self.run_pair(AT_LEAST_TWO)
+        rc, out = self.finish()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("INTEGRATION: pass %s" % head, out.splitlines())
+        self.assertNotIn("STOP:", out)
+        self.assertEqual([r["what"] for r in self.records()], ["push", "pr"])
+        self.assertIn("Integration: every proven task's verify commands re-ran on the merged "
+                      "run branch `%s`: passed." % head[:12], self.records()[1]["body"])
+        _, doc = self.envelope(out)
+        pay = doc["predicate"]["payload"]
+        self.assertEqual(pay["integration"], {"head": head, "passed": True, "runs": [
+            {"task": "T1", "command": AT_LEAST_TWO, "ok": True, "returncode": 0},
+            {"task": "T2", "command": AT_LEAST_TWO, "ok": True, "returncode": 0}]})
+        self.assertEqual(pay["stopped"]["reason"], "no_ready_tasks")
+        a = {x["test"]: x for x in doc["predicate"]["assertions"]}
+        self.assertEqual(a["integration:%s" % head[:12]]["result"], {"outcome": "passed"})
+
+    def test_the_integration_event_is_logged_before_finish_and_inside_the_digest(self):
+        self.run_pair(EXACTLY_TWO)
+        rc, out = self.finish()
+        _, doc = self.envelope(out)
+        pay = doc["predicate"]["payload"]
+        with open(C.State.load(self.st_path).log_path, "rb") as f:
+            prefix = f.read()[:pay["log_bytes"]]
+        events = [json.loads(l) for l in prefix.splitlines()]
+        names = [e["event"] for e in events]
+        self.assertEqual(names[-1], "finish")
+        self.assertLess(names.index("integration"), names.index("finish"))
+        ev = events[names.index("integration")]
+        self.assertEqual((ev["head"], ev["passed"]), (pay["integration"]["head"], False))
+        stops = [e for e in events if e["event"] == "stop"]
+        self.assertEqual(stops[-1]["reason"], "integration_red")
+
+    def test_a_second_finish_reads_the_recorded_result_and_does_not_rerun(self):
+        self.run_pair(EXACTLY_TWO)
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        n = [e["event"] for e in self.log_events()].count("integration")
+        rc2, out2 = self.finish()
+        self.assertEqual(rc2, 3)
+        self.assertEqual([l for l in out2.splitlines() if l.startswith(("INTEGRATION:", "STOP:",
+                                                                        "FINISH:"))],
+                         [l for l in out.splitlines() if l.startswith(("INTEGRATION:", "STOP:",
+                                                                       "FINISH:"))])
+        self.assertNotIn("REMOTE:", out2)
+        self.assertEqual([e["event"] for e in self.log_events()].count("integration"), n)
+        self.assertEqual(self.records(), [])
+
+    def test_retry_remote_refuses_a_run_whose_integration_failed(self):
+        self.run_pair(EXACTLY_TWO)
+        self.finish()
+        rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote"], err=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("integration", err)
+        self.assertEqual(self.records(), [])
+
+    def test_a_passing_integration_is_not_rerun_either(self):
+        self.run_pair(AT_LEAST_TWO)
+        self.finish()
+        n = [e["event"] for e in self.log_events()].count("integration")
+        rc, out = self.finish()
+        self.assertEqual(rc, 0)
+        self.assertEqual([e["event"] for e in self.log_events()].count("integration"), n)
+
+    def test_the_integration_checkout_is_removed(self):
+        self.run_pair(AT_LEAST_TWO)
+        self.finish()
+        vdir = os.path.join(C.State.load(self.st_path).dir, C.VERIFY_DIR)
+        self.assertEqual(os.listdir(vdir) if os.path.isdir(vdir) else [], [])
+
+    def test_integration_red_is_a_stop_reason_in_the_tool_and_the_schema(self):
+        self.assertIn("integration_red", C.STOP_REASONS)
+        with open(os.path.join(HERE, "schemas", "run-result.v1.json"), encoding="utf-8") as f:
+            schema = json.load(f)
+        stopped = schema["properties"]["stopped"]["oneOf"][1]
+        self.assertIn("integration_red", stopped["properties"]["reason"]["enum"])
+        self.assertIn("integration", schema["required"])
+        self.assertEqual(sorted(schema["properties"]["integration"]["required"]),
+                         ["head", "passed", "runs"])
 
 
 if __name__ == "__main__":
