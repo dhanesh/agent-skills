@@ -411,6 +411,8 @@ reg_case "a lowercase shall in prose fails" FAIL \
   "$(mkreg shall '' 'The agent shall check the thing.')" "lowercase"
 reg_case "a lowercase must inside inline code passes" PASS \
   "$(mkreg lowercode '' 'Write each requirement as a `must` statement.')"
+reg_case "a \`\`\`\` span with backticks after it is inline code, not a fence" FAIL \
+  "$(mkreg infostr '' 'Use the component, not a' '   ```` ```mermaid ```` block.' '' 'You MUST NOT skip this.')" "unregistered"
 reg_case "a skill with no register section fails" FAIL \
   "$(mkreg nosection NOSECTION 'Plain prose has no keyword.')" "section"
 

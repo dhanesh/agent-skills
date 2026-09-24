@@ -25,7 +25,9 @@ How a row matches (the register's `line` column is informational, never read):
     heading or table row), or where the block's tail is a prefix of the row's text.
   - A truncated row covers from its anchor to the end of the block. A full row covers
     to the end of the sentence its text ends in.
-  - A keyword is assigned to the covering row anchored latest before it. A candidate
+  - A keyword is assigned to the covering row anchored latest before it, preferring a
+    row with a keyword level over a plain one (a plain row records a clause judged not
+    to be a rule; it cannot take a keyword from its block's row). A candidate
     counts once, at its strongest keyword: "MAY proceed … and MUST name" is one MUST
     row, as the register has always recorded it.
 
@@ -84,12 +86,14 @@ def blocks(lines):
     for ln in lines:
         m = FENCE.match(ln)
         if m:
-            tok = m.group(1)
-            if not fence:
+            tok, rest = m.group(1), ln[m.end():]
+            if not fence and not (tok[0] == "`" and "`" in rest):
+                # CommonMark: a backtick fence's info string has no backtick, so
+                # "```` ```mermaid ```` block" is inline code, not an opener.
                 flush()
                 fence = tok
                 continue
-            if tok[0] == fence[0] and len(tok) >= len(fence):
+            if fence and tok[0] == fence[0] and len(tok) >= len(fence) and not rest.strip():
                 fence = ""
                 continue
         if fence:
@@ -232,7 +236,10 @@ def check_skill(skill, skill_md, rows):
             if not owners:
                 problems.append(("unregistered", sentence_around(text, pos)))
                 continue
-            a, r = max(owners, key=lambda o: o[0])
+            # A plain row (a clause judged not to be a rule) claims a keyword only when
+            # no keyworded row covers it, so it cannot steal one from its block's row.
+            keyed = [o for o in owners if o[1]["level"] != "plain"]
+            a, r = max(keyed or owners, key=lambda o: o[0])
             key = (id(r), a)
             prev = covered.get(key, (r, "plain", pos))
             best = word if RANK[family(word)] > RANK[family(prev[1])] else prev[1]
