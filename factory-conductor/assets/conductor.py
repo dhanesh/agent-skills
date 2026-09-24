@@ -16,7 +16,7 @@ Usage:
     python3 conductor.py gate --action <class> [--root <repo>]         # GATE: COVERED|ASK
     python3 conductor.py next [--root <repo>] [--max N]                # READY: T1 T2 | STOP:
     python3 conductor.py status [--root <repo>]                        # one STATUS: line per task
-    python3 conductor.py resume [--root <repo>]                        # last step, gate, READY:
+    python3 conductor.py resume [--root <repo>]                        # READY:, NEXT: lines
     python3 conductor.py start <task> [--root <repo>]                  # START: <task> <worktree>
     python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass <sha>|fail
     python3 conductor.py review <task> --verdict pass|fail [--detail T] [--root <repo>]
@@ -1038,11 +1038,44 @@ def cmd_status(args):
     return 0
 
 
+RUN_NEXT = "NEXT: run next"
+RUN_FINISH = "NEXT: run finish"
+
+
+def next_actions(st):
+    """One `NEXT: <task> <action>` line per in-flight task, in plan order: the exact
+    step a session with no memory of the run takes for it (spec section 6).
+
+        running                      dispatch-executor          (into the existing worktree)
+        verifying, last fail verify  dispatch-repair verify     (the verify tails)
+        verifying, review failed     dispatch-repair review     (review.detail)
+        reviewing, no verdict        dispatch-reviewer <sha>    (the verified head)
+        reviewing, verdict pass      merge"""
+    out = []
+    for tid in st.order:
+        t = st.tasks[tid]
+        review = t.get("review") if isinstance(t.get("review"), dict) else {}
+        if t["status"] == "running":
+            out.append("NEXT: %s dispatch-executor" % tid)
+        elif t["status"] == "verifying":
+            out.append("NEXT: %s dispatch-repair %s"
+                       % (tid, "review" if review.get("verdict") == "fail" else "verify"))
+        elif t["status"] == "reviewing":
+            out.append("NEXT: %s merge" % tid if review.get("verdict") == "pass"
+                       else "NEXT: %s dispatch-reviewer %s" % (tid, t.get("verified_head")))
+    return out
+
+
 def cmd_resume(args):
-    """Report the last recorded step, re-check the grant, then the ready set.
+    """Report the last recorded step, re-check the grant, then print the exact next
+    action: one NEXT: line per in-flight task and a last `NEXT: run next|finish`.
 
     A run stopped by grant_ask resumes once a grant covers it again; a run stopped for
-    any other reason stays stopped. The log is only appended to."""
+    any other reason stays stopped, and its only NEXT: line is `run finish` (a stopped
+    run takes no further step; finish parks its in-flight tasks). Like `next`, resume
+    records a stop rule that fires (budget_wall_clock, budget_dispatches, no_ready_tasks),
+    so a run with nothing in flight and nothing ready says `run finish`. The log is only
+    appended to."""
     st = _load_current(args.root)
     if st is None:
         return 2
@@ -1057,20 +1090,30 @@ def cmd_resume(args):
     if st.stopped and (st.stopped.get("reason") if isinstance(st.stopped, dict)
                        else st.stopped) != "grant_ask":
         _stopped(st)
+        print(RUN_FINISH)
         return 3
     if not _gated(st, "local_reversible"):
+        print(RUN_FINISH)
         return 3
     lifted = st.stopped
     if lifted:
         st.stopped = None
         st.save()
+    st.log("resume", run=st.run_id, last_event=last.get("event") if last else None,
+           lifted_stop=lifted)
+    reason = check_stop(st)
+    if reason:
+        _record_stop(st, reason)
+        print(RUN_FINISH)
+        return 3
     ready = st.ready(st.max_parallel())
     left = _dispatches_left(st)
     if left is not None:
         ready = ready[:left]
     print("READY: %s" % " ".join(ready) if ready else "READY:")
-    st.log("resume", run=st.run_id, last_event=last.get("event") if last else None,
-           lifted_stop=lifted)
+    for line in next_actions(st):
+        print(line)
+    print(RUN_NEXT)
     return 0
 
 

@@ -117,7 +117,9 @@ class StateTests(unittest.TestCase):
         before = read_text(st.log_path)
         rc, out, _ = run_main(["resume", "--root", root])
         self.assertEqual(rc, 0)
-        self.assertEqual(out.splitlines()[-1], "READY:")  # T1 running, T2 waits on it
+        # T1 running, T2 waits on it: nothing ready, T1's executor is re-dispatched
+        self.assertEqual(out.splitlines()[-3:],
+                         ["READY:", "NEXT: T1 dispatch-executor", "NEXT: run next"])
         self.assertTrue(read_text(st.log_path).startswith(before))
 
 
