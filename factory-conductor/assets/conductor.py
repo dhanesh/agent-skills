@@ -47,7 +47,10 @@ one it does not; unknown keys in the grant are warned about, logged and dropped)
 wall_clock_min (from init; checked by next, start, verify, review and merge),
 max_dispatches (one per executor start, per repair send-back after a failing verify or
 review, and per reviewer after a passing verify; a task that needs a dispatch past the
-cap parks with budget_dispatches), max_repairs_per_task (every failing verify or review
+cap parks with budget_dispatches; when neither the grant nor --budget sets it, init
+derives n_tasks * 2 * (1 + max_repairs_per_task), records it in the state and in
+budget_derived, and logs derived: true on the init event, so cost is always bounded),
+max_repairs_per_task (every failing verify or review
 after the first is a repair; at the cap the task parks with verify_red_after_repairs, and
 the run goes on;
 DEFAULT_REPAIRS = 2 when neither the grant nor --budget sets it, recorded in the state)
@@ -296,6 +299,8 @@ class State:
         self.base_branch = data["base_branch"]
         self.created_at = data["created_at"]
         self.budget = dict(data.get("budget") or {})
+        # Budget keys init derived rather than read from the grant or --budget.
+        self.budget_derived = list(data.get("budget_derived") or [])
         self.dispatches = data.get("dispatches", 0)
         self.stopped = data.get("stopped")
         self.finished = data.get("finished")
@@ -312,7 +317,7 @@ class State:
 
     @classmethod
     def new(cls, root, run_id, plan, plan_envelope, plan_sha256, grant_id,
-            run_branch, base_branch, budget):
+            run_branch, base_branch, budget, budget_derived=()):
         """Validate the plan, create the run directory, write state.json and log `init`.
 
         Raises PlanError on a malformed plan, before anything is written."""
@@ -334,11 +339,13 @@ class State:
         st = cls({"root": root, "run_id": run_id, "plan_envelope": plan_envelope,
                   "plan_sha256": plan_sha256, "grant_id": grant_id,
                   "run_branch": run_branch, "base_branch": base_branch,
-                  "created_at": _rfc3339(_now()), "budget": budget, "dispatches": 0,
+                  "created_at": _rfc3339(_now()), "budget": budget,
+                  "budget_derived": list(budget_derived), "dispatches": 0,
                   "stopped": None, "tasks": tasks, "order": order}, directory)
         st.save()
         st.log("init", run=run_id, plan=plan_envelope, plan_sha256=plan_sha256,
-               waves=schedule)
+               waves=schedule, max_dispatches=budget.get("max_dispatches"),
+               derived="max_dispatches" in st.budget_derived)
         return st
 
     @classmethod
@@ -369,6 +376,9 @@ class State:
                 raise StateError("task %s has an invalid depends_on" % tid)
         if data.get("budget") is not None and not isinstance(data["budget"], dict):
             raise StateError("budget is not an object")
+        if data.get("budget_derived") is not None and not isinstance(
+                data["budget_derived"], list):
+            raise StateError("budget_derived is not a list")
         return cls(data, os.path.dirname(os.path.abspath(path)))
 
     def to_dict(self):
@@ -376,8 +386,8 @@ class State:
                 "plan_envelope": self.plan_envelope, "plan_sha256": self.plan_sha256,
                 "grant_id": self.grant_id, "run_branch": self.run_branch,
                 "base_branch": self.base_branch, "created_at": self.created_at,
-                "budget": self.budget, "dispatches": self.dispatches,
-                "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
+                "budget": self.budget, "budget_derived": self.budget_derived,
+                "dispatches": self.dispatches, "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
                 "order": self.order}
 
     def save(self):
@@ -481,6 +491,12 @@ class State:
         (init records the effective value; this covers a state built without init)."""
         cap = self.budget.get("max_repairs_per_task")
         return DEFAULT_REPAIRS if cap is None else int(cap)
+
+
+def derived_max_dispatches(n_tasks, max_repairs):
+    """The dispatch cap init sets when neither the grant nor --budget does:
+    n_tasks * 2 * (1 + max_repairs_per_task), one executor and one reviewer per attempt."""
+    return n_tasks * 2 * (1 + max_repairs)
 
 
 def check_budget(budget):
@@ -962,6 +978,13 @@ def cmd_init(args):
     budget = {"max_parallel": DEFAULT_PARALLEL, "max_repairs_per_task": DEFAULT_REPAIRS}
     budget.update(granted)
     budget.update(extra)  # only ever tighter than the grant, or a key it does not set
+    derived = []
+    if budget.get("max_dispatches") is None:
+        # Cost is always bounded: one executor and one reviewer per attempt, for the first
+        # attempt and every repair the budget allows.
+        budget["max_dispatches"] = derived_max_dispatches(len(plan_tasks),
+                                                          budget["max_repairs_per_task"])
+        derived.append("max_dispatches")
     exists, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % run_branch)
     if exists:
         return _init_fail("the run branch %s already exists; finish or delete it first"
@@ -972,7 +995,8 @@ def cmd_init(args):
     try:
         st = State.new(root=root, run_id=new_run_id(), plan=plan, plan_envelope=plan_path,
                        plan_sha256=hashlib.sha256(raw).hexdigest(), grant_id=gid,
-                       run_branch=run_branch, base_branch=base, budget=budget)
+                       run_branch=run_branch, base_branch=base, budget=budget,
+                       budget_derived=derived)
     except (PlanError, OSError) as e:
         _git_ok(root, "checkout", "-q", base)
         _git_ok(root, "branch", "-D", run_branch)
@@ -1032,8 +1056,9 @@ def cmd_status(args):
         if t.get("question"):
             line += " question=%s" % json.dumps(t["question"])
         print(line)
-    print("STATUS: budget %s dispatches=%d" % (json.dumps(st.budget, sort_keys=True),
-                                               st.dispatches))
+    derived = (" derived=%s" % ",".join(st.budget_derived)) if st.budget_derived else ""
+    print("STATUS: budget %s dispatches=%d%s" % (json.dumps(st.budget, sort_keys=True),
+                                                 st.dispatches, derived))
     print(BUDGET_NOTE)
     return 0
 

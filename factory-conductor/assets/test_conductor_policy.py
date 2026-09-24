@@ -153,7 +153,9 @@ class InitTests(unittest.TestCase):
         self.assertEqual(st.plan_envelope, os.path.abspath(plan))
         import hashlib
         self.assertEqual(st.plan_sha256, hashlib.sha256(read_text(plan, "rb")).hexdigest())
-        self.assertEqual(st.budget, {"max_parallel": 2, "max_repairs_per_task": 2})
+        # max_dispatches is derived (G2): 1 task x 2 x (1 + 2)
+        self.assertEqual(st.budget, {"max_parallel": 2, "max_repairs_per_task": 2,
+                                     "max_dispatches": 6})
         self.assertEqual(C.git(self.root, "status", "--porcelain").stdout.strip(), "")
 
     def test_init_without_a_grant_prints_gate_ask_and_changes_nothing(self):
@@ -836,7 +838,9 @@ class FixRound1Tests(unittest.TestCase):
         rc, _, err = self.make(grant_budget={"max_dispach": 1, "max_parallel": 1})
         self.assertEqual(rc, 0)
         self.assertIn("max_dispach", err)
-        self.assertEqual(self.st().budget, {"max_parallel": 1, "max_repairs_per_task": 2})
+        # the misspelled max_dispach is dropped, so max_dispatches is derived (G2)
+        self.assertEqual(self.st().budget, {"max_parallel": 1, "max_repairs_per_task": 2,
+                                            "max_dispatches": 6})
         warn = self.events("budget_warning")
         self.assertEqual([w["unknown_keys"] for w in warn], [["max_dispach"]])
 
@@ -1046,3 +1050,82 @@ class NonGitStopTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class DerivedDispatchBudgetTests(unittest.TestCase):
+    """G2: an unattended run's cost is always bounded. With no max_dispatches from the
+    grant or --budget, init derives n_tasks * 2 * (1 + max_repairs_per_task): one
+    executor and one reviewer per attempt."""
+
+    make = FixRound1Tests.make
+    run_main = FixRound1Tests.run_main
+    st = FixRound1Tests.st
+    wt = FixRound1Tests.wt
+    events = FixRound1Tests.events
+
+    def test_a_three_task_plan_with_default_repairs_derives_eighteen(self):
+        rc, _, err = self.make(n=3)
+        self.assertEqual(rc, 0, err)
+        st = self.st()
+        self.assertEqual(st.budget["max_dispatches"], 18)  # 3 x 2 x (1 + 2)
+        self.assertEqual(st.budget_derived, ["max_dispatches"])
+        init = self.events("init")[0]
+        self.assertIs(init["derived"], True)
+        self.assertEqual(init["max_dispatches"], 18)
+        _, out, _ = self.run_main(["status", "--root", self.root])
+        line = [l for l in out.splitlines() if l.startswith("STATUS: budget {")][0]
+        self.assertIn('"max_dispatches": 18', line)
+        self.assertTrue(line.endswith(" derived=max_dispatches"), line)
+
+    def test_the_derivation_uses_the_effective_repair_budget(self):
+        self.assertEqual(self.make(n=3, budget={"max_repairs_per_task": 1})[0], 0)
+        self.assertEqual(self.st().budget["max_dispatches"], 12)  # 3 x 2 x (1 + 1)
+
+    def test_a_grant_value_wins_and_is_not_derived(self):
+        self.assertEqual(self.make(n=3, grant_budget={"max_dispatches": 5})[0], 0)
+        st = self.st()
+        self.assertEqual(st.budget["max_dispatches"], 5)
+        self.assertEqual(st.budget_derived, [])
+        self.assertIs(self.events("init")[0]["derived"], False)
+        _, out, _ = self.run_main(["status", "--root", self.root])
+        self.assertNotIn("derived=", out)
+
+    def test_a_budget_value_wins_over_the_derivation(self):
+        self.assertEqual(self.make(n=3, budget={"max_dispatches": 40})[0], 0)
+        self.assertEqual(self.st().budget["max_dispatches"], 40)
+        self.assertEqual(self.st().budget_derived, [])
+
+    def test_budget_still_cannot_loosen_a_grant_value(self):
+        rc, _, err = self.make(n=3, grant_budget={"max_dispatches": 5},
+                               budget={"max_dispatches": 6})
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot loosen", err)
+
+    def test_the_run_stops_with_budget_dispatches_at_the_derived_cap(self):
+        # T1's executor keeps committing after its review passed, so every merge finds
+        # the branch moved and sends it back to verify: a loop that counts no failure
+        # and, uncapped, would dispatch a reviewer forever. The derived cap ends it.
+        self.assertEqual(self.make(n=2)[0], 0)
+        cap = self.st().budget["max_dispatches"]
+        self.assertEqual(cap, 12)  # 2 x 2 x (1 + 2)
+        self.assertEqual(self.run_main(["start", "T1", "--root", self.root])[0], 0)
+        wt = self.wt()
+        for i in range(cap + 2):
+            _commit(wt, "work%d.txt" % i)
+            rc, out, _ = self.run_main(["verify", "T1", "--root", self.root])
+            if "PARK: T1 budget_dispatches" in out:
+                break
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(self.run_main(["review", "T1", "--verdict", "pass",
+                                            "--root", self.root])[0], 0)
+            _commit(wt, "late%d.txt" % i)  # after the review: the branch moves
+            rc, _, err = self.run_main(["merge", "T1", "--root", self.root])
+            self.assertEqual(rc, 2, err)
+            self.assertIn("verify again", err)
+        st = self.st()
+        self.assertEqual((st.tasks["T1"]["status"], st.tasks["T1"]["park_reason"]),
+                         ("parked", "budget_dispatches"))
+        self.assertEqual(st.dispatches, cap)
+        rc, out, _ = self.run_main(["next", "--root", self.root])
+        self.assertEqual((rc, out.strip()), (3, "STOP: budget_dispatches"))
