@@ -107,11 +107,17 @@ re-run: the same isolated checkout, symlink check, env and timeout verify uses),
 <command> per failing command. A failing re-run records the stop integration_red (the
 earlier reason kept as `previous`), still writes the envelope as evidence, prints
 STOP: integration_red after FINISH: and exits 3: the red run branch is never pushed and no
-PR is opened, and `--retry-remote` refuses it (exit 2). A later `finish` reads the recorded
-result and never re-runs it. It writes a run-result/v1 envelope under
-.skill-contract/envelopes/ and prints FINISH: <path>. That local write is deliberately not
-gated (no check-grant for local_reversible): a revoked or expired grant must still let a
-run end and report what it did.
+PR is opened, and `--retry-remote` refuses it (exit 2). The re-run executes the
+repository's code, so it is gated with local_reversible: on an ASK nothing runs,
+INTEGRATION: skipped grant_ask is printed, the envelope records integration.skipped, and
+the run stops with grant_ask (exit 3), unpushed. `finish --retry-remote` on such a run
+re-gates: while the grant still asks it prints STOP: grant_ask (3); once one covers the
+run it re-runs the integration on the current head, writes a NEW envelope (the old path
+kept as finished.superseded) and goes on to the push and the PR. Otherwise a later
+`finish` reads the recorded result and never re-runs it. It writes a run-result/v1
+envelope under .skill-contract/envelopes/ and prints FINISH: <path>. That local write is
+deliberately not gated (no check-grant for local_reversible): a revoked or expired grant
+must still let a run end and report what it did.
 The envelope's subjects pin the plan envelope and the grant read at init; its payload
 carries each task's status, verify re-runs (commands in the plan's {python} form),
 review, merge commit and park reason, the stop, the budget (max_tokens and max_usd
@@ -1127,12 +1133,19 @@ def next_actions(st):
 def _resume_finished(st):
     """resume on a finished run: FINISH: <envelope>, then `NEXT: run finish` while a
     remote step is pending (the agent runs `finish --retry-remote`), else `NEXT: run done`
-    (every step done, or an integration re-run that was red or skipped, which is never
-    pushed). Exit 0."""
+    (every step done, or a red integration re-run, which is never pushed). An integration
+    skipped because the grant asked says `run finish` once the grant covers the run again
+    (--retry-remote re-runs it) and `run ask` until then. Exit 0."""
     print("FINISH: %s" % st.finished.get("envelope"))
     integration = st.finished.get("integration")
-    never = isinstance(integration, dict) and _integration_stop(integration)
-    print(RUN_FINISH if _pending_remote(st) and not never else RUN_DONE)
+    stop = _integration_stop(integration) if isinstance(integration, dict) else None
+    if stop == "grant_ask":
+        # Skipped because the grant asked: `finish --retry-remote` re-runs it once a grant
+        # covers the run again; until then a human must renew the grant.
+        ok, _ = _gate_logged(st, "local_reversible")
+        print(RUN_FINISH if ok else RUN_ASK)
+    else:
+        print(RUN_FINISH if _pending_remote(st) and not stop else RUN_DONE)
     return 0
 
 
@@ -2398,6 +2411,26 @@ def cmd_finish(args):
     # park them (their dependents become blocked) so an unattended run can still end.
     for tid in busy:
         _park(st, tid, "in_flight_at_stop")
+    rc, payload, env_rel, stop_reason = _judge_and_write(st, plan_doc)
+    if rc is not None:
+        return rc
+    print("FINISH: %s" % st.finished["envelope"])
+    if stop_reason:
+        # The envelope is honest evidence and is written; a merged result that is red, or
+        # that could not be re-verified because the grant asked, is never pushed and no PR
+        # is opened.
+        print("STOP: %s" % stop_reason)
+        return 3
+    return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
+
+
+def _judge_and_write(st, plan_doc, covered=None, superseded=None):
+    """finish's core: re-verify the merged run branch (gated with local_reversible unless
+    `covered` says the caller already asked), record any stop, log `finish`, write the
+    run-result envelope and record it in st.finished (with `superseded`, the envelope it
+    replaces, when a --retry-remote re-ran a skipped integration). Returns (exit code,
+    None, None, None) on a refusal, else (None, payload, env_rel, stop reason or None)."""
+    gline = None
     # A stop an earlier, crashed finish recorded (integration_red, or grant_ask over another
     # stop) is undone first: this attempt judges the run branch afresh.
     if isinstance(st.stopped, dict) and "prior" in st.stopped:
@@ -2406,7 +2439,8 @@ def cmd_finish(args):
     # Re-verify the merged result before the envelope and before any remote step. It runs
     # the repository's code, so it is gated like verify; on an ASK nothing runs. The
     # integration and any stop are logged before `finish`, so log_sha256 covers them.
-    covered, gline = _gate_logged(st, "local_reversible")
+    if covered is None:
+        covered, gline = _gate_logged(st, "local_reversible")
     if covered:
         integration, why = _integration(st, plan_doc)
     else:
@@ -2414,7 +2448,7 @@ def cmd_finish(args):
         integration = {"head": head, "passed": False, "skipped": gline, "runs": []}
     if why:
         sys.stderr.write("cannot finish: %s\n" % why)
-        return 2
+        return 2, None, None, None
     st.log("integration", **integration)
     _print_integration(integration)
     stop_reason = _integration_stop(integration)
@@ -2442,7 +2476,8 @@ def cmd_finish(args):
     if viol:
         for n, detail in viol:
             sys.stderr.write("FAIL: C%d: %s\n" % (n, detail))
-        return _init_fail("cannot finish: the run-result envelope would be invalid")
+        return _init_fail("cannot finish: the run-result envelope would be invalid"), \
+            None, None, None
     eid = statement["predicate"]["id"]
     env_rel = ".skill-contract/envelopes/%s.json" % eid
     by = {s: [t["id"] for t in payload["tasks"] if t["status"] == s]
@@ -2459,23 +2494,18 @@ def cmd_finish(args):
         data = f.read()
     end = data.find(line)
     if end < 0:
-        return _init_fail("cannot finish: the finish event is not in %s" % st.log_path)
+        return _init_fail("cannot finish: the finish event is not in %s" % st.log_path), \
+            None, None, None
     prefix = data[:end + len(line)]
     payload["log_sha256"] = hashlib.sha256(prefix).hexdigest()
     payload["log_bytes"] = len(prefix)
     path = CC.write_envelope(st.root, statement)
-    st.finished = {"envelope": path, "id": eid, "sha256": CC.sha256_file(path),
-                   "at": _rfc3339(_now()), "pushed": False, "pr": False,
-                   "integration": integration}
+    st.finished = dict({"envelope": path, "id": eid, "sha256": CC.sha256_file(path),
+                        "at": _rfc3339(_now()), "pushed": False, "pr": False,
+                        "integration": integration},
+                       **({"superseded": superseded} if superseded else {}))
     st.save()
-    print("FINISH: %s" % path)
-    if stop_reason:
-        # The envelope is honest evidence and is written; a merged result that is red, or
-        # that could not be re-verified because the grant asked, is never pushed and no PR
-        # is opened.
-        print("STOP: %s" % stop_reason)
-        return 3
-    return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
+    return None, payload, env_rel, stop_reason
 
 
 def _finish_again(st, args, push_cmd, pr_cmd):
@@ -2487,14 +2517,13 @@ def _finish_again(st, args, push_cmd, pr_cmd):
     if isinstance(integration, dict):
         _print_integration(integration)  # the recorded result: integration never re-runs
     print("FINISH: %s" % path)
+    if stop_reason == "grant_ask" and args.retry_remote:
+        return _retry_skipped(st, path, push_cmd, pr_cmd)
     if stop_reason:
         if args.retry_remote:
-            why = ("the grant asked, so the merged run branch was never re-verified"
-                   if stop_reason == "grant_ask" else
-                   "the merged run branch failed its integration re-run")
-            sys.stderr.write("%s at %s; it is never pushed and no PR is opened: a human must "
-                             "fix or re-run it; not retrying\n"
-                             % (why, integration.get("head")))
+            sys.stderr.write("the merged run branch failed its integration re-run at %s; it is "
+                             "never pushed and no PR is opened: a human must fix it; not "
+                             "retrying\n" % integration.get("head"))
             return 2
         print("STOP: %s" % stop_reason)
         return 3
@@ -2520,6 +2549,41 @@ def _finish_again(st, args, push_cmd, pr_cmd):
         return 2
     payload = doc["predicate"]["payload"]
     return _finish_remote(st, payload, _rel(st, path), push_cmd, pr_cmd)
+
+
+def _retry_skipped(st, path, push_cmd, pr_cmd):
+    """finish --retry-remote on a run whose integration was skipped (the grant asked at
+    finish). Re-gate local_reversible: while it asks, STOP: grant_ask (3) and nothing is
+    written. Once covered, re-run the integration on the run branch's current head, write
+    a NEW envelope (a new id, its log prefix covering the new integration event), keep
+    the old one as finished.superseded, and go on to push that head and open the PR. A
+    red re-run stops with integration_red (3), and later retries refuse (2)."""
+    want = st.finished.get("sha256")
+    try:
+        got = CC.sha256_file(path)
+    except OSError:
+        got = None
+    if not want or got != want:
+        sys.stderr.write("the run-result envelope %s changed since finish wrote it "
+                         "(sha256 %s, recorded %s); not retrying\n" % (path, got, want))
+        return 2
+    plan_doc, why = _pinned_plan(st)
+    if why:
+        sys.stderr.write("cannot retry: %s\n" % why)
+        return 2
+    covered, _ = _gate_logged(st, "local_reversible")
+    if not covered:
+        print("STOP: grant_ask")
+        return 3
+    rc, payload, env_rel, stop_reason = _judge_and_write(st, plan_doc, covered=True,
+                                                         superseded=path)
+    if rc is not None:
+        return rc
+    print("FINISH: %s" % st.finished["envelope"])
+    if stop_reason:
+        print("STOP: %s" % stop_reason)
+        return 3
+    return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
 
 
 def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):

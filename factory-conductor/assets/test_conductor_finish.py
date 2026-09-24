@@ -890,12 +890,14 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(a[0]["command"], FIRST_T1)
         gates = [e for e in self.log_events() if e["event"] == "gate"]
         self.assertEqual((gates[-1]["action"], gates[-1]["ok"]), ("local_reversible", False))
-        # a second finish and --retry-remote read the recorded result; nothing is pushed
+        # a second finish reads the recorded result, and --retry-remote while the grant
+        # still asks re-runs nothing; nothing is pushed (SkippedIntegrationRetryTests
+        # covers the retry once a new grant exists)
         rc, out2 = self.finish()
         self.assertEqual((rc, out2.splitlines()[-1]), (3, "STOP: grant_ask"))
-        write_grant(self.root, self.plan)
-        rc, out3 = self.finish(extra=["--retry-remote"])
-        self.assertEqual(rc, 2)
+        with mock.patch.object(C, "_run_steps", side_effect=AssertionError("ran a command")):
+            rc, out3 = self.finish(extra=["--retry-remote"])
+        self.assertEqual((rc, out3.splitlines()[-1]), (3, "STOP: grant_ask"))
         self.assertEqual(self.records(), [])
 
     # M3
@@ -938,6 +940,112 @@ class ReviewFixTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["budget_derived"]["type"], "array")
         integ = schema["properties"]["integration"]["properties"]
         self.assertEqual(integ["skipped"]["type"], "string")
+
+
+
+@unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
+class SkippedIntegrationRetryTests(unittest.TestCase):
+    """Ruled fix: an integration skipped because the grant lapsed does not strand the run.
+    `finish --retry-remote` re-gates, re-runs integration on the current head, writes a
+    new envelope (the old one is kept as finished.superseded) and pushes that head."""
+
+    setUp = FinishTests.setUp
+    run_plan = FinishTests.run_plan
+    out = FinishTests.out
+    finish = FinishTests.finish
+    envelope = FinishTests.envelope
+    records = FinishTests.records
+    log_events = FinishTests.log_events
+
+    def st(self):
+        return C.State.load(self.st_path)
+
+    def skipped(self):
+        self.run_plan()
+        write_grant(self.root, self.plan, minutes=-5)  # the grant lapses
+        rc, out = self.finish()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("INTEGRATION: skipped grant_ask", out.splitlines())
+        old, _ = self.envelope(out)
+        return old
+
+    def test_a_new_grant_lets_retry_remote_verify_write_a_new_envelope_and_push(self):
+        old = self.skipped()
+        write_grant(self.root, self.plan)  # a new grant is issued
+        head = C.git(self.root, "rev-parse", "refs/heads/factory/p").stdout.strip()
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 0, out)
+        lines = out.splitlines()
+        self.assertIn("INTEGRATION: pass %s" % head, lines)
+        new, doc = self.envelope("\n".join(l for l in lines if l != "FINISH: %s" % old))
+        self.assertNotEqual(new, old)
+        self.assertTrue(os.path.isfile(old))  # never overwritten
+        rep = CC.check_envelope(new, root=self.root)
+        self.assertEqual((rep["violations"], rep["stale"]), ([], []))
+        pay = doc["predicate"]["payload"]
+        self.assertEqual((pay["integration"]["head"], pay["integration"]["passed"]), (head, True))
+        self.assertNotIn("skipped", pay["integration"])
+        # the new digest covers the new integration event
+        with open(self.st().log_path, "rb") as f:
+            prefix = f.read()[:pay["log_bytes"]]
+        self.assertEqual(hashlib.sha256(prefix).hexdigest(), pay["log_sha256"])
+        events = [json.loads(l) for l in prefix.splitlines()]
+        self.assertEqual([e["event"] for e in events][-1], "finish")
+        self.assertEqual([e["passed"] for e in events if e["event"] == "integration"],
+                         [False, True])
+        fin = self.st().finished
+        self.assertEqual((fin["envelope"], fin["superseded"]), (new, old))
+        self.assertEqual(fin["integration"]["head"], head)
+        recs = self.records()
+        self.assertEqual([r["what"] for r in recs], ["push", "pr"])
+        self.assertEqual(recs[0]["argv"], ["-u", "origin", "%s:refs/heads/factory/p" % head])
+        # a second --retry-remote is idempotent: nothing re-runs, nothing new is written
+        n_env = len(os.listdir(CC.envelope_dir(self.root)))
+        with open(self.st().log_path, "rb") as f:
+            log = f.read()
+        rc, out2 = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 0, out2)
+        self.assertIn("FINISH: %s" % new, out2.splitlines())
+        self.assertEqual(len(os.listdir(CC.envelope_dir(self.root))), n_env)
+        with open(self.st().log_path, "rb") as f:
+            self.assertEqual(f.read(), log)
+        self.assertEqual(len(self.records()), 2)
+
+    def test_retry_remote_while_the_grant_still_asks_stops_with_grant_ask(self):
+        old = self.skipped()
+        n_env = len(os.listdir(CC.envelope_dir(self.root)))
+        with mock.patch.object(C, "_run_steps", side_effect=AssertionError("ran a command")):
+            rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(out.splitlines()[-1], "STOP: grant_ask")
+        self.assertIn("GATE: ASK", out)
+        self.assertEqual(len(os.listdir(CC.envelope_dir(self.root))), n_env)
+        self.assertEqual(self.st().finished["envelope"], old)
+        self.assertEqual(self.records(), [])
+
+    def test_a_red_rerun_writes_its_envelope_and_retry_then_refuses(self):
+        old = self.skipped()
+        write_grant(self.root, self.plan)
+        # the re-run on the current head fails T1's own check
+        with mock.patch.object(C, "_run_steps", return_value=[
+                {"command": ["x"], "ok": False, "returncode": 1, "stdout_tail": "",
+                 "stderr_tail": ""}]):
+            rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(out.splitlines()[-1], "STOP: integration_red")
+        self.assertNotEqual(self.st().finished["envelope"], old)
+        self.assertEqual(self.records(), [])
+        rc, out = self.finish(extra=["--retry-remote"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.records(), [])
+
+    def test_resume_on_a_skipped_run_says_ask_or_finish_by_the_grant(self):
+        self.skipped()
+        rc, out = self.out(["resume", "--root", self.root])
+        self.assertEqual((rc, out.splitlines()[-1]), (0, "NEXT: run ask"))
+        write_grant(self.root, self.plan)
+        rc, out = self.out(["resume", "--root", self.root])
+        self.assertEqual((rc, out.splitlines()[-1]), (0, "NEXT: run finish"))
 
 
 if __name__ == "__main__":
