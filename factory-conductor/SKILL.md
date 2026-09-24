@@ -152,8 +152,8 @@ Each step is one command. Read its output lines, not just the exit code.
 `conductor status` and park every in-flight task (`running`, `verifying`, `reviewing`) you are
 not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
-**Ending the run.** When the run stops, you MUST stop or wait for the subagents still working,
-then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
+**Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
+the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
 as `in_flight_at_stop`. A `GATE: ASK`, or `REMOTE: pending …` (exit 3), means the grant does
 not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
 steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line means the push or
