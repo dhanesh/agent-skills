@@ -18,7 +18,7 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.0"
+  version: "1.2.1"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 
@@ -159,8 +159,8 @@ normative correctness improves over time. The loop is detailed in
 ## The invariants (do not weaken these)
 
 1. **Code observation MUST NOT raise normative confidence.** A hook may set `observed_conf` high,
-   but `normative_conf` moves *only* on oracle evidence. This is the whole point — the model
-   must be able to say "observed, but unverified."
+   but `normative_conf` moves *only* on oracle evidence. This is the whole point: it lets the model
+   say "observed, but unverified."
 2. **No invented facts in hooks.** Hooks MUST capture only what is deterministically parseable from
    the trusted channel — files any tool names, executions parsed from a Bash command's argv,
    verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions
@@ -172,15 +172,15 @@ normative correctness improves over time. The loop is detailed in
    able to validate a fact. The `wm` CLI runs with the agent's authority, so `wm validate` and
    `wm refute` MUST refuse a `human` evidence kind and `constraint --assert-valid` MUST record `agent_assert`.
    Regression tests guard the direct path, the echo path and the CLI path.
-4. **Append-only evidence: evidence MUST be soft-invalidated and MUST NOT be hard-deleted.** Superseded facts get
+4. **Append-only evidence: evidence MUST be soft-invalidated, not hard-deleted.** Superseded facts get
    `invalidated_at`; confidence is always *derived* from live evidence, so the audit trail and
    the score cannot drift apart.
 5. **Every triple MUST be ontology-checked before it enters the ledger.** Predicates are a closed,
    deliberately-extensible vocabulary with RDFS-style domain/range per verb — a hallucinated
    verb or a semantically impossible pairing (a referent that `imports` a file) MUST be rejected
-   with the allowed set named and MUST NOT be silently stored. Markers that violate it are skipped
+   with the allowed set named, not silently stored. Markers that violate it are skipped
    (hooks never break); CLI writes get a structured, self-correctable error. Extensions MUST go through
-   `wm ontology --add` and MUST NOT happen as a side effect of a marker. See `references/ontology.md`.
+   `wm ontology --add`, not happen as a side effect of a marker. See `references/ontology.md`.
 
 When a situation genuinely needs an exception to an invariant, you MUST surface it to the user rather than silently working around it.
 

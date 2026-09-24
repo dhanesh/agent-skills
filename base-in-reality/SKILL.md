@@ -6,7 +6,7 @@ compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSear
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.0"
+  version: "1.2.1"
   tags: "audit,research,citations,standards,verification,architecture,business-logic"
 ---
 
@@ -99,7 +99,7 @@ subagent's prompt:
    first via the bundled source helper at the absolute `$FETCH` path resolved above
    (`python3 "$FETCH" --source <s> --query "<q>" --limit <n>` — pass the literal absolute path
    into the subagent; a skill-relative `assets/`-prefixed path will not resolve from the target repo),
-   then WebSearch/WebFetch for standards and paywalled sources. It must hold ≥1 fetched source
+   then WebSearch/WebFetch for standards and paywalled sources. It MUST hold ≥1 fetched source
    before asserting anything stronger than `UNCONFIRMED`. Output a finding conforming to
    `assets/findings.schema.json`: `verdict ∈ {VIOLATION,DEVIATION,OUTDATED,UNCONFIRMED}`,
    `severity ∈ {critical,high,medium,low}`, `citations[]` (each with the fetched URL/DOI and

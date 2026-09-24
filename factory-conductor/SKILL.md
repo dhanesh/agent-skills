@@ -159,7 +159,7 @@ each other once merged: the envelope is written, but nothing is pushed and no PR
 Report the failing lines; a human fixes the run branch, and `--retry-remote` refuses the run
 (exit 2). An exit 2 from `finish` (for
 example, the plan envelope was edited after `init`, or the grant file is gone) means report its
-stderr and stop: a human must restore the plan or the grant. Once finished, the run is
+stderr and stop: you MUST leave restoring the plan or the grant to a human. Once finished, the run is
 final: `finish` reprints its `FINISH:` line, `--retry-remote` still runs pending steps, every
 other command except `status` and `gate` refuses (exit 2), and `init` starts a new run.
 
@@ -296,7 +296,7 @@ The conductor proves that each task's verify commands passed on that task's own 
 from the run branch as it stood when the task started, and that a reviewer passed the same
 commit. The commands run in a clone under `<root>/.skill-contract/runs/…/verify/` that holds
 only committed files: dependency directories such as `node_modules` or `.venv` are absent, so a
-command must install its dependencies or use tooling installed globally, and a lookup that
+command that needs them fails unless it installs them or uses tooling installed globally, and a lookup that
 walks up parent directories can reach the root's own files. Before the push, `finish`
 re-verifies the merged run branch: it re-runs every proven task's verify commands on its head
 in the same kind of clone, so two tasks that each pass alone but break each other once merged

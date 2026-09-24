@@ -18,7 +18,7 @@ compatibility: Requires python3 (stdlib only) to inspect bundles and generate th
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.1"
+  version: "1.1.2"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 
@@ -73,7 +73,7 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
    (defaults to the root index's H1), `--tagline`, `--base /<repo>` +
    `--site https://<user>.github.io` + `--deploy-workflow` when the target is GitHub
    Pages. The output is a self-contained project — nothing in it references the skill.
-3. **Build and verify.** `cd <dir> && npm install && npm run build` must complete with
+3. **Build and verify.** `cd <dir> && npm install && npm run build` MUST complete with
    zero errors; treat generator `WARN:` lines about unresolved links as content issues
    to report. Where a browser is available, `npm run preview` and check the two pages
    that prove the generation: the homepage (hero, one card per section, working links)

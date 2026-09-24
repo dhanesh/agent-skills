@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.2"
+  version: "1.1.3"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -329,7 +329,7 @@ Unless `--no-verify` is set:
 ### Stage 6 — Report
 
 Write `MOCKSTAR-COVERAGE.md` to the output directory root, following the template in
-`references/coverage-report.md`. The report must include:
+`references/coverage-report.md`, with these sections:
 
 - **Summary** — inputs list, tenant name, endpoint count (grounded vs. inferred), boot verdict.
 - **Endpoints table** — one row per mock: method, path, mock file, source, locator, confidence.
@@ -380,7 +380,7 @@ mockstar runs tenant resolution as the **first** routing step, with default mode
   - (Subdomain mode `<tenant>.host` exists but is off by default.)
 
 **Consequence for this skill:** if `--tenant` is not `default`, every consumer — the smoke test,
-the coverage-report examples, and whoever calls the mock — must use a selector. The coverage
+the coverage-report examples, and whoever calls the mock — MUST use a selector. The coverage
 report's Summary states the tenant and the exact selector to use. When in doubt, use `default`
 as the tenant so bare-path access works with zero configuration. No `mockstar.config.json` is
 required for tenant routing: the CLI `serve` path always enables `path` + `header` modes.
@@ -394,7 +394,7 @@ Pick per persona; each honours the same tenant selectors above.
   Editing a `mocks/<tenant>/*.json` file hot-reloads only that tenant.
 - **Docker (shared/staging/CI):** mount `mocks/` → `/config/mocks` and `handlers/` →
   `/config/handlers` (see "Docker delivery" below). The container binds `0.0.0.0:3000` and is
-  crash-only — the orchestrator **must** set a restart policy (`--restart=always`, K8s
+  crash-only — the orchestrator MUST set a restart policy (`--restart=always`, K8s
   `restartPolicy: Always`, or systemd `Restart=on-failure`). Use `/health` for liveness and
   `/ready` for load-balancer drain.
 - **SDET — library embed (in-process, no daemon):** import mockstar into a Jest/Vitest/`bun test`
@@ -466,8 +466,6 @@ The template (`assets/Dockerfile.template`) copies `mocks/` into `/config/mocks`
 
 The skill's asset helpers (`assets/extract_text.py`, `assets/smoke.sh`) live in this skill's
 directory, not in the target repository. Subagents launched in Stage 2 and Stage 5 run from the
-target repo's working directory, so a relative `assets/` path will not resolve for them. You
-MUST resolve the **absolute** path to each helper once before dispatching any subagent, and pass
-the literal absolute path into the subagent's prompt; you MUST NOT pass a relative
-`assets/`-prefixed form. This mirrors the pattern used by the `base-in-reality` skill for its
+target repo's working directory, so a relative `assets/` path will not resolve for them. The
+rule for handing them the absolute paths is in "Locating asset helpers" above. This mirrors the pattern used by the `base-in-reality` skill for its
 `fetch_sources.py` helper.

@@ -51,7 +51,7 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 - **The spec** — drafted from `references/spec-template.md`. It MUST include these sections:
   Problem, Users, Goals, Non-goals, Constraints (typed: `invariant`, `goal` or `boundary`),
   Required truths (each traced to a constraint and a requirement, with a runnable check),
-  Requirements (numbered R1..Rn, each a single testable "must" statement), Acceptance
+  Requirements (numbered R1..Rn, each a single testable `must` statement), Acceptance
   criteria (≥1 per requirement, referencing its id, written as a runnable check), Open
   questions (may be an empty list, but the section exists so unknowns have a home). The
   full loop adds Tensions, Solution options and Iterations, and unattended mode adds
@@ -59,7 +59,7 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 - **The plan** — one or more tasks per requirement, each carrying *what* to change, *where*
   (files/areas if known — the spec's `[where: ...]` hints pre-fill this), and *verify* (the
   acceptance criterion turned into a check the implementer can actually run). A requirement
-  can also carry `[after: R2, R3]`, naming the other requirements it must follow; the
+  can also carry `[after: R2, R3]`, naming the other requirements it comes after; the
   compiler turns that into the task's `depends_on` and can schedule the whole plan into
   waves with `--waves`. The
   requirement↔task coverage map MUST be total in both directions: every requirement covered,
@@ -73,7 +73,7 @@ The exact grammar, lint rules, JSON schema, and exit codes live in
 The method is manifold's: **constrain → tension → anchor → choose**. *Constrain* writes typed
 constraints (B business, T technical, U UX, S security, O operational), with a pre-mortem in
 the full loop. *Tension* finds conflicting pairs and resolves each one. *Anchor* works back
-from the outcome, asking "what must be TRUE?", and records each required truth with its
+from the outcome, asking "what has to be TRUE?", and records each required truth with its
 parent, the constraints it serves, the requirements that deliver it, a confidence and a check.
 *Choose* compares 2–4 options under the **pragmatic rule**: among the options that satisfy
 every invariant and every required truth, pick the lowest complexity, then the most
@@ -100,7 +100,7 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    interview; note unresolved answers as candidates for Open questions rather than stalling.
    In unattended mode, the same round also carries the decision sweep.
 2. **Draft the spec** from `references/spec-template.md`, running the planning loop at the
-   mode's depth. Write each requirement as one testable "must" statement — if a sentence
+   mode's depth. Write each requirement as one testable `must` statement — if a sentence
    bundles two obligations, split it into two ids. Write each acceptance criterion as
    something runnable: a command plus expected exit code/output, or an observation an
    outside party could make. When a machine can run the check, end the criterion with
