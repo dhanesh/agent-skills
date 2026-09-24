@@ -147,15 +147,18 @@ rest of the plan goes on. Its limits:
 
 - the proof is only as strong as each task's verify commands; before the push the conductor
   re-runs every proven task's checks on the merged run branch, so tasks that each pass alone
-  but break each other once merged stop the run and are never pushed; CI on the pushed branch
+  but break each other once merged stop the run and are never pushed; the push is exactly the
+  commit that re-run verified, and a branch that moved after it is not pushed; CI on the pushed branch
   is still the independent check outside your machine, and the reviewer is the one check that
   looks past weak verify commands;
 - cost is always bounded, by dispatches and by wall clock: when the grant sets no dispatch cap
-  the conductor derives one from the plan's size, and the grant's expiry caps a run at 7 days;
+  the conductor derives one from the plan's size (each dispatch a resume asks for counts too),
+  and the grant's expiry caps a run at 7 days from the newest grant;
   repairs per task and parallelism are enforced too (2 each by default); tokens and dollars
   are recorded, not enforced, because the runtime does not expose usage;
 - a crashed or interrupted run is resumable by a fresh session with no memory of it:
-  `conductor resume` prints the exact next step for every task in flight;
+  `conductor resume` prints the exact next step for every task in flight; if the grant has
+  lapsed, the run waits for you to renew it rather than ending itself;
 - a question the grant does not answer parks that task for you: the conductor does not answer it
   itself;
 - to anyone receiving the run result, its per-task proofs read as claims until they re-run them

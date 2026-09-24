@@ -34,8 +34,8 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `park <task> --reason R` | `PARK: <task> <reason>` | 0; 2 refused |
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
 | `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (ending ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
-| `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish` | 0; 3 stopped (now or before) or gate asks; 2 finished |
-| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>` or `INTEGRATION: fail <task> <command>` lines, `FINISH: <envelope>`, then `STOP: integration_red`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red, or a remote step asked, failed or is pending; 2 refused |
+| `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
+| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
 ### init
 
@@ -61,7 +61,7 @@ key exits 2, and a key the grant does not set can be added. An unknown key in `-
 | Key | Enforced by |
 |---|---|
 | `wall_clock_min` (when set) | `next`, `start`, `verify`, `review`, `merge`: `STOP: budget_wall_clock` once that many minutes have passed since `init` |
-| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt. Only dispatches the tool records count: a re-dispatch after a crash, or a subagent an executor starts itself, does not |
+| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
 | `max_repairs_per_task` (2 by default) | every failing verify or review after the first is a repair; at the cap the task parks with `verify_red_after_repairs` |
 | `max_parallel` | `start` refuses past it; `next --max` is clamped to it |
 | `max_tokens`, `max_usd` | recorded, not enforced: the runtime does not expose usage to the tool |
@@ -74,9 +74,11 @@ The effective values are recorded in `state.json` and shown by `status`. A deriv
 `"derived": true` (with `max_dispatches`), and marked `derived=max_dispatches` on the
 `status` budget line. A grant or `--budget` value always wins over the derivation, and
 `--budget` still cannot loosen a key the grant sets. `wall_clock_min` is enforced only when
-set, but the grant's expiry (at most 7 days) ends every run's gates, so cost is always bounded
-by dispatches and by wall clock. Because the repair, parallel and dispatch defaults are the
-conductor's, not the grant's, `--budget` can raise them when the grant does not set them.
+set, but the grant's expiry ends every run's gates: at most 7 days from the newest grant that
+covers the plan (a newer grant extends it), so cost is always bounded by dispatches and by wall
+clock. Because the repair, parallel and dispatch defaults are the conductor's, not the grant's,
+`--budget` can raise them when the grant does not set them: a `--budget` `max_dispatches` above
+the derived value is accepted when the grant sets none.
 
 ### gate
 
@@ -173,10 +175,18 @@ task cannot be parked.
 
 Prints the last recorded event, re-checks `local_reversible`, and prints `READY:`, then the
 exact next action as `NEXT:` lines (see "Resume" below). It lifts a `grant_ask` stop once a
-grant covers the run again; any other stop stays, and `resume` exits 3 with its `STOP:` line
-and `NEXT: run finish`. Like `next`, it records a stop rule that fires (`budget_wall_clock`,
+grant covers the run again. While the grant still asks it prints `GATE: ASK`,
+`STOP: grant_ask` and `NEXT: run ask` (exit 3): a human renews the grant, then `resume` runs
+again. Any other stop stays, and `resume` exits 3 with its `STOP:` line and
+`NEXT: run finish`. Like `next`, it records a stop rule that fires (`budget_wall_clock`,
 `budget_dispatches`, `no_ready_tasks`), prints `STOP:` and `NEXT: run finish`, and exits 3.
-It logs a `resume` event.
+A `running` or `verifying` task whose worktree is gone parks with `worktree-missing`. Each
+`dispatch-*` line spends a dispatch (logged as `dispatch` with `resume: true`); a task past
+`max_dispatches` parks with `budget_dispatches` and gets no line. It logs a `resume` event.
+On a finished run it prints `FINISH: <envelope>` and exits 0 with `NEXT: run finish` while a
+remote step is pending (run `finish --retry-remote`), `NEXT: run done` when every step is done
+or the integration was red, and, for an integration skipped because the grant asked,
+`NEXT: run finish` once a grant covers the run again or `NEXT: run ask` until then.
 
 ### finish
 
@@ -191,14 +201,28 @@ It logs a `resume` event.
   this is where that shows. A red result records the stop `integration_red` (the reason the
   run had before is kept as `previous`, and a `stop` event is logged), still writes the
   envelope, prints `STOP: integration_red` after `FINISH:` and exits 3: nothing is pushed and
-  no PR is opened. A human fixes the run branch; `--retry-remote` refuses the run (exit 2).
-  A later `finish` prints the recorded result and never re-runs it.
+  no PR is opened, and `--retry-remote` refuses the run (exit 2). The run stays finished: a
+  human fixes the conflict on the run branch and pushes it by hand, or starts a new run from
+  a plan that orders the two tasks (`depends_on`) or merges them.
+- **Integration is gated.** The re-run executes the repository's code, so `finish` first asks
+  `local_reversible`. On an ASK nothing runs: it prints `INTEGRATION: skipped grant_ask`,
+  records `integration: {head, passed: false, skipped: "<the GATE line>", runs: []}`, records
+  the stop `grant_ask` (with `previous`), writes the envelope, prints `STOP: grant_ask` and
+  exits 3; nothing is pushed. `finish --retry-remote` on such a run re-gates: while the grant
+  still asks it prints `STOP: grant_ask` (exit 3) and writes nothing; once a grant covers the
+  run it re-runs the integration on the run branch's current head, logs it, writes a new
+  envelope (a new id, whose log prefix covers that `integration` event), keeps the old path
+  as `finished.superseded`, and goes on to the push and the PR. A red re-run stops with
+  `integration_red` as above.
+- **Recorded results.** A later plain `finish` reprints the recorded `INTEGRATION:` line(s)
+  and never re-runs them. A stop that an earlier, crashed `finish` recorded (it keeps the
+  stop it replaced under `prior`) is undone before the next attempt judges the run branch.
 - **The envelope.** It writes `run-result/v1` under `.skill-contract/envelopes/` and prints
   `FINISH: <path>`. The subjects pin the plan envelope and the grant. The payload
   (`assets/schemas/run-result.v1.json`) carries each task's status, verify runs in the plan's own
   `{python}` form, review, merge commit, park reason and question, plus the stop, the budget and
-  its note, the `integration` result (`{head, passed, runs: [{task, command, ok,
-  returncode}]}`), and the worktrees kept for a human. `log_sha256` is the digest of the log's
+  its note, `budget_derived`, the `integration` result (`{head, passed, skipped?, runs:
+  [{task, command, ok, returncode}]}`), and the worktrees kept for a human. `log_sha256` is the digest of the log's
   first `log_bytes` bytes, which end with the `finish` event, so it covers the `integration`
   event too. An exit 2 here writes nothing: the plan
   envelope no longer matches its pinned sha256, the grant file is gone, or a task is in flight
@@ -206,13 +230,19 @@ It logs a `resume` event.
   grant. There is one passed `verify:<task>`
   assertion per proven task, carrying that task's first verify command, and, when the
   integration re-run ran any command, one `integration:<first 12 of head>` assertion, passed
-  or failed, carrying its first failing command (its first command on a pass).
+  or failed, carrying its first failing command (its first command on a pass). A skipped
+  re-run gives an `untested` one carrying the first proven task's first command; with no
+  proven task there is none. A receiver's `check-envelope --rerun` re-runs only that one
+  command, from its own root: not the whole re-run on the merged run branch.
 - **Push.** It gates `push_branch`, then runs `--push-cmd`, by default
   `["git","push","-u","origin","{run_branch}"]`, only while the root is on the run branch. The
   allowlist is `git push [--set-upstream|--porcelain|--quiet|-u|-q] <remote> <run_branch>`, with
   a remote name only (not a URL or path), no refspec, no force and no other option. The
   conductor rewrites the branch to the explicit, non-forced refspec
-  `refs/heads/<rb>:refs/heads/<rb>`, so a `remote.<name>.push` mapping cannot retarget it. The
+  `<integration head>:refs/heads/<rb>`, so a `remote.<name>.push` mapping cannot retarget it
+  and the commit pushed is exactly the one the integration re-run verified. Right before
+  each push, on the first `finish` and on `--retry-remote` alike, it refuses (exit 2, a
+  `push_refused` log event) when `refs/heads/<rb>` has moved since that re-run. The
   push runs with `GIT_ALLOW_PROTOCOL=file:git:http:https:ssh`, so a planted `insteadOf` cannot
   turn it into an `ext::` command. Hooks are off, so the user's pre-push hooks do not run.
   The envelope write before it is deliberately not gated: a revoked or expired grant still
@@ -231,9 +261,10 @@ It logs a `resume` event.
   prints the same `FINISH:` line, plus `REMOTE: pending push|pr` and exit 3 while a step is
   pending. `finish --retry-remote` re-gates and runs only the pending steps, and refuses (exit 2)
   if the envelope changed since `finish` wrote it.
-- **After finish.** `next`, `resume`, `start`, `verify`, `review`, `merge`, `park` and
-  `decision` refuse with exit 2 ("run finished"). `status` and `gate` still work, `finish`
-  reprints its `FINISH:` line, `finish --retry-remote` still runs pending remote steps, and
+- **After finish.** `next`, `start`, `verify`, `review`, `merge`, `park` and `decision`
+  refuse with exit 2 ("run finished"). `status` and `gate` still work, `resume` reports what
+  is left (see `resume`), `finish` reprints its `INTEGRATION:` and `FINISH:` lines,
+  `finish --retry-remote` still runs pending remote steps (and a skipped integration), and
   `init` starts a new run.
 
 ## Task statuses and stop reasons
@@ -244,13 +275,13 @@ Statuses: `pending`, `running` (started), `verifying` (verify failed, awaiting r
 
 Stop reasons the tool records: `budget_wall_clock` (from `next`, `resume`, `start`, `verify`,
 `review` or `merge`), `budget_dispatches` (from `next`, `resume` or `start`), `grant_ask` (a gate ASK in `start`,
-`verify`, `merge` or `resume`), `new_human_decision` (a `merge-inconsistent` park) and
+`verify`, `merge`, `resume` or `finish`), `new_human_decision` (a `merge-inconsistent` park) and
 `no_ready_tasks` (from `next` or `resume`), and `integration_red` (from `finish`, when the merged
 run branch fails a proven task's own checks). The grant's `stop_on` is not enforced.
 
 Park reasons: `verify_red_after_repairs`, `budget_dispatches`, `unrunnable-verify`,
 `no-commits`, `merge-conflict`, `merge-inconsistent`, `new_human_decision`,
-`in_flight_at_stop`, and any `park --reason` text.
+`in_flight_at_stop`, `worktree-missing` (from `resume`), and any `park --reason` text.
 
 ## The run directory
 
@@ -261,16 +292,17 @@ repository and is never committed.
 - `state.json`, rewritten atomically on every change: `root`, `run_id`, `plan_envelope`,
   `plan_sha256`, `grant_id`, `run_branch`, `base_branch`, `created_at`, `budget`,
   `budget_derived` (the budget keys `init` derived, e.g. `["max_dispatches"]`), `dispatches`,
-  `stopped` (null or `{reason, at, detail?, task?, previous?}`), `finished` (null or
-  `{envelope, id, sha256, at, pushed, pr, integration}`), `order` (task ids in plan order) and `tasks`. Each task holds
+  `stopped` (null or `{reason, at, detail?, task?, previous?, prior?}`; `prior` is the full
+  stop a `finish` stop replaced, restored by the next `finish`), `finished` (null or
+  `{envelope, id, sha256, at, pushed, pr, integration, superseded?}`), `order` (task ids in plan order) and `tasks`. Each task holds
   `status`, `depends_on`, `verify`, `repairs`, `failures`, `branch`, `worktree`, `verify_runs`
   (per command: `command`, `ok`, `returncode`, `stdout_tail`, `stderr_tail`, the last 2000
   characters each), `verified_head`, `review`, `merge_commit`, `park_reason`, `question`.
 - `autonomy-log.jsonl`, append-only, one JSON object per line, each with `at` (RFC 3339 UTC)
   and `event`: `init` (with the waves, `max_dispatches` and `derived`), `gate`, `dispatch` (kind `executor`, `repair` or
-  `reviewer`), `dispatch_refused`, `verify` (each command and its outcome), `review`, `merge`,
+  `reviewer`; `resume: true` when a `resume` line spent it), `dispatch_refused`, `verify` (each command and its outcome), `review`, `merge`,
   `park`, `decision`, `stop`, `resume`, `budget_warning`, `integration`, `finish`, `push`,
-  `pr`.
+  `push_refused`, `pr`.
 - `wt/<task>/`, the task worktrees. `verify/` and `merge/` hold the short-lived isolated
   clones (the integration re-run's are `verify/integration-<task>-<sha>`).
 
@@ -281,7 +313,7 @@ no memory of the run: a new session, a `claude --continue`, or a scheduled re-en
 the same way. Run `conductor resume` and do what each `NEXT:` line says. It reads state.json,
 prints the last event, re-checks the grant, prints `READY:`, then one `NEXT:` line per
 in-flight task, in plan order, and one last line for the run. A run resumed after its grant
-expired asks and stays stopped until a new grant covers it, or ends with `finish`.
+expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 
 | Line | When | What to do |
 |---|---|---|
@@ -289,13 +321,22 @@ expired asks and stays stopped until a new grant covers it, or ends with `finish
 | `NEXT: <task> dispatch-repair verify` | `verifying` after a failing verify | send the executor the failing commands and the tails from `tasks.<task>.verify_runs` in `state.json` (read, never written), into the existing worktree, then `conductor verify <task>` on its report |
 | `NEXT: <task> dispatch-repair review` | `verifying` after a failed review | send the executor `tasks.<task>.review.detail`, then `conductor verify <task>` on its report |
 | `NEXT: <task> dispatch-reviewer <sha>` | `reviewing`, no verdict | dispatch a reviewer on `<sha>`, the verified head, then `conductor review` |
+| `NEXT: <task> verify` | `verifying`, last verify passed, no review (merge found the branch moved) | `conductor verify <task>`; nothing is dispatched |
 | `NEXT: <task> merge` | `reviewing`, verdict pass | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
 | `NEXT: run next` | work is in flight, or a task is ready | carry on with the loop (`conductor next`) |
-| `NEXT: run finish` | the run is stopped (its `STOP:` line says why), or nothing is in flight and nothing is ready (resume records that stop, as `next` would) | `conductor finish`; a stopped run prints no task lines, because it takes no further step and `finish` parks its in-flight tasks |
+| `NEXT: run ask` | the grant asks, now or as a `grant_ask` stop it still does not lift | report it to the user and wait; once they renew the grant, run `conductor resume` again |
+| `NEXT: run finish` | the run is stopped for any other reason (its `STOP:` line says why), or nothing is in flight and nothing is ready (resume records that stop, as `next` would) | `conductor finish`; a stopped run prints no task lines, because it takes no further step and `finish` parks its in-flight tasks |
+| `FINISH: …`, `NEXT: run finish` | the run is finished and a remote step is pending (or a skipped integration can now run) | `conductor finish --retry-remote` |
+| `FINISH: …`, `NEXT: run done` | the run is finished: every step done, or the integration was red | report it; nothing is left to run |
+| `PARK: <task> worktree-missing` | `running` or `verifying`, its worktree is gone | nothing: the task is done for this run |
+| `PARK: <task> budget_dispatches` | the dispatch this line would spend is past `max_dispatches` | nothing: the task is done for this run |
 
 Every line starts `NEXT: `, then a task id or `run`, then the action; that grammar is stable
-for tools that read it. These re-dispatches are not counted in `max_dispatches`: the tool counts only the dispatches
-that `start`, `verify` and `review` record. A task that stays stuck after that is parked
+for tools that read it. Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer`
+line spends one dispatch when `resume` prints it, even when a failed verify already counted
+one for the same repair. That is conservative, and intended: every `resume` that asks for a
+dispatch spends one, so a session that keeps crashing still runs into the cap. `verify` and
+`merge` lines spend none. A task that stays stuck after that is parked
 (`conductor park <task> --reason …`), so the run can end.
 
 ## Worked example: three tasks, one failing
@@ -374,7 +415,7 @@ run finished: <repo>/.skill-contract/envelopes/run-result-v1-20260922T211857Z-e5
 
 Six dispatches: three executors, one repair, two reviewers. `finish` first re-ran T1's and
 T2's checks on the merged run branch (its head is T2's merge commit), then pushed
-`refs/heads/factory/add-greeting:refs/heads/factory/add-greeting` to a local bare `origin` and
+`52bf22e3013fc203fb897c612f6f2e0a63907c41:refs/heads/factory/add-greeting` (the verified head) to a local bare `origin` and
 ran the PR step, stubbed here with `echo`, each after its gate said COVERED. T3's worktree and
 branch `factory/add-greeting--T3` are kept for the human. A receiver checks the result:
 

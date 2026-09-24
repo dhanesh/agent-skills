@@ -87,9 +87,11 @@ yourself. Read the grant's `budget` too: `max_repairs_per_task` defaults to 2 an
 `max_parallel` to 2. When neither the grant nor `init --budget` sets `max_dispatches`,
 `init` derives it by default as tasks × 2 × (1 + `max_repairs_per_task`), one executor and
 one reviewer per attempt, and `status` marks it derived; you SHOULD tell the user that cap
-before the run starts. `wall_clock_min` is enforced when set, and the grant's expiry caps
-the wall clock at 7 days in any case. The grant's `stop_on` is not enforced (the
-conductor's own stop rules below apply).
+before the run starts. When the grant sets no `max_dispatches`, `--budget` can set a value
+above the derived one: the tighten-only rule covers only keys the grant sets.
+`wall_clock_min` is enforced when set, and the grant's expiry caps the wall clock in any case:
+at most 7 days from the newest grant that covers the plan, so a newer grant extends it. The
+grant's `stop_on` is not enforced (the conductor's own stop rules below apply).
 
 ## The loop
 
@@ -128,15 +130,17 @@ Each step is one command. Read its output lines, not just the exit code.
    refused the fast-forward and the run branch is unchanged (an untracked file in the way, say):
    the task stays `reviewing`, so park it with that line unless the cause is plainly transient.
 8. **Repeat** from step 2 until the run stops.
-9. **Finish.** `conductor finish` first re-runs every proven task's verify commands on the
-   merged run branch (`INTEGRATION: pass <sha>`), then writes the `run-result/v1` envelope
-   (`FINISH: <path>`), then gates `push_branch` and pushes, then gates `open_pr` and opens
-   the PR against the base branch. See "Ending the run" below.
+9. **Finish.** `conductor finish` first gates `local_reversible` and re-runs every proven
+   task's verify commands on the merged run branch (`INTEGRATION: pass <sha>`), then writes
+   the `run-result/v1` envelope (`FINISH: <path>`), then gates `push_branch` and pushes exactly
+   that verified commit, then gates `open_pr` and opens the PR against the base branch. See
+   "Ending the run" below.
 
 **Reading any step's output.**
 
 - `STOP: <reason>` from any command (`next`, but also `start`, `verify`, `review`, `merge` or
-  `resume`, for example when the wall clock runs out) ends the loop: go to step 9.
+  `resume`, for example when the wall clock runs out) ends the loop: go to step 9. From
+  `resume`, follow its `NEXT:` line instead: `NEXT: run ask` waits for a renewed grant.
 - `PARK: <task> <reason>` means that task is done for this run; carry on with the rest.
 - An exit 2 that the step's own instruction above does not cover, such as the root being off
   the run branch or dirty, a merge in progress, or a plan edited since `init`, means park it:
@@ -156,12 +160,20 @@ steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line mea
 the PR command failed: report its stderr, and retry at most once. `INTEGRATION: fail <task>
 <command>` lines and `STOP: integration_red` (exit 3) mean tasks that each passed alone break
 each other once merged: the envelope is written, but nothing is pushed and no PR is opened.
-Report the failing lines; a human fixes the run branch, and `--retry-remote` refuses the run
-(exit 2). An exit 2 from `finish` (for
+Report the failing lines; `--retry-remote` refuses the run (exit 2). The run stays finished:
+the human fixes the conflict by hand on the run branch and pushes it themselves, or starts a
+new run (`init`) from a plan that orders or merges the two tasks.
+`INTEGRATION: skipped grant_ask` and `STOP: grant_ask` (exit 3) mean the grant lapsed before
+`finish`, so no check ran and nothing is pushed: report it. Once the user renews the grant,
+`conductor finish --retry-remote` runs the integration on the run branch's current head, writes a
+new envelope (its `FINISH:` line; the old one is kept as `superseded`), and pushes and opens the
+PR. An exit 2 saying the run branch "moved since the integration re-run" means a commit landed
+after the check: report it; the tool pushes only the verified commit. An exit 2 from `finish` (for
 example, the plan envelope was edited after `init`, or the grant file is gone) means report its
 stderr and stop: you MUST leave restoring the plan or the grant to a human. Once finished, the run is
-final: `finish` reprints its `FINISH:` line, `--retry-remote` still runs pending steps, every
-other command except `status` and `gate` refuses (exit 2), and `init` starts a new run.
+final: `finish` reprints its `INTEGRATION:` and `FINISH:` lines, `--retry-remote` still runs
+pending steps, `resume` reports what is left, every other command except `status` and `gate`
+refuses (exit 2), and `init` starts a new run.
 
 **Hands off.** Every step goes through `conductor`: you MUST NOT merge, push, force-push, open
 the PR or edit code yourself, even when a gate asks. You MUST NOT pass a `--pr-cmd` or
@@ -177,7 +189,8 @@ A fresh agent session with no memory of the run can resume it: a new session, a
 line says, in order. It first prints the last recorded step (`STATUS: run=<run-id> …`) and
 re-checks the grant; it lifts a `grant_ask` stop once a grant covers the run again, and no
 other stop. Then it prints one `NEXT:` line per in-flight task and a last line for the run.
-A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`.
+A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `running` or
+`verifying` task whose worktree is gone prints `PARK: <task> worktree-missing` instead.
 
 - `NEXT: <task> dispatch-executor`: the executor stopped mid-task. Dispatch the executor brief
   again into the existing worktree (not `start`), then `conductor verify <task>` on its report.
@@ -188,14 +201,24 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`.
   `tasks.<task>.review.detail` from `state.json`, then verify on its report.
 - `NEXT: <task> dispatch-reviewer <sha>`: dispatch a reviewer on that commit, then record its
   verdict with `conductor review`.
+- `NEXT: <task> verify`: `merge` found the task's branch moved past the proven commit. Run
+  `conductor verify <task>`; nothing is dispatched.
 - `NEXT: <task> merge`: run `conductor merge <task>`. If a crash hit after the merge reached
   the run branch, `merge` finds that merge, records the task as proven and prints `MERGE:`.
 - `NEXT: run next`: carry on with the loop from step 2.
+- `NEXT: run ask`: the grant asks (`GATE: ASK`, `STOP: grant_ask`). Report it to the user and
+  wait; once they renew the grant, run `conductor resume` again.
 - `NEXT: run finish`: the run is stopped (its `STOP:` line says why, and `resume` records a
-  stop rule that fires, as `next` does) or nothing is left to do: go to "Ending the run".
+  stop rule that fires, as `next` does) or nothing is left to do: go to "Ending the run". On
+  a finished run (resume prints its `FINISH:` line) it means a remote step is pending: run
+  `conductor finish --retry-remote`.
+- `NEXT: run done`: the run is finished and nothing is left to run: report it.
 
-These re-dispatches are not counted in `max_dispatches`: the tool counts only what `start`,
-`verify` and `review` record.
+Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer` line spends one dispatch
+from `max_dispatches` when `resume` prints it, even when a failed verify already counted one
+for the same repair. That is conservative: every `resume` call that asks for a dispatch
+spends one, so a session that keeps crashing still stops. A task past the cap prints
+`PARK: <task> budget_dispatches` and gets no `NEXT:` line.
 
 ## The executor brief
 
@@ -277,7 +300,8 @@ Report: Verdict: pass | fail, then one line of detail.
 A **run report** for the user: the PR URL (or the pending remote step and why), the
 `run-result/v1` envelope path, each task's status (`proven` with its merge commit, `parked`
 with its reason or question, `blocked` with the task it waits on), the stop reason, the
-integration result (`INTEGRATION: pass <sha>`, or the failing lines), and the budget spent.
+integration result (`INTEGRATION: pass <sha>`, the failing lines, or `skipped`), and the
+budget spent.
 The report MUST state that `max_tokens` and `max_usd` were recorded, not enforced, as
 `conductor status` does. Name the grant id and each action class the run used.
 
@@ -287,7 +311,7 @@ Before you report, run `conductor status` and check that every task has a final 
 that the `FINISH:` line printed. Then check the envelope as a receiver would:
 `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <run-result> --root <repo>`.
 Its claims read `CLAIMED`, because the conductor produced them; add `--rerun` to re-run each
-proven task's first verify command and see them `PROVEN`. A mismatch between `status` and the
+assertion's one command from the root and see them `PROVEN`. A mismatch between `status` and the
 envelope is a conductor bug: report it rather than editing state.
 
 ## What the proof is worth
@@ -300,20 +324,23 @@ command that needs them fails unless it installs them or uses tooling installed 
 walks up parent directories can reach the root's own files. Before the push, `finish`
 re-verifies the merged run branch: it re-runs every proven task's verify commands on its head
 in the same kind of clone, so two tasks that each pass alone but break each other once merged
-are caught there and not pushed. CI on the pushed branch is still the independent check
-outside this machine. A plan with weak checks gets weak proof, and the reviewer is the only
+are caught there and not pushed. The push sends exactly the commit that re-run verified, and
+refuses when the run branch has moved since. CI on the pushed branch is still the independent
+check outside this machine. A plan with weak checks gets weak proof, and the reviewer is the only
 thing that looks past them.
 
 Cost is bounded in every run, by dispatches and by wall clock: `max_dispatches` is derived when the
 grant sets none, and the grant's expiry caps the wall clock at 7 days even without
 `wall_clock_min`. Repairs per task and parallelism are bounded too. `max_dispatches` counts
-only the dispatches the conductor records: a re-dispatch after a crash, or a subagent an
-executor starts against its brief, is not counted. `max_tokens` and `max_usd` are recorded,
+the dispatches the conductor records, including each one `resume` asks for; a subagent an
+executor starts against its brief is not counted. `max_tokens` and `max_usd` are recorded,
 not enforced: the runtime does not expose usage to the tool.
 
 The run result's assertions are claims. To a receiver they read as CLAIMED, because the
 conductor wrote the envelope; they become PROVEN when a receiver re-runs them
 (`check-envelope --rerun`) or when CI on the pushed branch reports them through a `run_url`.
+A rerun runs the one command an assertion carries, in the receiver's own tree: for
+`integration:<head>` that is one command, not the whole re-run on the merged run branch.
 
 A grant is the user's recorded yes, but an agent with a shell can forge one, and so can an
 executor. An executor running as the same OS user can also forge `state.json` or the log,
@@ -337,9 +364,11 @@ from any skill that provides one, and an
 `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1` that covers it. It
 provides a `https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1` envelope; the
 payload schema is `assets/schemas/run-result.v1.json`. Its assertions are one passed
-`verify:<task>` per proven task, carrying that task's first verify command, and one
-`integration:<head>` for the re-run on the merged run branch, passed or failed; a receiver
-sees the passed ones as CLAIMED until it re-runs them.
+`verify:<task>` per proven task, carrying that task's first verify command. An
+`integration:<head>` assertion is added when the re-run on the merged run branch ran a
+command (passed or failed), or as `untested` when the grant asked and a task is proven; there
+is none when no task is proven. A receiver sees the passed ones as CLAIMED until it re-runs
+them.
 
 ```json skill-contract
 {"provides": ["https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"], "consumes": ["https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1", "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"]}
