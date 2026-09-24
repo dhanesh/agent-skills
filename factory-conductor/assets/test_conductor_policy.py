@@ -1048,10 +1048,6 @@ class NonGitStopTests(unittest.TestCase):
                             run_branch="f", base_branch="m", budget=bad)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
 class DerivedDispatchBudgetTests(unittest.TestCase):
     """G2: an unattended run's cost is always bounded. With no max_dispatches from the
@@ -1129,3 +1125,7 @@ class DerivedDispatchBudgetTests(unittest.TestCase):
         self.assertEqual(st.dispatches, cap)
         rc, out, _ = self.run_main(["next", "--root", self.root])
         self.assertEqual((rc, out.strip()), (3, "STOP: budget_dispatches"))
+
+
+if __name__ == "__main__":
+    unittest.main()
