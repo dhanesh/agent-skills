@@ -36,6 +36,8 @@ gate: clean
 	_fail() { printf '\n!!! FAILURE: %s\n' "$$1"; printf '%s\n' "$$2" | tail -40; printf '!!! end of %s failure\n\n' "$$1"; }; \
 	printf '\n=== README catalog ===\n'; \
 	out=$$(sh $(GATES)/readme-catalog.sh . 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "README catalog" "$$(printf '%s\n' "$$out" | grep -v '^PASS:')"; rc=1; }; \
+	printf '\n=== BCP 14 register ===\n'; \
+	out=$$(sh $(GATES)/bcp14-registry.sh . 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "BCP 14 register" "$$out"; rc=1; }; \
 	printf '\n=== skill-contract reference ===\n'; \
 	out=$$(cd $(CONTRACT_REF) && for t in test_*.py; do python3 -I "$$t" 2>&1 || exit 1; done); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "skill-contract reference" "$$out"; rc=1; }; \
 	for d in $(SKILLS); do \
@@ -156,7 +158,7 @@ readme:
 
 # The BCP 14 register: every capitalised keyword in a SKILL.md has a row in
 # docs/rfc2119/2026-09-19-classification.md at its level, no SKILL.md prose uses a
-# lowercase must/shall, and every skill has a register section.
+# lowercase must/shall, and every skill has a register section. Also runs in `gate`.
 bcp14:
 	@sh $(GATES)/bcp14-registry.sh .
 

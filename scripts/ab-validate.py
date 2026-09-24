@@ -226,6 +226,9 @@ SINCE_Q3_GAPS = "9cfe144"  # factory-conductor Q3 gaps: resume prints NEXT: line
 # run branch before the push (G3). The first commit of that work, on
 # feat/factory-conductor; the main merge base has no conductor at all, so these rows
 # move only against a baseline on this branch (`make ab-validate BASE=<ref>`).
+SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalised
+# keyword in a SKILL.md has a register row at its level, no lowercase must/shall in
+# SKILL.md prose, every skill has a register section; plus the Jev backfill.
 
 
 def _git_out(*args):
@@ -4579,6 +4582,44 @@ def check_bcp14(old, new):
         a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
 
 
+# ── BCP 14 register (scripts/gates/bcp14-registry.sh) ───────────────────────
+# PP-7 checked the declaration and the vocabulary; nothing read the register, so
+# rows went stale (they quoted pre-rewrite sentences), a new skill shipped with
+# no section, and lowercase "must"s read as rules with no BCP 14 meaning. Both
+# trees are measured with the checker from the tree under test, over each
+# tree's own SKILL.md files and register, so the numbers are the trees', not
+# the checker's.
+def check_bcp14_registry(old, new):
+    checker = os.path.join(new, "scripts", "gates", "bcp14_registry.py")
+
+    def counts(tree):
+        r = subprocess.run([sys.executable, "-I", checker, "--root", tree, "--counts"],
+                           capture_output=True, text=True, timeout=120)
+        m = re.search(r"BCP14_COUNTS: (.*)", r.stdout)
+        if r.returncode != 0 or not m:
+            err = (r.stderr or r.stdout).strip()[-300:]
+            PROBE_ERRORS.append((tree, "scripts/gates", err))
+            return {"_error": err}
+        return {k: int(v) for k, v in (kv.split("=") for kv in m.group(1).split())}
+
+    a, b = counts(old), counts(new)
+    if _errored(a, b):
+        return
+    row("bcp14", "SKILL.md keyword sentences with no BCP 14 register row (lower=better)",
+        a["unregistered"], b["unregistered"], b["unregistered"] < a["unregistered"] and b["unregistered"] == 0,
+        "rows quoted the pre-rewrite sentence, and jev-agent-setup had no section, so a keyword's level was "
+        "recorded nowhere a reviewer could check it",
+        since=SINCE_BCP14_REGISTRY)
+    row("bcp14", "lowercase must/shall in SKILL.md prose (lower=better)",
+        a["lowercase"], b["lowercase"], b["lowercase"] < a["lowercase"] and b["lowercase"] == 0,
+        "RFC 8174 gives lowercase no normative meaning, so each one read as a rule of unstated strength",
+        since=SINCE_BCP14_REGISTRY)
+    row("bcp14", "register rows whose level differs from their text, plus skills with no section "
+        "(must not rise)", a["level"] + a["section"], b["level"] + b["section"],
+        b["level"] + b["section"] <= a["level"] + a["section"], "a row that says SHOULD over a MUST "
+        "misstates the rule; a missing section hides a skill's keywords", kind="guard")
+
+
 # ── base-in-reality: the refutation vote follows the verdict rubric ─────────
 # A critical finding with one dissenting refuter, or with refuters that
 # crashed, shipped as VIOLATION: the workflow took a flat 2-of-3 majority and
@@ -5749,6 +5790,7 @@ def main():
         check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
+        check_bcp14_registry(old, REPO)
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
         check_factory_trust_ba(old, REPO)

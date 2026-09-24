@@ -138,4 +138,10 @@ Every SKILL.md declares, directly under its title: *The key words MUST, MUST NOT
 - SHOULD / SHOULD NOT: a strong default with a legitimate exception.
 - MAY: a genuine option.
 
-Lowercase keeps its plain-English meaning. PP-5 counts capitalised SHOULD and MAY as escape-hatch cues, and still counts MUST NOT as an absolute, so the pressure to use it sparingly stays. The first rollout's per-sentence record is `docs/rfc2119/2026-09-19-classification.md`.
+Lowercase keeps its plain-English meaning. PP-5 counts capitalised SHOULD and MAY as escape-hatch cues, and still counts MUST NOT as an absolute, so the pressure to use it sparingly stays. The per-sentence record is `docs/rfc2119/2026-09-19-classification.md`.
+
+`scripts/gates/bcp14-registry.sh` (`make bcp14`, part of `make gate`) keeps that record in step with the skills:
+- every capitalised keyword needs a register row at the level the text uses;
+- rows match on the sentence's text, so a reworded sentence needs its row re-quoted;
+- every skill needs a section;
+- SKILL.md prose must not use a lowercase "must" or "shall". It reads as a rule but carries no BCP 14 meaning. Make it a keyword with a row, or reword it as plain prose that states no rule.

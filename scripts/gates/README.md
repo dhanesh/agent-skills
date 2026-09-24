@@ -13,6 +13,7 @@ on every skill it ships.
 | `frontmatter-standard.sh <dir>` | Standard frontmatter metadata: `license`, `compatibility`, and `metadata` (`author`/`version`/`tags`) | `FRONTMATTER_RESULT:` |
 | `skill-contract.sh <skill-dir>` | Commandments 1–2 of `docs/skill-contract/SPEC.md`, via the reference checker, on every skill: frontmatter keys inside the Agent Skills allowed set; the opt-in and the `## Contract` block both present or both absent; an adopter's vendored `assets/contract_check.py` byte-identical to the reference (`make contract-vendor`). | `SKILL_CONTRACT_RESULT:` |
 | `readme-catalog.sh [repo-root]` | Repo-level, run once per `make gate` (`make readme` alone): every skill has an install line and a Skills-table row in the root README.md, and no install line or row names a directory that isn't a skill (a row's label must match its link). Order and description accuracy are not checked. | `README_CATALOG_RESULT:` |
+| `bcp14-registry.sh [repo-root]` | Repo-level, run once per `make gate` (`make bcp14` alone), logic in `bcp14_registry.py` (stdlib): every capitalised BCP 14 keyword in a `*/SKILL.md` body (fences, inline code and the declaration skipped) is covered by a row in `docs/rfc2119/2026-09-19-classification.md` whose final level equals the strongest keyword it covers; rows match on normalised sentence text (a row's text ends at its first `…`, and a truncated row covers the rest of its paragraph), never on line number. No lowercase `must`/`shall` in SKILL.md prose; every skill has a register section. `--counts` prints the tallies `scripts/ab-validate.py` compares. | `BCP14_RESULT:` |
 | `run-eval.sh <dir>` | The skill's outcome eval (`eval/run_eval.py` per [docs/eval-standard.md](../../docs/eval-standard.md)): deterministic harness → skill tooling → model-free grader, negative fixtures mandatory. **Missing eval fails.** | `EVAL_RESULT:` |
 | `package-skill.sh <dir> <out>` | Produces a distributable archive of the skill | — |
 
@@ -24,4 +25,4 @@ Run all gates across every skill via the repo `Makefile`: `make gate`.
 `validate-skill.sh`, `scan-leaks.sh`, `dry-run-replay.sh`, and `package-skill.sh` originated in the
 `repo2skill` authoring skill; now that it ships in this repo, this directory is their canonical home —
 edit them here and note the change in the commit message. `prompting-playbook.sh`, `frontmatter-standard.sh`,
-and `run-eval.sh` are repo-local gates that never went through `repo2skill`.
+`run-eval.sh`, `readme-catalog.sh` and `bcp14-registry.sh` are repo-local gates that never went through `repo2skill`.

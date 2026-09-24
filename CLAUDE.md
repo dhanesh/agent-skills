@@ -23,6 +23,7 @@ failing check for that one skill.) The checks:
 | Asset paths | `scripts/gates/asset-paths.sh` | no skill-relative helper invocation in `SKILL.md` — agents run from the *target repo*, so `python3 assets/x.py` never resolves for them; use `"$SKILL_DIR/assets/x.py"` |
 | skill-contract | `scripts/gates/skill-contract.sh` | commandments 1–2 of [`docs/skill-contract/SPEC.md`](docs/skill-contract/SPEC.md) on **every** skill: frontmatter keys stay inside the Agent Skills allowed set, the `skill-contract` opt-in and the `## Contract` block come together or not at all, and an adopter's `assets/contract_check.py` is byte-identical to the reference (fix drift with `make contract-vendor`). `make contract` runs the reference checker's conformance vectors and the end-to-end handoff once per `make gate` |
 | README catalog | `scripts/gates/readme-catalog.sh` | the root `README.md` lists **every** skill (an `npx skills add … --skill <name>` install line **and** a Skills-table row) and nothing that isn't one — runs once per `make gate`, `make readme` alone. A new skill isn't shipped until it's in the catalog |
+| BCP 14 register | `scripts/gates/bcp14-registry.sh` | every capitalised MUST/SHOULD/MAY in a `SKILL.md` has a row in `docs/rfc2119/2026-09-19-classification.md` at the level the text uses (rows match on sentence text, not line number), every skill has a register section, and no `SKILL.md` prose uses a lowercase "must" or "shall" — runs once per `make gate`, `make bcp14` alone. Changing a keyword sentence means changing its row |
 | Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
 | **Shell suites** | `*/assets/test_*.sh` | each shell suite marked `# gate: offline`. Every `test_*.sh` **must** carry a `# gate:` marker — `offline` (runs here) or `integration` (excluded); an unmarked suite **fails** the gate rather than silently skipping |
@@ -40,6 +41,7 @@ make test                       # just the unit suites (Python + offline shell)
 make test-integration           # the `# gate: integration` shell suites (needs bunx/network, optional docker)
 make eval                       # just the outcome evals (docs/eval-standard.md)
 make frontmatter                # just the metadata-standard check
+make bcp14                      # just the BCP 14 register check
 make contract                   # skill-contract: reference checker vectors + end-to-end handoff
 make contract-vendor            # copy the reference checker into every adopting skill
 make playbook PLAYBOOK_FLAGS=--strict   # promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures; fails a fresh repo2skill scaffold by design
