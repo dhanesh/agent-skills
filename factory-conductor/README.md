@@ -44,17 +44,25 @@ You can stop a run at any time by revoking the grant
 
 ## What it enforces, and what it does not
 
-- **Enforced:** repairs per task (2 by default) and parallelism (2 by default) always; wall
-  clock and dispatches (executor, repair and reviewer, as the tool records them) when the grant
-  or `init --budget` sets them. Set both for an unattended run. `--budget` can only tighten a
-  limit the grant sets.
+- **Cost is always bounded, by dispatches and by wall clock.** Dispatches (executor, repair and
+  reviewer, as the tool records them) are always capped: when the grant and `init --budget`
+  set no `max_dispatches`, `init` derives tasks × 2 × (1 + `max_repairs_per_task`), one
+  executor and one reviewer per attempt, and `status` shows it as derived. The wall clock is
+  capped by `wall_clock_min` when set, and by the grant's expiry (at most 7 days) always.
+  Repairs per task (2 by default) and parallelism (2 by default) are enforced too.
+  `--budget` can only tighten a limit the grant sets.
 - **Recorded, not enforced:** `max_tokens` and `max_usd`. The runtime does not expose usage to
   the tool, so dispatch count is the real cost limit. The grant's `stop_on` list is recorded
   too, but not enforced: the conductor's own stop rules apply.
-- **The proof is per task, and only as good as the checks.** The conductor proves that a task's
-  verify commands passed on that task's own commit, before it was merged. It does not re-verify
-  the merged run branch, so two tasks that each pass alone can still break each other; CI on
-  the pushed branch is what catches that. The independent reviewer looks past weak checks.
+- **The proof is only as good as the checks.** The conductor proves that a task's verify
+  commands passed on that task's own commit, before it was merged. Then, before the push,
+  `finish` re-runs every proven task's checks on the merged run branch: two tasks that each
+  pass alone but break each other once merged stop the run (`integration_red`), and that run
+  branch is never pushed. CI on the pushed branch is still the independent check outside
+  your machine, and the independent reviewer looks past weak checks.
+- **A crash does not strand a run.** A new session with no memory of it runs
+  `conductor resume`, which prints the exact next step for every in-flight task
+  (`NEXT: T2 dispatch-reviewer <sha>`, `NEXT: run finish`, …).
 - **Claims, not proof, to a receiver.** The run result's assertions read as CLAIMED to anyone
   else until they re-run them (`check-envelope --rerun`) or CI on the pushed branch reports them.
 - **Same-user residuals.** A hostile executor running as your OS user could forge the run's

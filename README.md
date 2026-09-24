@@ -145,13 +145,17 @@ merges only what passed both into one `factory/<plan-slug>` run branch, and ends
 that branch and opening one PR. A failing or undecidable task is parked with its reason and the
 rest of the plan goes on. Its limits:
 
-- the proof is only as strong as each task's verify commands, and it is per task: the merged
-  run branch is not re-verified, so tasks that each pass alone can break each other, and only
-  CI on the pushed branch catches that; the reviewer is the one check that looks past weak
-  verify commands;
-- repairs per task and parallelism are enforced (2 each by default), and wall clock and
-  dispatches when the grant sets them; tokens and dollars are recorded, not enforced, because
-  the runtime does not expose usage;
+- the proof is only as strong as each task's verify commands; before the push the conductor
+  re-runs every proven task's checks on the merged run branch, so tasks that each pass alone
+  but break each other once merged stop the run and are never pushed; CI on the pushed branch
+  is still the independent check outside your machine, and the reviewer is the one check that
+  looks past weak verify commands;
+- cost is always bounded, by dispatches and by wall clock: when the grant sets no dispatch cap
+  the conductor derives one from the plan's size, and the grant's expiry caps a run at 7 days;
+  repairs per task and parallelism are enforced too (2 each by default); tokens and dollars
+  are recorded, not enforced, because the runtime does not expose usage;
+- a crashed or interrupted run is resumable by a fresh session with no memory of it:
+  `conductor resume` prints the exact next step for every task in flight;
 - a question the grant does not answer parks that task for you: the conductor does not answer it
   itself;
 - to anyone receiving the run result, its per-task proofs read as claims until they re-run them

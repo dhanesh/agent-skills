@@ -45,6 +45,13 @@ The run directory is `.skill-contract/runs/<run-id>/`, holding `state.json`, `au
 5. **`review`.** A reviewer subagent gets the task, the diff and the constraints, and answers: does it satisfy the requirement, and does it do anything the task did not ask for. A fail sends it back on the same repair budget.
 6. **`merge`.** After both pass, merge the task branch into the run branch and drop the worktree. A conflict parks the task.
 7. **Loop** until no task is ready, then **`finish`**.
+8. **Integration** (amended for the Q3 gaps, 2026-09-25). Before the envelope and before any
+   remote step, `finish` re-runs every proven task's verify commands on the merged run-branch
+   head, through the same isolated checkout, symlink check, command environment and timeouts
+   as `verify`. A red result is recorded in the run result and stops the run with
+   `integration_red`: the run branch is not pushed and no PR is opened. Before this, only each
+   task's own commit was proven, so tasks that each passed alone could break each other and
+   only CI would notice.
 
 **Parking never stops the run.** A parked task records its reason; the remaining ready tasks continue. Dependents of a parked task become blocked and are reported as such.
 
@@ -67,14 +74,16 @@ The grant is re-checked before each action, so an expiry, a revocation, a change
 |---|---|
 | `wall_clock_min` | enforced, measured from `init` |
 | `max_repairs_per_task` | enforced, counted |
-| `max_dispatches` | enforced, counted; this is the cost limit |
+| `max_dispatches` | enforced, counted; this is the cost limit. When neither the grant nor `--budget` sets it, `init` derives `n_tasks × 2 × (1 + max_repairs_per_task)` and records it as derived (amended for the Q3 gaps, 2026-09-25), so a run's cost is always bounded |
 | `max_parallel` | enforced, default 2 |
 | `max_tokens`, `max_usd` | **recorded, not enforced.** The runtime does not expose usage to the tool. The SKILL.md and the run report MUST say so. |
 
 **Stop rules.** The run stops, then `finish`es with whatever is proven:
 - a budget is exhausted (wall clock or dispatches);
 - the grant expired, was revoked, or its subjects went stale;
-- every remaining task is parked or blocked.
+- every remaining task is parked or blocked;
+- the merged run branch fails a proven task's own checks at `finish` (`integration_red`,
+  amended for the Q3 gaps, 2026-09-25): the envelope is written, nothing is pushed.
 
 Two events PARK the task instead of stopping the run (amended in the final fix wave,
 2026-09-23): a task that needs a human decision the grant's `decisions` and `defaults` do not
@@ -88,8 +97,8 @@ The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 
 ## 4. The log and the evidence
 
-- **`autonomy-log.jsonl`** is append-only, one JSON object per event: `init`, `dispatch`, `verify` (with each command and outcome), `review`, `merge`, `gate`, `park`, `stop`, `finish`. It stays local and is never committed.
-- **`run-result/v1`**, a new kind, is written by `finish`. Per task: status (`proven`, `parked`, `blocked`), the verify commands with outcomes, the review verdict, the merge commit and the park reason. It pins the plan envelope, the grant and the log's sha256. Its assertions carry each verify command, `assertedBy` the conductor skill. Under C7 a receiver reads them as CLAIMED, because the conductor produced the envelope; they become PROVEN when a receiver re-runs them (`check-envelope --rerun`) or when CI on the pushed branch reports them (`run_url`). Inside the run, the conductor's own re-run is what licenses each merge.
+- **`autonomy-log.jsonl`** is append-only, one JSON object per event: `init`, `dispatch`, `verify` (with each command and outcome), `review`, `merge`, `gate`, `park`, `stop`, `integration`, `finish`. The `integration` event precedes `finish`, so the log digest covers it. It stays local and is never committed.
+- **`run-result/v1`**, a new kind, is written by `finish`. Per task: status (`proven`, `parked`, `blocked`), the verify commands with outcomes, the review verdict, the merge commit and the park reason. It pins the plan envelope, the grant and the log's sha256. Its assertions carry each verify command, `assertedBy` the conductor skill, plus one `integration:<head>` assertion for the re-run on the merged run branch, passed or failed; the payload carries that re-run as `integration: {head, passed, runs}`. Under C7 a receiver reads them as CLAIMED, because the conductor produced the envelope; they become PROVEN when a receiver re-runs them (`check-envelope --rerun`) or when CI on the pushed branch reports them (`run_url`). Inside the run, the conductor's own re-run is what licenses each merge.
 - **The PR body** lists proven tasks, parked tasks with reasons, the stop rule that ended the run, and the budget note from C5.
 
 ## 5. Scheduling (3B)
@@ -109,7 +118,7 @@ The user can stop a run at any moment with `revoke-grant`: the next gate asks.
 
 - **While running:** one line per event on stdout, plus the log.
 - **tmux `blocked` marker: a documented follow-up** (amended in the final fix wave, 2026-09-23). The earlier text had a parked task set tmux-agent-herdr-lite's pane `blocked` marker. A park does not block the run, whose other tasks go on, so marking the pane blocked would mislabel it; a marker for a run that stopped for a human is the follow-up. No code ships for it.
-- **Resume:** `conductor resume` reads `state.json`, re-checks the grant and continues. A run resumed after expiry stops instead.
+- **Resume:** `conductor resume` reads `state.json`, re-checks the grant and continues. A run resumed after expiry stops instead. Amended for the Q3 gaps (2026-09-25): it prints the exact next action, one `NEXT: <task> dispatch-executor | dispatch-repair verify | dispatch-repair review | dispatch-reviewer <sha> | merge` line per in-flight task and a last `NEXT: run next | run finish`, so a fresh session with no memory of the run (a new session, `claude --continue`, a scheduled re-entry) resumes it by following those lines. Like `next`, it records a stop rule that fires; a stopped run says only `run finish`.
 - **Packaging:** an ordinary skill. The executor and reviewer are subagents the session dispatches. A Claude Code plugin that restricts their tools is a documented follow-up, not part of this spec.
 
 ## 7. Acceptance criteria
@@ -137,7 +146,7 @@ Cheap hardening that removes whole classes of silent tampering is still applied:
 - **Model quality bounds everything.** The conductor proves what a task's verify commands prove. A plan with weak checks yields weak proof. The SKILL.md states this, as spec-first-planning states that its linter checks structure and not reasoning.
 - **Parallel merges conflict.** Mitigations: waves keep dependents apart, worktrees isolate, and a conflict parks rather than forcing.
 - **A long run drifts from the spec.** Mitigations: staleness is checked at every gate, and the 7-day grant lifetime caps a run.
-- **Cost.** Only dispatch counts and wall clock bound it. This is stated, not hidden.
+- **Cost.** Only dispatch counts and wall clock bound it. This is stated, not hidden. Both always apply: the dispatch cap is derived when unset, and the grant's 7-day lifetime caps the wall clock.
 - **A parked task can be missed.** Mitigations: the PR body and the run report.
 
 ## Out of scope

@@ -65,6 +65,15 @@ carries unit tests, eval negatives and an A/B row:
   on every criterion), and `conductor init` refuses a plan with a null command. Before that,
   every planner-derived task had a null command and parked at verify, so only hand-built plans
   reached `proven`. Jev re-judgement: to be re-judged after merge.
+- **Q3 gaps closed (2026-09-25, before merge):** after step 4 Jev put Q3 ("unattended mode
+  works") at partly 0.56 vs yes 0.42, and three gaps behind that score are closed on the same
+  branch. A dead session no longer strands a run: `conductor resume` prints one `NEXT:` line
+  per in-flight task and one for the run, so a fresh session with no memory of it can carry
+  on. Cost is always bounded: with no `max_dispatches` from the grant or `--budget`, `init`
+  derives tasks × 2 × (1 + `max_repairs_per_task`), and the grant's expiry caps the wall clock
+  at 7 days. The merged result is verified before the push: `finish` re-runs every proven
+  task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3 to
+  be re-judged after merge.
 
 Nothing else in this document has been re-measured since.
 

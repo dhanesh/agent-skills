@@ -113,7 +113,10 @@ and skip what the conversation has already answered:
    below). One working day is a sensible default.
 7. **Budget.** Ask for `wall_clock_min` (minutes from the start of the run),
    `max_dispatches` (how many agent dispatches the run may make: executors, repairs and
-   reviewers; this is the only real cost cap), `max_repairs_per_task` (default 2) and
+   reviewers; this is the only real cost cap; when the user gives none, factory-conductor
+   derives it at `init` as tasks × 2 × (1 + `max_repairs_per_task`), one executor and one
+   reviewer per attempt, so leaving it out still bounds the run), `max_repairs_per_task`
+   (default 2) and
    `max_parallel` (tasks in flight at once, default 2). Tokens and dollars
    (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
    usage. Also ask which events should stop the run (`stop_on`): it is recorded but not
