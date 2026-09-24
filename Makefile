@@ -12,7 +12,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme bcp14 ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -153,6 +153,12 @@ frontmatter:
 # row, and no entry names a directory that is not a skill. Also runs in `gate`.
 readme:
 	@sh $(GATES)/readme-catalog.sh .
+
+# The BCP 14 register: every capitalised keyword in a SKILL.md has a row in
+# docs/rfc2119/2026-09-19-classification.md at its level, no SKILL.md prose uses a
+# lowercase must/shall, and every skill has a register section.
+bcp14:
+	@sh $(GATES)/bcp14-registry.sh .
 
 # Lint every skill against "The Prompting Playbook" conventions (full output).
 # Promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures:

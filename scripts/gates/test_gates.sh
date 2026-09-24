@@ -344,4 +344,74 @@ pp7_case "a \`\`\`\` fence wrapping \`\`\` is one block" PASS "$(mkbcp fourbt "$
 pp7_case "a declaration only inside a code fence does not count" FAIL "$(mkbcp declfence '```' "$DECL" '```' 'You MUST check it.')"
 pp7_case "SHALL after the declaration on its line is caught" FAIL "$(mkbcp declsame "$DECL You SHALL check it." 'You MUST check it.')"
 
+# ── bcp14-registry: every keyword sentence has a register row at its level ───
+# PP-7 checks the declaration and the vocabulary; nothing checked that a MUST
+# added to a SKILL.md was classified, so the register fell behind by dozens of
+# sentences. Each case is a fresh temp repo: one skill plus a register, so a
+# checker that passes everything (or nothing) flips a row.
+mkreg() {  # $1 name, $2 register rows for alpha (or the literal NOSECTION), then SKILL.md body lines
+  r="$WORK/reg-$1"; rows="$2"; shift 2
+  rm -rf "$r"; mkdir -p "$r/alpha" "$r/docs/rfc2119"
+  {
+    echo '---'
+    echo 'name: alpha'
+    echo 'description: A fixture skill for the bcp14-registry self-tests.'
+    echo '---'
+    echo '# alpha'
+    echo ''
+    echo "$DECL"
+    echo ''
+    for l in "$@"; do echo "$l"; done
+  } > "$r/alpha/SKILL.md"
+  {
+    echo '# BCP 14 classification'
+    echo ''
+    if [ "$rows" != NOSECTION ]; then
+      echo '## alpha (1 candidates)'
+      echo ''
+      echo '| id | line | sentence | Jev level (conf, harm) | final | departure reason |'
+      echo '|---|---|---|---|---|---|'
+      [ -n "$rows" ] && printf '%s\n' "$rows"
+    fi
+  } > "$r/docs/rfc2119/2026-09-19-classification.md"
+  printf '%s\n' "$r"
+}
+reg_case() {  # $1 label, $2 expected PASS|FAIL, $3 repo, $4 a FAIL reason the output must name (optional)
+  st=0; out="$(sh "$GATES/bcp14-registry.sh" "$3" 2>&1)" || st=$?
+  if printf '%s\n' "$out" | grep -q "^BCP14_RESULT: $2"; then
+    if [ "$2" = FAIL ] && [ "$st" -eq 0 ]; then
+      bad "bcp14-registry: $1 (printed FAIL but exited 0)"
+    elif [ "$2" = PASS ] && [ "$st" -ne 0 ]; then
+      bad "bcp14-registry: $1 (printed PASS but exited $st)"
+    elif [ -n "${4:-}" ] && ! printf '%s\n' "$out" | grep -q "^FAIL: alpha $4"; then
+      bad "bcp14-registry: $1 (no 'FAIL: alpha $4' line)"
+    else
+      ok "bcp14-registry: $1"
+    fi
+  else
+    bad "bcp14-registry: $1 (expected BCP14_RESULT: $2)"
+  fi
+}
+ROW_MUST='| c1 | 9 | You MUST check the thing before you ship it. | MUST (0.90, 0.80) | MUST |  |'
+ROW_SHOULD='| c1 | 9 | You MUST check the thing before you ship it. | SHOULD (0.40, 0.30) | SHOULD |  |'
+ROW_TRUNC='| c1 | 9 | **Check first.** The thing is… | MUST (0.90, 0.80) | MUST |  |'
+reg_case "a registered keyword sentence at its level passes" PASS \
+  "$(mkreg clean "$ROW_MUST" 'You MUST check the thing before you ship it.' '' 'Plain prose has no keyword.')"
+reg_case "a truncated row covers the rest of its paragraph" PASS \
+  "$(mkreg trunc "$ROW_TRUNC" '**Check first.** The thing is' 'fragile, so you MUST check it.')"
+reg_case "a keyword inside inline code or a fence needs no row" PASS \
+  "$(mkreg code '' 'Run `MUST` as a literal.' '```' 'You MUST NOT see this.' '```')"
+reg_case "an unregistered MUST fails" FAIL \
+  "$(mkreg unreg "$ROW_MUST" 'You MUST check the thing before you ship it.' '' 'You MUST NOT skip the other thing.')" "unregistered"
+reg_case "a row whose level differs from the text fails" FAIL \
+  "$(mkreg level "$ROW_SHOULD" 'You MUST check the thing before you ship it.')" "level"
+reg_case "a lowercase must in prose fails" FAIL \
+  "$(mkreg lower '' 'The agent must check the thing.')" "lowercase"
+reg_case "a lowercase shall in prose fails" FAIL \
+  "$(mkreg shall '' 'The agent shall check the thing.')" "lowercase"
+reg_case "a lowercase must inside inline code passes" PASS \
+  "$(mkreg lowercode '' 'Write each requirement as a `must` statement.')"
+reg_case "a skill with no register section fails" FAIL \
+  "$(mkreg nosection NOSECTION 'Plain prose has no keyword.')" "section"
+
 exit $rc
