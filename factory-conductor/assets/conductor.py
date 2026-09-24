@@ -112,7 +112,8 @@ repository's code, so it is gated with local_reversible: on an ASK nothing runs,
 INTEGRATION: skipped grant_ask is printed, the envelope records integration.skipped, and
 the run stops with grant_ask (exit 3), unpushed. `finish --retry-remote` on such a run
 re-gates: while the grant still asks it prints STOP: grant_ask (3); once one covers the
-run it re-runs the integration on the current head, writes a NEW envelope (the old path
+run it re-runs the integration on the head the skip recorded (a run branch that moved since
+is refused, exit 2), writes a NEW envelope (the old path
 kept as finished.superseded) and goes on to the push and the PR. Otherwise a later
 `finish` reads the recorded result and never re-runs it. It writes a run-result/v1
 envelope under .skill-contract/envelopes/ and prints FINISH: <path>. That local write is
@@ -1130,6 +1131,16 @@ def next_actions(st):
     return out
 
 
+def _undo_finish_stop(st):
+    """A stop an unfinished `finish` recorded over an earlier one (it carries `prior`: a
+    crash, or an exit-2 path, before the envelope) is undone to that earlier stop, as the
+    next `finish` would undo it. So a sticky stop under it (new_human_decision, say) is
+    never lifted or overwritten as if it were a grant_ask."""
+    if isinstance(st.stopped, dict) and "prior" in st.stopped:
+        st.stopped = st.stopped["prior"]
+        st.save()
+
+
 def _resume_finished(st):
     """resume on a finished run: FINISH: <envelope>, then `NEXT: run finish` while a
     remote step is pending (the agent runs `finish --retry-remote`), else `NEXT: run done`
@@ -1144,8 +1155,14 @@ def _resume_finished(st):
         # covers the run again; until then a human must renew the grant.
         ok, _ = _gate_logged(st, "local_reversible")
         print(RUN_FINISH if ok else RUN_ASK)
+    elif stop or not _pending_remote(st):
+        print(RUN_DONE)
     else:
-        print(RUN_FINISH if _pending_remote(st) and not stop else RUN_DONE)
+        # The pending step's own gate decides: while it asks, `--retry-remote` could only
+        # print GATE: ASK again, so the human is asked instead.
+        action = "push_branch" if "push" in _pending_remote(st) else "open_pr"
+        ok, _ = _gate_logged(st, action)
+        print(RUN_FINISH if ok else RUN_ASK)
     return 0
 
 
@@ -1177,6 +1194,7 @@ def cmd_resume(args):
         print("STATUS: run=%s last_event=none" % st.run_id)
     if st.finished:
         return _resume_finished(st)
+    _undo_finish_stop(st)
     if st.stopped and (st.stopped.get("reason") if isinstance(st.stopped, dict)
                        else st.stopped) != "grant_ask":
         _stopped(st)
@@ -2553,8 +2571,9 @@ def _finish_again(st, args, push_cmd, pr_cmd):
 
 def _retry_skipped(st, path, push_cmd, pr_cmd):
     """finish --retry-remote on a run whose integration was skipped (the grant asked at
-    finish). Re-gate local_reversible: while it asks, STOP: grant_ask (3) and nothing is
-    written. Once covered, re-run the integration on the run branch's current head, write
+    finish). A run branch that moved since the skip is refused (2, push_refused): the new
+    commits were never reviewed. Re-gate local_reversible: while it asks, STOP: grant_ask
+    (3) and nothing is written. Once covered, re-run the integration on that head, write
     a NEW envelope (a new id, its log prefix covering the new integration event), keep
     the old one as finished.superseded, and go on to push that head and open the PR. A
     red re-run stops with integration_red (3), and later retries refuse (2)."""
@@ -2570,6 +2589,17 @@ def _retry_skipped(st, path, push_cmd, pr_cmd):
     plan_doc, why = _pinned_plan(st)
     if why:
         sys.stderr.write("cannot retry: %s\n" % why)
+        return 2
+    # Re-verify only the head the skip recorded: a commit that landed since was never
+    # reviewed as any task's work, so it is neither verified nor pushed (C1).
+    recorded = st.finished["integration"].get("head")
+    now, _ = _run_branch_head(st)
+    if now != recorded:
+        sys.stderr.write("the run branch %s moved since the skipped integration recorded %s "
+                         "(it is at %s); not re-verifying or pushing: a human must check the "
+                         "new commits\n" % (st.run_branch, recorded, now))
+        st.log("push_refused", reason="run branch moved since the skipped integration",
+               verified=recorded, head=now)
         return 2
     covered, _ = _gate_logged(st, "local_reversible")
     if not covered:

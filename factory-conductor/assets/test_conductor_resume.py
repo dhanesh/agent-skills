@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
@@ -341,13 +342,87 @@ class ResumeReviewFixTests(unittest.TestCase):
                                       json.dumps([sys.executable, "-c", "pass"])])
         return rc, [l for l in out.splitlines() if l.startswith("FINISH: ")][0]
 
-    def test_a_finished_run_with_a_pending_remote_step_says_run_finish(self):
+    def test_a_finished_run_whose_pending_push_is_asked_says_run_ask_then_finish(self):
+        # W5: the pending step's own gate decides, so a no-memory walk ends at `run ask`
         rc, fin = self.finish_run(policy={"read_only": "auto", "local_reversible": "grant"})
         self.assertEqual(rc, 3)  # push_branch asks
+        for _ in range(2):  # stable: it keeps saying ask, never a finish that cannot help
+            rc, nxt, out = self.resume()
+            self.assertEqual(rc, 0, out)
+            self.assertIn(fin, out.splitlines())
+            self.assertEqual(nxt, ["NEXT: run ask"])
+        gates = [e for e in self.events("gate")]
+        self.assertEqual((gates[-1]["action"], gates[-1]["ok"]), ("push_branch", False))
+        write_grant(self.root, self.plan)  # the user grants the push and the PR
         rc, nxt, out = self.resume()
-        self.assertEqual(rc, 0, out)
-        self.assertIn(fin, out.splitlines())
+        self.assertEqual((rc, nxt), (0, ["NEXT: run finish"]))
+        rc, out, err = self.run_main(["finish", "--root", self.root, "--retry-remote",
+                                      "--pr-cmd", json.dumps([sys.executable, "-c", "pass"])])
+        self.assertEqual(rc, 0, out + err)
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (0, ["NEXT: run done"]))
+
+    # N2: finish's grant_ask over an earlier stop, left by a crash before the envelope
+    def crash_state(self, prior):
+        self.init(n=2, parallel=2)
+        st = self.st()
+        st.stopped = {"reason": "grant_ask", "at": "t", "detail": "GATE: ASK reason=expired",
+                      "previous": prior and prior["reason"], "prior": prior}
+        st.save()
+
+    def test_a_crashed_finish_stop_resumes_as_its_sticky_prior_under_a_renewed_grant(self):
+        prior = {"reason": "new_human_decision", "at": "t", "detail": "merge-inconsistent",
+                 "task": "T1"}
+        self.crash_state(prior)
+        rc, nxt, out = self.resume()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: new_human_decision", out.splitlines())
         self.assertEqual(nxt, ["NEXT: run finish"])
+        self.assertEqual(self.st().stopped, prior)  # never lifted, never overwritten
+        rc, out, _ = self.run_main(["next", "--root", self.root])
+        self.assertEqual(rc, 3)
+
+    def test_a_crashed_finish_stop_keeps_its_prior_while_the_grant_still_asks(self):
+        prior = {"reason": "new_human_decision", "at": "t", "detail": "merge-inconsistent",
+                 "task": "T1"}
+        self.crash_state(prior)
+        write_grant(self.root, self.plan, minutes=-5)
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (3, ["NEXT: run finish"]))
+        self.assertEqual(self.st().stopped, prior)
+        write_grant(self.root, self.plan)
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (3, ["NEXT: run finish"]))
+        self.assertEqual(self.st().stopped["reason"], "new_human_decision")
+
+    def test_a_crashed_finish_stop_with_no_prior_resumes_the_run(self):
+        self.crash_state(None)
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (0, ["NEXT: run next"]))
+        self.assertIsNone(self.st().stopped)
+
+    def test_the_real_crash_window_in_finish_never_lifts_a_sticky_stop(self):
+        self.init(n=2, parallel=2)
+        self.ok("start", "T1")
+        with contextlib.redirect_stdout(io.StringIO()):
+            C._park_and_stop(self.st(), "T1", "merge-inconsistent")
+        write_grant(self.root, self.plan, minutes=-5)
+
+        class Killed(Exception):
+            pass
+
+        with mock.patch.object(C.CC, "write_envelope", side_effect=Killed()):
+            with self.assertRaises(Killed):
+                self.run_main(["finish", "--root", self.root])
+        self.assertEqual(self.st().stopped["prior"]["reason"], "new_human_decision")
+        self.assertFalse(self.st().finished)
+        for grant in ("lapsed", "renewed"):
+            if grant == "renewed":
+                write_grant(self.root, self.plan)
+            rc, nxt, out = self.resume()
+            self.assertEqual((rc, nxt), (3, ["NEXT: run finish"]), grant)
+            self.assertEqual(self.st().stopped["reason"], "new_human_decision")
+        self.assertEqual(self.run_main(["next", "--root", self.root])[0], 3)
 
     def test_a_finished_run_with_every_step_done_says_run_done(self):
         rc, fin = self.finish_run()
