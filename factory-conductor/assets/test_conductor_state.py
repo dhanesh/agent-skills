@@ -112,7 +112,7 @@ class StateTests(unittest.TestCase):
         self.assertEqual(run_main(["init", "--plan", env, "--root", root])[0], 0)
         st = C.State.load(C.state_path(root))
         st.log("start", task="T1")
-        st.set_status("T1", "running")
+        st.set_status("T1", "running", worktree=root)  # a worktree that exists
         st.save()
         before = read_text(st.log_path)
         rc, out, _ = run_main(["resume", "--root", root])

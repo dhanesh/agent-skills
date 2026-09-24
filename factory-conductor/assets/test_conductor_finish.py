@@ -579,12 +579,16 @@ class FinishTests(unittest.TestCase):
         rc, out = self.finish()
         self.assertEqual(rc, 0, out)
         for argv in (["start", "T3"], ["verify", "T1"], ["review", "T1", "--verdict", "pass"],
-                     ["merge", "T1"], ["next"], ["resume"], ["park", "T3", "--reason", "r"],
+                     ["merge", "T1"], ["next"], ["park", "T3", "--reason", "r"],
                      ["decision", "T3", "--question", "q"]):
             with self.subTest(argv=argv):
                 rc, out, err = self.out(argv + ["--root", self.root], err=True)
                 self.assertEqual(rc, 2)
                 self.assertIn("run finished", err)
+        # resume reports instead (I4): the envelope, and that nothing is left to do
+        rc, out = self.out(["resume", "--root", self.root])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.splitlines()[-1], "NEXT: run done")
 
     def test_payload_verify_commands_keep_the_plan_form(self):
         self.run_plan()

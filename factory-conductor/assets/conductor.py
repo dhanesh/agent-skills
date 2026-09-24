@@ -36,7 +36,9 @@ not be the default branch. It cuts factory/<plan-slug> from the current branch (
 name must match branch_pattern too), checks it out in the root and writes the state.
 `start`, `merge` and `resume` re-run check-grant before they act and proceed ONLY on
 exit 0; an ASK prints GATE: ASK <reason>, stops the run with grant_ask and exits 3.
-`resume` lifts a grant_ask stop once a grant covers the run again; no other stop.
+`resume` lifts a grant_ask stop once a grant covers the run again; no other stop. While
+the grant still asks, resume prints NEXT: run ask (a human renews the grant, then resume
+again). `finish` gates its integration re-run too (see Finish).
 `verify` is gated too. Later gates ask whether *some* grant covers this plan now: they
 do not pin the grant id read at `init`, so a newer grant a same-user process writes for
 the same plan would cover the run (a residual under spec section 7a). A git older than
@@ -143,8 +145,11 @@ left as it was); a failed step exits 3 too. Completed steps are recorded (finish
 finished.pr, with the envelope's sha256: --retry-remote refuses, exit 2, an envelope
 that changed since). A later `finish` prints the same FINISH: line; while a step is pending it
 also prints REMOTE: pending push|pr and exits 3, and `finish --retry-remote` re-gates and
-runs just the pending steps. Once finished, next, resume, start, verify, review, merge,
-park and decision refuse with exit 2 ("run finished").
+runs just the pending steps. The push sends <integration head>:refs/heads/<rb>, and
+refuses (exit 2) when the run branch has moved since the integration re-run verified it.
+Once finished, next, start, verify, review, merge, park and decision refuse with exit 2
+("run finished"); resume prints FINISH: and NEXT: run finish (a remote step is pending:
+run finish --retry-remote) or NEXT: run done, exit 0.
 
 Run id grammar: run-<yyyymmddThhmmssZ>-<6 hex>.
 Exit 0 success; 2 usage or invalid input; 3 the run must stop.
@@ -1076,15 +1081,28 @@ def cmd_status(args):
 
 RUN_NEXT = "NEXT: run next"
 RUN_FINISH = "NEXT: run finish"
+RUN_ASK = "NEXT: run ask"
+RUN_DONE = "NEXT: run done"
+# resume's dispatch actions and the dispatch kind each one spends (see next_actions).
+DISPATCH_KIND = {"dispatch-executor": "executor", "dispatch-repair": "repair",
+                 "dispatch-reviewer": "reviewer"}
+
+
+def _moved_after_review(t):
+    """True for a verifying task whose last verify passed and has no review: merge found
+    its branch moved past the proven commit, so it needs a verify, not a repair."""
+    runs = t.get("verify_runs") or []
+    return bool(runs) and all(r.get("ok") for r in runs) and not t.get("review")
 
 
 def next_actions(st):
-    """One `NEXT: <task> <action>` line per in-flight task, in plan order: the exact
-    step a session with no memory of the run takes for it (spec section 6).
+    """[(task, action)] for every in-flight task, in plan order: the exact step a session
+    with no memory of the run takes for it (spec section 6).
 
         running                      dispatch-executor          (into the existing worktree)
         verifying, last fail verify  dispatch-repair verify     (the verify tails)
         verifying, review failed     dispatch-repair review     (review.detail)
+        verifying, branch moved      verify                     (no dispatch)
         reviewing, no verdict        dispatch-reviewer <sha>    (the verified head)
         reviewing, verdict pass      merge"""
     out = []
@@ -1092,30 +1110,51 @@ def next_actions(st):
         t = st.tasks[tid]
         review = t.get("review") if isinstance(t.get("review"), dict) else {}
         if t["status"] == "running":
-            out.append("NEXT: %s dispatch-executor" % tid)
+            out.append((tid, "dispatch-executor"))
         elif t["status"] == "verifying":
-            out.append("NEXT: %s dispatch-repair %s"
-                       % (tid, "review" if review.get("verdict") == "fail" else "verify"))
+            if review.get("verdict") == "fail":
+                out.append((tid, "dispatch-repair review"))
+            elif _moved_after_review(t):
+                out.append((tid, "verify"))
+            else:
+                out.append((tid, "dispatch-repair verify"))
         elif t["status"] == "reviewing":
-            out.append("NEXT: %s merge" % tid if review.get("verdict") == "pass"
-                       else "NEXT: %s dispatch-reviewer %s" % (tid, t.get("verified_head")))
+            out.append((tid, "merge" if review.get("verdict") == "pass"
+                        else "dispatch-reviewer %s" % t.get("verified_head")))
     return out
+
+
+def _resume_finished(st):
+    """resume on a finished run: FINISH: <envelope>, then `NEXT: run finish` while a
+    remote step is pending (the agent runs `finish --retry-remote`), else `NEXT: run done`
+    (every step done, or an integration re-run that was red or skipped, which is never
+    pushed). Exit 0."""
+    print("FINISH: %s" % st.finished.get("envelope"))
+    integration = st.finished.get("integration")
+    never = isinstance(integration, dict) and _integration_stop(integration)
+    print(RUN_FINISH if _pending_remote(st) and not never else RUN_DONE)
+    return 0
 
 
 def cmd_resume(args):
     """Report the last recorded step, re-check the grant, then print the exact next
-    action: one NEXT: line per in-flight task and a last `NEXT: run next|finish`.
+    action: one NEXT: line per in-flight task and a last `NEXT: run next|finish|ask`.
 
-    A run stopped by grant_ask resumes once a grant covers it again; a run stopped for
-    any other reason stays stopped, and its only NEXT: line is `run finish` (a stopped
-    run takes no further step; finish parks its in-flight tasks). Like `next`, resume
-    records a stop rule that fires (budget_wall_clock, budget_dispatches, no_ready_tasks),
-    so a run with nothing in flight and nothing ready says `run finish`. The log is only
-    appended to."""
+    - A finished run prints FINISH: and `run finish` (a remote step is pending) or
+      `run done`, exit 0.
+    - A gate ASK, now or recorded as a grant_ask stop the grant still does not lift,
+      prints `run ask`: a human must renew the grant, then resume again. Exit 3.
+    - Any other stop, or a stop rule that fires now (resume records it, as `next` does),
+      prints only `run finish`, exit 3: a stopped run takes no further step.
+    - A running or verifying task whose worktree is gone parks with worktree-missing.
+    - Every dispatch-executor, dispatch-repair and dispatch-reviewer line spends one
+      dispatch, as `start`, `verify` and `review` do; a task past max_dispatches parks
+      with budget_dispatches and gets no line. Calling resume repeatedly spends
+      dispatches: that keeps the cost bounded even for a session that keeps crashing.
+
+    The log is only appended to."""
     st = _load_current(args.root)
     if st is None:
-        return 2
-    if _finished(st):
         return 2
     last = st.last_event()
     if last:
@@ -1123,13 +1162,15 @@ def cmd_resume(args):
               % (st.run_id, last.get("event"), last.get("at")))
     else:
         print("STATUS: run=%s last_event=none" % st.run_id)
+    if st.finished:
+        return _resume_finished(st)
     if st.stopped and (st.stopped.get("reason") if isinstance(st.stopped, dict)
                        else st.stopped) != "grant_ask":
         _stopped(st)
         print(RUN_FINISH)
         return 3
     if not _gated(st, "local_reversible"):
-        print(RUN_FINISH)
+        print(RUN_ASK)
         return 3
     lifted = st.stopped
     if lifted:
@@ -1142,12 +1183,29 @@ def cmd_resume(args):
         _record_stop(st, reason)
         print(RUN_FINISH)
         return 3
+    lines = []
+    for tid, action in next_actions(st):
+        t = st.tasks[tid]
+        if t["status"] in ("running", "verifying") and not (
+                t.get("worktree") and os.path.isdir(t["worktree"])):
+            # Nothing can be dispatched into it: park rather than loop on it forever.
+            _park(st, tid, "worktree-missing")
+            continue
+        kind = DISPATCH_KIND.get(action.split()[0])
+        if kind and not _dispatch(st, tid, kind, resume=True):
+            continue  # parked with budget_dispatches
+        lines.append("NEXT: %s %s" % (tid, action))
+    reason = check_stop(st)
+    if reason:
+        _record_stop(st, reason)
+        print(RUN_FINISH)
+        return 3
     ready = st.ready(st.max_parallel())
     left = _dispatches_left(st)
     if left is not None:
         ready = ready[:left]
     print("READY: %s" % " ".join(ready) if ready else "READY:")
-    for line in next_actions(st):
+    for line in lines:
         print(line)
     print(RUN_NEXT)
     return 0
@@ -1549,9 +1607,10 @@ def _count_failure(st, task):
     t["repairs"] = max(0, failures - 1)
 
 
-def _dispatch(st, task, kind):
-    """Spend one dispatch (kind: executor, repair or reviewer) and log it. When
-    max_dispatches is spent the task parks with budget_dispatches instead: False."""
+def _dispatch(st, task, kind, resume=False):
+    """Spend one dispatch (kind: executor, repair or reviewer) and log it (resume: true
+    when a resume NEXT: line asked for it). When max_dispatches is spent the task parks
+    with budget_dispatches instead: False."""
     if _dispatches_left(st) == 0:
         sys.stderr.write("dispatch budget spent (max_dispatches %d): %s needs a %s dispatch\n"
                          % (st.budget["max_dispatches"], task, kind))
@@ -1559,7 +1618,8 @@ def _dispatch(st, task, kind):
         return False
     st.dispatches += 1
     st.save()
-    st.log("dispatch", task=task, kind=kind, dispatches=st.dispatches)
+    extra = {"resume": True} if resume else {}
+    st.log("dispatch", task=task, kind=kind, dispatches=st.dispatches, **extra)
     return True
 
 

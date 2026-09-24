@@ -159,7 +159,7 @@ class ResumeNextTests(unittest.TestCase):
         self.assertIn("STOP: budget_wall_clock", out)
         self.assertEqual(nxt, ["NEXT: run finish"])
 
-    def test_a_grant_ask_that_still_asks_says_finish(self):
+    def test_a_grant_ask_that_still_asks_says_ask(self):
         self.init()
         subprocess.run([sys.executable, "-I",
                         os.path.join(os.path.dirname(C.__file__), "contract_check.py"),
@@ -167,7 +167,10 @@ class ResumeNextTests(unittest.TestCase):
         rc, nxt, out = self.resume()
         self.assertEqual(rc, 3, out)
         self.assertIn("GATE: ASK", out)
-        self.assertEqual(nxt, ["NEXT: run finish"])
+        self.assertEqual(nxt, ["NEXT: run ask"])  # M2: the human decides, not finish
+        # still asking on the next resume, from the recorded grant_ask stop
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (3, ["NEXT: run ask"]))
 
     def test_the_wall_clock_ends_the_run_even_with_work_in_flight(self):
         self.init()
@@ -250,6 +253,8 @@ class ResumeNextTests(unittest.TestCase):
                 elif action == "dispatch-reviewer":
                     self.assertRegex(parts[2], r"^[0-9a-f]{40}$")
                     self.ok("review", tid, "--verdict", "pass")
+                elif action == "verify":
+                    self.ok("verify", tid)
                 elif action == "merge":
                     self.assertIn("MERGE: %s " % tid, self.ok("merge", tid))
                 else:
@@ -266,6 +271,150 @@ class ResumeNextTests(unittest.TestCase):
         st = self.st()
         self.assertEqual({t["status"] for t in st.tasks.values()}, {"proven"})
         self.assertEqual(st.stopped["reason"], "no_ready_tasks")
+
+
+
+@unittest.skipUnless(shutil.which("git"), "git not installed")
+class ResumeReviewFixTests(unittest.TestCase):
+    """Review of the Q3 commits: a missing worktree parks (I3), a finished run says what
+    is left (I4), every dispatch line spends a dispatch (I5), a moved branch needs only
+    verify (M1)."""
+
+    init = ResumeNextTests.init
+    run_main = ResumeNextTests.run_main
+    st = ResumeNextTests.st
+    ok = ResumeNextTests.ok
+    resume = ResumeNextTests.resume
+
+    def events(self, name):
+        with open(self.st().log_path) as f:
+            return [e for e in map(json.loads, f) if e["event"] == name]
+
+    # I3
+    def test_a_running_task_whose_worktree_is_gone_parks_instead_of_looping(self):
+        self.init()
+        self.ok("start", "T1")
+        wt = self.st().tasks["T1"]["worktree"]
+        shutil.rmtree(wt)
+        subprocess.run(["git", "-C", self.root, "worktree", "prune"], check=True)
+        rc, nxt, out = self.resume()
+        self.assertIn("PARK: T1 worktree-missing", out.splitlines())
+        self.assertNotIn("NEXT: T1", "\n".join(nxt))
+        self.assertEqual((rc, nxt), (3, ["NEXT: run finish"]))  # nothing left to do
+        t = self.st().tasks["T1"]
+        self.assertEqual((t["status"], t["park_reason"]), ("parked", "worktree-missing"))
+        self.assertEqual([e["reason"] for e in self.events("park")], ["worktree-missing"])
+
+    def test_a_verifying_task_whose_worktree_is_gone_parks_and_the_run_goes_on(self):
+        self.init(n=2)
+        self.ok("start", "T1")
+        wt = self.st().tasks["T1"]["worktree"]
+        commit_in(wt, "other.txt")
+        self.ok("verify", "T1")  # fails: verifying
+        shutil.rmtree(wt)
+        rc, nxt, out = self.resume()
+        self.assertIn("PARK: T1 worktree-missing", out.splitlines())
+        self.assertEqual((rc, nxt), (0, ["NEXT: run next"]))  # T2 is still ready
+
+    # I4
+    def finish_run(self, policy=None, breaks=False):
+        """One task proven and merged, the run finished. breaks: a commit on the run
+        branch after the merge breaks T1's own check, so integration goes red."""
+        self.root = repo()
+        self.plan = write_plan_envelope(self.root, {"T1": ([], [
+            {"text": "no bad file", "command": ["test", "!", "-f", "bad.txt"]}])})
+        write_grant(self.root, self.plan, policy=policy)
+        origin = os.path.join(self.root + "-origin.git")
+        self.addCleanup(shutil.rmtree, origin, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
+        subprocess.run(["git", "-C", self.root, "remote", "add", "origin", origin], check=True)
+        self.assertEqual(self.run_main(["init", "--plan", self.plan, "--root", self.root])[0], 0)
+        self.ok("start", "T1")
+        commit_in(self.st().tasks["T1"]["worktree"], "t1.txt")
+        self.ok("verify", "T1")
+        self.ok("review", "T1", "--verdict", "pass")
+        self.assertIn("MERGE: T1", self.ok("merge", "T1"))
+        if breaks:
+            commit_in(self.root, "bad.txt")
+        self.ok("next")
+        rc, out, err = self.run_main(["finish", "--root", self.root, "--pr-cmd",
+                                      json.dumps([sys.executable, "-c", "pass"])])
+        return rc, [l for l in out.splitlines() if l.startswith("FINISH: ")][0]
+
+    def test_a_finished_run_with_a_pending_remote_step_says_run_finish(self):
+        rc, fin = self.finish_run(policy={"read_only": "auto", "local_reversible": "grant"})
+        self.assertEqual(rc, 3)  # push_branch asks
+        rc, nxt, out = self.resume()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(fin, out.splitlines())
+        self.assertEqual(nxt, ["NEXT: run finish"])
+
+    def test_a_finished_run_with_every_step_done_says_run_done(self):
+        rc, fin = self.finish_run()
+        self.assertEqual(rc, 0)
+        rc, nxt, out = self.resume()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(fin, out.splitlines())
+        self.assertEqual(nxt, ["NEXT: run done"])
+
+    def test_a_finished_run_whose_integration_was_red_says_run_done(self):
+        rc, fin = self.finish_run(breaks=True)
+        self.assertEqual(rc, 3)
+        self.assertIs(self.st().finished["integration"]["passed"], False)
+        rc, nxt, out = self.resume()
+        self.assertEqual(rc, 0, out)
+        self.assertIn(fin, out.splitlines())
+        self.assertEqual(nxt, ["NEXT: run done"])
+
+    # I5
+    def test_every_dispatch_line_spends_a_dispatch_and_repeated_resumes_stop(self):
+        self.init(n=2)
+        st = self.st()
+        st.budget["max_dispatches"] = 3
+        st.save()
+        self.ok("start", "T1")  # 1
+        rc, nxt, out = self.resume()
+        self.assertEqual(nxt, ["NEXT: T1 dispatch-executor", "NEXT: run next"])
+        self.assertEqual(self.st().dispatches, 2)
+        rc, nxt, out = self.resume()
+        self.assertEqual(nxt, ["NEXT: T1 dispatch-executor", "NEXT: run next"])
+        self.assertEqual(self.st().dispatches, 3)
+        kinds = [e.get("kind") for e in self.events("dispatch")]
+        self.assertEqual(kinds, ["executor", "executor", "executor"])
+        rc, nxt, out = self.resume()  # past the cap: T1 parks, no NEXT: for it
+        self.assertIn("PARK: T1 budget_dispatches", out.splitlines())
+        self.assertIn("STOP: budget_dispatches", out.splitlines())  # T2 ready, none left
+        self.assertEqual((rc, nxt), (3, ["NEXT: run finish"]))
+        self.assertEqual(self.st().dispatches, 3)
+
+    def test_repair_and_reviewer_lines_spend_their_kind(self):
+        self.init(n=2, parallel=2)
+        self.ok("start", "T1")
+        self.ok("start", "T2")
+        commit_in(self.st().tasks["T1"]["worktree"], "other.txt")
+        self.ok("verify", "T1")  # fail: a repair dispatch
+        commit_in(self.st().tasks["T2"]["worktree"], "t2.txt")
+        self.ok("verify", "T2")  # pass: a reviewer dispatch
+        before = self.st().dispatches
+        self.resume()
+        self.assertEqual(self.st().dispatches, before + 2)
+        self.assertEqual([e["kind"] for e in self.events("dispatch")][-2:], ["repair", "reviewer"])
+
+    # M1
+    def test_a_branch_that_moved_after_review_says_verify_and_spends_nothing(self):
+        self.init()
+        self.ok("start", "T1")
+        wt = self.st().tasks["T1"]["worktree"]
+        commit_in(wt, "t1.txt")
+        self.ok("verify", "T1")
+        self.ok("review", "T1", "--verdict", "pass")
+        commit_in(wt, "late.txt")  # the branch moves: merge sends it back to verify
+        rc, _, err = self.run_main(["merge", "T1", "--root", self.root])
+        self.assertEqual(rc, 2, err)
+        before = self.st().dispatches
+        rc, nxt, out = self.resume()
+        self.assertEqual((rc, nxt), (0, ["NEXT: T1 verify", "NEXT: run next"]))
+        self.assertEqual(self.st().dispatches, before)
 
 
 if __name__ == "__main__":
