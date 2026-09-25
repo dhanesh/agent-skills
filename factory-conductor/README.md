@@ -17,7 +17,8 @@ This is step 4 of the collection's [software factory](../README.md#software-fact
 npx skills add dhanesh/agent-skills --skill factory-conductor
 ```
 
-Install it next to `spec-first-planning`, which produces what it consumes.
+Install it next to `spec-first-planning`, which produces what it consumes. The conductor
+needs macOS or Linux; it does not start on Windows.
 
 ## Usage
 
@@ -83,7 +84,8 @@ You can stop a run at any time by revoking the grant
   whether a push or PR is still pending (`run finish`) or nothing is left (`run done`).
 - **Re-entry is local, not hosted.** The timer runs on this machine, only while it is on and
   you are logged in (a systemd user timer needs `loginctl enable-linger` to survive logout;
-  Windows is unsupported), and the agent it starts has your permissions. A session that is
+  the conductor needs macOS or Linux and does not start on Windows), and the agent it starts
+  has your permissions. A session that is
   alive but idle past `stall_min`, with no conductor call and no worktree change, can get a
   second driver: the run lock keeps the record intact, and the dispatch cap bounds the waste.
 - **Claims, not proof, to a receiver.** The run result's assertions read as CLAIMED to anyone

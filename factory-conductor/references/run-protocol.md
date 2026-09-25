@@ -1,7 +1,8 @@
 # Run protocol: the conductor.py reference
 
 `conductor.py` is the factory-conductor's state tool: stdlib Python 3.10+, git 2.31+, one file
-beside the vendored skill-contract checker. Every command takes `--root <repo>` (default `.`)
+beside the vendored skill-contract checker. It needs macOS or Linux; it does not start on
+Windows (the run lock uses `fcntl`, and process groups use `setsid`/`killpg`). Every command takes `--root <repo>` (default `.`)
 and acts on the newest run under `<root>/.skill-contract/runs/`. This page is the full
 reference; SKILL.md holds the protocol an agent follows.
 
@@ -284,8 +285,9 @@ held by another conductor command…` on stderr once after 2 s, because `verify`
 `finish` hold it while their commands run (up to 600 s each). If the wait runs out it
 prints `run locked: another conductor command holds <path>` on stderr and exits 2: run the
 same command again; the task is not at fault. The lock is released when its holder exits
-or dies (SIGKILL included), and it is not re-entrant: a verify command, `--push-cmd` or
-`--pr-cmd` that calls `conductor` on the same run waits for its own parent, then exits 2.
+or dies (SIGKILL included), and it is not re-entrant: a verify, push or PR command that
+calls the conductor on its own run blocks on the run lock until that command's own timeout
+(600 s for verify, 300 s for a remote step) kills it, and the step fails.
 
 `lease.json` says who drives the run: `{"holder", "host", "pid", "renewed_at", "n"}`.
 - A **session** lease (`holder: "session"`, `pid: null`) is written by any command. It is
@@ -355,10 +357,9 @@ Until then the timer keeps firing and prints `exhausted`; the tick after `finish
 - a systemd user timer (Linux, when `systemctl --user` works),
   `~/.config/systemd/user/factory-conductor-<run-id>.{service,timer}`, enabled with
   `enable --now`; it stops at logout unless lingering is on (`loginctl enable-linger`);
-- otherwise a crontab line tagged `# factory-conductor <run-id>`; cron cannot express a
-  literal `\%` in a path, so such a root fails the install.
-
-Windows is unsupported (`REENTRY: failed`).
+- otherwise, if `crontab` exists, a crontab line tagged `# factory-conductor <run-id>`
+  (cron cannot express a literal `\%` in a path, so such a root fails the install);
+  otherwise install prints `REENTRY: failed`.
 
 - **install** needs the newest grant's valid `reentry` block (`REENTRY: disabled`, exit 3,
   without one) and a covering `local_reversible` gate. An ASK prints the `GATE: ASK` line,

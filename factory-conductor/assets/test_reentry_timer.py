@@ -56,6 +56,15 @@ class TimerTests(unittest.TestCase):
         self.assertEqual(shlex.split(line[len("ExecStart="):]), ARGV)
         self.assertIn("OnUnitActiveSec=10min", files["factory-conductor-%s.timer" % RID])
 
+    def test_systemd_service_leaves_the_started_agent_running(self):
+        # Type=oneshot with the default KillMode=control-group kills everything left in
+        # the unit's cgroup when watch exits, the detached agent included (setsid does
+        # not leave the cgroup), so every tick would burn an attempt.
+        svc = T.render("systemd", RID, ARGV, 10)["factory-conductor-%s.service" % RID]
+        service = svc.split("[Service]", 1)[1]
+        self.assertIn("\nKillMode=process\n", service)
+        self.assertIn("\nType=oneshot\n", service)
+
     def test_cron_line_is_tagged_and_quoted(self):
         (_, line), = T.render("cron", RID, ARGV, 10).items()
         self.assertTrue(line.endswith("# factory-conductor %s" % RID))

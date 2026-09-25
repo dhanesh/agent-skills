@@ -113,8 +113,9 @@ writes the plan and the grant, and `factory-conductor` runs it. Nothing else is 
 npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor
 ```
 
-You need Python 3.10 or newer, git 2.31 or newer, an agent harness that can dispatch subagents
-(Claude Code can), and the `gh` CLI for the PR step.
+You need macOS or Linux (the conductor does not start on Windows), Python 3.10 or newer, git
+2.31 or newer, an agent harness that can dispatch subagents (Claude Code can), and the `gh` CLI
+for the PR step.
 
 1. **Plan unattended and approve the grant.** On a working branch that is not your default
    branch (for example `git switch -c factory/work`), ask `spec-first-planning` to plan the

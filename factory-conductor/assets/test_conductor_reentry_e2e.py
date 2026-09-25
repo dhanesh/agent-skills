@@ -22,6 +22,7 @@ import warnings
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 import reentry as R  # noqa: E402
+import reentry_timer as T  # noqa: E402
 from conductor_testkit import new_run, read_text, repo, tmpdir, write_grant, write_text  # noqa: E402
 from test_conductor_reentry import utc  # noqa: E402
 
@@ -67,13 +68,30 @@ for _ in range(20):
 '''
 
 
+_TIMER_ENV = ("FACTORY_CONDUCTOR_TIMER_HOME", "FACTORY_CONDUCTOR_TIMER_DRYRUN",
+              "FACTORY_CONDUCTOR_TIMER_KIND")
+_saved = {}
+
+
 def setUpModule():
-    # spawn detaches the agent on purpose; its Popen is dropped while it still runs
+    _saved["env"] = {k: os.environ.get(k) for k in _TIMER_ENV}
+    _saved["filters"] = list(warnings.filters)
+    # R.spawn drops the agent's Popen on purpose (see its docstring): the
+    # "subprocess N is still running" ResourceWarning is expected
     warnings.filterwarnings("ignore", r"subprocess \d+ is still running", ResourceWarning)
-    # watch uninstalls a finished run's timer: keep every timer call in a temp home
+    # install and watch touch timers: keep every timer call in a temp home, dry-run, cron
     os.environ["FACTORY_CONDUCTOR_TIMER_HOME"] = tmpdir()
     os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
     os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = "cron"
+
+
+def tearDownModule():
+    for k, v in _saved["env"].items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    warnings.filters[:] = _saved["filters"]
 
 
 def watch(root):
@@ -98,6 +116,9 @@ class ReentryEndToEnd(unittest.TestCase):
         # the "session" starts T1, then dies: nothing more happens
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(C.main(["start", "T1", "--root", root]), 0)
+            # the session installs the timer right after starting, as the skill says
+            self.assertEqual(C.main(["reentry", "install", "--root", root]), 0)
+        self.assertNotEqual(T.installed(st.run_id), [])
         # time passes: age the lease, the log and the worktree beyond stall_min
         R.renew_lease(st.dir, now=utc(45))
         with open(st.log_path, "a") as f:
@@ -135,6 +156,7 @@ class ReentryEndToEnd(unittest.TestCase):
         self.assertTrue(read_text(log).rstrip().endswith("NEXT: run ask"), read_text(log))
         # a later timer tick on the finished run: done (and the timer is removed)
         self.assertEqual(watch(root), (0, "REENTRY: done"))
+        self.assertEqual(T.installed(st.run_id), [])
         attempts = {e.get("n") for e in final.events() if e.get("event") == "reentry"}
         self.assertEqual(attempts, {1})
 

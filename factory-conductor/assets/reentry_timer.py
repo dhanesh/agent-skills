@@ -98,8 +98,12 @@ def render(kind, run_id, argv, interval_min):
         u = UNIT % run_id
         desc = ("factory-conductor watch %s" % run_id).replace("%", "%%")
         exec_start = " ".join(_sd_quote(a) for a in argv)
+        # KillMode=process: when watch (the oneshot's main process) exits, systemd must
+        # not kill the rest of the unit's cgroup. The agent watch started is in that
+        # cgroup (start_new_session does not leave it), and the default control-group
+        # mode would kill it at every tick.
         return {u + ".service": "[Unit]\nDescription=%s\n\n"
-                                "[Service]\nType=oneshot\nExecStart=%s\n"
+                                "[Service]\nType=oneshot\nKillMode=process\nExecStart=%s\n"
                                 % (desc, exec_start),
                 u + ".timer": "[Unit]\nDescription=%s\n\n"
                               "[Timer]\nOnBootSec=%dmin\nOnUnitActiveSec=%dmin\n\n"

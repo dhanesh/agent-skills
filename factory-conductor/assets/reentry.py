@@ -275,7 +275,12 @@ def spawn(argv, root, log_path, n):
     """Start the agent detached (its own session) in root, stdin from /dev/null and its
     output to log_path; returns its pid. ENV_REENTRY=n lets its conductor commands keep
     the reentry lease. Raises OSError (or ValueError/TypeError for an argv exec cannot
-    carry) when it cannot start."""
+    carry) when it cannot start.
+
+    The Popen object is dropped on purpose: watch exits right after, and the agent,
+    in its own session, is reparented and outlives it. Python therefore emits a
+    "subprocess N is still running" ResourceWarning when the object is collected; that
+    is expected, and test_conductor_reentry_e2e.py filters exactly that warning."""
     env = dict(os.environ, **{ENV_REENTRY: str(n)})
     with open(log_path, "ab") as out:
         p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=out,

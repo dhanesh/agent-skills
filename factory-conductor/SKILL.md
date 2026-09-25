@@ -12,7 +12,7 @@ description: >-
   the human. Not the planner (spec-first-planning), not the loop designer
   (crafting-self-prompting-loops).
 license: MIT
-compatibility: Requires python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
+compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
   version: "1.1.0"
@@ -51,8 +51,14 @@ one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REV
 `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`, `REENTRY:`,
 and `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
-refused or its input is invalid (usage errors exit 2 as well). The full reference, the state and
-log formats and a worked example are in `references/run-protocol.md`.
+refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
+and it comes before every exit-2 rule below: from any command, `run locked` on stderr
+means another conductor command held the run lock for 900 s. That says nothing about the
+step, so run the same command again: do not park a task or stop the run for it. After 3
+`run locked` retries of the same command, run `conductor status` and report instead of
+retrying further. The conductor needs macOS or Linux; it does not start on Windows. The
+full reference, the state and log formats and a worked example are in
+`references/run-protocol.md`.
 
 ## When to use
 
@@ -146,9 +152,6 @@ Each step is one command. Read its output lines, not just the exit code.
 - An exit 2 that the step's own instruction above does not cover, such as the root being off
   the run branch or dirty, a merge in progress, or a plan edited since `init`, means park it:
   `conductor park <task> --reason "<the stderr line>"`. Run an unchanged command at most twice.
-  The exception is `run locked` on stderr: another conductor command held the run lock for
-  900 s. That says nothing about the task, so run the same command again instead of parking
-  it; the retry does not count toward the two.
 - A report that does not follow its brief's format: ask that subagent once for the format.
   If it still does not follow it, treat an executor as `BLOCKED` and a reviewer as a `fail`.
 
@@ -173,7 +176,7 @@ new run (`init`) from a plan that orders or merges the two tasks.
 new envelope (its `FINISH:` line; the old one is kept as `superseded`), and pushes and opens the
 PR. If the run branch moved since the skip, the retry refuses (exit 2): the new commits were
 never reviewed, so report them for a human to check. An exit 2 saying the run branch "moved since the integration re-run" means a commit landed
-after the check: report it; the tool pushes only the verified commit. An exit 2 from `finish` (for
+after the check: report it; the tool pushes only the verified commit. An exit 2 from `finish` (except `run locked`; for
 example, the plan envelope was edited after `init`, or the grant file is gone) means report its
 stderr and stop: you MUST leave restoring the plan or the grant to a human. Once finished, the run is
 final: `finish` reprints its `INTEGRATION:` and `FINISH:` lines, `--retry-remote` still runs
@@ -236,7 +239,7 @@ install --root <repo>` right after `init`, so a timer on this machine resumes th
 this session dies. It prints `REENTRY: installed every <n> min`. Without a block it prints
 `REENTRY: disabled` (exit 3); when the grant asks it prints the `GATE: ASK` line (exit 3)
 and the run goes on without a timer. `REENTRY: failed` (exit 2) means no timer was
-installed (an unsupported platform, or a loader that failed; nothing is left behind): say
+installed (no timer kind on this system, or a loader that failed; nothing is left behind): say
 so in the run report and carry on.
 
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
@@ -246,12 +249,11 @@ under `max_reentries`. It prints one `REENTRY:` line (the words are in
 `references/run-protocol.md`). The agent it starts is a fresh session that follows "Resume
 after a crash" and stops at `NEXT: run ask` or `NEXT: run done`.
 
-Every conductor command takes the run lock and renews the lease, so two drivers never
-write at once. A command that finds the lock held waits for it, up to 900 s, and says so
-on stderr after 2 s. A verify command, a `--push-cmd` or a `--pr-cmd` MUST NOT call
-`conductor` on this run, because the command that runs it holds the lock: it would wait
-900 s and exit 2. You MUST NOT edit `lease.json` or `.lock`, because they are how a live
-session tells the timer not to start a second driver. The lease of an agent `watch`
+Every conductor command except `init` and `watch` takes the run lock and renews the lease,
+so two drivers never write at once. A command that finds the lock held waits for it, up to
+900 s, and says so on stderr after 2 s. The rule in "Hands off" covers `lease.json` and
+`.lock` too: they are how a live session tells the timer not to start a second driver. The
+lease of an agent `watch`
 started holds while its process lives on this host; no other command takes it over, a
 human's `status` included.
 
@@ -266,10 +268,11 @@ Re-entry needs this machine on and the user logged in, and it runs the user's ow
 command with the user's own permissions: it is not a hosted service. launchd (macOS) runs
 the timer only while the user is logged in, and a systemd user timer stops at logout
 unless lingering is on (`loginctl enable-linger`). cron cannot run a repository whose
-path holds a literal `\%`, so that install fails. Windows is unsupported. A session that
-is alive but has made no conductor call and no worktree change for `stall_min` looks
-stalled, and can get a second driver. The run lock prevents corruption, and the existing
-guards limit the cost to wasted dispatches. The resume prompt quotes the root inside
+path holds a literal `\%`, so that install fails. A session that is alive but has made no
+conductor call and no worktree change for `stall_min` looks stalled, and can get a second
+driver. The run lock prevents corruption, and the existing guards limit the cost to wasted
+dispatches; that session's run can also be ended by `reentry_exhausted` once
+`max_reentries` such agents have started. The resume prompt quotes the root inside
 backticks, so a root that holds a backtick garbles the prompt's code span; it reaches no
 shell.
 
