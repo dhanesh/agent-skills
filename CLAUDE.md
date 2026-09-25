@@ -63,9 +63,7 @@ both fail. `UNPROVEN` exists so a held guard can never be counted as a win, and 
 
 **The baseline is the merge base with `origin/main`** (or `main`), so a bare
 `make ab-validate` always measures *the branch under review*. Override it with
-`make ab-validate BASE=<ref>`. It used to be a hardcoded commit, which meant the
-command re-measured one historical campaign forever and said nothing about the current
-work.
+`make ab-validate BASE=<ref>`.
 
 **Adding a row:** pass `since=<a commit in the change that introduces it>` — use one of
 the `SINCE_*` constants at the top of the script, adding a new one per campaign. While
@@ -136,8 +134,6 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
 
 ## Sibling skills for auditing this kind of work
 
-- `agent-ready-rails` — is a repo ready for coding agents? (this repo scored 11/12; the gap it
-  flagged — unit tests not in CI — is now closed.)
+- `agent-ready-rails` — is a repo ready for coding agents?
 - `base-in-reality` — are the codebase's claims true against authoritative sources?
 - `crafting-self-prompting-loops` — is a single agent loop sound?
-</content>
