@@ -5,7 +5,7 @@ A lease says who drives a run. A reentry lease (an agent `watch` started) is liv
 exactly while its pid lives on this host. A session lease (any other driver) is live
 while it was renewed, or an in-flight task's worktree changed, within stall_min: an
 executor subagent can work for a long time without calling the conductor."""
-import contextlib, fcntl, json, os, socket, tempfile, time
+import contextlib, fcntl, json, os, re, socket, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
 
 LOCK_FILE = ".lock"
@@ -14,6 +14,8 @@ LEASE_FILE = "lease.json"
 # second command that gave up sooner would exit 2, and the protocol parks a task on an
 # uncovered exit 2, so the wait outlasts the longest command.
 LOCK_TIMEOUT = 900
+LOCK_NOTICE_AFTER = 2.0  # seconds of waiting before run_lock says why it is waiting
+LOCK_NOTICE = "waiting for the run lock held by another conductor command\u2026\n"
 ENV_REENTRY = "FACTORY_CONDUCTOR_REENTRY"
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -26,17 +28,30 @@ class RunLocked(Exception):
 def run_lock(run_dir, timeout=None):
     """Hold an exclusive flock on <run_dir>/.lock, so two drivers never interleave
     writes to state.json or the log. Raises RunLocked after `timeout` seconds
-    (default: the module's LOCK_TIMEOUT, read at call time so tests can shorten it)."""
+    (default: the module's LOCK_TIMEOUT, read at call time so tests can shorten it).
+    After LOCK_NOTICE_AFTER seconds of waiting it says so, once, on stderr.
+
+    Not re-entrant: nested use in one process deadlocks (until the timeout), because
+    each call opens a new file description and flock locks conflict between them. The
+    lock is released when the holder exits or dies, SIGKILL included, and its fd is
+    not inherited by child processes."""
     f = open(os.path.join(run_dir, LOCK_FILE), "a+")
     try:
-        deadline = time.monotonic() + (LOCK_TIMEOUT if timeout is None else timeout)
+        start = time.monotonic()
+        deadline = start + (LOCK_TIMEOUT if timeout is None else timeout)
+        told = False
         while True:
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     raise RunLocked(run_dir)
+                if not told and now - start >= LOCK_NOTICE_AFTER:
+                    sys.stderr.write(LOCK_NOTICE)
+                    sys.stderr.flush()
+                    told = True
                 time.sleep(0.1)
         yield
     finally:
@@ -75,11 +90,17 @@ def read_lease(run_dir):
 
 
 def renew_lease(run_dir, now=None):
-    """Renew the lease for the command running now. A command run by the agent that
-    watch started (ENV_REENTRY == the lease's n) keeps the reentry holder and its pid;
-    any other command takes the lease as a session."""
+    """Renew the lease for the command running now.
+
+    A reentry lease stays a reentry lease (holder, pid and n kept, renewed_at updated)
+    when the command is the watch-started agent's own (ENV_REENTRY == the lease's n),
+    or when that agent is still alive on this host: any other command, even a human's
+    read-only `status`, must never demote a live agent, or watch could start a second
+    driver. A session lease is written only when no live reentry agent holds the run."""
     old = read_lease(run_dir) or {}
-    if old.get("holder") == "reentry" and str(old.get("n")) == os.environ.get(ENV_REENTRY):
+    if old.get("holder") == "reentry" and (
+            str(old.get("n")) == os.environ.get(ENV_REENTRY)
+            or (old.get("host") == socket.gethostname() and pid_alive(old.get("pid")))):
         _write(run_dir, dict(old, renewed_at=_stamp(now)))
         return
     _write(run_dir, {"holder": "session", "host": socket.gethostname(), "pid": None,
@@ -91,14 +112,52 @@ def set_reentry_lease(run_dir, n, pid, now=None):
                      "renewed_at": _stamp(now), "n": n})
 
 
-def pid_alive(pid):
-    """True while process `pid` runs on this host. A zombie child of this process is
-    reaped and counts as dead; a pid that is not a positive integer is dead."""
-    try:
+def _as_pid(pid):
+    """pid as a positive int, or None: an int (not a bool) or a digit-only string."""
+    if isinstance(pid, bool):
+        return None
+    if isinstance(pid, str) and re.fullmatch(r"[0-9]+", pid):
         pid = int(pid)
-    except (TypeError, ValueError):
+    return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _exited_child(pid):
+    """True when pid is an exited but unreaped child of this process (a zombie).
+
+    Never reaps it where it can avoid that, so the child's owner (a Popen) can still
+    read its exit status:
+    - os.waitid with WNOWAIT, where Python has it (Linux), peeks without reaping;
+    - otherwise (macOS has no os.waitid) `ps -o stat=` shows a zombie as Z;
+    - only when neither works does it fall back to waitpid(WNOHANG), which reaps."""
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        try:
+            return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return False  # not our child: nothing to peek at
+        except (OSError, OverflowError):
+            pass
+    try:
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return os.waitpid(pid, os.WNOHANG) != (0, 0)
+    except ChildProcessError:
         return False
-    if pid <= 0:  # os.kill(0 or -n, 0) would probe a process group, not a process
+    except (OSError, OverflowError):
+        return False
+
+
+def pid_alive(pid):
+    """True while process `pid` runs on this host. A zombie child of this process
+    counts as dead (and is not reaped, see _exited_child). Anything that is not a
+    positive int or a digit-only string is dead: os.kill(0 or -n, 0) would probe a
+    process group, and True, 1.5 or 2**40 are not pids."""
+    pid = _as_pid(pid)
+    if pid is None:
         return False
     try:
         os.kill(pid, 0)
@@ -106,53 +165,66 @@ def pid_alive(pid):
         return False
     except PermissionError:
         return True
-    except OSError:
+    except (OSError, OverflowError):
         return False
-    try:
-        return os.waitpid(pid, os.WNOHANG) == (0, 0)
-    except ChildProcessError:  # not our child: os.kill already said it lives
-        return True
+    return not _exited_child(pid)
 
 
-def _newest_mtime(path):
-    newest = 0.0
+def _active_since(path, threshold):
+    """True as soon as anything in the worktree at `path` has an mtime at or after
+    `threshold` (a timestamp); stops at the first one. A worktree's .git is a file
+    naming its gitdir (relative to the worktree, or absolute): `git add` rewrites the
+    gitdir's index and a commit appends to its logs/HEAD (HEAD itself, a symref, is
+    not rewritten by a commit), so those count as activity too."""
+    def fresh(name):
+        try:
+            return os.stat(name).st_mtime >= threshold
+        except OSError:
+            return False
     for base, dirs, files in os.walk(path):
         dirs[:] = [d for d in dirs if d != ".git"]
-        for name in [base] + [os.path.join(base, n) for n in files]:
-            try:
-                newest = max(newest, os.stat(name).st_mtime)
-            except OSError:
-                pass
-    try:  # a worktree's .git is a file naming its gitdir; commits touch HEAD and index
+        if fresh(base) or any(fresh(os.path.join(base, n)) for n in files):
+            return True
+    try:
         with open(os.path.join(path, ".git"), encoding="utf-8") as f:
             gitdir = f.read().split("gitdir:", 1)[1].strip()
-        gitdir = os.path.join(path, gitdir)  # a relative gitdir is relative to the worktree
-        for name in ("HEAD", "index"):
-            with contextlib.suppress(OSError):
-                newest = max(newest, os.stat(os.path.join(gitdir, name)).st_mtime)
     except (OSError, IndexError):
-        pass
-    return newest
+        return False
+    gitdir = os.path.join(path, gitdir)
+    return fresh(os.path.join(gitdir, "index")) or fresh(os.path.join(gitdir, "logs", "HEAD"))
+
+
+def _parse_stamp(value):
+    try:
+        return datetime.strptime(value, _STAMP).replace(tzinfo=timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def lease_live(run_dir, lease, stall_min, worktrees, now=None):
-    """True when someone is (or may be) driving the run; when in doubt, True."""
+    """True when someone is (or may be) driving the run; when in doubt, True.
+
+    A lease that cannot be read, or whose renewed_at is missing, malformed or more
+    than the stall window in the future, is judged by the lease file's own mtime: live
+    while it was written within the window."""
     now_ts = (now or datetime.now(timezone.utc)).timestamp()
     window = stall_min * 60
-    if lease is None:
-        return False
-    if lease.get("corrupt"):
+
+    def written_recently():
         try:
             return now_ts - os.stat(os.path.join(run_dir, LEASE_FILE)).st_mtime < window
         except OSError:
             return False
+
+    if lease is None:
+        return False
+    if lease.get("corrupt"):
+        return written_recently()
     if lease.get("holder") == "reentry":
         return lease.get("host") == socket.gethostname() and pid_alive(lease.get("pid"))
-    try:
-        renewed = datetime.strptime(lease["renewed_at"], _STAMP) \
-            .replace(tzinfo=timezone.utc).timestamp()
-    except (KeyError, TypeError, ValueError):
-        return True
+    renewed = _parse_stamp(lease.get("renewed_at"))
+    if renewed is None or renewed - now_ts > window:
+        return written_recently()
     if now_ts - renewed < window:
         return True
-    return any(now_ts - _newest_mtime(w) < window for w in worktrees if os.path.isdir(w))
+    return any(_active_since(w, now_ts - window) for w in worktrees if os.path.isdir(w))
