@@ -103,6 +103,43 @@ it fresh, and file post-mortems into the same bundle.
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site-kit --skill knowledge-gardener --skill bug-autopsy
 ```
 
+### Unattended: plan to PR
+
+Two skills take an approved plan to an open pull request without you: `spec-first-planning`
+writes the plan and the grant, and `factory-conductor` runs it. Nothing else is required.
+`verifier-installer` and `test-safety-net` are optional extras that honour the same grant.
+
+```bash
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor
+```
+
+You need Python 3.10 or newer, git 2.31 or newer, an agent harness that can dispatch subagents
+(Claude Code can), and the `gh` CLI for the PR step.
+
+1. **Plan unattended and approve the grant.** On a working branch that is not your default
+   branch (for example `git switch -c factory/work`), ask `spec-first-planning` to plan the
+   feature unattended. It runs the full planning loop, asks every decision up front, writes the
+   plan as a `task-plan/v1` envelope, and shows you the grant: the action classes it covers,
+   the branch pattern, the expiry (7 days at most) and the budget. Say yes, and it writes the
+   grant. Push that working branch (`git push -u origin <branch>`): the PR targets it.
+2. **`conductor init`.** `spec-first-planning` hands the plan to `factory-conductor`, or you
+   say "run the plan". The conductor checks the plan, the grant and the branch, then runs
+   `conductor init --plan <envelope>`, which creates the run branch `factory/<plan-slug>`.
+3. **Hand off.** Walk away. For each task the conductor dispatches a fresh executor in its own
+   worktree, re-runs the task's verify commands itself, has a fresh reviewer judge the diff
+   against the requirement, and merges only what passed both. If the session dies, a new one
+   picks the run up with `conductor resume`.
+
+**What you get back:** one open PR from `factory/<plan-slug>` against your working branch,
+holding every task that passed verify and review, re-verified together on the merged branch
+before the push. The PR body and a `run-result/v1` envelope list each task's proof, and every
+parked task with its reason or its open question. If proven tasks break each other once merged,
+nothing is pushed and the run says which checks failed.
+
+**What stays with you:** merging the PR; answering parked questions; renewing the grant if it
+lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI
+configuration, which no grant covers and which always asks you.
+
 ### What happens when you install a subset
 
 - **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
