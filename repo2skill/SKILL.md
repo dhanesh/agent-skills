@@ -14,7 +14,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only, offline) plus make and a POSIX shell for the gate loop. Built for this repo's layout — the quality gates under scripts/gates were vendored from this skill — but the scaffolder runs anywhere python3 does.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "agent-skills,skill-authoring,scaffolding,prompting-playbook,quality-gates,code-review"
 ---
 
@@ -66,8 +66,8 @@ sections are orthogonal, the deliverable is a real contract, each absolute is ju
 ## Workflow
 
 1. **Scope the skill.** Pin down, in a few lines: the kebab-case name (= directory
-   name, ≤ 64 chars), the trigger surface (the phrasings a user would actually say,
-   which become the description), the named deliverable, and the boundaries against
+   name, ≤ 64 chars), the trigger surface (the kinds of request that should fire it,
+   in the user's words, which become the description), the named deliverable, and the boundaries against
    sibling skills — which adjacent jobs this skill refuses and who owns them. If the
    promise or the deliverable can't be stated in one sentence each, the skill isn't
    scoped yet.

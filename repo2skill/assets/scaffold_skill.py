@@ -70,7 +70,7 @@ def validate_name(name):
 SKILL_MD = string.Template('''\
 ---
 name: $name
-description: "TODO(repo2skill): one clause on what $name does and the outcome it produces. Use when the user says 'TODO trigger phrasing' or 'TODO another concrete phrasing'. Not for TODO-adjacent-job — use TODO-sibling-skill for that."
+description: "TODO(repo2skill): one clause on what $name does and the outcome it produces. Use when TODO-kind-of-request (e.g. 'TODO one phrasing in the user's words'). Not for TODO-adjacent-job — use TODO-sibling-skill for that."
 license: MIT
 compatibility: TODO(repo2skill) one-liner on runtime requirements (default assumption python3, stdlib only, offline).
 metadata:
