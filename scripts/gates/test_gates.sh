@@ -468,5 +468,22 @@ reg_case "a \`\`\`\` span with backticks after it is inline code, not a fence" F
   "$(mkreg infostr '' 'Use the component, not a' '   ```` ```mermaid ```` block.' '' 'You MUST NOT skip this.')" "unregistered"
 reg_case "a skill with no register section fails" FAIL \
   "$(mkreg nosection NOSECTION 'Plain prose has no keyword.')" "section"
+# A row whose quoted text matches no sentence in the skill any more is an orphan:
+# it records a keyword level for nothing, and hid three stale rows until this
+# check. A row that describes deliberately removed text says so in its line
+# column (`removed`), and then its text must really be gone.
+ROW_GONE='| c2 | 12 | You MUST NOT do the thing that was deleted. | MUST (0.90, 0.80) | MUST |  |'
+ROW_REMOVED='| c2 | removed | You MUST NOT do the thing that was deleted. | MUST (0.90, 0.80) | MUST | removed 2026-09 |'
+reg_case "a row quoting no current sentence fails" FAIL \
+  "$(mkreg orphan "$ROW_MUST
+$ROW_GONE" 'You MUST check the thing before you ship it.')" "orphan"
+reg_case "a row marked removed passes when its text is gone" PASS \
+  "$(mkreg removed "$ROW_MUST
+$ROW_REMOVED" 'You MUST check the thing before you ship it.')"
+reg_case "a row marked removed fails while its text is still there" FAIL \
+  "$(mkreg notgone "$ROW_MUST
+$ROW_REMOVED" 'You MUST check the thing before you ship it.' 'You MUST NOT do the thing that was deleted.')" "removed"
+reg_case "a table-separator row matches its raw line" PASS \
+  "$(mkreg sep '| c1 | 9 | \|---\|---\| | plain (0.80, 0.10) | plain | table separator |' '| a | b |' '|---|---|' '| 1 | 2 |')"
 
 exit $rc

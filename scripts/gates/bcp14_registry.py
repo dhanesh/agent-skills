@@ -13,14 +13,18 @@ skipped:
       (MUST family > SHOULD family > MAY; "plain" covers none);
   (c) no lowercase "must" or "shall" appears as a word (RFC 8174 gives lowercase no
       normative meaning, so a lowercase one reads as a rule and carries none);
-  (d) every skill has a section in the register, even one with no candidates.
+  (d) every skill has a section in the register, even one with no candidates;
+  (e) every row quotes a sentence the skill still has, in prose or inside a fence (no
+      orphans). A row that records text deliberately removed from the skill says so
+      with `removed` in its line column, and then its text has to be gone.
 
 How a row matches (the register's `line` column is informational, never read):
   - Text on both sides is normalised: markdown emphasis (*), backticks and backslash
     escapes are dropped, whitespace is collapsed, and a leading list, table or quote
     marker is ignored.
   - A row's quoted sentence ends at its first "…"; text after it is elided, so such a
-    row is "truncated".
+    row is "truncated". A row whose text normalises to under MIN_PREFIX characters (a
+    table separator, say) matches a SKILL.md line equal to its unescaped text.
   - A row anchors wherever its prefix occurs in a block (a paragraph, list item,
     heading or table row), or where the block's tail is a prefix of the row's text.
   - A truncated row covers from its anchor to the end of the block. A full row covers
@@ -34,7 +38,7 @@ How a row matches (the register's `line` column is informational, never read):
 Usage: bcp14_registry.py [--root DIR] [--register FILE] [--counts]
 Prints one FAIL: <skill> <reason>: <sentence prefix> line per problem, then
 BCP14_RESULT: PASS or BCP14_RESULT: FAIL (n); exits 1 on failure, 2 on usage errors.
---counts prints BCP14_COUNTS: unregistered=<n> level=<n> lowercase=<n> section=<n>
+--counts prints BCP14_COUNTS: unregistered=<n> level=<n> lowercase=<n> section=<n> orphan=<n>
 and exits 0; scripts/ab-validate.py uses it to measure both trees with one checker.
 stdlib only, offline, deterministic.
 """
@@ -185,7 +189,8 @@ def parse_register(path):
                 continue
             prefix, truncated = row_prefix(cells[2])
             cur.append({"id": cells[0], "sentence": cells[2], "final": cells[4],
-                        "level": family(cells[4]), "prefix": prefix, "truncated": truncated})
+                        "level": family(cells[4]), "prefix": prefix, "truncated": truncated,
+                        "removed": cells[1].strip().lower() == "removed"})
     return sections
 
 
@@ -233,6 +238,23 @@ def check_skill(skill, skill_md, rows):
     if rows is None:
         problems.append(("section", "no section in the register (add one, even with 0 candidates)"))
         rows = []
+    texts = [normalise(raw)[0] for raw in blocks(body)]
+    raw_lines = {ln.strip() for ln in body}
+    # A row may quote text inside a fenced template (an executor brief, say): the
+    # keyword gate skips fences, but the row still has to quote something real.
+    whole = normalise(" ".join(QUOTE.sub("", ln).strip() for ln in body))[0]
+    for r in rows:
+        if len(r["prefix"]) >= MIN_PREFIX:
+            present = any(anchors(r, t) for t in texts) or r["prefix"] in whole
+        else:
+            present = r["sentence"].replace("\\|", "|").strip() in raw_lines
+        if r["removed"] and present:
+            problems.append(("removed", "row %s is marked removed but its text is still in SKILL.md: %s"
+                             % (r["id"], r["sentence"])))
+        elif not r["removed"] and not present:
+            problems.append(("orphan", "row %s quotes no current sentence (re-quote it or mark it "
+                             "`removed`): %s" % (r["id"], r["sentence"])))
+    rows = [r for r in rows if not r["removed"]]
     for raw in blocks(body):
         text, masked = normalise(raw)
         for m in LOWER.finditer(masked):
@@ -297,9 +319,9 @@ def main(argv):
         print("BCP14_RESULT: FAIL (1)")
         return 1
     if args.counts:
-        n = {k: 0 for k in ("unregistered", "level", "lowercase", "section")}
+        n = {k: 0 for k in ("unregistered", "level", "lowercase", "section", "orphan")}
         for _, reason, _ in found:
-            n[reason] += 1
+            n["orphan" if reason == "removed" else reason] += 1
         print("BCP14_COUNTS: " + " ".join("%s=%d" % kv for kv in n.items()))
         return 0
     for s, reason, sentence in found:

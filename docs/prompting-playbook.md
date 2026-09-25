@@ -149,4 +149,5 @@ Lowercase keeps its plain-English meaning. PP-5 treats every MUST NOT as an abso
 - every capitalised keyword needs a register row at the level the text uses;
 - rows match on the sentence's text, so a reworded sentence needs its row re-quoted;
 - every skill needs a section;
+- every row has to quote text the skill still has (in prose or inside a fence). A row kept as the record of deliberately removed text says `removed` in its line column, and its text must then be gone;
 - SKILL.md prose must not use a lowercase "must" or "shall". It reads as a rule but carries no BCP 14 meaning. Make it a keyword with a row, or reword it as plain prose that states no rule.
