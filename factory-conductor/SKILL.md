@@ -165,9 +165,10 @@ the human fixes the conflict by hand on the run branch and pushes it themselves,
 new run (`init`) from a plan that orders or merges the two tasks.
 `INTEGRATION: skipped grant_ask` and `STOP: grant_ask` (exit 3) mean the grant lapsed before
 `finish`, so no check ran and nothing is pushed: report it. Once the user renews the grant,
-`conductor finish --retry-remote` runs the integration on the run branch's current head, writes a
+`conductor finish --retry-remote` runs the integration on the head the skip recorded, writes a
 new envelope (its `FINISH:` line; the old one is kept as `superseded`), and pushes and opens the
-PR. An exit 2 saying the run branch "moved since the integration re-run" means a commit landed
+PR. If the run branch moved since the skip, the retry refuses (exit 2): the new commits were
+never reviewed, so report them for a human to check. An exit 2 saying the run branch "moved since the integration re-run" means a commit landed
 after the check: report it; the tool pushes only the verified commit. An exit 2 from `finish` (for
 example, the plan envelope was edited after `init`, or the grant file is gone) means report its
 stderr and stop: you MUST leave restoring the plan or the grant to a human. Once finished, the run is
@@ -206,12 +207,13 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
 - `NEXT: <task> merge`: run `conductor merge <task>`. If a crash hit after the merge reached
   the run branch, `merge` finds that merge, records the task as proven and prints `MERGE:`.
 - `NEXT: run next`: carry on with the loop from step 2.
-- `NEXT: run ask`: the grant asks (`GATE: ASK`, `STOP: grant_ask`). Report it to the user and
-  wait; once they renew the grant, run `conductor resume` again.
+- `NEXT: run ask`: the grant asks (`GATE: ASK`, `STOP: grant_ask`; on a finished run, the
+  gate of its pending push or PR). Report it to the user and wait; once they renew the
+  grant, run `conductor resume` again.
 - `NEXT: run finish`: the run is stopped (its `STOP:` line says why, and `resume` records a
   stop rule that fires, as `next` does) or nothing is left to do: go to "Ending the run". On
-  a finished run (resume prints its `FINISH:` line) it means a remote step is pending: run
-  `conductor finish --retry-remote`.
+  a finished run (resume prints its `FINISH:` line) it means a remote step is pending and
+  its gate now covers it: run `conductor finish --retry-remote`.
 - `NEXT: run done`: the run is finished and nothing is left to run: report it.
 
 Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer` line spends one dispatch

@@ -175,7 +175,9 @@ task cannot be parked.
 
 Prints the last recorded event, re-checks `local_reversible`, and prints `READY:`, then the
 exact next action as `NEXT:` lines (see "Resume" below). It lifts a `grant_ask` stop once a
-grant covers the run again. While the grant still asks it prints `GATE: ASK`,
+grant covers the run again. A stop that a crashed `finish` recorded over an earlier one (it
+carries `prior`) is first undone to that earlier stop, so a sticky stop such as
+`new_human_decision` is never lifted by a renewed grant. While the grant still asks it prints `GATE: ASK`,
 `STOP: grant_ask` and `NEXT: run ask` (exit 3): a human renews the grant, then `resume` runs
 again. Any other stop stays, and `resume` exits 3 with its `STOP:` line and
 `NEXT: run finish`. Like `next`, it records a stop rule that fires (`budget_wall_clock`,
@@ -183,9 +185,10 @@ again. Any other stop stays, and `resume` exits 3 with its `STOP:` line and
 A `running` or `verifying` task whose worktree is gone parks with `worktree-missing`. Each
 `dispatch-*` line spends a dispatch (logged as `dispatch` with `resume: true`); a task past
 `max_dispatches` parks with `budget_dispatches` and gets no line. It logs a `resume` event.
-On a finished run it prints `FINISH: <envelope>` and exits 0 with `NEXT: run finish` while a
-remote step is pending (run `finish --retry-remote`), `NEXT: run done` when every step is done
-or the integration was red, and, for an integration skipped because the grant asked,
+On a finished run it prints `FINISH: <envelope>` and exits 0. A pending remote step is gated
+first (`push_branch` or `open_pr`, logged): `NEXT: run finish` when it is covered (run
+`finish --retry-remote`), `NEXT: run ask` while it asks. `NEXT: run done` when every step is
+done or the integration was red, and, for an integration skipped because the grant asked,
 `NEXT: run finish` once a grant covers the run again or `NEXT: run ask` until then.
 
 ### finish
@@ -209,8 +212,10 @@ or the integration was red, and, for an integration skipped because the grant as
   records `integration: {head, passed: false, skipped: "<the GATE line>", runs: []}`, records
   the stop `grant_ask` (with `previous`), writes the envelope, prints `STOP: grant_ask` and
   exits 3; nothing is pushed. `finish --retry-remote` on such a run re-gates: while the grant
-  still asks it prints `STOP: grant_ask` (exit 3) and writes nothing; once a grant covers the
-  run it re-runs the integration on the run branch's current head, logs it, writes a new
+  still asks it prints `STOP: grant_ask` (exit 3) and writes nothing. It re-verifies only the
+  head the skip recorded: a run branch that moved since is refused (exit 2, a `push_refused`
+  event, "a human must check the new commits"), because no task review covered the new
+  commits. Once a grant covers the run it re-runs the integration on that head, logs it, writes a new
   envelope (a new id, whose log prefix covers that `integration` event), keeps the old path
   as `finished.superseded`, and goes on to the push and the PR. A red re-run stops with
   `integration_red` as above.
@@ -326,7 +331,8 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `NEXT: run next` | work is in flight, or a task is ready | carry on with the loop (`conductor next`) |
 | `NEXT: run ask` | the grant asks, now or as a `grant_ask` stop it still does not lift | report it to the user and wait; once they renew the grant, run `conductor resume` again |
 | `NEXT: run finish` | the run is stopped for any other reason (its `STOP:` line says why), or nothing is in flight and nothing is ready (resume records that stop, as `next` would) | `conductor finish`; a stopped run prints no task lines, because it takes no further step and `finish` parks its in-flight tasks |
-| `FINISH: …`, `NEXT: run finish` | the run is finished and a remote step is pending (or a skipped integration can now run) | `conductor finish --retry-remote` |
+| `FINISH: …`, `NEXT: run finish` | the run is finished and a remote step is pending whose gate covers it (or a skipped integration can now run) | `conductor finish --retry-remote` |
+| `FINISH: …`, `NEXT: run ask` | the run is finished, and the pending push or PR (or the skipped integration) is asked by its gate | report it; once the user renews the grant, `conductor resume` again |
 | `FINISH: …`, `NEXT: run done` | the run is finished: every step done, or the integration was red | report it; nothing is left to run |
 | `PARK: <task> worktree-missing` | `running` or `verifying`, its worktree is gone | nothing: the task is done for this run |
 | `PARK: <task> budget_dispatches` | the dispatch this line would spend is past `max_dispatches` | nothing: the task is done for this run |
