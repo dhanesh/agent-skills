@@ -68,7 +68,7 @@ Practical sequence for a fresh joint setup:
 
 1. Pick a non-colliding layout (see above; both `--global` is the simplest).
 2. Run either installer, then the other. Each runs its own test suite as an install gate
-   (27 tests for this kit, 108 for the world model) — expect both green.
+   (27 tests for this kit; world-model-ledger's own suite for the other) — expect both green.
 3. Restart Claude Code once, after the second install, so all hooks load together.
 
 Without `jq`: after each install, manually merge the emitted `settings.hooks.json` into
@@ -123,7 +123,7 @@ jq '.hooks | map_values(length)' .claude/settings.json            # project inst
 
 # 2. Both install gates green ($CH / $WM = each kit's home dir):
 python3 "$CH/test_context_ledger.py"     # 27 tests OK
-python3 "$WM/test_world_model.py"        # 79 tests OK
+python3 "$WM/test_world_model.py"        # all tests OK
 
 # 3. Both Stop hooks answer the lifecycle protocol (each must print {"continue": true}):
 printf '{"cwd":"%s","transcript_path":"/dev/null"}' "$PWD" | "$CH/hooks/stop.sh"
