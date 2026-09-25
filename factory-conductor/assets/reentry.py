@@ -6,7 +6,11 @@ exactly while its pid lives on this host. A session lease (any other driver) is 
 while it was renewed, or an in-flight task's worktree changed, within stall_min: an
 executor subagent can work for a long time without calling the conductor."""
 import contextlib, fcntl, json, os, re, socket, subprocess, sys, tempfile, time
+import shlex
 from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contract_check as CC  # noqa: E402  (the vendored skill-contract checker, same dir)
 
 LOCK_FILE = ".lock"
 LEASE_FILE = "lease.json"
@@ -228,3 +232,49 @@ def lease_live(run_dir, lease, stall_min, worktrees, now=None):
     if now_ts - renewed < window:
         return True
     return any(_active_since(w, now_ts - window) for w in worktrees if os.path.isdir(w))
+
+
+# Fixed here, never read from a plan or a grant, so neither can inject text into it.
+RESUME_PROMPT = (
+    "You are resuming a factory-conductor run in {root}. Load the factory-conductor skill. "
+    "Run `conductor resume --root {root}` and do exactly what each NEXT: line says, as the "
+    "skill's resume section describes, until resume prints `NEXT: run done` or "
+    "`NEXT: run ask`. On `NEXT: run ask`, stop: do not finish the run and do not ask "
+    "anyone. Do nothing the skill does not tell you to do.")
+
+
+def decide(finished, stopped_reason, covered, block, live, idle_min, count):
+    """The watch decision; the first failing check wins, in spec section 3's order."""
+    if finished:
+        return "done"
+    if stopped_reason == "grant_ask":
+        return "waiting-human"
+    if not covered:
+        return "ask"
+    if not block:
+        return "disabled"
+    if live:
+        return "live"
+    if idle_min < block.get("stall_min", CC.REENTRY_DEFAULTS["stall_min"]):
+        return "not-stalled"
+    if count >= block.get("max_reentries", CC.REENTRY_DEFAULTS["max_reentries"]):
+        return "exhausted"
+    return "start"
+
+
+def expand_agent_cmd(argv, root):
+    """agent_cmd with each whole {prompt} token replaced by the resume prompt and each
+    whole {root} token by root. Nothing else is substituted: the argv never meets a shell."""
+    prompt = RESUME_PROMPT.format(root=shlex.quote(root))
+    return [prompt if a == "{prompt}" else root if a == "{root}" else a for a in argv]
+
+
+def spawn(argv, root, log_path, n):
+    """Start the agent detached (its own session) in root, stdin from /dev/null and its
+    output to log_path; returns its pid. ENV_REENTRY=n lets its conductor commands keep
+    the reentry lease. Raises OSError when it cannot start."""
+    env = dict(os.environ, **{ENV_REENTRY: str(n)})
+    with open(log_path, "ab") as out:
+        p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    return p.pid

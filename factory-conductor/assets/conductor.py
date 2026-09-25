@@ -192,7 +192,8 @@ STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", 
 # integration_red is recorded by finish: the merged run branch failed a proven task's
 # own checks, so it is never pushed.
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
-                "new_human_decision", "no_ready_tasks", "integration_red")
+                "new_human_decision", "no_ready_tasks", "integration_red",
+                "reentry_exhausted")
 DEFAULT_PARALLEL = 2
 DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
@@ -464,6 +465,23 @@ class State:
             except ValueError:
                 continue
         return None
+
+    def events(self):
+        """Every complete event in the log, oldest first; a torn line is skipped."""
+        try:
+            with open(self.log_path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            return []
+        out = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
 
     def set_status(self, task, status, **fields):
         """Set a task's status and fields. Parking a task blocks every transitive dependent."""
@@ -2679,6 +2697,99 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
     return 0
 
 
+# watch's wait for the run lock. A timer tick must never hang: a lock held longer means
+# another conductor command is running right now, which is a live run.
+WATCH_LOCK_TIMEOUT = 5
+
+
+def _idle_min(st):
+    """Minutes since the last complete log event (a huge number when there is none)."""
+    last = st.last_event()
+    try:
+        at = _dt.datetime.strptime(last["at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc)
+    except (TypeError, KeyError, ValueError):
+        return 10 ** 6
+    return (_now() - at).total_seconds() / 60
+
+
+def _reentry_block(root):
+    """The newest grant's valid reentry block with the defaults filled in, or None.
+    Whether that grant covers the run at all is the gate's call, not this one's."""
+    path = CC.latest_grant(root)
+    doc, err = CC.load_envelope(path) if path else (None, ["no grant"])
+    pred = (doc or {}).get("predicate") if isinstance(doc, dict) else None
+    pay = pred.get("payload") if isinstance(pred, dict) else None
+    block = pay.get("reentry") if isinstance(pay, dict) else None
+    if err or not block or CC.reentry_problems(block):
+        return None
+    return dict(CC.REENTRY_DEFAULTS, **block)
+
+
+def cmd_watch(args):
+    """One re-entry check (spec: scheduled re-entry, section 3); prints one REENTRY: line.
+
+    watch takes the run lock itself, for at most WATCH_LOCK_TIMEOUT seconds, and never
+    renews the lease: it is a timer, not a driver."""
+    root = os.path.abspath(args.root)
+    d = current_run(root)
+    if d is None:
+        print("REENTRY: no-run")
+        return 0
+    try:
+        with R.run_lock(d, timeout=WATCH_LOCK_TIMEOUT):
+            return _watch_locked(root, d)
+    except R.RunLocked:
+        print("REENTRY: live")  # another conductor command is running right now
+        return 0
+
+
+def _watch_locked(root, d):
+    try:
+        st = State.load(os.path.join(d, STATE_FILE))
+    except StateError as e:
+        sys.stderr.write("cannot read the run state in %s: %s\n" % (d, e))
+        print("REENTRY: failed")
+        return 2
+    block = _reentry_block(root)
+    rc, last = gate(root, "local_reversible", plan_subject(st))
+    covered, _ = gate_line(rc, last)  # the judgment every gate makes; nothing is logged
+    worktrees = [t["worktree"] for t in st.tasks.values()
+                 if t.get("status") in ("running", "verifying") and t.get("worktree")]
+    stall = (block or CC.REENTRY_DEFAULTS)["stall_min"]
+    old_lease = R.read_lease(d)
+    live = R.lease_live(d, old_lease, stall, worktrees)
+    count = sum(1 for e in st.events() if e.get("event") == "reentry")
+    verdict = R.decide(bool(st.finished), (st.stopped or {}).get("reason"), covered, block,
+                       live, _idle_min(st), count)
+    if verdict == "done":
+        import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+        T.uninstall(st.run_id)
+    if verdict == "exhausted" and (st.stopped or {}).get("reason") != "reentry_exhausted":
+        # _record_stop without its STOP: line: watch prints exactly one REENTRY: line
+        detail = "max_reentries=%d" % block["max_reentries"]
+        st.stopped = {"reason": "reentry_exhausted", "at": _rfc3339(_now()), "detail": detail}
+        st.save()
+        st.log("stop", reason="reentry_exhausted", detail=detail)
+    if verdict != "start":
+        print("REENTRY: %s" % verdict)
+        return 0
+    n = count + 1
+    argv = R.expand_agent_cmd(block["agent_cmd"], root)
+    # the log records the argv with {prompt} left unexpanded: the prompt never reaches it
+    shown = [root if a == "{root}" else a for a in block["agent_cmd"]]
+    try:
+        pid = R.spawn(argv, root, os.path.join(d, "reentry-%d.log" % n), n)
+    except OSError as e:
+        st.log("reentry", n=n, ok=False, argv=shown, error=str(e), replaced=old_lease)
+        print("REENTRY: failed")
+        return 2
+    R.set_reentry_lease(d, n, pid)
+    st.log("reentry", n=n, ok=True, argv=shown, pid=pid, replaced=old_lease)
+    print("REENTRY: started %d pid=%d" % (n, pid))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2699,6 +2810,9 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("watch")
+    s.add_argument("--root", default=".")
+    s.set_defaults(fn=cmd_watch, no_lock=True)  # takes the lock itself; never renews the lease
     s = sub.add_parser("finish")
     s.add_argument("--root", default=".")
     s.add_argument("--push-cmd", default=None)

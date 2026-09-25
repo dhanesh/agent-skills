@@ -4,7 +4,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reentry as R
 import conductor as C
-from conductor_testkit import GIT, new_run, repo, tmpdir
+from conductor_testkit import GIT, new_run, repo, revoke, tmpdir, write_grant
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOLDER = ("import sys,time;sys.path.insert(0,%r);import reentry as R\n"
@@ -354,6 +354,238 @@ class WiringTests(unittest.TestCase):
         found = [os.path.join(b, n) for b, _, fs in os.walk(root) for n in fs
                  if n == R.LOCK_FILE]
         self.assertEqual(found, [])
+
+
+class DecideTests(unittest.TestCase):
+    B = {"agent_cmd": ["a", "{prompt}"], "stall_min": 30, "max_reentries": 5}
+
+    def d(self, **kw):
+        a = dict(finished=False, stopped_reason=None, covered=True, block=self.B,
+                 live=False, idle_min=60, count=0)
+        a.update(kw)
+        return R.decide(**a)
+
+    def test_each_branch_in_spec_order(self):
+        self.assertEqual(self.d(finished=True), "done")
+        self.assertEqual(self.d(stopped_reason="grant_ask"), "waiting-human")
+        self.assertEqual(self.d(covered=False), "ask")
+        self.assertEqual(self.d(block=None), "disabled")
+        self.assertEqual(self.d(live=True), "live")
+        self.assertEqual(self.d(idle_min=29), "not-stalled")
+        self.assertEqual(self.d(count=5), "exhausted")
+        self.assertEqual(self.d(), "start")
+
+    def test_finished_wins_over_everything(self):
+        self.assertEqual(self.d(finished=True, covered=False, live=True), "done")
+
+    def test_a_stopped_run_other_than_grant_ask_is_still_resumed(self):
+        self.assertEqual(self.d(stopped_reason="no_ready_tasks"), "start")
+
+    def test_missing_limits_fall_back_to_the_checker_defaults(self):
+        block = {"agent_cmd": ["a", "{prompt}"]}
+        stall = C.CC.REENTRY_DEFAULTS["stall_min"]
+        most = C.CC.REENTRY_DEFAULTS["max_reentries"]
+        self.assertEqual(self.d(block=block, idle_min=stall - 1), "not-stalled")
+        self.assertEqual(self.d(block=block, idle_min=stall, count=most), "exhausted")
+        self.assertEqual(self.d(block=block, idle_min=stall, count=most - 1), "start")
+
+
+class PromptTests(unittest.TestCase):
+    def test_the_prompt_and_root_are_substituted_whole(self):
+        argv = R.expand_agent_cmd(["agent", "-p", "{prompt}", "--cwd", "{root}"], "/r o")
+        self.assertEqual(argv[:2], ["agent", "-p"])
+        self.assertIn("conductor resume --root '/r o'", argv[2])
+        self.assertEqual(argv[3:], ["--cwd", "/r o"])
+
+    def test_a_token_inside_a_longer_argument_is_left_alone(self):
+        self.assertEqual(R.expand_agent_cmd(["a", "x{prompt}", "{root}/y"], "/r"),
+                         ["a", "x{prompt}", "{root}/y"])
+
+
+def setUpModule():
+    # watch uninstalls a finished run's timer: keep every timer call in a temp home
+    os.environ["FACTORY_CONDUCTOR_TIMER_HOME"] = tmpdir()
+    os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
+    os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = "cron"
+
+
+STUB = ("import os,sys,time;open(sys.argv[1],'a').write(os.environ.get("
+        "'FACTORY_CONDUCTOR_REENTRY','?')+'\\n');time.sleep(float(sys.argv[2]))")
+
+
+def run_watch(root):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = C.main(["watch", "--root", root])
+    return rc, buf.getvalue().strip()
+
+
+class WatchTests(unittest.TestCase):
+    def setUp(self):
+        self.root = repo()
+        self.st, self.plan = new_run(self.root, PLAN)
+        self.marker = os.path.join(tmpdir(), "started")
+
+    def tearDown(self):
+        # stop the agent a watch started (it sleeps), so none outlives the suite; spawn
+        # gave it its own session, so its pid is its process group
+        lease = R.read_lease(self.st.dir) or {}
+        if lease.get("holder") == "reentry" and R.pid_alive(lease.get("pid")):
+            with contextlib.suppress(OSError):
+                os.killpg(lease["pid"], signal.SIGKILL)
+
+    def grant(self, sleep=30, **block):
+        b = {"agent_cmd": [sys.executable, "-c", STUB, self.marker, str(sleep), "{prompt}"],
+             "stall_min": 30, "max_reentries": 2}
+        b.update(block)
+        write_grant(self.root, self.plan, reentry=b)
+
+    def age(self, minutes=45):
+        old = time.time() - minutes * 60
+        for name in (self.st.log_path, os.path.join(self.st.dir, R.LEASE_FILE)):
+            if os.path.exists(name):
+                os.utime(name, (old, old))
+        R.renew_lease(self.st.dir, now=utc(minutes))
+        # rewrite the last log line's timestamp too: watch reads the last event's `at`
+        with open(self.st.log_path, "a") as f:
+            f.write(json.dumps({"at": utc(minutes).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "event": "aged"}) + "\n")
+
+    def started(self):
+        time.sleep(0.5)
+        if not os.path.exists(self.marker):
+            return []
+        with open(self.marker) as f:
+            return f.read().split()
+
+    def test_no_run(self):
+        self.assertEqual(run_watch(repo()), (0, "REENTRY: no-run"))
+
+    def test_disabled_without_a_block(self):
+        write_grant(self.root, self.plan)
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: disabled"))
+
+    def test_a_grant_with_a_shell_agent_cmd_starts_nothing(self):
+        # the checker rejects the whole grant (Task 1), so it no longer covers the run
+        self.grant(agent_cmd=["sh", "-c", "x", "{prompt}"])
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
+        self.assertEqual(self.started(), [])
+
+    def test_a_fresh_run_is_not_stalled(self):
+        self.grant()  # no lease yet (new_run skips main), but init was logged just now
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: not-stalled"))
+
+    def test_watch_never_writes_the_lease(self):
+        self.grant()
+        run_watch(self.root)
+        self.assertIsNone(R.read_lease(self.st.dir))
+
+    def test_a_live_session_lease_blocks_re_entry(self):
+        self.grant()
+        self.age()
+        R.renew_lease(self.st.dir)  # a session just ran a conductor command
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+        self.assertEqual(self.started(), [])
+
+    def test_a_held_run_lock_is_live_within_seconds(self):
+        self.grant()
+        self.age()
+        p = hold(self.st.dir, 30)
+        try:
+            t0 = time.monotonic()
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+            self.assertLess(time.monotonic() - t0, 10)
+        finally:
+            p.kill(); p.wait()
+        self.assertEqual(self.started(), [])
+
+    def test_a_stalled_run_starts_the_agent_once(self):
+        self.grant()
+        self.age()
+        rc, out = run_watch(self.root)
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, r"^REENTRY: started 1 pid=\d+$")
+        self.assertEqual(self.started(), ["1"])
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))  # its pid lives
+        ev = [json.loads(l) for l in open(self.st.log_path) if '"reentry"' in l]
+        self.assertEqual((ev[-1]["n"], ev[-1]["ok"]), (1, True))
+        self.assertNotIn(R.RESUME_PROMPT[:20], json.dumps(ev[-1]))  # prompt elided
+        self.assertIn("{prompt}", ev[-1]["argv"])
+        lease = R.read_lease(self.st.dir)
+        self.assertEqual((lease["holder"], lease["n"], lease["pid"]),
+                         ("reentry", 1, ev[-1]["pid"]))
+        self.assertTrue(os.path.exists(os.path.join(self.st.dir, "reentry-1.log")))
+
+    def test_no_part_of_the_prompt_reaches_the_log(self):
+        self.grant()
+        self.age()
+        run_watch(self.root)
+        with open(self.st.log_path) as f:
+            log = f.read()
+        fragments = [p.strip() for p in R.RESUME_PROMPT.split("{root}")]
+        self.assertEqual(len(fragments), 3)
+        for frag in fragments:
+            for piece in frag.split(". "):
+                if len(piece) > 12:
+                    self.assertNotIn(piece, log)
+
+    def test_waiting_on_the_human_starts_nothing(self):
+        self.grant()
+        st = C.State.load(self.st.state_path)
+        st.stopped = {"reason": "grant_ask", "at": "t", "detail": "x"}
+        st.save()
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: waiting-human"))
+        self.assertEqual(self.started(), [])
+
+    def test_a_finished_run_is_done(self):
+        self.grant()
+        st = C.State.load(self.st.state_path)
+        st.finished = {"at": "t"}
+        st.save()
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: done"))
+        self.assertEqual(self.started(), [])
+
+    def test_a_revoked_grant_starts_nothing(self):
+        self.grant()
+        revoke(self.root)
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
+        self.assertEqual(self.started(), [])
+
+    def test_exhaustion_records_a_stop(self):
+        self.grant(sleep=0, max_reentries=1)
+        self.age(); run_watch(self.root); time.sleep(0.5)
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: exhausted"))
+        self.assertEqual(C.State.load(self.st.state_path).stopped["reason"], "reentry_exhausted")
+        self.assertIn("reentry_exhausted", C.STOP_REASONS)
+        with open(os.path.join(HERE, "schemas", "run-result.v1.json")) as f:
+            self.assertIn("reentry_exhausted", f.read())
+
+    def test_a_missing_binary_fails_and_still_counts(self):
+        self.grant(agent_cmd=["/nonexistent/agent", "{prompt}"], max_reentries=1)
+        self.age()
+        rc, out = run_watch(self.root)
+        self.assertEqual((rc, out), (2, "REENTRY: failed"))
+        self.age()
+        self.assertEqual(run_watch(self.root)[1], "REENTRY: exhausted")
+
+    def test_overlapping_watches_start_one_agent(self):
+        self.grant()
+        self.age()
+        here = os.path.dirname(os.path.abspath(C.__file__))
+        code = ("import sys;sys.path.insert(0,%r);import conductor as C;"
+                "sys.exit(C.main(['watch','--root',%r]))" % (here, self.root))
+        ps = [subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+              for _ in range(3)]
+        outs = [p.communicate()[0].strip() for p in ps]
+        self.assertEqual(sum(o.startswith("REENTRY: started") for o in outs), 1, outs)
+        self.assertEqual(self.started(), ["1"])
 
 
 if __name__ == "__main__":
