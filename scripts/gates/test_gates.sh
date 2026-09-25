@@ -343,6 +343,59 @@ pp7_case "SHALL inside a ~~~ fence is ignored" PASS "$(mkbcp tilde "$DECL" '' 'Y
 pp7_case "a \`\`\`\` fence wrapping \`\`\` is one block" PASS "$(mkbcp fourbt "$DECL" '' 'You MUST check it.' '````md' '```' 'SHALL' '```' '````')"
 pp7_case "a declaration only inside a code fence does not count" FAIL "$(mkbcp declfence '```' "$DECL" '```' 'You MUST check it.')"
 pp7_case "SHALL after the declaration on its line is caught" FAIL "$(mkbcp declsame "$DECL You SHALL check it." 'You MUST check it.')"
+# CommonMark: a backtick fence's info string cannot contain a backtick, so a line
+# opening with ```` followed by more backticks is inline code, not a fence. PP-7
+# once read it as an opener and skipped the rest of starlight-handbook-kit's body.
+pp7_case "a \`\`\`\` span with backticks after it is inline code, not a fence" FAIL \
+  "$(mkbcp infostr "$DECL" '' 'You MUST use the component, not a' '   ```` ```mermaid ```` block.' '' 'You SHALL NOT skip this.')"
+# A closing fence carries nothing after its backticks: "```js" inside a block is content.
+pp7_case "a fence line with an info string does not close a block" PASS \
+  "$(mkbcp noclose "$DECL" '' 'You MUST check it.' '```' '```js' 'SHALL' '```')"
+
+# ── prompting-playbook PP-5: every absolute carries a reason ─────────────────
+# PP-5 used to weigh absolutes against hedges ("usually", SHOULD, MAY). Current
+# guidance reads a hedge on a real requirement as permission to under-deliver,
+# and says an absolute earns its place by stating why. So PP-5 now asks each
+# never/always/MUST NOT for a reason, in its sentence or the next one. The
+# fixture's first body line is line 9 (4 frontmatter lines, title, blank,
+# declaration, blank).
+pp5_case() {  # $1 label, $2 a grep -E pattern the output must match, $3 skill dir, $4 flags (optional)
+  if sh "$GATES/prompting-playbook.sh" "$3" ${4:-} 2>&1 | grep -qE "$2"; then
+    ok "PP-5: $1"
+  else
+    bad "PP-5: $1 (no line matching '$2')"
+  fi
+}
+pp5_none() {  # $1 label, $2 skill dir: no unreasoned-absolute line at all
+  if sh "$GATES/prompting-playbook.sh" "$2" 2>&1 | grep -q 'PP-5 unreasoned absolute'; then
+    bad "PP-5: $1 (reported an unreasoned absolute)"
+  else
+    ok "PP-5: $1"
+  fi
+}
+d="$(mkbcp pp5why "$DECL" '' 'You MUST NOT push to main, because CI deploys every commit on it.')"
+pp5_none "an absolute with a reason in its sentence passes" "$d"
+pp5_case "an absolute with a reason reports PASS" '^PASS: PP-5' "$d"
+pp5_none "an absolute with its reason in the next sentence passes" \
+  "$(mkbcp pp5next "$DECL" '' 'Never push to main. A push there would deploy untested code.')"
+d="$(mkbcp pp5bare "$DECL" '' 'Never push to main.')"
+pp5_case "an unreasoned absolute is advisory, with file and line" \
+  '^INFO: PP-5 unreasoned absolute: .*/SKILL\.md:9: Never push to main' "$d"
+pp5_case "an unreasoned absolute fails under --strict" '^FAIL: PP-5 unreasoned absolute' "$d" --strict
+pp5_case "an unreasoned absolute in another paragraph's sentence is not rescued" \
+  '^INFO: PP-5 unreasoned absolute: .*:9:' \
+  "$(mkbcp pp5para "$DECL" '' 'Never push to main.' '' 'A push there would deploy untested code.')"
+pp5_case "hedges no longer balance an unreasoned absolute" '^INFO: PP-5 unreasoned absolute' \
+  "$(mkbcp pp5hedge "$DECL" '' 'Never push to main unless asked.' 'Usually prefer small commits; when in doubt, by default, you SHOULD ask.' 'You MAY skip it.')"
+pp5_none "code is exempt (fences and inline code)" \
+  "$(mkbcp pp5code "$DECL" '' 'Run `never-push --always` first.' '```' 'never push to main' '```')"
+if out="$(python3 "$GATES/pp5_reasons.py" --self-test 2>&1)" && \
+   printf '%s\n' "$out" | grep -q '^PP5_SELFTEST: PASS'; then
+  ok "PP-5 reason detector ($(printf '%s\n' "$out" | grep -c '^PASS:') cases)"
+else
+  printf '%s\n' "$out" | grep '^FAIL:' | sed 's/^/  /'
+  bad "PP-5 reason detector self-test"
+fi
 
 # ── bcp14-registry: every keyword sentence has a register row at its level ───
 # PP-7 checks the declaration and the vocabulary; nothing checked that a MUST
@@ -415,5 +468,48 @@ reg_case "a \`\`\`\` span with backticks after it is inline code, not a fence" F
   "$(mkreg infostr '' 'Use the component, not a' '   ```` ```mermaid ```` block.' '' 'You MUST NOT skip this.')" "unregistered"
 reg_case "a skill with no register section fails" FAIL \
   "$(mkreg nosection NOSECTION 'Plain prose has no keyword.')" "section"
+# A row whose quoted text matches no sentence in the skill any more is an orphan:
+# it records a keyword level for nothing, and hid three stale rows until this
+# check. A row that describes deliberately removed text says so in its line
+# column (`removed`), and then its text must really be gone.
+ROW_GONE='| c2 | 12 | You MUST NOT do the thing that was deleted. | MUST (0.90, 0.80) | MUST |  |'
+ROW_REMOVED='| c2 | removed | You MUST NOT do the thing that was deleted. | MUST (0.90, 0.80) | MUST | removed 2026-09 |'
+reg_case "a row quoting no current sentence fails" FAIL \
+  "$(mkreg orphan "$ROW_MUST
+$ROW_GONE" 'You MUST check the thing before you ship it.')" "orphan"
+reg_case "a row marked removed passes when its text is gone" PASS \
+  "$(mkreg removed "$ROW_MUST
+$ROW_REMOVED" 'You MUST check the thing before you ship it.')"
+reg_case "a row marked removed fails while its text is still there" FAIL \
+  "$(mkreg notgone "$ROW_MUST
+$ROW_REMOVED" 'You MUST check the thing before you ship it.' 'You MUST NOT do the thing that was deleted.')" "removed"
+# Presence is stricter than coverage. A full row (no "…") has to end where a
+# sentence or block ends, so a sentence that gained text is caught; the
+# block-tail fallback that coverage uses never counts as presence; a row may not
+# span two blocks; and a row under 10 normalised characters is looked for in the
+# whole body. Link text, underscore emphasis and a keyword wrapped across lines
+# normalise away.
+reg_case "a full row whose sentence gained text is an orphan" FAIL \
+  "$(mkreg grow '| c1 | 9 | Never push to main | MUST (0.9, 0.8) | plain | |' 'Never push to main unless the owner says so, and then only on Fridays.')" "orphan"
+reg_case "a row matching only a block's tail is an orphan" FAIL \
+  "$(mkreg tail '| c1 | 9 | Always pin the version so reruns match. | MUST (0.9, 0.8) | plain | |' '## Always pin the version')" "orphan"
+reg_case "a row spanning two blocks is an orphan" FAIL \
+  "$(mkreg span '| c1 | 9 | main. You MUST check | MUST (0.9, 0.8) | MUST | |' 'Never push to main.' '' 'You MUST check it.')" "orphan"
+reg_case "a short row is found anywhere in the body" PASS \
+  "$(mkreg short '| c1 | 9 | Never. | MUST (0.9, 0.8) | plain | |' 'Push? Never. Ask first.')"
+reg_case "a truncated row matches its prefix" PASS \
+  "$(mkreg trunc '| c1 | 9 | Run the gate first … | MUST (0.9, 0.8) | plain | |' 'Run the gate first and read its output.')"
+reg_case "a row matches fenced template text" PASS \
+  "$(mkreg fence '| c1 | 9 | Never push to main. | MUST (0.9, 0.8) | plain | |' '```' 'Never push to main.' '```')"
+reg_case "a row matches link text" PASS \
+  "$(mkreg link '| c1 | 9 | See the spec; you MUST NOT push. | MUST (0.9, 0.8) | MUST | |' 'See [the spec](x.md); you MUST NOT push.')"
+reg_case "a row matches through underscore emphasis" PASS \
+  "$(mkreg us "$ROW_MUST" 'You _MUST_ check the thing before you ship it.')"
+reg_case "a row matches a keyword wrapped across lines" PASS \
+  "$(mkreg wrap "$ROW_MUST" 'You **MUST' 'check** the thing before you ship it.')"
+reg_case "a row matches a blockquote inside a list item" PASS \
+  "$(mkreg bq "$ROW_MUST" '- item' '  > You MUST check the thing before you ship it.')"
+reg_case "a table-separator row matches its raw line" PASS \
+  "$(mkreg sep '| c1 | 9 | \|---\|---\| | plain (0.80, 0.10) | plain | table separator |' '| a | b |' '|---|---|' '| 1 | 2 |')"
 
 exit $rc

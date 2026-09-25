@@ -7,7 +7,7 @@ the problem.
 
 ## Contents
 
-- **`SKILL.md`** — always-on L1: the non-negotiables, function/naming rules,
+- **`SKILL.md`** — always-on L1: the core rules, function/naming rules,
   simple design, right-sizing, a review-report format, decision trees, a smells
   table, and pointers into the references below.
 - **`references/`** (loaded on demand):

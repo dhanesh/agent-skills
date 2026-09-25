@@ -6,7 +6,7 @@ compatibility: Requires Node.js 18+ with npm for Astro + Starlight builds; the s
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.2"
+  version: "1.1.3"
   tags: "astro,starlight,documentation,handbook,scaffold,ci-gates,mdx"
 ---
 
@@ -26,7 +26,7 @@ link all fail loudly instead of shipping.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads

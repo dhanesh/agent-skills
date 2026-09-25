@@ -70,7 +70,7 @@ def validate_name(name):
 SKILL_MD = string.Template('''\
 ---
 name: $name
-description: "TODO(repo2skill): one clause on what $name does and the outcome it produces. Use when the user says 'TODO trigger phrasing' or 'TODO another concrete phrasing'. Not for TODO-adjacent-job — use TODO-sibling-skill for that."
+description: "TODO(repo2skill): one clause on what $name does and the outcome it produces. Use when TODO-kind-of-request (e.g. 'TODO one phrasing in the user's words'). Not for TODO-adjacent-job — use TODO-sibling-skill for that."
 license: MIT
 compatibility: TODO(repo2skill) one-liner on runtime requirements (default assumption python3, stdlib only, offline).
 metadata:
@@ -95,8 +95,8 @@ do, naming the sibling skill that does each one.
 
 ## Workflow
 
-1. **Scope.** TODO(repo2skill): the single first job — gather exactly the inputs the
-   next step needs, and nothing more. State what was found in one line.
+1. **Scope.** TODO(repo2skill): the single first job — gather the inputs the next step
+   needs. State what was found in one line.
 2. **Execute.** TODO(repo2skill): the core step that produces the deliverable named
    below. One job per step; offload reference detail to references/overview.md
    rather than inlining it here.

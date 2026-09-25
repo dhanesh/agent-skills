@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX shell; git is needed only to check git-pinned sources. Fully offline.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "okf,knowledge,maintenance,drift,staleness,refresh,feynman-walkthrough,okf-site-kit"
 ---
 
@@ -34,7 +34,7 @@ them true*: sweep, report drift, refresh only what moved, re-pin, republish.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads

@@ -256,6 +256,10 @@ class GitSourceTests(unittest.TestCase):
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
         self._git("init", "-q")
+        # No background auto-gc or maintenance: on a CI runner it raced the rmtree
+        # cleanup (FileNotFoundError on .git/objects/<xx>).
+        self._git("config", "gc.auto", "0")
+        self._git("config", "maintenance.auto", "false")
         self._git("config", "user.email", "test@example.test")
         self._git("config", "user.name", "Test")
         self._commit("a.txt", "v1", "first")
@@ -311,6 +315,10 @@ class SelfPinTests(unittest.TestCase):
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
         self._git("init", "-q")
+        # No background auto-gc or maintenance: on a CI runner it raced the rmtree
+        # cleanup (FileNotFoundError on .git/objects/<xx>).
+        self._git("config", "gc.auto", "0")
+        self._git("config", "maintenance.auto", "false")
         self._git("config", "user.email", "test@example.test")
         self._git("config", "user.name", "Test")
         self._commit("src.py", "v1", "first")
@@ -484,6 +492,10 @@ class CliDiffGitTests(unittest.TestCase):
         self.repo = os.path.join(self.tmp, "repo")
         os.makedirs(self.repo)
         self._git("init", "-q")
+        # No background auto-gc or maintenance: on a CI runner it raced the rmtree
+        # cleanup (FileNotFoundError on .git/objects/<xx>).
+        self._git("config", "gc.auto", "0")
+        self._git("config", "maintenance.auto", "false")
         self._git("config", "user.email", "test@example.test")
         self._git("config", "user.name", "Test")
         self._commit("src.py", "v1", "first")

@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
-  version: "1.0.2"
+  version: "1.0.3"
   tags: "security,audit,posture,hygiene,dependency-pinning,ci-security,defensive"
 ---
 
@@ -19,15 +19,17 @@ defects can a checklist prove from the tree, and how severe is each one in this 
 actual context?*
 
 The division of labor is the point: `assets/audit_posture.py` finds candidate defects
-deterministically (same tree in, same findings out), and the agent adjudicates each one
-with the code open — a flagged `debug=True` in a test fixture is INFO; the same line in a
-production entrypoint is HIGH. The tool never guesses context; you never grep by hand.
+deterministically (same tree in, same findings out), and the agent adjudicates each one with the
+code open — a flagged `debug=True` in a test fixture is INFO; the same line in a production
+entrypoint is HIGH. The tool never guesses context and you never grep by hand, because each side
+does only what it is reliable at: the tool finds the same candidates every run, and you judge
+each one in context.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -59,7 +61,7 @@ authorization is unclear, you MUST ask before running.
    `--skip-dir` (`.git`, `node_modules`, `vendor`, build dirs are skipped by default) —
    and pick the `--fail-on` threshold if the exit code will gate anything.
 
-2. **Run the deterministic sweep.** From the skill directory:
+2. **Run the deterministic sweep.**
 
    ```bash
    python3 "$SKILL_DIR/assets/audit_posture.py" <repo> --format json --fail-on never

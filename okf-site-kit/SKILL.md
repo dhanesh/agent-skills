@@ -18,7 +18,7 @@ compatibility: Requires python3 (stdlib only) to inspect bundles and generate th
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.2"
+  version: "1.1.3"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 
@@ -38,7 +38,7 @@ site is a generated view of it, regenerated whenever the bundle changes.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -49,7 +49,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## Ground rules
 
-- **The bundle is read-only.** The generator MUST NOT mutate the source bundle. When the
+- **The bundle is read-only.** The generator MUST NOT mutate the source bundle, because the
+  bundle belongs to its producer and the site is disposable output. When the
   scan finds problems worth fixing at the source (missing `type`, broken links), surface
   them to the user and fix the bundle only if they ask.
 - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types, extra
@@ -84,9 +85,11 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
    when the harness supports it, or a pushed branch with the deploy workflow when the
    user wants GitHub Pages. State plainly which bundle warnings remain unfixed.
 5. **Regenerate on change.** The site is disposable output: when the bundle changes,
-   rerun `generate … --force` (it rebuilds `src/content/docs/` and
-   `public/bundle-assets/`, leaving any user customizations to config untouched only if
-   they re-apply flags — say so). For continuous publishing, the emitted
+   rerun `generate … --force` with the same flags. It rebuilds `src/content/docs/` and
+   `public/bundle-assets/` and rewrites the scaffolding files (`astro.config.mjs`,
+   `package.json` and the rest listed in
+   [references/parameters.md](references/parameters.md)), so hand-edits to them are
+   lost; tell the user so before regenerating. For continuous publishing, the emitted
    `--deploy-workflow` rebuilds on every push to `main`.
 
 ## What the generator handles
@@ -131,8 +134,8 @@ The build itself is the main gate (`npm run build` fails on broken pages), backe
 the generator's own report. Before calling it done, confirm: build exits 0; the
 homepage links resolve (spot-check one card); one concept page shows badge + panel +
 rewritten link; `WARN:` lines have been either fixed or reported to the user. The
-generator's unit suite ([assets/test_okf_site.py](assets/test_okf_site.py), 32 tests)
-is the regression net when modifying the generator itself.
+generator's unit suite ([assets/test_okf_site.py](assets/test_okf_site.py)) is the
+regression net when modifying the generator itself.
 
 ## Extending this skill
 

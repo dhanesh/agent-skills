@@ -15,8 +15,10 @@ The scaffold ships the full standard block; you edit values, not structure:
   the *only* thing the host agent reads when deciding whether to load the skill.
   Recipe, in order:
   1. one clause on what the skill does and the outcome it produces;
-  2. `Use when …` with the user's own likely phrasings — quote the phrasings, don't
-     paraphrase them into abstractions ("audit my repo" beats "repository analysis");
+  2. `Use when …` naming the kinds of request that should fire it, each anchored by
+     one phrasing in the user's own words where that sharpens it ("audit my repo"
+     beats "repository analysis") — one phrasing per kind of request, not a list of
+     near-synonyms;
   3. boundaries: `Not for X — use <sibling> for that`, naming real sibling skills so
      the host can route instead of guess.
 - **`license`** — `MIT` (house standard).
@@ -49,7 +51,11 @@ Style rules the gates only partially enforce:
 - Offload depth (rubrics, long examples, parameter docs) to `references/` and link
   it; the body is working memory, keep it lean.
 - Prefer heuristics with an escape hatch over absolutist `never`/`always` rules —
-  reserve absolutes for genuine safety invariants.
+  reserve absolutes for genuine safety invariants, and mark each one with a BCP 14
+  keyword (`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT`, `MAY`) under the declaration
+  the skeleton already carries, and on nothing else. PP-7 fails the other RFC 2119
+  keywords (`SHALL`, `REQUIRED`, `RECOMMENDED`, `OPTIONAL`) in capitals; state
+  everything that is not a hard rule at normal volume.
 - A top-level `PARAMETERS.md` is reserved for template-placeholder bijection with
   `assets/templates/`; document flags in `references/parameters.md` instead.
 

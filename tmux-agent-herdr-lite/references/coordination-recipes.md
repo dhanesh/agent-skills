@@ -2,7 +2,9 @@
 
 Ports of the workflows Herdr's own agent skill teaches, expressed with this
 cockpit's commands. Run these from any shell (including from inside a
-registered pane — an agent can drive its siblings).
+registered pane — an agent can drive its siblings). The commands are written
+bare for readability, but they are not on PATH: invoke each one as
+`"$SKILL_DIR/scripts/<command>"` (see the `SKILL_DIR` preamble in `SKILL.md`).
 
 ## Run a dev server and wait until it is ready
 

@@ -234,6 +234,10 @@ SINCE_Q3_REVIEW = "2f70b1c"  # factory-conductor Q3 review fixes: the push pinne
 SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalised
 # keyword in a SKILL.md has a register row at its level, no lowercase must/shall in
 # SKILL.md prose, every skill has a register section; plus the Jev backfill.
+SINCE_PP5_REASONS = "b314fca"  # gates: PP-5 asks every never/always/MUST NOT for a
+# stated reason (scripts/gates/pp5_reasons.py) and stops counting hedges.
+SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
+# quotes no current sentence; `removed` in the line column marks deleted text.
 
 
 def _git_out(*args):
@@ -4571,9 +4575,6 @@ def check_bcp14(old, new):
     def pp7_failing(tree):
         return sum(any(ln.startswith("FAIL: PP-7") for ln in lines(tree, d)) for d in skills(tree))
 
-    def pp5_advisories(tree):
-        return sum(any(ln.startswith("INFO: PP-5") for ln in lines(tree, d)) for d in skills(tree))
-
     a, b = declared(old), declared(new)
     row("bcp14", "skills declaring BCP 14 (RFC 2119/8174) keywords", a, b, b > a,
         "no skill said whether a 'never' was a safety rule or a default, so a model could not tell either",
@@ -4582,9 +4583,45 @@ def check_bcp14(old, new):
     row("bcp14", "skills failing PP-7 (both trees, new checker; lower=better)", a, b, b < a,
         "PP-7 is new, so the baseline is measured with it: the number is the skills', not the checker's",
         since=SINCE_BCP14)
-    a, b = pp5_advisories(old), pp5_advisories(new)
-    row("bcp14", "skills with a PP-5 overcorrection advisory (both trees, new checker; must not rise)",
-        a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
+    # Retired 2026-09-25: "skills with a PP-5 overcorrection advisory (must not rise)".
+    # It counted skills that had more than six absolutes (never/always/must not) and
+    # fewer hedges than absolutes; its last measurement, with the old checker on
+    # both trees, was 7 skills at the merge base and 5 on this branch. PP-5 no longer
+    # counts hedges (SINCE_PP5_REASONS), so the old checker is gone and the number
+    # cannot be taken again. check_pp5_reasons' row measures something different:
+    # absolutes with no stated reason, per absolute rather than per skill. Once it
+    # lands it is a HELD* guard, so any change in that count reads as a regression.
+
+
+# ── PP-5: every absolute states its reason (scripts/gates/pp5_reasons.py) ──
+# PP-5 weighed absolutes against hedges, so a skill could pass by adding
+# "usually" and fail by stating a real rule plainly. The new PP-5 asks each
+# never/always/MUST NOT directive for a reason. Both trees are measured with the
+# detector from the tree under test, over each tree's own SKILL.md files, so the
+# old number is the old skills' count under the new rule, not the old checker's.
+def check_pp5_reasons(old, new):
+    detector = os.path.join(new, "scripts", "gates", "pp5_reasons.py")
+
+    def count(tree):
+        mds = sorted(os.path.join(tree, d, "SKILL.md") for d in os.listdir(tree)
+                     if os.path.isfile(os.path.join(tree, d, "SKILL.md")))
+        r = subprocess.run([sys.executable, "-I", detector, "--count", *mds],
+                           capture_output=True, text=True, timeout=120)
+        m = re.search(r"PP5_UNREASONED: (\d+)", r.stdout)
+        if r.returncode != 0 or not m:
+            err = (r.stderr or r.stdout).strip()[-300:]
+            PROBE_ERRORS.append((tree, "scripts/gates", err))
+            return {"_error": err}
+        return {"n": int(m.group(1))}
+
+    a, b = count(old), count(new)
+    if _errored(a, b):
+        return
+    row("pp5", "unreasoned absolutes across SKILL.md (both trees, new detector; lower=better)",
+        a["n"], b["n"], b["n"] < a["n"] and b["n"] == 0,
+        "a never/always/MUST NOT with no stated reason reads as a rule to obey defensively; "
+        "the old PP-5 counted hedges instead, which read as permission to under-deliver",
+        since=SINCE_PP5_REASONS)
 
 
 # ── BCP 14 register (scripts/gates/bcp14-registry.sh) ───────────────────────
@@ -4623,6 +4660,11 @@ def check_bcp14_registry(old, new):
         "(must not rise)", a["level"] + a["section"], b["level"] + b["section"],
         b["level"] + b["section"] <= a["level"] + a["section"], "a row that says SHOULD over a MUST "
         "misstates the rule; a missing section hides a skill's keywords", kind="guard")
+    row("bcp14", "register rows quoting no current SKILL.md sentence (lower=better)",
+        a["orphan"], b["orphan"], b["orphan"] < a["orphan"] and b["orphan"] == 0,
+        "an orphan row records a keyword level for text the skill no longer has, so the register "
+        "claimed a rule nobody could find",
+        since=SINCE_BCP14_ORPHANS)
 
 
 # ── base-in-reality: the refutation vote follows the verdict rubric ─────────
@@ -5946,6 +5988,7 @@ def main():
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
         check_bcp14_registry(old, REPO)
+        check_pp5_reasons(old, REPO)
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
         check_factory_trust_ba(old, REPO)

@@ -76,10 +76,10 @@ stdlib `ast` and executes nothing, so the flag is a no-op there.
 
 **A degraded precise run declines rather than under-reporting.** A toolchain that loads but
 cannot parse — an aliased or shimmed compiler, a version whose AST this walker does not share —
-used to produce `discovery: "precise"` with **zero units**, which reads as "this repo has nothing
-worth testing" while wearing the label you are told to trust more. Any unreadable file, or no
-units at all over a non-empty source tree, now hands the run back to the heuristic reader with a
-`note:` on stderr naming the reason.
+would otherwise report `discovery: "precise"` with **zero units**, which reads as "this repo has
+nothing worth testing" while wearing the label you are told to trust more. Any unreadable file,
+or no units at all over a non-empty source tree, hands the run back to the heuristic reader with
+a `note:` on stderr naming the reason.
 
 **Which path to expect.** `heuristic`, in most repos you meet. `precise` needs a real
 `node_modules/typescript` already installed in the tree being analysed — not one hoisted into a
@@ -362,8 +362,7 @@ that creator is on a short ALLOWLIST (`runtime`, `testing`, `os/signal`, the pro
 generated runner) and attributable otherwise, so `go http.ListenAndServe(...)`,
 `time.AfterFunc(d, os.Clearenv)` and `context.AfterFunc(ctx, os.Clearenv)` in a unit all trip, and
 a creator a future Go adds is judged rather than waved through. The walk always reads the
-whole stack; a fixed buffer that filled up used to read its cut-off tail as the end and exempt the
-call. The first other frame — the repo's own code, or a third-party module, which is treated
+whole stack, so a cut-off tail is never mistaken for its end. The first other frame — the repo's own code, or a third-party module, which is treated
 like the repo — is judged: the call is blocked when the primitive's group OR the entry's is blocked.
 That second half is why `net.Dial`, which reads the clock before it opens a socket, trips as
 `network` rather than `clock`. `testing`'s controls override instead of adding: `t.TempDir()` reads
@@ -538,14 +537,14 @@ its reason and exits 2:
 8. The executable is refused when it is static, musl or stripped (`assets/rust_binary.py`): each makes
    a preloaded hook fail open. One that does not link libtest's harness (`harness = false`) exits 4,
    because there is no libtest run to observe.
-9. The guard lists the crates' own unmangled fns (ruling R42): the defined, global, unmangled
+9. The guard lists the crates' own unmangled fns: the defined, global, unmangled
    TEXT symbols of the `*.rcgu.o` (rustc codegen) members of every rlib named in cargo's
    compiler-artifact messages. Those rlibs are the crate under test and its dependencies, never
    the sysroot, and a build script's bundled C members (zstd, sqlite, zlib, ring) are never read.
-   An rlib or codegen member it cannot read exits 2, never a traceback (ruling R44). LLVM
+   An rlib or codegen member it cannot read exits 2, never a traceback. LLVM
    bitcode, which an `lto` setting (fat or thin) in `[profile.dev]`/`[profile.test]` or `-C
    linker-plugin-lto` makes rustc write, is refused naming the setting it found and the remedy,
-   `lto = false` for the profile the tests build with (ruling R43). Most crates list nothing. Then the repo's own `rustc` builds the hook
+   `lto = false` for the profile the tests build with. Most crates list nothing. Then the repo's own `rustc` builds the hook
    (`--crate-type cdylib -C panic=abort -C force-unwind-tables=yes`). It is cached outside the
    repo, under `~/.cache/test-safety-net/rust-hook/` (or `$TEST_SAFETY_NET_CACHE`), keyed by the
    rendered source, the toolchain and the flags. The list is written beside it, under
@@ -573,7 +572,7 @@ comes from the build's JSON and the `test result:` line, and the exit table is g
 |---|---|---|
 | 0 | GREEN | exit 0, a `test result:` line, and libtest's own `test <name> ... ok` line before it |
 | 1 | RED | an assertion failed, or the binary died with no result line (a signal, an abort) |
-| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; a cargo-built rlib whose codegen objects cannot be read for the unmangled-fn list (LLVM bitcode from an `lto` setting in `[profile.dev]`/`[profile.test]` or `-C linker-plugin-lto` -- set `lto = false` -- or a malformed archive), or a list the hook cannot hold; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; the hook failed to build with this toolchain; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; a test or lib target named like one of Rust's own crates (ruling R30) -- rename it; no `rustc` or `cargo` on PATH; not darwin or linux |
+| 2 | NOT ARMED | one of: no `Cargo.lock` (run `cargo generate-lockfile`) or a stale one; a toolchain pin below 1.82 or not installed; a dependency not in the local cargo cache (run `cargo fetch`); a static, stripped or musl binary; a cargo-built rlib whose codegen objects cannot be read for the unmangled-fn list (LLVM bitcode from an `lto` setting in `[profile.dev]`/`[profile.test]` or `-C linker-plugin-lto` -- set `lto = false` -- or a malformed archive), or a list the hook cannot hold; the hook failed to load, its handshake came late, or it wrote `tsn-hook: cannot attribute`; the hook failed to build with this toolchain; an environment-controlled test not alone in its file; several packages and no `-p`; a test name beginning with `-`; a test or lib target named like one of Rust's own crates -- rename it; no `rustc` or `cargo` on PATH; not darwin or linux |
 | 3 | GUARD TRIP | `IOGuardViolation: a tier <N> candidate reached <group> I/O via <call> from <symbol>` |
 | 4 | NO TEST | one of: an `#[ignore]` test, or a name matching no test; the test process exiting early, because the hook forces status 125 when a crate frame calls `exit` or `quick_exit` (so a unit that calls `process::exit` cannot be proven in-process); a `harness = false` target; the 300 s timeout |
 | 5 | NO BUILD | the test did not compile |
@@ -701,12 +700,12 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    whose output depends on HashMap iteration order passes the guard. Pin sorted output, never
    iteration order.
 6. **LTO in the test profile.** An `lto` setting, fat or thin, in `[profile.dev]` or
-   `[profile.test]` makes every proof exit 2 (NOT ARMED) since residual 11's list (ruling R43):
-   rustc writes LLVM bitcode into the rlibs, the crates' unmangled fns cannot be listed from it,
-   and the refusal names the setting and the remedy, `lto = false` for that profile. Before the
-   list, fat LTO made honest failing tests read 3 or 4 instead of 1 (the inlined panic hook's
-   `getenv` and libtest's own exit landed in the harness `main`), and thin LTO was proven like any
-   other build. Both fail closed: units in such repos are declined, never falsely passed.
+   `[profile.test]` makes every proof exit 2 (NOT ARMED): rustc writes LLVM bitcode into the
+   rlibs, the crates' unmangled fns (residual 11) cannot be listed from it, and the refusal names
+   the setting and the remedy, `lto = false` for that profile. The refusal prevents a misread: under
+   fat LTO an honest failing test would read 3 or 4 instead of 1 (the inlined panic hook's `getenv`
+   and libtest's own exit land in the harness `main`). Both fail closed: units in such repos are
+   declined, never falsely passed.
 7. **Closed: life-before-main crates (`ctor`) are seen and attributed.** The preloaded hook's
    initialiser runs before the executable's constructors, so a constructor's I/O is judged by its
    own crate frame, like any other. Measured with the real `ctor` 1.0.13 (`#[ctor::ctor(unsafe)]`
@@ -744,27 +743,26 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
     manglings. The wrapper's default debug build keeps the `Drop` its own frame and judges it, and
     so does `#[inline(never)]` on the `drop`. A `[profile.dev]`/`[profile.test]` opt-level of 1 or
     more with this shape can read GREEN.
-11. **Closed for the crates' own code: an unmangled main-thread callback is a crate frame.** A
+11. **An unmangled main-thread callback is a crate frame when the crates' own code defines it.** A
     `#[no_mangle]` or `#[export_name]` function that only a C or std frame calls on the main
     thread — an `atexit` handler, a signal handler, an `.init_array` entry — carries a plain C
-    symbol, not a Rust-mangled one. The walk used to find no crate frame beneath it, and the
-    main-thread branch of the thread-identity rule read that as pre-`main` init: its I/O passed
-    unattributed (ruling R41; darwin rustc 1.92, `scratchpad/final-review/ax/`: such an `atexit`
-    handler wrote a file and exited 0, the same handler mangled exited 3). The shape can be
-    accidental, since any exported C-ABI callback qualifies. Now the guard lists the crates' own
-    unmangled fns from the rustc codegen members of the rlibs cargo built (step 9), and the hook
-    judges a frame whose name is on that list and which lies in the executable's own image as a
-    crate frame, named `<fn> (unmangled fn of crate <crate>)` (ruling R42). The same `atexit`
-    handler exits 3 on darwin 1.92 and 1.98 and on linux 1.82, 1.94 and 1.98 (aarch64);
+    symbol, not a Rust-mangled one, so the walk finds no crate frame beneath it, and the
+    main-thread branch of the thread-identity rule would read that as pre-`main` init and pass
+    its I/O unattributed. The shape can be accidental, since any exported C-ABI callback
+    qualifies. So the guard lists the crates' own unmangled fns from the rustc codegen members of
+    the rlibs cargo built (step 9), and the hook judges a frame whose name is on that list and
+    which lies in the executable's own image as a crate frame, named
+    `<fn> (unmangled fn of crate <crate>)`. An `atexit` handler that writes a file exits 3 on
+    darwin 1.92 and 1.98 and on linux 1.82, 1.94 and 1.98 (aarch64);
     `test_io_guard_rust.py`'s `TestUnmangledExports` pins it, with a `#[no_mangle]` `.init_array`
     entry reading the environment, and an honest pure call and an honest failure in an exporting
-    crate (0 and 1). Honest tests over bundled C (zstd, sqlite, zlib) read the same before and
-    after, because their C is never on the list. **Still unseen:** an unmangled fn defined
+    crate (0 and 1). Honest tests over bundled C (zstd, sqlite, zlib) are unaffected, because
+    their C is never on the list. **Still unseen:** an unmangled fn defined
     anywhere but a cargo-built rlib's codegen objects: a build script's bundled C member, a
     `cc`-built static library, or a `#[no_mangle]` item in `tests/` itself (the skill never writes
-    one there). Such a callback still names no crate and reads GREEN. So does, at opt-level 1 or
+    one there). Such a callback names no crate and reads GREEN. So does, at opt-level 1 or
     more, a callback whose last act is a tail-called libc call: it leaves no frame of its own for
-    the walk to find, mangled or not, as it did before the list (ruling R45). The other way round,
+    the walk to find, mangled or not. The other way round,
     a crate that exports a libc-named symbol (a `#[no_mangle] getenv` wrapper) puts that name on
     the list, and every honest run that reaches it trips: that fails closed.
 

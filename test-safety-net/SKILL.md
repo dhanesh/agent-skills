@@ -27,7 +27,7 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.4.0"
+  version: "1.4.1"
   skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
@@ -39,7 +39,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be
 Build the change-detector that unblocks agent work on an untested codebase. This is **not** a
 correctness audit: current behaviour gets pinned even where it looks wrong, and a suspected bug
 gets reported rather than silently blessed as correct. The output is a net that catches
-unintended behaviour change, plus an honest account of what it could not net and why — never a
+unintended behaviour change, plus an honest account of what it could not net and why, not a
 coverage percentage.
 
 ## When to use
@@ -113,7 +113,7 @@ than none, because it makes the invariant look enforced when it is not.
 
    **On rust, check the lockfile, the toolchain and the cargo cache before you plan to write.**
    The rust guard builds with `cargo test --locked --offline` and runs every `rustc` and `cargo`
-   call with `RUSTUP_AUTO_INSTALL=0`, so it never writes `Cargo.lock` and never downloads a
+   call with `RUSTUP_AUTO_INSTALL=0`, so it does not write `Cargo.lock` or download a
    toolchain or a crate. Every proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale
    one, with a `rust-toolchain.toml` pin below 1.82 or not installed, or with a dependency not in
    the local cargo cache. The remedy for a missing lockfile is `cargo generate-lockfile`. It writes
@@ -165,11 +165,12 @@ than none, because it makes the invariant look enforced when it is not.
    over-tier one into a false Tier 1. If inspection shows a Tier 3/4 unit is actually reachable at
    a controlled boundary, you may promote it, but only by **recording** the promotion (the tier
    the ranker assigned, the tier you used instead, and why) in the report below. You MUST NOT
-   silently treat a ranker tier as advisory.
+   silently treat a ranker tier as advisory, because the report is the only place a reviewer can
+   see that a tier was overridden.
 
 3. **Confirm with the user before writing anything.** Show the `ranked` top N (default 10) and
    the size of `remainder`/`not_netted`. This is a hard gate — you MUST NOT proceed past it
-   unconfirmed, unless
+   unconfirmed, because the next step writes test files into the user's repo, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed without asking,
    and MUST name the grant id and action class in the report. Any other exit (3 ASK/NONE, 2
@@ -193,8 +194,8 @@ than none, because it makes the invariant look enforced when it is not.
    **The runtime guard, not the tier, is what enforces "never real I/O."** Static triage is a
    filter — it declines obvious hazards, but dynamic dispatch (Python's `getattr`, JavaScript's
    computed member access and dynamic `import()`, Rust's trait objects and macros) means it cannot
-   decide reachability from source alone; review rounds on the ranker found fifteen-plus
-   constructions it called safe that actually reached real I/O. So the invariant is enforced during
+   decide reachability from source alone, and ordinary constructions (an aliased import, a
+   same-module helper, an argument default) reach real I/O past it. So the invariant is enforced during
    this red→green proof by the **tier-aware runtime guard this skill ships for the stack you are
    on** — one per stack, each loaded on the
    single-test invocation itself and never written into the repo, so Invariant 1 stays clean with
@@ -268,7 +269,8 @@ than none, because it makes the invariant look enforced when it is not.
    - On a nonzero exit whose failure is an `IOGuardViolation`, **discard the whole batch and
      re-prove one test at a time.** Per-test attribution cannot be trusted for an async violation,
      and a batch is cheap to re-run.
-   - **You MUST NOT keep a test reported `ok` from a run that exited nonzero.**
+   - **You MUST NOT keep a test reported `ok` from a run that exited nonzero**, because the `ok`
+     may be the very test whose late violation made the run fail.
 
    `assets/test_io_guard_node.sh` builds all three fixtures (assertions 12, 13 and 14) and asserts
    both the invariant they share — the culprit reporting `ok` while some *other* entry carries the
@@ -295,7 +297,7 @@ than none, because it makes the invariant look enforced when it is not.
    **Copy the whole block.** `<package>` is the package directory (`./internal/billing`), and the
    `-run` anchors matter for the reason they do on node: the pattern is a substring regex. Tests go
    in `<file>_test.go` beside the source, **in the same package**, appended to when the file
-   exists and never overwritten. These two blocks are extracted from this file by
+   exists, not overwritten. These two blocks are extracted from this file by
    `assets/test_io_guard_go.py` and run verbatim against a clean unit and a leaking one.
 
    **On go, the exit status is the whole protocol:**
@@ -335,7 +337,8 @@ than none, because it makes the invariant look enforced when it is not.
 
    **Copy the whole block.** Run it from the crate root, adding `-p <package>` for a workspace
    member. Tests go in `tests/tsn_<module_path>.rs` and reach the unit through its public path
-   (`use <crate>::<path>::<item>;`). Append to that file when it exists; never overwrite it. The exit
+   (`use <crate>::<path>::<item>;`). Append to that file when it exists; never overwrite it, because it may hold tests you did not
+   write. The exit
    table is go's. Rust controls two groups, filesystem and environment, through two helpers that you
    copy into the test file verbatim:
 
@@ -402,8 +405,8 @@ than none, because it makes the invariant look enforced when it is not.
      - an environment-controlled test that is not alone in its file;
      - several packages and no `-p`;
      - a test name beginning with `-`;
-     - a test or lib target named like one of Rust's own crates (ruling R30: `tests/test.rs`
-       compiles to crate `test`, read as libtest's own work) -- rename it;
+     - a test or lib target named like one of Rust's own crates (`tests/test.rs` compiles to
+       crate `test`, read as libtest's own work) -- rename it;
      - the hook failed to build with this toolchain;
      - no `rustc` or `cargo` on PATH.
    - The guard never passes `--nocapture`, and you MUST NOT add it: under it the default panic hook reads
@@ -451,16 +454,15 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and eleven residuals (two of them, 7 and 11, now closed) are in `references/stacks.md`. Read
-   residuals 1, 9, 10 and 11 before you trust a GREEN: anything that bypasses libc is unseen
-   whatever its intent (a dependency's raw syscall included), deliberate verdict forgery by the code
-   under test is outside the threat model, and at opt-level 1 or more a crate's generic `Drop`
-   holding the control helper can read GREEN. Residual 11 is closed only for the crates' own code:
-   a `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
-   (an `atexit` handler, a signal handler) is now judged as a crate frame, but one defined in a
-   build script's bundled C, or in any object cargo did not build into an rlib, still names no
-   crate and reads GREEN; so does, at opt-level 1 or more, a callback whose last act is a
-   tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
+   and residuals are in `references/stacks.md`. Read residuals 1, 9, 10 and 11 before you trust a
+   GREEN: anything that bypasses libc is unseen whatever its intent (a dependency's raw syscall
+   included), deliberate verdict forgery by the code under test is outside the threat model, and
+   at opt-level 1 or more a crate's generic `Drop` holding the control helper can read GREEN. A
+   `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
+   (an `atexit` handler, a signal handler) is judged as a crate frame when the crates' own code
+   defines it; one defined in a build script's bundled C, or in any object cargo did not build
+   into an rlib, names no crate and reads GREEN; so does, at opt-level 1 or more, a callback whose
+   last act is a tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
    symbol (a `#[no_mangle] getenv` wrapper) trips every honest run instead: that fails closed.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
@@ -476,16 +478,19 @@ than none, because it makes the invariant look enforced when it is not.
 
 ## Invariants (do not violate)
 
-1. **You MUST NOT modify source.** You MUST only create test files. When a test file exists, you
-   MUST **append** to it and MUST NOT overwrite it. This is what makes the skill safe to run
-   unattended on a repo nobody trusts yet — and why Tier 3 seams are reported, never applied.
-2. **You MUST NOT write a test that performs real I/O.** Enforced by the tier-aware runtime guard in
+1. **You MUST NOT modify source.** This is what makes the skill safe to run unattended on a repo
+   nobody trusts yet, and why Tier 3 seams are reported, never applied. You MUST only create test
+   files. When a test file exists, you MUST **append** to it and MUST NOT overwrite it, because it
+   may hold tests you did not write.
+2. **You MUST NOT write a test that performs real I/O**, because such a test is flaky and can
+   change the user's files, network state or services. Enforced by the tier-aware runtime guard in
    step 4, not by the static tier alone — see `references/triage.md` for the full mechanism and
    why the tiers cannot enforce this on their own.
-3. **You MUST NOT ship an unproven test.** A test that did not go RED MUST be discarded and listed
+3. **You MUST NOT ship an unproven test**, because a test that never went RED may pass whatever
+   the code does. A test that did not go RED MUST be discarded and listed
    under "could not prove," never shipped.
-4. **You MUST NOT leave the suite red.** End state is a green suite plus suspected bugs in the report. A
-   red generated test is a bug in this skill, not an acceptable outcome.
+4. **You MUST NOT leave the suite red**, because a red generated test is a bug in this skill,
+   not an acceptable outcome. End state is a green suite plus suspected bugs in the report.
 5. **Hard gate before writing** — step 3's confirmation MUST happen before any test file is touched,
    unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
@@ -498,7 +503,8 @@ Captured output from running the user's code gets embedded into generated test f
 code generation from program output, and it is the one real injection surface in this skill.
 
 > You MUST emit every captured value with `repr()`. You MUST NOT build a test's expected value by
-> string concatenation or f-string interpolation of captured output. A captured string containing
+> string concatenation or f-string interpolation of captured output, because a quote or newline
+> in that output would then become code. A captured string containing
 > a quote, a newline or a backslash MUST become an inert literal, never executable source.
 
 ## Deliverable
@@ -534,7 +540,7 @@ clock were controlled, not only whichever one the ranker happened to name.
 No coverage percentage anywhere, in this report or in conversation about it.
 
 **Promoted units** get a line in the report naming the ranker's original tier, the tier used
-instead, and why — never a silent override (see step 2).
+instead, and why, not a silent override (see step 2).
 
 **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurrence
 count, not a call graph. It cannot tell a call from a comment, it misses a caller that reaches the

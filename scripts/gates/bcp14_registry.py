@@ -13,14 +13,22 @@ skipped:
       (MUST family > SHOULD family > MAY; "plain" covers none);
   (c) no lowercase "must" or "shall" appears as a word (RFC 8174 gives lowercase no
       normative meaning, so a lowercase one reads as a rule and carries none);
-  (d) every skill has a section in the register, even one with no candidates.
+  (d) every skill has a section in the register, even one with no candidates;
+  (e) every row quotes a sentence the skill still has, in prose or inside a fence (no
+      orphans). A row that records text deliberately removed from the skill says so
+      with `removed` in its line column, and then its text has to be gone.
 
 How a row matches (the register's `line` column is informational, never read):
   - Text on both sides is normalised: markdown emphasis (*), backticks and backslash
     escapes are dropped, whitespace is collapsed, and a leading list, table or quote
     marker is ignored.
   - A row's quoted sentence ends at its first "…"; text after it is elided, so such a
-    row is "truncated".
+    row is "truncated". Link syntax [text](url) reads as its text.
+  - Presence (rule e) is stricter than coverage: a row's text has to sit inside one
+    prose block or one fenced block, with no tail fallback, and a full row has to end
+    where a sentence, clause or block ends. A row under MIN_PREFIX normalised
+    characters is looked for in the whole body; one that normalises to nothing (a
+    table separator) matches a SKILL.md line equal to its unescaped text.
   - A row anchors wherever its prefix occurs in a block (a paragraph, list item,
     heading or table row), or where the block's tail is a prefix of the row's text.
   - A truncated row covers from its anchor to the end of the block. A full row covers
@@ -34,7 +42,7 @@ How a row matches (the register's `line` column is informational, never read):
 Usage: bcp14_registry.py [--root DIR] [--register FILE] [--counts]
 Prints one FAIL: <skill> <reason>: <sentence prefix> line per problem, then
 BCP14_RESULT: PASS or BCP14_RESULT: FAIL (n); exits 1 on failure, 2 on usage errors.
---counts prints BCP14_COUNTS: unregistered=<n> level=<n> lowercase=<n> section=<n>
+--counts prints BCP14_COUNTS: unregistered=<n> level=<n> lowercase=<n> section=<n> orphan=<n>
 and exits 0; scripts/ab-validate.py uses it to measure both trees with one checker.
 stdlib only, offline, deterministic.
 """
@@ -51,6 +59,7 @@ FENCE = re.compile(r"^\s*(```+|~~~+)")
 QUOTE = re.compile(r"^\s*(?:>\s?)+")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 LEAD = re.compile(r"^(?:(?:[-+>|]|\d+[.)])\s*)+")
+LINK = re.compile(r"(?<!!)\[([^\]]+)\]\([^)\s]*\)")
 CODE_SPAN = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)", re.S)
 SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 RANK = {"plain": 0, "MAY": 1, "SHOULD": 2, "MUST": 3}
@@ -66,24 +75,35 @@ def family(word):
 
 def body_of(text):
     """The SKILL.md body: everything after the closing frontmatter ---."""
+    return body_with_start(text)[0]
+
+
+def body_with_start(text):
+    """(body lines, the 1-based file line number of the body's first line)."""
     lines = text.splitlines()
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
             if lines[i].strip() == "---":
-                return lines[i + 1:]
-    return lines
+                return lines[i + 1:], i + 2
+    return lines, 1
 
 
 def blocks(lines):
     """Prose blocks: paragraphs, list items, headings and table rows, fences dropped."""
+    return [" ".join(t for _, t in seg) for seg in segments(lines)]
+
+
+def segments(lines, first=1):
+    """The blocks of `lines` as [(line_no, stripped text), ...] lists, so a caller can
+    map a position in a block back to its source line. `first` numbers lines[0]."""
     out, cur, fence = [], [], ""
 
     def flush():
         if cur:
-            out.append(" ".join(cur))
+            out.append(list(cur))
             cur.clear()
 
-    for ln in lines:
+    for n, ln in enumerate(lines, first):
         m = FENCE.match(ln)
         if m:
             tok, rest = m.group(1), ln[m.end():]
@@ -103,12 +123,12 @@ def blocks(lines):
             flush()
         elif s.startswith("#") or s.startswith("|"):
             flush()
-            out.append(s)
+            out.append([(n, s)])
         elif LIST_ITEM.match(QUOTE.sub("", ln)):
             flush()
-            cur.append(s)
+            cur.append((n, s))
         else:
-            cur.append(s)
+            cur.append((n, s))
     flush()
     return out
 
@@ -117,6 +137,7 @@ def normalise(raw):
     """Return (text, masked): text with emphasis, backticks and escapes dropped and
     whitespace collapsed; masked is the same length with inline code and the BCP 14
     declaration replaced by NULs, so keyword and lowercase scans skip them."""
+    raw = LINK.sub(r"\1", raw)  # [text](url) reads as its text
     skip = [False] * len(raw)
     for m in list(CODE_SPAN.finditer(raw)) + list(DECL.finditer(raw)):
         for i in range(m.start(), m.end()):
@@ -124,7 +145,10 @@ def normalise(raw):
     chars, flags, i = [], [], 0
     while i < len(raw):
         c = raw[i]
-        if c in "*`":
+        if c in "*`" or (c == "_" and not (0 < i < len(raw) - 1 and raw[i - 1].isalnum()
+                                           and raw[i + 1].isalnum())):
+            # Emphasis and code markers; an underscore counts as emphasis unless it
+            # sits inside a word (snake_case).
             i += 1
             continue
         if c == "\\" and i + 1 < len(raw) and not raw[i + 1].isalnum() and not raw[i + 1].isspace():
@@ -151,6 +175,7 @@ def normalise(raw):
 
 def row_prefix(sentence):
     """(normalised prefix, truncated?) for a register row's quoted sentence."""
+    sentence = LINK.sub(r"\1", sentence)  # before the split: "[x](…)" is a link, not an elision
     truncated = "…" in sentence
     head = sentence.split("…", 1)[0]
     text, _ = normalise(head)
@@ -174,7 +199,8 @@ def parse_register(path):
                 continue
             prefix, truncated = row_prefix(cells[2])
             cur.append({"id": cells[0], "sentence": cells[2], "final": cells[4],
-                        "level": family(cells[4]), "prefix": prefix, "truncated": truncated})
+                        "level": family(cells[4]), "prefix": prefix, "truncated": truncated,
+                        "removed": cells[1].strip().lower() == "removed"})
     return sections
 
 
@@ -214,6 +240,41 @@ def anchors(row, text):
     return spans
 
 
+def fenced_texts(lines):
+    """The normalised text of each fenced block, one string per fence."""
+    out, cur, fence = [], [], ""
+    for ln in lines:
+        m = FENCE.match(ln)
+        if m:
+            tok, rest = m.group(1), ln[m.end():]
+            if not fence and not (tok[0] == "`" and "`" in rest):
+                fence, cur = tok, []
+                continue
+            if fence and tok[0] == fence[0] and len(tok) >= len(fence) and not rest.strip():
+                out.append(normalise(" ".join(x.strip() for x in cur))[0])
+                fence = ""
+                continue
+        if fence:
+            cur.append(ln)
+    return out
+
+
+ENDED = re.compile(r"[.!?:;][\"'”’)\]]*$")
+
+
+def quoted_in(row, text):
+    """Does the block `text` still hold the row's quoted text? Stricter than anchors():
+    no tail fallback, and a full row (no "…") has to end where a sentence, clause or
+    block ends, so a sentence that gained words after the quote is caught."""
+    p, i = row["prefix"], text.find(row["prefix"])
+    while i != -1:
+        end = i + len(p)
+        if row["truncated"] or ENDED.search(p) or end == len(text) or text[end] in ".!?:;":
+            return True
+        i = text.find(p, i + 1)
+    return False
+
+
 def check_skill(skill, skill_md, rows):
     """[(reason, sentence)] problems for one skill; rows is None when no section exists."""
     with open(skill_md, encoding="utf-8") as f:
@@ -222,6 +283,25 @@ def check_skill(skill, skill_md, rows):
     if rows is None:
         problems.append(("section", "no section in the register (add one, even with 0 candidates)"))
         rows = []
+    # A row may quote text inside a fenced template (an executor brief, say): the
+    # keyword gate skips fences, but the row still has to quote something real.
+    texts = [normalise(raw)[0] for raw in blocks(body)] + fenced_texts(body)
+    raw_lines = {ln.strip() for ln in body}
+    whole = normalise(" ".join(QUOTE.sub("", ln).strip() for ln in body))[0]
+    for r in rows:
+        if len(r["prefix"]) >= MIN_PREFIX:
+            present = any(quoted_in(r, t) for t in texts)
+        elif r["prefix"]:
+            present = r["prefix"] in whole
+        else:
+            present = r["sentence"].replace("\\|", "|").strip() in raw_lines
+        if r["removed"] and present:
+            problems.append(("removed", "row %s is marked removed but its text is still in SKILL.md: %s"
+                             % (r["id"], r["sentence"])))
+        elif not r["removed"] and not present:
+            problems.append(("orphan", "row %s quotes no current sentence (re-quote it or mark it "
+                             "`removed`): %s" % (r["id"], r["sentence"])))
+    rows = [r for r in rows if not r["removed"]]
     for raw in blocks(body):
         text, masked = normalise(raw)
         for m in LOWER.finditer(masked):
@@ -286,9 +366,9 @@ def main(argv):
         print("BCP14_RESULT: FAIL (1)")
         return 1
     if args.counts:
-        n = {k: 0 for k in ("unregistered", "level", "lowercase", "section")}
+        n = {k: 0 for k in ("unregistered", "level", "lowercase", "section", "orphan")}
         for _, reason, _ in found:
-            n[reason] += 1
+            n["orphan" if reason == "removed" else reason] += 1
         print("BCP14_COUNTS: " + " ".join("%s=%d" % kv for kv in n.items()))
         return 0
     for s, reason, sentence in found:

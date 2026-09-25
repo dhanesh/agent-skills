@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
@@ -36,7 +36,7 @@ cannot skip is the single highest-leverage change for agent success.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -90,7 +90,7 @@ rather than inventing config from memory.
    `references/install-playbooks.md`. If the plan lists errors (broken
    manifest files), surface them here — fixing a corrupt `package.json` is a
    decision the user makes, not you. You MUST NOT write anything before this
-   confirmation, unless
+   confirmation, because installing rails changes the user's repo and CI, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed, and MUST name
    the grant id and action class in the report. Any other exit (3 ASK/NONE, 2 INVALID, 1 usage
@@ -104,8 +104,8 @@ rather than inventing config from memory.
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
    and the CI workflow. Extend existing files rather than replacing them, and you
-   MUST NOT add a second workflow when one already exists — you MUST extend the existing
-   one. Keep the diff small and reviewable.
+   MUST NOT add a second workflow when one already exists, because two workflows drift apart and CI
+   stops being one ground truth; you MUST extend the existing one. Keep the diff small and reviewable.
 4. **Prove the loop (verify and repair).** For each installed rail, run its
    command and record the result. Then follow the prove-the-loop protocol in
    `references/install-playbooks.md`: introduce one trivial, reversible break,
@@ -158,8 +158,8 @@ change-detecting tests.
 - **Read-only until step 2's confirmation (or a covering grant)** — detection never writes;
   installs MUST happen only after the user approves the plan, or after `check-grant` exits 0
   for `local_reversible` as step 2 describes.
-- **One ground truth.** Local `verify` and CI MUST run the same commands; when in
-  doubt, make CI call the entrypoint rather than restating commands.
+- **One ground truth.** Local `verify` and CI MUST run the same commands; have CI call
+  the `verify` entrypoint rather than restate its commands, so the two cannot drift.
 - **Prove, don't presume.** A rail counts as installed when it was watched
   failing and recovering, not when its file exists. You MUST leave the tree clean after
   the demonstration.

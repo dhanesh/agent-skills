@@ -5,7 +5,7 @@ license: MIT
 compatibility: python3 stdlib for the installer; uv plus network and a TypeSafe API key when the jev CLI runs; macOS or Linux home-directory layout.
 metadata:
   author: dhanesh
-  version: "0.1.0"
+  version: "0.1.1"
   tags: "typesafe,jev,system-one,agent-setup,bcp14"
 ---
 
@@ -44,10 +44,12 @@ approve or override a permission decision.
    `--targets codex,gemini`). Flags are in [references/parameters.md](references/parameters.md).
 3. **Install.** Run the same command without `--dry-run`. If your harness refuses writes to
    an agent instruction file (Claude Code auto mode treats `~/.claude/CLAUDE.md` as
-   self-modification), you MUST NOT route around it. Give the user the exact command to run
+   self-modification), you MUST NOT route around it, because that refusal is the
+   harness's permission boundary. Give the user the exact command to run
    themselves and continue with the other targets.
 4. **Key.** The installer creates a 0600 placeholder at `~/.config/typesafe/env`. You MUST NOT
-   ask for the key in chat or write it anywhere. Tell the user to edit that file.
+   ask for the key in chat or write it anywhere, because chat and files are kept in transcripts
+   and history. Tell the user to edit that file.
 5. **Verify and repair.** Run `--check` and require exit 0. Then smoke-test the CLI with one
    harmless Noul (`echo '{"state":{"x":"sky is blue"},"questions":{"q":{"type":"noul","instructions":"Is x true?"}}}' | jev`).
    On a `STALE`/`MISSING` line, re-run the install for that target. On exit 3 (malformed

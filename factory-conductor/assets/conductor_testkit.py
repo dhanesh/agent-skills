@@ -75,6 +75,10 @@ def repo():
     as check-grant requires."""
     d = tmpdir()
     subprocess.run(["git", "init", "-q", "-b", "main", d], check=True)
+    # No background auto-gc or maintenance racing the temp-dir cleanup (a CI flake
+    # in a sibling suite: FileNotFoundError on .git/objects/<xx> during rmtree).
+    for key, value in (("gc.auto", "0"), ("maintenance.auto", "false")):
+        subprocess.run(["git", "-C", d, "config", key, value], check=True)
     with open(os.path.join(d, "a.txt"), "w") as f:
         f.write("a\n")
     os.makedirs(os.path.join(d, "docs"))

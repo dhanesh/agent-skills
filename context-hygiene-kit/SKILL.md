@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires Claude Code lifecycle hooks (Stop/PreCompact/SessionStart), bash, and python3 (stdlib only, no pip); jq optional for clean settings.json merging.
 metadata:
   author: dhanesh
-  version: "1.2.2"
+  version: "1.2.3"
   tags: "claude-code,hooks,context-management,memory,anti-bloat,anti-rot,compaction"
 ---
 
@@ -53,13 +53,11 @@ Both modes are idempotent and do the same core work: copy the core files (`conte
 
 Memory is **always per-project** — even a global install keeps each repo's `.context/` separate (memories never bleed across repos). After either install, **tell the user to restart Claude Code** so the hooks load; for a global install, also remind them to add `.context/` to each repo's `.gitignore` (the project installer does this automatically).
 
-Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `settings.hooks.json` next to the target settings for manual merge).
+Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq`. Without it, the installer writes the hooks to `$(dirname "$SETTINGS")/settings.hooks.json` for you to merge by hand: `<project>/.claude/settings.hooks.json` for a project install, `~/.claude/settings.hooks.json` for a global one.
 
 Installing this kit **alongside the sibling `world-model-ledger` skill**? The settings merges coexist, but two project-scoped installs into the same repo clobber each other's files — read `references/interop.md` first for the safe layouts, install order, and a joint-install verification checklist.
 
 > After setup you do **not** re-invoke this skill — the three hooks run automatically every turn. Re-run the installer only to reconfigure, switch scope, or repair.
-
-Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `.claude/settings.hooks.json` for manual merge).
 
 ## How it works — three cadences
 
@@ -85,7 +83,7 @@ To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X
 ## The three non-negotiables (do not weaken these)
 
 1. **The token budget MUST be a HARD cap (anti-bloat).** `curate()` asserts `hot_tokens <= B`. Pinned cards get *first claim* on the budget but cannot overflow it — excess pins spill to cold and raise `pins_over_budget` (an LSC-8 human-gate signal), so anti-bloat is never silently traded for anti-rot.
-2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection control is harvest-side: the harvester MUST ingest only the **trusted channel** (user + assistant text); `tool_result`/`tool_use` blocks MUST NOT be harvested and markers MUST start the line, so untrusted text cannot smuggle one. As a **secondary, best-effort** layer, any untrusted card content that is ranked in is rendered inside `<data>…</data>` (OWASP LLM01 "segregate/denote external content") with embedded fence tokens neutralized so it can't break out — the curator *ranks* card content, and MUST NOT execute it. The `<data>` fence is a soft delimiter, **not** a complete boundary: if untrusted content ever has to reach a tool-capable downstream model, you SHOULD prefer a dual-LLM/quarantine pattern over relying on the fence.
+2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection control is harvest-side: the harvester MUST ingest only the **trusted channel** (user + assistant text); `tool_result`/`tool_use` blocks MUST NOT be harvested and markers MUST start the line, so untrusted text cannot smuggle one. As a **secondary, best-effort** layer, any untrusted card content that is ranked in is rendered inside `<data>…</data>` (OWASP LLM01 "segregate/denote external content") with embedded fence tokens neutralized so it can't break out — the curator *ranks* card content and MUST NOT execute it, because a card is untrusted data, not an instruction. The `<data>` fence is a soft delimiter, **not** a complete boundary: if untrusted content ever has to reach a tool-capable downstream model, you SHOULD prefer a dual-LLM/quarantine pattern over relying on the fence.
 3. **Deterministic capture only.** No model summarises the session. The harvester extracts verbatim signals. If you are tempted to add free-prose "decision extraction", you MUST leave it out — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers.
 
 ## Operating it

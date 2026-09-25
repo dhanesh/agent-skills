@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires tmux 3.2+, bash, python3, and a POSIX-like shell. Optional clipboard support uses pbcopy, xclip, or wl-copy; optional sounds use paplay, pw-play, or afplay; optional persistence uses TPM with tmux-resurrect/tmux-continuum.
 metadata:
   author: dhanesh
-  version: "2.1.1"
+  version: "2.1.2"
   tags: "tmux,zellij,herdr,coding-agents,terminal-multiplexer,automation"
 ---
 
@@ -17,7 +17,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -26,7 +26,7 @@ SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'tmux-agent-herdr-l
 test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
 ```
 
-## On invocation — set up now, don't stand by
+## On invocation — install, then serve the request
 
 When this skill fires (slash command or auto-trigger), immediately do this — it is idempotent, so do it every time rather than asking:
 
@@ -76,8 +76,6 @@ It only adds additive settings (mouse, vi copy mode, focus events, pane border t
 sets window tabs to show the folder (`#{b:pane_current_path}`) instead of the running command.
 The fleet summary is **not** force-injected into your status bar; add it yourself with
 `#(scripts/agent-status-summary)` in your `status-right`.
-
-Plus mouse support, vi copy mode, focus events, pane border titles, and the agent summary in the status bar.
 
 ## The agent coordination API (scripts/)
 
@@ -144,7 +142,6 @@ AGENT_STATUS: done result="tests passed"
 
 ## Common pitfalls
 
-- Do not stand by after the skill loads — run the installer first, every time; it is idempotent.
 - Do not tell the human to run `agent-*` commands — point them at `prefix a` (then `m` for the menu, `d` for the dashboard); the commands are the agent-facing API.
 - Do not expect exact Zellij or Herdr behavior — no plugin runtime, no socket event push; `agent-wait` polls. See `references/herdr-parity.md`.
 - Do not tell the human to use `agent-pane` for normal work — agents are auto-tracked by the zsh hook when run in any pane. `agent-pane` is only for worktree isolation or scripted spawning. After install, remind the human to open a new shell (or `source ~/.zshrc`) so the hook activates.
@@ -159,11 +156,11 @@ After running the installer:
 tmux -V
 # Exactly ONE source line for the config, and it must sit before any TPM run line:
 grep -n 'source-file .*agent-panes/tmux-agent.conf\|run .*tpm/tpm' ~/.tmux.conf
-scripts/agent-workspace
-scripts/agent-pane smoke 'echo AGENT_STATUS: working; sleep 1; echo ok; sleep 5'
-scripts/agent-wait smoke --status done --timeout 30
-scripts/agent-explain smoke
-scripts/agent-list --json
+"$SKILL_DIR/scripts/agent-workspace"
+"$SKILL_DIR/scripts/agent-pane" smoke 'echo AGENT_STATUS: working; sleep 1; echo ok; sleep 5'
+"$SKILL_DIR/scripts/agent-wait" smoke --status done --timeout 30
+"$SKILL_DIR/scripts/agent-explain" smoke
+"$SKILL_DIR/scripts/agent-list" --json
 ```
 
 Inside tmux, `prefix a d` opens the dashboard popup, `prefix a m` opens the menu with "New agent pane", and (if you added the snippet to `status-right`) the status bar shows the fleet summary. The skill's unit suite passes via `make gate-skill SKILL=tmux-agent-herdr-lite`.

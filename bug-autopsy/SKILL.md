@@ -17,7 +17,7 @@ license: MIT
 compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 
@@ -35,7 +35,7 @@ the incident is still burning, triage first and come back.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads

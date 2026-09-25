@@ -11,11 +11,11 @@ beside, never rearrange.
 
 `rank_risk.py`'s `triage()` looks at a unit's calls (resolved through the file's import-alias
 map, chased transitively through same-module functions and methods) and buckets it into a tier.
-Treat that tier as a **starting hypothesis**, not a verdict. Five rounds of review on this exact
-classifier found fifteen-plus distinct constructions it called safe that actually reached real
-I/O: an aliased import, a same-module helper, an argument default, a class body, a base-class
+Treat that tier as a **starting hypothesis**, not a verdict. Ordinary constructions can reach
+real I/O past it; adversarial review of this classifier found more than a dozen it called safe,
+among them an aliased import, a same-module helper, an argument default, a class body, a base-class
 expression, a method call reached only through an ordinary variable, and a locally-shadowed
-import, among others. Static analysis cannot decide reachability in Python from source alone —
+import. Static analysis cannot decide reachability in Python from source alone —
 `getattr`, dispatch tables, and dynamic imports are undecidable in general.
 
 So the invariant this skill promises — **never write a test that performs real I/O** — is not
@@ -211,12 +211,11 @@ reports an ordinary assertion failure ordinarily. Where the two directions trade
 over-fires: a false trip costs one declined candidate, a missed one ships a test that performs
 real I/O.
 
-The entry point is in that list because leaving it out was a real defect, not a hypothetical:
-`<prefix>/bin/pytest` is under none of the interpreter's library directories, its frame sits at
-the base of every stack in a console-script run, and so the guard read pytest's OWN capture and
-environment handling as the unit's. At Tier 1 pytest died inside its capture teardown with no
-test result at all; at Tier 2 every test ERRORed on pytest setting `PYTEST_CURRENT_TEST`. Only
-`python -m pytest` — which no document here tells you to run — was unaffected. The exemption is
+The entry point is in that list because `<prefix>/bin/pytest` is under none of the interpreter's
+library directories and its frame sits at the base of every stack in a console-script run;
+without the exemption the guard reads pytest's own capture and environment handling as the
+unit's. Tier 1 then dies inside pytest's capture teardown with no test result, and at Tier 2
+every test ERRORs on pytest setting `PYTEST_CURRENT_TEST`. The exemption is
 narrow by construction: it applies to a **non-`.py`** `argv[0]`, which is what a console script
 is, so `python3 some_module.py`, where `argv[0]` is the target repo's own code, can never be
 exempted by it.
@@ -233,9 +232,8 @@ while armed, an object constructed BEFORE arming is not an instance of the rebou
 
 **A violation off the main thread is surfaced, not swallowed.** `Thread._bootstrap_inner`
 catches `BaseException` and hands it to `threading.excepthook`, so a trip on a worker thread
-could not reach the test result on its own — pytest turned it into a warning and reported the
-run as PASSED, and the skill shipped a test whose captured value existed only because the guard
-was armed. The guard now records every off-main-thread trip at the raise (which also sees a
+cannot reach the test result on its own — pytest would turn it into a warning beside a PASSED
+run. The guard records every off-main-thread trip at the raise (which also sees a
 `concurrent.futures` future nobody reads, where no excepthook fires at all) and re-raises it on
 the main thread at `Thread.join`, at pytest teardown, or at `disarm()` — whichever comes first.
 The residual is named in the list below.
@@ -253,11 +251,7 @@ The residual is named in the list below.
 4. `os.environ` **reads** are intercepted — the subscript included, and `.get`/`.pop`/
    `.setdefault`/`.items`/`.copy`, which are the forms that never call `os.getenv`. What is not:
    `len(os.environ)` and `key in os.environ`, neither of which reads a value, and `os.environb`,
-   a separate object. An earlier version of this list said the subscript was uninterceptable *and*
-   that the filter shared the blind spot; both halves were false. The filter's `os.environ` marker
-   DOES see `os.environ.get(...)` — so the two layers disagreed, in the direction where the filter
-   tiered a unit 2 while the guard stayed silent, and an ordinary module alias (`ENV = os.environ`)
-   hid it from the filter as well. That two-layer miss is what closing this residual removed.
+   a separate object.
 5. A daemon thread that is never joined and outlives the proof run can trip after the last point
    at which the record could be re-raised. The pytest plugin fails the session on any record it
    still holds at `pytest_sessionfinish`, so the observable outcome is a failed run rather than a

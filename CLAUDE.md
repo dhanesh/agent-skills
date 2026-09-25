@@ -18,7 +18,7 @@ failing check for that one skill.) The checks:
 | Structure/frontmatter | `scripts/gates/validate-skill.sh` | `SKILL.md`+`README.md` exist; `name` (kebab-case, ≤64) + `description` (≤1024); **no dangling** `references/`,`assets/`,`scripts/` paths; template↔`PARAMETERS.md` bijection |
 | Metadata standard | `scripts/gates/frontmatter-standard.sh` | frontmatter carries `license`, `compatibility`, and `metadata` (`author`/`version`/`tags`) |
 | Secrets/leaks | `scripts/gates/scan-leaks.sh` | no secrets, keys, or denylisted content |
-| Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`), including **PP-7**: every SKILL.md declares BCP 14 (RFC 2119/8174) and uses only `MUST`/`MUST NOT`/`SHOULD`/`SHOULD NOT`/`MAY` in capitals (whether keywords sit only on hard rules is item 7 of the agent review checklist in `docs/prompting-playbook.md`) |
+| Prompt quality | `scripts/gates/prompting-playbook.sh` | "The Prompting Playbook" conventions (see `docs/prompting-playbook.md`), including **PP-5** (advisory; hard under `--strict`): every `never`/`always`/`MUST NOT` directive states its reason in its sentence or the next, hedges no longer count; and **PP-7**: every SKILL.md declares BCP 14 (RFC 2119/8174) and uses only `MUST`/`MUST NOT`/`SHOULD`/`SHOULD NOT`/`MAY` in capitals (whether keywords sit only on hard rules is item 7 of the agent review checklist in `docs/prompting-playbook.md`) |
 | Install replay | `scripts/gates/dry-run-replay.sh` | for skills with a `PARAMETERS.md` |
 | Asset paths | `scripts/gates/asset-paths.sh` | no skill-relative helper invocation in `SKILL.md` — agents run from the *target repo*, so `python3 assets/x.py` never resolves for them; use `"$SKILL_DIR/assets/x.py"` |
 | skill-contract | `scripts/gates/skill-contract.sh` | commandments 1–2 of [`docs/skill-contract/SPEC.md`](docs/skill-contract/SPEC.md) on **every** skill: frontmatter keys stay inside the Agent Skills allowed set, the `skill-contract` opt-in and the `## Contract` block come together or not at all, and an adopter's `assets/contract_check.py` is byte-identical to the reference (fix drift with `make contract-vendor`). `make contract` runs the reference checker's conformance vectors and the end-to-end handoff once per `make gate` |
@@ -63,9 +63,7 @@ both fail. `UNPROVEN` exists so a held guard can never be counted as a win, and 
 
 **The baseline is the merge base with `origin/main`** (or `main`), so a bare
 `make ab-validate` always measures *the branch under review*. Override it with
-`make ab-validate BASE=<ref>`. It used to be a hardcoded commit, which meant the
-command re-measured one historical campaign forever and said nothing about the current
-work.
+`make ab-validate BASE=<ref>`.
 
 **Adding a row:** pass `since=<a commit in the change that introduces it>` — use one of
 the `SINCE_*` constants at the top of the script, adding a new one per campaign. While
@@ -136,8 +134,6 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
 
 ## Sibling skills for auditing this kind of work
 
-- `agent-ready-rails` — is a repo ready for coding agents? (this repo scored 11/12; the gap it
-  flagged — unit tests not in CI — is now closed.)
+- `agent-ready-rails` — is a repo ready for coding agents?
 - `base-in-reality` — are the codebase's claims true against authoritative sources?
 - `crafting-self-prompting-loops` — is a single agent loop sound?
-</content>

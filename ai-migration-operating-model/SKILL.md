@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "migration,rewrite,port,parity,golden-tests,rulebook,agent-orchestration,phase-gates"
 ---
 
@@ -35,7 +35,7 @@ tests and diffs as the judge, and repeated failures as reasons to improve the pr
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -111,10 +111,12 @@ first rather than authoring a phase gate the pack can't honor.
 5. **Run a disposable pilot slice** per `references/pilot-playbook.md`: translate one
    small unit, run the judge, throw the code away, keep the lessons as new rulebook
    rules. Iterate until a fresh translation of the slice passes parity clean.
-6. **Fan out under the pack.** Implementer agents claim units from the work queue
-   (statuses machine-readable, queue rebuilt from facts so the run is resumable);
-   reviewer agents attack output using the reviewer prompts and cite `MR` rule ids.
-   Batch defects route through the doctrine: rule, regenerate, re-judge.
+6. **Hand the fan-out to the executing session.** This skill does not run the bulk
+   migration (see Boundaries); it hands over the pack the fan-out runs against.
+   Implementer agents claim units from the work queue (statuses machine-readable,
+   queue rebuilt from facts so the run is resumable); reviewer agents attack output
+   using the reviewer prompts and cite `MR` rule ids. Batch defects route through
+   the doctrine: rule, regenerate, re-judge.
 7. **Advance only through phase gates.** Each gate in `PHASE_GATES.md` is passed by its
    named check — gate 1 is the judge existing and catching broken code; the last gates
    are behavioral parity green (`PARITY_RESULT: PASS` across the golden corpus) and an

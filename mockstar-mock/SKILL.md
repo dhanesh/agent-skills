@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.3"
+  version: "1.1.4"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -47,8 +47,8 @@ generating.
 
 - `bunx @dhaneshpurohit/mockstar` available (install: `bun add -g @dhaneshpurohit/mockstar` or use `bunx`
   directly with Bun). **Package name matters:** mockstar is published on npm as the scoped package
-  `@dhaneshpurohit/mockstar` (latest ≥ 0.2.2). The *unscoped* `mockstar` on npm is an unrelated
-  project — you MUST NOT invoke bare `bunx mockstar`. Equivalent Docker image: `ghcr.io/dhanesh/mockstar:latest`
+  `@dhaneshpurohit/mockstar` (latest ≥ 0.2.2). You MUST NOT invoke bare `bunx mockstar`, because
+  the *unscoped* `mockstar` on npm is an unrelated project. Equivalent Docker image: `ghcr.io/dhanesh/mockstar:latest`
   (`--runtime docker`). The importer's schema-derived bodies and mixed-segment path-param handling
   require mockstar ≥ 0.2.2; **configurable webhook signing schemes require ≥ 0.3.0** (below that,
   emit only the pre-0.3 signing fields — see Stage 0 step 2). The coverage report records the
@@ -60,17 +60,19 @@ generating.
 ## Invariants (do not violate)
 
 1. **No fabricated endpoints.** Every endpoint in the output MUST trace to a fetched or provided
-   source. If an endpoint is absent from every input, you MUST NOT emit it.
+   source. If an endpoint is absent from every input, you MUST NOT emit it, because a consumer would build
+   against a route no source defines.
 2. **Prefer native tooling.** You SHOULD use `bunx @dhaneshpurohit/mockstar import` for OpenAPI
    (and losslessly-liftable Postman/HAR) rather than hand-authoring what the importer can produce.
    You SHOULD use `bunx @dhaneshpurohit/mockstar enhance` for Tier 2 placeholder rewriting rather
    than hand-tokenizing bodies.
-3. **Schema-valid output.** Verification (Stage 5) boots the server. A mock project that fails to
-   boot is not a valid deliverable, and you MUST NOT skip the boot with `--no-verify` except in CI
-   pre-check mode, where boot is deferred.
+3. **Schema-valid output.** Verification (Stage 5) boots the server. You MUST NOT skip the boot with
+   `--no-verify` except in CI pre-check mode, where boot is deferred, because a mock project that
+   fails to boot is not a valid deliverable.
 4. **No silent truncation.** When `--max-endpoints` caps the inventory, every dropped endpoint
    MUST be logged to `MOCKSTAR-COVERAGE.md` under the "Dropped" section with its source.
-5. **Read-only inputs.** You MUST NOT modify source spec files, HAR archives, or documentation.
+5. **Read-only inputs.** You MUST NOT modify source spec files, HAR archives, or documentation,
+   because they are the sources every endpoint traces back to.
    The only writes are to the `--into` output directory and to `MOCKSTAR-COVERAGE.md`.
 
 ## Flags
@@ -100,8 +102,8 @@ absolute paths into every subagent prompt:
 - If the harness does not expose the base directory, discover it:
   `find ~/.claude ~/.config ~/.agents -path '*mockstar-mock*/assets/extract_text.py' 2>/dev/null | head -1`
 - Verify: `python3 "$EXTRACT" --help` should print usage and exit 0.
-- Hand subagents the literal absolute `$EXTRACT` and `$SMOKE` values. You MUST NOT hand them a
-  relative `assets/`-prefixed form.
+- You MUST hand subagents the literal absolute `$EXTRACT` and `$SMOKE` values, because a
+  relative `assets/`-prefixed form will not resolve from the target repo.
 
 ---
 
@@ -200,9 +202,11 @@ path is needed for subagents.
 
 ### Stage 2 — Extract → Endpoint Inventory
 
-Fan out one subagent per input type. Each subagent follows the adapter rules in
-`references/input-adapters.md` and emits records that are valid against
-`references/inventory.schema.json`. Key rules per adapter:
+Extract each input with the adapter rules in `references/input-adapters.md`, emitting records
+that are valid against `references/inventory.schema.json`. With two or more input types, fan
+out one subagent per input type by default, so the types extract in parallel. With a single
+input type, extract it yourself: a subagent re-reads its source and reports back, which costs
+more than it saves there. Key rules per adapter:
 
 - **OpenAPI** — preferred path: if the sole input is a raw OpenAPI 3.x file and no extra
   examples need merging, skip manual extraction and hand the file directly to
@@ -217,9 +221,10 @@ Fan out one subagent per input type. Each subagent follows the adapter rules in
 - **GraphQL** — model the entire API as a single `POST /graphql` record; each named operation
   becomes a `responses[]` entry with a `when.body` predicate matching on `operationName`.
 - **Prose** — extract from code fences, Markdown tables, and inline backtick references in that
-  order; you MUST NOT invent endpoints that are absent from the text.
+  order; you MUST NOT invent endpoints that are absent from the text; otherwise the mock
+  serves a route no source defines.
 
-After all subagents complete, merge their outputs into a single Endpoint Inventory array.
+Once every input is extracted, merge the records into a single Endpoint Inventory array.
 Deduplication key: `(method, path)` (case-insensitive method, exact Hono-style path). Resolve
 conflicts in priority order: OpenAPI > Postman/HAR > curl > prose. Union `responses[]` by
 status code. Enforce `--max-endpoints` by dropping records in reverse-priority order and
@@ -256,7 +261,8 @@ mock JSON entries by hand per `references/mockstar-mapping.md` and write them to
   - `webhookHints[]` → `webhooks[]` on the triggering entry. When a hint carries `signing`,
     emit `webhooks[].signing` — expand a named `provider` via the cookbook in
     `references/mockstar-mapping.md` rather than hand-rolling the wire format, and you MUST NOT
-    emit an inline secret (`secretRef` MUST be `{{ env.NAME }}` or `file:/path`).
+    emit an inline secret (`secretRef` MUST be `{{ env.NAME }}` or `file:/path`), because it would
+    be written into the generated project's files, and mockstar rejects it at config load.
   - For GraphQL: route operations via `scenarios[].when.body` matching on `operationName`
     (NOT via a `match.body.jsonpath` router on the parent entry).
 
@@ -295,7 +301,8 @@ Unless `--no-verify` is set:
    Use the primary (no-`when`) status code from the Endpoint Inventory. For endpoints without
    a grounded status, use `200`.
 
-2. Run the smoke suite using the absolute `$SMOKE` path resolved in Stage 1, passing the
+2. Run the smoke suite using the absolute `$SMOKE` path resolved under "Locating asset
+   helpers" (before Stage 0), passing the
    resolved runtime environment **and the tenant** via `MOCKSTAR_SMOKE_TENANT`:
    ```sh
    # local runtime
