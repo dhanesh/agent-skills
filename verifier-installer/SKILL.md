@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
@@ -158,8 +158,8 @@ change-detecting tests.
 - **Read-only until step 2's confirmation (or a covering grant)** — detection never writes;
   installs MUST happen only after the user approves the plan, or after `check-grant` exits 0
   for `local_reversible` as step 2 describes.
-- **One ground truth.** Local `verify` and CI MUST run the same commands; when in
-  doubt, make CI call the entrypoint rather than restating commands.
+- **One ground truth.** Local `verify` and CI MUST run the same commands; have CI call
+  the `verify` entrypoint rather than restate its commands, so the two cannot drift.
 - **Prove, don't presume.** A rail counts as installed when it was watched
   failing and recovering, not when its file exists. You MUST leave the tree clean after
   the demonstration.
