@@ -226,6 +226,11 @@ SINCE_Q3_GAPS = "9cfe144"  # factory-conductor Q3 gaps: resume prints NEXT: line
 # run branch before the push (G3). The first commit of that work, on
 # feat/factory-conductor; the main merge base has no conductor at all, so these rows
 # move only against a baseline on this branch (`make ab-validate BASE=<ref>`).
+SINCE_Q3_REVIEW = "2f70b1c"  # factory-conductor Q3 review fixes: the push pinned to the
+# head the integration re-run verified (C1, N1) and that re-run gated so no repository
+# command runs under a lapsed grant (I2). The first commit of that round; not in the main
+# merge base, which has no conductor, so these guards move only against a baseline on
+# this branch (BASE=067b042 for the push row, BASE=f2a4b95 for the lapsed-grant row).
 SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalised
 # keyword in a SKILL.md has a register row at its level, no lowercase must/shall in
 # SKILL.md prose, every skill has a register section; plus the Jev backfill.
@@ -5567,14 +5572,22 @@ def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None):
     plan_env = CC.write_envelope(root, CC.build_statement(
         "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
         "spec-first-planning", "2.1.0", root, ["docs/spec.md"], plan_payload))
-    now = CC.utc_now()
+    _fc_write_grant(CC, root, plan_env, gate_policy, budget)
+    return plan_env
+
+
+def _fc_write_grant(CC, root, plan_env, gate_policy, budget=None, expires=timedelta(days=1),
+                    after=0):
+    """A human-accepted grant for plan_env, generated `after` seconds from now (so a later
+    one is the newest head) and expiring `expires` after that (negative: already lapsed)."""
+    now = CC.utc_now() + timedelta(seconds=after)
     plan_rel = os.path.relpath(plan_env, root).replace(os.sep, "/")
     grant_payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
                      "decisions": [{"id": "D1", "question": "q", "answer": "a",
                                     "source": "sweep"}],
                      "defaults": [], "gate_policy": gate_policy, "budget": dict(budget or {}),
                      "stop_on": [],
-                     "expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "expires_at": (now + expires).strftime("%Y-%m-%dT%H:%M:%SZ"),
                      "system_one": {"allowed": False}, "revoked": False}
     accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
                 "result": {"outcome": "passed"},
@@ -5584,7 +5597,6 @@ def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None):
     CC.write_envelope(root, CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0",
                                                root, ["docs/spec.md", plan_rel],
                                                grant_payload, [accepted], now=now))
-    return plan_env
 
 
 def _fc_tree(tree):
@@ -5687,6 +5699,149 @@ def _fc_pair_pushed(tree, cmd):
                                    capture_output=True).returncode == 0 else 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+_FC_FULL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "grant",
+            "open_pr": "grant"}
+_FC_LOCAL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "ask",
+             "open_pr": "ask"}
+
+
+def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
+    """A one-task run (T1 proven by `cmd`, its work t1.txt) driven until `next` stops it.
+    Returns (run, plan envelope path)."""
+    plan_env = _fc_fixture(CC, root, {"T1": cmd}, policy)
+    if origin:
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True,
+                       capture_output=True)
+
+    def run(*argv):
+        return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                              capture_output=True, text=True, timeout=300)
+
+    run("init", "--plan", plan_env)
+    _fc_drive(run, ["T1"])
+    run("next")
+    return run, plan_env
+
+
+def _fc_moved_head_pushed(tree, move):
+    """1 when the tree's conductor pushes a run-branch head other than the one its checks
+    ran on at `finish`, 0 when it pushes that head, None when it pushes nothing. The first
+    finish runs under a grant that asks on push_branch; then (move) a commit lands on the
+    run branch, a grant covering the push is issued, and `finish --retry-remote` runs."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
+    try:
+        run, plan_env = _fc_one_proven(conductor, CC, root, ["test", "-f", "t1.txt"],
+                                       _FC_LOCAL, origin=origin)
+        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        checked = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
+                                 text=True).stdout.strip()
+        if move:
+            with open(os.path.join(root, "late.txt"), "w") as f:
+                f.write("never reviewed\n")
+            subprocess.run(["git", "-C", root, "add", "late.txt"], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", root, "commit", "-q", "-m", "late"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        _fc_write_grant(CC, root, plan_env, _FC_FULL, after=2)
+        run("finish", "--retry-remote", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        r = subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
+                            "refs/heads/factory/pair"], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        return 1 if r.stdout.strip() != checked else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _fc_lapsed_finish_runs(tree, lapse):
+    """1 when the tree's conductor runs a repository command during `finish`, else 0. T1's
+    verify command appends a line to a sentinel file outside the repo; after T1 is proven
+    (its own verify writes the sentinel under a valid grant), lapse writes a newer grant
+    that has already expired, then `finish` runs. Without lapse it is the sanity arm."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root, sentinel = os.path.join(tmp, "repo"), os.path.join(tmp, "sentinel")
+    try:
+        cmd = ["sh", "-c", "echo x >> '%s'; test -f t1.txt" % sentinel]
+        run, plan_env = _fc_one_proven(conductor, CC, root, cmd,
+                                       {"read_only": "auto", "local_reversible": "grant"})
+
+        def lines():
+            try:
+                with open(sentinel, encoding="utf-8") as f:
+                    return f.read().count("\n")
+            except OSError:
+                return 0
+
+        before = lines()
+        if lapse:
+            _fc_write_grant(CC, root, plan_env, _FC_FULL, expires=timedelta(minutes=-5),
+                            after=2)
+        run("finish")
+        return 1 if lines() > before else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_conductor_q3_review(old, new):
+    s = "factory-conductor"
+
+    def moved_pushed(tree):
+        """_fc_moved_head_pushed, sanity-checked: in a tree that has the conductor the SAME
+        fixture with no move MUST push the checked head, or a 0 here would prove nothing."""
+        if _fc_tree(tree)[0] is None:
+            return 0
+        if _fc_moved_head_pushed(tree, move=False) != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "moved-head sanity check failed: the unmoved run branch was "
+                                 "not pushed as the head its checks ran on"))
+            return None
+        return _fc_moved_head_pushed(tree, move=True) or 0
+
+    a, b = moved_pushed(old), moved_pushed(new)
+    # Moves only against a baseline whose conductor pushes the moved branch
+    # (BASE=067b042: 1 -> 0); against main (no conductor) it is a guard, 0 -> 0.
+    row(s, "pushes of a head other than the one integration verified", a, b,
+        b == 0 and (a is not None and a >= b),
+        "a commit that lands on the run branch after finish's checks (between an asked push "
+        "and --retry-remote) is never pushed: the push is <verified head>:refs/heads/<rb> and "
+        "refused when the branch moved. Sanity-checked: the unmoved branch DOES push",
+        kind="delta" if a == 1 else "guard", since=SINCE_Q3_REVIEW)
+
+    def lapsed_runs(tree):
+        """_fc_lapsed_finish_runs, sanity-checked. In the new tree finish MUST move the
+        sentinel under a valid grant (else a probe error). A baseline whose finish runs no
+        repository command at all (before G3) scores 0 honestly."""
+        if _fc_tree(tree)[0] is None:
+            return 0
+        if _fc_lapsed_finish_runs(tree, lapse=False) != 1:
+            if tree == new:
+                PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                     "lapsed-grant sanity check failed: finish did not run "
+                                     "the checks under a valid grant"))
+                return None
+            return 0
+        return _fc_lapsed_finish_runs(tree, lapse=True)
+
+    a, b = lapsed_runs(old), lapsed_runs(new)
+    # Moves only against a baseline with the ungated re-run (BASE=f2a4b95: 1 -> 0); against
+    # main and against 067b042 (no re-run at finish) it is a guard, 0 -> 0.
+    row(s, "repo commands run under a lapsed grant at finish", a, b,
+        b == 0 and (a is not None and a >= b),
+        "finish's integration re-run executes the repository's code, so it is gated with "
+        "local_reversible: under a lapsed grant nothing runs (INTEGRATION: skipped). A "
+        "sentinel written by the task's own check stays unchanged; under a valid grant the "
+        "same fixture DOES move it", kind="delta" if a == 1 else "guard",
+        since=SINCE_Q3_REVIEW)
 
 
 def check_factory_conductor_q3(old, new):
@@ -5797,6 +5952,7 @@ def main():
         check_autonomy_grant(old, REPO)
         check_factory_conductor(old, REPO)
         check_factory_conductor_q3(old, REPO)
+        check_factory_conductor_q3_review(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
