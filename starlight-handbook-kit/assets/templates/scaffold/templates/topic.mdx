@@ -7,7 +7,7 @@ decision_guidance: true
 ---
 {/* TEMPLATE_VERSION: 1.1.0 */}
 {/*
-  CANONICAL TOPIC TEMPLATE (U1 / RT-4 — BINDING).
+  CANONICAL TOPIC TEMPLATE.
   Authors: copy this file into src/content/docs/<cluster>/<topic>.mdx and fill it in.
 
   Frontmatter MUST stay as the first thing in the file (the `---` block on line 1):
@@ -72,9 +72,9 @@ burden). A table works well here.
 Use the `<Mermaid>` component to show the architecture or flow. It is static-first:
 the raw source renders as readable text without JavaScript, then hydrates to an SVG.
 
-IMPORTANT: always use the `<Mermaid>` component for diagrams. Do NOT put the diagram
-in a fenced code block — Starlight's Expressive Code renders a fenced mermaid block
-as syntax-highlighted *code*, not a diagram (a common mistake).
+Diagrams go in the `<Mermaid>` component, not a fenced code block: Starlight's
+Expressive Code renders a fenced mermaid block as syntax-highlighted *code*, not a
+diagram, and the mermaid gate fails the build on one.
 
 <Mermaid code={`graph TD
   Client[Client] -->|request| Service[Service]
