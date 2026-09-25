@@ -211,12 +211,11 @@ reports an ordinary assertion failure ordinarily. Where the two directions trade
 over-fires: a false trip costs one declined candidate, a missed one ships a test that performs
 real I/O.
 
-The entry point is in that list because leaving it out was a real defect, not a hypothetical:
-`<prefix>/bin/pytest` is under none of the interpreter's library directories, its frame sits at
-the base of every stack in a console-script run, and so the guard read pytest's OWN capture and
-environment handling as the unit's. At Tier 1 pytest died inside its capture teardown with no
-test result at all; at Tier 2 every test ERRORed on pytest setting `PYTEST_CURRENT_TEST`. Only
-`python -m pytest` — which no document here tells you to run — was unaffected. The exemption is
+The entry point is in that list because `<prefix>/bin/pytest` is under none of the interpreter's
+library directories and its frame sits at the base of every stack in a console-script run;
+without the exemption the guard reads pytest's own capture and environment handling as the
+unit's. Tier 1 then dies inside pytest's capture teardown with no test result, and at Tier 2
+every test ERRORs on pytest setting `PYTEST_CURRENT_TEST`. The exemption is
 narrow by construction: it applies to a **non-`.py`** `argv[0]`, which is what a console script
 is, so `python3 some_module.py`, where `argv[0]` is the target repo's own code, can never be
 exempted by it.
