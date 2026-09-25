@@ -63,7 +63,7 @@ jev <<'JSON'
 JSON
 ```
 
-When building features, agents MUST load the `typesafe-ai` skill (if installed) and read the
+When building a feature that calls Jev, agents MUST load the `typesafe-ai` skill (if installed) and read the
 live docs (https://docs.typesafe.ai/llms.txt) first. Python code MUST add `typesafe-sdk`
 via `uv add` or PEP 723 metadata. The key lives in `TYPESAFE_API_KEY` (fallback
 `~/.config/typesafe/env`); it MUST stay server-side and MUST NOT be committed.
