@@ -53,13 +53,11 @@ Both modes are idempotent and do the same core work: copy the core files (`conte
 
 Memory is **always per-project** — even a global install keeps each repo's `.context/` separate (memories never bleed across repos). After either install, **tell the user to restart Claude Code** so the hooks load; for a global install, also remind them to add `.context/` to each repo's `.gitignore` (the project installer does this automatically).
 
-Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `settings.hooks.json` next to the target settings for manual merge).
+Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq`. Without it, the installer writes the hooks to `$(dirname "$SETTINGS")/settings.hooks.json` for you to merge by hand: `<project>/.claude/settings.hooks.json` for a project install, `~/.claude/settings.hooks.json` for a global one.
 
 Installing this kit **alongside the sibling `world-model-ledger` skill**? The settings merges coexist, but two project-scoped installs into the same repo clobber each other's files — read `references/interop.md` first for the safe layouts, install order, and a joint-install verification checklist.
 
 > After setup you do **not** re-invoke this skill — the three hooks run automatically every turn. Re-run the installer only to reconfigure, switch scope, or repair.
-
-Requires `python3` (stdlib only — no pip installs) and, for clean settings merging, `jq` (falls back to writing `.claude/settings.hooks.json` for manual merge).
 
 ## How it works — three cadences
 

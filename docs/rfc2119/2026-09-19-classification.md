@@ -239,11 +239,11 @@ Skills appear in rewrite order.
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 54 | Memory is **always per-project** — even a global install keeps each repo's \`.con… | MUST (0.43, 0.51) | plain | the always/never sentence describes the kit's per-project storage (memories never bleed across repos); the restart reminder is an ordinary install step |
-| c2 | 87 | 1. **The token budget MUST be a HARD cap (anti-bloat).** `curate()` asserts … | MUST (0.95, 0.82) | MUST |  |
-| c3 | 88 | 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection contr… | MUST (0.94, 0.88) | MUST |  |
-| c4 | 89 | 3. **Deterministic capture only.** No model summarises the session. The harveste… | MUST (0.91, 0.81) | MUST |  |
-| c5 | 100 | You MUST confirm the gate passed: `python3 test_context_ledger.py` (27 tests — budget… | MUST (0.94, 0.84) | MUST |  |
-| c6 | 88 | if untrusted content ever has to reach a tool-capable downstream model… | plain (0.73, 0.51) | plain | backfill 2026-09-25: was lowercase "must" in the condition of c3's SHOULD; the condition describes a situation, not a rule. The SHOULD after it stays with c3 |
+| c2 | 85 | 1. **The token budget MUST be a HARD cap (anti-bloat).** `curate()` asserts … | MUST (0.95, 0.82) | MUST |  |
+| c3 | 86 | 2. **Two-channel boundary (LSC-7).** The **load-bearing** prompt-injection contr… | MUST (0.94, 0.88) | MUST |  |
+| c4 | 87 | 3. **Deterministic capture only.** No model summarises the session. The harveste… | MUST (0.91, 0.81) | MUST |  |
+| c5 | 98 | You MUST confirm the gate passed: `python3 test_context_ledger.py` (27 tests — budget… | MUST (0.94, 0.84) | MUST |  |
+| c6 | 86 | if untrusted content ever has to reach a tool-capable downstream model… | plain (0.73, 0.51) | plain | backfill 2026-09-25: was lowercase "must" in the condition of c3's SHOULD; the condition describes a situation, not a rule. The SHOULD after it stays with c3 |
 
 ## starlight-handbook-kit (2 candidates · 2 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
 
