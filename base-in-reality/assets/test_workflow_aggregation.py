@@ -112,5 +112,21 @@ class WorkflowMatchesLinter(unittest.TestCase):
             self.assertEqual(got["verdict"], "UNCONFIRMED", sev)
 
 
+class VerifyPromptTest(unittest.TestCase):
+    """The verifier sub-agent's citation rule is a prohibition, not an option.
+
+    "You MAY only cite sources you actually fetched" reads, under BCP 14, as a
+    permission. The rule is the skill's defining one (no fabricated authority),
+    so the prompt has to forbid an unfetched citation and say why. Needs no node.
+    """
+
+    def test_citation_rule_is_a_prohibition_with_its_reason(self):
+        with open(WORKFLOW, encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("MAY only cite", src)
+        self.assertIn("Cite only sources you actually fetched this run", src)
+        self.assertIn("fabricated authority", src)
+
+
 if __name__ == "__main__":
     unittest.main()

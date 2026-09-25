@@ -26,8 +26,8 @@ Skills appear in rewrite order.
   - Five clauses were demoted inside rows that keep their level: world-model-ledger c7 and c8, and starlight-handbook-kit c2.
   - One is kept. In the shared "Locating this skill's helpers" preamble in 13 skills, Jev rated the clause "and MUST NOT receive a relative form" plain at 0.61 (harm 0.60). We departed from that and kept the keyword. Removing it would take agent-ready-rails and tmux-agent-herdr-lite out of the PP-5 advisory, and the owner asked that every skill's PP-5 status stay as it is until the separate PP-5 change. Revisited under the new PP-5 (every absolute states a reason; 2026-09-25): the clause is dropped in all 13 skills, and the MUST before it now carries the reason, "because a relative one will not resolve from the target repo". Jev chose drop_clause 0.54 over keep_with_reason 0.46, and put P(dropping it loses a real constraint) at 0.28. base-in-reality c6 and mockstar-mock c9, the same rule in skill-specific words, got the same treatment.
 
-  Two flags are outside this register's scope, which is SKILL.md only, and are left unchanged:
-  - base-in-reality `assets/workflow.mjs`: "You MAY only cite sources you actually fetched". Jev rates it MUST (0.92, harm 0.46): the rule is real and the MAY misstates it.
+  Two flags are outside this register's scope, which is SKILL.md only:
+  - base-in-reality `assets/workflow.mjs`: "You MAY only cite sources you actually fetched". Jev rates it MUST (0.92, harm 0.46): the rule is real and the MAY misstates it. Fixed 2026-09-25: the sub-agent prompt now reads "Cite only sources you actually fetched this run: a citation you did not fetch is fabricated authority, the one thing this audit exists to rule out." It is a sub-agent prompt with no BCP 14 declaration, so it is a plain imperative with its reason; `assets/test_workflow_aggregation.py` guards the wording.
   - jev-agent-setup `assets/jev-instructions.md`: the heading "… REQUIRED". Jev gives MUST at a low confidence (0.35, harm 0.58). The block is owner policy.
 
 ## test-safety-net (29 candidates · 11 MUST · 0 SHOULD · 0 MAY · 18 plain · 16 departures)

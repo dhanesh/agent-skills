@@ -87,8 +87,9 @@ const results = await pipeline(
     '(arxiv/pubmed/crossref/openalex/semanticscholar) run the bundled helper by its absolute ' +
     `path: \`uv run "${fetcherPath}" --source <s> --query "<q>" --limit <n>\` (you run from the ` +
     'target repo, so a relative assets/... path will not resolve). Then WebSearch/WebFetch for ' +
-    'standards (NIST/RFC/OWASP) and Scholar/JSTOR. You MAY only cite sources you actually ' +
-    'fetched this run. If you cannot ground it, verdict=UNCONFIRMED. Claim: ' +
+    'standards (NIST/RFC/OWASP) and Scholar/JSTOR. Cite only sources you actually fetched this run: ' +
+    'a citation you did not fetch is fabricated authority, the one thing this audit exists to rule ' +
+    'out. If you cannot ground it, verdict=UNCONFIRMED. Claim: ' +
     JSON.stringify(c),
     { schema: FINDING, label: `verify:${c.location}`, phase: 'Verify' },
   ),
