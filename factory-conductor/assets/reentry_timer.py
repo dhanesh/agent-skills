@@ -50,6 +50,20 @@ def platform_kind():
     return None
 
 
+def _has_crontab_binary():
+    return shutil.which("crontab") is not None
+
+
+def _sweep_kinds():
+    """Which kinds a kind=None sweep checks. cron is included when it can actually be
+    read: dry-run always can (a stand-in file, no binary needed); real mode only when
+    a `crontab` binary exists. A real host with no crontab at all (Arch, minimal
+    Fedora, many containers) has nothing to sweep there, and must not crash trying."""
+    if _dry() or _has_crontab_binary():
+        return KINDS
+    return tuple(k for k in KINDS if k != "cron")
+
+
 def _dir(kind):
     return {"launchd": os.path.join(_home(), "Library", "LaunchAgents"),
             "systemd": os.path.join(_home(), ".config", "systemd", "user")}[kind]
@@ -95,7 +109,13 @@ def render(kind, run_id, argv, interval_min):
         # cron itself (not the shell) scans the line for an unescaped `%` and turns it
         # into a newline (stdin separator); `\%` is cron's own escape for a literal `%`
         # and is stripped before the line ever reaches sh -c, so this must run on the
-        # raw joined text, not be shell-quote-aware.
+        # raw joined text, not be shell-quote-aware. A literal `\%` already present in
+        # an argument cannot be told apart from our own escaping reliably across real
+        # cron implementations (verified against Debian cron), so it is refused
+        # outright rather than risk a silently wrong command.
+        for a in argv:
+            if "\\%" in a:
+                raise OSError("cron cannot express a literal \\% in a path")
         cmd = shlex.join(argv).replace("%", "\\%")
         return {"crontab": "*/%d * * * * %s %s" % (interval_min, cmd, TAG % run_id)}
     raise ValueError("unsupported timer kind: %r" % kind)
@@ -113,6 +133,16 @@ def _run(cmd, ran):
                       or "command failed (%d): %s" % (r.returncode, label))
 
 
+def _best_effort(cmd, ran):
+    """Run cmd (dry-run aware) without ever raising: a cleanup/tidy-up step whose own
+    failure must never mask the real error already in flight, or block removing the
+    other kinds in a sweep."""
+    ran.append(shlex.join(cmd))
+    if _dry():
+        return
+    subprocess.run(cmd, capture_output=True)
+
+
 def _crontab_read():
     label = "crontab -l"
     if _dry():
@@ -124,8 +154,11 @@ def _crontab_read():
             return f.read().splitlines()
     r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if r.returncode != 0:
-        if "no crontab" in (r.stderr or "").lower():
-            return []  # an empty crontab is not a failure
+        err = (r.stderr or "").lower()
+        # "no crontab for X" (Vixie/ISC cron); busybox crond says "can't open
+        # '<path>': ..." -- both mean an empty crontab, not a failure.
+        if "no crontab" in err or ("can't open" in err and "crontab" in err):
+            return []
         raise OSError((r.stderr or "").strip() or "crontab -l failed")
     return r.stdout.splitlines()
 
@@ -150,8 +183,10 @@ def install(run_id, argv, interval_min, kind=None):
     Every existing timer for run_id, under any kind, is swept first (a run whose kind
     changed between installs must never leave an orphaned entry under the old one), so
     the returned command list starts with that sweep's. On a loader failure after files
-    were written (systemd/launchd), those files are removed again before the error
-    propagates, so a failed install never leaves a definition on disk."""
+    were written (systemd/launchd), those files are removed again -- for systemd, a
+    best-effort disable + daemon-reload follows too, so a partially-enabled unit never
+    leaves a dangling wants symlink -- before the error propagates, so a failed install
+    never leaves a definition behind."""
     kind = kind or platform_kind()
     if kind is None:
         raise OSError("unsupported platform for scheduled re-entry")
@@ -180,19 +215,31 @@ def install(run_id, argv, interval_min, kind=None):
                 os.remove(path)
             except OSError:
                 pass
+        if kind == "systemd":
+            _best_effort(["systemctl", "--user", "disable", UNIT % run_id + ".timer"], [])
+            _best_effort(["systemctl", "--user", "daemon-reload"], [])
         raise
     return ran
 
 
 def installed(run_id, kind=None):
-    """run_id's installed timer artifacts. kind=None sweeps all three kinds by run id
-    (the cron line, the unit files, the plist) rather than trusting a single detected
-    kind, so a run installed under one kind is still found after the detected kind
-    changes (a different host, a systemd user session that came up later, ...)."""
+    """run_id's installed timer artifacts. kind=None sweeps every kind that can
+    actually be checked (see _sweep_kinds) by run id, rather than trusting a single
+    detected kind, so a run installed under one kind is still found after the
+    detected kind changes (a different host, a systemd user session that came up
+    later, ...). Each kind is tried independently; if any fail, their errors are
+    combined into one OSError raised only after every kind was attempted, so one
+    kind's failure never hides another's result."""
     if kind is None:
-        out = [l for l in _crontab_read() if l.endswith(TAG % run_id)]
-        for k in ("launchd", "systemd"):
-            out += installed(run_id, kind=k)
+        out = []
+        errors = []
+        for k in _sweep_kinds():
+            try:
+                out += installed(run_id, kind=k)
+            except OSError as e:
+                errors.append("%s: %s" % (k, e))
+        if errors:
+            raise OSError("; ".join(errors))
         return out
     if kind == "cron":
         return [l for l in _crontab_read() if l.endswith(TAG % run_id)]
@@ -201,19 +248,28 @@ def installed(run_id, kind=None):
 
 
 def uninstall(run_id, kind=None):
-    """Remove run_id's timer. kind=None sweeps all three kinds (see installed()).
+    """Remove run_id's timer. kind=None sweeps every kind that can actually be
+    checked (see _sweep_kinds), best-effort per kind: one kind's failure (a cron
+    read error, say) never blocks removing the others, and all of their errors are
+    combined into one OSError raised only after every kind was attempted.
 
     Files are deleted before the unload command runs (verified against real systemd
-    257: `disable --now` on a unit systemd already has loaded still stops and disables
-    it once the file is gone, and a stale unit that was never bootstrapped needs no
-    unload at all). For launchd, when this process IS the job being uninstalled
-    (XPC_SERVICE_NAME == its label), the bootout is skipped: that job is not coming
-    back at the next login once its plist is gone, and it ends normally when `watch`
-    exits, so a self-bootout would only race its own exit."""
+    257: `disable --now` on a unit systemd already has loaded still stops and
+    disables it once the file is gone). launchd always runs its own bootout too, as
+    the very last action, even when this process IS the job being uninstalled
+    (XPC_SERVICE_NAME == its label): skipping a self-bootout left the job loaded, so
+    it kept firing no-op `watch` calls until the next login instead of ending when
+    this process exits."""
     if kind is None:
         ran = []
-        for k in KINDS:
-            ran += uninstall(run_id, kind=k)
+        errors = []
+        for k in _sweep_kinds():
+            try:
+                ran += uninstall(run_id, kind=k)
+            except OSError as e:
+                errors.append("%s: %s" % (k, e))
+        if errors:
+            raise OSError("; ".join(errors))
         return ran
     if kind == "cron":
         lines = _crontab_read()
@@ -229,9 +285,10 @@ def uninstall(run_id, kind=None):
     if not present:
         return ran
     if kind == "launchd":
-        if os.environ.get("XPC_SERVICE_NAME") != LABEL % run_id:
-            _run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), LABEL % run_id)], ran)
+        _run(["launchctl", "bootout", "gui/%d/%s" % (os.getuid(), LABEL % run_id)], ran)
     if kind == "systemd":
         _run(["systemctl", "--user", "daemon-reload"], ran)
         _run(["systemctl", "--user", "disable", "--now", UNIT % run_id + ".timer"], ran)
+        _best_effort(["systemctl", "--user", "reset-failed", UNIT % run_id + ".timer",
+                      UNIT % run_id + ".service"], ran)
     return ran

@@ -415,6 +415,59 @@ class ReentryCommandTests(unittest.TestCase):
         self.assertEqual([e for e in C.State.load(self.st.state_path).events()
                           if e.get("event") == "reentry_timer"], [])
 
+    # ── fix round 2, Minor 1: status/uninstall report failed, never a traceback ──
+
+    def test_status_reports_failed_on_an_underlying_error(self):
+        self.grant()
+        run_reentry(self.root, "install")
+        os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL"] = "crontab -l"
+        try:
+            rc, out = run_reentry(self.root, "status")
+        finally:
+            os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL", None)
+        self.assertEqual((rc, out), (2, "REENTRY: failed"))
+
+    def test_uninstall_reports_failed_on_an_underlying_error(self):
+        self.grant()
+        run_reentry(self.root, "install")
+        os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL"] = "crontab -l"
+        try:
+            rc, out = run_reentry(self.root, "uninstall")
+        finally:
+            os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL", None)
+        self.assertEqual((rc, out), (2, "REENTRY: failed"))
+
+    # ── fix round 2, Important: status/uninstall work without a crontab binary ──
+
+    def test_status_and_uninstall_work_without_a_crontab_binary(self):
+        self.grant()
+        old_kind = os.environ.get("FACTORY_CONDUCTOR_TIMER_KIND")
+        os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = "systemd"
+        try:
+            rc, out = run_reentry(self.root, "install")  # still sandboxed here
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = old_kind
+        self.assertEqual(rc, 0, out)
+
+        def fake_which(name):
+            return None if name == "crontab" else "/usr/bin/" + name
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN", None)
+        try:
+            with mock.patch.object(T.shutil, "which", side_effect=fake_which), \
+                    mock.patch.object(T.subprocess, "run", side_effect=fake_run):
+                rc, out = run_reentry(self.root, "status")
+                self.assertEqual(rc, 0, out)
+                self.assertIn(T.UNIT % self.st.run_id, out.splitlines()[0])
+                rc, out = run_reentry(self.root, "uninstall")
+                self.assertEqual((rc, out), (0, "REENTRY: uninstalled"))
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
+        self.assertEqual(T.installed(self.st.run_id, kind="systemd"), [])
+
 
 class WiringTests(unittest.TestCase):
     def test_every_run_command_renews_the_session_lease(self):

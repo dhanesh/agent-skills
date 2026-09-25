@@ -2848,15 +2848,22 @@ def cmd_reentry(args):
     run: only watch's own stall logic decides that. Any OSError from T.install (an
     unsupported platform, or a loader that failed) is reported as REENTRY: failed;
     T.install has already removed whatever files it wrote, and no install event is
-    logged."""
+    logged. status and uninstall report the same way on an OSError from T (a swept
+    kind that failed, e.g. a cron read error) -- never a traceback."""
     import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
     root = os.path.abspath(args.root)
     st = _load_current(root)
     if st is None:
         return 2
     if args.action == "status":
-        last = next((e for e in reversed(st.events()) if e.get("event") == "reentry"), None)
-        print("REENTRY: timer %s" % (", ".join(T.installed(st.run_id)) or "none"))
+        try:
+            timer_line = ", ".join(T.installed(st.run_id)) or "none"
+            last = next((e for e in reversed(st.events()) if e.get("event") == "reentry"), None)
+        except OSError as e:
+            sys.stderr.write("%s\n" % e)
+            print("REENTRY: failed")
+            return 2
+        print("REENTRY: timer %s" % timer_line)
         print("REENTRY: lease %s" % json.dumps(R.read_lease(st.dir), sort_keys=True))
         print("REENTRY: count %d" % len({e.get("n") for e in st.events()
                                          if e.get("event") == "reentry"}))
@@ -2864,7 +2871,12 @@ def cmd_reentry(args):
                                     if last else "none"))
         return 0
     if args.action == "uninstall":
-        T.uninstall(st.run_id)
+        try:
+            T.uninstall(st.run_id)
+        except OSError as e:
+            sys.stderr.write("%s\n" % e)
+            print("REENTRY: failed")
+            return 2
         st.log("reentry_timer", action="uninstall")
         print("REENTRY: uninstalled")
         return 0

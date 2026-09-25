@@ -1,4 +1,4 @@
-import os, plistlib, re, shlex, sys, unittest
+import os, plistlib, re, shlex, shutil, subprocess, sys, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reentry_timer as T
@@ -160,9 +160,13 @@ class TimerTests(unittest.TestCase):
             after = f.read()
         self.assertEqual(before, after)
 
-    # ── I5: launchd never boots itself out ───────────────────────────────────
+    # ── fix round 2, I5: launchd always boots itself out, last ──────────────────
 
-    def test_launchd_uninstall_skips_bootout_for_its_own_job(self):
+    def test_launchd_uninstall_always_boots_out_even_for_its_own_job(self):
+        # fix round 1 skipped the bootout for XPC_SERVICE_NAME == its own label;
+        # that left the job loaded, so it kept firing no-op `watch`es until the next
+        # login. Round 2: it still runs the bootout, just last (after the files are
+        # already gone).
         T.install(RID, ARGV, 10, kind="launchd")
         os.environ["XPC_SERVICE_NAME"] = T.LABEL % RID
         try:
@@ -170,7 +174,7 @@ class TimerTests(unittest.TestCase):
         finally:
             os.environ.pop("XPC_SERVICE_NAME", None)
         self.assertEqual(T.installed(RID, kind="launchd"), [])
-        self.assertFalse(any("bootout" in c for c in ran), ran)
+        self.assertTrue(any("bootout" in c for c in ran), ran)
 
     def test_launchd_uninstall_boots_out_a_different_job(self):
         T.install(RID, ARGV, 10, kind="launchd")
@@ -205,6 +209,133 @@ class TimerTests(unittest.TestCase):
         cmd_part = line.split(" # ")[0]
         unescaped = cmd_part.replace("\\%", "%")  # cron's own unescaping, before sh sees it
         self.assertEqual(shlex.split(unescaped)[5:], SPECIAL_ARGV)
+
+    # ── fix round 2, ruled: a literal \% in an argv is refused for cron ─────────
+
+    def test_a_literal_backslash_percent_is_refused_for_cron(self):
+        argv = ARGV[:-1] + ["/w/a\\%b"]
+        with self.assertRaises(OSError):
+            T.render("cron", RID, argv, 10)
+        with self.assertRaises(OSError):
+            T.install(RID, argv, 10, kind="cron")
+        self.assertEqual(T.installed(RID, kind="cron"), [])
+
+    def test_a_lone_backslash_or_a_lone_percent_is_still_fine_for_cron(self):
+        T.render("cron", RID, ARGV[:-1] + ["/w/a\\nb"], 10)   # backslash, no %
+        T.render("cron", RID, ARGV[:-1] + ["/w/50%h"], 10)    # %, no backslash
+
+    # ── fix round 2, Important: no crontab binary must never crash a sweep ──────
+
+    def test_sweep_kinds_skips_cron_without_a_binary_in_real_mode(self):
+        with mock.patch.object(T, "_dry", return_value=False), \
+                mock.patch.object(T.shutil, "which", return_value=None):
+            self.assertNotIn("cron", T._sweep_kinds())
+        with mock.patch.object(T, "_dry", return_value=False), \
+                mock.patch.object(T.shutil, "which", return_value="/usr/bin/crontab"):
+            self.assertIn("cron", T._sweep_kinds())
+
+    def test_sweep_kinds_always_includes_cron_in_dry_run_even_with_no_binary(self):
+        with mock.patch.object(T.shutil, "which", return_value=None):
+            self.assertIn("cron", T._sweep_kinds())  # _dry() is True here (setUp)
+
+    def test_uninstall_and_installed_work_without_a_crontab_binary(self):
+        # simulate a real host that has systemd but no crontab binary at all (Arch,
+        # minimal Fedora, many containers): dry-run is off so the binary check runs
+        # for real, but every subprocess call is faked so the real system is still
+        # never touched, and the fake asserts `crontab` is never invoked
+        T.install(RID, ARGV, 10, kind="systemd")  # written while still sandboxed
+
+        def fake_which(name):
+            return None if name == "crontab" else "/usr/bin/" + name
+
+        def fake_run(cmd, **kw):
+            self.assertNotEqual(cmd[0], "crontab", "crontab must never run: no binary")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN", None)
+        try:
+            with mock.patch.object(T.shutil, "which", side_effect=fake_which), \
+                    mock.patch.object(T.subprocess, "run", side_effect=fake_run):
+                self.assertTrue(T.installed(RID))          # finds the systemd unit
+                ran = T.uninstall(RID)                      # kind=None sweep
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
+        self.assertTrue(any("systemctl" in c for c in ran), ran)
+        self.assertEqual(T.installed(RID, kind="systemd"), [])
+
+    def _write_kind_files(self, kind, run_id):
+        """Write run_id's files for `kind` directly, bypassing install()'s own
+        pre-uninstall sweep -- so two different kinds can be made to coexist on disk,
+        which a normal install() call never allows (fix round 1, I3)."""
+        files = T.render(kind, run_id, ARGV, 10)
+        os.makedirs(T._dir(kind), exist_ok=True)
+        for name, text in files.items():
+            with open(os.path.join(T._dir(kind), name), "w") as f:
+                f.write(text)
+
+    def test_a_cron_read_error_does_not_block_systemd_or_launchd_removal(self):
+        self._write_kind_files("systemd", RID)
+        self._write_kind_files("launchd", RID)
+        os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL"] = "crontab -l"
+        try:
+            with self.assertRaises(OSError):
+                T.uninstall(RID)  # kind=None: cron fails, systemd/launchd must not
+        finally:
+            os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL", None)
+        self.assertEqual(T.installed(RID, kind="systemd"), [])
+        self.assertEqual(T.installed(RID, kind="launchd"), [])
+
+    # ── fix round 2, Minor 5: busybox's "can't open" crontab message ────────────
+
+    def test_busybox_cant_open_crontab_message_is_treated_as_empty(self):
+        os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN", None)
+        try:
+            with mock.patch.object(T.subprocess, "run") as m:
+                m.return_value = subprocess.CompletedProcess(
+                    ["crontab", "-l"], 1, stdout="",
+                    stderr="crontab: can't open '/var/spool/cron/crontabs/root': "
+                           "No such file or directory\n")
+                self.assertEqual(T._crontab_read(), [])
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
+
+    def test_an_unrelated_crontab_read_error_still_raises(self):
+        os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN", None)
+        try:
+            with mock.patch.object(T.subprocess, "run") as m:
+                m.return_value = subprocess.CompletedProcess(
+                    ["crontab", "-l"], 1, stdout="", stderr="permission denied\n")
+                with self.assertRaises(OSError):
+                    T._crontab_read()
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN"] = "1"
+
+    # ── fix round 2, Minor 4: systemd tidy-up ────────────────────────────────────
+
+    def test_systemd_uninstall_runs_reset_failed(self):
+        T.install(RID, ARGV, 10, kind="systemd")
+        ran = T.uninstall(RID, kind="systemd")
+        self.assertTrue(any("reset-failed" in c for c in ran), ran)
+
+    def test_a_failing_systemd_enable_rolls_back_disable_and_daemon_reload(self):
+        calls = []
+        real_best_effort = T._best_effort
+
+        def spy(cmd, ran):
+            calls.append(list(cmd))
+            return real_best_effort(cmd, ran)
+
+        os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL"] = "systemctl --user enable"
+        try:
+            with mock.patch.object(T, "_best_effort", side_effect=spy):
+                with self.assertRaises(OSError):
+                    T.install(RID, ARGV, 10, kind="systemd")
+        finally:
+            os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL", None)
+        self.assertEqual(T.installed(RID, kind="systemd"), [])
+        joined = [shlex.join(c) for c in calls]
+        self.assertTrue(any("disable" in c for c in joined), joined)
+        self.assertTrue(any("daemon-reload" in c for c in joined), joined)
 
 
 if __name__ == "__main__":
