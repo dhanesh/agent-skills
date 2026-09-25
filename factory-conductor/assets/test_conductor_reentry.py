@@ -1,4 +1,4 @@
-import contextlib, io, json, os, signal, socket, subprocess, sys, tempfile, time, unittest
+import contextlib, io, json, os, shlex, signal, socket, subprocess, sys, tempfile, time, unittest
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -333,6 +333,20 @@ class ReentryCommandTests(unittest.TestCase):
         self.assertEqual(run_reentry(self.root, "install"),
                          (0, "REENTRY: installed every 10 min"))
         self.assertTrue(T.installed(self.st.run_id, kind="cron"))
+
+    def test_install_captures_path_into_the_timer_and_the_log(self):
+        # final wave C1: a timer's own PATH is minimal; install captures the caller's
+        self.grant()
+        captured = "/opt/my tools/bin:/usr/bin:/bin"
+        with mock.patch.dict(os.environ, {"PATH": captured}):
+            self.assertEqual(run_reentry(self.root, "install")[0], 0)
+        line, = T.installed(self.st.run_id, kind="cron")
+        words = shlex.split(line.split(" # ")[0])[5:]
+        self.assertEqual(words[:2], ["/usr/bin/env", "PATH=" + captured])
+        self.assertEqual(words[2:], C.watch_argv(self.root))
+        ev = [e for e in C.State.load(self.st.state_path).events()
+              if e.get("event") == "reentry_timer"][-1]
+        self.assertEqual((ev["action"], ev["path"]), ("install", captured))
 
     def test_status_prints_the_four_lines(self):
         self.grant()

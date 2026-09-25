@@ -7,6 +7,8 @@ from conductor_testkit import tmpdir
 RID = "run-20260925T000000Z-abcdef"
 ARGV = ["/usr/bin/python3", "/opt/my skills/conductor.py", "watch", "--root", "/w/it's repo"]
 # every systemd/cron special char in one argument: %, $, ${X}, a backslash, a space
+# a captured PATH with a space, a % and a $ in it
+PATH_VAL = "/opt/my tools/bin:/usr/50%x/bin:/o/$d/bin:/usr/bin:/bin"
 SPECIAL_ARGV = ["/usr/bin/python3", "/opt/a b/conductor.py", "watch", "--root",
                 "/w/50%h $HOME ${USER} it's \"q\" back\\slash"]
 
@@ -345,6 +347,64 @@ class TimerTests(unittest.TestCase):
         joined = [shlex.join(c) for c in calls]
         self.assertTrue(any("disable" in c for c in joined), joined)
         self.assertTrue(any("daemon-reload" in c for c in joined), joined)
+
+
+    # ── final wave C1: the timer carries the PATH captured at install ───────────
+    # launchd hands a job PATH=/usr/bin:/bin:/usr/sbin:/sbin and cron PATH=/usr/bin:/bin,
+    # so without this the agent, the plan's tools and the right python3 are not found.
+
+    def test_launchd_plist_carries_the_captured_path(self):
+        (_, text), = T.render("launchd", RID, ARGV, 10, path=PATH_VAL).items()
+        pl = plistlib.loads(text.encode())
+        self.assertEqual(pl["EnvironmentVariables"], {"PATH": PATH_VAL})
+        self.assertEqual(pl["ProgramArguments"], ARGV)
+
+    def test_systemd_service_carries_the_captured_path_quoted(self):
+        svc = T.render("systemd", RID, ARGV, 10, path=PATH_VAL)[
+            "factory-conductor-%s.service" % RID]
+        service = svc.split("[Service]", 1)[1]
+        env = [l for l in service.splitlines() if l.startswith("Environment=")]
+        self.assertEqual(len(env), 1, svc)
+        value = env[0][len("Environment="):]
+        self.assertTrue(value.startswith('"') and value.endswith('"'), value)
+        # Environment= resolves % specifiers and C escapes but never expands $, so
+        # the $ is not doubled here (unlike ExecStart=)
+        word = value[1:-1].replace("%%", "%").replace('\\"', '"').replace("\\\\", "\\")
+        self.assertEqual(word, "PATH=" + PATH_VAL)
+        self.assertNotIn("50%x", value)  # every % escaped as %%
+
+    def test_cron_line_runs_through_env_with_the_captured_path(self):
+        (_, line), = T.render("cron", RID, ARGV, 10, path=PATH_VAL).items()
+        self.assertIsNone(re.search(r"(?<!\\)%", line), line)
+        words = shlex.split(line.split(" # ")[0].replace("\\%", "%"))[5:]
+        self.assertEqual(words, ["/usr/bin/env", "PATH=" + PATH_VAL] + ARGV)
+
+    def test_a_literal_backslash_percent_in_the_path_is_refused_for_cron(self):
+        with self.assertRaises(OSError):
+            T.render("cron", RID, ARGV, 10, path="/a\\%b:/usr/bin")
+
+    def test_install_passes_the_path_into_each_kind(self):
+        # install sweeps every kind first, so each kind is checked right after its own
+        T.install(RID, ARGV, 10, kind="cron", path=PATH_VAL)
+        line, = T.installed(RID, kind="cron")
+        self.assertIn("/usr/bin/env", line)
+        T.install(RID, ARGV, 10, kind="launchd", path=PATH_VAL)
+        plist, = T.installed(RID, kind="launchd")
+        with open(plist, "rb") as f:
+            self.assertEqual(plistlib.load(f)["EnvironmentVariables"]["PATH"], PATH_VAL)
+        T.install(RID, ARGV, 10, kind="systemd", path=PATH_VAL)
+        svc = [p for p in T.installed(RID, kind="systemd") if p.endswith(".service")][0]
+        with open(svc) as f:
+            self.assertIn("Environment=", f.read())
+        T.uninstall(RID)
+
+    def test_no_path_given_renders_no_environment(self):
+        (_, text), = T.render("launchd", RID, ARGV, 10).items()
+        self.assertNotIn("EnvironmentVariables", plistlib.loads(text.encode()))
+        svc = T.render("systemd", RID, ARGV, 10)["factory-conductor-%s.service" % RID]
+        self.assertNotIn("Environment=", svc)
+        (_, line), = T.render("cron", RID, ARGV, 10).items()
+        self.assertNotIn("/usr/bin/env", line)
 
 
 if __name__ == "__main__":

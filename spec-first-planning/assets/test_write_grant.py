@@ -455,6 +455,27 @@ class TestReentry(WriteGrantBase):
                          ["claude", "-p", "{prompt}"])
         self.assertIn("REENTRY: claude -p '{prompt}' every 10 min", out)
 
+    WARN = ("warning: agent_cmd[0] is not an absolute path; the timer's PATH is the one "
+            "captured at reentry install")
+
+    def _cli_write(self, answers):
+        r = self.cli("--root", self.root, "--spec", "docs/spec.md", "--plan", self.plan_path,
+                     "--answers", self._write_answers(answers), "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_a_relative_agent_cmd_warns_about_the_timer_path(self):
+        # final wave C1: a timer runs with a minimal PATH; a bare name resolves only on
+        # the PATH captured at `reentry install`, so an absolute path is recommended
+        r = self._cli_write(dict(self.answers, reentry={"agent_cmd": ["claude", "-p",
+                                                                      "{prompt}"]}))
+        self.assertIn(self.WARN, r.stderr)
+
+    def test_an_absolute_agent_cmd_does_not_warn(self):
+        r = self._cli_write(dict(self.answers, reentry={
+            "agent_cmd": ["/usr/local/bin/claude", "-p", "{prompt}"]}))
+        self.assertNotIn("warning: agent_cmd", r.stderr + r.stdout)
+
     def test_reentry_gets_default_values_it_does_not_supply(self):
         answers = dict(self.answers, reentry={"agent_cmd": ["claude", "-p", "{prompt}"]})
         _, st = self._run_write(answers)

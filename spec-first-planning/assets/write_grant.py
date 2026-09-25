@@ -335,6 +335,9 @@ def main(argv=None):
     if reentry:
         print("REENTRY: %s every %d min" % (shlex.join(reentry["agent_cmd"]),
                                              reentry["interval_min"]))
+        if not os.path.isabs(reentry["agent_cmd"][0]):
+            print("warning: agent_cmd[0] is not an absolute path; the timer's PATH is the "
+                  "one captured at reentry install", file=sys.stderr)
     print("GRANT: %s" % path)
     return 0
 

@@ -2887,13 +2887,16 @@ def cmd_reentry(args):
     ok, _line = _gate_logged(st, "local_reversible")  # prints GATE: ...; never stops the run
     if not ok:
         return 3
+    # the timer's own PATH is minimal (launchd: /usr/bin:/bin:/usr/sbin:/sbin, cron:
+    # /usr/bin:/bin): the agent, the plan's tools and their python3 need this one
+    path = os.environ.get("PATH") or os.defpath
     try:
-        T.install(st.run_id, watch_argv(root), block["interval_min"])
+        T.install(st.run_id, watch_argv(root), block["interval_min"], path=path)
     except OSError as e:
         sys.stderr.write("%s\n" % e)
         print("REENTRY: failed")
         return 2
-    st.log("reentry_timer", action="install", interval_min=block["interval_min"])
+    st.log("reentry_timer", action="install", interval_min=block["interval_min"], path=path)
     print("REENTRY: installed every %d min" % block["interval_min"])
     return 0
 

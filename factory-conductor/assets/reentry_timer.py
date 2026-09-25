@@ -80,31 +80,43 @@ def _names(kind, run_id):
     raise ValueError("unsupported timer kind: %r" % kind)
 
 
-def _sd_quote(a):
+def _sd_quote(a, dollar=True):
     """One systemd ExecStart= word: systemd's own quoting, verified against a real
     systemd (257) with `systemctl show`. This is not shell quoting -- systemd expands
     `%` as a specifier and C-unescapes `\\` and `$...` itself, even inside quotes, so
-    shlex.quote (POSIX shell quoting) is the wrong tool here."""
-    return '"%s"' % (a.replace("\\", "\\\\").replace('"', '\\"')
-                      .replace("%", "%%").replace("$", "$$"))
+    shlex.quote (POSIX shell quoting) is the wrong tool here.
+
+    dollar=False is for an Environment= assignment: systemd resolves specifiers and C
+    escapes there too, but never expands `$`, so a doubled `$$` would stay doubled."""
+    a = a.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return '"%s"' % (a.replace("$", "$$") if dollar else a)
 
 
-def render(kind, run_id, argv, interval_min):
+def render(kind, run_id, argv, interval_min, path=None):
+    """The files (or, for cron, the one tagged line) for run_id's timer. `path`, when
+    given, is the PATH the timer runs argv with: a timer's own PATH is minimal
+    (launchd: /usr/bin:/bin:/usr/sbin:/sbin, cron: /usr/bin:/bin), too short to find
+    the user's agent, the plan's tools or the python3 they run, so install passes the
+    PATH it was run with."""
     if kind == "launchd":
         pl = {"Label": LABEL % run_id, "ProgramArguments": list(argv),
               "StartInterval": interval_min * 60, "RunAtLoad": False}
+        if path is not None:
+            pl["EnvironmentVariables"] = {"PATH": path}
         return {LABEL % run_id + ".plist": plistlib.dumps(pl).decode()}
     if kind == "systemd":
         u = UNIT % run_id
         desc = ("factory-conductor watch %s" % run_id).replace("%", "%%")
         exec_start = " ".join(_sd_quote(a) for a in argv)
+        env = ("Environment=%s\n" % _sd_quote("PATH=" + path, dollar=False)
+               if path is not None else "")
         # KillMode=process: when watch (the oneshot's main process) exits, systemd must
         # not kill the rest of the unit's cgroup. The agent watch started is in that
         # cgroup (start_new_session does not leave it), and the default control-group
         # mode would kill it at every tick.
         return {u + ".service": "[Unit]\nDescription=%s\n\n"
-                                "[Service]\nType=oneshot\nKillMode=process\nExecStart=%s\n"
-                                % (desc, exec_start),
+                                "[Service]\nType=oneshot\nKillMode=process\n%sExecStart=%s\n"
+                                % (desc, env, exec_start),
                 u + ".timer": "[Unit]\nDescription=%s\n\n"
                               "[Timer]\nOnBootSec=%dmin\nOnUnitActiveSec=%dmin\n\n"
                               "[Install]\nWantedBy=timers.target\n"
@@ -116,7 +128,10 @@ def render(kind, run_id, argv, interval_min):
         # raw joined text, not be shell-quote-aware. A literal `\%` already present in
         # an argument cannot be told apart from our own escaping reliably across real
         # cron implementations (verified against Debian cron), so it is refused
-        # outright rather than risk a silently wrong command.
+        # outright rather than risk a silently wrong command. The captured PATH goes
+        # through /usr/bin/env as one more argument, so the same escaping covers it.
+        if path is not None:
+            argv = ["/usr/bin/env", "PATH=" + path] + list(argv)
         for a in argv:
             if "\\%" in a:
                 raise OSError("cron cannot express a literal \\% in a path")
@@ -181,8 +196,9 @@ def _crontab_write(lines, ran):
         raise OSError((r.stderr or "").strip() or "crontab - failed")
 
 
-def install(run_id, argv, interval_min, kind=None):
-    """Write and load run_id's timer as `kind` (or the detected platform kind).
+def install(run_id, argv, interval_min, kind=None, path=None):
+    """Write and load run_id's timer as `kind` (or the detected platform kind), running
+    argv with PATH=`path` when given (see render).
 
     Every existing timer for run_id, under any kind, is swept first (a run whose kind
     changed between installs must never leave an orphaned entry under the old one), so
@@ -195,7 +211,7 @@ def install(run_id, argv, interval_min, kind=None):
     if kind is None:
         raise OSError("unsupported platform for scheduled re-entry")
     ran = uninstall(run_id)  # sweep every kind, not just this one (I3)
-    files = render(kind, run_id, argv, interval_min)
+    files = render(kind, run_id, argv, interval_min, path=path)
     if kind == "cron":
         _crontab_write(_crontab_read() + [files["crontab"]], ran)
         return ran
