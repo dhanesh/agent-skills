@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.3"
+  version: "1.1.4"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -219,7 +219,7 @@ Fan out one subagent per input type. Each subagent follows the adapter rules in
 - **Prose** — extract from code fences, Markdown tables, and inline backtick references in that
   order; you MUST NOT invent endpoints that are absent from the text.
 
-After all subagents complete, merge their outputs into a single Endpoint Inventory array.
+Once every input is extracted, merge the records into a single Endpoint Inventory array.
 Deduplication key: `(method, path)` (case-insensitive method, exact Hono-style path). Resolve
 conflicts in priority order: OpenAPI > Postman/HAR > curl > prose. Union `responses[]` by
 status code. Enforce `--max-endpoints` by dropping records in reverse-priority order and
@@ -295,7 +295,8 @@ Unless `--no-verify` is set:
    Use the primary (no-`when`) status code from the Endpoint Inventory. For endpoints without
    a grounded status, use `200`.
 
-2. Run the smoke suite using the absolute `$SMOKE` path resolved in Stage 1, passing the
+2. Run the smoke suite using the absolute `$SMOKE` path resolved under "Locating asset
+   helpers" (before Stage 0), passing the
    resolved runtime environment **and the tenant** via `MOCKSTAR_SMOKE_TENANT`:
    ```sh
    # local runtime

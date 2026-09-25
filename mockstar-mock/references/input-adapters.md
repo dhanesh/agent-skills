@@ -227,8 +227,11 @@ Set `confidence: "grounded"` only when an operation file carries an explicit exa
 
 **Pre-processing.**
 
-- **PDF / DOCX** — convert to plain text via `assets/extract_text.py` (implemented in
-  Task 5) before extraction. Pass the output file path as the prose source.
+- **PDF / DOCX** — Stage 1 normally hands you these already converted to text. If you
+  receive the raw file, convert it with the absolute `$EXTRACT` path the dispatcher gave
+  you (`uv run "$EXTRACT" <file>` prints the text to stdout; capture it to a temp file and
+  use that file as the prose source). A relative `assets/` path does not resolve from the
+  target repo.
 - **URL** — fetch the page with `curl -L` (or `WebFetch`) to obtain HTML/text;
   strip HTML tags to get readable prose.
 - **Markdown** — use directly; no conversion needed.
