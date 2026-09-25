@@ -36,8 +36,8 @@ Like the hooks, it is **observation only**: `observed_conf` rises but `normative
 and status stays `unverified` — a *declared* dependency is a sighting, not proof it is correct
 or desirable. No invented facts: a file→file edge is added only when the target resolves to a
 real scanned file, and every `depends_on` referent is a literal token from the source
-(`FROM`/`uses`/`import`). `build` now auto-creates these **dependency** referents; *semantic /
-domain* referents (business concepts, higher-level services) still come from the agent via
+(`FROM`/`uses`/`import`). `build` auto-creates these **dependency** referents; *semantic /
+domain* referents (business concepts, higher-level services) come from the agent via
 `wm map`. External deps are capped per file and deduped (one referent, many `depends_on` edges).
 
 **Re-run safety.** Every write is an upsert on a stable key — entities on `symbol_id`,
@@ -59,7 +59,9 @@ never pruned. The build result reports `pruned_stale_edges`.
 
 ## (a) Marker lines — lowest friction
 
-Write these at the **start of a line** in your (assistant) turn; the Stop hook harvests them.
+Markers go at the **start of a line**; the Stop hook harvests them. Write `WM-OBSERVE`,
+`WM-MAPS`, `WM-CONSTRAINT` and `WM-CONTRADICTS` in your (assistant) turn. `WM-VALIDATED` and
+`WM-REFUTES` count only when the user types them in their own message (see below).
 
 ```
 WM-OBSERVE: <subject> <predicate> <object> [@ <file:line>]

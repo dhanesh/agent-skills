@@ -60,8 +60,7 @@ inserted on rejection (the check runs before any write).
 When a triple names an unknown entity, the stub's kind comes from the ontology instead of a
 blind default — the same move as `rdfs:domain`/`rdfs:range` entailment:
 
-- `billing/refund.py depends_on stripe-sdk` → `stripe-sdk` stubbed as a **referent** (before
-  this layer, it would have been silently mis-typed).
+- `billing/refund.py depends_on stripe-sdk` → `stripe-sdk` stubbed as a **referent**.
 - `auth.py imports hashlib` → `hashlib` stubbed as a **module**.
 - An explicit `--subj-kind`/`--obj-kind` wins when it is inside the domain/range; outside it,
   the write is rejected with the rule spelled out.
