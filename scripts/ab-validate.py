@@ -238,6 +238,10 @@ SINCE_PP5_REASONS = "b314fca"  # gates: PP-5 asks every never/always/MUST NOT fo
 # stated reason (scripts/gates/pp5_reasons.py) and stops counting hedges.
 SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
 # quotes no current sentence; `removed` in the line column marks deleted text.
+SINCE_REENTRY = "c676d92"  # factory-conductor: scheduled re-entry Task 2 -- the run
+# lock and the lease reentry.py adds. The baseline conductor has no `watch` at all, so
+# every row below (the delta and its four guards) moves against a baseline that lacks
+# the subcommand entirely.
 
 
 def _git_out(*args):
@@ -5589,11 +5593,11 @@ def check_factory_conductor(old, new):
 
 
 # ── factory-conductor: the Q3 gaps ──────────────────────────────────────────
-def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None):
+def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None, reentry=None):
     """A fixture repo on factory/p (cut from main) holding docs/spec.md plus `files`
     ({path: text}), a task-plan/v1 envelope for `tasks` ({id: verify command}, all
-    independent, title "Pair") and a human-accepted grant with `gate_policy` and
-    `budget`. Returns the plan envelope's path."""
+    independent, title "Pair") and a human-accepted grant with `gate_policy`, `budget`
+    and, when given, a payload.reentry block. Returns the plan envelope's path."""
     subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
     for rel, text in dict({"docs/spec.md": "# Spec\n"}, **(files or {})).items():
         path = os.path.join(root, *rel.split("/"))
@@ -5614,14 +5618,15 @@ def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None):
     plan_env = CC.write_envelope(root, CC.build_statement(
         "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
         "spec-first-planning", "2.1.0", root, ["docs/spec.md"], plan_payload))
-    _fc_write_grant(CC, root, plan_env, gate_policy, budget)
+    _fc_write_grant(CC, root, plan_env, gate_policy, budget, reentry=reentry)
     return plan_env
 
 
 def _fc_write_grant(CC, root, plan_env, gate_policy, budget=None, expires=timedelta(days=1),
-                    after=0):
+                    after=0, reentry=None):
     """A human-accepted grant for plan_env, generated `after` seconds from now (so a later
-    one is the newest head) and expiring `expires` after that (negative: already lapsed)."""
+    one is the newest head) and expiring `expires` after that (negative: already lapsed).
+    `reentry`, when given, becomes the payload's reentry block."""
     now = CC.utc_now() + timedelta(seconds=after)
     plan_rel = os.path.relpath(plan_env, root).replace(os.sep, "/")
     grant_payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
@@ -5631,6 +5636,8 @@ def _fc_write_grant(CC, root, plan_env, gate_policy, budget=None, expires=timede
                      "stop_on": [],
                      "expires_at": (now + expires).strftime("%Y-%m-%dT%H:%M:%SZ"),
                      "system_one": {"allowed": False}, "revoked": False}
+    if reentry is not None:
+        grant_payload["reentry"] = reentry
     accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
                 "result": {"outcome": "passed"},
                 "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
@@ -5922,6 +5929,197 @@ def check_factory_conductor_q3(old, new):
         since=SINCE_Q3_GAPS)
 
 
+# ── factory-conductor: scheduled re-entry ───────────────────────────────────
+# Every timer touch (watch's own T.uninstall on a finished run, `reentry install`)
+# must stay off the real system: a temp FACTORY_CONDUCTOR_TIMER_HOME, dry-run, cron.
+_FC_REENTRY_STUB = "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('ok', encoding='utf-8')\n"
+_FC_REENTRY_ASK = {"read_only": "auto", "local_reversible": "ask", "push_branch": "ask",
+                   "open_pr": "ask"}
+
+
+def _fc_tree_reentry(tree):
+    """(conductor path, CC, R) for `tree`; R is None when the tree's conductor predates
+    scheduled re-entry (no reentry.py) -- an honest gap, not a probe error."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None, None, None
+    assets = os.path.join(tree, "factory-conductor", "assets")
+    if not os.path.isfile(os.path.join(assets, "reentry.py")):
+        return conductor, CC, None
+    sys.path.insert(0, assets)
+    try:
+        import importlib
+        R = importlib.import_module("reentry")
+        importlib.reload(R)
+    finally:
+        sys.path.pop(0)
+    return conductor, CC, R
+
+
+def _fc_reentry_run_dir(root):
+    """The one run directory under root's runs/, or None."""
+    runs = os.path.join(root, ".skill-contract", "runs")
+    if not os.path.isdir(runs):
+        return None
+    ds = sorted(d for d in os.listdir(runs)
+               if os.path.isfile(os.path.join(runs, d, "state.json")))
+    return os.path.join(runs, ds[-1]) if ds else None
+
+
+def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=False,
+                      prior_attempt=False, max_reentries=2):
+    """One `watch` tick against a fresh T1-only reentry fixture in `tree`. Returns 1 when
+    the marker file appears (the agent started), 0 when it does not, None (PROBE_ERRORS)
+    on a setup failure -- a broken fixture proves nothing either way.
+
+    Both `init` and `start` themselves gate on local_reversible (they would refuse under
+    an ask policy before any run existed to stop), so every fixture is built covered and
+    T1 is always started. `ask` then supersedes the grant with a fresh one whose
+    local_reversible is "ask" and calls `resume`, which gates again, finds itself
+    refused, and records a real grant_ask stop -- before watch ever runs. `age`
+    backdates the lease, the log and the worktree 45 min -- past stall_min, as
+    test_conductor_reentry_e2e.py does; `revoke` revokes the grant once T1 is started;
+    `prior_attempt` appends an aged reentry(n=1) log line so the attempt count already
+    meets max_reentries."""
+    import contextlib, signal, time
+    tmp = tempfile.mkdtemp()
+    root, marker = os.path.join(tmp, "repo"), os.path.join(tmp, "marker")
+    timer_home = os.path.join(tmp, "timer-home")
+    os.makedirs(timer_home, exist_ok=True)
+    env = dict(os.environ, FACTORY_CONDUCTOR_TIMER_HOME=timer_home,
+              FACTORY_CONDUCTOR_TIMER_DRYRUN="1", FACTORY_CONDUCTOR_TIMER_KIND="cron")
+    pid = None
+    try:
+        block = {"agent_cmd": [sys.executable, "-c", _FC_REENTRY_STUB, marker, "{prompt}"],
+                "max_reentries": max_reentries}
+        plan_env = _fc_fixture(CC, root, {"T1": ["true"]}, _FC_LOCAL, reentry=block)
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=120, env=env)
+
+        r = run("init", "--plan", plan_env)
+        if r.returncode != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "reentry probe: init failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+        r = run("start", "T1")
+        if r.returncode != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "reentry probe: start failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+        if ask:
+            _fc_write_grant(CC, root, plan_env, _FC_REENTRY_ASK, reentry=block, after=2)
+            run("resume")  # gates again under the new grant: refused, grant_ask stop
+        run_dir = _fc_reentry_run_dir(root)
+        if run_dir is None:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "reentry probe: no run directory after init"))
+            return None
+        if revoke:
+            CC.revoke_grant(root)
+        old_stamp = (CC.utc_now() - timedelta(minutes=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if age:
+            R.renew_lease(run_dir, now=CC.utc_now() - timedelta(minutes=45))
+            with open(os.path.join(run_dir, "autonomy-log.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": old_stamp, "event": "aged"}) + "\n")
+            old_ts = time.time() - 45 * 60
+            for base_dir in (os.path.join(run_dir, "wt"),
+                             os.path.join(root, ".git", "worktrees")):
+                for base, dirs, files in os.walk(base_dir):
+                    for n in files + dirs:
+                        with contextlib.suppress(OSError):
+                            os.utime(os.path.join(base, n), (old_ts, old_ts),
+                                    follow_symlinks=False)
+                    with contextlib.suppress(OSError):
+                        os.utime(base, (old_ts, old_ts))
+        if prior_attempt:
+            with open(os.path.join(run_dir, "autonomy-log.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": old_stamp, "event": "reentry", "n": 1,
+                                    "ok": True}) + "\n")
+        r = run("watch")
+        if r.stdout.startswith("REENTRY: started"):
+            with contextlib.suppress(IndexError, ValueError):
+                pid = int(r.stdout.strip().rsplit("pid=", 1)[1])
+        for _ in range(200):
+            if os.path.isfile(marker):
+                break
+            if pid is not None and not R.pid_alive(pid):
+                break
+            time.sleep(0.05)
+        return 1 if os.path.isfile(marker) else 0
+    finally:
+        if pid is not None:
+            with contextlib.suppress(Exception):
+                if R.pid_alive(pid):
+                    os.killpg(pid, signal.SIGKILL)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_conductor_reentry(old, new):
+    s = "factory-conductor"
+
+    def old_watch(tree):
+        """0 when the old conductor has no `watch` at all (an argparse usage error,
+        exit 2, against an empty root -- there is no run to find either) or errors some
+        other way; 1 only if it somehow succeeds. Not a probe error: this only asks
+        whether the baseline command runs, not whether it resumes anything."""
+        conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+        if not os.path.isfile(conductor):
+            return 0
+        tmp = tempfile.mkdtemp()
+        try:
+            r = subprocess.run([sys.executable, "-I", conductor, "watch", "--root", tmp],
+                               capture_output=True, text=True, timeout=30)
+            return 1 if r.returncode == 0 else 0
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    a = old_watch(old)
+    conductor, CC, R = _fc_tree_reentry(new)
+    if conductor is None or R is None:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "reentry probe: the tree under review has no reentry.py / "
+                             "watch to measure"))
+        b = None
+    else:
+        b = _fc_reentry_probe(new, CC, R, conductor, age=True)
+    row(s, "stalled runs resumed without the human", a, b, a == 0 and b == 1,
+        "a killed session's stalled run is resumed by `conductor watch`: the lease, the "
+        "worktree and the log are aged past stall_min (as test_conductor_reentry_e2e.py "
+        "ages them), and it spawns the grant's agent_cmd -- a marker-writing stub here. "
+        "The baseline conductor has no `watch` at all", kind="delta", since=SINCE_REENTRY)
+
+    def guard(dimension, note, **kwargs):
+        if b != 1:
+            PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                                 "reentry guard sanity check failed for %r: the healthy "
+                                 "aged fixture did not start the agent in the new tree"
+                                 % dimension))
+            row(s, dimension, a, None, False, note, kind="guard")
+            return
+        g = _fc_reentry_probe(new, CC, R, conductor, **kwargs)
+        row(s, dimension, a, g, g == 0, note, kind="guard")
+
+    guard("an agent started while another driver's lease is still live",
+          "watch never starts a second driver while the session lease from `start` is "
+          "still live (fresh, unaged); sanity-checked against the aged fixture above, "
+          "which DOES start", age=False)
+    guard("an agent started on a run already stopped for a human (grant_ask)",
+          "a run that `resume` already stopped for grant_ask (local_reversible: ask) "
+          "stays stopped for watch too, never resumed as if it were merely stalled; "
+          "sanity-checked against the aged fixture above, which DOES start", ask=True)
+    guard("an agent started under a revoked grant",
+          "a revoked grant is never covered, so watch never starts; sanity-checked "
+          "against the aged fixture above, which DOES start", revoke=True)
+    guard("an agent started past max_reentries",
+          "watch refuses once the attempt count already meets max_reentries; "
+          "sanity-checked against the aged fixture above, which DOES start",
+          age=True, prior_attempt=True, max_reentries=1)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -5996,6 +6194,7 @@ def main():
         check_factory_conductor(old, REPO)
         check_factory_conductor_q3(old, REPO)
         check_factory_conductor_q3_review(old, REPO)
+        check_factory_conductor_reentry(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
