@@ -74,10 +74,7 @@ spacing, interleaving, testing, and generation are the canonical four. The evide
 real, and it is *scoped*: these are retention techniques, and their difficulty is the
 price of durability, worth paying when durability is the goal the learner chose. Bjork's
 own caveat (Bjork & Bjork, 2011) — a difficulty is desirable only when the learner can
-overcome it — is one reason this skill keeps them opt-in rather than default. (This
-skill previously shipped under the name `desirable-difficulty`; the rename to
-`feynman-walkthrough` tracks the shift from retention-first coaching to
-understanding-first walkthroughs.)
+overcome it — is one reason this skill keeps them opt-in rather than default.
 
 ## Techniques rated low utility (for when the learner asks)
 
