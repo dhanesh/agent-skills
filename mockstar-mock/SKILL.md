@@ -202,9 +202,11 @@ path is needed for subagents.
 
 ### Stage 2 — Extract → Endpoint Inventory
 
-Fan out one subagent per input type. Each subagent follows the adapter rules in
-`references/input-adapters.md` and emits records that are valid against
-`references/inventory.schema.json`. Key rules per adapter:
+Extract each input with the adapter rules in `references/input-adapters.md`, emitting records
+that are valid against `references/inventory.schema.json`. With two or more input types, fan
+out one subagent per input type by default, so the types extract in parallel. With a single
+input type, extract it yourself: a subagent re-reads its source and reports back, which costs
+more than it saves there. Key rules per adapter:
 
 - **OpenAPI** — preferred path: if the sole input is a raw OpenAPI 3.x file and no extra
   examples need merging, skip manual extraction and hand the file directly to
