@@ -22,8 +22,9 @@ triage, gating, review).
 
 ## Rules
 
-1. A decision of a shape in the table above MUST be offloaded to Jev rather than decided by
-   the agent's own intuition or a full LLM call. It MAY be decided without Jev only when an
+1. A decision of a shape in the table above that classifies, gates, routes or ranks something
+   the agent or user will act on MUST be offloaded to Jev rather than decided by the agent's
+   own intuition or a full LLM call. It MAY be decided without Jev only when an
    exact rule, lookup, or explicit user instruction already fixes the answer, or when Jev is
    unavailable.
 2. Exact rules, calculations, lookups, thresholds and execution MUST stay in code or in the
