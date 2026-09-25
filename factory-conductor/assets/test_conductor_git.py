@@ -442,7 +442,10 @@ class GitTests(unittest.TestCase):
         C.git(self.root, "checkout", "-q", "-b", "other", "main")
         commit_in(self.root, "a.txt", "other\n")
         C.git(self.root, "checkout", "-q", "factory/p")
-        C.git(self.root, "merge", "other")
+        # the identity matters: with none configured (a CI runner) git refuses the
+        # merge before it records MERGE_HEAD
+        subprocess.run(["git", "-C", self.root, "merge", "other"], capture_output=True,
+                       env=dict(os.environ, **GIT))
         st.stopped = {"reason": "new_human_decision", "detail": "x", "at": "t"}
         st.set_status("T1", "reviewing")
         st.save()
@@ -675,7 +678,10 @@ class GitTests(unittest.TestCase):
         commit_in(self.root, "a.txt", "other\n")
         C.git(self.root, "checkout", "-q", "factory/p")
         commit_in(self.root, "a.txt", "run\n")
-        C.git(self.root, "merge", "other")
+        # the identity matters: with none configured (a CI runner) git refuses the
+        # merge before it records MERGE_HEAD
+        subprocess.run(["git", "-C", self.root, "merge", "other"], capture_output=True,
+                       env=dict(os.environ, **GIT))
         self.assertEqual(C.git(self.root, "rev-parse", "-q", "--verify",
                                "MERGE_HEAD").returncode, 0)
         self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 2)
