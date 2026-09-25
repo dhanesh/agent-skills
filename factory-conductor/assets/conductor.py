@@ -184,6 +184,7 @@ import tempfile  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract_check as CC  # noqa: E402  (the vendored skill-contract checker, same dir)
+import reentry as R  # noqa: E402  (the run lock and the lease, same dir)
 
 RUN_ID_RE = r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z"
 STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", "blocked")
@@ -1024,6 +1025,7 @@ def cmd_init(args):
         _git_ok(root, "checkout", "-q", base)
         _git_ok(root, "branch", "-D", run_branch)
         return _init_fail("cannot create the run under %s: %s" % (root, e))
+    _renew_lease(st.dir)
     st.log("gate", action="local_reversible", ok=True, result=last, exit=rc)
     if unknown:
         st.log("budget_warning", grant=gid, unknown_keys=unknown)
@@ -2720,7 +2722,31 @@ def main(argv=None):
         args = p.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
-    return args.fn(args)
+    if args.cmd == "init" or getattr(args, "no_lock", False):
+        return args.fn(args)
+    d = current_run(os.path.abspath(args.root))
+    if d is None:
+        return args.fn(args)
+    # Every command on a run holds its lock, so two drivers (a session and a scheduled
+    # re-entry) never interleave writes to state.json or the log, then renews the lease.
+    try:
+        with R.run_lock(d):
+            rc = args.fn(args)
+            _renew_lease(d)
+            return rc
+    except R.RunLocked:
+        sys.stderr.write("run locked: another conductor command holds %s\n"
+                         % os.path.join(d, R.LOCK_FILE))
+        return 2
+
+
+def _renew_lease(run_dir):
+    """Renew the run's lease. A failed lease write never turns a command's outcome into
+    a traceback: the lease is a liveness hint, and state.json is the record."""
+    try:
+        R.renew_lease(run_dir)
+    except OSError as e:
+        sys.stderr.write("warning: cannot renew the lease in %s: %s\n" % (run_dir, e))
 
 
 if __name__ == "__main__":
