@@ -11,11 +11,11 @@ beside, never rearrange.
 
 `rank_risk.py`'s `triage()` looks at a unit's calls (resolved through the file's import-alias
 map, chased transitively through same-module functions and methods) and buckets it into a tier.
-Treat that tier as a **starting hypothesis**, not a verdict. Five rounds of review on this exact
-classifier found fifteen-plus distinct constructions it called safe that actually reached real
-I/O: an aliased import, a same-module helper, an argument default, a class body, a base-class
+Treat that tier as a **starting hypothesis**, not a verdict. Ordinary constructions can reach
+real I/O past it; adversarial review of this classifier found more than a dozen it called safe,
+among them an aliased import, a same-module helper, an argument default, a class body, a base-class
 expression, a method call reached only through an ordinary variable, and a locally-shadowed
-import, among others. Static analysis cannot decide reachability in Python from source alone —
+import. Static analysis cannot decide reachability in Python from source alone —
 `getattr`, dispatch tables, and dynamic imports are undecidable in general.
 
 So the invariant this skill promises — **never write a test that performs real I/O** — is not
