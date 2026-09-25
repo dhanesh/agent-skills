@@ -64,7 +64,23 @@ carries unit tests, eval negatives and an A/B row:
   criterion's `[cmd: <argv>]` hint into the task's verify command (`--unattended` requires one
   on every criterion), and `conductor init` refuses a plan with a null command. Before that,
   every planner-derived task had a null command and parked at verify, so only hand-built plans
-  reached `proven`. Jev re-judgement: to be re-judged after merge.
+  reached `proven`. **Jev re-judgement after merge (AC8, 2026-09-25, against merge commit
+  6790597):**
+  - Q1 (a factory for all skills or a subset): partly, 0.96.
+  - Q2 (does the README say which skills you need): yes, 0.70, before the "Unattended: plan to
+    PR" recipe. After it: yes, 1.00, and "a new user, reading only the factory section, knows
+    which skills to install to run an approved plan unattended to an open PR" P = 0.96–0.97
+    (3 runs). The pre-recipe P = 0.36 for that question was measured on an extract that
+    stopped before the section's install line; the full pre-recipe section scores 0.94, so
+    the recipe makes the answer explicit rather than newly possible.
+  - Q3 (unattended mode works): yes 0.53 vs partly 0.45.
+  - "An approved plan reaches an open PR without the human": P = 0.78.
+  - "This is a complete software factory": P = 0.04.
+  - The top remaining Q3 limit is session hosting (0.81): something still has to start and
+    keep an agent session alive for the run.
+
+  Q1 and the complete factory need roadmap steps 5 and 6. Q3's next lever is scheduled
+  re-entry: a job that starts a fresh session and runs `conductor resume` on a stalled run.
 - **Q3 gaps closed (2026-09-25, before merge):** after step 4 Jev put Q3 ("unattended mode
   works") at partly 0.56 vs yes 0.42, and three gaps behind that score are closed on the same
   branch. A dead session no longer strands a run: `conductor resume` prints one `NEXT:` line
@@ -72,8 +88,8 @@ carries unit tests, eval negatives and an A/B row:
   on. Cost is always bounded: with no `max_dispatches` from the grant or `--budget`, `init`
   derives tasks × 2 × (1 + `max_repairs_per_task`), and the grant's expiry caps the wall clock
   at 7 days. The merged result is verified before the push: `finish` re-runs every proven
-  task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3 to
-  be re-judged after merge.
+  task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3
+  was re-judged after merge: yes 0.53 vs partly 0.45 (see the step 4 bullet above).
 
 Nothing else in this document has been re-measured since.
 
