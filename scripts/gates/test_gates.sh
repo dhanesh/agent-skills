@@ -344,6 +344,51 @@ pp7_case "a \`\`\`\` fence wrapping \`\`\` is one block" PASS "$(mkbcp fourbt "$
 pp7_case "a declaration only inside a code fence does not count" FAIL "$(mkbcp declfence '```' "$DECL" '```' 'You MUST check it.')"
 pp7_case "SHALL after the declaration on its line is caught" FAIL "$(mkbcp declsame "$DECL You SHALL check it." 'You MUST check it.')"
 
+# ── prompting-playbook PP-5: every absolute carries a reason ─────────────────
+# PP-5 used to weigh absolutes against hedges ("usually", SHOULD, MAY). Current
+# guidance reads a hedge on a real requirement as permission to under-deliver,
+# and says an absolute earns its place by stating why. So PP-5 now asks each
+# never/always/MUST NOT for a reason, in its sentence or the next one. The
+# fixture's first body line is line 9 (4 frontmatter lines, title, blank,
+# declaration, blank).
+pp5_case() {  # $1 label, $2 a grep -E pattern the output must match, $3 skill dir, $4 flags (optional)
+  if sh "$GATES/prompting-playbook.sh" "$3" ${4:-} 2>&1 | grep -qE "$2"; then
+    ok "PP-5: $1"
+  else
+    bad "PP-5: $1 (no line matching '$2')"
+  fi
+}
+pp5_none() {  # $1 label, $2 skill dir: no unreasoned-absolute line at all
+  if sh "$GATES/prompting-playbook.sh" "$2" 2>&1 | grep -q 'PP-5 unreasoned absolute'; then
+    bad "PP-5: $1 (reported an unreasoned absolute)"
+  else
+    ok "PP-5: $1"
+  fi
+}
+d="$(mkbcp pp5why "$DECL" '' 'You MUST NOT push to main, because CI deploys every commit on it.')"
+pp5_none "an absolute with a reason in its sentence passes" "$d"
+pp5_case "an absolute with a reason reports PASS" '^PASS: PP-5' "$d"
+pp5_none "an absolute with its reason in the next sentence passes" \
+  "$(mkbcp pp5next "$DECL" '' 'Never push to main. A push there would deploy untested code.')"
+d="$(mkbcp pp5bare "$DECL" '' 'Never push to main.')"
+pp5_case "an unreasoned absolute is advisory, with file and line" \
+  '^INFO: PP-5 unreasoned absolute: .*/SKILL\.md:9: Never push to main' "$d"
+pp5_case "an unreasoned absolute fails under --strict" '^FAIL: PP-5 unreasoned absolute' "$d" --strict
+pp5_case "an unreasoned absolute in another paragraph's sentence is not rescued" \
+  '^INFO: PP-5 unreasoned absolute: .*:9:' \
+  "$(mkbcp pp5para "$DECL" '' 'Never push to main.' '' 'A push there would deploy untested code.')"
+pp5_case "hedges no longer balance an unreasoned absolute" '^INFO: PP-5 unreasoned absolute' \
+  "$(mkbcp pp5hedge "$DECL" '' 'Never push to main unless asked.' 'Usually prefer small commits; when in doubt, by default, you SHOULD ask.' 'You MAY skip it.')"
+pp5_none "code is exempt (fences and inline code)" \
+  "$(mkbcp pp5code "$DECL" '' 'Run `never-push --always` first.' '```' 'never push to main' '```')"
+if out="$(python3 "$GATES/pp5_reasons.py" --self-test 2>&1)" && \
+   printf '%s\n' "$out" | grep -q '^PP5_SELFTEST: PASS'; then
+  ok "PP-5 reason detector ($(printf '%s\n' "$out" | grep -c '^PASS:') cases)"
+else
+  printf '%s\n' "$out" | grep '^FAIL:' | sed 's/^/  /'
+  bad "PP-5 reason detector self-test"
+fi
+
 # ── bcp14-registry: every keyword sentence has a register row at its level ───
 # PP-7 checks the declaration and the vocabulary; nothing checked that a MUST
 # added to a SKILL.md was classified, so the register fell behind by dozens of

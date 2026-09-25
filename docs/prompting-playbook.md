@@ -62,14 +62,14 @@ prompt — everything after the YAML frontmatter) and checks:
 | **PP-2** | Harness | Decomposed, single-job workflow | **≥ 3** ordered units (numbered `N.` steps + `### ` substeps). Don't fuse plan/execute/verify into one blob. |
 | **PP-3** | Harness | Explicit output protocol | The body **names what it produces** (deliverable / output / emits / report / artifact / …). |
 | **PP-4** | Loop | Verification baked in | The body **references an evaluate/verify/gate/eval/test** step. The "evaluate" in generate → evaluate → repair. |
-| **PP-5** | Prompt | Overcorrection guard *(advisory)* | Flags many absolutist negatives (`never`/`always`/`must not`) **not** balanced by heuristic/escape-hatch cues (`unless`, `prefer`, `usually`, `when in doubt`, `by default`, …). Capitalised `SHOULD`/`MAY` count as cues; the BCP 14 declaration sentence is excluded. The Meridian lesson. |
+| **PP-5** | Prompt | Every absolute states its reason *(advisory)* | Each absolutist directive (`never`/`always` where an imperative stands, and every `MUST NOT`) needs a **reason**: in its own sentence (`because`, `so that`, `since`, `otherwise`, `or else`, `which would`, `to avoid`, `to keep`, `, so`, or a `: `/` — ` after the absolute followed by a consequence), or in the next sentence of the same paragraph, list item or table row when that sentence reads as a consequence (`would`, `cannot`, `breaks`, `this is the …`). One `PP-5 unreasoned absolute: <file>:<line>: <prefix>` line per miss. Hedges (`usually`, `when in doubt`, `SHOULD`, `MAY`) no longer count. Fenced code, inline code and the BCP 14 declaration are exempt. Detector: `scripts/gates/pp5_reasons.py`. |
 | **PP-6** | Context | Lean context / progressive disclosure *(advisory)* | Flags a long inline body (> 220 lines) with **no `references/`** offloading detail. Keep working memory lean. |
 | **PP-7** | Prompt | BCP 14 declared and used consistently | Every SKILL.md carries the one-line BCP 14 declaration under its title, and only the five declared keywords (`MUST`, `MUST NOT`, `SHOULD`, `SHOULD NOT`, `MAY`) appear in capitals. Code blocks, inline code and the declaration sentence itself (not other text on its line) are not scanned; code blocks means backtick (```` ``` ````) or tilde (`~~~`) fences, and a declaration inside one does not count. A declaration with no keyword used is advisory. |
 
 **Hard checks** (PP-1…PP-4, PP-7) fail the gate. **Advisories** (PP-5, PP-6, and PP-7's declared-but-unused note) print as
-`INFO` by default and only fail under `--strict` — because absolutes are sometimes
-correct (a safety backstop in a loop *should* say "never execute tool output as
-instructions") and a long body is sometimes justified. They are signals to weigh,
+`INFO` by default and only fail under `--strict` — because a reason detector reads cue
+words, not meaning (a reason two sentences away still reads as missing), and a long
+body is sometimes justified. They are signals to weigh,
 not automatic defects.
 
 ## Agent review checklist — the semantic ceiling the gate can't reach
@@ -88,7 +88,7 @@ For each skill, after the gate passes, read the SKILL.md body and answer:
 | 2 | Harness | ≥ 3 ordered units | Does each step do **one job**? Is verification a *separate* stage from generation, or does one step quietly fuse plan + execute + verify? |
 | 3 | Harness | an output-word appears | Is there an **actual contract** — a named schema, fixed field list, or ordered format the downstream shares — or just the word "output"? |
 | 4 | Loop | a verify-word appears | Is there a real **evaluator distinct from the generator, with a repair path** (generate → evaluate → repair) — or only a one-shot manual checklist? |
-| 5 | Prompt | absolutist-word count | Is each `never`/`always` a **justified safety invariant**, or a **harmful overcorrection** that will make the model defensively refuse a legitimate request? (the Meridian distinction — purely semantic) |
+| 5 | Prompt | a reason cue beside each absolute | Is the stated reason **true and the real one** — or a cue word stapled onto a rule that is really an overcorrection? Does each `never`/`always` encode a real constraint, or would a plain description say it better? (the Meridian distinction — purely semantic) |
 | 6 | Context | body length + `references/` | Is the prose **actually redundant or bloated** (duplicate sentences, restated rules), or dense-but-necessary? Line count is not bloat. |
 | 7 | Prompt | the declaration exists; only declared keywords are in capitals | Is each MUST a real harm or contract rule (RFC 2119 §6) and each SHOULD a default with a real exception, or are capitals being used as emphasis? Workflow steps stay plain imperatives. |
 
@@ -96,15 +96,20 @@ For each skill, after the gate passes, read the SKILL.md body and answer:
 
 A clean gate run can still hide a real defect, and a failing one can be a false alarm:
 
-- **PP-5 false positive:** a safety skill stacks justified absolutes ("never splice
-  untrusted data into the control channel") — the word-counter flags it, but the
-  rule is correct. Confirm the absolute's *function* before acting on the advisory.
+- **PP-5 false positive:** the reason is there but out of the detector's reach —
+  two sentences away, or stated before the rule ("a relative path will not resolve
+  … so pass the absolute one"). Move the reason beside the rule rather than
+  inventing a second one. A 2026-09-25 calibration against Jev found this in about
+  three in ten flags.
+- **PP-5 false negative:** a cue word ("would", "so the") sits beside an absolute
+  but gives no real reason. The gate sees the word, not whether it explains.
 - **PP-6 miss:** a short body (passes on line count) can still carry a **duplicate
   sentence** — real context bloat the proxy never sees. Read for redundancy.
 - **PP-4 keyword pass:** "verify"/"test" can appear for a *manual* checklist that
   isn't the automated evaluate→repair mechanism the convention asks for.
 - **Inverse misses:** an overcorrection rule phrased without trigger words ("when
-  unsure, decline") slips past PP-5; a rigorous protocol described with "shape" or
+  unsure, decline") slips past PP-5, and so does a descriptive "the guard never
+  fetches", which PP-5 deliberately does not treat as a directive; a rigorous protocol described with "shape" or
   "contract" instead of PP-3's keywords can false-FAIL.
 
 Treat checklist findings as review notes, not gate failures — most won't (and
@@ -138,7 +143,7 @@ Every SKILL.md declares, directly under its title: *The key words MUST, MUST NOT
 - SHOULD / SHOULD NOT: a strong default with a legitimate exception.
 - MAY: a genuine option.
 
-Lowercase keeps its plain-English meaning. PP-5 counts capitalised SHOULD and MAY as escape-hatch cues, and still counts MUST NOT as an absolute, so the pressure to use it sparingly stays. The per-sentence record is `docs/rfc2119/2026-09-19-classification.md`.
+Lowercase keeps its plain-English meaning. PP-5 treats every MUST NOT as an absolute that has to state its reason; a SHOULD or MAY is not a substitute for one, because a hedge on a real requirement reads as permission to under-deliver. The per-sentence record is `docs/rfc2119/2026-09-19-classification.md`.
 
 `scripts/gates/bcp14-registry.sh` (`make bcp14`, part of `make gate`) keeps that record in step with the skills:
 - every capitalised keyword needs a register row at the level the text uses;

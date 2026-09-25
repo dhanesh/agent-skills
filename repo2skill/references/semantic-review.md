@@ -43,8 +43,10 @@ Two rows specific to this repo's authoring standard, beyond the playbook:
 A clean gate run can hide a real defect, and a failing one can be a false alarm —
 keep these patterns from the playbook doc in mind while reviewing:
 
-- **PP-5 false positive:** a safety skill stacks justified absolutes; the word-counter
-  flags it, but the rule is correct. Confirm the absolute's *function* before acting.
+- **PP-5 false positive:** the reason exists but sits two sentences away or before the
+  rule, so the reason detector misses it. Move it beside the rule; don't invent another.
+- **PP-5 false negative:** a cue word ("would", "so the") beside an absolute that
+  explains nothing. Check the reason is true and is the real one.
 - **PP-6 miss:** a short body can still carry duplicate sentences — real context
   bloat the line-counter can't see. Read for redundancy.
 - **PP-4 keyword pass:** "verify"/"test" can appear for a *manual* checklist that

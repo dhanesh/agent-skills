@@ -66,24 +66,35 @@ def family(word):
 
 def body_of(text):
     """The SKILL.md body: everything after the closing frontmatter ---."""
+    return body_with_start(text)[0]
+
+
+def body_with_start(text):
+    """(body lines, the 1-based file line number of the body's first line)."""
     lines = text.splitlines()
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
             if lines[i].strip() == "---":
-                return lines[i + 1:]
-    return lines
+                return lines[i + 1:], i + 2
+    return lines, 1
 
 
 def blocks(lines):
     """Prose blocks: paragraphs, list items, headings and table rows, fences dropped."""
+    return [" ".join(t for _, t in seg) for seg in segments(lines)]
+
+
+def segments(lines, first=1):
+    """The blocks of `lines` as [(line_no, stripped text), ...] lists, so a caller can
+    map a position in a block back to its source line. `first` numbers lines[0]."""
     out, cur, fence = [], [], ""
 
     def flush():
         if cur:
-            out.append(" ".join(cur))
+            out.append(list(cur))
             cur.clear()
 
-    for ln in lines:
+    for n, ln in enumerate(lines, first):
         m = FENCE.match(ln)
         if m:
             tok, rest = m.group(1), ln[m.end():]
@@ -103,12 +114,12 @@ def blocks(lines):
             flush()
         elif s.startswith("#") or s.startswith("|"):
             flush()
-            out.append(s)
+            out.append([(n, s)])
         elif LIST_ITEM.match(QUOTE.sub("", ln)):
             flush()
-            cur.append(s)
+            cur.append((n, s))
         else:
-            cur.append(s)
+            cur.append((n, s))
     flush()
     return out
 

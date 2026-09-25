@@ -33,10 +33,12 @@
 #                        an advisory INFO).
 #
 # Advisory checks (report only; promoted to hard with --strict):
-#   PP-5  Prompt eng.  : overcorrection guard. Counts absolutist negative
-#                        directives (never/always/must not). The Meridian
-#                        lesson — rigid negative rules make a model defensive
-#                        and overcorrect. Prefer heuristics with an escape hatch.
+#   PP-5  Prompt eng.  : every absolute states its reason. Each never/always/
+#                        MUST NOT directive needs a reason (because, so that,
+#                        otherwise, ": " + consequence, ...) in its sentence or
+#                        the next one. Hedges no longer count: an unexplained
+#                        rule makes a model overcorrect, and a hedge on a real
+#                        requirement reads as permission to under-deliver.
 #   PP-6  Context eng. : lean context / progressive disclosure. Flags a large
 #                        SKILL.md body that keeps all detail inline instead of
 #                        offloading to references/. Keep working memory lean.
@@ -135,25 +137,24 @@ else
     check_fail "PP-4 verification: no evaluate/verify/gate mechanism referenced. A new use case rarely needs a smarter model — it needs an explicit evaluate -> repair step."
 fi
 
-# ── PP-5: overcorrection guard (Prompt engineering, advisory) ────────────────
-# Rigid absolutist negatives make a model defensive (the Meridian overcorrection).
-# The BCP 14 declaration names MUST NOT/SHOULD/MAY itself; it is not a directive.
-# Only the declaration *sentence* is dropped: other text on its line is scanned.
-# The sentence has no internal full stop, so [^.]* bounds it to that sentence.
-BCP14_DECL='BCP 14 \(RFC 2119, RFC 8174\)'
-BCP14_SENTENCE="[^.]*${BCP14_DECL}[^.]*all capitals\\.?"
-pp5_text="$(printf '%s\n' "$BODY" | sed -E "s/${BCP14_SENTENCE}//")"
-absol="$(printf '%s\n' "$pp5_text" | grep -oiE '\b(never|always|must not|do not ever|under no circumstances)\b' | wc -l | tr -d ' ')"
-# Escape-hatch / heuristic vocabulary that tempers an absolute into a judgment call.
-hedge="$(printf '%s\n' "$pp5_text" | grep -ciE '\b(unless|except|prefer|usually|typically|when in doubt|heuristic|judgment|trade-?off|by default|generally)\b' || true)"
-# RFC 2119 defines SHOULD and MAY as defaults with exceptions and options:
-# escape hatches by definition, when written in capitals.
-bcp_hedge="$(printf '%s\n' "$pp5_text" | grep -cE '\b(SHOULD|MAY)\b' || true)"
-hedge=$((hedge + bcp_hedge))
-if [ "$absol" -le 6 ] || [ "$hedge" -ge "$absol" ]; then
-    check_pass "PP-5 overcorrection: $absol absolutist directive(s) balanced by $hedge heuristic/escape-hatch cue(s)"
+# ── PP-5: every absolute carries a reason (Prompt engineering, advisory) ─────
+# An absolute rule earns its place by saying why; a hedge on a real requirement
+# reads as permission to under-deliver, so hedges no longer count for anything.
+# Each never/always/MUST NOT directive needs a reason in its own sentence or the
+# next one of the same paragraph (scripts/gates/pp5_reasons.py; fenced code,
+# inline code and the BCP 14 declaration are exempt). One advisory per absolute.
+pp5_out="$(python3 -I "$(dirname "$0")/pp5_reasons.py" "$SKILL_MD")" || {
+    check_fail "PP-5 reasons: pp5_reasons.py failed on $SKILL_MD"
+    pp5_out=""
+}
+if [ -z "$pp5_out" ]; then
+    check_pass "PP-5 reasons: every never/always/MUST NOT directive states its reason"
 else
-    check_advisory "PP-5 overcorrection: $absol absolutist directive(s) (never/always/must not) vs only $hedge heuristic cue(s). Rigid negative rules make a model overcorrect and refuse — give it heuristics with an escape hatch"
+    while IFS= read -r pp5_line; do
+        check_advisory "PP-5 unreasoned absolute: $pp5_line"
+    done <<EOF_PP5
+$pp5_out
+EOF_PP5
 fi
 
 # ── PP-6: lean context / progressive disclosure (Context engineering, advisory)
@@ -180,6 +181,9 @@ fi
 # closes only on the same character, at least as long as the one that opened
 # it, so a ```` block may wrap ``` lines. A declaration inside a fence does not
 # count.
+# The declaration sentence has no internal full stop, so [^.]* bounds it.
+BCP14_DECL='BCP 14 \(RFC 2119, RFC 8174\)'
+BCP14_SENTENCE="[^.]*${BCP14_DECL}[^.]*all capitals\\.?"
 bcp14_nofence="$(printf '%s\n' "$BODY" | awk '
     {
         if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
