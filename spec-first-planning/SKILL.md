@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.2.0"
+  version: "2.2.1"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -37,7 +37,7 @@ refuses to emit a plan with coverage holes.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path, because a relative one will not resolve from the target repo:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -93,7 +93,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    using. In attended mode, at each checkpoint (after the spec draft, and after the plan) you
    MUST offer two
    switches, *go deeper* (the full loop) and *go unattended* (the full loop, the decision
-   sweep, then a grant), and you MUST NOT escalate unless the user asks.
+   sweep, then a grant), and you MUST NOT escalate unless the user asks, because the deeper modes spend the
+   user's time and an unattended run ends in a grant only the user can give.
 1. **Elicit — one focused round.** Ask only what the conversation hasn't already answered:
    the problem (who hurts, how), the users, what success observably looks like, explicit
    non-goals, and hard constraints. Prefer a single batched round of questions over an

@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -36,7 +36,7 @@ into reading reports; the tool's output decides what happens next.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path, because a relative one will not resolve from the target repo:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -180,7 +180,8 @@ refuses (exit 2), and `init` starts a new run.
 the PR or edit code yourself, even when a gate asks. You MUST NOT pass a `--pr-cmd` or
 `--push-cmd` that does anything but push the run branch or open the PR; they exist for stubs
 and for hosts without `gh`, so by default pass neither. You MUST NOT edit, delete or recreate
-`state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`; report a mismatch
+`state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`, because they are the
+run's record that `resume` and `finish` read back and the human audits; report a mismatch
 instead.
 
 ## Resume after a crash
@@ -277,8 +278,9 @@ Report: Verdict: pass | fail, then one line of detail.
 
 - **A task that needs a human.** On a `NEEDS_DECISION` report you MUST run
   `conductor decision <task> --question "<the question>"` and carry on with the other tasks.
-  You MUST NOT answer a human-decision question yourself, even when the answer looks obvious;
-  the parked question goes into the run result and the PR body for the human.
+  You MUST NOT answer a human-decision question yourself, even when the answer looks obvious,
+  because the grant does not delegate that decision; the parked question goes into the run
+  result and the PR body for the human.
 - **A blocked task.** On a `BLOCKED` report, `conductor park <task> --reason "<reason>"`.
 - **Parking does not stop the run.** The parked task's dependents become `blocked`, and every
   other ready task continues. A parked task's worktree and branch are kept for the human.

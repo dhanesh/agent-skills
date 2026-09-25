@@ -38,7 +38,7 @@ site is a generated view of it, regenerated whenever the bundle changes.
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path, because a relative one will not resolve from the target repo:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads
@@ -49,7 +49,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## Ground rules
 
-- **The bundle is read-only.** The generator MUST NOT mutate the source bundle. When the
+- **The bundle is read-only.** The generator MUST NOT mutate the source bundle, because the
+  bundle belongs to its producer and the site is disposable output. When the
   scan finds problems worth fixing at the source (missing `type`, broken links), surface
   them to the user and fix the bundle only if they ask.
 - **Tolerance over rejection.** Per the OKF spec's consumer rules, unknown types, extra

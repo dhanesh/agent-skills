@@ -14,7 +14,7 @@ license: MIT
 compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. python3 >= 3.10 is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.4.1"
+  version: "1.4.2"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
@@ -48,7 +48,7 @@ Start from the family's template in `assets/templates/` (or `base-loop.template.
 | # | Slot | What to decide |
 |---|------|----------------|
 | LSC-1 | Goal / success definition | the checkable "done" from step 1 |
-| LSC-2 | Stop condition (primary) | how the model signals "done" (a flag/token the harness observes — you MUST NOT infer it from free text) |
+| LSC-2 | Stop condition (primary) | how the model signals "done" (a flag/token the harness observes — you MUST NOT infer it from free text, because prose can say "done" when the check has not passed) |
 | LSC-3 | **Backstop cap (mandatory)** | a hard outside limit (max iterations / token budget / wall-clock) that fires regardless of the model |
 | LSC-4 | State-passing | the *minimum sufficient for correction* carried forward — enough to build on the last round and detect repetition, with feedback diagnostic enough to fix the next attempt (minimal noise, not minimal signal) — plus a **declared schema checked at the iteration boundary**, so a malformed state is caught in the round that produced it instead of becoming the next round's premise |
 | LSC-5 | Self-evaluation | a per-round progress judgment (with **external leverage** — tool/verifier or a separate evaluator, not pure self-grading) + a no-progress detector |

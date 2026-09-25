@@ -21,13 +21,14 @@ actual context?*
 The division of labor is the point: `assets/audit_posture.py` finds candidate defects
 deterministically (same tree in, same findings out), and the agent adjudicates each one
 with the code open — a flagged `debug=True` in a test fixture is INFO; the same line in a
-production entrypoint is HIGH. The tool never guesses context; you never grep by hand.
+production entrypoint is HIGH. The tool never guesses context and you never grep by hand, so every finding is both
+reproducible and judged in context.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path, because a relative one will not resolve from the target repo:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads

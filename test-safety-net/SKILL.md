@@ -39,7 +39,7 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY in this skill are to be
 Build the change-detector that unblocks agent work on an untested codebase. This is **not** a
 correctness audit: current behaviour gets pinned even where it looks wrong, and a suspected bug
 gets reported rather than silently blessed as correct. The output is a net that catches
-unintended behaviour change, plus an honest account of what it could not net and why — never a
+unintended behaviour change, plus an honest account of what it could not net and why, not a
 coverage percentage.
 
 ## When to use
@@ -165,7 +165,8 @@ than none, because it makes the invariant look enforced when it is not.
    over-tier one into a false Tier 1. If inspection shows a Tier 3/4 unit is actually reachable at
    a controlled boundary, you may promote it, but only by **recording** the promotion (the tier
    the ranker assigned, the tier you used instead, and why) in the report below. You MUST NOT
-   silently treat a ranker tier as advisory.
+   silently treat a ranker tier as advisory, because the report is the only place a reviewer can
+   see that a tier was overridden.
 
 3. **Confirm with the user before writing anything.** Show the `ranked` top N (default 10) and
    the size of `remainder`/`not_netted`. This is a hard gate — you MUST NOT proceed past it
@@ -268,7 +269,8 @@ than none, because it makes the invariant look enforced when it is not.
    - On a nonzero exit whose failure is an `IOGuardViolation`, **discard the whole batch and
      re-prove one test at a time.** Per-test attribution cannot be trusted for an async violation,
      and a batch is cheap to re-run.
-   - **You MUST NOT keep a test reported `ok` from a run that exited nonzero.**
+   - **You MUST NOT keep a test reported `ok` from a run that exited nonzero**, because the `ok`
+     may be the very test whose late violation made the run fail.
 
    `assets/test_io_guard_node.sh` builds all three fixtures (assertions 12, 13 and 14) and asserts
    both the invariant they share — the culprit reporting `ok` while some *other* entry carries the
@@ -295,7 +297,7 @@ than none, because it makes the invariant look enforced when it is not.
    **Copy the whole block.** `<package>` is the package directory (`./internal/billing`), and the
    `-run` anchors matter for the reason they do on node: the pattern is a substring regex. Tests go
    in `<file>_test.go` beside the source, **in the same package**, appended to when the file
-   exists and never overwritten. These two blocks are extracted from this file by
+   exists, not overwritten. These two blocks are extracted from this file by
    `assets/test_io_guard_go.py` and run verbatim against a clean unit and a leaking one.
 
    **On go, the exit status is the whole protocol:**
@@ -335,7 +337,8 @@ than none, because it makes the invariant look enforced when it is not.
 
    **Copy the whole block.** Run it from the crate root, adding `-p <package>` for a workspace
    member. Tests go in `tests/tsn_<module_path>.rs` and reach the unit through its public path
-   (`use <crate>::<path>::<item>;`). Append to that file when it exists; never overwrite it. The exit
+   (`use <crate>::<path>::<item>;`). Append to that file when it exists; never overwrite it, because it may hold tests you did not
+   write. The exit
    table is go's. Rust controls two groups, filesystem and environment, through two helpers that you
    copy into the test file verbatim:
 
@@ -475,16 +478,17 @@ than none, because it makes the invariant look enforced when it is not.
 
 ## Invariants (do not violate)
 
-1. **You MUST NOT modify source.** You MUST only create test files. When a test file exists, you
-   MUST **append** to it and MUST NOT overwrite it. This is what makes the skill safe to run
-   unattended on a repo nobody trusts yet — and why Tier 3 seams are reported, never applied.
+1. **You MUST NOT modify source.** This is what makes the skill safe to run unattended on a repo
+   nobody trusts yet, and why Tier 3 seams are reported, never applied. You MUST only create test
+   files. When a test file exists, you MUST **append** to it and MUST NOT overwrite it, because it
+   may hold tests you did not write.
 2. **You MUST NOT write a test that performs real I/O.** Enforced by the tier-aware runtime guard in
    step 4, not by the static tier alone — see `references/triage.md` for the full mechanism and
    why the tiers cannot enforce this on their own.
 3. **You MUST NOT ship an unproven test.** A test that did not go RED MUST be discarded and listed
    under "could not prove," never shipped.
-4. **You MUST NOT leave the suite red.** End state is a green suite plus suspected bugs in the report. A
-   red generated test is a bug in this skill, not an acceptable outcome.
+4. **You MUST NOT leave the suite red**, because a red generated test is a bug in this skill,
+   not an acceptable outcome. End state is a green suite plus suspected bugs in the report.
 5. **Hard gate before writing** — step 3's confirmation MUST happen before any test file is touched,
    unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
@@ -497,7 +501,8 @@ Captured output from running the user's code gets embedded into generated test f
 code generation from program output, and it is the one real injection surface in this skill.
 
 > You MUST emit every captured value with `repr()`. You MUST NOT build a test's expected value by
-> string concatenation or f-string interpolation of captured output. A captured string containing
+> string concatenation or f-string interpolation of captured output, because a quote or newline
+> in that output would then become code. A captured string containing
 > a quote, a newline or a backslash MUST become an inert literal, never executable source.
 
 ## Deliverable
@@ -533,7 +538,7 @@ clock were controlled, not only whichever one the ranker happened to name.
 No coverage percentage anywhere, in this report or in conversation about it.
 
 **Promoted units** get a line in the report naming the ranker's original tier, the tier used
-instead, and why — never a silent override (see step 2).
+instead, and why, not a silent override (see step 2).
 
 **How to improve this.** `inbound_refs` is a static approximation — an identifier-occurrence
 count, not a call graph. It cannot tell a call from a comment, it misses a caller that reaches the

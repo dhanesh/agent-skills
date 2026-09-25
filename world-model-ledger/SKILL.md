@@ -18,7 +18,7 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 
@@ -92,7 +92,7 @@ verification checklist.
 | Hook | Fires | Job |
 |---|---|---|
 | **PreToolUse** → `hooks/pretooluse.sh` | before an edit | retrieve & summarize the model's ✓validated / ?unverified / ✗contradicted items for the touched file(s)/symbol(s); inject as context. Read-only. |
-| **PostToolUse** → `hooks/posttooluse-observe.sh` | after **every** tool call | the universal observer: register the entities/edges the call reveals — files any tool reads/edits → entities; `Bash` → `runtime` `executes`/`reads` edges + verifier oracle (green→validated, red→contradicted); URLs → referents. Tool **input** only (never output); no invented facts. |
+| **PostToolUse** → `hooks/posttooluse-observe.sh` | after **every** tool call | the universal observer: register the entities/edges the call reveals — files any tool reads/edits → entities; `Bash` → `runtime` `executes`/`reads` edges + verifier oracle (green→validated, red→contradicted); URLs → referents. Tool **input** only, not output; no invented facts. |
 | **Stop** → `hooks/stop.sh` | every turn | the summarization home: harvest any optional markers from the trusted channel, consolidate (re-derive confidence + evaluate constraints), refresh `.world-model/digest.md`. |
 | **SessionStart** → `hooks/session_start.sh` | session start/resume | **auto-bootstrap** the model on first run (create + seed `.world-model/`, no manual step), then inject the digest so a resumed session starts aware of contradictions. |
 
@@ -158,13 +158,14 @@ normative correctness improves over time. The loop is detailed in
 
 ## The invariants (do not weaken these)
 
-1. **Code observation MUST NOT raise normative confidence.** A hook may set `observed_conf` high,
-   but `normative_conf` moves *only* on oracle evidence. This is the whole point: it lets the model
-   say "observed, but unverified."
+1. **Code observation MUST NOT raise normative confidence.** This is the whole point:
+   it lets the model say "observed, but unverified." A hook may set `observed_conf` high, but
+   `normative_conf` moves *only* on oracle evidence.
 2. **No invented facts in hooks.** Hooks MUST capture only what is deterministically parseable from
    the trusted channel — files any tool names, executions parsed from a Bash command's argv,
    verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions
-   MUST come from the agent's own markers/CLI and MUST NOT come from a model summarizing inside a hook.
+   MUST come from the agent's own markers/CLI and MUST NOT come from a model summarizing inside a hook, because a summary is a guess and a
+   hook writes what it captures straight into the ledger.
 3. **Trusted channel only.** `tool_result` / `tool_use` content MUST NOT be harvested into facts
    or evidence, so untrusted output cannot forge a marker. The two tags that raise the
    ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST NOT be accepted from any channel but the

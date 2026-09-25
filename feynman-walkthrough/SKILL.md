@@ -19,7 +19,7 @@ compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-sche
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
@@ -32,14 +32,14 @@ subject, codebase, or paper until they genuinely understand it. The goal is **en
 understanding by the end of the session**, not a study regimen. Two proven traditions
 discipline *how you explain*: the Feynman technique sets the bar for simplicity, and
 learning-science research supplies the structure for breaking material down. They are
-standards for you, the explainer — never a license to quiz the learner up front, withhold
+standards for you, the explainer, not a license to quiz the learner up front, withhold
 answers, or manufacture friction.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a
 path written relative to this skill will not resolve. Resolve the base directory once and use it
 everywhere — including in any subagent prompt, which MUST receive the literal absolute
-path, and MUST NOT receive a relative form:
+path, because a relative one will not resolve from the target repo:
 
 ```sh
 SKILL_DIR="<this skill's base directory>"   # your harness provides it when the skill loads

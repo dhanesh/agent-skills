@@ -197,7 +197,7 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.0.0"
+CONDUCTOR_VERSION = "1.0.1"
 
 ACTIVE = ("running", "verifying", "reviewing")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",

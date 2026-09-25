@@ -6,7 +6,7 @@ compatibility: Needs an agent harness with subagent fan-out and WebFetch/WebSear
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.1"
+  version: "1.2.2"
   tags: "audit,research,citations,standards,verification,architecture,business-logic"
 ---
 
@@ -20,7 +20,7 @@ algorithm, or best practice — provably, against a real source?*
 
 The defining rule: **no fabricated authority.** Every finding MUST be tied to a source the
 agent actually fetched in-session. Ungrounded claims MUST be reported as `UNCONFIRMED`, and MUST NOT
-be reported as violations.
+be reported as violations, because a violation with no fetched source is fabricated authority.
 
 ## When to use
 
@@ -32,7 +32,8 @@ domain(s).
 
 ## Invariants (do not violate)
 
-1. **You MUST NOT edit code.** `--annotate` inserts comment markers only — never logic. The one
+1. **You MUST NOT edit code**, because this is a read-only audit and every fix is the user's
+   call. `--annotate` inserts comment markers only, never logic. The one
    file this skill creates on the default path is its own report under
    `docs/base-in-reality/`; you MUST name it before writing it, and MUST offer the in-conversation
    report instead if the user wants their tree untouched.
@@ -41,7 +42,8 @@ domain(s).
    claim the agent makes about itself — the evidence log is what makes it checkable.
    Ungrounded ⇒ `UNCONFIRMED`. See `references/verdict-rubric.md`.
 3. **Adversarial gate.** A `VIOLATION`/`DEVIATION` MUST NOT be reported unless it survives a
-   refutation pass.
+   refutation pass, so that a finding the first verifier over-read is caught before it reaches the
+   report.
 4. **No silent truncation.** If `--max-claims` caps extraction, you MUST list what was dropped in
    the report's Dropped-claims log.
 
@@ -73,7 +75,7 @@ subagent's prompt:
 - Verify it resolves: `python3 "$FETCH" --source openalex --query test --limit 1` should emit
   JSON. (`uv run "$FETCH"` is equivalent; the script declares `dependencies = []` and imports
   only the stdlib, so `python3` works on any host and does not make `uv` a prerequisite.)
-- You MUST hand subagents the literal absolute `$FETCH` value — they MUST NOT receive a relative `assets/`-prefixed form.
+- You MUST hand subagents the literal absolute `$FETCH` value, because a relative `assets/`-prefixed form will not resolve from the target repo.
 - **Open the evidence log before any fetching**, and export it so every subagent inherits it:
   `export BIR_EVIDENCE_LOG="$(mktemp -t bir-evidence-XXXXXX.jsonl)"`. Each retrieval appends the
   URL/DOI actually returned, and stage 6 reconciles the report against it. Without this, a
