@@ -99,8 +99,13 @@ A clean gate run can still hide a real defect, and a failing one can be a false 
 - **PP-5 false positive:** the reason is there but out of the detector's reach —
   two sentences away, or stated before the rule ("a relative path will not resolve
   … so pass the absolute one"). Move the reason beside the rule rather than
-  inventing a second one. A 2026-09-25 calibration against Jev found this in about
-  three in ten flags.
+  inventing a second one. Measured 2026-09-25 against Jev over the 63 flags the
+  detector raises on `main` (6790597): Jev judged the reason explicitly stated in 18
+  (29%) at P≥0.7 and in 36 (57%) at P≥0.5; 13 of those 63 are the shared helpers
+  preamble, whose reason sits in the sentence before. The detector leans this way on
+  purpose: a gate that passes an unreasoned rule is worse than a noisy advisory. The
+  other direction, over the 51 absolutes it passed on this branch, Jev found no
+  stated reason in 2 (4%, P<0.5); both were fixed.
 - **PP-5 false negative:** a cue word ("would", "so the") sits beside an absolute
   but gives no real reason. The gate sees the word, not whether it explains.
 - **PP-6 miss:** a short body (passes on line count) can still carry a **duplicate

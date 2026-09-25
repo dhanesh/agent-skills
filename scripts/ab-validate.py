@@ -4584,11 +4584,13 @@ def check_bcp14(old, new):
         "PP-7 is new, so the baseline is measured with it: the number is the skills', not the checker's",
         since=SINCE_BCP14)
     # Retired 2026-09-25: "skills with a PP-5 overcorrection advisory (must not rise)".
-    # It counted skills whose absolutes outnumbered their hedges. PP-5 no longer
-    # counts hedges (SINCE_PP5_REASONS), so that measurement no longer exists; the
-    # guard it stood for, that capitals not make a skill more absolutist unchecked,
-    # is carried by check_pp5_reasons' row, which fails if any absolute loses its
-    # reason.
+    # It counted skills that had more than six absolutes (never/always/must not) and
+    # fewer hedges than absolutes; its last measurement, with the old checker on
+    # both trees, was 7 skills at the merge base and 5 on this branch. PP-5 no longer
+    # counts hedges (SINCE_PP5_REASONS), so the old checker is gone and the number
+    # cannot be taken again. check_pp5_reasons' row measures something different:
+    # absolutes with no stated reason, per absolute rather than per skill. Once it
+    # lands it is a HELD* guard, so any change in that count reads as a regression.
 
 
 # ── PP-5: every absolute states its reason (scripts/gates/pp5_reasons.py) ──
