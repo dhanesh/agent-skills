@@ -715,6 +715,8 @@ def reentry_problems(block):
     if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) and a for a in cmd)):
         out.append("agent_cmd must be a non-empty list of non-empty strings")
     else:
+        if any("\x00" in a for a in cmd):
+            out.append("agent_cmd must not contain a NUL byte")
         head = _reentry_cmd_token(cmd[0])
         if head in SHELLS:
             out.append("agent_cmd must not start with a shell (%s)" % cmd[0])

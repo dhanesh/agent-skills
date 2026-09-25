@@ -378,6 +378,11 @@ class DecideTests(unittest.TestCase):
     def test_finished_wins_over_everything(self):
         self.assertEqual(self.d(finished=True, covered=False, live=True), "done")
 
+    def test_an_exhausted_stop_stays_exhausted(self):
+        self.assertEqual(self.d(stopped_reason="reentry_exhausted", idle_min=0), "exhausted")
+        self.assertEqual(self.d(stopped_reason="reentry_exhausted", live=True), "exhausted")
+        self.assertEqual(self.d(stopped_reason="reentry_exhausted", covered=False), "exhausted")
+
     def test_a_stopped_run_other_than_grant_ask_is_still_resumed(self):
         self.assertEqual(self.d(stopped_reason="no_ready_tasks"), "start")
 
@@ -427,12 +432,14 @@ class WatchTests(unittest.TestCase):
         self.marker = os.path.join(tmpdir(), "started")
 
     def tearDown(self):
-        # stop the agent a watch started (it sleeps), so none outlives the suite; spawn
-        # gave it its own session, so its pid is its process group
-        lease = R.read_lease(self.st.dir) or {}
-        if lease.get("holder") == "reentry" and R.pid_alive(lease.get("pid")):
-            with contextlib.suppress(OSError):
-                os.killpg(lease["pid"], signal.SIGKILL)
+        # stop every agent a watch started (they sleep), so none outlives the suite;
+        # spawn gave each its own session, so its pid is its process group
+        pids = {e.get("pid") for e in self.reentry_events()}
+        pids.add((R.read_lease(self.st.dir) or {}).get("pid"))
+        for pid in pids:
+            if R.pid_alive(pid):
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
 
     def grant(self, sleep=30, **block):
         b = {"agent_cmd": [sys.executable, "-c", STUB, self.marker, str(sleep), "{prompt}"],
@@ -450,13 +457,38 @@ class WatchTests(unittest.TestCase):
         with open(self.st.log_path, "a") as f:
             f.write(json.dumps({"at": utc(minutes).strftime("%Y-%m-%dT%H:%M:%SZ"),
                                 "event": "aged"}) + "\n")
+        os.utime(self.st.log_path, (old, old))
 
-    def started(self):
-        time.sleep(0.5)
+    def reentry_events(self):
+        return [e for e in C.State.load(self.st.state_path).events()
+                if e.get("event") == "reentry"]
+
+    def attempts(self):
+        return len({e["n"] for e in self.reentry_events()})
+
+    def marker_lines(self):
         if not os.path.exists(self.marker):
             return []
         with open(self.marker) as f:
             return f.read().split()
+
+    def wait_started(self, lines, deadline=10):
+        """Poll until the marker holds `lines`; returns what it holds at the end."""
+        end = time.monotonic() + deadline
+        while self.marker_lines() != lines and time.monotonic() < end:
+            time.sleep(0.05)
+        return self.marker_lines()
+
+    def wait_dead(self, pid, deadline=10):
+        end = time.monotonic() + deadline
+        while R.pid_alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(R.pid_alive(pid), pid)
+
+    def assert_nothing_started(self):
+        self.assertEqual(self.reentry_events(), [])
+        self.assertNotEqual((R.read_lease(self.st.dir) or {}).get("holder"), "reentry")
+        self.assertEqual(self.marker_lines(), [])
 
     def test_no_run(self):
         self.assertEqual(run_watch(repo()), (0, "REENTRY: no-run"))
@@ -465,17 +497,25 @@ class WatchTests(unittest.TestCase):
         write_grant(self.root, self.plan)
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: disabled"))
+        self.assert_nothing_started()
 
     def test_a_grant_with_a_shell_agent_cmd_starts_nothing(self):
         # the checker rejects the whole grant (Task 1), so it no longer covers the run
         self.grant(agent_cmd=["sh", "-c", "x", "{prompt}"])
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
-        self.assertEqual(self.started(), [])
+        self.assert_nothing_started()
+
+    def test_a_grant_with_a_nul_byte_in_agent_cmd_starts_nothing(self):
+        self.grant(agent_cmd=["a\x00b", "{prompt}"])
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
+        self.assert_nothing_started()
 
     def test_a_fresh_run_is_not_stalled(self):
         self.grant()  # no lease yet (new_run skips main), but init was logged just now
         self.assertEqual(run_watch(self.root), (0, "REENTRY: not-stalled"))
+        self.assert_nothing_started()
 
     def test_watch_never_writes_the_lease(self):
         self.grant()
@@ -487,7 +527,22 @@ class WatchTests(unittest.TestCase):
         self.age()
         R.renew_lease(self.st.dir)  # a session just ran a conductor command
         self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
-        self.assertEqual(self.started(), [])
+        self.assertEqual(self.reentry_events(), [])
+        self.assertEqual(R.read_lease(self.st.dir)["holder"], "session")
+
+    def test_fresh_worktree_activity_under_an_old_session_lease_is_live(self):
+        for status in ("running", "verifying", "reviewing"):
+            with self.subTest(status=status):
+                self.grant()
+                wt = tmpdir()
+                st = C.State.load(self.st.state_path)
+                st.tasks["T1"].update(status=status, worktree=wt)
+                st.save()
+                self.age()  # old session lease, old log
+                with open(os.path.join(wt, "f.py"), "w") as f:
+                    f.write("x")  # the executor is working
+                self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+                self.assertEqual(self.reentry_events(), [])
 
     def test_a_held_run_lock_is_live_within_seconds(self):
         self.grant()
@@ -500,7 +555,7 @@ class WatchTests(unittest.TestCase):
             self.assertLess(time.monotonic() - t0, 10)
         finally:
             p.kill(); p.wait()
-        self.assertEqual(self.started(), [])
+        self.assert_nothing_started()
 
     def test_a_stalled_run_starts_the_agent_once(self):
         self.grant()
@@ -508,12 +563,13 @@ class WatchTests(unittest.TestCase):
         rc, out = run_watch(self.root)
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"^REENTRY: started 1 pid=\d+$")
-        self.assertEqual(self.started(), ["1"])
+        self.assertEqual(self.wait_started(["1"]), ["1"])
         self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))  # its pid lives
-        ev = [json.loads(l) for l in open(self.st.log_path) if '"reentry"' in l]
-        self.assertEqual((ev[-1]["n"], ev[-1]["ok"]), (1, True))
-        self.assertNotIn(R.RESUME_PROMPT[:20], json.dumps(ev[-1]))  # prompt elided
-        self.assertIn("{prompt}", ev[-1]["argv"])
+        ev = self.reentry_events()
+        # the attempt is logged before the spawn (ok null), its outcome after
+        self.assertEqual([(e["n"], e["ok"]) for e in ev], [(1, None), (1, True)])
+        self.assertNotIn(R.RESUME_PROMPT[:20], json.dumps(ev))  # prompt elided
+        self.assertIn("{prompt}", ev[0]["argv"])
         lease = R.read_lease(self.st.dir)
         self.assertEqual((lease["holder"], lease["n"], lease["pid"]),
                          ("reentry", 1, ev[-1]["pid"]))
@@ -539,7 +595,7 @@ class WatchTests(unittest.TestCase):
         st.save()
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: waiting-human"))
-        self.assertEqual(self.started(), [])
+        self.assert_nothing_started()
 
     def test_a_finished_run_is_done(self):
         self.grant()
@@ -548,32 +604,119 @@ class WatchTests(unittest.TestCase):
         st.save()
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: done"))
-        self.assertEqual(self.started(), [])
+        self.assert_nothing_started()
 
     def test_a_revoked_grant_starts_nothing(self):
         self.grant()
         revoke(self.root)
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
-        self.assertEqual(self.started(), [])
+        self.assert_nothing_started()
 
     def test_exhaustion_records_a_stop(self):
         self.grant(sleep=0, max_reentries=1)
-        self.age(); run_watch(self.root); time.sleep(0.5)
+        self.age()
+        self.assertEqual(run_watch(self.root)[1][:17], "REENTRY: started ")
+        self.wait_dead(R.read_lease(self.st.dir)["pid"])
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: exhausted"))
-        self.assertEqual(C.State.load(self.st.state_path).stopped["reason"], "reentry_exhausted")
+        st = C.State.load(self.st.state_path)
+        self.assertEqual(st.stopped["reason"], "reentry_exhausted")
+        self.assertIsNone(st.stopped.get("previous"))
         self.assertIn("reentry_exhausted", C.STOP_REASONS)
         with open(os.path.join(HERE, "schemas", "run-result.v1.json")) as f:
             self.assertIn("reentry_exhausted", f.read())
+        # watch's own stop event is fresh, but an exhausted run stays exhausted
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: exhausted"))
+        stops = [e for e in st.events() if e.get("event") == "stop"]
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(self.attempts(), 1)
+
+    def test_exhaustion_keeps_an_earlier_stop_as_previous(self):
+        self.grant(max_reentries=1)
+        st = C.State.load(self.st.state_path)
+        st.stopped = {"reason": "no_ready_tasks", "at": "t"}
+        st.save()
+        st.log("reentry", n=1, ok=False, argv=[], error="x")
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: exhausted"))
+        stopped = C.State.load(self.st.state_path).stopped
+        self.assertEqual((stopped["reason"], stopped["previous"]),
+                         ("reentry_exhausted", "no_ready_tasks"))
 
     def test_a_missing_binary_fails_and_still_counts(self):
         self.grant(agent_cmd=["/nonexistent/agent", "{prompt}"], max_reentries=1)
         self.age()
         rc, out = run_watch(self.root)
         self.assertEqual((rc, out), (2, "REENTRY: failed"))
+        self.assertEqual([(e["n"], e["ok"]) for e in self.reentry_events()],
+                         [(1, None), (1, False)])
         self.age()
         self.assertEqual(run_watch(self.root)[1], "REENTRY: exhausted")
+
+    def test_a_failed_lease_write_kills_the_agent_and_counts(self):
+        # reviewer probe 4a: a lease write that fails after the spawn must not leave an
+        # agent running unleased, or the next watch starts a second one
+        self.grant(max_reentries=1)
+        self.age()
+        with mock.patch.object(R, "set_reentry_lease", side_effect=OSError("disk full")):
+            self.assertEqual(run_watch(self.root), (2, "REENTRY: failed"))
+        ev = self.reentry_events()
+        self.assertEqual([(e["n"], e["ok"]) for e in ev], [(1, None), (1, False)])
+        self.assertEqual(ev[-1]["error"], "lease write failed")
+        self.wait_dead(ev[-1]["pid"])
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: exhausted"))
+        self.assertEqual(self.attempts(), 1)
+
+    def test_a_failed_attempt_log_starts_nothing(self):
+        # reviewer probe 4b: an attempt that cannot be logged cannot be counted, so it
+        # must not start an agent at all
+        self.grant(max_reentries=1)
+        self.age()
+        real = C.State.log
+
+        def failing(st, event, **kw):
+            if event == "reentry":
+                raise OSError("log EIO")
+            return real(st, event, **kw)
+        with mock.patch.object(C.State, "log", failing), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(run_watch(self.root), (2, "REENTRY: failed"))
+        self.assert_nothing_started()
+        self.assertEqual(run_watch(self.root)[1], "REENTRY: started 1 pid=%d"
+                         % R.read_lease(self.st.dir)["pid"])
+        self.assertEqual(self.wait_started(["1"]), ["1"])
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+        self.assertEqual(self.marker_lines(), ["1"])
+        self.assertEqual(self.attempts(), 1)
+
+    def test_a_failed_outcome_log_leaves_one_leased_agent(self):
+        self.grant()
+        self.age()
+        real = C.State.log
+
+        def failing(st, event, **kw):
+            if event == "reentry" and kw.get("ok") is True:
+                raise OSError("log EIO")
+            return real(st, event, **kw)
+        with mock.patch.object(C.State, "log", failing), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(run_watch(self.root), (2, "REENTRY: failed"))
+        self.assertEqual(R.read_lease(self.st.dir)["holder"], "reentry")
+        self.assertEqual(self.wait_started(["1"]), ["1"])
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+        self.assertEqual(self.attempts(), 1)
+
+    def test_an_unexpected_error_is_one_failed_line(self):
+        self.grant()
+        self.age()
+        with mock.patch.object(R, "decide", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(run_watch(self.root), (2, "REENTRY: failed"))
+        self.assert_nothing_started()
 
     def test_overlapping_watches_start_one_agent(self):
         self.grant()
@@ -585,8 +728,34 @@ class WatchTests(unittest.TestCase):
               for _ in range(3)]
         outs = [p.communicate()[0].strip() for p in ps]
         self.assertEqual(sum(o.startswith("REENTRY: started") for o in outs), 1, outs)
-        self.assertEqual(self.started(), ["1"])
+        self.assertEqual(self.wait_started(["1"]), ["1"])
+        self.assertEqual(self.attempts(), 1)
 
+
+class IdleTests(unittest.TestCase):
+    def setUp(self):
+        self.st, _ = new_run(repo(), PLAN)
+
+    def append(self, line):
+        with open(self.st.log_path, "a") as f:
+            f.write(line + "\n")
+
+    def test_a_future_stamp_is_judged_by_the_log_mtime(self):
+        future = utc(-600).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.append(json.dumps({"at": future, "event": "x"}))
+        self.assertGreaterEqual(C._idle_min(self.st), 0)
+        self.assertLess(C._idle_min(self.st), 5)
+        old = time.time() - 45 * 60
+        os.utime(self.st.log_path, (old, old))
+        self.assertGreater(C._idle_min(self.st), 44)
+
+    def test_a_line_that_is_not_an_object_is_skipped(self):
+        self.append(json.dumps({"at": utc(45).strftime("%Y-%m-%dT%H:%M:%SZ"), "event": "x"}))
+        self.append("[1, 2]")
+        self.append("7")
+        self.assertEqual(self.st.last_event()["event"], "x")
+        self.assertTrue(all(isinstance(e, dict) for e in self.st.events()))
+        self.assertGreater(C._idle_min(self.st), 44)
 
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,7 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import contextlib  # noqa: E402
 import datetime as _dt  # noqa: E402
 import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
@@ -453,7 +454,8 @@ class State:
         return record
 
     def last_event(self):
-        """The last complete event in the log, or None. A torn trailing line is skipped."""
+        """The last complete event in the log, or None. A torn line, or one that is not
+        a JSON object, is skipped."""
         try:
             with open(self.log_path, encoding="utf-8") as f:
                 lines = f.read().splitlines()
@@ -461,13 +463,16 @@ class State:
             return None
         for line in reversed(lines):
             try:
-                return json.loads(line)
+                rec = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(rec, dict):
+                return rec
         return None
 
     def events(self):
-        """Every complete event in the log, oldest first; a torn line is skipped."""
+        """Every complete event in the log, oldest first. A torn line, or one that is
+        not a JSON object, is skipped."""
         try:
             with open(self.log_path, encoding="utf-8") as f:
                 lines = f.read().splitlines()
@@ -906,12 +911,14 @@ def check_stop(st):
     return None
 
 
-def _record_stop(st, reason, **detail):
-    """Record the run as stopped, log `stop`, print STOP: <reason>. Returns 3."""
+def _record_stop(st, reason, quiet=False, **detail):
+    """Record the run as stopped, log `stop`, print STOP: <reason> (unless quiet, for a
+    command whose output contract is one line of its own). Returns 3."""
     st.stopped = dict(detail, reason=reason, at=_rfc3339(_now()))
     st.save()
     st.log("stop", reason=reason, **detail)
-    print("STOP: %s" % reason)
+    if not quiet:
+        print("STOP: %s" % reason)
     return 3
 
 
@@ -2710,7 +2717,15 @@ def _idle_min(st):
             tzinfo=_dt.timezone.utc)
     except (TypeError, KeyError, ValueError):
         return 10 ** 6
-    return (_now() - at).total_seconds() / 60
+    idle = (_now() - at).total_seconds() / 60
+    if idle < 0:
+        # a stamp in the future (a clock step): judge by when the log was last written,
+        # rather than suppress re-entry until the clock catches up
+        try:
+            idle = max(0.0, (_now().timestamp() - os.stat(st.log_path).st_mtime) / 60)
+        except OSError:
+            idle = 0.0
+    return idle
 
 
 def _reentry_block(root):
@@ -2727,7 +2742,8 @@ def _reentry_block(root):
 
 
 def cmd_watch(args):
-    """One re-entry check (spec: scheduled re-entry, section 3); prints one REENTRY: line.
+    """One re-entry check (spec: scheduled re-entry, section 3). Prints exactly one
+    REENTRY: line and exits 0 or 2, whatever goes wrong.
 
     watch takes the run lock itself, for at most WATCH_LOCK_TIMEOUT seconds, and never
     renews the lease: it is a timer, not a driver."""
@@ -2738,10 +2754,19 @@ def cmd_watch(args):
         return 0
     try:
         with R.run_lock(d, timeout=WATCH_LOCK_TIMEOUT):
-            return _watch_locked(root, d)
+            try:
+                return _watch_locked(root, d)
+            except Exception as e:  # noqa: BLE001  the one-line contract is binding
+                sys.stderr.write("watch: %s: %s\n" % (e.__class__.__name__, e))
+                print("REENTRY: failed")
+                return 2
     except R.RunLocked:
         print("REENTRY: live")  # another conductor command is running right now
         return 0
+    except OSError as e:  # the lock file itself cannot be opened
+        sys.stderr.write("watch: cannot take the run lock in %s: %s\n" % (d, e))
+        print("REENTRY: failed")
+        return 2
 
 
 def _watch_locked(root, d):
@@ -2755,37 +2780,55 @@ def _watch_locked(root, d):
     rc, last = gate(root, "local_reversible", plan_subject(st))
     covered, _ = gate_line(rc, last)  # the judgment every gate makes; nothing is logged
     worktrees = [t["worktree"] for t in st.tasks.values()
-                 if t.get("status") in ("running", "verifying") and t.get("worktree")]
+                 if t.get("status") in ACTIVE and t.get("worktree")]
     stall = (block or CC.REENTRY_DEFAULTS)["stall_min"]
     old_lease = R.read_lease(d)
     live = R.lease_live(d, old_lease, stall, worktrees)
-    count = sum(1 for e in st.events() if e.get("event") == "reentry")
-    verdict = R.decide(bool(st.finished), (st.stopped or {}).get("reason"), covered, block,
-                       live, _idle_min(st), count)
+    # an attempt is logged before its spawn (ok null) and again with its outcome: count n
+    count = len({e.get("n") for e in st.events() if e.get("event") == "reentry"})
+    reason = (st.stopped or {}).get("reason")
+    verdict = R.decide(bool(st.finished), reason, covered, block, live, _idle_min(st), count)
     if verdict == "done":
         import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
         T.uninstall(st.run_id)
-    if verdict == "exhausted" and (st.stopped or {}).get("reason") != "reentry_exhausted":
-        # _record_stop without its STOP: line: watch prints exactly one REENTRY: line
-        detail = "max_reentries=%d" % block["max_reentries"]
-        st.stopped = {"reason": "reentry_exhausted", "at": _rfc3339(_now()), "detail": detail}
-        st.save()
-        st.log("stop", reason="reentry_exhausted", detail=detail)
+    if verdict == "exhausted" and reason != "reentry_exhausted":
+        extra = {"previous": reason} if st.stopped else {}
+        _record_stop(st, "reentry_exhausted", quiet=True,
+                     detail="max_reentries=%d" % block["max_reentries"], **extra)
     if verdict != "start":
         print("REENTRY: %s" % verdict)
         return 0
-    n = count + 1
-    argv = R.expand_agent_cmd(block["agent_cmd"], root)
+    return _start_agent(root, d, st, block, count + 1, old_lease)
+
+
+def _start_agent(root, d, st, block, n, old_lease):
+    """Log the attempt, spawn, lease, log the outcome -- in that order, so an attempt
+    that cannot be counted never starts, and an agent that cannot be leased is killed.
+    Either way at most one agent drives the run, and every started one counts."""
     # the log records the argv with {prompt} left unexpanded: the prompt never reaches it
     shown = [root if a == "{root}" else a for a in block["agent_cmd"]]
     try:
-        pid = R.spawn(argv, root, os.path.join(d, "reentry-%d.log" % n), n)
-    except OSError as e:
-        st.log("reentry", n=n, ok=False, argv=shown, error=str(e), replaced=old_lease)
+        st.log("reentry", n=n, ok=None, argv=shown, replaced=old_lease)
+    except (OSError, ValueError) as e:
+        sys.stderr.write("watch: cannot log the attempt: %s\n" % e)
         print("REENTRY: failed")
         return 2
-    R.set_reentry_lease(d, n, pid)
-    st.log("reentry", n=n, ok=True, argv=shown, pid=pid, replaced=old_lease)
+    argv = R.expand_agent_cmd(block["agent_cmd"], root)
+    try:
+        pid = R.spawn(argv, root, os.path.join(d, "reentry-%d.log" % n), n)
+    except (OSError, ValueError, TypeError) as e:
+        st.log("reentry", n=n, ok=False, error=str(e))
+        print("REENTRY: failed")
+        return 2
+    try:
+        R.set_reentry_lease(d, n, pid)
+    except Exception:  # noqa: BLE001  an unleased agent must not keep running
+        with contextlib.suppress(Exception):
+            os.killpg(pid, signal.SIGKILL)
+        st.log("reentry", n=n, ok=False, pid=pid, error="lease write failed")
+        print("REENTRY: failed")
+        return 2
+    st.log("reentry", n=n, ok=True, pid=pid)
     print("REENTRY: started %d pid=%d" % (n, pid))
     return 0
 

@@ -1022,6 +1022,12 @@ class ReentryBlockTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertTrue(self.problems(agent_cmd=bad))
 
+    def test_a_nul_byte_in_any_element_is_refused(self):
+        # exec cannot carry a NUL: Popen raises ValueError, so a grant never holds one
+        for cmd in (["a\x00b", "{prompt}"], ["agent", "-p\x00", "{prompt}"]):
+            with self.subTest(cmd=cmd):
+                self.assertIn("agent_cmd must not contain a NUL byte", self.problems(agent_cmd=cmd))
+
     def test_a_shell_is_refused_by_basename(self):
         for sh in ("sh", "/bin/bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"):
             with self.subTest(sh=sh):

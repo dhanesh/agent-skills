@@ -249,6 +249,8 @@ def decide(finished, stopped_reason, covered, block, live, idle_min, count):
         return "done"
     if stopped_reason == "grant_ask":
         return "waiting-human"
+    if stopped_reason == "reentry_exhausted":
+        return "exhausted"  # watch's own stop event must not make it look fresh again
     if not covered:
         return "ask"
     if not block:
@@ -272,7 +274,8 @@ def expand_agent_cmd(argv, root):
 def spawn(argv, root, log_path, n):
     """Start the agent detached (its own session) in root, stdin from /dev/null and its
     output to log_path; returns its pid. ENV_REENTRY=n lets its conductor commands keep
-    the reentry lease. Raises OSError when it cannot start."""
+    the reentry lease. Raises OSError (or ValueError/TypeError for an argv exec cannot
+    carry) when it cannot start."""
     env = dict(os.environ, **{ENV_REENTRY: str(n)})
     with open(log_path, "ab") as out:
         p = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL, stdout=out,
