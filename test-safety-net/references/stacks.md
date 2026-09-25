@@ -700,12 +700,12 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    whose output depends on HashMap iteration order passes the guard. Pin sorted output, never
    iteration order.
 6. **LTO in the test profile.** An `lto` setting, fat or thin, in `[profile.dev]` or
-   `[profile.test]` makes every proof exit 2 (NOT ARMED) since residual 11's list (ruling R43):
-   rustc writes LLVM bitcode into the rlibs, the crates' unmangled fns cannot be listed from it,
-   and the refusal names the setting and the remedy, `lto = false` for that profile. Before the
-   list, fat LTO made honest failing tests read 3 or 4 instead of 1 (the inlined panic hook's
-   `getenv` and libtest's own exit landed in the harness `main`), and thin LTO was proven like any
-   other build. Both fail closed: units in such repos are declined, never falsely passed.
+   `[profile.test]` makes every proof exit 2 (NOT ARMED): rustc writes LLVM bitcode into the
+   rlibs, the crates' unmangled fns (residual 11) cannot be listed from it, and the refusal names
+   the setting and the remedy, `lto = false` for that profile. The refusal prevents a misread: under
+   fat LTO an honest failing test would read 3 or 4 instead of 1 (the inlined panic hook's `getenv`
+   and libtest's own exit land in the harness `main`). Both fail closed: units in such repos are
+   declined, never falsely passed.
 7. **Closed: life-before-main crates (`ctor`) are seen and attributed.** The preloaded hook's
    initialiser runs before the executable's constructors, so a constructor's I/O is judged by its
    own crate frame, like any other. Measured with the real `ctor` 1.0.13 (`#[ctor::ctor(unsafe)]`
