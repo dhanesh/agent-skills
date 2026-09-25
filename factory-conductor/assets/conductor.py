@@ -2746,9 +2746,25 @@ def cmd_watch(args):
     REENTRY: line and exits 0 or 2, whatever goes wrong.
 
     watch takes the run lock itself, for at most WATCH_LOCK_TIMEOUT seconds, and never
-    renews the lease: it is a timer, not a driver."""
+    renews the lease: it is a timer, not a driver.
+
+    A timer names its run (--run). When that run is missing or finished, or a newer
+    run has started under the root, the run's timer is removed and watch prints
+    `REENTRY: done` (missing or finished) or `REENTRY: superseded` (not the newest):
+    an abandoned run's timer never outlives it. Without --run, watch checks the newest
+    run, as before."""
     root = os.path.abspath(args.root)
     d = current_run(root)
+    if getattr(args, "run", None) is not None:
+        try:
+            gone = _watch_named_run(root, args.run, d)
+        except (OSError, ValueError) as e:
+            sys.stderr.write("watch: %s: %s\n" % (e.__class__.__name__, e))
+            print("REENTRY: failed")
+            return 2
+        if gone:
+            print("REENTRY: %s" % gone)
+            return 0
     if d is None:
         print("REENTRY: no-run")
         return 0
@@ -2767,6 +2783,27 @@ def cmd_watch(args):
         sys.stderr.write("watch: cannot take the run lock in %s: %s\n" % (d, e))
         print("REENTRY: failed")
         return 2
+
+
+def _watch_named_run(root, run_id, newest):
+    """None when run_id is the newest run under root (watch goes on as usual); else
+    removes run_id's timer and returns the word to print: "done" for a missing or
+    finished run, "superseded" for an unfinished run a newer one replaced. Raises
+    ValueError for a malformed run id (nothing is touched) and OSError when the
+    timer cannot be removed."""
+    d = run_dir(root, run_id)  # ValueError on anything that is not a run id
+    if newest is not None and os.path.realpath(newest) == os.path.realpath(d):
+        return None
+    word = "done"
+    if os.path.isfile(os.path.join(d, STATE_FILE)):
+        try:
+            finished = bool(State.load(os.path.join(d, STATE_FILE)).finished)
+        except StateError:
+            finished = False
+        word = "done" if finished else "superseded"
+    import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+    T.uninstall(run_id)
+    return word
 
 
 def _watch_locked(root, d):
@@ -2833,11 +2870,12 @@ def _start_agent(root, d, st, block, n, old_lease):
     return 0
 
 
-def watch_argv(root):
-    """The absolute argv a timer runs: this interpreter, this conductor.py, watch.
-    A timer runs with no working directory or PATH to rely on, so every part of this
-    argv is an absolute path."""
-    return [sys.executable, os.path.abspath(__file__), "watch", "--root", os.path.abspath(root)]
+def watch_argv(root, run_id):
+    """The absolute argv a timer runs: this interpreter, this conductor.py, watch, for
+    run_id. A timer runs with no working directory to rely on, so every path in this
+    argv is absolute; --run lets a superseded run's timer remove itself."""
+    return [sys.executable, os.path.abspath(__file__), "watch", "--root",
+            os.path.abspath(root), "--run", run_id]
 
 
 def cmd_reentry(args):
@@ -2891,7 +2929,7 @@ def cmd_reentry(args):
     # /usr/bin:/bin): the agent, the plan's tools and their python3 need this one
     path = os.environ.get("PATH") or os.defpath
     try:
-        T.install(st.run_id, watch_argv(root), block["interval_min"], path=path)
+        T.install(st.run_id, watch_argv(root, st.run_id), block["interval_min"], path=path)
     except OSError as e:
         sys.stderr.write("%s\n" % e)
         print("REENTRY: failed")
@@ -2923,6 +2961,7 @@ def main(argv=None):
         s.set_defaults(fn=fn)
     s = sub.add_parser("watch")
     s.add_argument("--root", default=".")
+    s.add_argument("--run", default=None)
     s.set_defaults(fn=cmd_watch, no_lock=True)  # takes the lock itself; never renews the lease
     s = sub.add_parser("reentry")
     s.add_argument("action", choices=("install", "uninstall", "status"))

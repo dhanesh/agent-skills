@@ -343,7 +343,7 @@ class ReentryCommandTests(unittest.TestCase):
         line, = T.installed(self.st.run_id, kind="cron")
         words = shlex.split(line.split(" # ")[0])[5:]
         self.assertEqual(words[:2], ["/usr/bin/env", "PATH=" + captured])
-        self.assertEqual(words[2:], C.watch_argv(self.root))
+        self.assertEqual(words[2:], C.watch_argv(self.root, self.st.run_id))
         ev = [e for e in C.State.load(self.st.state_path).events()
               if e.get("event") == "reentry_timer"][-1]
         self.assertEqual((ev["action"], ev["path"]), ("install", captured))
@@ -393,6 +393,70 @@ class ReentryCommandTests(unittest.TestCase):
         st.save()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: done"))
         self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    # ── final wave I1: a superseded run's timer removes itself ───────────────────
+
+    def tick(self, run_id):
+        """One timer tick for run_id: `watch --root <root> --run <run_id>`."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = C.main(["watch", "--root", self.root, "--run", run_id])
+        return rc, buf.getvalue().strip()
+
+    def test_the_timer_argv_names_its_run(self):
+        self.assertEqual(C.watch_argv(self.root, self.st.run_id)[-4:],
+                         ["--root", os.path.abspath(self.root), "--run", self.st.run_id])
+
+    def test_an_abandoned_runs_timer_is_removed_once_a_newer_run_exists(self):
+        a = self.st
+        self.grant()
+        self.assertEqual(run_reentry(self.root, "install")[0], 0)
+        line, = T.installed(a.run_id, kind="cron")
+        self.assertIn("--run %s" % a.run_id, line)
+        # while A is the newest run, its tick is an ordinary one (install renewed the
+        # session lease, so A reads live)
+        self.assertEqual(self.tick(a.run_id), (0, "REENTRY: live"))
+        # run B starts later under the same root, installs its own timer and finishes
+        later = datetime.strptime(a.run_id[4:20], "%Y%m%dT%H%M%SZ") + timedelta(minutes=1)
+        with mock.patch.object(C, "new_run_id",
+                               return_value=C.new_run_id(now=later.replace(tzinfo=timezone.utc))):
+            b, plan_b = new_run(self.root, PLAN)
+        self.assertEqual(C.current_run(self.root), b.dir)
+        write_grant(self.root, plan_b, reentry={
+            "agent_cmd": [sys.executable, "-c", "pass", "{prompt}"], "interval_min": 10})
+        self.assertEqual(run_reentry(self.root, "install")[0], 0)
+        self.assertTrue(T.installed(b.run_id, kind="cron"))
+        st_b = C.State.load(b.state_path)
+        st_b.finished = {"at": "t"}
+        st_b.save()
+        self.assertEqual(self.tick(b.run_id), (0, "REENTRY: done"))
+        # A's timer fires again: A is no longer the newest run, so it removes itself
+        self.assertTrue(T.installed(a.run_id, kind="cron"))
+        self.assertEqual(self.tick(a.run_id), (0, "REENTRY: superseded"))
+        self.assertEqual(T.installed(a.run_id, kind="cron"), [])
+        self.assertEqual(T.installed(b.run_id, kind="cron"), [])
+        self.assertIsNone(C.State.load(a.state_path).stopped)  # nothing else changes
+
+    def test_a_tick_for_a_missing_run_removes_its_timer_and_is_done(self):
+        gone = "run-20200101T000000Z-abcdef"
+        T.install(gone, C.watch_argv(self.root, gone), 10, kind="cron")
+        self.assertEqual(self.tick(gone), (0, "REENTRY: done"))
+        self.assertEqual(T.installed(gone, kind="cron"), [])
+
+    def test_a_tick_for_a_finished_older_run_is_done(self):
+        st = C.State.load(self.st.state_path)
+        st.finished = {"at": "t"}
+        st.save()
+        later = datetime.strptime(self.st.run_id[4:20], "%Y%m%dT%H%M%SZ") + timedelta(minutes=1)
+        with mock.patch.object(C, "new_run_id",
+                               return_value=C.new_run_id(now=later.replace(tzinfo=timezone.utc))):
+            new_run(self.root, PLAN)
+        T.install(self.st.run_id, C.watch_argv(self.root, self.st.run_id), 10, kind="cron")
+        self.assertEqual(self.tick(self.st.run_id), (0, "REENTRY: done"))
+        self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    def test_a_tick_with_a_malformed_run_id_fails_and_touches_nothing(self):
+        self.assertEqual(self.tick("../etc"), (2, "REENTRY: failed"))
 
     def test_install_under_an_ask_gate_gives_exit_3_with_no_stop_and_no_timer(self):
         b = {"agent_cmd": [sys.executable, "-c", "pass", "{prompt}"],
