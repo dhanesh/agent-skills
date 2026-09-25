@@ -122,10 +122,11 @@ is useful with zero markers. A model never guesses facts inside a hook. Full con
    `unverified`) — a declared dependency is a sighting, never a correctness judgement. **Safe to
    re-run:** writes are upserts
    on stable keys, so a re-build only *adds new* files/edges or *refreshes existing* ones — it
-   never duplicates or deletes rows, and never downgrades a fact you have already validated. Each
+   does not duplicate or delete rows, or downgrade a fact you have already validated. Each
    run reports `entities_added` / `interactions_added` (both `0` on an unchanged repo). Add
    `--prune` to soft-invalidate build-origin edges for files you have since deleted or renamed
-   (opt-in; never hard-deletes, and never touches an edge the agent has observed or validated).
+   (opt-in; it soft-invalidates rather than hard-deletes, and does not touch an edge the agent
+   has observed or validated).
 1. **(Optional) Record what you observe.** The hooks already capture files, executions, and
    fetched URLs automatically. To add a relationship the hooks can't infer, emit a marker line —
    `WM-OBSERVE: hash_pw uses bcrypt @ auth/hash.py:14` — or call
@@ -161,11 +162,12 @@ normative correctness improves over time. The loop is detailed in
 1. **Code observation MUST NOT raise normative confidence.** This is the whole point:
    it lets the model say "observed, but unverified." A hook may set `observed_conf` high, but
    `normative_conf` moves *only* on oracle evidence.
-2. **No invented facts in hooks.** Hooks MUST capture only what is deterministically parseable from
-   the trusted channel — files any tool names, executions parsed from a Bash command's argv,
-   verifier exit status, fetched URLs, and explicit markers. Richer *semantic* interactions
-   MUST come from the agent's own markers/CLI and MUST NOT come from a model summarizing inside a hook, because a summary is a guess and a
-   hook writes what it captures straight into the ledger.
+2. **No invented facts in hooks.** Hooks MUST capture only what is deterministically parseable
+   from the trusted channel — files any tool names, executions parsed from a Bash command's
+   argv, verifier exit status, fetched URLs, and explicit markers. Richer *semantic*
+   interactions MUST come from the agent's own markers/CLI and MUST NOT come from a model
+   summarizing inside a hook, because a summary is a guess and a hook writes what it captures
+   straight into the ledger.
 3. **Trusted channel only.** `tool_result` / `tool_use` content MUST NOT be harvested into facts
    or evidence, so untrusted output cannot forge a marker. The two tags that raise the
    ORACLE axis (`WM-VALIDATED`/`WM-REFUTES`) MUST NOT be accepted from any channel but the

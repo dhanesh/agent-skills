@@ -177,9 +177,11 @@ pending steps, `resume` reports what is left, every other command except `status
 refuses (exit 2), and `init` starts a new run.
 
 **Hands off.** Every step goes through `conductor`: you MUST NOT merge, push, force-push, open
-the PR or edit code yourself, even when a gate asks. You MUST NOT pass a `--pr-cmd` or
-`--push-cmd` that does anything but push the run branch or open the PR; they exist for stubs
-and for hosts without `gh`, so by default pass neither. You MUST NOT edit, delete or recreate
+the PR or edit code yourself, even when a gate asks, because only `conductor` checks the grant
+before each step and records it in the run's log. You MUST NOT pass a `--pr-cmd` or
+`--push-cmd` that does anything but push the run branch or open the PR, because the conductor runs it in place of
+the push or PR step the grant approved. They exist for stubs and for hosts without `gh`, so by
+default pass neither. You MUST NOT edit, delete or recreate
 `state.json`, `autonomy-log.jsonl` or anything under `.skill-contract/`, because they are the
 run's record that `resume` and `finish` read back and the human audits; report a mismatch
 instead.

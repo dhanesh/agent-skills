@@ -113,7 +113,7 @@ than none, because it makes the invariant look enforced when it is not.
 
    **On rust, check the lockfile, the toolchain and the cargo cache before you plan to write.**
    The rust guard builds with `cargo test --locked --offline` and runs every `rustc` and `cargo`
-   call with `RUSTUP_AUTO_INSTALL=0`, so it never writes `Cargo.lock` and never downloads a
+   call with `RUSTUP_AUTO_INSTALL=0`, so it does not write `Cargo.lock` or download a
    toolchain or a crate. Every proof exits 2 (NOT ARMED) in a repo with no `Cargo.lock` or a stale
    one, with a `rust-toolchain.toml` pin below 1.82 or not installed, or with a dependency not in
    the local cargo cache. The remedy for a missing lockfile is `cargo generate-lockfile`. It writes
@@ -170,7 +170,7 @@ than none, because it makes the invariant look enforced when it is not.
 
 3. **Confirm with the user before writing anything.** Show the `ranked` top N (default 10) and
    the size of `remainder`/`not_netted`. This is a hard gate — you MUST NOT proceed past it
-   unconfirmed, unless
+   unconfirmed, because the next step writes test files into the user's repo, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed without asking,
    and MUST name the grant id and action class in the report. Any other exit (3 ASK/NONE, 2
@@ -482,10 +482,12 @@ than none, because it makes the invariant look enforced when it is not.
    nobody trusts yet, and why Tier 3 seams are reported, never applied. You MUST only create test
    files. When a test file exists, you MUST **append** to it and MUST NOT overwrite it, because it
    may hold tests you did not write.
-2. **You MUST NOT write a test that performs real I/O.** Enforced by the tier-aware runtime guard in
+2. **You MUST NOT write a test that performs real I/O**, because such a test is flaky and can
+   change the user's files, network state or services. Enforced by the tier-aware runtime guard in
    step 4, not by the static tier alone — see `references/triage.md` for the full mechanism and
    why the tiers cannot enforce this on their own.
-3. **You MUST NOT ship an unproven test.** A test that did not go RED MUST be discarded and listed
+3. **You MUST NOT ship an unproven test**, because a test that never went RED may pass whatever
+   the code does. A test that did not go RED MUST be discarded and listed
    under "could not prove," never shipped.
 4. **You MUST NOT leave the suite red**, because a red generated test is a bug in this skill,
    not an acceptable outcome. End state is a green suite plus suspected bugs in the report.

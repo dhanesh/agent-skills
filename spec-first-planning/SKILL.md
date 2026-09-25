@@ -91,10 +91,10 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    Unattended runs only when the user asks for it, and then the full loop MUST run, plus the
    decision sweep in `references/unattended.md`. You MUST tell the user which depth you are
    using. In attended mode, at each checkpoint (after the spec draft, and after the plan) you
-   MUST offer two
-   switches, *go deeper* (the full loop) and *go unattended* (the full loop, the decision
-   sweep, then a grant), and you MUST NOT escalate unless the user asks, because the deeper modes spend the
-   user's time and an unattended run ends in a grant only the user can give.
+   MUST offer two switches, *go deeper* (the full loop) and *go unattended* (the full loop, the
+   decision sweep, then a grant), and you MUST NOT escalate unless the user asks, because the
+   deeper modes spend the user's time and an unattended run ends in a grant only the user can
+   give.
 1. **Elicit — one focused round.** Ask only what the conversation hasn't already answered:
    the problem (who hurts, how), the users, what success observably looks like, explicit
    non-goals, and hard constraints. Prefer a single batched round of questions over an
@@ -151,7 +151,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    exit: 3 ASK/NONE, 2 INVALID, 1 usage error), you MUST propose the handoff (the consumer,
    the envelope path, and each claim's status) and MUST wait for the user's yes before
    invoking that skill with the envelope path. If discover names none (`NO_CONSUMER:`), you
-   MUST NOT treat that as a failure: give the user the envelope path; the plan is still done.
+   MUST NOT treat that as a failure, because the plan is still done: give the user the envelope
+   path.
    In unattended mode, the grant is written between `check-envelope` and this check (see
    `## Unattended mode`). Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
    Python 3.10 or newer.
@@ -182,7 +183,8 @@ branch or a detached HEAD, so work on a branch such as `factory/*`. Before the h
 MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/work` — any
 name but `factory/<plan-slug>`, which factory-conductor creates as its run branch).
 Under a grant, you MUST push only the current branch, to the remote branch of the same name,
-and MUST NOT force-push. A push or pull request whose commits change CI configuration (such as
+and MUST NOT force-push, because a force-push can destroy remote history and a grant covers only
+reversible actions. A push or pull request whose commits change CI configuration (such as
 `.github/workflows/`) counts as `deploy`: `check-grant` answers ASK `ci-config`, so ask first.
 
 The linter checks structure and traceability, not the quality of the reasoning. A grant is

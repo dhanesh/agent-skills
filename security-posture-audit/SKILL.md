@@ -19,10 +19,11 @@ defects can a checklist prove from the tree, and how severe is each one in this 
 actual context?*
 
 The division of labor is the point: `assets/audit_posture.py` finds candidate defects
-deterministically (same tree in, same findings out), and the agent adjudicates each one
-with the code open — a flagged `debug=True` in a test fixture is INFO; the same line in a
-production entrypoint is HIGH. The tool never guesses context and you never grep by hand, so every finding is both
-reproducible and judged in context.
+deterministically (same tree in, same findings out), and the agent adjudicates each one with the
+code open — a flagged `debug=True` in a test fixture is INFO; the same line in a production
+entrypoint is HIGH. The tool never guesses context and you never grep by hand, because each side
+does only what it is reliable at: the tool finds the same candidates every run, and you judge
+each one in context.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
 scripts. You execute from the *target repo*, not from this skill's directory, so a

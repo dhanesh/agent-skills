@@ -90,7 +90,7 @@ rather than inventing config from memory.
    `references/install-playbooks.md`. If the plan lists errors (broken
    manifest files), surface them here — fixing a corrupt `package.json` is a
    decision the user makes, not you. You MUST NOT write anything before this
-   confirmation, unless
+   confirmation, because installing rails changes the user's repo and CI, unless
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible`
    exits 0 (an autonomy grant the user approved covers it); then you MAY proceed, and MUST name
    the grant id and action class in the report. Any other exit (3 ASK/NONE, 2 INVALID, 1 usage
@@ -104,8 +104,8 @@ rather than inventing config from memory.
    matching stack section in `references/install-playbooks.md`: write the
    verifier config/scripts (Makefile targets, package scripts, smoke test)
    and the CI workflow. Extend existing files rather than replacing them, and you
-   MUST NOT add a second workflow when one already exists — you MUST extend the existing
-   one. Keep the diff small and reviewable.
+   MUST NOT add a second workflow when one already exists, because two workflows drift apart and CI
+   stops being one ground truth; you MUST extend the existing one. Keep the diff small and reviewable.
 4. **Prove the loop (verify and repair).** For each installed rail, run its
    command and record the result. Then follow the prove-the-loop protocol in
    `references/install-playbooks.md`: introduce one trivial, reversible break,
