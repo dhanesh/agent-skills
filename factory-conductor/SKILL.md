@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.1.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -48,8 +48,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --root <repo>`,
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
-`MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`, and
-`REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
+`MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`, `REENTRY:`,
+and `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). The full reference, the state and
 log formats and a worked example are in `references/run-protocol.md`.
@@ -100,7 +100,8 @@ Each step is one command. Read its output lines, not just the exit code.
 1. **Init.** `conductor init --plan <envelope>` prints `RUN: <run-id>`. It creates the run
    branch `factory/<plan-slug>` from the current branch, checks it out in the root, and writes
    `.skill-contract/runs/<run-id>/` (git-ignored and not committed). `--budget '<json>'` MAY
-   tighten the grant's budget; it cannot loosen a key the grant sets (exit 2).
+   tighten the grant's budget; it cannot loosen a key the grant sets (exit 2). When the grant
+   carries a `reentry` block, install its timer now (see "Scheduled re-entry").
 2. **Next.** `conductor next` prints `READY: T1 T3`, nothing when work is in flight and nothing
    new is ready, or `STOP: <reason>` (exit 3).
 3. **Start.** For each ready task, `conductor start <task>` prints
@@ -145,6 +146,9 @@ Each step is one command. Read its output lines, not just the exit code.
 - An exit 2 that the step's own instruction above does not cover, such as the root being off
   the run branch or dirty, a merge in progress, or a plan edited since `init`, means park it:
   `conductor park <task> --reason "<the stderr line>"`. Run an unchanged command at most twice.
+  The exception is `run locked` on stderr: another conductor command held the run lock for
+  900 s. That says nothing about the task, so run the same command again instead of parking
+  it; the retry does not count toward the two.
 - A report that does not follow its brief's format: ask that subagent once for the format.
   If it still does not follow it, treat an executor as `BLOCKED` and a reviewer as a `fail`.
 
@@ -225,6 +229,50 @@ for the same repair. That is conservative: every `resume` call that asks for a d
 spends one, so a session that keeps crashing still stops. A task past the cap prints
 `PARK: <task> budget_dispatches` and gets no `NEXT:` line.
 
+## Scheduled re-entry
+
+When the grant carries a `reentry` block, run `"$SKILL_DIR/assets/conductor.py" reentry
+install --root <repo>` right after `init`, so a timer on this machine resumes the run if
+this session dies. It prints `REENTRY: installed every <n> min`. Without a block it prints
+`REENTRY: disabled` (exit 3); when the grant asks it prints the `GATE: ASK` line (exit 3)
+and the run goes on without a timer. `REENTRY: failed` (exit 2) means no timer was
+installed (an unsupported platform, or a loader that failed; nothing is left behind): say
+so in the run report and carry on.
+
+The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
+command, with a fixed resume prompt, only when the run is not finished, not waiting on the
+human, still covered by the grant, not driven by a live session, idle for `stall_min`, and
+under `max_reentries`. It prints one `REENTRY:` line (the words are in
+`references/run-protocol.md`). The agent it starts is a fresh session that follows "Resume
+after a crash" and stops at `NEXT: run ask` or `NEXT: run done`.
+
+Every conductor command takes the run lock and renews the lease, so two drivers never
+write at once. A command that finds the lock held waits for it, up to 900 s, and says so
+on stderr after 2 s. A verify command, a `--push-cmd` or a `--pr-cmd` MUST NOT call
+`conductor` on this run, because the command that runs it holds the lock: it would wait
+900 s and exit 2. You MUST NOT edit `lease.json` or `.lock`, because they are how a live
+session tells the timer not to start a second driver. The lease of an agent `watch`
+started holds while its process lives on this host; no other command takes it over, a
+human's `status` included.
+
+When `max_reentries` agents have started, `watch` records the stop `reentry_exhausted`.
+It is a stop like the others: the next driver or the human runs `conductor finish`. Until
+then every tick prints `REENTRY: exhausted`. `conductor reentry uninstall` removes the
+timer at once, whatever kind it is, and a finished run removes its own at the next tick
+(`REENTRY: done`). `conductor reentry status` prints the timer, the lease, the number of
+attempts and the last recorded `reentry` event.
+
+Re-entry needs this machine on and the user logged in, and it runs the user's own agent
+command with the user's own permissions: it is not a hosted service. launchd (macOS) runs
+the timer only while the user is logged in, and a systemd user timer stops at logout
+unless lingering is on (`loginctl enable-linger`). cron cannot run a repository whose
+path holds a literal `\%`, so that install fails. Windows is unsupported. A session that
+is alive but has made no conductor call and no worktree change for `stall_min` looks
+stalled, and can get a second driver. The run lock prevents corruption, and the existing
+guards limit the cost to wasted dispatches. The resume prompt quotes the root inside
+backticks, so a root that holds a backtick garbles the prompt's code span; it reaches no
+shell.
+
 ## The executor brief
 
 Fill in every `<…>` and send it as the whole prompt. The interfaces are the task's `where`, its
@@ -295,7 +343,8 @@ Report: Verdict: pass | fail, then one line of detail.
   `new_human_decision`. At `finish`, a merged run branch that fails a proven task's own checks
   stops it with `integration_red` and is not pushed, and a run-branch commit that changes CI
   config makes the push and the PR ask (`ci-config`), because CI runs with the repository's
-  secrets.
+  secrets. `watch` stops it with `reentry_exhausted` once `max_reentries` agents have
+  started.
 - **What parks a task.** Repairs reaching `max_repairs_per_task` (2 by default) park it with
   `verify_red_after_repairs`; a dispatch it needs past `max_dispatches` parks it with
   `budget_dispatches`. `max_dispatches` counts every executor, repair and reviewer dispatch the
@@ -306,8 +355,9 @@ Report: Verdict: pass | fail, then one line of detail.
 A **run report** for the user: the PR URL (or the pending remote step and why), the
 `run-result/v1` envelope path, each task's status (`proven` with its merge commit, `parked`
 with its reason or question, `blocked` with the task it waits on), the stop reason, the
-integration result (`INTEGRATION: pass <sha>`, the failing lines, or `skipped`), and the
-budget spent.
+integration result (`INTEGRATION: pass <sha>`, the failing lines, or `skipped`), the
+budget spent, and, when the grant allows re-entry, the attempt count from
+`conductor reentry status`.
 The report MUST state that `max_tokens` and `max_usd` were recorded, not enforced, as
 `conductor status` does. Name the grant id and each action class the run used.
 

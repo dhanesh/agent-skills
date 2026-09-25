@@ -129,6 +129,9 @@ You need Python 3.10 or newer, git 2.31 or newer, an agent harness that can disp
    worktree, re-runs the task's verify commands itself, has a fresh reviewer judge the diff
    against the requirement, and merges only what passed both. If the session dies, a new one
    picks the run up with `conductor resume`.
+4. **(Optional) re-entry.** Consent to re-entry in the grant (the planner asks for your agent
+   command); the conductor installs a timer that resumes the run with that command if the
+   session dies.
 
 **What you get back:** one open PR from `factory/<plan-slug>` against your working branch,
 holding every task that passed verify and review, re-verified together on the merged branch
@@ -139,6 +142,9 @@ nothing is pushed and the run says which checks failed.
 **What stays with you:** merging the PR; answering parked questions; renewing the grant if it
 lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI
 configuration, which no grant covers and which always asks you.
+
+**One limit:** re-entry runs on this machine and needs it on, with you logged in. It is not
+a hosted service.
 
 ### What happens when you install a subset
 

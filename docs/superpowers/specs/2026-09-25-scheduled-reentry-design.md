@@ -91,9 +91,9 @@ A re-entry spends no dispatch itself. The agent's own `resume` spends dispatches
 - **Install** needs a grant with a valid `reentry` block and a `local_reversible` gate that is COVERED. It writes one timer per run:
   - **macOS:** `~/Library/LaunchAgents/io.agent-skills.factory-conductor.<run-id>.plist`, with `StartInterval` set to `interval_min × 60` and `ProgramArguments` set to the absolute interpreter, the absolute `conductor.py`, `watch` and `--root <abs root>`. It is loaded with `launchctl bootstrap gui/<uid>`.
   - **Linux:** a systemd user `.service` and `.timer` pair in `~/.config/systemd/user/`, with `OnUnitActiveSec` set, enabled with `systemctl --user enable --now`. If there is no user systemd, it falls back to one crontab line tagged `# factory-conductor <run-id>`.
-  - **Other platforms** print `REENTRY: unsupported platform` and exit 2. `watch` still works when run by hand.
-- **Uninstall** removes exactly what install wrote, identified by the run id, and unloads it.
-- **Status** prints the installed timer, the lease, the re-entry count and the last `watch` decision.
+  - **Other platforms** print `REENTRY: failed` and exit 2 (the reason on stderr). `watch` still works when run by hand. *(Amended 2026-09-26: the implementation reports every install failure, an unsupported platform included, as `failed`.)*
+- **Uninstall** removes exactly what install wrote, identified by the run id, and unloads it. *(Amended 2026-09-26: it sweeps every timer kind by run id, not only the kind detected now.)*
+- **Status** prints the installed timer, the lease, the re-entry count and the last recorded `reentry` event. *(Amended 2026-09-26, Task 6: it was "the last `watch` decision". `watch` does not log every tick, because a log event per tick would reset the stall clock and defeat stall detection, so the last recorded attempt is what `status` can show.)*
 
 The SKILL instructs the driving agent to run `reentry install` right after `init` when the grant carries a `reentry` block. `watch` uninstalls the timer when the run finishes, so no timers are left behind. `revoke-grant` stops re-entry at the next `watch`, and the timer then uninstalls itself once the run finishes. `conductor reentry uninstall` stops it at once.
 

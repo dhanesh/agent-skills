@@ -11,7 +11,7 @@ reference; SKILL.md holds the protocol an agent follows.
 |---|---|
 | 0 | OK. The step happened. |
 | 3 | A human is needed or the run stopped: a `GATE: ASK`, a `STOP:`, a task sent back for repair (`VERIFY: … fail`, `REVIEW: … fail`) or parked (`PARK:`), a merged run branch that failed its integration re-run (`STOP: integration_red`), or a remote step that asked, failed or is still pending after `finish`. |
-| 2 | Refused or invalid: bad input, a task in the wrong status, a finished run, a precondition not met. Argparse usage errors also exit 2. |
+| 2 | Refused or invalid: bad input, a task in the wrong status, a finished run, a precondition not met. Argparse usage errors also exit 2. So does `run locked` (see "The run lock and the lease"), which means run the same command again, not park the task. |
 
 The conductor never exits 1. The vendored checker's `check-grant` does exit 1 on a usage
 error, but the conductor treats any non-zero checker exit as an ASK (`reason=checker-error`).
@@ -35,6 +35,8 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
 | `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (ending ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
+| `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
+| `reentry install\|uninstall\|status` | install: `REENTRY: installed every <n> min`, `REENTRY: disabled`, a `GATE: ASK` line, or `REENTRY: failed`; uninstall: `REENTRY: uninstalled` or `REENTRY: failed`; status: `REENTRY: timer <paths or crontab line\|none>`, `REENTRY: lease <json\|null>`, `REENTRY: count <n>`, `REENTRY: last <event json\|none>` | 0; 3 `disabled` or gate asks (install); 2 `failed`, or no run |
 | `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
 ### init
@@ -272,6 +274,113 @@ done or the integration was red, and, for an integration skipped because the gra
   `finish --retry-remote` still runs pending remote steps (and a skipped integration), and
   `init` starts a new run.
 
+### The run lock and the lease
+
+Every command on a run except `init` and `watch` holds an exclusive lock on
+`<run>/.lock` (`flock`) while it runs, then renews `<run>/lease.json`. So two drivers, a
+session and an agent `watch` started, never interleave writes to `state.json` or the log.
+A command that finds the lock held waits up to 900 s, printing `waiting for the run lock
+held by another conductor command…` on stderr once after 2 s, because `verify` and
+`finish` hold it while their commands run (up to 600 s each). If the wait runs out it
+prints `run locked: another conductor command holds <path>` on stderr and exits 2: run the
+same command again; the task is not at fault. The lock is released when its holder exits
+or dies (SIGKILL included), and it is not re-entrant: a verify command, `--push-cmd` or
+`--pr-cmd` that calls `conductor` on the same run waits for its own parent, then exits 2.
+
+`lease.json` says who drives the run: `{"holder", "host", "pid", "renewed_at", "n"}`.
+- A **session** lease (`holder: "session"`, `pid: null`) is written by any command. It is
+  live while `renewed_at` is within `stall_min`, or while a file in an in-flight task's
+  worktree (or that worktree's git index or `logs/HEAD`) changed within `stall_min`: an
+  executor can work for a long time without calling the conductor.
+- A **reentry** lease (`holder: "reentry"`, the agent's `pid` and attempt number `n`) is
+  written by `watch` after it starts an agent. It is live exactly while that pid lives on
+  this host. No other command takes it over while the pid lives, not even a human's
+  `status`: the command renews it as a reentry lease. The agent's own commands keep it too
+  (they carry `FACTORY_CONDUCTOR_REENTRY=<n>` in their environment).
+- A lease that cannot be read, or whose `renewed_at` is malformed or far in the future, is
+  judged by the file's own mtime. A failed lease write prints a `warning:` and never
+  changes a command's outcome: `state.json` is the record.
+
+### watch
+
+One re-entry check, for a timer to run every `interval_min`. It prints exactly one
+`REENTRY:` line and exits 0, or 2 for `failed`, whatever goes wrong. It takes the run lock
+for at most 5 s (a held lock prints `live`: another command is running right now) and never
+renews the lease: it is a timer, not a driver. The first check that fails decides, in this
+order:
+
+| Line | When |
+|---|---|
+| `REENTRY: no-run` | no run under the root |
+| `REENTRY: done` | the run is finished; `watch` also removes the run's timer (every kind, by run id) |
+| `REENTRY: waiting-human` | the run is stopped with `grant_ask` |
+| `REENTRY: exhausted` | the run is stopped with `reentry_exhausted` (every later tick, until `finish`) |
+| `REENTRY: ask` | the newest grant does not cover `local_reversible` for this plan (expired, revoked, stale, or invalid: a shell `agent_cmd` makes the whole grant invalid) |
+| `REENTRY: disabled` | the covering grant has no valid `reentry` block |
+| `REENTRY: live` | the lease is live (see above), or the run lock is held |
+| `REENTRY: not-stalled` | the last log event is less than `stall_min` old |
+| `REENTRY: exhausted` | `max_reentries` attempts were made: records the stop `reentry_exhausted` (quietly; an earlier stop is kept as `previous`) |
+| `REENTRY: started <n> pid=<pid>` | otherwise: agent `n` was started |
+| `REENTRY: failed` | the state cannot be read, the attempt cannot be logged, the agent cannot be spawned, its lease cannot be written, or any unexpected error (a one-line reason on stderr) |
+
+Idle time is minutes since the last complete log event's `at`; a stamp in the future (a
+clock step) is judged by the log file's mtime instead. Attempts are counted as the distinct
+`n` of `reentry` events. Starting an agent goes in this order, so every started agent is
+counted and at most one drives the run:
+1. log `reentry` with `n`, `ok: null`, the argv with `{prompt}` left unexpanded (no part of
+   the prompt reaches the log) and `replaced` (the lease it found);
+2. spawn `agent_cmd` with `{prompt}` and `{root}` substituted as whole arguments (never a
+   shell), in the root, in its own session, stdin from `/dev/null`, output to
+   `<run>/reentry-<n>.log`, with `FACTORY_CONDUCTOR_REENTRY=<n>`;
+3. write the reentry lease; if that fails, kill the agent's process group;
+4. log `reentry` with `n`, `ok: true` and `pid` (or `ok: false` and `error` on a failed
+   spawn or lease).
+
+The resume prompt is fixed in `reentry.py`, never read from a plan or a grant. It tells the
+agent to load the skill, run `conductor resume --root <root>` and follow each `NEXT:` line
+until `NEXT: run done` or `NEXT: run ask`, and on `run ask` to stop without finishing the
+run or asking anyone. The root is shlex-quoted inside backticks, so a root holding a
+backtick garbles the prompt's markdown code span (it reaches no shell).
+
+`reentry_exhausted` is a stop like the others: the next driver or a human runs `finish`.
+Until then the timer keeps firing and prints `exhausted`; the tick after `finish` prints
+`done` and removes the timer.
+
+### reentry
+
+`reentry install|uninstall|status` manages the run's timer, which runs
+`<python> <abs path>/conductor.py watch --root <abs root>` every `interval_min`:
+- a launchd agent (macOS), `~/Library/LaunchAgents/io.agent-skills.factory-conductor.<run-id>.plist`,
+  loaded with `launchctl bootstrap gui/<uid>`; it runs only while the user is logged in;
+- a systemd user timer (Linux, when `systemctl --user` works),
+  `~/.config/systemd/user/factory-conductor-<run-id>.{service,timer}`, enabled with
+  `enable --now`; it stops at logout unless lingering is on (`loginctl enable-linger`);
+- otherwise a crontab line tagged `# factory-conductor <run-id>`; cron cannot express a
+  literal `\%` in a path, so such a root fails the install.
+
+Windows is unsupported (`REENTRY: failed`).
+
+- **install** needs the newest grant's valid `reentry` block (`REENTRY: disabled`, exit 3,
+  without one) and a covering `local_reversible` gate. An ASK prints the `GATE: ASK` line,
+  logs the gate and exits 3, but does not stop the run: the timer is auxiliary. It first
+  removes any timer this run has under any kind, then writes and loads the new one, logs
+  `reentry_timer` (`action: "install"`, `interval_min`) and prints
+  `REENTRY: installed every <n> min`. An unsupported platform or a loader that fails prints
+  `REENTRY: failed` (exit 2) after removing what it wrote; no event is logged.
+- **uninstall** removes the run's timer under every kind, by run id (not by the kind this
+  host detects now), logs `reentry_timer` (`action: "uninstall"`) and prints
+  `REENTRY: uninstalled`. A kind that fails does not stop the others; the errors are
+  reported together as `REENTRY: failed` (exit 2).
+- **status** prints four lines: `REENTRY: timer` (the installed files or crontab line, or
+  `none`), `REENTRY: lease` (the lease as JSON, or `null`), `REENTRY: count` (distinct
+  attempts) and `REENTRY: last` (the newest `reentry` event as compact JSON, or `none`).
+  `watch` does not log a tick that starts nothing, because a log event per tick would reset
+  the idle clock, so `last` is the last attempt, not the last tick.
+
+Tests and the eval set `FACTORY_CONDUCTOR_TIMER_HOME` (a temp home),
+`FACTORY_CONDUCTOR_TIMER_DRYRUN=1` (no loader runs) and `FACTORY_CONDUCTOR_TIMER_KIND`
+(`launchd`, `systemd` or `cron`), so the real system is never touched.
+
 ## Task statuses and stop reasons
 
 Statuses: `pending`, `running` (started), `verifying` (verify failed, awaiting repair),
@@ -281,8 +390,9 @@ Statuses: `pending`, `running` (started), `verifying` (verify failed, awaiting r
 Stop reasons the tool records: `budget_wall_clock` (from `next`, `resume`, `start`, `verify`,
 `review` or `merge`), `budget_dispatches` (from `next`, `resume` or `start`), `grant_ask` (a gate ASK in `start`,
 `verify`, `merge`, `resume` or `finish`), `new_human_decision` (a `merge-inconsistent` park) and
-`no_ready_tasks` (from `next` or `resume`), and `integration_red` (from `finish`, when the merged
-run branch fails a proven task's own checks). The grant's `stop_on` is not enforced.
+`no_ready_tasks` (from `next` or `resume`), `integration_red` (from `finish`, when the merged
+run branch fails a proven task's own checks), and `reentry_exhausted` (from `watch`, once
+`max_reentries` agents have started). The grant's `stop_on` is not enforced.
 
 Park reasons: `verify_red_after_repairs`, `budget_dispatches`, `unrunnable-verify`,
 `no-commits`, `merge-conflict`, `merge-inconsistent`, `new_human_decision`,
@@ -307,7 +417,12 @@ repository and is never committed.
   and `event`: `init` (with the waves, `max_dispatches` and `derived`), `gate`, `dispatch` (kind `executor`, `repair` or
   `reviewer`; `resume: true` when a `resume` line spent it), `dispatch_refused`, `verify` (each command and its outcome), `review`, `merge`,
   `park`, `decision`, `stop`, `resume`, `budget_warning`, `integration`, `finish`, `push`,
-  `push_refused`, `pr`.
+  `push_refused`, `pr`, `reentry` (a `watch` attempt: `n`, `ok` null before the spawn,
+  then `true` with `pid` or `false` with `error`), `reentry_timer` (`action` install or
+  uninstall).
+- `.lock`, the run lock, and `lease.json`, the lease (see "The run lock and the lease").
+  Neither is part of the record; `resume` and `finish` never read them.
+- `reentry-<n>.log`, the output of the agent attempt `n` that `watch` started.
 - `wt/<task>/`, the task worktrees. `verify/` and `merge/` hold the short-lived isolated
   clones (the integration re-run's are `verify/integration-<task>-<sha>`).
 

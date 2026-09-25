@@ -125,7 +125,13 @@ and skip what the conversation has already answered:
    resume the run? If so, give the exact agent command, as an argv list with `{prompt}`
    where the resume prompt goes." Show the argv back before the yes. It becomes
    `answers.reentry` (`agent_cmd`, optional `interval_min` 10, `stall_min` 30,
-   `max_reentries` 5). Recommend the user's agent in headless mode, with an explicit tool
+   `max_reentries` 5). `agent_cmd` carries `{prompt}` exactly once and can carry `{root}`
+   (the repository root), each as a whole argument. It is a plain agent binary: a shell
+   (`sh`, `bash`, `zsh`, …) or a launcher wrapping one (`env bash …`, `sudo sh …`) makes
+   the checker reject the whole grant, because a shell would turn the argv back into an
+   evaluated string. The ranges are `interval_min` 5–60, `stall_min` 15–240 and at least
+   twice `interval_min`, and `max_reentries` 1–20; a value outside them also rejects the
+   grant. Recommend the user's agent in headless mode, with an explicit tool
    allowlist, e.g. `["claude", "-p", "{prompt}", "--allowedTools", "…"]`. Warn against
    any permission-bypass flag, because the resumed agent acts with the user's own
    permissions and no one watches it. Without an answer, no block is written and nothing
