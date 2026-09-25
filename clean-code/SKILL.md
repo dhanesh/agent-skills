@@ -223,25 +223,6 @@ or two findings, not an exhaustive audit.
 
 ## Decision trees
 
-**Writing a function**
-```
-> ~20 lines?                          → split it
-Does more than one thing?             → split it
-> 3 arguments?                        → group into an object, or split
-Modifies state AND returns a value?   → separate command from query
-Has a flag argument?                  → split into two named functions
-Has side effects?                     → make them explicit; ideally eliminate
-```
-
-**Naming something**
-```
-Single letter (outside a loop index)? → rename
-An abbreviation?                      → expand it
-Encodes the type (strName, iCount)?   → remove the encoding
-Reveals what it is without comment?   → good
-Consistent with similar concepts?     → align it
-```
-
 **Designing a dependency**
 ```
 Domain importing a framework/ORM?     → invert it (define an interface inward)

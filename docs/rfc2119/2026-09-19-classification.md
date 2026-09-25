@@ -154,7 +154,7 @@ Skills appear in rewrite order.
 | c29 | 194 | 3. **Has no duplication** — one fact in one place (DRY). | plain (0.69, 0.20) | plain |  |
 | c30 | 195 | 4. **Minimizes elements** — no more classes, methods, or abstraction than rules 1–… | plain (0.82, 0.18) | plain |  |
 | c31 | 198 | Rules 2–4 are applied by refactoring once it works. **Rule 4 is the guard against … | plain (0.82, 0.16) | plain |  |
-| c32 | 281 | \| **Data clumps** — fields always travel together \| extract a class \| | plain (0.77, 0.19) | plain |  |
+| c32 | 262 | \| **Data clumps** — fields always travel together \| extract a class \| | plain (0.77, 0.19) | plain |  |
 | c33 | 78 | 2. Make one structural change. Behaviour SHOULD NOT change. | MUST (0.59, 0.45) | SHOULD | backfill 2026-09-25: was lowercase "must not". Confidence 0.59 < 0.6, decided ourselves; harm 0.45 < 0.5 caps it below MUST, as for c4, step 1 of the same loop; step 3 names the alternative (revert or repair) |
 | c34 | 126 | ✅ Proportionate: one well-named function that takes the rows (or a path) and returns the total; if it needs to be testable, pass the source in as a parameter. | SHOULD (0.33, 0.17) | plain | backfill 2026-09-25: was lowercase "must". Confidence 0.33 < 0.6 (plain 0.42), decided ourselves: the word sat in a condition inside a labelled illustrative example, not a directive; harm 0.17. Now "needs to be" |
 
