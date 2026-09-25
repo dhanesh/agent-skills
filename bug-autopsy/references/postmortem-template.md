@@ -17,7 +17,7 @@ sources:
 
 Fill every `<placeholder>`; delete the guidance sentences (the non-bullet
 prose under each heading) once the section stands on its own. Verify with
-`python3 ../assets/postmortem_lint.py <this file>` — the linter enforces the
+`python3 "$SKILL_DIR/assets/postmortem_lint.py" <this file>` — the linter enforces the
 structure below. Frontmatter is the OKF concept header; keep it when the
 post-mortem lives in a knowledge bundle, drop it for a standalone document.
 
