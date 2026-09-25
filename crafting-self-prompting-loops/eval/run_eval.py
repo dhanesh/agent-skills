@@ -179,6 +179,8 @@ def _git_repo(root):
     if shutil.which("git") is None:
         return
     for args in (["init", "-q", "-b", "main"],
+                 # no background auto-gc/maintenance racing the temp-dir cleanup
+                 ["config", "gc.auto", "0"], ["config", "maintenance.auto", "false"],
                  ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
                   "commit", "-q", "--allow-empty", "-m", "x"],
                  ["checkout", "-q", "-b", "factory/x"]):
