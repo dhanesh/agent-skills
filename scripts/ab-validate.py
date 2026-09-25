@@ -236,6 +236,8 @@ SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalise
 # SKILL.md prose, every skill has a register section; plus the Jev backfill.
 SINCE_PP5_REASONS = "b314fca"  # gates: PP-5 asks every never/always/MUST NOT for a
 # stated reason (scripts/gates/pp5_reasons.py) and stops counting hedges.
+SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
+# quotes no current sentence; `removed` in the line column marks deleted text.
 
 
 def _git_out(*args):
@@ -4656,6 +4658,11 @@ def check_bcp14_registry(old, new):
         "(must not rise)", a["level"] + a["section"], b["level"] + b["section"],
         b["level"] + b["section"] <= a["level"] + a["section"], "a row that says SHOULD over a MUST "
         "misstates the rule; a missing section hides a skill's keywords", kind="guard")
+    row("bcp14", "register rows quoting no current SKILL.md sentence (lower=better)",
+        a["orphan"], b["orphan"], b["orphan"] < a["orphan"] and b["orphan"] == 0,
+        "an orphan row records a keyword level for text the skill no longer has, so the register "
+        "claimed a rule nobody could find",
+        since=SINCE_BCP14_ORPHANS)
 
 
 # ── base-in-reality: the refutation vote follows the verdict rubric ─────────
