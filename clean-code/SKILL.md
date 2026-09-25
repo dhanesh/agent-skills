@@ -20,7 +20,7 @@ compatibility: Prompt-only; no runtime dependencies. Language-agnostic — the p
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.0.2"
+  version: "1.0.3"
   tags: "clean-code,refactoring,solid,code-review,architecture,naming,tdd,code-smells,craftsmanship"
 ---
 
@@ -38,9 +38,10 @@ possible. The single most common way to misapply these principles is to
 over-build — wrapping a 20-line script in layers it doesn't need. Read
 **Right-size the solution** below before you reach for any pattern.
 
-This file (L1) is always active. Apply it to every function, class, or module
-you write or review. The deeper material lives in `references/` — pull a file
-in only when the task calls for it (see **Going deeper** at the bottom).
+This file (L1) holds the everyday rules for code you write or review; apply
+them in proportion to the change in front of you. The deeper material lives in
+`references/` — pull a file in only when the task calls for it (see **Going
+deeper** at the bottom).
 
 ## Orient before you act
 
@@ -150,7 +151,7 @@ but every example is **illustrative, not a template**:
   ports and adapters is showing what they look like *when a problem needs them*
   (see Right-size), not a layout to impose everywhere.
 
-## L1 — The non-negotiables
+## L1 — Core rules
 
 | Rule | One-line | Violation signal |
 |---|---|---|

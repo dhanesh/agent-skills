@@ -125,7 +125,7 @@ Skills appear in rewrite order.
 |---|---|---|---|---|---|
 | c1 | 29 | A working guide to Robert C. Martin's principles. The aim is not to recite rules — … | plain (0.94, 0.16) | plain |  |
 | c2 | 34 | But *clean* means **as simple as the problem allows**, never as elaborate as possi… | plain (0.57, 0.20) | plain |  |
-| c3 | 39 | This file (L1) is always active. Apply it to every function, class, or module you … | MUST (0.44, 0.23) | plain | describes the skill's always-loaded scope; harm 0.23 <0.5, no gate — the imperative that follows is a workflow step |
+| c3 | 41 | This file (L1) holds the everyday rules for code you write or review; apply… | MUST (0.44, 0.23) | plain | describes the skill's always-loaded scope; harm 0.23 <0.5, no gate — the imperative that follows is a workflow step. Prompt audit 2026-09 (A-M1): was "This file (L1) is always active. Apply it to every function, class, or module…", an absolute that over-applied L1 against Right-size; now "apply them in proportion to the change". Still plain, no keyword |
 | c4 | 74 | 1. Run the suite. Green? Refactor. Red? Fix or report the failure first — you SHOULD NOT… | MUST (0.55, 0.43) | SHOULD | harm 0.43 < 0.5 caps it below MUST; no gate enforces it; 'fix or report' is the stated alternative |
 | c5 | 142 | The **principle and the shape** are the point, never the syntax. A snippet in one … | plain (0.80, 0.16) | plain |  |
 | c6 | 153 | \| Rule \| One-line \| Violation signal \| | plain (0.68, 0.23) | plain | table header, not a sentence |
