@@ -9,13 +9,10 @@
 - **How to reach the mocks:** <if tenant is `default`: bare path, e.g. `GET /pet/1`.
   Otherwise: header `x-mockstar-tenant: <tenant>` **or** path prefix `/t/<tenant>/…`>
 - Endpoints mocked: <n> (grounded <g> / inferred <i>)
-- Response-body fidelity: <schema-derived | skeletal> — current `mockstar import` synthesises a
-  body from the response JSON Schema (honouring `example`/`enum`/`default`/type, resolving
-  in-document `$ref`), so bodies are shaped like the real API. It falls back to a
-  `{"note":"Mock for … "}` placeholder only when a response has neither example nor schema.
-  Schema-derived bodies shipped in mockstar **0.2.2** (npm `latest` and `ghcr.io/dhanesh/mockstar:latest`);
-  only pre-0.2.2 builds emit the placeholder for every endpoint. `enhance` then tokenises literal
-  IDs/timestamps. Flag any endpoint still left with a `note` placeholder.
+- Response-body fidelity: <schema-derived | skeletal> — list every endpoint whose body is still
+  the `{"note":"Mock for … "}` placeholder (the importer emits it when a response has neither
+  example nor schema). Schema-derived bodies need mockstar **0.2.2** or later; below that, every
+  endpoint gets the placeholder. `enhance` then tokenises literal IDs and timestamps.
 - Verified: <boot PASS|FAIL>, routes smoked <ok>/<total> (smoke sent tenant selector: <yes|n/a default>)
 
 ## Runtime & compatibility
