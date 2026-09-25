@@ -95,8 +95,8 @@ do, naming the sibling skill that does each one.
 
 ## Workflow
 
-1. **Scope.** TODO(repo2skill): the single first job — gather exactly the inputs the
-   next step needs, and nothing more. State what was found in one line.
+1. **Scope.** TODO(repo2skill): the single first job — gather the inputs the next step
+   needs. State what was found in one line.
 2. **Execute.** TODO(repo2skill): the core step that produces the deliverable named
    below. One job per step; offload reference detail to references/overview.md
    rather than inlining it here.
