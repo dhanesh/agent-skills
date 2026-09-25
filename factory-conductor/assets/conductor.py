@@ -2842,17 +2842,26 @@ def watch_argv(root):
 
 def cmd_reentry(args):
     """reentry install|uninstall|status: the run's watch timer (install needs the grant's
-    reentry block and a COVERED local_reversible gate)."""
+    reentry block and a COVERED local_reversible gate).
+
+    An ASK gate on install is logged and printed (_gate_logged) but never stops the
+    run: only watch's own stall logic decides that. Any OSError from T.install (an
+    unsupported platform, or a loader that failed) is reported as REENTRY: failed;
+    T.install has already removed whatever files it wrote, and no install event is
+    logged."""
     import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
     root = os.path.abspath(args.root)
     st = _load_current(root)
     if st is None:
         return 2
     if args.action == "status":
+        last = next((e for e in reversed(st.events()) if e.get("event") == "reentry"), None)
         print("REENTRY: timer %s" % (", ".join(T.installed(st.run_id)) or "none"))
         print("REENTRY: lease %s" % json.dumps(R.read_lease(st.dir), sort_keys=True))
         print("REENTRY: count %d" % len({e.get("n") for e in st.events()
                                          if e.get("event") == "reentry"}))
+        print("REENTRY: last %s" % (json.dumps(last, sort_keys=True, separators=(",", ":"))
+                                    if last else "none"))
         return 0
     if args.action == "uninstall":
         T.uninstall(st.run_id)
@@ -2863,13 +2872,14 @@ def cmd_reentry(args):
     if block is None:
         print("REENTRY: disabled")
         return 3
-    if not _gated(st, "local_reversible"):
+    ok, _line = _gate_logged(st, "local_reversible")  # prints GATE: ...; never stops the run
+    if not ok:
         return 3
     try:
         T.install(st.run_id, watch_argv(root), block["interval_min"])
     except OSError as e:
         sys.stderr.write("%s\n" % e)
-        print("REENTRY: unsupported platform")
+        print("REENTRY: failed")
         return 2
     st.log("reentry_timer", action="install", interval_min=block["interval_min"])
     print("REENTRY: installed every %d min" % block["interval_min"])

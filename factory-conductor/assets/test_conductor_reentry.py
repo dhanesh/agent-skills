@@ -334,16 +334,17 @@ class ReentryCommandTests(unittest.TestCase):
                          (0, "REENTRY: installed every 10 min"))
         self.assertTrue(T.installed(self.st.run_id, kind="cron"))
 
-    def test_status_prints_the_three_lines(self):
+    def test_status_prints_the_four_lines(self):
         self.grant()
         run_reentry(self.root, "install")
         rc, out = run_reentry(self.root, "status")
         lines = out.splitlines()
         self.assertEqual(rc, 0)
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), 4)
         self.assertTrue(lines[0].startswith("REENTRY: timer "))
         self.assertTrue(lines[1].startswith("REENTRY: lease "))
         self.assertEqual(lines[2], "REENTRY: count 0")
+        self.assertEqual(lines[3], "REENTRY: last none")
 
     def test_status_count_is_distinct_n_values(self):
         self.grant()
@@ -352,6 +353,16 @@ class ReentryCommandTests(unittest.TestCase):
         self.st.log("reentry", n=1, ok=True, pid=1)
         self.assertEqual(run_reentry(self.root, "status")[1].splitlines()[2],
                          "REENTRY: count 1")
+
+    def test_status_last_is_the_newest_reentry_event_as_compact_json(self):
+        self.grant()
+        self.st.log("reentry", n=1, ok=None, argv=["x"])
+        rec = self.st.log("reentry", n=1, ok=True, pid=123)
+        out = run_reentry(self.root, "status")[1]
+        last_line = out.splitlines()[3]
+        self.assertEqual(last_line, "REENTRY: last " + json.dumps(rec, sort_keys=True,
+                                                                   separators=(",", ":")))
+        self.assertNotIn(" ", last_line[len("REENTRY: last "):])  # compact: no spaces
 
     def test_uninstall_leaves_installed_empty(self):
         self.grant()
@@ -368,6 +379,41 @@ class ReentryCommandTests(unittest.TestCase):
         st.save()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: done"))
         self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    def test_install_under_an_ask_gate_gives_exit_3_with_no_stop_and_no_timer(self):
+        b = {"agent_cmd": [sys.executable, "-c", "pass", "{prompt}"],
+             "interval_min": 10, "stall_min": 30, "max_reentries": 2}
+        write_grant(self.root, self.plan, reentry=b,
+                   policy={"read_only": "auto", "local_reversible": "ask",
+                           "push_branch": "grant", "open_pr": "grant"})
+        rc, out = run_reentry(self.root, "install")
+        self.assertEqual(rc, 3)
+        self.assertTrue(out.startswith("GATE: ASK"), out)
+        self.assertIsNone(C.State.load(self.st.state_path).stopped)
+        self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    def test_install_on_an_unsupported_platform_gives_exit_2(self):
+        self.grant()
+        with mock.patch.object(T, "platform_kind", return_value=None):
+            rc, out = run_reentry(self.root, "install")
+        self.assertEqual((rc, out), (2, "REENTRY: failed"))
+        self.assertEqual([e for e in C.State.load(self.st.state_path).events()
+                          if e.get("event") == "reentry_timer"], [])
+
+    def test_install_with_a_failing_loader_leaves_nothing_and_logs_no_install(self):
+        self.grant()
+        old_kind = os.environ.get("FACTORY_CONDUCTOR_TIMER_KIND")
+        os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = "systemd"
+        os.environ["FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL"] = "systemctl --user enable"
+        try:
+            rc, out = run_reentry(self.root, "install")
+        finally:
+            os.environ["FACTORY_CONDUCTOR_TIMER_KIND"] = old_kind
+            os.environ.pop("FACTORY_CONDUCTOR_TIMER_DRYRUN_FAIL", None)
+        self.assertEqual((rc, out), (2, "REENTRY: failed"))
+        self.assertEqual(T.installed(self.st.run_id, kind="systemd"), [])
+        self.assertEqual([e for e in C.State.load(self.st.state_path).events()
+                          if e.get("event") == "reentry_timer"], [])
 
 
 class WiringTests(unittest.TestCase):
