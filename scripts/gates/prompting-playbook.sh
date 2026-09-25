@@ -179,17 +179,23 @@ fi
 # sentence itself (not other text on its line) are not scanned: the declaration
 # names every keyword and would satisfy "keywords used" vacuously. A fence
 # closes only on the same character, at least as long as the one that opened
-# it, so a ```` block may wrap ``` lines. A declaration inside a fence does not
-# count.
+# it, so a ```` block may wrap ``` lines, and carries nothing after its fence
+# characters. Per CommonMark a backtick fence's info string has no backtick, so
+# "```` ```mermaid ```` block" is inline code, not an opener (the same rule as
+# bcp14_registry.py). A declaration inside a fence does not count.
 # The declaration sentence has no internal full stop, so [^.]* bounds it.
 BCP14_DECL='BCP 14 \(RFC 2119, RFC 8174\)'
 BCP14_SENTENCE="[^.]*${BCP14_DECL}[^.]*all capitals\\.?"
 bcp14_nofence="$(printf '%s\n' "$BODY" | awk '
     {
         if (match($0, /^[[:space:]]*(```+|~~~+)/)) {
-            m = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", m)
-            if (fence == "") { fence = m; next }
-            if (substr(m, 1, 1) == substr(fence, 1, 1) && length(m) >= length(fence)) { fence = ""; next }
+            m = substr($0, RSTART, RLENGTH); rest = substr($0, RSTART + RLENGTH)
+            sub(/^[[:space:]]*/, "", m)
+            if (fence == "") {
+                if (!(substr(m, 1, 1) == "`" && index(rest, "`") > 0)) { fence = m; next }
+            } else if (substr(m, 1, 1) == substr(fence, 1, 1) && length(m) >= length(fence) && rest ~ /^[[:space:]]*$/) {
+                fence = ""; next
+            }
         }
         if (fence == "") print
     }')"

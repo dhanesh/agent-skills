@@ -343,6 +343,14 @@ pp7_case "SHALL inside a ~~~ fence is ignored" PASS "$(mkbcp tilde "$DECL" '' 'Y
 pp7_case "a \`\`\`\` fence wrapping \`\`\` is one block" PASS "$(mkbcp fourbt "$DECL" '' 'You MUST check it.' '````md' '```' 'SHALL' '```' '````')"
 pp7_case "a declaration only inside a code fence does not count" FAIL "$(mkbcp declfence '```' "$DECL" '```' 'You MUST check it.')"
 pp7_case "SHALL after the declaration on its line is caught" FAIL "$(mkbcp declsame "$DECL You SHALL check it." 'You MUST check it.')"
+# CommonMark: a backtick fence's info string cannot contain a backtick, so a line
+# opening with ```` followed by more backticks is inline code, not a fence. PP-7
+# once read it as an opener and skipped the rest of starlight-handbook-kit's body.
+pp7_case "a \`\`\`\` span with backticks after it is inline code, not a fence" FAIL \
+  "$(mkbcp infostr "$DECL" '' 'You MUST use the component, not a' '   ```` ```mermaid ```` block.' '' 'You SHALL NOT skip this.')"
+# A closing fence carries nothing after its backticks: "```js" inside a block is content.
+pp7_case "a fence line with an info string does not close a block" PASS \
+  "$(mkbcp noclose "$DECL" '' 'You MUST check it.' '```' '```js' 'SHALL' '```')"
 
 # ── prompting-playbook PP-5: every absolute carries a reason ─────────────────
 # PP-5 used to weigh absolutes against hedges ("usually", SHOULD, MAY). Current
