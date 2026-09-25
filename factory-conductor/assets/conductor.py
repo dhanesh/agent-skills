@@ -2833,6 +2833,49 @@ def _start_agent(root, d, st, block, n, old_lease):
     return 0
 
 
+def watch_argv(root):
+    """The absolute argv a timer runs: this interpreter, this conductor.py, watch.
+    A timer runs with no working directory or PATH to rely on, so every part of this
+    argv is an absolute path."""
+    return [sys.executable, os.path.abspath(__file__), "watch", "--root", os.path.abspath(root)]
+
+
+def cmd_reentry(args):
+    """reentry install|uninstall|status: the run's watch timer (install needs the grant's
+    reentry block and a COVERED local_reversible gate)."""
+    import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+    root = os.path.abspath(args.root)
+    st = _load_current(root)
+    if st is None:
+        return 2
+    if args.action == "status":
+        print("REENTRY: timer %s" % (", ".join(T.installed(st.run_id)) or "none"))
+        print("REENTRY: lease %s" % json.dumps(R.read_lease(st.dir), sort_keys=True))
+        print("REENTRY: count %d" % len({e.get("n") for e in st.events()
+                                         if e.get("event") == "reentry"}))
+        return 0
+    if args.action == "uninstall":
+        T.uninstall(st.run_id)
+        st.log("reentry_timer", action="uninstall")
+        print("REENTRY: uninstalled")
+        return 0
+    block = _reentry_block(root)
+    if block is None:
+        print("REENTRY: disabled")
+        return 3
+    if not _gated(st, "local_reversible"):
+        return 3
+    try:
+        T.install(st.run_id, watch_argv(root), block["interval_min"])
+    except OSError as e:
+        sys.stderr.write("%s\n" % e)
+        print("REENTRY: unsupported platform")
+        return 2
+    st.log("reentry_timer", action="install", interval_min=block["interval_min"])
+    print("REENTRY: installed every %d min" % block["interval_min"])
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2856,6 +2899,10 @@ def main(argv=None):
     s = sub.add_parser("watch")
     s.add_argument("--root", default=".")
     s.set_defaults(fn=cmd_watch, no_lock=True)  # takes the lock itself; never renews the lease
+    s = sub.add_parser("reentry")
+    s.add_argument("action", choices=("install", "uninstall", "status"))
+    s.add_argument("--root", default=".")
+    s.set_defaults(fn=cmd_reentry)
     s = sub.add_parser("finish")
     s.add_argument("--root", default=".")
     s.add_argument("--push-cmd", default=None)

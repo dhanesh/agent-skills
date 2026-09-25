@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reentry as R
+import reentry_timer as T
 import conductor as C
 from conductor_testkit import GIT, new_run, repo, revoke, tmpdir, write_grant
 
@@ -299,6 +300,74 @@ PLAN = {"title": "T", "spec": "s.md", "coverage": {}, "uncovered": [],
         "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "a",
                    "verify": [{"text": "t", "command": ["true"]}],
                    "depends_on": []}]}
+
+
+def run_reentry(root, action):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = C.main(["reentry", action, "--root", root])
+    return rc, buf.getvalue().strip()
+
+
+class ReentryCommandTests(unittest.TestCase):
+    """conductor reentry install|uninstall|status, kept to the cron kind (setUpModule)
+    so nothing touches the real system."""
+
+    def setUp(self):
+        self.root = repo()
+        self.st, self.plan = new_run(self.root, PLAN)
+
+    def grant(self, **block):
+        b = {"agent_cmd": [sys.executable, "-c", "pass", "{prompt}"],
+             "interval_min": 10, "stall_min": 30, "max_reentries": 2}
+        b.update(block)
+        write_grant(self.root, self.plan, reentry=b)
+
+    def test_install_without_a_block_is_disabled(self):
+        write_grant(self.root, self.plan)  # newest grant, no reentry block
+        self.assertEqual(run_reentry(self.root, "install"), (3, "REENTRY: disabled"))
+        self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    def test_install_with_a_block_installs_the_timer(self):
+        self.grant()
+        self.assertEqual(run_reentry(self.root, "install"),
+                         (0, "REENTRY: installed every 10 min"))
+        self.assertTrue(T.installed(self.st.run_id, kind="cron"))
+
+    def test_status_prints_the_three_lines(self):
+        self.grant()
+        run_reentry(self.root, "install")
+        rc, out = run_reentry(self.root, "status")
+        lines = out.splitlines()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("REENTRY: timer "))
+        self.assertTrue(lines[1].startswith("REENTRY: lease "))
+        self.assertEqual(lines[2], "REENTRY: count 0")
+
+    def test_status_count_is_distinct_n_values(self):
+        self.grant()
+        # two log lines for the same attempt (ok null, then ok true) count as one
+        self.st.log("reentry", n=1, ok=None, argv=[])
+        self.st.log("reentry", n=1, ok=True, pid=1)
+        self.assertEqual(run_reentry(self.root, "status")[1].splitlines()[2],
+                         "REENTRY: count 1")
+
+    def test_uninstall_leaves_installed_empty(self):
+        self.grant()
+        run_reentry(self.root, "install")
+        self.assertEqual(run_reentry(self.root, "uninstall"), (0, "REENTRY: uninstalled"))
+        self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
+
+    def test_watch_uninstalls_the_timer_once_the_run_is_finished(self):
+        self.grant()
+        run_reentry(self.root, "install")
+        self.assertTrue(T.installed(self.st.run_id, kind="cron"))
+        st = C.State.load(self.st.state_path)
+        st.finished = {"at": "t"}
+        st.save()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: done"))
+        self.assertEqual(T.installed(self.st.run_id, kind="cron"), [])
 
 
 class WiringTests(unittest.TestCase):
