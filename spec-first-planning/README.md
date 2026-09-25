@@ -63,6 +63,14 @@ task-plan envelope as the verify step's `command`; a criterion without one gets 
 factory-conductor refuses. So `--unattended` requires the hint on every criterion: a grant
 exists only for runs a machine can prove.
 
+**Scheduled re-entry consent (2.3.0).** The decision sweep can ask whether a timer on the
+user's machine should resume a stalled run. A yes becomes `answers.reentry` (`agent_cmd` as
+an argv list with `{prompt}`, plus `interval_min`, `stall_min` and `max_reentries`);
+`write_grant.py` checks it with the vendored `contract_check.reentry_problems` (no shell, no
+launcher wrapping one, `{prompt}` exactly once) and echoes it back as `REENTRY: <argv> every
+<n> min`. Left out, no `reentry` block is written and nothing re-enters. Details:
+`references/unattended.md`.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 

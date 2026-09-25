@@ -18,7 +18,7 @@ Usage:
 path (after following symlinks) must resolve inside --root, or the run is refused — a
 symlink pointing out of the root does not count as "inside".
 
-answers.json keys (only these 7 are recognised; any other key is refused):
+answers.json keys (only these 8 are recognised; any other key is refused):
     branch_pattern (str, required)   -- a glob, e.g. "factory/*"
     gate_policy    (dict, required)  -- action class -> "auto" | "grant" | "ask"
     expires_at     (str, required)   -- RFC 3339 UTC, in the future, at most 7 days after
@@ -27,6 +27,11 @@ answers.json keys (only these 7 are recognised; any other key is refused):
     stop_on        (list of str, optional)   -- default []
     defaults       (list of dict, optional)  -- default []
     system_one     (dict, optional)  -- {"allowed": bool, ...}; default {"allowed": false}
+    reentry        (dict, optional)  -- consent to scheduled re-entry; checked against
+                                        contract_check.reentry_problems (agent_cmd, plus
+                                        contract_check.REENTRY_DEFAULTS' interval_min,
+                                        stall_min, max_reentries). Absent means no block
+                                        is written.
 
 Exit 0: prints "GRANT: <path>" as its last line. When <root>/.git is a directory, it first
     appends GRANT_EXCLUDE to <root>/.git/info/exclude (once) and says so: a grant is one
@@ -44,6 +49,7 @@ floor on callers that only want GrantRefused or the constants.
 import argparse
 import json
 import os
+import shlex
 import sys
 import unicodedata
 from datetime import datetime, timezone
@@ -57,6 +63,7 @@ USAGE = ("usage: write_grant.py --root DIR --spec REL_SPEC --plan PLAN_ENVELOPE_
 
 KNOWN_ANSWER_KEYS = frozenset({
     "branch_pattern", "gate_policy", "expires_at", "budget", "stop_on", "defaults", "system_one",
+    "reentry",
 })
 
 
@@ -111,7 +118,7 @@ def _check_unknown_keys(answers):
         raise GrantRefused("unknown answer key %r%s" % (key, note))
 
 
-def _check_answer_shapes(answers):
+def _check_answer_shapes(contract_check, answers):
     budget = answers.get("budget", {})
     if not isinstance(budget, dict):
         raise GrantRefused("answers.budget must be an object")
@@ -124,6 +131,11 @@ def _check_answer_shapes(answers):
     system_one = answers.get("system_one", {"allowed": False})
     if not (isinstance(system_one, dict) and isinstance(system_one.get("allowed"), bool)):
         raise GrantRefused("answers.system_one must be an object with a boolean 'allowed'")
+    reentry = answers.get("reentry")
+    if reentry is not None:
+        problems = contract_check.reentry_problems(reentry)
+        if problems:
+            raise GrantRefused("answers.reentry: " + "; ".join(problems))
 
 
 def _check_accepted_by(accepted_by):
@@ -178,7 +190,7 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
     import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
 
     _check_unknown_keys(answers)
-    _check_answer_shapes(answers)
+    _check_answer_shapes(contract_check, answers)
     _check_accepted_by(accepted_by)
 
     now = now or contract_check.utc_now()
@@ -201,6 +213,7 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
     _validate_plan(contract_check, root, spec_rel, spec_path, plan_rel)
 
     spec = spec_lint.parse_spec(text)
+    reentry = answers.get("reentry")
     payload = {
         "scope": {"repo": ".", "branch_pattern": answers["branch_pattern"]},
         "decisions": [{"id": d["id"], "question": d["question"], "answer": d["answer"],
@@ -212,6 +225,7 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
         "expires_at": answers["expires_at"],
         "system_one": answers.get("system_one", {"allowed": False}),
         "revoked": False,
+        **({"reentry": dict(contract_check.REENTRY_DEFAULTS, **reentry)} if reentry else {}),
     }
     accepted = {"test": "grant-accepted", "assertedBy": {"human": accepted_by.strip()},
                 "result": {"outcome": "passed"},
@@ -317,6 +331,10 @@ def main(argv=None):
         if excluded:
             print("NOTE: the grant is yours alone and is kept out of commits "
                   "(.git/info/exclude lists %s)" % GRANT_EXCLUDE)
+    reentry = st["predicate"]["payload"].get("reentry")
+    if reentry:
+        print("REENTRY: %s every %d min" % (shlex.join(reentry["agent_cmd"]),
+                                             reentry["interval_min"]))
     print("GRANT: %s" % path)
     return 0
 

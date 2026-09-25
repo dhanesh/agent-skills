@@ -121,13 +121,22 @@ and skip what the conversation has already answered:
    (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
    usage. Also ask which events should stop the run (`stop_on`): it is recorded but not
    enforced by factory-conductor 1.0.0, whose own stop rules apply.
-8. **System One use.** May the run consult a System One model such as Jev for
+8. **Re-entry (optional).** Ask: "If this session dies, should a timer on this machine
+   resume the run? If so, give the exact agent command, as an argv list with `{prompt}`
+   where the resume prompt goes." Show the argv back before the yes. It becomes
+   `answers.reentry` (`agent_cmd`, optional `interval_min` 10, `stall_min` 30,
+   `max_reentries` 5). Recommend the user's agent in headless mode, with an explicit tool
+   allowlist, e.g. `["claude", "-p", "{prompt}", "--allowedTools", "…"]`. Warn against
+   any permission-bypass flag, because the resumed agent acts with the user's own
+   permissions and no one watches it. Without an answer, no block is written and nothing
+   re-enters.
+9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
-9. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
-   glob such as `factory/*`, and start the run on a branch that matches it, e.g.
-   `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
-   factory-conductor creates as its run branch.
+10. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
+    glob such as `factory/*`, and start the run on a branch that matches it, e.g.
+    `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
+    factory-conductor creates as its run branch.
 
 ### Action classes and their gates
 
@@ -182,9 +191,9 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
 
 ## answers.json
 
-`write_grant.py` accepts exactly these 7 keys and refuses any other:
+`write_grant.py` accepts exactly these 8 keys and refuses any other:
 `branch_pattern`, `gate_policy` and `expires_at` are required, and `budget`,
-`stop_on`, `defaults` and `system_one` are optional. A filled example:
+`stop_on`, `defaults`, `system_one` and `reentry` are optional. A filled example:
 
 ```json
 {
@@ -217,6 +226,10 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
     "allowed": true,
     "decision_kinds": ["naming", "test-case selection"],
     "data_sent": "file names and requirement text only, never source code or secrets"
+  },
+  "reentry": {
+    "agent_cmd": ["claude", "-p", "{prompt}", "--allowedTools", "Read,Edit,Bash(git *)"],
+    "interval_min": 10
   }
 }
 ```
