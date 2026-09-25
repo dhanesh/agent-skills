@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
-  version: "1.0.2"
+  version: "1.0.3"
   tags: "security,audit,posture,hygiene,dependency-pinning,ci-security,defensive"
 ---
 
@@ -59,7 +59,7 @@ authorization is unclear, you MUST ask before running.
    `--skip-dir` (`.git`, `node_modules`, `vendor`, build dirs are skipped by default) —
    and pick the `--fail-on` threshold if the exit code will gate anything.
 
-2. **Run the deterministic sweep.** From the skill directory:
+2. **Run the deterministic sweep.**
 
    ```bash
    python3 "$SKILL_DIR/assets/audit_posture.py" <repo> --format json --fail-on never
