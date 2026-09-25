@@ -687,14 +687,24 @@ def _parse_time(s):
 REENTRY_DEFAULTS = {"interval_min": 10, "stall_min": 30, "max_reentries": 5}
 REENTRY_RANGES = {"interval_min": (5, 60), "stall_min": (15, 240), "max_reentries": (1, 20)}
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"}
+# A launcher that execs its remaining argv (rather than running as the agent itself) is the
+# same bypass class as a shell: it would let a shell hide behind a non-shell cmd[0].
+LAUNCHERS = {"env", "sudo", "doas", "busybox", "nohup", "timeout", "nice", "xargs", "stdbuf"}
 _REENTRY_TOKEN = re.compile(r"\{[^{}]*\}")
+
+
+def _reentry_cmd_token(s):
+    """A command-list element reduced to a comparable program name: basename, extension
+    stripped, lower-cased -- so `cmd.exe`, `CMD`, `/bin/BASH` and `bash` all compare equal."""
+    return os.path.splitext(os.path.basename(s))[0].lower()
 
 
 def reentry_problems(block):
     """Problems with an autonomy grant's optional payload.reentry block; [] when valid.
 
     agent_cmd is an argv list, never a shell (a shell would turn the argv back into an
-    evaluated string), with {prompt} exactly once and {root} optional."""
+    evaluated string) and never a launcher (env, sudo, ...) wrapping one, with {prompt}
+    exactly once and {root} optional."""
     if not isinstance(block, dict):
         return ["must be an object"]
     out = []
@@ -705,8 +715,13 @@ def reentry_problems(block):
     if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) and a for a in cmd)):
         out.append("agent_cmd must be a non-empty list of non-empty strings")
     else:
-        if os.path.basename(cmd[0]).lower() in SHELLS:
+        head = _reentry_cmd_token(cmd[0])
+        if head in SHELLS:
             out.append("agent_cmd must not start with a shell (%s)" % cmd[0])
+        elif head in LAUNCHERS:
+            wrapped = next((a for a in cmd[1:] if _reentry_cmd_token(a) in SHELLS), None)
+            if wrapped is not None:
+                out.append("agent_cmd must not launch a shell through a launcher (%s)" % wrapped)
         if cmd.count("{prompt}") != 1:
             out.append("agent_cmd must contain the {prompt} token exactly once")
         bad = [t for a in cmd for t in _REENTRY_TOKEN.findall(a)
@@ -715,14 +730,18 @@ def reentry_problems(block):
             out.append("agent_cmd may carry only whole {prompt} and {root} tokens: %s"
                        % ", ".join(sorted(set(bad))))
     vals = dict(REENTRY_DEFAULTS)
+    bad_keys = set()
     for key, (lo, hi) in REENTRY_RANGES.items():
         if key in block:
             v = block[key]
             if not (isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi):
                 out.append("%s must be an integer from %d to %d" % (key, lo, hi))
+                bad_keys.add(key)
                 continue
             vals[key] = v
-    if vals["stall_min"] < 2 * vals["interval_min"]:
+    # Skip the cross-field check when either field is itself invalid: comparing a fabricated
+    # default against a value the user never asked for would misreport a field that is fine.
+    if not ({"interval_min", "stall_min"} & bad_keys) and vals["stall_min"] < 2 * vals["interval_min"]:
         out.append("stall_min must be at least 2 x interval_min")
     return out
 

@@ -48,7 +48,7 @@ following optional field:
 
 | Field | Type | Description |
 |---|---|---|
-| `reentry` | object, optional | Consent to scheduled re-entry (factory-conductor): `agent_cmd` (argv list, `{prompt}` exactly once, `{root}` optional, no shell as `agent_cmd[0]`), `interval_min` 5–60 (default 10), `stall_min` 15–240 and ≥ 2 × interval (default 30), `max_reentries` 1–20 (default 5). The checker refuses a malformed block (C10). |
+| `reentry` | object, optional | Consent to scheduled re-entry (factory-conductor): `agent_cmd` (argv list, `{prompt}` exactly once, `{root}` optional, no shell as `agent_cmd[0]`; a launcher such as `env` or `sudo` in front of a shell is refused too), `interval_min` 5–60 (default 10), `stall_min` 15–240 and ≥ 2 × interval (default 30), `max_reentries` 1–20 (default 5). The checker refuses a malformed block (C10). |
 
 The action classes are:
 
