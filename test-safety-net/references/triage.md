@@ -233,9 +233,8 @@ while armed, an object constructed BEFORE arming is not an instance of the rebou
 
 **A violation off the main thread is surfaced, not swallowed.** `Thread._bootstrap_inner`
 catches `BaseException` and hands it to `threading.excepthook`, so a trip on a worker thread
-could not reach the test result on its own — pytest turned it into a warning and reported the
-run as PASSED, and the skill shipped a test whose captured value existed only because the guard
-was armed. The guard now records every off-main-thread trip at the raise (which also sees a
+cannot reach the test result on its own — pytest would turn it into a warning beside a PASSED
+run. The guard records every off-main-thread trip at the raise (which also sees a
 `concurrent.futures` future nobody reads, where no excepthook fires at all) and re-raises it on
 the main thread at `Thread.join`, at pytest teardown, or at `disarm()` — whichever comes first.
 The residual is named in the list below.
@@ -253,11 +252,7 @@ The residual is named in the list below.
 4. `os.environ` **reads** are intercepted — the subscript included, and `.get`/`.pop`/
    `.setdefault`/`.items`/`.copy`, which are the forms that never call `os.getenv`. What is not:
    `len(os.environ)` and `key in os.environ`, neither of which reads a value, and `os.environb`,
-   a separate object. An earlier version of this list said the subscript was uninterceptable *and*
-   that the filter shared the blind spot; both halves were false. The filter's `os.environ` marker
-   DOES see `os.environ.get(...)` — so the two layers disagreed, in the direction where the filter
-   tiered a unit 2 while the guard stayed silent, and an ordinary module alias (`ENV = os.environ`)
-   hid it from the filter as well. That two-layer miss is what closing this residual removed.
+   a separate object.
 5. A daemon thread that is never joined and outlives the proof run can trip after the last point
    at which the record could be re-raised. The pytest plugin fails the session on any record it
    still holds at `pytest_sessionfinish`, so the observable outcome is a failed run rather than a

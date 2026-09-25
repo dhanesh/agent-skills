@@ -27,7 +27,7 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.4.0"
+  version: "1.4.1"
   skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
@@ -193,8 +193,8 @@ than none, because it makes the invariant look enforced when it is not.
    **The runtime guard, not the tier, is what enforces "never real I/O."** Static triage is a
    filter — it declines obvious hazards, but dynamic dispatch (Python's `getattr`, JavaScript's
    computed member access and dynamic `import()`, Rust's trait objects and macros) means it cannot
-   decide reachability from source alone; review rounds on the ranker found fifteen-plus
-   constructions it called safe that actually reached real I/O. So the invariant is enforced during
+   decide reachability from source alone, and ordinary constructions (an aliased import, a
+   same-module helper, an argument default) reach real I/O past it. So the invariant is enforced during
    this red→green proof by the **tier-aware runtime guard this skill ships for the stack you are
    on** — one per stack, each loaded on the
    single-test invocation itself and never written into the repo, so Invariant 1 stays clean with
@@ -402,8 +402,8 @@ than none, because it makes the invariant look enforced when it is not.
      - an environment-controlled test that is not alone in its file;
      - several packages and no `-p`;
      - a test name beginning with `-`;
-     - a test or lib target named like one of Rust's own crates (ruling R30: `tests/test.rs`
-       compiles to crate `test`, read as libtest's own work) -- rename it;
+     - a test or lib target named like one of Rust's own crates (`tests/test.rs` compiles to
+       crate `test`, read as libtest's own work) -- rename it;
      - the hook failed to build with this toolchain;
      - no `rustc` or `cargo` on PATH.
    - The guard never passes `--nocapture`, and you MUST NOT add it: under it the default panic hook reads
@@ -451,16 +451,15 @@ than none, because it makes the invariant look enforced when it is not.
    environment calls, sockets, the clocks, the entropy calls and the spawn/exec family. It decides
    each call by the Rust frame that made it, walked with `backtrace()`, and ends the process with
    `_exit(3)` on a trip, so `catch_unwind` cannot swallow one. Its intercept table, decision rule
-   and eleven residuals (two of them, 7 and 11, now closed) are in `references/stacks.md`. Read
-   residuals 1, 9, 10 and 11 before you trust a GREEN: anything that bypasses libc is unseen
-   whatever its intent (a dependency's raw syscall included), deliberate verdict forgery by the code
-   under test is outside the threat model, and at opt-level 1 or more a crate's generic `Drop`
-   holding the control helper can read GREEN. Residual 11 is closed only for the crates' own code:
-   a `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
-   (an `atexit` handler, a signal handler) is now judged as a crate frame, but one defined in a
-   build script's bundled C, or in any object cargo did not build into an rlib, still names no
-   crate and reads GREEN; so does, at opt-level 1 or more, a callback whose last act is a
-   tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
+   and residuals are in `references/stacks.md`. Read residuals 1, 9, 10 and 11 before you trust a
+   GREEN: anything that bypasses libc is unseen whatever its intent (a dependency's raw syscall
+   included), deliberate verdict forgery by the code under test is outside the threat model, and
+   at opt-level 1 or more a crate's generic `Drop` holding the control helper can read GREEN. A
+   `#[no_mangle]`/`#[export_name]` callback that only C or std frames invoke on the main thread
+   (an `atexit` handler, a signal handler) is judged as a crate frame when the crates' own code
+   defines it; one defined in a build script's bundled C, or in any object cargo did not build
+   into an rlib, names no crate and reads GREEN; so does, at opt-level 1 or more, a callback whose
+   last act is a tail-called libc call, which leaves no frame of its own. A crate that exports a libc-named
    symbol (a `#[no_mangle] getenv` wrapper) trips every honest run instead: that fails closed.
 
    **The guard raises its own exception type, distinct from `AssertionError`.** The proof run has
