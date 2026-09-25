@@ -483,6 +483,32 @@ $ROW_REMOVED" 'You MUST check the thing before you ship it.')"
 reg_case "a row marked removed fails while its text is still there" FAIL \
   "$(mkreg notgone "$ROW_MUST
 $ROW_REMOVED" 'You MUST check the thing before you ship it.' 'You MUST NOT do the thing that was deleted.')" "removed"
+# Presence is stricter than coverage. A full row (no "…") has to end where a
+# sentence or block ends, so a sentence that gained text is caught; the
+# block-tail fallback that coverage uses never counts as presence; a row may not
+# span two blocks; and a row under 10 normalised characters is looked for in the
+# whole body. Link text, underscore emphasis and a keyword wrapped across lines
+# normalise away.
+reg_case "a full row whose sentence gained text is an orphan" FAIL \
+  "$(mkreg grow '| c1 | 9 | Never push to main | MUST (0.9, 0.8) | plain | |' 'Never push to main unless the owner says so, and then only on Fridays.')" "orphan"
+reg_case "a row matching only a block's tail is an orphan" FAIL \
+  "$(mkreg tail '| c1 | 9 | Always pin the version so reruns match. | MUST (0.9, 0.8) | plain | |' '## Always pin the version')" "orphan"
+reg_case "a row spanning two blocks is an orphan" FAIL \
+  "$(mkreg span '| c1 | 9 | main. You MUST check | MUST (0.9, 0.8) | MUST | |' 'Never push to main.' '' 'You MUST check it.')" "orphan"
+reg_case "a short row is found anywhere in the body" PASS \
+  "$(mkreg short '| c1 | 9 | Never. | MUST (0.9, 0.8) | plain | |' 'Push? Never. Ask first.')"
+reg_case "a truncated row matches its prefix" PASS \
+  "$(mkreg trunc '| c1 | 9 | Run the gate first … | MUST (0.9, 0.8) | plain | |' 'Run the gate first and read its output.')"
+reg_case "a row matches fenced template text" PASS \
+  "$(mkreg fence '| c1 | 9 | Never push to main. | MUST (0.9, 0.8) | plain | |' '```' 'Never push to main.' '```')"
+reg_case "a row matches link text" PASS \
+  "$(mkreg link '| c1 | 9 | See the spec; you MUST NOT push. | MUST (0.9, 0.8) | MUST | |' 'See [the spec](x.md); you MUST NOT push.')"
+reg_case "a row matches through underscore emphasis" PASS \
+  "$(mkreg us "$ROW_MUST" 'You _MUST_ check the thing before you ship it.')"
+reg_case "a row matches a keyword wrapped across lines" PASS \
+  "$(mkreg wrap "$ROW_MUST" 'You **MUST' 'check** the thing before you ship it.')"
+reg_case "a row matches a blockquote inside a list item" PASS \
+  "$(mkreg bq "$ROW_MUST" '- item' '  > You MUST check the thing before you ship it.')"
 reg_case "a table-separator row matches its raw line" PASS \
   "$(mkreg sep '| c1 | 9 | \|---\|---\| | plain (0.80, 0.10) | plain | table separator |' '| a | b |' '|---|---|' '| 1 | 2 |')"
 

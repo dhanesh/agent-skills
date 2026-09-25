@@ -23,8 +23,12 @@ How a row matches (the register's `line` column is informational, never read):
     escapes are dropped, whitespace is collapsed, and a leading list, table or quote
     marker is ignored.
   - A row's quoted sentence ends at its first "…"; text after it is elided, so such a
-    row is "truncated". A row whose text normalises to under MIN_PREFIX characters (a
-    table separator, say) matches a SKILL.md line equal to its unescaped text.
+    row is "truncated". Link syntax [text](url) reads as its text.
+  - Presence (rule e) is stricter than coverage: a row's text has to sit inside one
+    prose block or one fenced block, with no tail fallback, and a full row has to end
+    where a sentence, clause or block ends. A row under MIN_PREFIX normalised
+    characters is looked for in the whole body; one that normalises to nothing (a
+    table separator) matches a SKILL.md line equal to its unescaped text.
   - A row anchors wherever its prefix occurs in a block (a paragraph, list item,
     heading or table row), or where the block's tail is a prefix of the row's text.
   - A truncated row covers from its anchor to the end of the block. A full row covers
@@ -55,6 +59,7 @@ FENCE = re.compile(r"^\s*(```+|~~~+)")
 QUOTE = re.compile(r"^\s*(?:>\s?)+")
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 LEAD = re.compile(r"^(?:(?:[-+>|]|\d+[.)])\s*)+")
+LINK = re.compile(r"(?<!!)\[([^\]]+)\]\([^)\s]*\)")
 CODE_SPAN = re.compile(r"(`+)(.+?)(?<!`)\1(?!`)", re.S)
 SENTENCE_END = re.compile(r"[.!?](?=\s|$)")
 RANK = {"plain": 0, "MAY": 1, "SHOULD": 2, "MUST": 3}
@@ -132,6 +137,7 @@ def normalise(raw):
     """Return (text, masked): text with emphasis, backticks and escapes dropped and
     whitespace collapsed; masked is the same length with inline code and the BCP 14
     declaration replaced by NULs, so keyword and lowercase scans skip them."""
+    raw = LINK.sub(r"\1", raw)  # [text](url) reads as its text
     skip = [False] * len(raw)
     for m in list(CODE_SPAN.finditer(raw)) + list(DECL.finditer(raw)):
         for i in range(m.start(), m.end()):
@@ -139,7 +145,10 @@ def normalise(raw):
     chars, flags, i = [], [], 0
     while i < len(raw):
         c = raw[i]
-        if c in "*`":
+        if c in "*`" or (c == "_" and not (0 < i < len(raw) - 1 and raw[i - 1].isalnum()
+                                           and raw[i + 1].isalnum())):
+            # Emphasis and code markers; an underscore counts as emphasis unless it
+            # sits inside a word (snake_case).
             i += 1
             continue
         if c == "\\" and i + 1 < len(raw) and not raw[i + 1].isalnum() and not raw[i + 1].isspace():
@@ -166,6 +175,7 @@ def normalise(raw):
 
 def row_prefix(sentence):
     """(normalised prefix, truncated?) for a register row's quoted sentence."""
+    sentence = LINK.sub(r"\1", sentence)  # before the split: "[x](…)" is a link, not an elision
     truncated = "…" in sentence
     head = sentence.split("…", 1)[0]
     text, _ = normalise(head)
@@ -230,6 +240,41 @@ def anchors(row, text):
     return spans
 
 
+def fenced_texts(lines):
+    """The normalised text of each fenced block, one string per fence."""
+    out, cur, fence = [], [], ""
+    for ln in lines:
+        m = FENCE.match(ln)
+        if m:
+            tok, rest = m.group(1), ln[m.end():]
+            if not fence and not (tok[0] == "`" and "`" in rest):
+                fence, cur = tok, []
+                continue
+            if fence and tok[0] == fence[0] and len(tok) >= len(fence) and not rest.strip():
+                out.append(normalise(" ".join(x.strip() for x in cur))[0])
+                fence = ""
+                continue
+        if fence:
+            cur.append(ln)
+    return out
+
+
+ENDED = re.compile(r"[.!?:;][\"'”’)\]]*$")
+
+
+def quoted_in(row, text):
+    """Does the block `text` still hold the row's quoted text? Stricter than anchors():
+    no tail fallback, and a full row (no "…") has to end where a sentence, clause or
+    block ends, so a sentence that gained words after the quote is caught."""
+    p, i = row["prefix"], text.find(row["prefix"])
+    while i != -1:
+        end = i + len(p)
+        if row["truncated"] or ENDED.search(p) or end == len(text) or text[end] in ".!?:;":
+            return True
+        i = text.find(p, i + 1)
+    return False
+
+
 def check_skill(skill, skill_md, rows):
     """[(reason, sentence)] problems for one skill; rows is None when no section exists."""
     with open(skill_md, encoding="utf-8") as f:
@@ -238,14 +283,16 @@ def check_skill(skill, skill_md, rows):
     if rows is None:
         problems.append(("section", "no section in the register (add one, even with 0 candidates)"))
         rows = []
-    texts = [normalise(raw)[0] for raw in blocks(body)]
-    raw_lines = {ln.strip() for ln in body}
     # A row may quote text inside a fenced template (an executor brief, say): the
     # keyword gate skips fences, but the row still has to quote something real.
+    texts = [normalise(raw)[0] for raw in blocks(body)] + fenced_texts(body)
+    raw_lines = {ln.strip() for ln in body}
     whole = normalise(" ".join(QUOTE.sub("", ln).strip() for ln in body))[0]
     for r in rows:
         if len(r["prefix"]) >= MIN_PREFIX:
-            present = any(anchors(r, t) for t in texts) or r["prefix"] in whole
+            present = any(quoted_in(r, t) for t in texts)
+        elif r["prefix"]:
+            present = r["prefix"] in whole
         else:
             present = r["sentence"].replace("\\|", "|").strip() in raw_lines
         if r["removed"] and present:
