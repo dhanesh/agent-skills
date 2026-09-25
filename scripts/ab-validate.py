@@ -214,6 +214,26 @@ SINCE_FACTORY_TRUST_BA_R1 = "f8178b8"  # bug-autopsy review round 1 (I2): a
 SINCE_AUTONOMY_GRANT = "997f1c9"  # skill-contract commandment 10: the autonomy
 # grant kind and check-grant (Task 1) — a human-accepted grant that four
 # skills' confirmation gates can read instead of asking again.
+SINCE_FACTORY_CONDUCTOR = "e3c9f85"  # factory-conductor Task 1: run state, wave
+# scheduling and the append-only log — the earliest point the conductor tool
+# existed, and the pin for the whole campaign that lets it run a plan end to
+# end (init..finish, a validating run-result/v1 envelope).
+SINCE_FACTORY_PLANNER_CMD = "2ab10ce"  # spec-first-planning 2.2.0: a criterion's
+# [cmd: <argv>] hint becomes the task-plan verify command, and the conductor's
+# init refuses a null one — so a plan the real planner derives can be proven.
+SINCE_Q3_GAPS = "9cfe144"  # factory-conductor Q3 gaps: resume prints NEXT: lines (G1),
+# init derives a dispatch cap when none is set (G2), and finish re-verifies the merged
+# run branch before the push (G3). The first commit of that work, on
+# feat/factory-conductor; the main merge base has no conductor at all, so these rows
+# move only against a baseline on this branch (`make ab-validate BASE=<ref>`).
+SINCE_Q3_REVIEW = "2f70b1c"  # factory-conductor Q3 review fixes: the push pinned to the
+# head the integration re-run verified (C1, N1) and that re-run gated so no repository
+# command runs under a lapsed grant (I2). The first commit of that round; not in the main
+# merge base, which has no conductor, so these guards move only against a baseline on
+# this branch (BASE=067b042 for the push row, BASE=f2a4b95 for the lapsed-grant row).
+SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalised
+# keyword in a SKILL.md has a register row at its level, no lowercase must/shall in
+# SKILL.md prose, every skill has a register section; plus the Jev backfill.
 
 
 def _git_out(*args):
@@ -4567,6 +4587,44 @@ def check_bcp14(old, new):
         a, b, b <= a, "capitals must not make a skill more absolutist than it was", kind="guard")
 
 
+# ── BCP 14 register (scripts/gates/bcp14-registry.sh) ───────────────────────
+# PP-7 checked the declaration and the vocabulary; nothing read the register, so
+# rows went stale (they quoted pre-rewrite sentences), a new skill shipped with
+# no section, and lowercase "must"s read as rules with no BCP 14 meaning. Both
+# trees are measured with the checker from the tree under test, over each
+# tree's own SKILL.md files and register, so the numbers are the trees', not
+# the checker's.
+def check_bcp14_registry(old, new):
+    checker = os.path.join(new, "scripts", "gates", "bcp14_registry.py")
+
+    def counts(tree):
+        r = subprocess.run([sys.executable, "-I", checker, "--root", tree, "--counts"],
+                           capture_output=True, text=True, timeout=120)
+        m = re.search(r"BCP14_COUNTS: (.*)", r.stdout)
+        if r.returncode != 0 or not m:
+            err = (r.stderr or r.stdout).strip()[-300:]
+            PROBE_ERRORS.append((tree, "scripts/gates", err))
+            return {"_error": err}
+        return {k: int(v) for k, v in (kv.split("=") for kv in m.group(1).split())}
+
+    a, b = counts(old), counts(new)
+    if _errored(a, b):
+        return
+    row("bcp14", "SKILL.md keyword sentences with no BCP 14 register row (lower=better)",
+        a["unregistered"], b["unregistered"], b["unregistered"] < a["unregistered"] and b["unregistered"] == 0,
+        "rows quoted the pre-rewrite sentence, and jev-agent-setup had no section, so a keyword's level was "
+        "recorded nowhere a reviewer could check it",
+        since=SINCE_BCP14_REGISTRY)
+    row("bcp14", "lowercase must/shall in SKILL.md prose (lower=better)",
+        a["lowercase"], b["lowercase"], b["lowercase"] < a["lowercase"] and b["lowercase"] == 0,
+        "RFC 8174 gives lowercase no normative meaning, so each one read as a rule of unstated strength",
+        since=SINCE_BCP14_REGISTRY)
+    row("bcp14", "register rows whose level differs from their text, plus skills with no section "
+        "(must not rise)", a["level"] + a["section"], b["level"] + b["section"],
+        b["level"] + b["section"] <= a["level"] + a["section"], "a row that says SHOULD over a MUST "
+        "misstates the rule; a missing section hides a skill's keywords", kind="guard")
+
+
 # ── base-in-reality: the refutation vote follows the verdict rubric ─────────
 # A critical finding with one dissenting refuter, or with refuters that
 # crashed, shipped as VIOLATION: the workflow took a flat 2-of-3 majority and
@@ -5131,7 +5189,9 @@ def check_autonomy_grant(old, new):
         "no skill could proceed past its confirmation under a user-approved grant",
         since=SINCE_AUTONOMY_GRANT)
     a, b = adopters(old), adopters(new)
-    row(s, "skill-contract adopters", a, b, b > a,
+    # b >= 4, not b > a: that campaign brought the count to 4. A later adopter
+    # (factory-conductor, 4 -> 5) is credited by its own row, not this one again.
+    row(s, "skill-contract adopters", a, b, b >= 4,
         "verifier-installer and test-safety-net adopt the contract to read grants",
         since=SINCE_AUTONOMY_GRANT)
     a, b = decides(old), decides(new)
@@ -5167,6 +5227,657 @@ def check_autonomy_grant(old, new):
         "a granted push whose commits add .github/workflows/x.yml answers ASK ci-config: CI "
         "runs with the repository's secrets, so that push is deploy (A8); sanity-checked "
         "against a granted push of src/a.py, which stays COVERED", since=SINCE_AUTONOMY_GRANT)
+
+
+# ── factory-conductor ───────────────────────────────────────────────────────
+_FC_TASKS_OK = {"T1": ([], [{"text": "ok", "command": ["true"]}])}
+_FC_TASKS_BAD = {"T1": ([], [{"text": "bad", "command": ["false"]}])}
+
+
+def _fc_run(tree, tasks):
+    """Run a fixture plan through a tree's conductor, end to end. Returns
+    (envelope_ok, merged_ids):
+
+    - envelope_ok is 1 when `finish` wrote a run-result/v1 envelope that the vendored
+      checker (check-envelope) reads with no violations;
+    - merged_ids is the set of task ids `status` reports as `proven`.
+
+    A tree without the skill scores (0, set()) — that is how the old arm reads.
+
+    The push/PR remote steps are deliberately left uncovered by the grant (its
+    gate_policy sets only local_reversible): `finish` still writes and validates the
+    envelope, then asks on `push_branch` and stops there. That proves "an approved plan
+    runs to a validating run-result" without needing a `git` push stub or a real
+    remote — the simplest fixture that still proves the claim.
+    """
+    conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+    if not os.path.isfile(conductor):
+        return 0, set()
+    sys.path.insert(0, os.path.join(tree, "factory-conductor", "assets"))
+    try:
+        import importlib
+        CC = importlib.import_module("contract_check")
+        importlib.reload(CC)
+    finally:
+        sys.path.pop(0)
+    root = tempfile.mkdtemp()
+    try:
+        return _fc_run_in(tree, tasks, conductor, CC, root)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_FC_GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+
+
+def _fc_status_proven(run, ids):
+    """The task ids among `ids` that the conductor's `status` reports as proven."""
+    merged = set()
+    for line in run("status").stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == "STATUS:" and parts[1] in ids \
+                and parts[2] == "proven":
+            merged.add(parts[1])
+    return merged
+
+
+def _fc_drive(run, ids):
+    """start, commit real work, verify, review and merge each task in turn."""
+    for tid in ids:
+        started = run("start", tid)
+        wt = None
+        for line in started.stdout.splitlines():
+            if line.startswith("START: %s " % tid):
+                wt = line.split(" ", 2)[2].strip()
+        if wt and os.path.isdir(wt):
+            # merge parks a task with no commits (no-commits, exit 3); commit a real
+            # file in the task's worktree so there is something for verify to prove
+            # and merge to bring in.
+            with open(os.path.join(wt, "%s.txt" % tid.lower()), "w") as f:
+                f.write("done\n")
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        if run("verify", tid).returncode == 0:
+            run("review", tid, "--verdict", "pass")
+            run("merge", tid)
+
+
+def _fc_run_in(tree, tasks, conductor, CC, root):
+    genv = _FC_GENV
+    subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+    os.makedirs(os.path.join(root, "docs"))
+    open(os.path.join(root, "docs", "spec.md"), "w").write("# Spec\n")
+    open(os.path.join(root, "plan.json"), "w").write('{"plan": 1}\n')
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True, env=genv)
+    subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/p"], check=True,
+                   capture_output=True)
+    plan_payload = {"title": "T", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+                    "tasks": [{"id": i, "requirement_ids": ["R1"], "title": i,
+                               "verify": v, "depends_on": dep}
+                              for i, (dep, v) in tasks.items()]}
+    plan_env = CC.write_envelope(root, CC.build_statement(
+        "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+        "spec-first-planning", "2.1.0", root, ["docs/spec.md"], plan_payload))
+    now = CC.utc_now()
+    plan_rel = os.path.relpath(plan_env, root).replace(os.sep, "/")
+    grant_payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
+                     "decisions": [{"id": "D1", "question": "q", "answer": "a",
+                                    "source": "sweep"}],
+                     "defaults": [], "gate_policy": {"local_reversible": "grant"},
+                     "budget": {}, "stop_on": [],
+                     "expires_at": (now + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "system_one": {"allowed": False}, "revoked": False}
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                            "--unattended", "docs/spec.md"],
+                "subject": [CC.pin(root, "docs/spec.md")]}
+    CC.write_envelope(root, CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0",
+                                               root, ["docs/spec.md", plan_rel],
+                                               grant_payload, [accepted], now=now))
+
+    def run(*argv):
+        return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                              capture_output=True, text=True, timeout=300)
+
+    run("init", "--plan", plan_env)
+    _fc_drive(run, tasks)
+    fin = run("finish")
+    envelope_ok = 0
+    for line in fin.stdout.splitlines():
+        if line.startswith("FINISH: "):
+            env_path = line[len("FINISH: "):].strip()
+            rep = CC.check_envelope(env_path, root=root)
+            envelope_ok = 1 if not rep.get("violations") else 0
+    return envelope_ok, _fc_status_proven(run, tasks)
+
+
+# A real spec, as spec-first-planning's unattended mode leaves it: converged,
+# decision-closed, and every criterion carrying the [cmd: ...] that proves it. The
+# task's work is t1.txt (see _fc_drive), so `test -f t1.txt` passes only on its commit.
+_FC_PLANNER_SPEC = """# Spec: Export
+
+## Problem
+Users cannot export rows.
+
+## Users
+- analysts
+
+## Goals
+- export works
+
+## Non-goals
+- PDF
+
+## Constraints
+- B1 [invariant]: No row is lost.
+- T1 [boundary]: Export finishes within 10 s for 10000 rows.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: test -f t1.txt)
+- RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: test -f t1.txt)
+
+## Requirements
+- R1: The export must include every row.
+
+## Acceptance criteria
+- R1: the exported file exists. [cmd: test -f t1.txt]
+
+## Open questions
+
+## Tensions
+- TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
+
+## Solution options
+- OPT-A: Stream rows to a temp file, rename at end. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1, RT2)
+- OPT-B: Build in memory, then write. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — satisfies every RT at the lowest complexity.
+
+## Iterations
+- I1: constrained, tensioned, anchored; chose OPT-A.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
+def _fc_planner_run(tree):
+    """1 when a plan the tree's own planner derives is proven end to end by the tree's
+    conductor, else 0: a real spec -> spec_to_tasks.py --envelope -> write_grant.py ->
+    conductor init, start, verify, review, merge, finish, with at least one task
+    `proven` in the `status` lines. A tree without the conductor scores 0.
+
+    None (PROBE_ERRORS) when the planner or write_grant itself fails in a tree that has
+    the conductor: a broken fixture must not read as an honest 0."""
+    conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+    if not os.path.isfile(conductor):
+        return 0
+    assets = os.path.join(tree, "spec-first-planning", "assets")
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True,
+                       capture_output=True)
+        os.makedirs(os.path.join(root, "docs"))
+        with open(os.path.join(root, "docs", "spec.md"), "w", encoding="utf-8") as f:
+            f.write(_FC_PLANNER_SPEC)
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "commit", "-q", "-m", "spec"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/work"],
+                       check=True, capture_output=True)
+        r = subprocess.run([sys.executable, "-I", os.path.join(assets, "spec_to_tasks.py"),
+                            os.path.join(root, "docs", "spec.md"), "--envelope", root],
+                           capture_output=True, text=True, timeout=120)
+        env = [ln[len("ENVELOPE: "):].strip() for ln in r.stdout.splitlines()
+               if ln.startswith("ENVELOPE: ")]
+        if r.returncode != 0 or not env:
+            PROBE_ERRORS.append((tree, "spec-first-planning/assets/spec_to_tasks.py",
+                                 "planner-derived run: spec_to_tasks --envelope failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+        answers = os.path.join(tmp, "answers.json")
+        with open(answers, "w", encoding="utf-8") as f:
+            json.dump({"branch_pattern": "factory/*",
+                       "gate_policy": {"read_only": "auto", "local_reversible": "grant"},
+                       "expires_at": (datetime.now(timezone.utc) + timedelta(days=1))
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                       "budget": {"max_dispatches": 10}}, f)
+        r = subprocess.run([sys.executable, "-I", os.path.join(assets, "write_grant.py"),
+                            "--root", root, "--spec", "docs/spec.md", "--plan", env[0],
+                            "--answers", answers, "--accepted-by", "Dana"],
+                           capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            PROBE_ERRORS.append((tree, "spec-first-planning/assets/write_grant.py",
+                                 "planner-derived run: write_grant failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        with open(env[0], encoding="utf-8") as f:
+            ids = [t["id"] for t in json.load(f)["predicate"]["payload"]["tasks"]]
+        run("init", "--plan", env[0])
+        _fc_drive(run, ids)
+        proven = _fc_status_proven(run, ids)
+        run("finish")
+        return 1 if proven else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_conductor(old, new):
+    s = "factory-conductor"
+    a_ok, _ = _fc_run(old, _FC_TASKS_OK)
+    b_ok, b_merged = _fc_run(new, _FC_TASKS_OK)
+    row(s, "plans a conductor can run end to end (init..finish, validating run-result)",
+        a_ok, b_ok, b_ok == 1 and a_ok == 0,
+        "nothing ran a plan end to end: every task needed the human to dispatch, "
+        "verify and merge it", since=SINCE_FACTORY_CONDUCTOR)
+
+    def adopters(tree):
+        return sum(1 for d in sorted(os.listdir(tree))
+                   if os.path.isfile(os.path.join(tree, d, "SKILL.md"))
+                   and re.search(r"(?m)^## Contract\s*$",
+                                 open(os.path.join(tree, d, "SKILL.md"), encoding="utf-8").read()))
+
+    a, b = adopters(old), adopters(new)
+    row(s, "skill-contract adopters", a, b, b > a,
+        "factory-conductor consumes task-plan/v1 and autonomy-grant/v1 and provides "
+        "run-result/v1", since=SINCE_FACTORY_CONDUCTOR)
+
+    def merged_with_failing_verify(tree, ok_merged=None):
+        """1 if a task with a failing verify still gets merged (bad); else 0.
+
+        None (PROBE_ERRORS) if the sanity arm fails: the SAME fixture, with a passing
+        verify, MUST merge T1 in a tree that has the skill — otherwise a 0 here would
+        prove nothing."""
+        conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+        if not os.path.isfile(conductor):
+            return 0
+        if ok_merged is None:
+            _, ok_merged = _fc_run(tree, _FC_TASKS_OK)
+        if "T1" not in ok_merged:
+            PROBE_ERRORS.append((
+                tree, "factory-conductor/assets/conductor.py",
+                "merged-despite-failing-verify sanity check failed: the passing "
+                "fixture did not merge T1 in this tree"))
+            return None
+        _, bad_merged = _fc_run(tree, _FC_TASKS_BAD)
+        return 1 if "T1" in bad_merged else 0
+
+    def planner_proven(tree, ok_merged=None):
+        """_fc_planner_run, with a sanity arm: in a tree that has the conductor, the
+        hand-built passing fixture MUST prove T1, so a 0 here is the planner's plan
+        failing to prove, never a broken conductor fixture (PROBE_ERRORS, None)."""
+        conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+        if not os.path.isfile(conductor):
+            return 0
+        if ok_merged is None:
+            _, ok_merged = _fc_run(tree, _FC_TASKS_OK)
+        if "T1" not in ok_merged:
+            PROBE_ERRORS.append((
+                tree, "factory-conductor/assets/conductor.py",
+                "planner-derived sanity check failed: the hand-built passing fixture "
+                "did not prove T1 in this tree"))
+            return None
+        return _fc_planner_run(tree)
+
+    a, b = planner_proven(old), planner_proven(new, b_merged)
+    row(s, "plans derived by spec-first-planning that the conductor proves end to end",
+        a, b, a == 0 and b == 1,
+        "spec_to_tasks emitted a null verify command, so every planner-derived task parked "
+        "unrunnable-verify; a criterion's [cmd: ...] is now the command. Driven as a real "
+        "spec -> spec_to_tasks --envelope -> write_grant -> init..finish, read from the "
+        "`status` lines; sanity-checked against the hand-built passing fixture, which DOES "
+        "prove T1", since=SINCE_FACTORY_PLANNER_CMD)
+
+    a = merged_with_failing_verify(old)
+    b = merged_with_failing_verify(new, b_merged)
+    row(s, "tasks merged despite a failing verify", a, b, a == 0 and b == 0,
+        "a task is merged only after the conductor itself re-ran its verify commands "
+        "— sanity-checked against the same fixture with a passing verify, which DOES "
+        "merge", kind="guard")
+
+
+# ── factory-conductor: the Q3 gaps ──────────────────────────────────────────
+def _fc_fixture(CC, root, tasks, gate_policy, budget=None, files=None):
+    """A fixture repo on factory/p (cut from main) holding docs/spec.md plus `files`
+    ({path: text}), a task-plan/v1 envelope for `tasks` ({id: verify command}, all
+    independent, title "Pair") and a human-accepted grant with `gate_policy` and
+    `budget`. Returns the plan envelope's path."""
+    subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+    for rel, text in dict({"docs/spec.md": "# Spec\n"}, **(files or {})).items():
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True, env=_FC_GENV)
+    subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/p"], check=True,
+                   capture_output=True)
+    with open(os.path.join(root, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
+        f.write("/.skill-contract/envelopes/\n")
+    plan_payload = {"title": "Pair", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+                    "tasks": [{"id": i, "requirement_ids": ["R1"], "title": i,
+                               "verify": [{"text": "t", "command": cmd}], "depends_on": []}
+                              for i, cmd in tasks.items()]}
+    plan_env = CC.write_envelope(root, CC.build_statement(
+        "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+        "spec-first-planning", "2.1.0", root, ["docs/spec.md"], plan_payload))
+    _fc_write_grant(CC, root, plan_env, gate_policy, budget)
+    return plan_env
+
+
+def _fc_write_grant(CC, root, plan_env, gate_policy, budget=None, expires=timedelta(days=1),
+                    after=0):
+    """A human-accepted grant for plan_env, generated `after` seconds from now (so a later
+    one is the newest head) and expiring `expires` after that (negative: already lapsed)."""
+    now = CC.utc_now() + timedelta(seconds=after)
+    plan_rel = os.path.relpath(plan_env, root).replace(os.sep, "/")
+    grant_payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"},
+                     "decisions": [{"id": "D1", "question": "q", "answer": "a",
+                                    "source": "sweep"}],
+                     "defaults": [], "gate_policy": gate_policy, "budget": dict(budget or {}),
+                     "stop_on": [],
+                     "expires_at": (now + expires).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "system_one": {"allowed": False}, "revoked": False}
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                            "--unattended", "docs/spec.md"],
+                "subject": [CC.pin(root, "docs/spec.md")]}
+    CC.write_envelope(root, CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0",
+                                               root, ["docs/spec.md", plan_rel],
+                                               grant_payload, [accepted], now=now))
+
+
+def _fc_tree(tree):
+    """(conductor path, the tree's vendored contract_check module), or (None, None)."""
+    conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
+    if not os.path.isfile(conductor):
+        return None, None
+    sys.path.insert(0, os.path.join(tree, "factory-conductor", "assets"))
+    try:
+        import importlib
+        CC = importlib.import_module("contract_check")
+        importlib.reload(CC)
+    finally:
+        sys.path.pop(0)
+    return conductor, CC
+
+
+def _fc_dispatch_cap_bounded(tree):
+    """1 when the tree's conductor `init`, under a grant that sets no max_dispatches
+    and with no --budget, records a finite max_dispatches in the run's state; 0 when it
+    leaves the cap unset (or the tree has no conductor). None (PROBE_ERRORS) when init
+    itself fails in a tree that has the conductor: a broken fixture is not an honest 0."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _fc_fixture(CC, root, {"T1": ["true"], "T2": ["true"], "T3": ["true"]},
+                               {"local_reversible": "grant"})
+        r = subprocess.run([sys.executable, "-I", conductor, "init", "--plan", plan_env,
+                            "--root", root], capture_output=True, text=True, timeout=300)
+        runs = os.path.join(root, ".skill-contract", "runs")
+        states = [os.path.join(runs, d, "state.json") for d in sorted(os.listdir(runs))] \
+            if os.path.isdir(runs) else []
+        if r.returncode != 0 or not states:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "dispatch-cap probe: init failed: %s"
+                                 % (r.stderr or r.stdout).strip()[-200:]))
+            return None
+        with open(states[-1], encoding="utf-8") as f:
+            cap = (json.load(f).get("budget") or {}).get("max_dispatches")
+        return 1 if isinstance(cap, int) and not isinstance(cap, bool) else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# Each task adds one file to d/ (which holds base.txt): alone each sees two files, merged
+# the run branch holds three. _FC_EXACTLY_TWO fails there; _FC_AT_LEAST_TWO passes.
+_FC_EXACTLY_TWO = ["{python}", "-c",
+                   "import os,sys; sys.exit(0 if len(os.listdir('d')) == 2 else 1)"]
+_FC_AT_LEAST_TWO = ["{python}", "-c",
+                    "import os,sys; sys.exit(0 if len(os.listdir('d')) >= 2 else 1)"]
+
+
+def _fc_pair_pushed(tree, cmd):
+    """1 when the tree's conductor pushes the run branch of a two-task run to a scratch
+    bare origin, else 0. T1 and T2 are both started from the same run branch, each adds
+    one file to d/ and each is proven by `cmd` alone, then both merge; finish runs under
+    a grant that covers push_branch and open_pr (the PR step is a no-op program)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
+    try:
+        plan_env = _fc_fixture(CC, root, {"T1": cmd, "T2": cmd},
+                               {"read_only": "auto", "local_reversible": "grant",
+                                "push_branch": "grant", "open_pr": "grant"},
+                               files={"d/base.txt": "base\n"})
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True,
+                       capture_output=True)
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        wts = {}
+        for tid in ("T1", "T2"):
+            for line in run("start", tid).stdout.splitlines():
+                if line.startswith("START: %s " % tid):
+                    wts[tid] = line.split(" ", 2)[2].strip()
+        for tid, wt in wts.items():
+            with open(os.path.join(wt, "d", "%s.txt" % tid.lower()), "w") as f:
+                f.write(tid + "\n")
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        for tid in ("T1", "T2"):
+            if run("verify", tid).returncode == 0:
+                run("review", tid, "--verdict", "pass")
+        for tid in ("T1", "T2"):
+            run("merge", tid)
+        run("next")
+        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        return 1 if subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
+                                    "refs/heads/factory/pair"],
+                                   capture_output=True).returncode == 0 else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_FC_FULL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "grant",
+            "open_pr": "grant"}
+_FC_LOCAL = {"read_only": "auto", "local_reversible": "grant", "push_branch": "ask",
+             "open_pr": "ask"}
+
+
+def _fc_one_proven(conductor, CC, root, cmd, policy, origin=None):
+    """A one-task run (T1 proven by `cmd`, its work t1.txt) driven until `next` stops it.
+    Returns (run, plan envelope path)."""
+    plan_env = _fc_fixture(CC, root, {"T1": cmd}, policy)
+    if origin:
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", origin], check=True,
+                       capture_output=True)
+
+    def run(*argv):
+        return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                              capture_output=True, text=True, timeout=300)
+
+    run("init", "--plan", plan_env)
+    _fc_drive(run, ["T1"])
+    run("next")
+    return run, plan_env
+
+
+def _fc_moved_head_pushed(tree, move):
+    """1 when the tree's conductor pushes a run-branch head other than the one its checks
+    ran on at `finish`, 0 when it pushes that head, None when it pushes nothing. The first
+    finish runs under a grant that asks on push_branch; then (move) a commit lands on the
+    run branch, a grant covering the push is issued, and `finish --retry-remote` runs."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root, origin = os.path.join(tmp, "repo"), os.path.join(tmp, "origin.git")
+    try:
+        run, plan_env = _fc_one_proven(conductor, CC, root, ["test", "-f", "t1.txt"],
+                                       _FC_LOCAL, origin=origin)
+        run("finish", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        checked = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
+                                 text=True).stdout.strip()
+        if move:
+            with open(os.path.join(root, "late.txt"), "w") as f:
+                f.write("never reviewed\n")
+            subprocess.run(["git", "-C", root, "add", "late.txt"], check=True,
+                           capture_output=True)
+            subprocess.run(["git", "-C", root, "commit", "-q", "-m", "late"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        _fc_write_grant(CC, root, plan_env, _FC_FULL, after=2)
+        run("finish", "--retry-remote", "--pr-cmd", json.dumps([sys.executable, "-c", "pass"]))
+        r = subprocess.run(["git", "--git-dir", origin, "rev-parse", "-q", "--verify",
+                            "refs/heads/factory/pair"], capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        return 1 if r.stdout.strip() != checked else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _fc_lapsed_finish_runs(tree, lapse):
+    """1 when the tree's conductor runs a repository command during `finish`, else 0. T1's
+    verify command appends a line to a sentinel file outside the repo; after T1 is proven
+    (its own verify writes the sentinel under a valid grant), lapse writes a newer grant
+    that has already expired, then `finish` runs. Without lapse it is the sanity arm."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root, sentinel = os.path.join(tmp, "repo"), os.path.join(tmp, "sentinel")
+    try:
+        cmd = ["sh", "-c", "echo x >> '%s'; test -f t1.txt" % sentinel]
+        run, plan_env = _fc_one_proven(conductor, CC, root, cmd,
+                                       {"read_only": "auto", "local_reversible": "grant"})
+
+        def lines():
+            try:
+                with open(sentinel, encoding="utf-8") as f:
+                    return f.read().count("\n")
+            except OSError:
+                return 0
+
+        before = lines()
+        if lapse:
+            _fc_write_grant(CC, root, plan_env, _FC_FULL, expires=timedelta(minutes=-5),
+                            after=2)
+        run("finish")
+        return 1 if lines() > before else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_conductor_q3_review(old, new):
+    s = "factory-conductor"
+
+    def moved_pushed(tree):
+        """_fc_moved_head_pushed, sanity-checked: in a tree that has the conductor the SAME
+        fixture with no move MUST push the checked head, or a 0 here would prove nothing."""
+        if _fc_tree(tree)[0] is None:
+            return 0
+        if _fc_moved_head_pushed(tree, move=False) != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "moved-head sanity check failed: the unmoved run branch was "
+                                 "not pushed as the head its checks ran on"))
+            return None
+        return _fc_moved_head_pushed(tree, move=True) or 0
+
+    a, b = moved_pushed(old), moved_pushed(new)
+    # Moves only against a baseline whose conductor pushes the moved branch
+    # (BASE=067b042: 1 -> 0); against main (no conductor) it is a guard, 0 -> 0.
+    row(s, "pushes of a head other than the one integration verified", a, b,
+        b == 0 and (a is not None and a >= b),
+        "a commit that lands on the run branch after finish's checks (between an asked push "
+        "and --retry-remote) is never pushed: the push is <verified head>:refs/heads/<rb> and "
+        "refused when the branch moved. Sanity-checked: the unmoved branch DOES push",
+        kind="delta" if a == 1 else "guard", since=SINCE_Q3_REVIEW)
+
+    def lapsed_runs(tree):
+        """_fc_lapsed_finish_runs, sanity-checked. In the new tree finish MUST move the
+        sentinel under a valid grant (else a probe error). A baseline whose finish runs no
+        repository command at all (before G3) scores 0 honestly."""
+        if _fc_tree(tree)[0] is None:
+            return 0
+        if _fc_lapsed_finish_runs(tree, lapse=False) != 1:
+            if tree == new:
+                PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                     "lapsed-grant sanity check failed: finish did not run "
+                                     "the checks under a valid grant"))
+                return None
+            return 0
+        return _fc_lapsed_finish_runs(tree, lapse=True)
+
+    a, b = lapsed_runs(old), lapsed_runs(new)
+    # Moves only against a baseline with the ungated re-run (BASE=f2a4b95: 1 -> 0); against
+    # main and against 067b042 (no re-run at finish) it is a guard, 0 -> 0.
+    row(s, "repo commands run under a lapsed grant at finish", a, b,
+        b == 0 and (a is not None and a >= b),
+        "finish's integration re-run executes the repository's code, so it is gated with "
+        "local_reversible: under a lapsed grant nothing runs (INTEGRATION: skipped). A "
+        "sentinel written by the task's own check stays unchanged; under a valid grant the "
+        "same fixture DOES move it", kind="delta" if a == 1 else "guard",
+        since=SINCE_Q3_REVIEW)
+
+
+def check_factory_conductor_q3(old, new):
+    s = "factory-conductor"
+    a, b = _fc_dispatch_cap_bounded(old), _fc_dispatch_cap_bounded(new)
+    row(s, "unattended runs whose dispatch budget is bounded when the grant sets none",
+        a, b, a == 0 and b == 1,
+        "a grant with no max_dispatches (and no --budget) left an unattended run's cost "
+        "unbounded; init now derives n_tasks x 2 x (1 + max_repairs_per_task). Read from "
+        "the run's state.json after a real init; an init that fails is a probe error, not "
+        "a 0", since=SINCE_Q3_GAPS)
+
+    def red_pushed(tree):
+        """_fc_pair_pushed with the check the merged result fails, sanity-checked: in a
+        tree that has the conductor the SAME fixture with a check the merged result
+        passes MUST push, or a 0 here would prove nothing (PROBE_ERRORS, None)."""
+        if _fc_tree(tree)[0] is None:
+            return 0
+        if _fc_pair_pushed(tree, _FC_AT_LEAST_TWO) != 1:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "integration sanity check failed: the fixture whose merged "
+                                 "result passes was not pushed in this tree"))
+            return None
+        return _fc_pair_pushed(tree, _FC_EXACTLY_TWO)
+
+    a, b = red_pushed(old), red_pushed(new)
+    # A guard against the main merge base (it has no conductor, so it pushes nothing: 0 ->
+    # 0). Against a baseline on this branch whose conductor pushes the red run branch, the
+    # 1 -> 0 is a live claim and must move.
+    row(s, "runs that push a merged result failing its own checks", a, b,
+        b == 0 and (a is not None and a >= b),
+        "two tasks that each pass alone but break each other once merged: finish re-runs "
+        "the proven tasks' checks on the merged run branch and never pushes a red one "
+        "(STOP: integration_red). Sanity-checked against the same fixture with a check the "
+        "merged result passes, which DOES push", kind="delta" if a == 1 else "guard",
+        since=SINCE_Q3_GAPS)
 
 
 def main():
@@ -5234,10 +5945,14 @@ def main():
         check_skill_contract(old, REPO)
         check_test_safety_net_node_ffi(old, REPO)
         check_bcp14(old, REPO)
+        check_bcp14_registry(old, REPO)
         check_factory_trust_bir(old, REPO)
         check_factory_trust_vi(old, REPO)
         check_factory_trust_ba(old, REPO)
         check_autonomy_grant(old, REPO)
+        check_factory_conductor(old, REPO)
+        check_factory_conductor_q3(old, REPO)
+        check_factory_conductor_q3_review(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

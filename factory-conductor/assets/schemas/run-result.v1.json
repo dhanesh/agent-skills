@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1",
+  "title": "skill-contract run-result/v1 payload",
+  "description": "The predicate.payload of a run-result/v1 envelope written by conductor.py finish. The envelope's subjects pin the task-plan envelope and the autonomy grant the run ran under; its assertions are one passed verify:<task> per proven task, carrying that task's first verify command from the plan, and, when the integration re-run ran any command, one integration:<head, 12 chars> assertion, passed or failed.",
+  "type": "object",
+  "required": ["run_id", "plan", "grant", "run_branch", "base_branch", "created_at", "stopped", "log", "log_sha256", "log_bytes", "budget", "budget_derived", "dispatches", "budget_note", "integration", "tasks", "leftover_worktrees"],
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$"},
+    "plan": {
+      "type": "object",
+      "required": ["id", "path", "sha256", "title"],
+      "properties": {
+        "id": {"type": ["string", "null"], "description": "The task-plan envelope's predicate.id."},
+        "path": {"type": "string", "description": "Repo-relative path of the task-plan envelope."},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "title": {"type": ["string", "null"]}
+      }
+    },
+    "grant": {
+      "type": "object",
+      "required": ["id", "path", "sha256"],
+      "description": "The autonomy-grant/v1 envelope that covered the run at init.",
+      "properties": {
+        "id": {"type": "string"},
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "run_branch": {"type": "string"},
+    "base_branch": {"type": "string"},
+    "created_at": {"type": "string", "description": "When init ran, RFC 3339 UTC."},
+    "stopped": {
+      "oneOf": [
+        {"type": "null", "description": "finish ran on a run that no stop rule had ended."},
+        {
+          "type": "object",
+          "required": ["reason"],
+          "properties": {
+            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks", "integration_red"]},
+            "at": {"type": "string"},
+            "detail": {"type": "string"},
+            "task": {"type": "string"},
+            "previous": {"type": ["string", "null"], "description": "For integration_red: the stop reason the run had before finish found the merged result red (null when it had none)."}
+          }
+        }
+      ]
+    },
+    "log": {"type": "string", "description": "Repo-relative path of autonomy-log.jsonl (local, never committed)."},
+    "log_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the log's first log_bytes bytes, which end with the finish event. The log is append-only, so events after it (the push and PR gates and steps) never change that prefix."},
+    "log_bytes": {"type": "integer", "minimum": 1},
+    "budget": {"type": "object", "description": "The run's budget as enforced, plus max_tokens/max_usd, which are recorded, not enforced."},
+    "budget_derived": {"type": "array", "items": {"type": "string"}, "description": "The budget keys init derived rather than read from the grant or --budget (max_dispatches when neither set it)."},
+    "dispatches": {"type": "integer", "minimum": 0},
+    "budget_note": {"type": "string", "description": "Says that max_tokens and max_usd are recorded, not enforced: the runtime does not expose usage."},
+    "integration": {
+      "type": "object",
+      "required": ["head", "passed", "runs"],
+      "description": "finish re-ran every proven task's verify commands on the merged run-branch head, before any remote step. passed false means the run was not pushed and no PR was opened (stopped.reason integration_red).",
+      "properties": {
+        "head": {"type": "string", "pattern": "^[0-9a-f]{40,64}$", "description": "The run-branch commit the commands ran on."},
+        "passed": {"type": "boolean"},
+        "skipped": {"type": "string", "description": "Present when the local_reversible gate asked at finish, so no command ran: the gate's line. passed is false, runs is empty, and the run stopped with grant_ask."},
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["task", "command", "ok", "returncode"],
+            "properties": {
+              "task": {"type": "string"},
+              "command": {"type": ["array", "null"], "description": "In the plan's own form; null when a symlink that escapes the checkout meant nothing ran."},
+              "ok": {"type": "boolean"},
+              "returncode": {"type": ["integer", "null"]}
+            }
+          }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "verify", "review", "merge_commit", "park_reason"],
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": ["string", "null"], "description": "The plan's task title (untrusted text)."},
+          "status": {"type": "string", "enum": ["pending", "running", "verifying", "reviewing", "proven", "parked", "blocked"]},
+          "verify": {
+            "type": "array",
+            "description": "The conductor's last re-run of the task's verify commands; each command in the plan's own form ({python}, {skill_dir:<name>}).",
+            "items": {
+              "type": "object",
+              "required": ["command", "ok", "returncode"],
+              "properties": {
+                "command": {"type": ["array", "null"]},
+                "ok": {"type": "boolean"},
+                "returncode": {"type": ["integer", "null"]}
+              }
+            }
+          },
+          "verified_head": {"type": ["string", "null"]},
+          "review": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "object", "required": ["verdict"], "properties": {"verdict": {"type": "string", "enum": ["pass", "fail"]}, "detail": {"type": ["string", "null"]}}}
+            ]
+          },
+          "merge_commit": {"type": ["string", "null"]},
+          "park_reason": {"type": ["string", "null"]},
+          "question": {"type": ["string", "null"]},
+          "depends_on": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "leftover_worktrees": {
+      "type": "array",
+      "description": "Worktrees of unproven tasks still on disk (a merge-conflict park keeps its worktree for a human). finish does not delete them.",
+      "items": {
+        "type": "object",
+        "required": ["task", "path"],
+        "properties": {
+          "task": {"type": "string"},
+          "path": {"type": "string"},
+          "reason": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

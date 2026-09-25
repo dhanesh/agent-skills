@@ -20,7 +20,7 @@ compatibility: Prompt-only; no runtime dependencies. Language-agnostic — the p
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "clean-code,refactoring,solid,code-review,architecture,naming,tdd,code-smells,craftsmanship"
 ---
 
@@ -74,7 +74,7 @@ Pick the mode that fits the task. Most requests are one of these.
   1. Run the suite. Green? Refactor. Red? Fix or report the failure first — you
      SHOULD NOT refactor on top of a failing test, because you cannot then tell
      your change from the pre-existing break.
-  2. Make one structural change. Behaviour must not change.
+  2. Make one structural change. Behaviour SHOULD NOT change.
   3. Run the suite again. Still green → continue. Newly red → revert or repair
      that change before making another.
   4. If there is no test covering what you are about to restructure, say so and
@@ -123,7 +123,7 @@ it answers. If you can't name one, don't add it.
 > sum a column.
 >
 > ✅ Proportionate: one well-named function that takes the rows (or a path) and
-> returns the total; if it must be testable, pass the source in as a parameter.
+> returns the total; if it needs to be testable, pass the source in as a parameter.
 > One seam, no ceremony.
 >
 > Same discipline as the layered use-case example in `architecture.md` — but
@@ -165,7 +165,7 @@ but every example is **illustrative, not a template**:
 ### Function rules
 
 1. **Small** — functions SHOULD NOT exceed ~20 lines; aim for 5–10.
-2. **A function SHOULD do one thing** — if you can extract a sub-function with
+2. **Do one thing** — if you can extract a sub-function with
    a name that isn't just a restatement, the original did more than one thing.
 3. **One level of abstraction per function** — you SHOULD NOT mix high-level
    policy with low-level detail in the same body.
@@ -173,8 +173,7 @@ but every example is **illustrative, not a template**:
    into `renderForSuite()` and `renderForPage()`.
 5. **Fewer arguments** — 0 is best, 1 good, 2 fine, 3 needs justification. More
    than that usually means a missing object. You SHOULD avoid output arguments.
-6. **Command-Query Separation** — a function SHOULD change state *or* return a
-   value, not both.
+6. **Command-Query Separation** — change state *or* return a value, not both.
 
 ### Naming checklist
 

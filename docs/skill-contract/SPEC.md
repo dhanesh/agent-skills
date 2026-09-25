@@ -133,6 +133,25 @@ covers only reversible actions (`read_only`, `local_reversible`, `push_branch`, 
 the floors live in the checker rather than in the grant: an unattended run goes as far as an open
 pull request, and a human merges.
 
+**The run result.** A run result is an envelope of kind
+`https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1`. `factory-conductor`
+produces it when a run ends (`conductor.py finish`), whether a stop rule ended the run or not.
+Its subjects pin the task-plan envelope the run carried out and the `autonomy-grant/v1` it ran
+under. Its payload carries `run_id`, `plan` (id, path, sha256, title), `grant` (id, path,
+sha256), `run_branch`, `stopped` (the stop rule and when), `log_sha256` with `log_bytes` (the
+sha256 of the local, append-only autonomy log's first `log_bytes` bytes, which end with the
+`finish` event), the `budget` with a `budget_note` saying `max_tokens` and `max_usd` are
+recorded, not enforced, the worktrees left for a human, and `tasks`: each task's status, its
+verify commands with outcomes, the review verdict, the merge commit and the park reason. Its
+assertions are one passed `verify:<task>` per proven task, carrying that task's first verify
+command as the plan wrote it and pinning the plan envelope; parked and blocked tasks get none.
+Those assertions record the conductor re-running the executor's own checks: the conductor did not
+write the code it checked. The envelope names the conductor as both producer and asserter, so
+under commandment 7 the checker reads each one as `CLAIMED` until a receiver re-runs it, and as
+`PROVEN` once it has, or once CI reports the check on the pushed run branch (an assertion that
+carries a `run_url`).
+The payload schema is `factory-conductor/assets/schemas/run-result.v1.json`.
+
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 
 ```json skill-contract

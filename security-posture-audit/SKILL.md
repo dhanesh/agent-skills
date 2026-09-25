@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "security,audit,posture,hygiene,dependency-pinning,ci-security,defensive"
 ---
 
@@ -140,4 +140,4 @@ cannot prove, severity rationale, remediation pattern):
 - **Windows trees:** file-mode checks are skipped (POSIX-only); say so in Not covered.
 - **Huge files:** content checks skip files over ~1 MB; name/mode checks still apply.
 - **Unreadable/malformed manifests** surface as `parse-error` entries, never crashes —
-  you MUST report them as audit blind spots rather than dropping them.
+  report them as audit blind spots rather than dropping them.

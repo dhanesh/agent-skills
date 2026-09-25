@@ -28,12 +28,27 @@ A spec is one markdown file:
   Ids run R1..Rn in document order with no gaps or duplicates. Each
   statement is a single testable obligation containing `must` or `shall`.
   Optional trailing hint `[where: path/or/area]` — lifted into the derived
-  task's Where field, stripped from its title.
+  task's Where field, stripped from its title. Optional trailing hint
+  `[after: R<n>, ...]` — the requirement ids this one must follow; `R` is
+  matched case-insensitively. It becomes the derived task's `depends_on`
+  (mapped to the task(s) that cover each id) and is stripped from the
+  title the same way `[where: ...]` is.
 - **Criterion bullets** (in `## Acceptance criteria`): `- R<n>: <check>`.
   At least one per requirement; a criterion may mention several ids
   (`covers R1 and R2`), and every id it mentions must exist. Write each
   check as something runnable: a command plus expected exit code/output, or
-  an observation an outside party could make.
+  an observation an outside party could make. Optional trailing hint
+  `[cmd: <argv>]` (keyword matched case-insensitively): the command that
+  proves the criterion, split like a shell line (`shlex`) but run as an argv,
+  never through a shell. It must be the last thing on the bullet, parse, be
+  non-empty, and follow the skill-contract command rule (C6): start with
+  `{python}` rather than `python3`, or with a bare program name; no absolute
+  paths; no placeholder but a leading `{python}` or `{skill_dir:<name>}`.
+  It becomes the derived verify step's `command` and is stripped from its
+  text; a token inside it (`grep R9 x`) is not a requirement reference.
+  Example: `- R2: row parity holds. [cmd: {python} tests/compare_export.py fixtures/report.json]`.
+  Optional in light and converged mode; `--unattended` requires it on every
+  criterion.
 - **Open questions**: the section must exist; its list may be empty.
 
 **Full-loop sections** (Tension + Choose; required only under `--converged` /
@@ -68,6 +83,8 @@ pre-mortem and the decision sweep are in `references/unattended.md`:
 | 3 | Every requirement contains `must`/`shall` | a wish posing as a requirement |
 | 4 | Vague term with no metric in the same statement | unfalsifiable adjective ("fast", "robust", "user-friendly", "simple", "reliable", "scalable", "efficient", "seamless", "responsive", ...). A digit, `%`, `<=`, `>=`, `≤`, or `≥` in the statement licenses the word |
 | 5 | Every requirement referenced by ≥1 criterion; no criterion references an unknown id | a requirement nothing can prove; a check proving nothing |
+| 5a | Every id in a requirement's `[after: ...]` hint names a known requirement; the after-hints as a whole contain no cycle (message: "after: hints have a cycle") | a task ordered after a requirement that doesn't exist, or a dependency loop no schedule can satisfy |
+| 5b | A criterion's `[cmd: ...]` hint ends the criterion, parses with `shlex`, is non-empty, and passes the C6 command rule (the vendored `contract_check`) | a command no machine can run, or one that names an interpreter or an absolute path |
 | 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
 | 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
 | 8 | Traceability: every constraint is named in some RT's `maps_to`; every RT names ≥1 known constraint and ≥1 known requirement (`reqs:`); every RT's `parent` is `OUTCOME` or another RT in this spec, and not itself | a constraint nobody anchors; a truth that traces to nothing |
@@ -99,7 +116,9 @@ Recommended line's `(decision: ...)`) must name a decision that exists in
 
 Runs every `--converged` rule above, plus: `## Decisions` is present,
 non-empty, its grammar is well-formed, and every decision's answer is
-non-empty.
+non-empty; and every acceptance criterion carries a `[cmd: ...]` hint. A
+grant exists only for runs a machine can prove: factory-conductor refuses a
+plan with a null verify command at `init`.
 
 Output: one `FAIL: ...` line per issue, final `LINT_RESULT: PASS (...,
 mode=<mode>)` or `LINT_RESULT: FAIL (n issue(s), mode=<mode>)`. Exit 0 iff
@@ -134,18 +153,56 @@ TASKS_RESULT: PASS|FAIL (k/n requirements covered by m task(s))
 {
   "tasks": [
     {"id": "T1", "requirement_ids": ["R1"], "title": "...",
-     "verify": "criterion 1; criterion 2", "where": "web/reports/"}
+     "verify": "criterion 1; criterion 2", "where": "web/reports/",
+     "depends_on": ["T0"],
+     "verify_commands": [["{python}", "-m", "pytest", "-k", "rows"], null]}
   ],
   "coverage": {"R1": ["T1"], "R2": []},
   "uncovered": ["R2"]
 }
 ```
 
-`where` appears only when the requirement carried a `[where: ...]` hint.
+`where` appears only when the requirement carried a `[where: ...]` hint;
+`depends_on` appears only when it carried an `[after: ...]` hint that
+resolved to at least one covering task; `verify_commands` (one argv or
+`null` per verify step, in step order) only when at least one of its
+criteria carried a `[cmd: ...]` hint. The markdown plan shows each command
+after its step as ``(cmd: `...`)``. A requirement with no hints derives
+a plan byte-identical to one from before `[after: ...]` existed.
 Deterministic: same spec in, byte-identical plan out.
 
 Exit codes: `0` total coverage; `1` any requirement uncovered (a plan with
 a hole is not a plan); `2` unreadable input or no `R<n>:` bullets at all.
+
+### Waves and the critical path (`--waves`)
+
+`spec_to_tasks.py <spec.md> --waves` groups the derived tasks into waves from
+their `depends_on` and prints:
+
+```
+WAVE 1: T1
+WAVE 2: T2 T3
+WAVE 3: T4
+CRITICAL_PATH: T1 -> T2 -> T4
+WAVES_RESULT: PASS (3 wave(s))
+```
+
+then exits 0. Every task in a wave is independent of the others in that wave;
+wave N+1 depends on wave N only through `depends_on` edges already resolved.
+Task ids sort numerically within a wave and along the critical path (`T10`
+after `T2`, not before). The critical path is the longest chain of
+`depends_on`; a tie is broken by the chain whose ids come first numerically,
+compared element by element; with no dependencies at all it is the single
+lowest-numbered task.
+
+The wave algorithm is copied from `factory-conductor/assets/conductor.py`'s
+`waves(tasks)` — the same scheduler factory-conductor uses to run a plan —
+rather than imported across skills. An `[after: Rn]` hint naming an unknown
+requirement, or a cycle among the hints, already fails `spec_lint.py` (rule
+5a) before a plan is even derived; `--waves` still validates its own input
+(a schedule error prints `ERROR: ...` to stderr and exits non-zero) since a
+`depends_on` reaching it some other way — a hand-edited plan, for instance —
+isn't spec_lint's to catch.
 
 ### The task-plan envelope (`--envelope <repo-root>`)
 
@@ -155,7 +212,9 @@ skill-contract `task-plan/v1` envelope under
 payload is the JSON plan above plus `title` and `spec`, and three optional
 fields lifted from the spec when present: `constraints` (`{id, type, text}`),
 `required_truths` (only when every truth is well formed) and `decisions`
-(`{id, question, answer, source}`). `task-plan/v1` stays v1 because the
+(`{id, question, answer, source}`). Each task's `verify` is a list of
+`{text, command}`: `command` is the criterion's `[cmd: ...]` argv, or `null`
+when it has none. `task-plan/v1` stays v1 because the
 fields are additive. The schema is `assets/schemas/task-plan.v1.json`.
 
 In unattended mode this envelope is the plan a grant pins:

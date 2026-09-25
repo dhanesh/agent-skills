@@ -50,6 +50,30 @@ carries unit tests, eval negatives and an A/B row:
   new user know which skills to install' P(yes) 0.09 → 0.63; the section judged honest P=0.97.
 - **Step 3A (autonomy grant) landed:** grant kind + `check-grant`; spec-first-planning 2.0.0;
   4 adopters; Q3 to be re-judged by Jev after merge.
+- **Step 3A re-judged by Jev after merge:** Q1 partly (0.64), Q2 yes (0.74), Q3 partly (0.64);
+  "the skills ask every question that needs a human decision upfront" P(yes)=0.72;
+  "implementation then runs end to end without the human" P(yes)=0.13 — the grant existed but
+  nothing yet ran a plan under it, which is exactly the gap Step 4 closes.
+- **Step 4 (factory-conductor) landed:** `factory-conductor` runs an approved `task-plan/v1`
+  envelope, under a covering `autonomy-grant/v1`, from its first task to a pushed branch and an
+  open PR — a fresh executor per task and a fresh reviewer per finished task, wave scheduling
+  from `depends_on`, each task's own verify commands re-run as the proof, merge only on a passing
+  verify and review, wall-clock/dispatch/repair/parallel budgets enforced (tokens and dollars
+  recorded, not enforced), and a `run-result/v1` envelope on finish. skill-contract adopters: 5.
+  The documented path now runs end to end: spec-first-planning 2.2.0 turns an acceptance
+  criterion's `[cmd: <argv>]` hint into the task's verify command (`--unattended` requires one
+  on every criterion), and `conductor init` refuses a plan with a null command. Before that,
+  every planner-derived task had a null command and parked at verify, so only hand-built plans
+  reached `proven`. Jev re-judgement: to be re-judged after merge.
+- **Q3 gaps closed (2026-09-25, before merge):** after step 4 Jev put Q3 ("unattended mode
+  works") at partly 0.56 vs yes 0.42, and three gaps behind that score are closed on the same
+  branch. A dead session no longer strands a run: `conductor resume` prints one `NEXT:` line
+  per in-flight task and one for the run, so a fresh session with no memory of it can carry
+  on. Cost is always bounded: with no `max_dispatches` from the grant or `--budget`, `init`
+  derives tasks × 2 × (1 + `max_repairs_per_task`), and the grant's expiry caps the wall clock
+  at 7 days. The merged result is verified before the push: `finish` re-runs every proven
+  task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3 to
+  be re-judged after merge.
 
 Nothing else in this document has been re-measured since.
 

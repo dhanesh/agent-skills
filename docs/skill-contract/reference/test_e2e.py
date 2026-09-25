@@ -201,7 +201,7 @@ Users cannot export rows.
 - R1: The export must include every row.
 
 ## Acceptance criteria
-- R1: run `python3 -m pytest -k rows`, expect exit 0.
+- R1: run `python3 -m pytest -k rows`, expect exit 0. [cmd: {python} -m pytest -k rows]
 
 ## Open questions
 

@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.2.0"
+  version: "1.2.1"
   skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
@@ -120,7 +120,7 @@ rather than inventing config from memory.
 
 ## Deliverable — the install summary
 
-You SHOULD end with this report:
+Step 5 hands back this report:
 
 ```
 ## Verifier loop installed: <repo>

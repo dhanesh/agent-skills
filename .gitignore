@@ -8,3 +8,6 @@ __pycache__/
 
 # world-model-ledger runtime store
 .world-model/
+
+# factory-conductor run state and worktrees (state.json, autonomy-log.jsonl, wt/)
+.skill-contract/runs/

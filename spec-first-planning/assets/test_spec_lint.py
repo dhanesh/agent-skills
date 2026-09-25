@@ -69,6 +69,34 @@ class TestParse(unittest.TestCase):
         self.assertEqual(len(spec["criteria"]), 3)
         self.assertEqual(spec["criteria"][1][1], [2])
 
+    def test_no_after_hint_gives_empty_lists(self):
+        spec = spec_lint.parse_spec(GOOD)
+        self.assertEqual(spec["after"], {1: [], 2: [], 3: []})
+
+    def test_after_hint_parses_to_ints(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+
+    def test_after_hint_comma_separated_list_parses_in_order(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R1, R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [1, 2])
+
+    def test_after_hint_matches_r_case_insensitively(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: r2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+
 
 class TestLint(unittest.TestCase):
     def assertIssue(self, issues, needle):
@@ -162,6 +190,84 @@ class TestLint(unittest.TestCase):
     def test_deterministic_issue_order(self):
         bad = GOOD.replace("must offer", "offers").replace("must contain", "contains")
         self.assertEqual(spec_lint.lint(bad), spec_lint.lint(bad))
+
+    def test_after_hint_valid_is_clean(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2]",
+        )
+        self.assertEqual(spec_lint.lint(ok), [])
+
+    def test_after_hint_unknown_requirement_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R9]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "unknown requirement R9")
+
+    def test_after_hint_cycle_fails(self):
+        bad = GOOD.replace(
+            '- R1: The report page must offer a "Download CSV" action for every saved report.',
+            '- R1: The report page must offer a "Download CSV" action for every saved report. [after: R2]',
+        ).replace(
+            "- R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order.",
+            "- R2: The exported CSV must contain the same rows and columns as the on-screen table, in the same order. [after: R1]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "after: hints have a cycle")
+
+    def test_after_hint_malformed_token_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: foo]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id 'foo'")
+
+    def test_after_hint_partial_id_fails(self):
+        # "R22x" used to be silently read as R22 (findall grabbed the digits
+        # and ignored the trailing garbage) — it must now be rejected outright.
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R22x]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id 'R22x'")
+
+    def test_after_hint_empty_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: ]",
+        )
+        self.assertIssue(spec_lint.lint(bad), "R3 [after: ...] has a malformed id ''")
+
+    def test_after_hint_trailing_comma_fails(self):
+        bad = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: R2,]",
+        )
+        issues = spec_lint.lint(bad)
+        self.assertIssue(issues, "R3 [after: ...] has a malformed id ''")
+        # R2 itself is still a well-formed, known id and must not also be
+        # reported as unknown.
+        self.assertFalse(any("unknown requirement R2" in i for i in issues))
+
+    def test_after_hint_malformed_token_is_not_silently_dropped(self):
+        # Before this fix, "[after: foo]" parsed to an empty id list with no
+        # diagnostic at all — parse_spec must now surface it in malformed_after.
+        ok_looking = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [after: foo]",
+        )
+        spec = spec_lint.parse_spec(ok_looking)
+        self.assertEqual(spec["after"][3], [])
+        self.assertEqual(spec["malformed_after"], [(3, "foo")])
+
+    def test_after_hint_keyword_matches_case_insensitively(self):
+        ok = GOOD.replace(
+            "- R3: Export of a 10000-row report must complete within 5 seconds.",
+            "- R3: Export of a 10000-row report must complete within 5 seconds. [AFTER: R2]",
+        )
+        spec = spec_lint.parse_spec(ok)
+        self.assertEqual(spec["after"][3], [2])
+        self.assertEqual(spec_lint.lint(ok), [])
 
 
 LIGHT = """# Spec: Export
@@ -260,7 +366,10 @@ p
 """
 
 
-FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]") + """
+# FULL carries a [cmd: ...] hint on its criterion: --unattended requires one on every
+# acceptance criterion (a grant exists only for machine-proven runs).
+FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]").replace(
+    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n") + """
 ## Tensions
 - TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
 
@@ -394,6 +503,55 @@ class TestCli(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+class CmdHint(unittest.TestCase):
+    """C1: an acceptance criterion may end with [cmd: <argv>], the command that proves it."""
+
+    def spec(self, crit):
+        return GOOD.replace(
+            "- R3: Timing the export endpoint with a 10000-row fixture reports under 5 seconds.",
+            "- R3: Timing the export endpoint with a 10000-row fixture reports under 5 seconds." + crit)
+
+    def test_a_hint_parses_to_an_argv_and_is_stripped_from_the_text(self):
+        spec = spec_lint.parse_spec(self.spec(' [cmd: {python} tests/bench.py --rows "10 000"]'))
+        self.assertEqual(spec["criteria"][2][0],
+                         "R3: Timing the export endpoint with a 10000-row fixture reports "
+                         "under 5 seconds.")
+        self.assertEqual(spec["commands"], [None, None,
+                                            '{python} tests/bench.py --rows "10 000"'])
+        self.assertEqual(spec_lint.command_argv(spec["commands"][2]),
+                         (["{python}", "tests/bench.py", "--rows", "10 000"], None))
+
+    def test_a_clean_hint_lints_clean_and_the_keyword_is_case_insensitive(self):
+        self.assertEqual(spec_lint.lint(self.spec(" [cmd: {python} -m pytest -k export]")), [])
+        self.assertEqual(spec_lint.lint(self.spec(" [CMD: make bench]")), [])
+
+    def test_a_command_token_is_not_a_requirement_reference(self):
+        self.assertEqual(spec_lint.lint(self.spec(" [cmd: grep R9 fixtures.txt]")), [])
+
+    def test_an_unparsable_argv_fails(self):
+        issues = spec_lint.lint(self.spec(' [cmd: {python} -c "unterminated]'))
+        self.assertTrue(any("[cmd:" in i and "parse" in i for i in issues), issues)
+
+    def test_an_empty_argv_fails(self):
+        issues = spec_lint.lint(self.spec(" [cmd:   ]"))
+        self.assertTrue(any("[cmd:" in i and "empty" in i for i in issues), issues)
+
+    def test_an_argv_that_breaks_c6_fails(self):
+        for bad in (" [cmd: python3 -m pytest]", " [cmd: /usr/bin/make test]",
+                    " [cmd: make -C /abs/path]", " [cmd: {node} x.js]"):
+            issues = spec_lint.lint(self.spec(bad))
+            self.assertTrue(any("[cmd:" in i and "C6" in i for i in issues), (bad, issues))
+
+    def test_a_hint_that_is_not_trailing_fails(self):
+        issues = spec_lint.lint(self.spec(" [cmd: make bench] then read the log"))
+        self.assertTrue(any("[cmd:" in i and "end" in i for i in issues), issues)
+
+    def test_light_and_converged_keep_the_hint_optional(self):
+        self.assertEqual(spec_lint.lint(GOOD), [])
+        self.assertEqual(spec_lint.lint(FULL.replace(" [cmd: {python} -m pytest -k rows]", ""),
+                                        mode="converged"), [])
+
+
 class ConvergedRules(unittest.TestCase):
     def lint(self, t, mode):
         return spec_lint.lint(t, mode=mode)
@@ -465,6 +623,12 @@ class ConvergedRules(unittest.TestCase):
 
     def test_docstring_names_the_modes(self):
         self.assertIn("[--converged|--unattended]", spec_lint.__doc__)
+
+    def test_unattended_needs_a_cmd_hint_on_every_criterion(self):
+        t = FULL.replace(" [cmd: {python} -m pytest -k rows]", "")
+        self.assertEqual(self.lint(t, "converged"), [])
+        issues = self.lint(t, "unattended")
+        self.assertTrue(any("[cmd:" in i and "unattended" in i for i in issues), issues)
 
     def test_cli_modes(self):
         import subprocess, sys, tempfile, os

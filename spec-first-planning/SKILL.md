@@ -7,8 +7,8 @@ description: >-
   by default, the full loop to convergence on request. Use when the user says "plan this
   feature", "write a spec for X", "break this down into tasks", "what would done look like", or
   hands over a vague idea that needs requirements before code. Opt-in unattended mode asks
-  every human decision upfront and, after the user's explicit yes, writes an autonomy grant
-  that covers only reversible work. Ships a deterministic spec linter and a spec→tasks compiler
+  every human decision upfront and, after the user's explicit yes, writes an autonomy-grant
+  envelope that covers only reversible work. Ships a deterministic spec linter and a spec→tasks compiler
   that reports the requirement↔task coverage map. Not the executor — hands a skill-contract
   task-plan envelope to the implementing session or a loop built with
   crafting-self-prompting-loops; not a project-management tracker; complements, not replaces,
@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.0.0"
+  version: "2.2.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -51,14 +51,17 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 - **The spec** — drafted from `references/spec-template.md`. It MUST include these sections:
   Problem, Users, Goals, Non-goals, Constraints (typed: `invariant`, `goal` or `boundary`),
   Required truths (each traced to a constraint and a requirement, with a runnable check),
-  Requirements (numbered R1..Rn, each a single testable "must" statement), Acceptance
+  Requirements (numbered R1..Rn, each a single testable `must` statement), Acceptance
   criteria (≥1 per requirement, referencing its id, written as a runnable check), Open
   questions (may be an empty list, but the section exists so unknowns have a home). The
   full loop adds Tensions, Solution options and Iterations, and unattended mode adds
   Decisions; those are required only when that loop runs.
 - **The plan** — one or more tasks per requirement, each carrying *what* to change, *where*
   (files/areas if known — the spec's `[where: ...]` hints pre-fill this), and *verify* (the
-  acceptance criterion turned into a check the implementer can actually run). The
+  acceptance criterion turned into a check the implementer can actually run). A requirement
+  can also carry `[after: R2, R3]`, naming the other requirements it comes after; the
+  compiler turns that into the task's `depends_on` and can schedule the whole plan into
+  waves with `--waves`. The
   requirement↔task coverage map MUST be total in both directions: every requirement covered,
   every task traceable to a requirement.
 
@@ -70,7 +73,7 @@ The exact grammar, lint rules, JSON schema, and exit codes live in
 The method is manifold's: **constrain → tension → anchor → choose**. *Constrain* writes typed
 constraints (B business, T technical, U UX, S security, O operational), with a pre-mortem in
 the full loop. *Tension* finds conflicting pairs and resolves each one. *Anchor* works back
-from the outcome, asking "what must be TRUE?", and records each required truth with its
+from the outcome, asking "what has to be TRUE?", and records each required truth with its
 parent, the constraints it serves, the requirements that deliver it, a confidence and a check.
 *Choose* compares 2–4 options under the **pragmatic rule**: among the options that satisfy
 every invariant and every required truth, pick the lowest complexity, then the most
@@ -97,16 +100,20 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    interview; note unresolved answers as candidates for Open questions rather than stalling.
    In unattended mode, the same round also carries the decision sweep.
 2. **Draft the spec** from `references/spec-template.md`, running the planning loop at the
-   mode's depth. Write each requirement as one testable "must" statement — if a sentence
+   mode's depth. Write each requirement as one testable `must` statement — if a sentence
    bundles two obligations, split it into two ids. Write each acceptance criterion as
    something runnable: a command plus expected exit code/output, or an observation an
-   outside party could make. When you can't write the
+   outside party could make. When a machine can run the check, end the criterion with
+   `[cmd: <argv>]`, the command that proves it (`{python}` rather than `python3`, a bare
+   program name, no absolute paths): it becomes the task's verify command. Unattended mode
+   needs one on every criterion. When you can't write the
    check, the requirement isn't ready — park it in Open questions instead of faking one.
 3. **Lint and repair** with `python3 "$SKILL_DIR/assets/spec_lint.py" <spec.md>` for the
    light pass. Add `--converged` before the path for the full loop, or `--unattended` in
    unattended mode. Fix every `FAIL:` line (each names the requirement and the defect:
    missing section, id gap, missing modal, vague term with no metric, requirement with no
-   criterion, a constraint no truth maps to) and rerun until it prints `LINT_RESULT: PASS`.
+   criterion, a constraint no truth maps to, a `[cmd: ...]` that does not parse or breaks
+   the command rule) and rerun until it prints `LINT_RESULT: PASS`.
    Repair by making statements more checkable, not by deleting the inconvenient ones — if a
    requirement truly can't be kept, move it to Non-goals or Open questions so the decision
    stays visible. Each pass of the full loop adds one line to the
@@ -116,7 +123,12 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    machine-readable handoff). The compiler seeds one task per requirement with its verify
    steps attached. Now review with the user: split tasks that are too big (keep them pointing
    at their requirement id), fill in the Where fields you know, and order tasks by
-   dependency — the compiler emits requirement order, which is rarely build order.
+   dependency — the compiler emits requirement order, which is rarely build order. Where you
+   already know the build order, put it in the spec as `[after: R2, R3]` hints instead of
+   ordering by hand: the compiler turns them into each task's `depends_on`, and
+   `python3 "$SKILL_DIR/assets/spec_to_tasks.py" <spec.md> --waves` prints the resulting
+   waves and the critical path — feed either straight to factory-conductor or a loop built
+   with crafting-self-prompting-loops.
 5. **Verify coverage, then hand off.** The compiler's coverage map is the gate: any
    `UNCOVERED:` line or non-zero exit means a requirement has no task that proves it — repair
    the spec (usually a missing acceptance criterion) or the plan and re-derive until
@@ -129,7 +141,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <path> --root <repo-root>`;
    a failure there is this skill's bug, so fix it before going on. Then look for consumers:
    `python3 "$SKILL_DIR/assets/contract_check.py" discover --kind https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1 --from "$SKILL_DIR"`.
-   If it names one, run this before proposing:
+   In unattended mode, when factory-conductor is among the consumers, hand off to it;
+   otherwise propose the choice. If it names one, run this before proposing:
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo-root> --action local_reversible --subject <envelope path>`.
    If it exits 0 (`GRANT: COVERED`), you MAY hand off without asking, but only when the
    envelope you hand off is the plan the grant pins (one of its subjects, which `--subject`
@@ -165,7 +178,8 @@ Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `d
 never covered by a grant and will always ask: you MUST ask the user right before any of them,
 whatever the grant says. A grant lasts 7 days at most and does not cover the default
 branch or a detached HEAD, so work on a branch such as `factory/*`. Before the handoff check you
-MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/<slug>`).
+MUST be on a branch matching `branch_pattern` (e.g. `git switch -c factory/work` — any
+name but `factory/<plan-slug>`, which factory-conductor creates as its run branch).
 Under a grant, you MUST push only the current branch, to the remote branch of the same name,
 and MUST NOT force-push. A push or pull request whose commits change CI configuration (such as
 `.github/workflows/`) counts as `deploy`: `check-grant` answers ASK `ci-config`, so ask first.

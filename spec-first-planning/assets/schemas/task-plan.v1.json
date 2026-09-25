@@ -18,6 +18,12 @@
           "requirement_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^R[0-9]+$"}},
           "title": {"type": "string"},
           "where": {"type": "string"},
+          "depends_on": {
+            "type": "array",
+            "description": "Optional: task ids this task's requirement's [after: ...] hint resolved to.",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^T[0-9]+$"}
+          },
           "verify": {
             "type": "array",
             "minItems": 1,

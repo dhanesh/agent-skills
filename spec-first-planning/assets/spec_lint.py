@@ -16,6 +16,18 @@ references/spec-template.md. This linter enforces the mechanical half of
      bound like <= / >=).
   5. Every requirement has at least one acceptance criterion referencing
      its id; criteria may not reference unknown ids.
+  5a. An optional trailing `[after: Rn, ...]` hint on a requirement: every
+      comma-separated token must fully match `R<n>` (no prose, no partial id
+      like "R22x", no blank from an empty/trailing comma), every id named must
+      be a known requirement, and the after-hints as a whole must not contain
+      a cycle (message: "after: hints have a cycle"). spec_to_tasks.py turns a
+      clean hint into the derived task's `depends_on`.
+  5b. An optional trailing `[cmd: <argv>]` hint on an acceptance criterion
+      (keyword case-insensitive): the command that proves it, split with
+      shlex. It must end the criterion, parse, be non-empty, and follow the
+      skill-contract command rule (C6: {python} rather than an interpreter
+      name, a bare program name, no absolute paths, no other placeholders).
+      spec_to_tasks.py turns it into the verify step's `command`.
   6-9. (always on, the Constrain + Anchor light pass) Constraints are typed
      bullets; every required truth has a known status, parent, constraint
      mapping, requirements and a runnable check, and traces back to OUTCOME;
@@ -28,7 +40,8 @@ SPECIFICATION_READY; 2-4 options, none satisfying an unknown truth; a
 Recommended option that satisfies every truth and is the pragmatic choice
 (a tie needs a decision); iterations I1..In capped at 5; no open questions.
 --unattended adds the decision sweep on top: a non-empty Decisions section
-with every decision answered.
+with every decision answered, and a `[cmd: ...]` hint on every acceptance
+criterion (a grant exists only for runs a machine can prove).
 
 Usage:
     python3 spec_lint.py [--converged|--unattended] <spec.md>
@@ -40,7 +53,9 @@ Exit 0 iff the spec is clean; 1 on lint failures; 2 on a usage error or an
 unreadable file. Stdlib-only, offline, deterministic.
 """
 
+import os
 import re
+import shlex
 import sys
 from collections import OrderedDict
 
@@ -131,6 +146,50 @@ _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
 _RID_PREFIX_RE = re.compile(r"^(?:\*\*)?R(\d+)(?:\*\*)?\s*[:.]\s*(.*)$")
 _RID_REF_RE = re.compile(r"\bR(\d+)\b")
+
+# A requirement's optional "[after: R2, R3]" hint: which other requirements it
+# must follow. spec_to_tasks.py maps this to the derived task's depends_on.
+# "after" is matched case-insensitively, same as WHERE_RE in spec_to_tasks.py.
+AFTER_RE = re.compile(r"\[after:\s*([^\]]+)\]", re.IGNORECASE)
+# A single after-hint token must fully match this (case-insensitive R/r, then
+# digits, nothing else) — checked with .match() against an already-anchored
+# pattern, i.e. equivalent to fullmatch.
+_AFTER_ID_RE = re.compile(r"^[Rr](\d+)$")
+
+# An acceptance criterion's optional trailing "[cmd: <argv>]" hint: the command
+# that proves it. The greedy group runs to the LAST "]" so an argv may itself hold
+# brackets; "[cmd:" anywhere else in the criterion is a misplaced hint.
+CMD_RE = re.compile(r"\s*\[cmd:\s*(.*)\]\s*$", re.IGNORECASE)
+_CMD_ANY_RE = re.compile(r"\[cmd:", re.IGNORECASE)
+
+
+def command_argv(raw):
+    """(argv, None) for a [cmd: ...] hint's raw text, split with shlex; (None, why)
+    when it does not parse or is empty."""
+    try:
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        return None, "does not parse (%s)" % exc
+    if not argv:
+        return None, "is empty"
+    return argv, None
+
+
+def command_rule_violations(argv):
+    """The skill-contract command rule (commandment 6) violations of argv, as detail
+    strings, from the vendored reference checker (contract_check, same dir). That
+    checker needs Python >= 3.10; below it the rule cannot be checked, which is itself
+    reported."""
+    if sys.version_info < (3, 10):
+        return ["cannot be checked against the command rule: Python >= 3.10 is needed"]
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import contract_check  # lazy: needs Python >= 3.10 (guarded above)
+
+    viol = []
+    contract_check._check_command(argv, viol)
+    return [detail for _, detail in viol]
 
 
 def _fields(raw):
@@ -450,7 +509,7 @@ def lint_converged(spec):
 
 def lint_unattended(spec):
     """The decision sweep on top of --converged: Decisions present, non-empty,
-    every decision answered."""
+    every decision answered; and a [cmd: ...] hint on every acceptance criterion."""
     issues = []
     body = find_section(spec["sections"], "Decisions")
     if body is None:
@@ -464,6 +523,11 @@ def lint_unattended(spec):
         if not d["answer"]:
             issues.append("%s has no answer — every decision must be answered "
                           "before unattended mode" % d["id"])
+    # A grant exists only for machine-proven runs: every criterion names its command.
+    for (ctext, _refs, _owner), raw in zip(spec["criteria"], spec["commands"]):
+        if raw is None:
+            issues.append("acceptance criterion has no [cmd: ...] hint; unattended mode "
+                          "needs the command that proves every criterion: '%s'" % ctext[:60])
     return issues
 
 
@@ -475,7 +539,19 @@ def parse_spec(text):
       sections                -- OrderedDict of raw heading -> list of body lines
       requirements            -- list of (number:int, text:str) in document order
       malformed_requirements  -- bullets in Requirements without an R<n> prefix
-      criteria                -- list of (text:str, [referenced numbers]) in order
+      after                   -- dict of number:int -> [number:int, ...], the
+                                  well-formed requirement numbers named in that
+                                  requirement's optional "[after: Rn, ...]" hint
+                                  (empty list when the requirement carries no hint,
+                                  or every token in it was malformed)
+      malformed_after         -- list of (number:int, token:str) for each
+                                  after-hint token that isn't a bare "R<n>" id
+                                  (typo, blank from an empty/trailing comma, ...)
+      criteria                -- list of (text:str, [referenced numbers], owner) in
+                                  order; text has any trailing [cmd: ...] hint removed
+      commands                -- list aligned with criteria: the raw text of each
+                                  criterion's [cmd: ...] hint, or None
+      misplaced_cmds          -- criteria bullets with a "[cmd:" that does not end them
       constraints             -- list of {id, type, text} from ## Constraints
       malformed_constraints   -- bullets in Constraints not matching the grammar
       truths                  -- list of {id, num, status, text, parent, maps_to,
@@ -520,6 +596,27 @@ def parse_spec(text):
         else:
             malformed.append(bullet)
 
+    # Each after-hint is split on commas; every resulting token must fully
+    # match _AFTER_ID_RE (an id, nothing else — no prose, no partial id like
+    # "R22x", no blank left by an empty or trailing comma). A token that
+    # doesn't is recorded in malformed_after rather than silently dropped, so
+    # a typo shows up as a lint failure instead of a hint that just does
+    # nothing.
+    after = {}
+    malformed_after = []
+    for num, rtext in requirements:
+        am = AFTER_RE.search(rtext)
+        ids = []
+        if am:
+            for token in am.group(1).split(","):
+                token = token.strip()
+                idm = _AFTER_ID_RE.match(token)
+                if idm:
+                    ids.append(int(idm.group(1)))
+                else:
+                    malformed_after.append((num, token))
+        after[num] = ids
+
     # A criterion is OWNED by the requirement in its leading `R<n>:` prefix.
     # `_RID_REF_RE` matches an R<n> token anywhere — in a filename, a command,
     # or prose — so a criterion reading "R1: run `grep R2 fixtures.txt`" used to
@@ -528,12 +625,23 @@ def parse_spec(text):
     # (deduped) for the unknown-id diagnostic; ownership is what drives
     # coverage. A criterion with no prefix falls back to its mentions, so an
     # older spec that never used the prefix form still works.
+    #
+    # A trailing "[cmd: ...]" hint is split off first: the criterion's text is
+    # what is left, and a token inside the command (grep R9 x) is not a
+    # reference to a requirement.
     criteria = []
+    commands = []
+    misplaced_cmds = []
     for bullet in _section_bullets(sections, "Acceptance criteria"):
-        refs = list(dict.fromkeys(int(n) for n in _RID_REF_RE.findall(bullet)))
-        pm = _RID_PREFIX_RE.match(bullet)
+        cm = CMD_RE.search(bullet)
+        text = bullet[:cm.start()].rstrip() if cm else bullet
+        if _CMD_ANY_RE.search(text):
+            misplaced_cmds.append(bullet)
+        commands.append(cm.group(1).strip() if cm else None)
+        refs = list(dict.fromkeys(int(n) for n in _RID_REF_RE.findall(text)))
+        pm = _RID_PREFIX_RE.match(text)
         owner = int(pm.group(1)) if pm else None
-        criteria.append((bullet, refs, owner))
+        criteria.append((text, refs, owner))
 
     constraints, bad_c = _parse_constraints(sections)
     truths, bad_t = _parse_truths(sections)
@@ -548,7 +656,11 @@ def parse_spec(text):
         "sections": sections,
         "requirements": requirements,
         "malformed_requirements": malformed,
+        "after": after,
+        "malformed_after": malformed_after,
         "criteria": criteria,
+        "commands": commands,
+        "misplaced_cmds": misplaced_cmds,
         "constraints": constraints,
         "malformed_constraints": bad_c,
         "truths": truths,
@@ -583,6 +695,27 @@ def _section_bullets(sections, name):
         if m:
             out.append(m.group(1))
     return out
+
+
+def _after_cycle(after):
+    """True iff the `after` graph (requirement number -> the numbers it must
+    follow) contains a cycle. An id that is not a key of `after` (unknown to
+    the spec) is skipped here — that gets its own issue from the unknown-id
+    check in `lint`, not a cycle report."""
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color = {n: WHITE for n in after}
+
+    def visit(n):
+        color[n] = GRAY
+        for m in after.get(n, ()):
+            if m not in color:
+                continue
+            if color[m] == GRAY or (color[m] == WHITE and visit(m)):
+                return True
+        color[n] = BLACK
+        return False
+
+    return any(color[n] == WHITE and visit(n) for n in after)
 
 
 def lint(text, mode="light"):
@@ -671,6 +804,38 @@ def lint(text, mode="light"):
                 "R%d has no acceptance criterion — add at least one "
                 "'- R%d: <runnable check>' line" % (num, num)
             )
+
+    # 5a. [after: ...] hints: every token must be a well-formed id, every id
+    # named must be a known requirement, and the after-graph among
+    # requirements must not contain a cycle.
+    for num, token in spec["malformed_after"]:
+        issues.append(
+            "R%d [after: ...] has a malformed id '%s'" % (num, token)
+        )
+    after = spec["after"]
+    for num, refs in after.items():
+        for ref in refs:
+            if ref not in known:
+                issues.append(
+                    "R%d [after: ...] names unknown requirement R%d" % (num, ref)
+                )
+    if _after_cycle(after):
+        issues.append("after: hints have a cycle")
+
+    # 5b. [cmd: ...] hints: trailing, parseable, non-empty, and C6-clean.
+    for bullet in spec["misplaced_cmds"]:
+        issues.append("acceptance criterion [cmd: ...] must end the criterion: '%s'"
+                      % bullet[:60])
+    for (ctext, _refs, _owner), raw in zip(spec["criteria"], spec["commands"]):
+        if raw is None:
+            continue
+        argv, why = command_argv(raw)
+        if why:
+            issues.append("acceptance criterion [cmd: ...] %s: '%s'" % (why, ctext[:60]))
+            continue
+        for detail in command_rule_violations(argv):
+            issues.append("acceptance criterion [cmd: ...] breaks the command rule (C6): "
+                          "%s: '%s'" % (detail, ctext[:60]))
 
     # 6-9. Constrain + Anchor light pass: typed constraints, required truths,
     # and traceability from constraint to RT to requirement (always on).

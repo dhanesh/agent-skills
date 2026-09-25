@@ -20,6 +20,7 @@ npx skills add dhanesh/agent-skills --skill bug-autopsy
 npx skills add dhanesh/agent-skills --skill clean-code
 npx skills add dhanesh/agent-skills --skill context-hygiene-kit
 npx skills add dhanesh/agent-skills --skill crafting-self-prompting-loops
+npx skills add dhanesh/agent-skills --skill factory-conductor
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough
 npx skills add dhanesh/agent-skills --skill jev-agent-setup
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
@@ -45,8 +46,10 @@ npx skills add dhanesh/agent-skills
 
 The long-term aim of this collection is an autonomous software factory for an indie developer:
 idea → spec → build → verify → review → release → operate → support → growth. **Today it is a
-set of skills a human orchestrates, not yet autonomous.** You choose the next skill, confirm each
-handoff, and drive the build step yourself. The evidence behind this section, and the gaps, are
+set of skills a human orchestrates, not yet autonomous.** You choose the next skill and confirm
+each handoff. The build step can now run unattended from an approved plan to an open PR (see
+[Unattended mode](#unattended-mode-partial)), but release, operations and everything after stay
+with you. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
@@ -58,7 +61,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Idea validation | none (ai-migration-operating-model `qualify` covers migrations only) | missing |
 | Requirements / spec | `spec-first-planning` | covered |
 | Design / plan | `spec-first-planning`, `clean-code` (architecture), `ai-migration-operating-model` (migrations) | partly |
-| Build / execute | `crafting-self-prompting-loops` designs the loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
+| Build / execute | `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
 | Test / verify | `verifier-installer`, `test-safety-net`. Nothing checks built work against the spec's acceptance criteria. | partly |
 | Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
 | Release / deploy | none (`agent-ready-rails` only audits deploy safety) | missing |
@@ -73,7 +76,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 Each recipe is one install command. A human drives the steps between skills.
 
 **Plan → loop.** Turn a fuzzy request into a spec and task plan, then design the loop that
-executes it. This is the one pair with a machine handoff (a `task-plan/v1` envelope).
+executes it, handing off a `task-plan/v1` envelope.
 
 ```bash
 npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops
@@ -103,8 +106,10 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site
 ### What happens when you install a subset
 
 - **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
-  time and hand off a validated envelope, after asking you first. Today that is two skills and one
-  handoff: `spec-first-planning` → `crafting-self-prompting-loops`.
+  time and hand off a validated envelope, after asking you first unless a grant covers it. Today
+  five skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
+  and `spec-first-planning` → `factory-conductor` (a `task-plan/v1` envelope, with its
+  `autonomy-grant/v1`), which returns a `run-result/v1` envelope.
 - **A missing consumer is not an error.** The producer reports `NO_CONSUMER`, gives you the
   envelope path, and finishes normally.
 - **Every other link between skills is prose.** A skill says "use X next". If X is not installed,
@@ -114,11 +119,12 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough --skill okf-site
 
 ### Unattended mode: partial
 
-`spec-first-planning` 2.0.0 can plan unattended, and — after you say yes — write a
+`spec-first-planning` 2.x can plan unattended, and — after you say yes — write a
 skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope that
-covers chosen action classes, on branches matching a pattern, for at most 7 days. Four skills' confirmation gates honour it:
+covers chosen action classes, on branches matching a pattern, for at most 7 days. Five skills honour it:
 `spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
-`test-safety-net` each call `check-grant` before falling back to their own ask.
+`test-safety-net` each call `check-grant` before falling back to their own ask, and
+`factory-conductor` calls it before every consequential step of an unattended run.
 
 What a grant can and cannot do:
 
@@ -132,11 +138,36 @@ What a grant can and cannot do:
 - a push or PR whose commits change CI configuration (`.github/workflows/` and the like) asks
   you, because CI runs with the repository's secrets.
 
-Still on the roadmap: a **conductor** that runs a whole plan end to end inside that grant
-(step 4) — today you still drive the handoff between skills yourself.
+**Unattended runs now reach an open PR.** `factory-conductor` runs a whole plan inside that
+grant (roadmap step 4). It gives each task its own worktree and a fresh executor, re-runs the
+task's own verify commands itself, has a fresh reviewer judge the diff against the requirement,
+merges only what passed both into one `factory/<plan-slug>` run branch, and ends by pushing
+that branch and opening one PR. A failing or undecidable task is parked with its reason and the
+rest of the plan goes on. Its limits:
+
+- the proof is only as strong as each task's verify commands; before the push the conductor
+  re-runs every proven task's checks on the merged run branch, so tasks that each pass alone
+  but break each other once merged stop the run and are never pushed; the push is exactly the
+  commit that re-run verified, and a branch that moved after it is not pushed; CI on the pushed branch
+  is still the independent check outside your machine, and the reviewer is the one check that
+  looks past weak verify commands;
+- cost is always bounded, by dispatches and by wall clock: when the grant sets no dispatch cap
+  the conductor derives one from the plan's size (each dispatch a resume asks for counts too),
+  and the grant's expiry caps a run at 7 days from the newest grant;
+  repairs per task and parallelism are enforced too (2 each by default); tokens and dollars
+  are recorded, not enforced, because the runtime does not expose usage;
+- a crashed or interrupted run is resumable by a fresh session with no memory of it:
+  `conductor resume` prints the exact next step for every task in flight; if the grant has
+  lapsed, the run waits for you to renew it rather than ending itself;
+- a question the grant does not answer parks that task for you: the conductor does not answer it
+  itself;
+- to anyone receiving the run result, its per-task proofs read as claims until they re-run them
+  or CI on the pushed branch reports them;
+- an executor running as your OS user could forge the run's local state; the reviewer, CI on
+  the pushed branch and your merge are the defence, so merging the PR is always yours.
 
 ```bash
-npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops --skill verifier-installer --skill test-safety-net
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor --skill verifier-installer --skill test-safety-net
 ```
 
 The design and the gap analysis are in
@@ -164,6 +195,7 @@ The design and the gap analysis are in
 | [`bug-autopsy`](bug-autopsy/) | `feynman-walkthrough`'s sibling for failures: reconstructs a defect end-to-end (evidence-cited timeline, blameless ≥3-deep 5-Whys root cause), writes a lint-checked post-mortem, and persists it into the same OKF knowledge bundle so the failure teaches the next engineer. |
 | [`security-posture-audit`](security-posture-audit/) | Read-only, offline security *hygiene* audit — dependency pinning, committed env/key files, debug/permissive flags, insecure transports, risky CI patterns — severity-graded with file:line evidence and honest not-covered boundaries. Not a CVE scanner or SAST; completes the trust family alongside `scan-leaks` and `base-in-reality`. |
 | [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
+| [`factory-conductor`](factory-conductor/) | Runs an approved task plan unattended, from its first task to an open PR, inside a user-approved autonomy grant. The session dispatches a fresh executor per task and a fresh reviewer per finished task; a stdlib state tool schedules waves from `depends_on`, re-runs each task's own verify commands as the proof, merges only what passed both into one run branch, enforces wall-clock, dispatch, repair and parallel budgets (tokens and dollars are recorded, not enforced), parks what fails, and ends with a `run-result/v1` envelope, a pushed branch and a PR. Merging the PR stays with the human. |
 | [`jev-agent-setup`](jev-agent-setup/) | Machine-wide Jev (TypeSafe System One) setup for every coding agent: installs the `jev` CLI (JSON in, typed Noul/Choice/Score out) and a managed BCP 14 instruction block into the global files of Claude Code, Codex, Gemini CLI and `~/.agents/AGENTS.md`, so agents offload rank/classify/yes-no decisions to Jev. Idempotent, marker-bounded, backs up before first touch, `--check` for drift, optional mirror mode that copies CLAUDE.md to the other agents. Complements `typesafe-ai`, which covers building Jev into applications. |
 | [`world-model-ledger`](world-model-ledger/) | Install a persistent, SQLite-backed world model for a coding agent — entities (symbols/files/modules/real-world referents), interactions, and constraints, each with two confidence axes (observed vs normative), a validation status, and PROV-style evidence. Code-observed relationships are never treated as ground truth: only oracle evidence (tests/CI/docs/human) raises normative confidence. Four lifecycle hooks retrieve validated/unverified/contradicted items before edits, update records without inventing facts, and consolidate on Stop; detects contradictions, proposes located fixes, and improves normative correctness over time. Every triple is validated against a predicate ontology (RDFS-style domain/range) before it enters the ledger — hallucinated verbs and semantically impossible pairings are rejected, not stored. Ships a 116-test install gate. |
 
