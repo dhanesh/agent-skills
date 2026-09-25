@@ -684,6 +684,49 @@ def _parse_time(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+REENTRY_DEFAULTS = {"interval_min": 10, "stall_min": 30, "max_reentries": 5}
+REENTRY_RANGES = {"interval_min": (5, 60), "stall_min": (15, 240), "max_reentries": (1, 20)}
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"}
+_REENTRY_TOKEN = re.compile(r"\{[^{}]*\}")
+
+
+def reentry_problems(block):
+    """Problems with an autonomy grant's optional payload.reentry block; [] when valid.
+
+    agent_cmd is an argv list, never a shell (a shell would turn the argv back into an
+    evaluated string), with {prompt} exactly once and {root} optional."""
+    if not isinstance(block, dict):
+        return ["must be an object"]
+    out = []
+    unknown = set(block) - {"agent_cmd"} - set(REENTRY_RANGES)
+    if unknown:
+        out.append("unknown key(s): %s" % ", ".join(sorted(unknown)))
+    cmd = block.get("agent_cmd")
+    if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) and a for a in cmd)):
+        out.append("agent_cmd must be a non-empty list of non-empty strings")
+    else:
+        if os.path.basename(cmd[0]).lower() in SHELLS:
+            out.append("agent_cmd must not start with a shell (%s)" % cmd[0])
+        if cmd.count("{prompt}") != 1:
+            out.append("agent_cmd must contain the {prompt} token exactly once")
+        bad = [t for a in cmd for t in _REENTRY_TOKEN.findall(a)
+               if not (a == t and t in ("{prompt}", "{root}"))]
+        if bad:
+            out.append("agent_cmd may carry only whole {prompt} and {root} tokens: %s"
+                       % ", ".join(sorted(set(bad))))
+    vals = dict(REENTRY_DEFAULTS)
+    for key, (lo, hi) in REENTRY_RANGES.items():
+        if key in block:
+            v = block[key]
+            if not (isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi):
+                out.append("%s must be an integer from %d to %d" % (key, lo, hi))
+                continue
+            vals[key] = v
+    if vals["stall_min"] < 2 * vals["interval_min"]:
+        out.append("stall_min must be at least 2 x interval_min")
+    return out
+
+
 def grant_violations(st):
     """Grant-specific problems (after check_statement passed). [] = valid.
 
@@ -706,6 +749,8 @@ def grant_violations(st):
             break
     if "require_signature" in p:  # A8 dropped signing: fail closed rather than ignore it
         out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
+    if "reentry" in p:
+        out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
     try:
         expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
                               else "")

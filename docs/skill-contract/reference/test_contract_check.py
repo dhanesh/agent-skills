@@ -1003,6 +1003,52 @@ class GrantTests(unittest.TestCase):
         self.assertTrue(buf.getvalue().startswith("REVOKED: "))
 
 
+class ReentryBlockTests(unittest.TestCase):
+    OK = {"agent_cmd": ["claude", "-p", "{prompt}"], "interval_min": 10,
+          "stall_min": 30, "max_reentries": 5}
+
+    def problems(self, **over):
+        b = dict(self.OK)
+        b.update(over)
+        return cc.reentry_problems(b)
+
+    def test_a_valid_block_has_no_problems(self):
+        self.assertEqual(cc.reentry_problems(dict(self.OK)), [])
+        self.assertEqual(cc.reentry_problems({"agent_cmd": ["agent", "{prompt}", "{root}"]}), [])
+
+    def test_agent_cmd_must_be_an_argv_list_with_one_prompt(self):
+        for bad in ("claude -p {prompt}", [], ["claude", "-p"], ["a", "{prompt}", "{prompt}"],
+                    ["a", "{prompt}", 3]):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.problems(agent_cmd=bad))
+
+    def test_a_shell_is_refused_by_basename(self):
+        for sh in ("sh", "/bin/bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"):
+            with self.subTest(sh=sh):
+                self.assertTrue(self.problems(agent_cmd=[sh, "-c", "{prompt}"]))
+
+    def test_only_prompt_and_root_tokens(self):
+        self.assertTrue(self.problems(agent_cmd=["a", "{prompt}", "{home}"]))
+
+    def test_numeric_ranges(self):
+        for key, bad in (("interval_min", 4), ("interval_min", 61), ("stall_min", 14),
+                         ("stall_min", 241), ("max_reentries", 0), ("max_reentries", 21),
+                         ("interval_min", "10"), ("max_reentries", True)):
+            with self.subTest(key=key, bad=bad):
+                self.assertTrue(self.problems(**{key: bad}))
+
+    def test_stall_is_at_least_twice_the_interval(self):
+        self.assertTrue(self.problems(interval_min=20, stall_min=30))
+        self.assertEqual(self.problems(interval_min=15, stall_min=30), [])
+
+    def test_unknown_keys_are_refused(self):
+        self.assertTrue(self.problems(shell=True))
+
+    def test_a_grant_with_a_bad_block_is_invalid(self):
+        st = build_vectors.grant()
+        st["predicate"]["payload"]["reentry"] = {"agent_cmd": "sh -c x"}
+        self.assertTrue(any(v.startswith("payload.reentry") for v in cc.grant_violations(st)))
+
 
 if __name__ == "__main__":
     unittest.main()
