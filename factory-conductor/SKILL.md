@@ -234,9 +234,13 @@ spends one, so a session that keeps crashing still stops. A task past the cap pr
 
 ## Scheduled re-entry
 
-When the grant carries a `reentry` block, run `"$SKILL_DIR/assets/conductor.py" reentry
-install --root <repo>` right after `init`, so a timer on this machine resumes the run if
-this session dies. It prints `REENTRY: installed every <n> min`. Without a block it prints
+When the grant carries a `reentry` block, run `python3 "$SKILL_DIR/assets/conductor.py"
+reentry install --root <repo>` right after `init`, so a timer on this machine resumes the
+run if this session dies. It prints `REENTRY: installed every <n> min`. A timer's own PATH
+is minimal (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`, cron: `/usr/bin:/bin`), so install
+captures the PATH it runs with and the timer runs `watch` with that PATH: install from the
+session whose PATH finds the agent and the plan's tools. Give `agent_cmd[0]` as an
+absolute path (`command -v claude` prints it); `write_grant.py` warns when it is not. Without a block it prints
 `REENTRY: disabled` (exit 3); when the grant asks it prints the `GATE: ASK` line (exit 3)
 and the run goes on without a timer. `REENTRY: failed` (exit 2) means no timer was
 installed (no timer kind on this system, or a loader that failed; nothing is left behind): say
@@ -247,10 +251,15 @@ command, with a fixed resume prompt, only when the run is not finished, not wait
 human, still covered by the grant, not driven by a live session, idle for `stall_min`, and
 under `max_reentries`. It prints one `REENTRY:` line (the words are in
 `references/run-protocol.md`). The agent it starts is a fresh session that follows "Resume
-after a crash" and stops at `NEXT: run ask` or `NEXT: run done`.
+after a crash" and stops at `NEXT: run ask` or `NEXT: run done`. Each timer names its run
+(`watch --run <run-id>`): once that run is finished or gone its tick prints
+`REENTRY: done`, and once a newer run has started under the same root it prints
+`REENTRY: superseded`; either way the tick removes that run's timer.
 
-Every conductor command except `init` and `watch` takes the run lock and renews the lease,
-so two drivers never write at once. A command that finds the lock held waits for it, up to
+Every conductor command except `init` and `watch` takes the run lock, and every command
+except `watch` renews the lease (`init` too, though it takes no lock), so two drivers never
+write at once. Read-only commands renew it as well: a human who runs `status`, `resume` or
+`reentry status` delays re-entry by up to `stall_min`, which errs on the safe side. A command that finds the lock held waits for it, up to
 900 s, and says so on stderr after 2 s. The rule in "Hands off" covers `lease.json` and
 `.lock` too: they are how a live session tells the timer not to start a second driver. The
 lease of an agent `watch`
@@ -274,7 +283,10 @@ driver. The run lock prevents corruption, and the existing guards limit the cost
 dispatches; that session's run can also be ended by `reentry_exhausted` once
 `max_reentries` such agents have started. The resume prompt quotes the root inside
 backticks, so a root that holds a backtick garbles the prompt's code span; it reaches no
-shell.
+shell. The checker's refusal of shells and shell launchers in `agent_cmd` is defence in
+depth, not a sandbox: only fixed text and the quoted root reach the command, and the human
+chose the command itself. cron's `*/N` fires at the minutes divisible by N within each hour,
+so an `interval_min` that does not divide 60 (7, say) gives uneven gaps at the top of the hour.
 
 ## The executor brief
 

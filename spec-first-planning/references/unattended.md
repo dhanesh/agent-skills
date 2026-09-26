@@ -131,10 +131,13 @@ and skip what the conversation has already answered:
    the checker reject the whole grant, because a shell would turn the argv back into an
    evaluated string. The ranges are `interval_min` 5–60, `stall_min` 15–240 and at least
    twice `interval_min`, and `max_reentries` 1–20; a value outside them also rejects the
-   grant. Recommend the user's agent in headless mode, with an explicit tool
-   allowlist, e.g. `["claude", "-p", "{prompt}", "--allowedTools", "…"]`. Warn against
-   any permission-bypass flag, because the resumed agent acts with the user's own
-   permissions and no one watches it. Without an answer, no block is written and nothing
+   grant. Recommend the user's agent in headless mode, by absolute path (`command -v
+   claude` prints it: a timer runs with the PATH captured at `reentry install`, and
+   `write_grant.py` warns on a bare name), with an explicit tool allowlist that lets it
+   drive the whole run: `python3 <abs>/conductor.py …`, the subagent tool (`Agent` in
+   Claude Code), the plan's verify programs, git and file edits (see the example below).
+   Warn against any permission-bypass flag, because the resumed agent acts with the
+   user's own permissions and no one watches it. Without an answer, no block is written and nothing
    re-enters.
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
@@ -234,11 +237,16 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
     "data_sent": "file names and requirement text only, never source code or secrets"
   },
   "reentry": {
-    "agent_cmd": ["claude", "-p", "{prompt}", "--allowedTools", "Read,Edit,Bash(git *)"],
+    "agent_cmd": ["/Users/you/.local/bin/claude", "-p", "{prompt}", "--allowedTools",
+                  "Read,Edit,Write,Glob,Grep,Agent,Bash(python3 /Users/you/.claude/skills/factory-conductor/assets/conductor.py *),Bash(git *),Bash(python3 -m pytest *)"],
     "interval_min": 10
   }
 }
 ```
+
+In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
+the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's
+own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own.
 
 `expires_at` is RFC 3339 in UTC, in the future, and no more than 7 days after the grant
 is written. Set it from the user's answer, not from this example.

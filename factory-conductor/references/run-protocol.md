@@ -36,7 +36,7 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
 | `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (ending ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
-| `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
+| `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `superseded`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
 | `reentry install\|uninstall\|status` | install: `REENTRY: installed every <n> min`, `REENTRY: disabled`, a `GATE: ASK` line, or `REENTRY: failed`; uninstall: `REENTRY: uninstalled` or `REENTRY: failed`; status: `REENTRY: timer <paths or crontab line\|none>`, `REENTRY: lease <json\|null>`, `REENTRY: count <n>`, `REENTRY: last <event json\|none>` | 0; 3 `disabled` or gate asks (install); 2 `failed`, or no run |
 | `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
@@ -278,7 +278,8 @@ done or the integration was red, and, for an integration skipped because the gra
 ### The run lock and the lease
 
 Every command on a run except `init` and `watch` holds an exclusive lock on
-`<run>/.lock` (`flock`) while it runs, then renews `<run>/lease.json`. So two drivers, a
+`<run>/.lock` (`flock`) while it runs, then renews `<run>/lease.json`. `init` takes no lock
+(there is no run to lock yet) but renews the lease too; `watch` never renews it. So two drivers, a
 session and an agent `watch` started, never interleave writes to `state.json` or the log.
 A command that finds the lock held waits up to 900 s, printing `waiting for the run lock
 held by another conductor command…` on stderr once after 2 s, because `verify` and
@@ -299,6 +300,8 @@ calls the conductor on its own run blocks on the run lock until that command's o
   this host. No other command takes it over while the pid lives, not even a human's
   `status`: the command renews it as a reentry lease. The agent's own commands keep it too
   (they carry `FACTORY_CONDUCTOR_REENTRY=<n>` in their environment).
+- Read-only commands (`status`, `resume`, `reentry status`) renew the lease like any other,
+  so a human checking in delays re-entry by up to `stall_min`. That errs on the safe side.
 - A lease that cannot be read, or whose `renewed_at` is malformed or far in the future, is
   judged by the file's own mtime. A failed lease write prints a `warning:` and never
   changes a command's outcome: `state.json` is the record.
@@ -308,13 +311,17 @@ calls the conductor on its own run blocks on the run lock until that command's o
 One re-entry check, for a timer to run every `interval_min`. It prints exactly one
 `REENTRY:` line and exits 0, or 2 for `failed`, whatever goes wrong. It takes the run lock
 for at most 5 s (a held lock prints `live`: another command is running right now) and never
-renews the lease: it is a timer, not a driver. The first check that fails decides, in this
-order:
+renews the lease: it is a timer, not a driver. A timer passes `--run <run-id>`: when that
+run is missing or finished, watch removes its timer (every kind) and prints
+`REENTRY: done`; when a newer run has started under the root, it removes the timer and
+prints `REENTRY: superseded` (exit 0 both; a malformed id prints `failed`). Without
+`--run`, or for the newest run, the first check that fails decides, in this order:
 
 | Line | When |
 |---|---|
 | `REENTRY: no-run` | no run under the root |
-| `REENTRY: done` | the run is finished; `watch` also removes the run's timer (every kind, by run id) |
+| `REENTRY: done` | the run is finished (or `--run` names a missing run); `watch` also removes the run's timer (every kind, by run id) |
+| `REENTRY: superseded` | `--run` names an unfinished run that a newer run under the root replaced; its timer is removed |
 | `REENTRY: waiting-human` | the run is stopped with `grant_ask` |
 | `REENTRY: exhausted` | the run is stopped with `reentry_exhausted` (every later tick, until `finish`) |
 | `REENTRY: ask` | the newest grant does not cover `local_reversible` for this plan (expired, revoked, stale, or invalid: a shell `agent_cmd` makes the whole grant invalid) |
@@ -351,21 +358,27 @@ Until then the timer keeps firing and prints `exhausted`; the tick after `finish
 ### reentry
 
 `reentry install|uninstall|status` manages the run's timer, which runs
-`<python> <abs path>/conductor.py watch --root <abs root>` every `interval_min`:
+`<python> <abs path>/conductor.py watch --root <abs root> --run <run-id>` every
+`interval_min`, with the PATH `install` ran with (a timer's own PATH is minimal:
+launchd `/usr/bin:/bin:/usr/sbin:/sbin`, cron `/usr/bin:/bin`). launchd carries it in the
+plist's `EnvironmentVariables`, systemd in an `Environment=` line, cron as
+`/usr/bin/env PATH=<captured> …`:
 - a launchd agent (macOS), `~/Library/LaunchAgents/io.agent-skills.factory-conductor.<run-id>.plist`,
   loaded with `launchctl bootstrap gui/<uid>`; it runs only while the user is logged in;
 - a systemd user timer (Linux, when `systemctl --user` works),
   `~/.config/systemd/user/factory-conductor-<run-id>.{service,timer}`, enabled with
   `enable --now`; it stops at logout unless lingering is on (`loginctl enable-linger`);
 - otherwise, if `crontab` exists, a crontab line tagged `# factory-conductor <run-id>`
-  (cron cannot express a literal `\%` in a path, so such a root fails the install);
+  (cron cannot express a literal `\%` in a path or the captured PATH, so such an
+  install fails; cron's `*/N` fires at the minutes divisible by N within each hour, so an
+  `interval_min` that does not divide 60 gives uneven gaps);
   otherwise install prints `REENTRY: failed`.
 
 - **install** needs the newest grant's valid `reentry` block (`REENTRY: disabled`, exit 3,
   without one) and a covering `local_reversible` gate. An ASK prints the `GATE: ASK` line,
   logs the gate and exits 3, but does not stop the run: the timer is auxiliary. It first
   removes any timer this run has under any kind, then writes and loads the new one, logs
-  `reentry_timer` (`action: "install"`, `interval_min`) and prints
+  `reentry_timer` (`action: "install"`, `interval_min`, `path`: the captured PATH) and prints
   `REENTRY: installed every <n> min`. An unsupported platform or a loader that fails prints
   `REENTRY: failed` (exit 2) after removing what it wrote; no event is logged.
 - **uninstall** removes the run's timer under every kind, by run id (not by the kind this

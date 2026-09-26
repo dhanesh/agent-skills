@@ -97,12 +97,16 @@ carries unit tests, eval negatives and an A/B row:
   (`reentry.py`) say who is driving it now, so a timer tick and a live human session can
   never interleave; `conductor watch` is the one command a timer runs — it decides done,
   live, not-stalled, waiting-human, exhausted, disabled or start, and only `start` spawns
-  the grant's `agent_cmd` with the fixed resume prompt; a systemd-user timer or cron entry
-  (`reentry_timer.py`) installs and uninstalls per run, dry-runnable and POSIX-only;
+  the grant's `agent_cmd` with the fixed resume prompt; a launchd agent (macOS), a
+  systemd-user timer or a cron entry (`reentry_timer.py`) installs and uninstalls per run,
+  carries the PATH captured at install, removes itself once its run is finished or
+  superseded, and is dry-runnable and POSIX-only;
   spec-first-planning's unattended grant interview can now ask and carry re-entry consent.
-  Covered by an e2e test (a killed session's stalled run reaches `finish` unattended), eval
-  negatives, and an A/B row plus four guards (lease live, grant_ask, revoked, exhausted),
-  each sanity-checked against the same healthy fixture. Q3 (AC8) is to be re-judged by Jev
+  Covered by an e2e test (an abandoned session's stalled run reaches `finish` unattended,
+  fired through the rendered timer entry under a minimal environment), eval negatives, and
+  an A/B row plus four guards (lease live, grant_ask, revoked, exhausted). Each guard's
+  fixture passes every other check, so it is mutation-proven: deleting its own check from
+  `reentry.decide` makes it start, and the healthy aged fixture starts. Q3 (AC8) is to be re-judged by Jev
   after merge, run by the controller, against the actual merge commit.
 
 Nothing else in this document has been re-measured since.
