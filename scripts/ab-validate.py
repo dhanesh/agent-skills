@@ -239,9 +239,8 @@ SINCE_PP5_REASONS = "b314fca"  # gates: PP-5 asks every never/always/MUST NOT fo
 SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
 # quotes no current sentence; `removed` in the line column marks deleted text.
 SINCE_REENTRY = "c676d92"  # factory-conductor: scheduled re-entry Task 2 -- the run
-# lock and the lease reentry.py adds. The baseline conductor has no `watch` at all, so
-# every row below (the delta and its four guards) moves against a baseline that lacks
-# the subcommand entirely.
+# lock and the lease reentry.py adds. Against a baseline with no `watch` the old arm is an
+# honest 0; against one that has it, the old arm runs the same fixtures (I3).
 
 
 def _git_out(*args):
@@ -5967,7 +5966,7 @@ def _fc_reentry_run_dir(root):
 
 
 def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=False,
-                      prior_attempt=False, max_reentries=2):
+                      prior_attempt=False, max_reentries=2, fresh_lease=False):
     """One `watch` tick against a fresh T1-only reentry fixture in `tree`. Returns 1 when
     the marker file appears (the agent started), 0 when it does not, None (PROBE_ERRORS)
     on a setup failure -- a broken fixture proves nothing either way.
@@ -5976,11 +5975,17 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
     an ask policy before any run existed to stop), so every fixture is built covered and
     T1 is always started. `ask` then supersedes the grant with a fresh one whose
     local_reversible is "ask" and calls `resume`, which gates again, finds itself
-    refused, and records a real grant_ask stop -- before watch ever runs. `age`
-    backdates the lease, the log and the worktree 45 min -- past stall_min, as
-    test_conductor_reentry_e2e.py does; `revoke` revokes the grant once T1 is started;
-    `prior_attempt` appends an aged reentry(n=1) log line so the attempt count already
-    meets max_reentries."""
+    refused, and records a real grant_ask stop -- then writes a newer covering grant
+    (with the same reentry block), so the recorded stop is the only thing left that
+    says no. `age` backdates the lease, the log and the worktree 45 min -- past
+    stall_min, as test_conductor_reentry_e2e.py does; `fresh_lease` then renews the
+    lease now, so a live session lease is the only barrier; `revoke` revokes the grant
+    once T1 is started; `prior_attempt` appends an aged reentry(n=1) log line so the
+    attempt count already meets max_reentries.
+
+    Each guard fixture passes every other `decide` check, so deleting that guard's own
+    check from reentry.decide makes it start (mutation-proven, see the guards in
+    check_factory_conductor_reentry)."""
     import contextlib, signal, time
     tmp = tempfile.mkdtemp()
     root, marker = os.path.join(tmp, "repo"), os.path.join(tmp, "marker")
@@ -6013,6 +6018,8 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
         if ask:
             _fc_write_grant(CC, root, plan_env, _FC_REENTRY_ASK, reentry=block, after=2)
             run("resume")  # gates again under the new grant: refused, grant_ask stop
+            # a newer grant covers the run again: only the recorded stop still says no
+            _fc_write_grant(CC, root, plan_env, _FC_LOCAL, reentry=block, after=4)
         run_dir = _fc_reentry_run_dir(root)
         if run_dir is None:
             PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
@@ -6035,6 +6042,8 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
                                     follow_symlinks=False)
                     with contextlib.suppress(OSError):
                         os.utime(base, (old_ts, old_ts))
+        if fresh_lease:
+            R.renew_lease(run_dir)  # a session renewed its lease just now
         if prior_attempt:
             with open(os.path.join(run_dir, "autonomy-log.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps({"at": old_stamp, "event": "reentry", "n": 1,
@@ -6058,26 +6067,57 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _fc_has_watch(tree):
+    """True when the tree's conductor has scheduled re-entry to measure: reentry.py and
+    a `watch` subcommand."""
+    assets = os.path.join(tree, "factory-conductor", "assets")
+    try:
+        with open(os.path.join(assets, "conductor.py"), encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return False
+    return os.path.isfile(os.path.join(assets, "reentry.py")) and 'add_parser("watch")' in src
+
+
+# The four guards: (dimension, note, the probe's kwargs). Each fixture passes every other
+# check in reentry.decide, so only the guard's own check stops the start: deleting that
+# check from decide turns its 0 into a 1 (the mutation proof in the final review).
+_FC_REENTRY_GUARDS = (
+    ("an agent started while another driver's lease is still live",
+     "watch never starts a second driver while a session lease is live: the log and "
+     "the worktree are aged past stall_min, but the lease was renewed just now",
+     dict(age=True, fresh_lease=True)),
+    ("an agent started on a run already stopped for a human (grant_ask)",
+     "a run that `resume` stopped for grant_ask stays stopped for watch, even once a "
+     "newer grant covers it again and the run is aged: only the recorded stop says no",
+     dict(age=True, ask=True)),
+    ("an agent started under a revoked grant",
+     "a revoked grant is never covered, so watch never starts an aged, stalled run",
+     dict(age=True, revoke=True)),
+    ("an agent started past max_reentries",
+     "watch refuses an aged, stalled run once the attempt count already meets "
+     "max_reentries",
+     dict(age=True, prior_attempt=True, max_reentries=1)),
+)
+
+
 def check_factory_conductor_reentry(old, new):
     s = "factory-conductor"
 
-    def old_watch(tree):
-        """0 when the old conductor has no `watch` at all (an argparse usage error,
-        exit 2, against an empty root -- there is no run to find either) or errors some
-        other way; 1 only if it somehow succeeds. Not a probe error: this only asks
-        whether the baseline command runs, not whether it resumes anything."""
-        conductor = os.path.join(tree, "factory-conductor", "assets", "conductor.py")
-        if not os.path.isfile(conductor):
+    # The old arm runs the very same fixtures on the old tree. It scores an honest 0
+    # only when that tree has no scheduled re-entry at all (no reentry.py / no watch);
+    # once it has, the baseline is measured, not assumed. Old arms run first: the old
+    # and new trees share the module names reentry and contract_check.
+    def old_arm(**kwargs):
+        if not _fc_has_watch(old):
             return 0
-        tmp = tempfile.mkdtemp()
-        try:
-            r = subprocess.run([sys.executable, "-I", conductor, "watch", "--root", tmp],
-                               capture_output=True, text=True, timeout=30)
-            return 1 if r.returncode == 0 else 0
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        conductor, CC, R = _fc_tree_reentry(old)
+        if conductor is None or R is None:
+            return 0
+        return _fc_reentry_probe(old, CC, R, conductor, **kwargs)
 
-    a = old_watch(old)
+    a = old_arm(age=True)
+    old_guards = [old_arm(**kwargs) for _, _, kwargs in _FC_REENTRY_GUARDS]
     conductor, CC, R = _fc_tree_reentry(new)
     if conductor is None or R is None:
         PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
@@ -6087,38 +6127,24 @@ def check_factory_conductor_reentry(old, new):
     else:
         b = _fc_reentry_probe(new, CC, R, conductor, age=True)
     row(s, "stalled runs resumed without the human", a, b, a == 0 and b == 1,
-        "a killed session's stalled run is resumed by `conductor watch`: the lease, the "
-        "worktree and the log are aged past stall_min (as test_conductor_reentry_e2e.py "
-        "ages them), and it spawns the grant's agent_cmd -- a marker-writing stub here. "
-        "The baseline conductor has no `watch` at all", kind="delta", since=SINCE_REENTRY)
+        "an abandoned session's stalled run is resumed by `conductor watch`: the lease, "
+        "the worktree and the log are aged past stall_min (as "
+        "test_conductor_reentry_e2e.py ages them), and it spawns the grant's agent_cmd "
+        "-- a marker-writing stub here. The old arm runs the same fixture; a baseline "
+        "with no `watch` at all scores 0", kind="delta", since=SINCE_REENTRY)
 
-    def guard(dimension, note, **kwargs):
+    for (dimension, note, kwargs), ga in zip(_FC_REENTRY_GUARDS, old_guards):
+        note += ("; sanity-checked against the aged fixture above, which DOES start, "
+                 "and mutation-proven: without its own check in reentry.decide it starts")
         if b != 1:
             PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
                                  "reentry guard sanity check failed for %r: the healthy "
                                  "aged fixture did not start the agent in the new tree"
                                  % dimension))
-            row(s, dimension, a, None, False, note, kind="guard")
-            return
+            row(s, dimension, ga, None, False, note, kind="guard")
+            continue
         g = _fc_reentry_probe(new, CC, R, conductor, **kwargs)
-        row(s, dimension, a, g, g == 0, note, kind="guard")
-
-    guard("an agent started while another driver's lease is still live",
-          "watch never starts a second driver while the session lease from `start` is "
-          "still live (fresh, unaged); sanity-checked against the aged fixture above, "
-          "which DOES start", age=False)
-    guard("an agent started on a run already stopped for a human (grant_ask)",
-          "a run that `resume` already stopped for grant_ask (local_reversible: ask) "
-          "stays stopped for watch too, never resumed as if it were merely stalled; "
-          "sanity-checked against the aged fixture above, which DOES start", ask=True)
-    guard("an agent started under a revoked grant",
-          "a revoked grant is never covered, so watch never starts; sanity-checked "
-          "against the aged fixture above, which DOES start", revoke=True)
-    guard("an agent started past max_reentries",
-          "watch refuses once the attempt count already meets max_reentries; "
-          "sanity-checked against the aged fixture above, which DOES start",
-          age=True, prior_attempt=True, max_reentries=1)
-
+        row(s, dimension, ga, g, g == 0, note, kind="guard")
 
 def main():
     if "--self-test" in sys.argv[1:]:
