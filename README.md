@@ -63,7 +63,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Requirements / spec | `spec-first-planning` | covered |
 | Design / plan | `spec-first-planning`, `clean-code` (architecture), `ai-migration-operating-model` (migrations) | partly |
 | Build / execute | `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
-| Test / verify | `verifier-installer`, `test-safety-net`. Nothing checks built work against the spec's acceptance criteria. | partly |
+| Test / verify | `verifier-installer`, `test-safety-net`; `verification-skill-forge` generates a verify skill that drives the running app and records SHA-bound evidence, which `factory-conductor`'s evidence gate requires before a merge | partly |
 | Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
 | Release / deploy | none (`agent-ready-rails` only audits deploy safety) | missing |
 | Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
@@ -136,6 +136,18 @@ holding every task that passed verify and review, re-verified together on the me
 before the push. The PR body and a `run-result/v1` envelope list each task's proof, and every
 parked task with its reason or its open question. If proven tasks break each other once merged,
 nothing is pushed and the run says which checks failed.
+
+**Evidence-gated runs (optional, recommended).** Tests passing is not verification. Add
+`verification-skill-forge`, let it generate a `verify-<app>` skill for your app, and plan
+unattended with `[feature: …]` and `[proof: …]` on every requirement. The plan then carries a
+`verification` block and the conductor merges a task only after a verifier other than its
+writer has driven the running app and recorded evidence bound to that exact commit, for
+every feature the diff touches. Without the block the conductor runs as before and says
+`evidence_gate=off`.
+
+```bash
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor --skill verification-skill-forge
+```
 
 **What stays with you:** merging the PR; answering parked questions; renewing the grant if it
 lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI

@@ -198,10 +198,13 @@ Users cannot export rows.
 - RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: python3 bench.py --max 10)
 
 ## Requirements
-- R1: The export must include every row.
+- R1: The export must include every row. [feature: export-rows] [proof: the downloaded CSV lists every seeded row] [parallel-safe]
 
 ## Acceptance criteria
 - R1: run `python3 -m pytest -k rows`, expect exit 0. [cmd: {python} -m pytest -k rows]
+
+## Verification
+Verify skill: `.claude/skills/verify-export`
 
 ## Open questions
 

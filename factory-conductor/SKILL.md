@@ -295,8 +295,8 @@ Report: Verdict: pass | fail, then one line of detail.
 
 ## The verifier brief
 
-Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` is the plan's
-`verification.skill`; `<features>` is the task's `features` plus every feature whose source
+Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` and `<evidence_dir>` are the
+plan's `verification.skill` and `verification.evidence_dir` (`.verify` by default); `<features>` is the task's `features` plus every feature whose source
 anchor the diff touches (`conductor evidence` names a missing one in its reject line).
 
 ```text
@@ -305,7 +305,8 @@ code. You MUST NOT edit or commit files, or dispatch subagents. You MUST NOT use
 endpoints or internal setters.
 
 Worktree: <absolute worktree path> (its HEAD is <sha>). Verify skill: <worktree>/<skill>.
-Export VERIFY_EVIDENCE_DIR=<absolute root>/.verify and use an instance name of your own.
+Export VERIFY_EVIDENCE_DIR=<absolute root>/<evidence_dir> and use an instance name of
+your own.
 For each feature in <features>: follow the verify skill's Launch and Doctor, drive the
 feature's recipe in features/<id>.md, capture the action, the resulting state and its side
 effects, and record it with the skill's verify_evidence.py record, --verifier <your id>.
