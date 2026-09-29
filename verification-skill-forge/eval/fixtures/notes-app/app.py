@@ -11,9 +11,19 @@ GET /notes -> {"notes": [...]}
 import argparse
 import json
 import os
+import socketserver
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.2.0"
+
+
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind resolves socket.getfqdn(host), a reverse-DNS lookup
+        # that can stall for many seconds on a macOS runner; the name is never used.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def make_handler(data_dir, instance, port):
@@ -71,8 +81,12 @@ def main():
     p.add_argument("--instance", default="default")
     a = p.parse_args()
     os.makedirs(a.data, exist_ok=True)
-    ThreadingHTTPServer(("127.0.0.1", a.port),
-                        make_handler(a.data, a.instance, a.port)).serve_forever()
+    sys.stderr.write("notes: binding 127.0.0.1:%d\n" % a.port)
+    sys.stderr.flush()
+    server = Server(("127.0.0.1", a.port), make_handler(a.data, a.instance, a.port))
+    sys.stderr.write("notes: listening\n")
+    sys.stderr.flush()
+    server.serve_forever()
 
 
 if __name__ == "__main__":
