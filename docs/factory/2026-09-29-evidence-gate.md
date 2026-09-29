@@ -98,6 +98,13 @@ here.
   always passed `-q` (now `--no-quiet`); `VERIFIER` was never defined; `proven:` needs a
   follow-up commit. Forge fixes from the same exercise: legacy YAML manifolds, a CLI verify
   skill states "no port" instead of claiming one, the scaffold index no longer trips lint.
+- **Both findings fixed, as a four-PR stack on graph_d** (graph_d #33 verify skill, #34 JSON
+  fix, #35 id reuse after reopen, #36 MATCH ... CREATE; each targets `main` because graph_d's
+  CI runs only on PRs to `main`). Each fix has regression tests that fail before it, went
+  through two `/code-review` rounds, and all eight recipes were re-proven live at the top of
+  the stack. What stays open, by choice: a deleted maximum id can be reissued after a reopen
+  (needs a persisted high-water mark), and MATCH ... CREATE refuses a multi-variable `WHERE`
+  or `RETURN` rather than guess, because the executor has no row bindings.
 
 ## Not done, and why
 
