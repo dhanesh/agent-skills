@@ -13,7 +13,7 @@ stands and every place where the spec and the repo disagreed.
 
 | Step | Commit | State |
 |---|---|---|
-| 1. `verification-skill-forge` + a generated verify skill proven live | `b1b0917` | Tooling complete, proven live on the in-repo fixture app (two instances side by side, doctor, drive, record, cleanup, evidence survives: `verification-skill-forge/eval/run_eval.py`). **Not done:** §4.6 generation for a real GrayQuest application, and the independent cold-run session. |
+| 1. `verification-skill-forge` + a generated verify skill proven live | `b1b0917` | Tooling complete, proven live on the in-repo fixture app (two instances side by side, doctor, drive, record, cleanup, evidence survives: `verification-skill-forge/eval/run_eval.py`). **Not done:** §4.6 generation for one real application, and the independent cold-run session. |
 | 2. Evidence gate (§5.1) | `c644629` | Complete, with the §7 regression tests: removing an artifact after the verdict blocks the merge; stale and forged SHAs are rejected. |
 | 3. `spec-first-planning` amendment (§6) | `1e9f843` | Complete. |
 | 4. Parallel dispatch (§5.2) | `c644629` (partition, trail) | Partial by design, see below. Concurrency stays at the existing default of 2; nothing was raised. |
@@ -73,10 +73,9 @@ rows.
 
 ## Not done, and why
 
-- **§4.6 on a real GrayQuest app.** It needs a runnable GrayQuest checkout (services,
-  seed data, credentials), and the generated skill would carry private internals, which must
-  not land in this public repo. It belongs in the app's own repo, with the owner choosing the
-  app.
+- **§4.6 on a real application.** The spec named a GrayQuest app; this is a personal
+  project, so the target is one of the owner's own runnable apps, chosen by the owner. The
+  generated skill lives in that app's repository, not here.
 - **The cold run.** An independent agent session given only the app repo and a feature task.
   It depends on the step above.
 - **Raising concurrency.** §7 says raise only after clean runs at 2. There are no clean gated
