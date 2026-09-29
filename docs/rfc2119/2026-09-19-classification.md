@@ -359,3 +359,17 @@ New section, backfill 2026-09-25: the skill (jev-agent-setup 1.x, PR #62) shippe
 | c1 | 26 | The block governs decisions only. It never lets Jev approve or override a permission decision. | plain (0.65, 0.46) | plain | describes what the installed block does; the permission rule itself lives in that block, not in this skill's workflow |
 | c2 | 45 | If your harness refuses writes to an agent instruction file (Claude Code auto mode treats `~/.claude/CLAUDE.md` as self-modification), you MUST NOT route around it, because… | MUST (0.83, 0.74) | MUST | (no departure) PP-5 reasons 2026-09-25: reason added; level unchanged |
 | c3 | 50 | You MUST NOT ask for the key in chat or write it anywhere, because… | MUST (0.99, 0.77) | MUST | (no departure) PP-5 reasons 2026-09-25: reason added; level unchanged |
+
+## verification-skill-forge (7 candidates · 6 MUST · 1 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+New skill (verification-skill-forge 1.0.0, evidence-gated factory build step 1, 2026-09-29), written with BCP 14 from the start. Jev did not judge these rows; as with factory-conductor's, each level follows the rule it carries and names what enforces it.
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 34 | **Locating this skill's helpers (do this first).** The steps below run bundled … | not judged (new skill) | MUST | the shared `$SKILL_DIR` preamble, same block and level as every other adopter; asset-paths.sh lints the SKILL.md half |
+| c2 | 80 | You MUST NOT address the screen by coordinates or tab order, because… | not judged (new skill) | MUST | spec §4.2 Drive ("MUST NOT use screen coordinates or tab order"); `forge.py lint` fails coordinate clicks, Tab presses and "tab order" in Drive and in feature recipes |
+| c3 | 84 | It MUST NOT delete anything under `.verify/`, because… | not judged (new skill) | MUST | spec §4.2 Cleanup ("MUST NOT destroy evidence"); factory-conductor's `merge` re-reads the records after cleanup; `forge.py lint` fails an rm/find touching `.verify` in Cleanup |
+| c4 | 102 | You MUST NOT hand over a verify skill that was never run, because… | not judged (new skill) | MUST | spec §4.6 (proven live) and pstack's "a generated skill that was never executed is a draft"; the lint cannot see a live run, so the rule carries it, and the Verify section makes the report say so |
+| c5 | 115 | Every anchored constraint SHOULD end with at least one named observable proof. | not judged (new skill) | SHOULD | spec §4.4; `forge.py coverage` reports each gap and `--require-total` turns it into exit 3, but some constraints have no runtime face (a licence, a cost ceiling), so it is a recommendation with a named backlog, not an absolute |
+| c6 | 133 | The brief MUST forbid children to drive the app or edit files, because… | not judged (new skill) | MUST | spec §4.5 ("children never drive the app and never edit files"); the brief is in `references/maintain.md`; the tool cannot see a subagent, so the rule carries it |
+| c7 | 141 | You MUST NOT edit the feature map to match broken behaviour, because… | not judged (new skill) | MUST | spec §4.5 critical invariant; `forge.py check-maintain` fails a feature whose documented behaviour changed while none of its anchors did, and `forge.py finding` is the sanctioned route |
