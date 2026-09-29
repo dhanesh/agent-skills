@@ -222,7 +222,7 @@ FINAL = ("proven", "parked", "blocked")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
                "verify_runs", "verified_head", "review", "merge_commit", "park_reason",
                "failures", "question", "owner", "dispatched_at", "evidence", "features",
-               "serial_after")
+               "serial_after", "verifier_redos")
 # The evidence gate (spec 5.1). A plan whose payload carries a `verification` block
 # ({"skill": <repo-relative verify-<app> skill dir>, "evidence_dir": ".verify"}) runs
 # under it: every task names the feature-map ids it proves, and a head merges only
@@ -235,10 +235,15 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 # A reject the verifier can fix by recording again (a fresh verifier dispatch); the
 # other rejects park the task (feature-unmapped, no-features) or send it back to its
 # executor (evidence-failed: the app did the wrong thing).
+EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
+                 "evidence-diff-unreadable")
+EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
                  "evidence-artifact-altered", "doctor-missing", "doctor-red")
+# Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
+# EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported, never enforced: the runtime does not expose usage to this tool.
 BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
@@ -577,17 +582,26 @@ def derived_max_dispatches(n_tasks, max_repairs, per_attempt=2):
 
 def _where_paths(where):
     """The paths a task's `where` names: comma- or whitespace-separated, backticks and a
-    trailing `:symbol` or `/` dropped."""
+    trailing `:symbol` or `/` dropped. A glob is cut back to the directory before its
+    first wildcard segment (`src/*.py` -> `src`), so it overlaps every path it could
+    match; a glob with no literal prefix (`*.py`) becomes the whole tree, `.`."""
     out = []
     for part in re.split(r"[,\s]+", where or ""):
         part = part.strip("`'\"()").split(":")[0].rstrip("/")
-        if part and part not in (".", "*"):
-            out.append(part)
+        if not part:
+            continue
+        segs = part.split("/")
+        wild = [i for i, seg in enumerate(segs) if re.search(r"[*?\[]", seg)]
+        if wild:
+            part = "/".join(segs[:wild[0]]) or "."
+        out.append(part)
     return out
 
 
 def _overlap(a, b):
-    return any(x == y or x.startswith(y + "/") or y.startswith(x + "/")
+    """True when a path in a and a path in b are equal or one contains the other; `.`
+    (the whole tree) overlaps everything."""
+    return any(x == y or "." in (x, y) or x.startswith(y + "/") or y.startswith(x + "/")
                for x in a for y in b)
 
 
@@ -620,9 +634,19 @@ def partition(order, plan_tasks, gated=False):
         info[k] = (_where_paths(t.get("where") if isinstance(t.get("where"), str) else ""),
                    set(f for f in feats if isinstance(f, str)),
                    t.get("independence") == "parallel-safe")
+    try:
+        schedule = waves({k: {"depends_on": list(deps[k])} for k in order})
+    except PlanError:
+        schedule = []
+    # Pairs are compared in topological order (wave by wave, plan order within a wave),
+    # so a serial edge always points the same way as the dependency edges: a task never
+    # waits on one that transitively waits on it. Plan order alone could close a cycle
+    # when a task depends on one listed after it.
+    pos = {k: i for i, k in enumerate(order)}
+    topo = [k for w in schedule for k in sorted(w, key=pos.get)] or list(order)
     serialized = []
-    for j, b in enumerate(order):
-        for a in order[:j]:
+    for j, b in enumerate(topo):
+        for a in topo[:j]:
             if a in ancestors(b) or b in ancestors(a):
                 continue
             (wa, fa, sa), (wb, fb, sb) = info[a], info[b]
@@ -635,10 +659,6 @@ def partition(order, plan_tasks, gated=False):
             else:
                 continue
             serialized.append({"task": b, "after": a, "reason": why})
-    try:
-        schedule = waves({k: {"depends_on": list(deps[k])} for k in order})
-    except PlanError:
-        schedule = []
     return {"mode": "evidence" if gated else "legacy", "waves": schedule,
             "serialized": serialized}
 
@@ -1040,6 +1060,13 @@ def plan_verification(plan, root):
         return None, "verification must be an object with a string `skill`"
     skill = v["skill"].strip().rstrip("/")
     evdir = v.get("evidence_dir", DEFAULT_EVIDENCE_DIR)
+    # init makes it ignore itself (a `*` .gitignore inside it), and the recorder keeps its
+    # run state in .verify-run beside it: so one dot-directory at the root, never `.`, a
+    # source directory, or a directory the tooling already owns.
+    if not isinstance(evdir, str) or not re.match(EVIDENCE_DIR_RE, evdir) or evdir in (
+            ".git", ".skill-contract", ".verify-run", ".claude"):
+        return None, ("verification.evidence_dir must be one dot-directory at the repo root "
+                      "such as .verify, got %r" % (evdir,))
     for label, rel in (("verification.skill", skill), ("verification.evidence_dir", evdir)):
         if not isinstance(rel, str) or not rel or os.path.isabs(rel) \
                 or ".." in rel.replace("\\", "/").split("/"):
@@ -1984,18 +2011,33 @@ def feature_map_at(st, sha):
 
 
 def touched_features(st, t, sha):
-    """(sorted feature ids the task has to prove, unmapped declared ids, error). The task
-    declares `features`; the diff adds every feature whose anchor it touches."""
+    """(sorted feature ids the task has to prove, unmapped declared ids, (reason, detail)
+    or None). The task declares `features`; the diff adds every feature whose anchor it
+    touches. Anchors come from the map at the merge base AND at the head: the head is the
+    writer's, and a writer who re-anchors a feature away from the files it changed must
+    not shrink its own proof obligation. A map or a diff that cannot be read fails closed."""
     fmap = feature_map_at(st, sha)
     if fmap is None:
-        return None, None, "cannot read %s/features at %s" % (st.verification["skill"], sha)
+        return None, None, ("feature-map-unreadable", "cannot read %s/features at %s"
+                            % (st.verification["skill"], sha))
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return None, None, ("evidence-diff-unreadable", "no merge base of %s and %s"
+                            % (st.run_branch, sha))
+    anchors = {f: set(a) for f, a in fmap.items()}
+    for f, a in (feature_map_at(st, base) or {}).items():
+        anchors.setdefault(f, set()).update(a)
     declared = list(t.get("features") or [])
-    unmapped = [f for f in declared if f not in fmap]
+    unmapped = [f for f in declared if f not in anchors]
     ok, r = _git_ok(st.root, "diff", "--no-ext-diff", "--no-renames", "--name-only",
-                    "%s...%s" % (st.run_branch, sha))
-    changed = r.stdout.split() if ok else []
-    derived = {f for f, anchors in fmap.items()
-               if any(c == a or c.startswith(a + "/") for c in changed for a in anchors)}
+                    base, sha)
+    if not ok:
+        return None, None, ("evidence-diff-unreadable", "cannot diff %s..%s: %s"
+                            % (base[:12], sha[:12], _git_err(r)))
+    changed = r.stdout.split()
+    derived = {f for f, a in anchors.items()
+               if any(c == x or c.startswith(x + "/") for c in changed for x in a)}
     return sorted(set(declared) | derived), unmapped, None
 
 
@@ -2022,8 +2064,6 @@ def _check_record(doc, feature, sha, verifier, directory, base):
         return "evidence-malformed"
     if doc.get("sha") != sha:
         return "evidence-sha-mismatch"
-    if doc.get("verifier") != verifier:
-        return "evidence-verifier-mismatch"
     arts = doc.get("artifacts")
     if not isinstance(arts, list) or not arts:
         return "evidence-malformed"
@@ -2036,8 +2076,12 @@ def _check_record(doc, feature, sha, verifier, directory, base):
             return "evidence-artifact-missing"
         if CC.sha256_file(path) != a.get("sha256"):
             return "evidence-artifact-altered"
+    # A well-formed failure on this head counts whoever recorded it: the app failed on
+    # this commit, and another verifier's pass must not paper over it.
     if doc.get("result") != "pass":
         return "evidence-failed"
+    if doc.get("verifier") != verifier:
+        return "evidence-verifier-mismatch"
     return None
 
 
@@ -2058,7 +2102,7 @@ def evidence_verdict(st, t, sha, verifier):
         return out
     feats, unmapped, err = touched_features(st, t, sha)
     if err:
-        out["reason"], out["feature"] = "feature-unmapped", err
+        out["reason"], out["feature"] = err
         return out
     out["features"] = feats
     if unmapped:
@@ -2075,21 +2119,24 @@ def evidence_verdict(st, t, sha, verifier):
             out["reason"] = "evidence-stale-sha" if dirs else "evidence-missing"
             out["feature"] = f
             return out
-        first = None
-        chosen = None
+        # Every record at this head is judged: any failure blocks the head (and carries
+        # what its verifier saw, for the executor's repair); otherwise the first passing
+        # record by this verifier proves the feature; otherwise the first reason, in
+        # instance-name order, is reported.
+        verdicts = []
         for d in here:
             doc = _load_record(os.path.join(d, "evidence.json"), base)
             why = "evidence-missing" if doc is None else \
                 _check_record(doc, f, sha, verifier, d, base)
-            if why is None:
-                chosen = d
-                break
-            if why == "evidence-failed" and first is None and isinstance(doc, dict):
-                # What the verifier saw is what the executor's repair has to fix.
-                out["observed"] = str(doc.get("observed") or "")[:TAIL]
-            first = first or why
+            verdicts.append((d, doc, why))
+        failed = [(d, doc) for d, doc, why in verdicts if why == "evidence-failed"]
+        if failed:
+            out["reason"], out["feature"] = "evidence-failed", f
+            out["observed"] = str(failed[0][1].get("observed") or "")[:TAIL]
+            return out
+        chosen = next((d for d, _, why in verdicts if why is None), None)
         if chosen is None:
-            out["reason"], out["feature"] = first, f
+            out["reason"], out["feature"] = verdicts[0][2], f
             return out
         inst = os.path.basename(os.path.dirname(os.path.dirname(chosen)))
         dpath = os.path.join(base, inst, "doctor", sha, "doctor.json")
@@ -2153,11 +2200,13 @@ def cmd_evidence(args):
         return 0
     print("EVIDENCE: %s reject %s%s" % (args.task, v["reason"],
                                         " " + v["feature"] if v["feature"] else ""))
-    if v["reason"] in ("feature-unmapped", "no-features"):
+    if v["reason"] in EVIDENCE_PARK:
         # Not the verifier's to fix: the feature map needs verification-skill-forge's
-        # maintain mode (or the plan a feature id) before this task can be proven.
+        # maintain mode (or the plan a feature id), or git cannot show the diff, before
+        # this task can be proven. Fail closed.
         st.set_status(args.task, "reviewing", evidence=record)
-        _park(st, args.task, "feature-unmapped")
+        _park(st, args.task, "feature-unmapped" if v["reason"] in (
+            "feature-unmapped", "no-features") else v["reason"])
         return 3
     if v["reason"] == "evidence-failed":
         # The app did the wrong thing on this head: a repair, like a failing verify.
@@ -2166,8 +2215,15 @@ def cmd_evidence(args):
         st.save()
         _send_back(st, args.task)
         return 3
-    st.set_status(args.task, "reviewing", evidence=record)
+    # A verifier-side reject (EVIDENCE_REDO): another verifier records again. Redos are
+    # bounded per task by max_repairs_per_task, so one misbehaving verifier cannot drain
+    # the shared dispatch budget that other tasks need.
+    redos = int(t.get("verifier_redos") or 0) + 1
+    st.set_status(args.task, "reviewing", evidence=record, verifier_redos=redos)
     st.save()
+    if redos > st.max_repairs():
+        _park(st, args.task, "evidence_redo_exhausted")
+        return 3
     _dispatch(st, args.task, "verifier")
     return 3
 

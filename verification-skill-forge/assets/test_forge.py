@@ -357,5 +357,53 @@ class MaintainTests(Base):
         self.assertTrue(os.path.isfile(out.split(": ", 1)[1].strip()))
 
 
+class ReviewFindingTests(Base):
+    """Regressions for the /code-review findings on the forge and the recorder."""
+
+    def test_artifacts_sharing_a_name_are_refused(self):
+        for sub in ("before", "after"):
+            os.makedirs(os.path.join(self.tmp, sub))
+            with open(os.path.join(self.tmp, sub, "page.png"), "w") as f:
+                f.write(sub)
+        rc, _ = run(V.main, ["record", "--instance", "a", "--feature", "notes-create",
+                             "--verifier", "v", "--result", "pass", "--action", "x",
+                             "--observed", "y", "--side-effect", "z", "--artifact",
+                             os.path.join(self.tmp, "before", "page.png"), "--artifact",
+                             os.path.join(self.tmp, "after", "page.png"),
+                             "--worktree", self.root])
+        self.assertEqual(rc, 2)
+
+    def test_wrong_shaped_manifolds_degrade_instead_of_crashing(self):
+        d = os.path.join(self.root, ".manifold")
+        os.makedirs(d)
+        docs = {"a": {"phase": "ANCHORED", "constraints": {"b": [{"id": "B1"}]},
+                      "anchors": []},
+                "b": {"phase": "ANCHORED", "constraints": {"b": [{"id": ""}, {"id": "B1"}]}},
+                "c": {"phase": "ANCHORED", "schema_version": "3", "constraints": {}},
+                "e": {"phase": "ANCHORED", "constraints": {"b": [{"id": "B1"}]},
+                      "anchors": {"required_truths": [{"maps_to": "B1"}, "x"]}}}
+        for name, doc in docs.items():
+            with open(os.path.join(d, name + ".json"), "w") as f:
+                json.dump(doc, f)
+        rc, out = run(F.main, ["coverage", self.vd])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("DEGRADED: E_SCHEMA c.json", out)
+        self.assertIn("COVERAGE:", out)
+
+    def test_read_only_doctor_checks_pass_lint(self):
+        self.edit("SKILL.md", '--record --verifier "$VERIFIER"\n',
+                  '--record --verifier "$VERIFIER"\ntest -d ".verify-run/$INSTANCE"\n'
+                  '[ -d build ] && echo ok\ncurl -s "localhost:1/" | grep -q \'<title>\'\n')
+        self.assertNotIn("MUST be read-only", self.lint()[1])
+
+    def test_real_writes_in_doctor_still_fail(self):
+        for line in ('echo x > .verify-run/state', 'curl -s -d "a=1" localhost:1/',
+                     'curl -X POST localhost:1/reset'):
+            self.setUp()
+            self.edit("SKILL.md", '--record --verifier "$VERIFIER"\n',
+                      '--record --verifier "$VERIFIER"\n%s\n' % line)
+            self.assertIn("MUST be read-only", self.lint()[1], line)
+
+
 if __name__ == "__main__":
     unittest.main()

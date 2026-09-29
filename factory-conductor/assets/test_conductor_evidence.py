@@ -450,5 +450,97 @@ class TrailTests(Gate):
             self.assertTrue(json.load(f)["evidence_gate"])
 
 
+class ReviewFindingTests(Gate):
+    """Regressions for the /code-review findings on the evidence gate and the partition."""
+
+    def test_partition_never_closes_a_cycle_with_a_forward_dependency(self):
+        tasks = {"T1": {"depends_on": ["T3"], "features": ["x"]},
+                 "T2": {"depends_on": [], "features": ["x", "y"],
+                        "independence": "parallel-safe"},
+                 "T3": {"depends_on": [], "features": ["y"],
+                        "independence": "parallel-safe"}}
+        part = C.partition(["T1", "T2", "T3"], tasks, gated=True)
+        after = {(x["task"], x["after"]) for x in part["serialized"]}
+        # every serial edge points forward in topological order: T2, T3, then T1
+        self.assertEqual(after, {("T3", "T2"), ("T1", "T2")})
+
+    def test_a_glob_where_overlaps_the_paths_it_matches(self):
+        self.assertEqual(C._where_paths("src/*.py, *.md"), ["src", "."])
+        self.assertTrue(C._overlap(C._where_paths("src/*.py"), ["src/export.py"]))
+        self.assertTrue(C._overlap(C._where_paths("*.md"), ["docs/a.md"]))
+
+    def test_a_writer_cannot_reanchor_a_feature_away_from_its_diff(self):
+        self.init([task("T1", ["notes-create"])])
+        rc, out, _ = self.run_cmd("start", "T1", "--owner", "writer")
+        wt = out.split(" ", 2)[2].strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("x")
+        os.makedirs(os.path.join(wt, "src"), exist_ok=True)
+        with open(os.path.join(wt, "src", "list.py"), "w") as f:  # notes-list's anchor
+            f.write("x")
+        fp = os.path.join(wt, *SKILL.split("/"), "features", "notes-list.md")
+        with open(fp) as f:
+            text = f.read()
+        self.assertIn("- anchors: src/list.py", text)
+        with open(fp, "w") as f:
+            f.write(text.replace("- anchors: src/list.py", "- anchors: elsewhere.txt"))
+        git(wt, "add", "-A")
+        git(wt, "commit", "-q", "-m", "w")
+        sha = self.run_cmd("verify", "T1")[1].split()[-1]
+        self.run_cmd("review", "T1", "--verdict", "pass", "--reviewer", "reviewer")
+        self.record("notes-create", sha)
+        rc, out, _ = self.evidence()
+        self.assertIn("reject evidence-missing notes-list", out)
+
+    def test_a_failed_record_blocks_another_verifiers_pass(self):
+        self.init([task("T1", ["notes-create"])])
+        _, sha = self.build()
+        self.record("notes-create", sha, verifier="other", instance="a", result="fail")
+        self.record("notes-create", sha, verifier="verifier", instance="b")
+        rc, out, _ = self.evidence()
+        self.assertIn("reject evidence-failed notes-create", out)
+        self.assertEqual(self.state().tasks["T1"]["status"], "verifying")
+
+    def test_a_failure_outranks_a_malformed_record(self):
+        self.init([task("T1", ["notes-create"])])
+        _, sha = self.build()
+        d = self.record("notes-create", sha, instance="a")
+        with open(os.path.join(d, "evidence.json"), "w") as f:
+            f.write("{broken")
+        self.record("notes-create", sha, instance="b", result="fail")
+        self.assertIn("reject evidence-failed", self.evidence()[1])
+
+    def test_verifier_redos_are_bounded_per_task(self):
+        self.init([task("T1", ["notes-create"])])
+        self.build()
+        outs = [self.evidence()[1] for _ in range(4)]  # nothing recorded: evidence-missing
+        t = self.state().tasks["T1"]
+        self.assertEqual((t["status"], t["park_reason"]), ("parked", "evidence_redo_exhausted"))
+        self.assertEqual(t["verifier_redos"], 3)  # max_repairs_per_task 2, then parked
+
+    def test_evidence_dir_must_be_one_dot_directory(self):
+        for bad in (".", "src", "out/ev", ".git", "../x"):
+            p = payload([task("T1", ["notes-create"])])
+            p["verification"]["evidence_dir"] = bad
+            plan = write_plan_envelope(self.root, plan=p)
+            write_grant(self.root, plan)
+            rc, _, err = self.run_cmd("init", "--plan", plan)
+            self.assertEqual(rc, 2, bad)
+            self.assertIn("evidence_dir", err)
+
+    def test_every_reject_reason_has_one_route(self):
+        routes = [set(C.EVIDENCE_PARK), set(C.EVIDENCE_REDO), {"evidence-failed"}]
+        self.assertFalse(routes[0] & routes[1])
+        with open(C.__file__) as f:
+            src = f.read()
+        import re as _re
+        reasons = set(_re.findall(r'"((?:evidence|doctor|feature|verifier|writer|no)-[a-z-]+)"',
+                                  src.split("def evidence_verdict")[1].split("def cmd_evidence")[0]))
+        reasons |= set(_re.findall(r'"((?:evidence|doctor)-[a-z-]+)"',
+                                   src.split("def _check_record")[1].split("def evidence_verdict")[0]))
+        reasons |= {"feature-map-unreadable", "evidence-diff-unreadable"}
+        self.assertEqual(reasons - set().union(*routes), set())
+
+
 if __name__ == "__main__":
     unittest.main()

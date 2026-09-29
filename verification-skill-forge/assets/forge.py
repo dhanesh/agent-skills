@@ -90,10 +90,10 @@ COORDINATES = (
 )
 WRITES = (
     re.compile(r"(^|[\s;&|])(rm|mv|kill|pkill|killall|truncate|dd)\s"),
-    re.compile(r"(?<![0-9&])>>?\s*(?!/dev/null)[^\s&]"),
+    re.compile(r"(?<![0-9&=<-])>>?\s*(?!/dev/null)[^\s&=]"),
     re.compile(r"\bgit\s+(commit|push|reset|checkout|clean)\b"),
     re.compile(r"(?i)-X\s*(POST|PUT|PATCH|DELETE)\b"),
-    re.compile(r"(\s--data(-raw|-binary)?\b|\s-d\s)"),
+    re.compile(r"\bcurl\b.*(\s--data(-raw|-binary|-urlencode)?\b|\s-d\s)"),
     re.compile(r"(?i)\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE)\s"),
 )
 EVIDENCE_DELETE = re.compile(r"\b(rm|rmdir|shred|find)\b[^\n]*(?<![\w-])\.verify(?![\w-])")
@@ -380,8 +380,10 @@ def lint_skill_md(L, verify_dir):
     for line in doctor.splitlines():
         if "verify_evidence.py doctor" in line:
             continue
+        # Quoted text is data, not shell: `grep -q '<title>'` redirects nothing.
+        bare = re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
         for rx in WRITES:
-            if rx.search(line):
+            if rx.search(bare):
                 L.fail("Doctor: %r writes or kills: the doctor MUST be read-only"
                        % line.strip())
                 break
@@ -564,6 +566,9 @@ def read_manifolds(mdir):
             degraded.append(("E_VALIDATE", name, "top level is not an object"))
             continue
         sv = doc.get("schema_version", 3)
+        if isinstance(sv, bool) or not isinstance(sv, int):
+            degraded.append(("E_SCHEMA", name, "schema_version %r is not an integer" % (sv,)))
+            continue
         if sv not in SUPPORTED_SCHEMA:
             degraded.append(("E_SCHEMA", name, "schema_version %r is not supported" % sv))
             continue
@@ -577,12 +582,17 @@ def read_manifolds(mdir):
         ids = {}
         for group in cons.values():
             for c in group if isinstance(group, list) else []:
-                if isinstance(c, dict) and isinstance(c.get("id"), str):
+                if isinstance(c, dict) and isinstance(c.get("id"), str) \
+                        and re.match(r"^[A-Z]+\d*$", c["id"]):
                     ids[c["id"]] = c.get("type")
-        truths = (doc.get("anchors") or {}).get("required_truths") or []
+        anchors = doc.get("anchors")
+        truths = anchors.get("required_truths") if isinstance(anchors, dict) else []
         mapped = set()
         for rt in truths if isinstance(truths, list) else []:
-            for cid in (rt.get("maps_to") or []) if isinstance(rt, dict) else []:
+            maps = rt.get("maps_to") if isinstance(rt, dict) else None
+            for cid in maps if isinstance(maps, list) else []:
+                if not isinstance(cid, str):
+                    continue
                 if cid in ids:
                     mapped.add(cid)
                 else:

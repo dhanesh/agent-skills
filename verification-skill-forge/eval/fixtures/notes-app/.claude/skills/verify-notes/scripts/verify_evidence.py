@@ -233,6 +233,13 @@ def cmd_record(a):
     out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
     os.makedirs(out, exist_ok=True)
     arts = []
+    names = [os.path.basename(os.path.abspath(x)) for x in a.artifact]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        # Each artifact lands in the record's directory under its basename: two with one
+        # name would overwrite each other and the first hash would no longer match.
+        return _fail("artifacts share a file name (%s): rename one before recording"
+                     % ", ".join(dup))
     for src in a.artifact:
         src = os.path.abspath(src)
         if not os.path.isfile(src):
