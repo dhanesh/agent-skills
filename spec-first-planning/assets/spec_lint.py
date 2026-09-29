@@ -156,6 +156,31 @@ AFTER_RE = re.compile(r"\[after:\s*([^\]]+)\]", re.IGNORECASE)
 # pattern, i.e. equivalent to fullmatch.
 _AFTER_ID_RE = re.compile(r"^[Rr](\d+)$")
 
+# Runtime-proof hints on a requirement (spec 6 of the evidence-gated factory):
+# "[feature: notes-create, notes-list]" names the verify skill's feature-map ids the
+# derived task has to prove; "[proof: <observable predicate>]" is what an agent can
+# drive and see when it works; "[parallel-safe]" marks it independent of every other
+# task (the alternative independence marker is an "[after: ...]" hint).
+FEATURE_RE = re.compile(r"\[feature:\s*([^\]]*)\]", re.IGNORECASE)
+PROOF_RE = re.compile(r"\[proof:\s*([^\]]*)\]", re.IGNORECASE)
+PSAFE_RE = re.compile(r"\[parallel-safe\]", re.IGNORECASE)
+_FEATURE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+# "Verify skill: <repo-relative verify-<app> dir>" in an optional ## Verification section.
+VERIFY_SKILL_RE = re.compile(r"^\s*(?:[-*]\s*)?verify skill:\s*`?([^`\s]+)`?\s*$",
+                             re.IGNORECASE)
+# A predicate that is only about tests, builds, CI or lint is not a runtime observation.
+NOT_OBSERVABLE_RE = re.compile(
+    r"(?i)^\W*(?:(?:all|the|unit|integration|e2e)\s+)*tests?\b.*\b(?:pass|green|succeed)"
+    r"|^\W*(?:the\s+)?(?:build|compile|ci|lint(?:er)?|type-?check)s?\b"
+    r".*\b(?:clean|pass(?:es|ed)?|green|succeed(?:s|ed)?|ok)\b|^\W*(?:it\s+)?(?:compiles|builds)\b")
+
+
+def strip_proof_hints(text):
+    """A requirement's statement without its [feature:], [proof:] and [parallel-safe]
+    hints, so a hint's words neither satisfy the modal rule nor trip the vague-term one."""
+    return PSAFE_RE.sub("", PROOF_RE.sub("", FEATURE_RE.sub("", text)))
+
+
 # An acceptance criterion's optional trailing "[cmd: <argv>]" hint: the command
 # that proves it. The greedy group runs to the LAST "]" so an argv may itself hold
 # brackets; "[cmd:" anywhere else in the criterion is a misplaced hint.
@@ -528,6 +553,28 @@ def lint_unattended(spec):
         if raw is None:
             issues.append("acceptance criterion has no [cmd: ...] hint; unattended mode "
                           "needs the command that proves every criterion: '%s'" % ctext[:60])
+    # Tests are not verification: every task run unattended names what it proves at
+    # runtime, how an agent sees it, and whether it can run beside the others.
+    if not spec["verify_skill"]:
+        issues.append("missing '## Verification' with a 'Verify skill: <path>' line; "
+                      "unattended mode proves every task on the running app "
+                      "(verification-skill-forge generates the skill)")
+    for num, _ in spec["requirements"]:
+        if not spec["features"].get(num):
+            issues.append("R%d has no [feature: <id>, ...] hint naming the feature-map "
+                          "entries it proves" % num)
+        proof = spec["proofs"].get(num)
+        if not proof:
+            issues.append("R%d has no [proof: ...] observable predicate; it cannot run "
+                          "unattended: state what an agent can drive and see, or plan it "
+                          "attended" % num)
+        elif NOT_OBSERVABLE_RE.search(proof):
+            issues.append("R%d [proof: %s] is not observable at runtime (tests passing or "
+                          "a clean build is not verification); state what an agent can "
+                          "drive and see, or plan it attended" % (num, proof[:40]))
+        if not spec["parallel_safe"].get(num) and not spec["after"].get(num):
+            issues.append("R%d has no independence marker: add [parallel-safe] or "
+                          "[after: R<n>, ...]" % num)
     return issues
 
 
@@ -602,6 +649,27 @@ def parse_spec(text):
     # doesn't is recorded in malformed_after rather than silently dropped, so
     # a typo shows up as a lint failure instead of a hint that just does
     # nothing.
+    features, proofs, parallel_safe, malformed_features = {}, {}, {}, []
+    for num, rtext in requirements:
+        fm = FEATURE_RE.search(rtext)
+        ids = []
+        for token in (fm.group(1).split(",") if fm else []):
+            token = token.strip().strip("`")
+            if _FEATURE_ID_RE.match(token):
+                ids.append(token)
+            else:
+                malformed_features.append((num, token))
+        features[num] = ids
+        pm = PROOF_RE.search(rtext)
+        proofs[num] = pm.group(1).strip() if pm else None
+        parallel_safe[num] = bool(PSAFE_RE.search(rtext))
+    verify_skill = None
+    for line in find_section(sections, "Verification") or []:
+        vm = VERIFY_SKILL_RE.match(line)
+        if vm:
+            verify_skill = vm.group(1).strip().rstrip("/")
+            break
+
     after = {}
     malformed_after = []
     for num, rtext in requirements:
@@ -658,6 +726,11 @@ def parse_spec(text):
         "malformed_requirements": malformed,
         "after": after,
         "malformed_after": malformed_after,
+        "features": features,
+        "malformed_features": malformed_features,
+        "proofs": proofs,
+        "parallel_safe": parallel_safe,
+        "verify_skill": verify_skill,
         "criteria": criteria,
         "commands": commands,
         "misplaced_cmds": misplaced_cmds,
@@ -768,6 +841,7 @@ def lint(text, mode="light"):
 
     # 3 + 4. Per-requirement: modal obligation, no unmeasured vagueness.
     for num, rtext in reqs:
+        rtext = strip_proof_hints(rtext)
         if not MODAL_RE.search(rtext):
             issues.append(
                 "R%d lacks a modal obligation ('must' or 'shall') — every "
@@ -821,6 +895,23 @@ def lint(text, mode="light"):
                 )
     if _after_cycle(after):
         issues.append("after: hints have a cycle")
+
+    # 5c. Runtime-proof hints: well-formed feature ids, a verify skill whenever a
+    # feature is named (factory-conductor refuses features without one), and no
+    # requirement both [parallel-safe] and [after: ...].
+    for num, token in spec["malformed_features"]:
+        issues.append("R%d [feature: ...] has a malformed id '%s' (lowercase kebab-case)"
+                      % (num, token))
+    vs = spec["verify_skill"]
+    if any(spec["features"].values()) and not vs:
+        issues.append("a requirement names [feature: ...] but the spec has no "
+                      "'## Verification' section with a 'Verify skill: <path>' line")
+    if vs and (vs.startswith("/") or ".." in vs.split("/")
+               or not vs.split("/")[-1].startswith("verify-")):
+        issues.append("Verify skill %r must be a repo-relative verify-<app> directory" % vs)
+    for num, _ in reqs:
+        if spec["parallel_safe"].get(num) and spec["after"].get(num):
+            issues.append("R%d is both [parallel-safe] and [after: ...]; pick one" % num)
 
     # 5b. [cmd: ...] hints: trailing, parseable, non-empty, and C6-clean.
     for bullet in spec["misplaced_cmds"]:

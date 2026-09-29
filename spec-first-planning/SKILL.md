@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.2.1"
+  version: "2.3.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -109,6 +109,16 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    program name, no absolute paths): it becomes the task's verify command. Unattended mode
    needs one on every criterion. When you can't write the
    check, the requirement isn't ready — park it in Open questions instead of faking one.
+
+   **Tests are not verification.** For work that will run unattended, give every
+   requirement `[feature: <id>, ...]` (the verify skill's feature-map entries it proves),
+   `[proof: <what an agent can drive and see>]` and an independence marker,
+   `[parallel-safe]` or `[after: R<n>, ...]`, and name the verify skill in
+   `## Verification` (`Verify skill: <path>`; verification-skill-forge writes one). Where
+   Manifold converged, take the predicates from its anchored constraints. A requirement
+   whose only proof is "tests pass" or "builds clean" MUST NOT run unattended, because
+   factory-conductor would then merge work nobody saw working: plan it attended, and the
+   `--unattended` lint refuses it until you do.
 3. **Lint and repair** with `python3 "$SKILL_DIR/assets/spec_lint.py" <spec.md>` for the
    light pass. Add `--converged` before the path for the full loop, or `--unattended` in
    unattended mode. Fix every `FAIL:` line (each names the requirement and the defect:

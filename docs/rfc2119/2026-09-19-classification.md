@@ -263,7 +263,7 @@ Skills appear in rewrite order.
 | c5 | 108 | - **Producer-extended bundles** (e.g. `feynman-walkthrough`'s explainers): arbit… | MUST (0.31, 0.61) | plain | describes the generator's rendering behavior for extra frontmatter keys; a descriptive never, not a directive (confidence 0.31 < 0.6) |
 | c6 | 77 | 3. **Build and verify.** `cd <dir> && npm install && npm run build` MUST complete with zero errors; | MUST (0.81, 0.52) | MUST | backfill 2026-09-25: was lowercase "must"; a site that does not build is not a deliverable |
 
-## spec-first-planning (22 candidates · 12 MUST · 0 SHOULD · 0 MAY · 10 plain · 1 departure)
+## spec-first-planning (23 candidates · 13 MUST · 0 SHOULD · 0 MAY · 10 plain · 1 departure)
 
 Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec-first-planning 2.2.0). That wave added no keyword here: the `[cmd: …]` guidance, the factory-conductor handoff sentence (I4) and the run-branch example (c18) are plain text or edits inside existing rows.
 
@@ -291,6 +291,7 @@ Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec
 | c20 | 59 | A requirement can also carry `[after: R2, R3]`, naming the other requirements it comes after; | plain (0.52, 0.30) | plain | backfill 2026-09-25: was lowercase "it must follow", describing ordering; confidence 0.52 < 0.6, decided ourselves, plain as Jev chose |
 | c21 | 75 | *Anchor* works back from the outcome, asking "what has to be TRUE?" | plain (0.98, 0.24) | plain | backfill 2026-09-25: was the quoted question "what must be TRUE?", describing the Anchor stage |
 | c22 | 104 | Write each requirement as one testable `must` statement… | plain (0.61, 0.47) | plain | backfill 2026-09-25: was a quoted lowercase "must", a mention of the token `spec_lint.py` requires; now inline code. The step stays a plain imperative |
+| c23 | 113 | A requirement whose only proof is "tests pass" or "builds clean" MUST NOT run unattended, because… | not judged (new in 2.3.0, evidence-gated factory step 3) | MUST | spec §6 ("a task that cannot state an observable predicate MUST NOT qualify for unattended execution; it routes to attended mode"); `spec_lint.py --unattended` fails a requirement with no `[proof: …]` or with one that is only about tests, builds, CI or lint, so a grant can only pin a plan whose every task names an observable predicate |
 
 ## bug-autopsy (4 candidates · 2 MUST · 1 SHOULD · 0 MAY · 1 plain · 1 departure)
 

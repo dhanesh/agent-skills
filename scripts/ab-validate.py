@@ -5313,6 +5313,76 @@ _FC_GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                 GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
 
+_FC_FEATURE = """# {fid}: {fid}
+
+- id: {fid}
+- proven: no
+- anchors: {anchors}
+
+## What it is
+
+x
+
+## How to reach it
+
+x
+
+## Drive it
+
+```sh
+true
+```
+
+Expect exit 0.
+
+## Proof
+
+x
+
+## Gotchas
+
+x
+"""
+
+
+def _fc_verify_skill(root, features, rel=".claude/skills/verify-app"):
+    """Write (uncommitted) a verify skill at rel whose map holds features {id: anchors}."""
+    d = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.join(d, "features"), exist_ok=True)
+    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: %s\ndescription: x\n---\n" % os.path.basename(rel))
+    with open(os.path.join(d, "features", "README.md"), "w", encoding="utf-8") as f:
+        f.write("".join("- [%s](%s.md)\n" % (k, k) for k in features))
+    for fid, anchors in features.items():
+        with open(os.path.join(d, "features", fid + ".md"), "w", encoding="utf-8") as f:
+            f.write(_FC_FEATURE.format(fid=fid, anchors=anchors))
+
+
+def _fc_record(root, feature, sha, verifier="verifier", instance="a", result="pass",
+               sha_field=None, doctor_ok=True):
+    """Lay down a verify-evidence/v1 record (and its instance's doctor) as
+    verification-skill-forge's verify_evidence.py writes them. Returns its directory."""
+    d = os.path.join(root, ".verify", instance, feature, sha)
+    os.makedirs(d, exist_ok=True)
+    body = b'{"status": 201}\n'
+    with open(os.path.join(d, "capture.json"), "wb") as f:
+        f.write(body)
+    with open(os.path.join(d, "evidence.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": instance,
+                   "feature": feature, "sha": sha_field or sha, "verifier": verifier,
+                   "result": result, "action": "a", "observed": "o", "side_effects": ["s"],
+                   "artifacts": [{"path": "capture.json",
+                                  "sha256": hashlib.sha256(body).hexdigest()}],
+                   "captured_at": _now_z()}, f)
+    dd = os.path.join(root, ".verify", instance, "doctor", sha)
+    os.makedirs(dd, exist_ok=True)
+    with open(os.path.join(dd, "doctor.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "doctor", "instance": instance,
+                   "sha": sha, "ok": doctor_ok, "checks": {"port": "pass"},
+                   "verifier": verifier, "captured_at": _now_z()}, f)
+    return d
+
+
 def _fc_status_proven(run, ids):
     """The task ids among `ids` that the conductor's `status` reports as proven."""
     merged = set()
@@ -5324,10 +5394,19 @@ def _fc_status_proven(run, ids):
     return merged
 
 
-def _fc_drive(run, ids):
-    """start, commit real work, verify, review and merge each task in turn."""
+def _fc_gated(run):
+    """True when the run is under factory-conductor's evidence gate (1.1.0+): `status`
+    says evidence_gate=on. A baseline conductor never says it, so it is driven as before."""
+    return "evidence_gate=on" in run("status").stdout
+
+
+def _fc_drive(run, ids, record=None):
+    """start, commit real work, verify, review and merge each task in turn. Under the
+    evidence gate the driver also names the owner and the reviewer, calls record(tid, sha)
+    to lay down the verifier's evidence, and asks for the evidence verdict before merge."""
+    gated = _fc_gated(run)
     for tid in ids:
-        started = run("start", tid)
+        started = run("start", tid, *(["--owner", "writer"] if gated else []))
         wt = None
         for line in started.stdout.splitlines():
             if line.startswith("START: %s " % tid):
@@ -5341,8 +5420,13 @@ def _fc_drive(run, ids):
             subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
             subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
                            capture_output=True, env=_FC_GENV)
-        if run("verify", tid).returncode == 0:
-            run("review", tid, "--verdict", "pass")
+        verified = run("verify", tid)
+        if verified.returncode == 0:
+            run("review", tid, "--verdict", "pass",
+                *(["--reviewer", "reviewer"] if gated else []))
+            if gated and record is not None:
+                record(tid, verified.stdout.split()[-1])
+                run("evidence", tid, "--verifier", "verifier")
             run("merge", tid)
 
 
@@ -5424,10 +5508,13 @@ Users cannot export rows.
 - RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: test -f t1.txt)
 
 ## Requirements
-- R1: The export must include every row.
+- R1: The export must include every row. [feature: export-rows] [proof: the export file exists in the checkout] [parallel-safe]
 
 ## Acceptance criteria
 - R1: the exported file exists. [cmd: test -f t1.txt]
+
+## Verification
+Verify skill: `.claude/skills/verify-export`
 
 ## Open questions
 
@@ -5467,6 +5554,9 @@ def _fc_planner_run(tree):
         os.makedirs(os.path.join(root, "docs"))
         with open(os.path.join(root, "docs", "spec.md"), "w", encoding="utf-8") as f:
             f.write(_FC_PLANNER_SPEC)
+        # The verify skill the spec names (spec-first-planning 2.3.0 requires one for an
+        # unattended plan; a baseline ignores it): one feature anchored on t1.txt.
+        _fc_verify_skill(root, {"export-rows": "t1.txt"}, rel=".claude/skills/verify-export")
         subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
         subprocess.run(["git", "-C", root, "commit", "-q", "-m", "spec"], check=True,
                        capture_output=True, env=_FC_GENV)
@@ -5506,7 +5596,7 @@ def _fc_planner_run(tree):
         with open(env[0], encoding="utf-8") as f:
             ids = [t["id"] for t in json.load(f)["predicate"]["payload"]["tasks"]]
         run("init", "--plan", env[0])
-        _fc_drive(run, ids)
+        _fc_drive(run, ids, lambda tid, sha: _fc_record(root, "export-rows", sha))
         proven = _fc_status_proven(run, ids)
         run("finish")
         return 1 if proven else 0

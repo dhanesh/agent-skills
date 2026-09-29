@@ -24,6 +24,17 @@
             "minItems": 1,
             "items": {"type": "string", "pattern": "^T[0-9]+$"}
           },
+          "features": {
+            "type": "array",
+            "description": "Optional: the verify skill's feature-map ids this task proves (a requirement's [feature: ...] hint). factory-conductor's evidence gate needs evidence for each.",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"}
+          },
+          "predicate": {"type": "string", "description": "Optional: the observable success predicate an agent can drive and see (a requirement's [proof: ...] hint). Not 'tests pass'."},
+          "independence": {
+            "description": "Optional: \"parallel-safe\" ([parallel-safe]) or the task ids this one depends on ([after: ...]); feeds factory-conductor's independence partition.",
+            "oneOf": [{"const": "parallel-safe"}, {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^T[0-9]+$"}}]
+          },
           "verify": {
             "type": "array",
             "minItems": 1,
@@ -41,6 +52,12 @@
     },
     "coverage": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
     "uncovered": {"type": "array", "items": {"type": "string"}},
+    "verification": {
+      "type": "object",
+      "description": "Optional: the spec's ## Verification section. factory-conductor runs a plan that carries it under its evidence gate.",
+      "required": ["skill"],
+      "properties": {"skill": {"type": "string", "description": "Repo-relative path of the verify-<app> skill directory (verification-skill-forge generates it)."}}
+    },
     "constraints": {
       "type": "array",
       "description": "Optional: the spec's Constrain-step constraints, when it has any (task-plan/v1 stays v1 — additive).",
