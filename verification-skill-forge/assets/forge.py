@@ -308,8 +308,9 @@ def cmd_scaffold(a):
     with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
         f.write(SKELETON.format(app=a.app, standards="\n".join(STANDARDS)))
     with open(os.path.join(d, "features", "README.md"), "w", encoding="utf-8") as f:
-        f.write("# %s feature map\n\nOne file per user-facing feature. FILL: add each "
-                "feature as `- [<id>](<id>.md) — <one line>`.\n\n" % a.app)
+        f.write("# %s feature map\n\nOne file per user-facing feature. FILL: one line per "
+                "feature: a markdown link to its file, a dash, then what a user does with "
+                "it.\n\n" % a.app)
     vendor(d)
     _out("SCAFFOLD: %s" % d)
     return 0
@@ -369,9 +370,12 @@ def lint_skill_md(L, verify_dir):
     if launch and not re.search(r"(?i)\b(ready|readiness|timeout|wait|seconds)\b", prose(launch)):
         L.fail("Launch: say how to tell the instance is ready and how long to wait")
     if launch and "verify_evidence.py port" not in launch and \
-            "verify_evidence.py claim" not in launch:
+            "verify_evidence.py claim" not in launch and \
+            not re.search(r"(?i)\bno (?:network )?port\b", prose(launch)):
+        # A short-lived CLI binds nothing: saying so is the alternative to a port claim.
         L.fail("Launch: allocate the instance's port with scripts/verify_evidence.py port "
-               "(or claim), so two owners never share one")
+               "(or claim), so two owners never share one, or state that the app opens "
+               "no port (a CLI)")
     doctor = "\n".join(code_blocks(secs.get("Doctor", "")))
     for line in doctor.splitlines():
         if "verify_evidence.py doctor" in line:

@@ -89,6 +89,21 @@ class LintTests(Base):
             f.write(text.replace(launch, new))
         self.assertIn("no command takes the instance", self.lint()[1])
 
+    def test_a_cli_may_state_it_opens_no_port(self):
+        path = os.path.join(self.vd, "SKILL.md")
+        text = F.read(path)
+        launch = F.sections(F.frontmatter(text)[1])["Launch"]
+        new = launch.replace('python3 "$SKILL/scripts/verify_evidence.py" port --instance '
+                             '"$INSTANCE"\n', "")
+        new = new.replace("verify_evidence.py port", "the recorder")
+        with open(path, "w") as f:
+            f.write(text.replace(launch, new))
+        self.assertIn("allocate the instance's port", self.lint()[1])
+        text = F.read(path)
+        with open(path, "w") as f:
+            f.write(text.replace("## Launch\n", "## Launch\n\nA CLI: it opens no port.\n", 1))
+        self.assertNotIn("allocate the instance's port", self.lint()[1])
+
     def test_doctor_that_writes_fails(self):
         self.edit("SKILL.md", '--record --verifier "$VERIFIER"\n',
                   '--record --verifier "$VERIFIER"\nrm -f .verify-run/a/pid\n')

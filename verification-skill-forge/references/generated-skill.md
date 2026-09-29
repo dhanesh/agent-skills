@@ -32,7 +32,8 @@ so the cold-run agent never finds it.
 - Readiness: the signal (a log line, a health route answering for *this* instance) and
   the timeout. Lint fails a Launch that names neither.
 - For a short-lived CLI there is no server: launch means build once, then every drive runs
-  in its own PTY or temp directory keyed by the instance.
+  in its own PTY or temp directory keyed by the instance. Say "no port" (or "no network
+  port") in Launch: lint accepts that in place of a port claim.
 
 ## Doctor
 
