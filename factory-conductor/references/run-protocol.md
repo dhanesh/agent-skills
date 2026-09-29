@@ -298,7 +298,7 @@ verified head. Checks, in order; the first that fails is the reject reason:
 | 8 | its `sha` equals the head | `evidence-sha-mismatch` | verifier dispatch |
 | 9 | its `verifier` equals `--verifier` | `evidence-verifier-mismatch` | verifier dispatch |
 | 10 | every artifact exists inside the evidence dir with its sha256 | `evidence-artifact-missing`, `evidence-artifact-altered` | verifier dispatch |
-| 11 | `result` is `pass` | `evidence-failed` | back to `verifying`: a repair on the task's repair budget |
+| 11 | `result` is `pass` | `evidence-failed` | back to `verifying`: a repair on the task's repair budget; the record keeps the verifier's `observed` text, `resume` prints `dispatch-repair evidence`, and `verify` refuses the same commit |
 | 12 | `<instance>/doctor/<head>/doctor.json` exists, kind `doctor`, same `sha`, `ok: true` | `doctor-missing`, `doctor-red` | verifier dispatch |
 
 A pass records `tasks.<task>.evidence` (`verdict`, `verifier`, `verified_head`, `features`,
@@ -376,6 +376,7 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `NEXT: <task> dispatch-repair review` | `verifying` after a failed review | send the executor `tasks.<task>.review.detail`, then `conductor verify <task>` on its report |
 | `NEXT: <task> dispatch-reviewer <sha>` | `reviewing`, no verdict | dispatch a reviewer on `<sha>`, the verified head, then `conductor review` |
 | `NEXT: <task> verify` | `verifying`, last verify passed, no review (merge found the branch moved) | `conductor verify <task>`; nothing is dispatched |
+| `NEXT: <task> dispatch-repair evidence` | `verifying` after an `evidence-failed` verdict | send the executor `tasks.<task>.evidence.feature` and `.observed` (what the verifier saw), then `conductor verify <task>` on its report; `verify` refuses the commit the evidence failed on (`unchanged since failed evidence`), so the repair is a new commit |
 | `NEXT: <task> dispatch-verifier <sha>` | `reviewing`, review pass, evidence gate on, no passing evidence verdict on `<sha>` | dispatch the verifier brief on `<sha>`, then `conductor evidence <task> --verifier <id>` |
 | `NEXT: <task> merge` | `reviewing`, verdict pass (and, under the gate, a passing evidence verdict) | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
 | `NEXT: run next` | work is in flight, or a task is ready | carry on with the loop (`conductor next`) |

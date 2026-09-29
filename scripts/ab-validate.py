@@ -6248,6 +6248,46 @@ def _eg_lost_worktree_stranded(tree):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _eg_failure_lost(tree):
+    """1 when the running app's failure never reaches T1's executor: the task merges anyway
+    (a baseline has no gate), or a fresh session's `resume` sends it to verify or merge
+    instead of back to its executor. 0 when resume prints dispatch-repair evidence and
+    re-verifying the failed commit is refused."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 1
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], {})])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        gated = _fc_gated(run)
+        wt = run("start", "T1", *(["--owner", "w"] if gated else [])).stdout.split(" ", 2)[2]
+        wt = wt.strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        sha = run("verify", "T1").stdout.split()[-1]
+        run("review", "T1", "--verdict", "pass", *(["--reviewer", "r"] if gated else []))
+        _fc_record(root, "notes-create", sha, result="fail")
+        if not gated:
+            run("merge", "T1")
+            return 1 if "T1" in _fc_status_proven(run, ["T1"]) else 0
+        run("evidence", "T1", "--verifier", "verifier")
+        if "NEXT: T1 dispatch-repair evidence" not in run("resume").stdout:
+            return 1
+        return 0 if run("verify", "T1").returncode == 3 else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def check_evidence_gate(old, new):
     s = "factory-conductor"
 
@@ -6285,6 +6325,14 @@ def check_evidence_gate(old, new):
         a, b = merged(old, case), merged(new, case)
         row(s, label + " (lower=better)", a, b, b == 0 and (a is not None and a >= b), why,
             kind="delta" if a == 1 else "guard", since=SINCE_EVIDENCE_GATE)
+
+    a, b = _eg_failure_lost(old), _eg_failure_lost(new)
+    row(s, "runtime failures that never reach the task's executor (lower=better)", a, b,
+        a == 1 and b == 0,
+        "evidence-failed sends the task back with the verifier's observation, resume prints "
+        "`dispatch-repair evidence` (it printed `verify`, which re-proved the failed commit "
+        "and looped), and verify refuses the commit the app failed on",
+        since=SINCE_EVIDENCE_GATE)
 
     a, b = _eg_resume_merges_unverified(old), _eg_resume_merges_unverified(new)
     row(s, "resumes that send a reviewed head to merge with no runtime verdict "

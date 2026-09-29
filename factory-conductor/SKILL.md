@@ -133,7 +133,8 @@ Each step is one command. Read its output lines, not just the exit code.
    task merge. `EVIDENCE: <task> reject <reason>` (exit 3) means: `feature-unmapped` parks
    the task (run verification-skill-forge's maintain mode, then a new run);
    `evidence-failed` sends it back to its executor as a repair, with the verifier's
-   observation; any other reason dispatches a new verifier (the conductor has already
+   observation (`tasks.<task>.evidence.observed` in `state.json`), and the repair has to be a
+   new commit; any other reason dispatches a new verifier (the conductor has already
    counted the dispatch). The reasons are listed in "The evidence gate" below.
 8. **Merge.** `conductor merge <task>` needs a pass from both verify and review on the same
    pinned commit, and under the gate a passing evidence verdict on it too; it re-reads the
@@ -219,6 +220,10 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   `tasks.<task>.review.detail` from `state.json`, then verify on its report.
 - `NEXT: <task> dispatch-reviewer <sha>`: dispatch a reviewer on that commit, then record its
   verdict with `conductor review`.
+- `NEXT: <task> dispatch-repair evidence`: the running app failed the task's proof. Send the
+  executor `tasks.<task>.evidence.feature` and `.observed` from `state.json` (what the verifier
+  saw), then verify on its report. `verify` refuses the commit the evidence failed on, so the
+  repair has to be a new commit.
 - `NEXT: <task> dispatch-verifier <sha>`: the reviewer passed it but no evidence verdict
   covers that commit. Dispatch the verifier brief, then `conductor evidence <task>`.
 - `NEXT: <task> verify`: `merge` found the task's branch moved past the proven commit. Run

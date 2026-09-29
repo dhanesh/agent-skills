@@ -344,6 +344,29 @@ class PredicateTests(Gate):
         t = self.state().tasks["T1"]
         self.assertEqual((t["status"], t["evidence"], t["review"]), ("verifying", None, None))
 
+    def test_a_failed_proof_resumes_as_a_repair_and_the_same_commit_is_refused(self):
+        # A fresh session must send the task back to its executor with what the verifier
+        # saw, and re-verifying the commit the evidence failed must not bring it back.
+        self.record("notes-create", self.sha, result="fail")
+        self.evidence()
+        ev = self.state().tasks["T1"]["evidence"]
+        self.assertEqual((ev["reason"], ev["observed"]), ("evidence-failed", "o"))
+        rc, out, _ = self.run_cmd("resume")
+        self.assertIn("NEXT: T1 dispatch-repair evidence", out)
+        self.assertNotIn("NEXT: T1 verify", out)
+        rc, out, err = self.run_cmd("verify", "T1")
+        self.assertEqual(rc, 3)
+        self.assertIn("no new commit since the evidence failed", err)
+        t = self.state().tasks["T1"]
+        self.assertEqual(t["evidence"]["reason"], "evidence-failed")  # kept for the repair
+        with open(os.path.join(self.wt, "t1.txt"), "w") as f:
+            f.write("fixed\n")
+        git(self.wt, "add", "-A")
+        git(self.wt, "commit", "-q", "-m", "fix")
+        rc, out, _ = self.run_cmd("verify", "T1")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.state().tasks["T1"]["evidence"])
+
     def test_resume_asks_for_a_verifier(self):
         rc, out, _ = self.run_cmd("resume")
         self.assertIn("NEXT: T1 dispatch-verifier %s" % self.sha, out)

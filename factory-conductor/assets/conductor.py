@@ -1285,6 +1285,7 @@ def next_actions(st):
         running                      dispatch-executor          (into the existing worktree)
         verifying, last fail verify  dispatch-repair verify     (the verify tails)
         verifying, review failed     dispatch-repair review     (review.detail)
+        verifying, evidence failed   dispatch-repair evidence   (evidence.feature, .observed)
         verifying, branch moved      verify                     (no dispatch)
         reviewing, no verdict        dispatch-reviewer <sha>    (the verified head)
         reviewing, no evidence pass  dispatch-verifier <sha>    (evidence gate only)
@@ -1296,8 +1297,11 @@ def next_actions(st):
         if t["status"] == "running":
             out.append((tid, "dispatch-executor"))
         elif t["status"] == "verifying":
+            ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
             if review.get("verdict") == "fail":
                 out.append((tid, "dispatch-repair review"))
+            elif ev.get("reason") == "evidence-failed":
+                out.append((tid, "dispatch-repair evidence"))
             elif _moved_after_review(t):
                 out.append((tid, "verify"))
             else:
@@ -1757,6 +1761,13 @@ def cmd_verify(args):
         # nothing new. It counts as a failure, so the repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the review failed",
                                "unchanged since failed review", keep_review=True)
+    ev = t.get("evidence")
+    if isinstance(ev, dict) and ev.get("reason") == "evidence-failed" \
+            and ev.get("verified_head") == head:
+        # The running app already failed on this very commit: a green verify of it
+        # proves nothing new. It counts as a failure, so the repair loop stays bounded.
+        return _verify_refused(st, args.task, "no new commit since the evidence failed",
+                               "unchanged since failed evidence", keep_evidence=True)
     if not clean:
         # Only committed work can be merged, so only committed work is proven.
         return _verify_refused(st, args.task, "uncommitted changes in %s; commit them first"
@@ -1801,15 +1812,16 @@ def cmd_verify(args):
     return 0 if _dispatch(st, args.task, "reviewer") else 3
 
 
-def _verify_refused(st, task, message, reason, keep_review=False):
+def _verify_refused(st, task, message, reason, keep_review=False, keep_evidence=False):
     """Fail a verify before any command runs. Counts as a failing verify. Returns 3.
 
     keep_review keeps a failed review in place, so the repair still carries the
     reviewer's detail and the same rejected commit stays refused on every retry.
     """
     fields = {} if keep_review else {"review": None}
-    st.set_status(task, "verifying", verify_runs=[], verified_head=None, evidence=None,
-                  **fields)
+    if not keep_evidence:
+        fields["evidence"] = None
+    st.set_status(task, "verifying", verify_runs=[], verified_head=None, **fields)
     _count_failure(st, task)
     st.save()
     st.log("verify", task=task, passed=False, reason=reason, commands=[])
@@ -2037,7 +2049,7 @@ def evidence_verdict(st, t, sha, verifier):
     `sha` field), with every artifact present and unaltered, from an instance whose
     doctor.json at sha is ok. Check order is fixed, so a probe sees one reason."""
     out = {"ok": False, "reason": None, "feature": None, "features": [], "paths": [],
-           "doctor": []}
+           "doctor": [], "observed": None}
     if not verifier:
         out["reason"] = "verifier-missing"
         return out
@@ -2072,6 +2084,9 @@ def evidence_verdict(st, t, sha, verifier):
             if why is None:
                 chosen = d
                 break
+            if why == "evidence-failed" and first is None and isinstance(doc, dict):
+                # What the verifier saw is what the executor's repair has to fix.
+                out["observed"] = str(doc.get("observed") or "")[:TAIL]
             first = first or why
         if chosen is None:
             out["reason"], out["feature"] = first, f
@@ -2125,7 +2140,8 @@ def cmd_evidence(args):
     verifier = (args.verifier or "").strip() or None
     v = evidence_verdict(st, t, pinned, verifier)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
-              "feature": v["feature"], "verifier": verifier, "verified_head": pinned,
+              "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
+              "verified_head": pinned,
               "features": v["features"], "paths": v["paths"], "doctor": v["doctor"],
               "at": _rfc3339(_now())}
     st.log("evidence", task=args.task, ok=v["ok"], reason=v["reason"], feature=v["feature"],
