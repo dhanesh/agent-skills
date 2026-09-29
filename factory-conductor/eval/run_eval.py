@@ -23,7 +23,10 @@ without touching the run branch; `init` refuses a plan with a null verify comman
 (exit 2, no run), so such a task is never started or merged; and two tasks that each
 pass alone but break each other once merged are never pushed (finish re-verifies the
 merged run branch first), sanity-checked against the same fixture with a check the
-merged result passes, which DOES push to the scratch bare origin.
+merged result passes, which DOES push to the scratch bare origin. The evidence-gate arm
+drives one gated task per case through the gate suite's fixtures: fresh, independent,
+SHA-bound evidence with a green doctor merges; evidence from another head, a verdict from
+the writer, a red doctor and an artifact removed after the verdict never do.
 """
 import contextlib
 import hashlib
@@ -386,6 +389,47 @@ def integration_red_is_never_pushed_arm():
           "red: rc=%r pushed=%r; green: rc=%r pushed=%r" % (rc, pushed, g_rc, g_pushed))
 
 
+def _gated_run(case):
+    """One gated task driven to its evidence verdict, with the evidence `case` plants.
+    Returns (evidence exit, merge exit, proven?)."""
+    import test_conductor_evidence as E  # the gate suite's fixtures, a shipped asset
+    g = E.Gate("setUp")
+    g.setUp()
+    try:
+        g.init([E.task("T1", ["notes-create"])])
+        wt, sha = g.build()
+        if case == "good":
+            g.record("notes-create", sha)
+        elif case == "stale":
+            g.record("notes-create", E.git(g.root, "rev-parse", "HEAD"))
+        elif case == "writer":
+            g.record("notes-create", sha, verifier="writer")
+        elif case == "doctor-red":
+            g.record("notes-create", sha, doctor_ok=False)
+        rc = g.evidence(verifier="writer" if case == "writer" else "verifier")[0]
+        if case == "artifact-removed":
+            d = g.record("notes-create", sha)
+            rc = g.evidence()[0]
+            os.remove(os.path.join(d, "capture.json"))
+        return rc, g.run_cmd("merge", "T1")[0], g.proven()
+    finally:
+        shutil.rmtree(g.root, ignore_errors=True)
+
+
+def evidence_gate_arm():
+    good = _gated_run("good")
+    check("evidence gate: a head with a passing verdict from an independent verifier, on "
+          "fresh SHA-bound evidence and a green doctor, merges", good == (0, 0, True),
+          "evidence=%r merge=%r proven=%r" % good)
+    for case, label in (("stale", "evidence recorded on another head"),
+                        ("writer", "a verdict from the agent that wrote the code"),
+                        ("doctor-red", "evidence from an instance whose doctor is red"),
+                        ("artifact-removed", "an artifact removed after the verdict")):
+        rc, mrc, proven = _gated_run(case)
+        check("NEGATIVE: evidence gate: %s never merges" % label, not proven and mrc != 0,
+              "evidence=%r merge=%r" % (rc, mrc))
+
+
 def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
@@ -396,6 +440,7 @@ def main():
     merge_refuses_a_task_not_in_reviewing_status_arm()
     null_verify_is_refused_at_init_arm()
     integration_red_is_never_pushed_arm()
+    evidence_gate_arm()
 
     n, k = len(_checks), sum(_checks)
     ok = k == n
