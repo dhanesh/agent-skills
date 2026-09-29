@@ -20,6 +20,16 @@ paste. `forge lint` enforces the mechanical half of this contract; the rest is r
 it drives and when to reach for it. Without the frontmatter the skill never registers,
 so the cold-run agent never finds it.
 
+## Session variables
+
+Define, near the top, the variables every command uses (`SKILL`, `INSTANCE`, `VERIFIER`) and
+say who `VERIFIER` is: under factory-conductor, the id the verifier brief gives; working
+alone, a stable name for the session, never the author of the change being proven. A cold
+run on graph_d found a skill that used `$VERIFIER` without saying where it came from.
+
+If the harness adds quiet or machine-output flags, give it a switch that runs exactly what a
+user types (graph_d's harness: `--no-quiet`), so a verifier can prove the user-facing form.
+
 ## Launch
 
 - Every command takes the instance name (`$INSTANCE` or `--instance`). Lint fails a

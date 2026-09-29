@@ -13,7 +13,7 @@ stands and every place where the spec and the repo disagreed.
 
 | Step | Commit | State |
 |---|---|---|
-| 1. `verification-skill-forge` + a generated verify skill proven live | `b1b0917` | Tooling complete, proven live on the in-repo fixture app (two instances side by side, doctor, drive, record, cleanup, evidence survives: `verification-skill-forge/eval/run_eval.py`). **Not done:** §4.6 generation for one real application, and the independent cold-run session. |
+| 1. `verification-skill-forge` + a generated verify skill proven live | `b1b0917` | Tooling complete, proven live on the in-repo fixture app (two instances side by side, doctor, drive, record, cleanup, evidence survives: `verification-skill-forge/eval/run_eval.py`). §4.6 done on `dhanesh/graph_d` (branch `claude/verify-graph-d`), cold run passed; see "§4.6 on dhanesh/graph_d" below. |
 | 2. Evidence gate (§5.1) | `c644629` | Complete, with the §7 regression tests: removing an artifact after the verdict blocks the merge; stale and forged SHAs are rejected. |
 | 3. `spec-first-planning` amendment (§6) | `1e9f843` | Complete. |
 | 4. Parallel dispatch (§5.2) | `c644629` (partition, trail) | Partial by design, see below. Concurrency stays at the existing default of 2; nothing was raised. |
@@ -71,13 +71,36 @@ the resume walker (it now asks for a verifier instead of a merge), the partition
 tasks with unknown files are no longer offered together), the Manifold join and the two §6
 rows.
 
+## §4.6 on dhanesh/graph_d
+
+The owner chose `dhanesh/graph_d` (a Rust graph database with a sqlite3-like CLI). The
+generated `verify-graph-d` skill lives in that repo on branch `claude/verify-graph-d`, never
+here.
+
+- **Generated and proven live** on graph_d `c3f4f17`: build once, one database file per
+  instance (two instances side by side), GQL through `graph_d <db> -c/-f`, evidence for all
+  eight mapped features. Six pass and are marked `proven`: create, match with `WHERE`, the
+  three output formats, script files, parse errors, help. **Two fail, and each is a product bug,
+  recorded as a finding with the map left unchanged:** a node created after reopening a
+  database reuses id 1 and overwrites the existing node (the repo's cross-process test writes
+  once and reads once, so CI is green), and `MATCH (a),(b) CREATE (a)-[:KNOWS]->(b)` makes two
+  new anonymous nodes instead of linking a and b.
+- **Manifold join:** graph_d's `.manifold/` is legacy YAML, which the join did not read (it
+  fell back to "source-derived" without saying why). Fixed: 30 anchored constraints read, 6
+  with an observable proof. The rest (CI, releases, crates.io, rustdoc, benchmarks) have no
+  runtime face and stay listed as uncovered.
+- **Cold run: passed.** A fresh agent given only the repo and a feature task ("make `-o json`
+  stdout valid JSON"), and not told the skill existed, found it from `git log` and `.claude/`,
+  drove the binary through the harness, recorded passing evidence at its fix commit and
+  updated two map entries. Its fix is on graph_d branch `claude/json-stdout-empty-result`.
+- **What the cold run found, folded back:** the task premise and a gotcha were wrong (the row
+  count goes to stderr; the real defect was an empty JSON result printing nothing); the harness
+  always passed `-q` (now `--no-quiet`); `VERIFIER` was never defined; `proven:` needs a
+  follow-up commit. Forge fixes from the same exercise: legacy YAML manifolds, a CLI verify
+  skill states "no port" instead of claiming one, the scaffold index no longer trips lint.
+
 ## Not done, and why
 
-- **§4.6 on a real application.** The spec named a GrayQuest app; this is a personal
-  project, so the target is one of the owner's own runnable apps, chosen by the owner. The
-  generated skill lives in that app's repository, not here.
-- **The cold run.** An independent agent session given only the app repo and a feature task.
-  It depends on the step above.
 - **Raising concurrency.** §7 says raise only after clean runs at 2. There are no clean gated
   runs yet, so nothing was raised.
 - **Model-in-the-loop evals.** The gate evals are model-free by repo standard; whether a model

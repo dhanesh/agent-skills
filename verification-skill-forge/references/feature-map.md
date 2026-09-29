@@ -11,7 +11,9 @@ duplicate or dead entry.
 # <id>: <title a user would recognise>
 
 - id: <id>                      # lowercase kebab-case, equals the file name
-- proven: no | <40-hex commit>  # set only after the recipe was driven live on that commit
+- proven: no | <40-hex commit>  # set only after the recipe was driven live on that commit;
+                                #   a commit cannot name itself, so update it in a follow-up
+                                #   commit that touches only features/
 - anchors: <path>[:<symbol>], … # source paths relative to the app root
 - constraints: <manifold>:<id>, …   # optional: anchored Manifold constraints it proves
 

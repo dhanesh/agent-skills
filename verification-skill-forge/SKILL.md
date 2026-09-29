@@ -99,7 +99,7 @@ address a single app.
 7. **Prove it live.** Run the generated skill's own instructions once: launch two
    instances, doctor, drive one mapped feature, record evidence, clean up, then confirm
    the evidence still exists under `.verify/`. Set that feature's `proven` marker to the
-   commit you drove it on. You MUST NOT hand over a verify skill that was never run,
+   commit you drove it on, in a follow-up commit that touches only `features/`. You MUST NOT hand over a verify skill that was never run,
    because a recipe that was never executed teaches the next agent wrong steps.
 8. **Cold run.** Start a fresh agent session that has only the repo and a feature task,
    and does not know the skill exists. It passes if it loads the verify skill on its
