@@ -16,6 +16,13 @@ map to nothing anchors all of its constraints. Constraint titles come from the p
 manifold numbers from B1. A feature file may name a bare id when only one manifold has
 it.
 
+**Legacy YAML manifolds** (`<feature>.yaml`, from before Manifold's JSON+Markdown format)
+are read with a narrow line parser, since the stdlib has no YAML: top-level `feature:` and
+`phase:`, each `- id: B1` under `constraints:` with its `type:` and `statement:`, and every id
+named by `maps_to`, `maps_to_constraint` or `satisfies_constraints` in the file or its
+`<feature>.anchor.yaml`. Each such file prints `DEGRADED: LEGACY <file>` so the report says
+how it was read; a YAML file with a JSON twin is skipped; `manifold migrate` converts it.
+
 Where `.manifold/` is looked for: the app root, then the repository root. `--manifold`
 overrides both.
 

@@ -234,6 +234,26 @@ class ManifoldTests(Base):
         self.assertIn("DEGRADED: E_LINK notes.json", out)
         self.assertIn("COVERED: notes:B1", out)
 
+    def test_legacy_yaml_manifold_is_read(self):
+        d = os.path.join(self.root, ".manifold")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "notes.yaml"), "w") as f:
+            f.write("feature: notes\nphase: VERIFIED\nconstraints:\n  business:\n"
+                    "    - id: B1\n      type: invariant\n      statement: \"Notes are stored\"\n"
+                    "    - id: B2\n      type: goal\n      statement: \"Unmapped goal\"\n"
+                    "  security:\n    - id: S1\n      statement: \"No secrets in logs\"\n")
+        with open(os.path.join(d, "notes.anchor.yaml"), "w") as f:
+            f.write("required_truths:\n  - id: RT-1\n    maps_to_constraint: B1\n"
+                    "  - id: RT-2\n    satisfies_constraints: [S1, S9]\n")
+        rc, out = run(F.main, ["coverage", self.vd])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("DEGRADED: LEGACY notes.yaml", out)
+        self.assertIn("DEGRADED: E_LINK notes.yaml", out)
+        self.assertIn("COVERED: notes:B1 -> notes-create", out)
+        self.assertIn('UNCOVERED: notes:S1 "No secrets in logs"', out)
+        self.assertNotIn("notes:B2", out)
+        self.assertIn("COVERAGE: 1/2", out)
+
     def test_seed_writes_stubs_that_lint_refuses(self):
         self.write("notes", MANIFOLD, MANIFOLD_MD)
         rc, out = run(F.main, ["seed", self.vd])

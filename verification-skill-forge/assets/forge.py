@@ -592,7 +592,91 @@ def read_manifolds(mdir):
         for cid in sorted(mapped or ids, key=lambda c: (c[0], int(re.sub(r"\D", "", c) or 0))):
             out.append({"id": cid, "qid": "%s:%s" % (feature, cid), "feature": feature,
                         "type": ids.get(cid), "title": titles.get(cid, "")})
+    for path in sorted(glob.glob(os.path.join(mdir, "*.yaml")) +
+                       glob.glob(os.path.join(mdir, "*.yml"))):
+        name = os.path.basename(path)
+        if re.search(r"\.(anchor|verify)\.ya?ml$", name):
+            continue
+        if os.path.isfile(re.sub(r"\.ya?ml$", ".json", path)):
+            continue  # migrated: the JSON file is the manifold
+        try:
+            feature, phase, ids, mapped = read_legacy_yaml(path)
+        except (OSError, UnicodeDecodeError) as e:
+            degraded.append(("E_IO", name, str(e)))
+            continue
+        if not ids:
+            degraded.append(("E_VALIDATE", name, "legacy YAML with no `- id:` constraints "
+                             "forge can read; run `manifold migrate`"))
+            continue
+        degraded.append(("LEGACY", name, "legacy YAML read with forge's line parser; "
+                         "`manifold migrate` converts it to JSON"))
+        if phase not in ANCHORED_PHASES:
+            continue
+        for cid in sorted(set(mapped) - set(ids)):
+            degraded.append(("E_LINK", name, "a required truth maps to unknown constraint %s"
+                             % cid))
+        use = sorted(set(mapped) & set(ids)) or sorted(ids)
+        for cid in sorted(use, key=lambda c: (c[0], int(re.sub(r"\D", "", c) or 0))):
+            out.append({"id": cid, "qid": "%s:%s" % (feature, cid), "feature": feature,
+                        "type": ids[cid][0] or None, "title": ids[cid][1]})
     return out, degraded
+
+
+_Y_TOP = re.compile(r"^([A-Za-z_][\w-]*):\s*(.*?)\s*$")
+_Y_ID = re.compile(r"""^\s*-\s*id:\s*['"]?([BTUSO]\d+)['"]?\s*$""")
+_Y_FIELD = re.compile(r"""^\s+(type|statement):\s*['"]?(.*?)['"]?\s*$""")
+_Y_MAPS = re.compile(r"^\s*(?:-\s*)?(?:maps_to|maps_to_constraints?|satisfies_constraints)"
+                     r":\s*(.*?)\s*$")
+_Y_ITEM = re.compile(r"""^\s*-\s*['"]?([BTUSO]\d+)['"]?\s*$""")
+
+
+def read_legacy_yaml(path):
+    """(feature, phase, {id: (type, statement)}, mapped ids) from a legacy YAML manifold,
+    read line by line (stdlib has no YAML parser): top-level `feature:`/`phase:`,
+    `- id: B1` entries under `constraints:` with their `type:`/`statement:`, and every id a
+    `maps_to`, `maps_to_constraint` or `satisfies_constraints` names, in this file and its
+    `<feature>.anchor.yaml`. Only that narrow shape is read; `manifold migrate` converts
+    the file to the JSON format for everything else."""
+    top, cons, cur, block = {}, {}, None, None
+    mapped = []
+    texts = [read(path)]
+    anchor = re.sub(r"\.ya?ml$", ".anchor.yaml", path)
+    if os.path.isfile(anchor):
+        texts.append(read(anchor))
+    for n, text in enumerate(texts):
+        pending = False
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            m = _Y_TOP.match(line)
+            if m:
+                block = m.group(1)
+                if n == 0:
+                    top.setdefault(block, m.group(2).strip("'\""))
+                pending = False
+                continue
+            if n == 0 and block == "constraints":
+                m = _Y_ID.match(line)
+                if m:
+                    cur = m.group(1)
+                    cons.setdefault(cur, ["", ""])
+                    continue
+                m = _Y_FIELD.match(line)
+                if m and cur:
+                    cons[cur][0 if m.group(1) == "type" else 1] = m.group(2)
+                    continue
+            m = _Y_MAPS.match(line)
+            if m:
+                mapped += re.findall(r"\b([BTUSO]\d+)\b", m.group(1))
+                pending = not m.group(1)
+                continue
+            m = _Y_ITEM.match(line)
+            if pending and m:
+                mapped.append(m.group(1))
+            else:
+                pending = False
+    return (top.get("feature") or os.path.basename(path).rsplit(".", 1)[0],
+            top.get("phase"), {k: tuple(v) for k, v in cons.items()}, mapped)
 
 
 def coverage(verify_dir, mdir):
