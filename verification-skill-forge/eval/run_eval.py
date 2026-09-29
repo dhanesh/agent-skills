@@ -134,7 +134,9 @@ def main():
                 launched[inst] = {}
         ports = {i: d.get("port") for i, d in launched.items()}
         check("live: two instances ready at once",
-              all(d.get("ready") for d in launched.values()), json.dumps(ports))
+              all(d.get("ready") for d in launched.values()),
+              json.dumps(ports) if all(d.get("ready") for d in launched.values())
+              else json.dumps(launched)[:900])
         check("live: each instance has its own port", ports["a"] != ports["b"])
         r = sh(root, sys.executable, recorder, "claim", "--instance", "b", "--port",
                str(ports["a"]))

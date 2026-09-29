@@ -337,6 +337,16 @@ class MaintainTests(Base):
         self.assertEqual(rc, 1, out)
         self.assertIn("FAIL: notes-create", out)
 
+    def test_the_guard_holds_through_a_symlinked_path(self):
+        # macOS temp dirs are /var -> /private/var; git reports the resolved path.
+        link = os.path.join(self.tmp, "link")
+        os.symlink(self.root, link)
+        self.edit(os.path.join("features", "notes-create.md"),
+                  "The response is 201", "The response is 200")
+        rc, out = run(F.main, ["check-maintain", os.path.join(link, VERIFY), "--base", "HEAD"])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL: notes-create", out)
+
     def test_proof_rewritten_with_source_change_passes(self):
         self.edit(os.path.join("features", "notes-create.md"),
                   "The response is 201", "The response is 200")

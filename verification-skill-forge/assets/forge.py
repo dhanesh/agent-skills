@@ -820,8 +820,12 @@ def cmd_check_maintain(a):
     """Fail every feature whose documented behaviour changed since --base while none of
     its source anchors did: that is the map being edited to match the app, which hides a
     bug rather than recording one."""
-    d = os.path.abspath(a.verify_dir)
+    # Resolved paths throughout: git reports the real path of the work tree, and on
+    # macOS a temp dir under /var is really /private/var, so an unresolved path
+    # relativises to ../.. and every feature file looked new (the guard passed).
+    d = os.path.realpath(a.verify_dir)
     top = toplevel(d)
+    top = os.path.realpath(top) if top else None
     app_root = app_root_of(d)
     if not top or not app_root:
         sys.stderr.write("%s is not a verify skill inside a git work tree\n" % d)

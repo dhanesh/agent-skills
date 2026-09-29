@@ -36,12 +36,17 @@ def port_of(instance):
     return int(out.split()[1])
 
 
+# No proxy for loopback calls: urllib otherwise honours system proxy settings (macOS
+# reads them from the OS), which can swallow a request to 127.0.0.1.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def call(port, method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data,
                                  method=method, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=5) as r:
+        with OPENER.open(req, timeout=5) as r:
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
@@ -71,7 +76,14 @@ def launch(a):
         except (OSError, ValueError):
             pass
         time.sleep(0.1)
-    return emit({"instance": a.instance, "port": port, "ready": False}, ok=False)
+    log.flush()
+    try:
+        with open(os.path.join(d, "app.log"), encoding="utf-8", errors="replace") as f:
+            tail = f.read()[-600:]
+    except OSError:
+        tail = ""
+    return emit({"instance": a.instance, "port": port, "ready": False,
+                 "alive": p.poll() is None, "app_log_tail": tail}, ok=False)
 
 
 def doctor(a):
