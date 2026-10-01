@@ -63,6 +63,16 @@ task-plan envelope as the verify step's `command`; a criterion without one gets 
 factory-conductor refuses. So `--unattended` requires the hint on every criterion: a grant
 exists only for runs a machine can prove.
 
+**Tests are not verification (2.3.0).** A command passing is not the same as the feature
+working. So `--unattended` also requires every requirement to name the verify-skill
+features it proves (`[feature: export-download]`), what an agent will drive and see when it
+works (`[proof: the downloaded CSV lists every seeded row]`, never "tests pass" or "builds
+clean"), and an independence marker (`[parallel-safe]` or `[after: R1]`), plus a
+`## Verification` section naming the verify skill. The plan carries them as each task's
+`features`, `predicate` and `independence` and a `verification` block, which puts
+factory-conductor's evidence gate in force. A requirement that cannot state an observable
+predicate is refused: plan it attended. verification-skill-forge generates the verify skill.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 

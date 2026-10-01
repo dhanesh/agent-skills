@@ -118,8 +118,16 @@ Users cannot export rows.
 """
 
 # FULL ends its criterion with a [cmd: ...] hint: --unattended needs one on every criterion.
+# It also carries the runtime-proof hints (feature, an observable proof, an independence
+# marker) and the Verify skill that --unattended requires.
 FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]").replace(
-    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n") + """
+    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n").replace(
+    "- R1: The export must include every row.",
+    "- R1: The export must include every row. [feature: export-download] "
+    "[proof: the downloaded CSV lists every seeded row] [parallel-safe]") + """
+## Verification
+Verify skill: `.claude/skills/verify-export`
+
 ## Tensions
 - TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
 
@@ -354,6 +362,20 @@ def grant_arm():
     check("NEGATIVE: the light pass (LIGHT) is not converged",
           lint(LIGHT) == 0 and lint(LIGHT, "--converged") == 1, "")
     check("FULL is unattended-ready", lint(FULL, "--unattended") == 0, "")
+    tests_only = FULL.replace("the downloaded CSV lists every seeded row", "all tests pass")
+    check("NEGATIVE: a requirement whose only proof is 'all tests pass' blocks --unattended "
+          "(it routes to attended mode) but not --converged",
+          lint(tests_only, "--unattended") == 1 and lint(tests_only, "--converged") == 0, "")
+    no_proof = FULL.replace(" [proof: the downloaded CSV lists every seeded row]", "")
+    check("NEGATIVE: a requirement with no [proof: ...] blocks --unattended",
+          lint(no_proof, "--unattended") == 1, "")
+    import spec_to_tasks as _S
+    pay = _S.to_task_plan_payload(_S.derive_plan(FULL), "docs/spec.md")
+    check("the plan carries features, predicate, independence and the verify skill",
+          pay.get("verification") == {"skill": ".claude/skills/verify-export"}
+          and pay["tasks"][0].get("features") == ["export-download"]
+          and pay["tasks"][0].get("predicate") and
+          pay["tasks"][0].get("independence") == "parallel-safe", "")
     no_cmd = FULL.replace(" [cmd: {python} -m pytest -k rows]", "")
     check("NEGATIVE: a criterion without a [cmd: ...] hint blocks --unattended "
           "(it still converges)",

@@ -263,7 +263,7 @@ Skills appear in rewrite order.
 | c5 | 108 | - **Producer-extended bundles** (e.g. `feynman-walkthrough`'s explainers): arbit… | MUST (0.31, 0.61) | plain | describes the generator's rendering behavior for extra frontmatter keys; a descriptive never, not a directive (confidence 0.31 < 0.6) |
 | c6 | 77 | 3. **Build and verify.** `cd <dir> && npm install && npm run build` MUST complete with zero errors; | MUST (0.81, 0.52) | MUST | backfill 2026-09-25: was lowercase "must"; a site that does not build is not a deliverable |
 
-## spec-first-planning (22 candidates · 12 MUST · 0 SHOULD · 0 MAY · 10 plain · 1 departure)
+## spec-first-planning (23 candidates · 13 MUST · 0 SHOULD · 0 MAY · 10 plain · 1 departure)
 
 Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec-first-planning 2.2.0). That wave added no keyword here: the `[cmd: …]` guidance, the factory-conductor handoff sentence (I4) and the run-branch example (c18) are plain text or edits inside existing rows.
 
@@ -291,6 +291,7 @@ Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec
 | c20 | 59 | A requirement can also carry `[after: R2, R3]`, naming the other requirements it comes after; | plain (0.52, 0.30) | plain | backfill 2026-09-25: was lowercase "it must follow", describing ordering; confidence 0.52 < 0.6, decided ourselves, plain as Jev chose |
 | c21 | 75 | *Anchor* works back from the outcome, asking "what has to be TRUE?" | plain (0.98, 0.24) | plain | backfill 2026-09-25: was the quoted question "what must be TRUE?", describing the Anchor stage |
 | c22 | 104 | Write each requirement as one testable `must` statement… | plain (0.61, 0.47) | plain | backfill 2026-09-25: was a quoted lowercase "must", a mention of the token `spec_lint.py` requires; now inline code. The step stays a plain imperative |
+| c23 | 113 | A requirement whose only proof is "tests pass" or "builds clean" MUST NOT run unattended, because… | not judged (new in 2.3.0, evidence-gated factory step 3) | MUST | spec §6 ("a task that cannot state an observable predicate MUST NOT qualify for unattended execution; it routes to attended mode"); `spec_lint.py --unattended` fails a requirement with no `[proof: …]` or with one that is only about tests, builds, CI or lint, so a grant can only pin a plan whose every task names an observable predicate |
 
 ## bug-autopsy (4 candidates · 2 MUST · 1 SHOULD · 0 MAY · 1 plain · 1 departure)
 
@@ -323,7 +324,7 @@ Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec
 | c3 | 138 | - **Honest about "no".** If no judge can be built, the answer MUST be "don't migrate yet"… | MUST (0.39, 0.63) | MUST | confidence 0.39 < 0.6, decided ourselves; harm 0.63 justifies MUST on its own — a false "go" verdict on an unverifiable migration is the harm this doctrine exists to prevent |
 | c4 | 140 | - **Parity over aesthetics.** For money movement, fees, schedules, reconciliat… | MUST (0.76, 0.85) | MUST | |
 
-## factory-conductor (20 candidates · 13 MUST · 1 SHOULD · 1 MAY · 5 plain · 1 departure)
+## factory-conductor (22 candidates · 15 MUST · 1 SHOULD · 1 MAY · 5 plain · 1 departure)
 
 New skill (factory-conductor 1.0.0, plan Task 6, 2026-09-23), written with BCP 14 from the start. Jev did not judge these rows; each level follows the rule it carries and names what enforces it, as the spec-first-planning 2.0.0 rows do. Line numbers were refreshed in the final fix wave (2026-09-23), and again for the Q3 gaps (2026-09-25): G1 (resume prints `NEXT:` lines), G2 (a derived dispatch cap) and G3 (the integration re-run before the push). That work added no candidate: c3 was reworded in place (below), and the new resume, integration and cost text is plain. Line numbers refreshed again for the Q3 review fixes (2026-09-25: `NEXT: run ask`/`run done`/`verify`, resume's dispatch spending, the gated and retryable integration re-run, the push pinned to the verified head); those edits added no keyword.
 
@@ -349,6 +350,8 @@ New skill (factory-conductor 1.0.0, plan Task 6, 2026-09-23), written with BCP 1
 | c18 | 181 | You MUST NOT pass a `--pr-cmd` or `--push-cmd` that does anything but push the run branch or open the PR, because… | not judged (new in the final fix wave, M1) | MUST | `finish` runs these argv lists after the `push_branch` and `open_pr` gates, and the push allowlist forces the push's shape, but a `--pr-cmd` is any program: a command that does something else would run under a gate that approved only a PR. The tool cannot see intent, so the rule carries it; "by default pass neither" keeps PP-5 non-advisory; PP-5 re-review 2026-09-25: the old PP-5 is gone, and the new one reads "they exist for stubs…, so by default pass neither" as a separate clause, so the reason this row gives (it runs in place of the step the grant approved) now sits beside the rule; level unchanged |
 | c19 | 172 | An exit 2 from `finish` (for example, the plan envelope was edited after `init`, or the grant file is gone) means report its stderr and stop: you MUST leave restoring the plan or the grant to a human. | MUST (0.93, 0.63) | MUST | backfill 2026-09-25: was lowercase "a human must restore"; worded as MUST leave … to a human, like c16, so PP-5's count is unchanged. Preconditions already say not to repair a plan or grant yourself |
 | c20 | 328 | dependency directories such as `node_modules` or `.venv` are absent, so a command that needs them fails unless it installs them or uses tooling installed globally… | MUST (0.31, 0.63) | plain | backfill 2026-09-25: was lowercase "a command must install its dependencies". Confidence 0.31 < 0.6, decided ourselves: the section describes what the proof covers, and the conductor never writes verify commands (spec-first-planning derives them from `[cmd: …]`), so for this reader it is a consequence, not a directive; reworded as the failure it causes |
+| c21 | 304 | You MUST NOT edit or commit files, or dispatch subagents. You MUST NOT use test-only endpoints or internal setters. | not judged (new in 1.1.0, evidence gate) | MUST | inside the verifier-brief template, addressed to the verifier, like c9 and c10; a verifier that edits the worktree changes the head it records evidence for, and a test-only endpoint proves a path no user takes (spec §4.2 proof standards); one candidate |
+| c22 | 342 | Identity is what you pass: you MUST pass the id your harness gave each subagent, because… | not judged (new in 1.1.0, evidence gate) | MUST | spec §5.1 clause 4 (writer ≠ verifier by recorded identity, not convention); `start --owner`, `review --reviewer` and `evidence --verifier` refuse a reviewer or verifier equal to the owner, but the tool can only compare the strings it is given, so the rule carries the rest; the §7a same-user residual still applies |
 
 ## jev-agent-setup (3 candidates · 2 MUST · 0 SHOULD · 0 MAY · 1 plain · 0 departures)
 
@@ -359,3 +362,17 @@ New section, backfill 2026-09-25: the skill (jev-agent-setup 1.x, PR #62) shippe
 | c1 | 26 | The block governs decisions only. It never lets Jev approve or override a permission decision. | plain (0.65, 0.46) | plain | describes what the installed block does; the permission rule itself lives in that block, not in this skill's workflow |
 | c2 | 45 | If your harness refuses writes to an agent instruction file (Claude Code auto mode treats `~/.claude/CLAUDE.md` as self-modification), you MUST NOT route around it, because… | MUST (0.83, 0.74) | MUST | (no departure) PP-5 reasons 2026-09-25: reason added; level unchanged |
 | c3 | 50 | You MUST NOT ask for the key in chat or write it anywhere, because… | MUST (0.99, 0.77) | MUST | (no departure) PP-5 reasons 2026-09-25: reason added; level unchanged |
+
+## verification-skill-forge (7 candidates · 6 MUST · 1 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+New skill (verification-skill-forge 1.0.0, evidence-gated factory build step 1, 2026-09-29), written with BCP 14 from the start. Jev did not judge these rows; as with factory-conductor's, each level follows the rule it carries and names what enforces it.
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 34 | **Locating this skill's helpers (do this first).** The steps below run bundled … | not judged (new skill) | MUST | the shared `$SKILL_DIR` preamble, same block and level as every other adopter; asset-paths.sh lints the SKILL.md half |
+| c2 | 80 | You MUST NOT address the screen by coordinates or tab order, because… | not judged (new skill) | MUST | spec §4.2 Drive ("MUST NOT use screen coordinates or tab order"); `forge.py lint` fails coordinate clicks, Tab presses and "tab order" in Drive and in feature recipes |
+| c3 | 84 | It MUST NOT delete anything under `.verify/`, because… | not judged (new skill) | MUST | spec §4.2 Cleanup ("MUST NOT destroy evidence"); factory-conductor's `merge` re-reads the records after cleanup; `forge.py lint` fails an rm/find touching `.verify` in Cleanup |
+| c4 | 102 | You MUST NOT hand over a verify skill that was never run, because… | not judged (new skill) | MUST | spec §4.6 (proven live) and pstack's "a generated skill that was never executed is a draft"; the lint cannot see a live run, so the rule carries it, and the Verify section makes the report say so |
+| c5 | 115 | Every anchored constraint SHOULD end with at least one named observable proof. | not judged (new skill) | SHOULD | spec §4.4; `forge.py coverage` reports each gap and `--require-total` turns it into exit 3, but some constraints have no runtime face (a licence, a cost ceiling), so it is a recommendation with a named backlog, not an absolute |
+| c6 | 133 | The brief MUST forbid children to drive the app or edit files, because… | not judged (new skill) | MUST | spec §4.5 ("children never drive the app and never edit files"); the brief is in `references/maintain.md`; the tool cannot see a subagent, so the rule carries it |
+| c7 | 141 | You MUST NOT edit the feature map to match broken behaviour, because… | not judged (new skill) | MUST | spec §4.5 critical invariant; `forge.py check-maintain` fails a feature whose documented behaviour changed while none of its anchors did, and `forge.py finding` is the sanctioned route |

@@ -17,9 +17,13 @@ Usage:
     python3 conductor.py next [--root <repo>] [--max N]                # READY: T1 T2 | STOP:
     python3 conductor.py status [--root <repo>]                        # one STATUS: line per task
     python3 conductor.py resume [--root <repo>]                        # READY:, NEXT: lines
-    python3 conductor.py start <task> [--root <repo>]                  # START: <task> <worktree>
+    python3 conductor.py start <task> [--owner ID] [--root <repo>]     # START: <task> <worktree>
     python3 conductor.py verify <task> [--root <repo>]                 # VERIFY: <task> pass <sha>|fail
-    python3 conductor.py review <task> --verdict pass|fail [--detail T] [--root <repo>]
+    python3 conductor.py review <task> --verdict pass|fail [--detail T] [--reviewer ID]
+                                                                       [--root <repo>]
+    python3 conductor.py evidence <task> --verifier ID [--root <repo>]  # EVIDENCE: <task> pass <sha>
+                                                                       #   | reject <reason>
+    python3 conductor.py trail [--out FILE] [--root <repo>]            # TRAIL: <json> per task
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
     python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
@@ -158,6 +162,19 @@ Once finished, next, start, verify, review, merge, park and decision refuse with
 ("run finished"); resume prints FINISH: and NEXT: run finish (a remote step is pending:
 run finish --retry-remote) or NEXT: run done, exit 0.
 
+Evidence gate (spec 5.1). A plan payload with a `verification` block ({"skill": <verify
+skill dir>, "evidence_dir": ".verify"}) makes every task name `features`; `start` records
+the owner (--owner, required), `review` the reviewer (--reviewer, required, never the
+owner), and `evidence <task> --verifier ID` judges the verified head: verifier != owner,
+every declared feature mapped at that head, and for every touched feature (declared, plus
+those whose anchors the diff touches) a verify-evidence/v1 record at
+<evidence_dir>/<instance>/<feature>/<head>/evidence.json with the same sha, this verifier,
+a pass and intact artifacts, from an instance whose doctor.json at the head is ok. `merge`
+needs that verdict on the pinned head and re-reads the records after its grant gate. The
+independence partition (spec 5.2) is computed at init and logged on the init event; the
+trail (spec 5.3) is printed by `trail` and carried in the run result. See
+references/run-protocol.md, "Evidence gate".
+
 Run id grammar: run-<yyyymmddThhmmssZ>-<6 hex>.
 Exit 0 success; 2 usage or invalid input; 3 the run must stop.
 """
@@ -171,6 +188,7 @@ if sys.version_info < (3, 10):
 import argparse  # noqa: E402
 import datetime as _dt  # noqa: E402
 import fnmatch  # noqa: E402
+import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
@@ -197,12 +215,35 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.0.1"
+CONDUCTOR_VERSION = "1.1.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
+FINAL = ("proven", "parked", "blocked")
 TASK_FIELDS = ("status", "depends_on", "verify", "repairs", "branch", "worktree",
                "verify_runs", "verified_head", "review", "merge_commit", "park_reason",
-               "failures", "question")
+               "failures", "question", "owner", "dispatched_at", "evidence", "features",
+               "serial_after", "verifier_redos")
+# The evidence gate (spec 5.1). A plan whose payload carries a `verification` block
+# ({"skill": <repo-relative verify-<app> skill dir>, "evidence_dir": ".verify"}) runs
+# under it: every task names the feature-map ids it proves, and a head merges only
+# with a passing `evidence` verdict. The records are the ones
+# verification-skill-forge's verify_evidence.py writes.
+EVIDENCE_SCHEMA = "verify-evidence/v1"
+DEFAULT_EVIDENCE_DIR = ".verify"
+FEATURE_ID_RE = r"^[a-z][a-z0-9]*(-[a-z0-9]+)*\Z"
+SHA_RE = r"^[0-9a-f]{40}\Z"
+# A reject the verifier can fix by recording again (a fresh verifier dispatch); the
+# other rejects park the task (feature-unmapped, no-features) or send it back to its
+# executor (evidence-failed: the app did the wrong thing).
+EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
+                 "evidence-diff-unreadable")
+EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
+EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
+                 "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
+                 "evidence-malformed", "evidence-artifact-missing",
+                 "evidence-artifact-altered", "doctor-missing", "doctor-red")
+# Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
+# EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported, never enforced: the runtime does not expose usage to this tool.
 BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
@@ -329,6 +370,8 @@ class State:
         self.finished = data.get("finished")
         self.tasks = data["tasks"]
         self.order = list(data["order"])
+        self.verification = data.get("verification")
+        self.partition = data.get("partition") or {}
 
     @property
     def state_path(self):
@@ -340,7 +383,7 @@ class State:
 
     @classmethod
     def new(cls, root, run_id, plan, plan_envelope, plan_sha256, grant_id,
-            run_branch, base_branch, budget, budget_derived=()):
+            run_branch, base_branch, budget, budget_derived=(), verification=None):
         """Validate the plan, create the run directory, write state.json and log `init`.
 
         Raises PlanError on a malformed plan, before anything is written."""
@@ -348,13 +391,19 @@ class State:
         schedule = waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
         budget = dict(budget or {})
         check_budget(budget)
+        part = partition(order, plan_tasks, gated=bool(verification))
         tasks = {}
         for tid in order:
             t = plan_tasks[tid]
+            feats = t.get("features") if isinstance(t.get("features"), list) else []
             tasks[tid] = {"status": "pending", "depends_on": list(t["depends_on"]),
                           "verify": t.get("verify"), "repairs": 0, "branch": None,
                           "worktree": None, "verify_runs": [], "review": None,
-                          "verified_head": None, "merge_commit": None, "park_reason": None}
+                          "verified_head": None, "merge_commit": None, "park_reason": None,
+                          "features": [f for f in feats if isinstance(f, str)],
+                          "serial_after": sorted({x["after"] for x in part["serialized"]
+                                                  if x["task"] == tid}),
+                          "owner": None, "dispatched_at": None, "evidence": None}
         root = os.path.abspath(root)
         directory = run_dir(root, run_id)
         os.makedirs(directory, exist_ok=False)
@@ -364,11 +413,16 @@ class State:
                   "run_branch": run_branch, "base_branch": base_branch,
                   "created_at": _rfc3339(_now()), "budget": budget,
                   "budget_derived": list(budget_derived), "dispatches": 0,
-                  "stopped": None, "tasks": tasks, "order": order}, directory)
+                  "stopped": None, "tasks": tasks, "order": order,
+                  "verification": verification, "partition": part}, directory)
         st.save()
         st.log("init", run=run_id, plan=plan_envelope, plan_sha256=plan_sha256,
                waves=schedule, max_dispatches=budget.get("max_dispatches"),
-               derived="max_dispatches" in st.budget_derived)
+               derived="max_dispatches" in st.budget_derived,
+               evidence_gate=bool(verification), partition=part)
+        # The partition rides on the init event, so it is recorded before any owner is
+        # dispatched (spec 5.2): which tasks may run side by side, and which were
+        # serialized because they may share files or features.
         return st
 
     @classmethod
@@ -411,7 +465,8 @@ class State:
                 "base_branch": self.base_branch, "created_at": self.created_at,
                 "budget": self.budget, "budget_derived": self.budget_derived,
                 "dispatches": self.dispatches, "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
-                "order": self.order}
+                "order": self.order, "verification": self.verification,
+                "partition": self.partition}
 
     def save(self):
         """Write state.json atomically: a temp file in the same directory, then os.replace."""
@@ -501,7 +556,9 @@ class State:
             if len(out) >= slots:
                 break
             if t["status"] == "pending" and all(
-                    self.tasks[d]["status"] == "proven" for d in t.get("depends_on") or []):
+                    self.tasks[d]["status"] == "proven" for d in t.get("depends_on") or []) \
+                    and all(self.tasks[d]["status"] in FINAL
+                            for d in t.get("serial_after") or [] if d in self.tasks):
                 out.append(tid)
         return out
 
@@ -516,10 +573,94 @@ class State:
         return DEFAULT_REPAIRS if cap is None else int(cap)
 
 
-def derived_max_dispatches(n_tasks, max_repairs):
+def derived_max_dispatches(n_tasks, max_repairs, per_attempt=2):
     """The dispatch cap init sets when neither the grant nor --budget does:
-    n_tasks * 2 * (1 + max_repairs_per_task), one executor and one reviewer per attempt."""
-    return n_tasks * 2 * (1 + max_repairs)
+    n_tasks * per_attempt * (1 + max_repairs_per_task): one executor and one reviewer per
+    attempt, plus one verifier under the evidence gate (per_attempt 3)."""
+    return n_tasks * per_attempt * (1 + max_repairs)
+
+
+def _where_paths(where):
+    """The paths a task's `where` names: comma- or whitespace-separated, backticks and a
+    trailing `:symbol` or `/` dropped. A glob is cut back to the directory before its
+    first wildcard segment (`src/*.py` -> `src`), so it overlaps every path it could
+    match; a glob with no literal prefix (`*.py`) becomes the whole tree, `.`."""
+    out = []
+    for part in re.split(r"[,\s]+", where or ""):
+        part = part.strip("`'\"()").split(":")[0].rstrip("/")
+        if not part:
+            continue
+        segs = part.split("/")
+        wild = [i for i, seg in enumerate(segs) if re.search(r"[*?\[]", seg)]
+        if wild:
+            part = "/".join(segs[:wild[0]]) or "."
+        out.append(part)
+    return out
+
+
+def _overlap(a, b):
+    """True when a path in a and a path in b are equal or one contains the other; `.`
+    (the whole tree) overlaps everything."""
+    return any(x == y or "." in (x, y) or x.startswith(y + "/") or y.startswith(x + "/")
+               for x in a for y in b)
+
+
+def partition(order, plan_tasks, gated=False):
+    """The independence partition, computed before any dispatch (spec 5.2).
+
+    Two tasks with no dependency path between them are serialized (the later one in plan
+    order waits until the earlier one is final: proven, parked or blocked) when their
+    `where` paths overlap, or when they prove a shared feature. Under the evidence gate a
+    task that names no `where` and is not marked `independence: "parallel-safe"` cannot be
+    shown disjoint, so it is serialized too. Returns {mode, waves, serialized}."""
+    deps = {k: set(t.get("depends_on") or []) for k, t in plan_tasks.items()}
+    reach = {}
+
+    def ancestors(k, seen=None):
+        if k in reach:
+            return reach[k]
+        seen = seen or set()
+        out = set()
+        for d in deps.get(k, ()):
+            if d not in seen and d in deps:
+                out |= {d} | ancestors(d, seen | {k})
+        reach[k] = out
+        return out
+
+    info = {}
+    for k in order:
+        t = plan_tasks[k]
+        feats = t.get("features") if isinstance(t.get("features"), list) else []
+        info[k] = (_where_paths(t.get("where") if isinstance(t.get("where"), str) else ""),
+                   set(f for f in feats if isinstance(f, str)),
+                   t.get("independence") == "parallel-safe")
+    try:
+        schedule = waves({k: {"depends_on": list(deps[k])} for k in order})
+    except PlanError:
+        schedule = []
+    # Pairs are compared in topological order (wave by wave, plan order within a wave),
+    # so a serial edge always points the same way as the dependency edges: a task never
+    # waits on one that transitively waits on it. Plan order alone could close a cycle
+    # when a task depends on one listed after it.
+    pos = {k: i for i, k in enumerate(order)}
+    topo = [k for w in schedule for k in sorted(w, key=pos.get)] or list(order)
+    serialized = []
+    for j, b in enumerate(topo):
+        for a in topo[:j]:
+            if a in ancestors(b) or b in ancestors(a):
+                continue
+            (wa, fa, sa), (wb, fb, sb) = info[a], info[b]
+            if wa and wb and _overlap(wa, wb):
+                why = "shared files"
+            elif fa & fb:
+                why = "shared feature %s" % ", ".join(sorted(fa & fb))
+            elif gated and ((not wa and not sa) or (not wb and not sb)):
+                why = "files unknown"
+            else:
+                continue
+            serialized.append({"task": b, "after": a, "reason": why})
+    return {"mode": "evidence" if gated else "legacy", "waves": schedule,
+            "serialized": serialized}
 
 
 def check_budget(budget):
@@ -901,6 +1042,51 @@ def _init_fail(message, code=2):
     return code
 
 
+def plan_verification(plan, root):
+    """(verification block or None, None) or (None, why). A plan that declares
+    `verification` runs under the evidence gate: its skill is a verify-<app> directory in
+    the repo, and every task names at least one feature-map id. A plan that names features
+    without declaring the block is refused, so a gate cannot be dropped by omission."""
+    v = plan.get("verification")
+    named = [t.get("id") for t in plan.get("tasks") or []
+             if isinstance(t, dict) and t.get("features")]
+    if v is None:
+        if named:
+            return None, ("task(s) %s name features but the plan declares no verification "
+                          "block; the evidence gate cannot run without the verify skill"
+                          % ", ".join(str(x) for x in named))
+        return None, None
+    if not isinstance(v, dict) or not isinstance(v.get("skill"), str):
+        return None, "verification must be an object with a string `skill`"
+    skill = v["skill"].strip().rstrip("/")
+    evdir = v.get("evidence_dir", DEFAULT_EVIDENCE_DIR)
+    # init makes it ignore itself (a `*` .gitignore inside it), and the recorder keeps its
+    # run state in .verify-run beside it: so one dot-directory at the root, never `.`, a
+    # source directory, or a directory the tooling already owns.
+    if not isinstance(evdir, str) or not re.match(EVIDENCE_DIR_RE, evdir) or evdir in (
+            ".git", ".skill-contract", ".verify-run", ".claude"):
+        return None, ("verification.evidence_dir must be one dot-directory at the repo root "
+                      "such as .verify, got %r" % (evdir,))
+    for label, rel in (("verification.skill", skill), ("verification.evidence_dir", evdir)):
+        if not isinstance(rel, str) or not rel or os.path.isabs(rel) \
+                or ".." in rel.replace("\\", "/").split("/"):
+            return None, "%s must be a repo-relative path, got %r" % (label, rel)
+    if not os.path.basename(skill).startswith("verify-") or not os.path.isfile(
+            os.path.join(root, skill, "SKILL.md")) or not os.path.isdir(
+            os.path.join(root, skill, "features")):
+        return None, ("verification.skill %s is not a verify-<app> skill with SKILL.md and "
+                      "features/ (verification-skill-forge generates one)" % skill)
+    for t in plan.get("tasks") or []:
+        feats = t.get("features") if isinstance(t, dict) else None
+        if not isinstance(feats, list) or not feats or not all(
+                isinstance(f, str) and re.match(FEATURE_ID_RE, f) for f in feats):
+            return None, ("task %s: under the evidence gate every task needs `features`, a "
+                          "list of feature-map ids it will prove" % (t.get("id")
+                                                                      if isinstance(t, dict)
+                                                                      else "?"))
+    return {"skill": skill, "evidence_dir": evdir.rstrip("/")}, None
+
+
 def cmd_init(args):
     """Start a run from a task-plan/v1 envelope under a covering grant; print RUN: <id>.
 
@@ -956,6 +1142,9 @@ def cmd_init(args):
         return _init_fail("invalid plan: every verify command must follow the skill-contract "
                           "command rule: start with {python} (not python3) or a bare program "
                           "name, and use no absolute paths; see the lines above")
+    verification, why = plan_verification(plan, root)
+    if why:
+        return _init_fail("invalid plan: %s" % why)
     base = CC.current_branch(root)
     if base is None:
         return _init_fail("%s is not a git work tree, or git cannot say which branch is "
@@ -1005,8 +1194,8 @@ def cmd_init(args):
     if budget.get("max_dispatches") is None:
         # Cost is always bounded: one executor and one reviewer per attempt, for the first
         # attempt and every repair the budget allows.
-        budget["max_dispatches"] = derived_max_dispatches(len(plan_tasks),
-                                                          budget["max_repairs_per_task"])
+        budget["max_dispatches"] = derived_max_dispatches(
+            len(plan_tasks), budget["max_repairs_per_task"], 3 if verification else 2)
         derived.append("max_dispatches")
     exists, _ = _git_ok(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % run_branch)
     if exists:
@@ -1019,7 +1208,11 @@ def cmd_init(args):
         st = State.new(root=root, run_id=new_run_id(), plan=plan, plan_envelope=plan_path,
                        plan_sha256=hashlib.sha256(raw).hexdigest(), grant_id=gid,
                        run_branch=run_branch, base_branch=base, budget=budget,
-                       budget_derived=derived)
+                       budget_derived=derived, verification=verification)
+        if verification:
+            for d in (verification["evidence_dir"], ".verify-run"):
+                os.makedirs(os.path.join(root, d), exist_ok=True)
+                _ignore_runs_dir(os.path.join(root, d))
     except (PlanError, OSError) as e:
         _git_ok(root, "checkout", "-q", base)
         _git_ok(root, "branch", "-D", run_branch)
@@ -1074,14 +1267,24 @@ def cmd_status(args):
             line += " verified_head=%s" % t["verified_head"]
         if isinstance(t.get("review"), dict):
             line += " review=%s" % t["review"].get("verdict")
+        if isinstance(t.get("evidence"), dict):
+            ev = t["evidence"]
+            line += " evidence=%s" % ev.get("verdict")
+            if ev.get("reason"):
+                line += ":%s" % ev["reason"]
+        if t.get("owner"):
+            line += " owner=%s" % json.dumps(t["owner"])
         if t.get("park_reason"):
             line += " reason=%s" % json.dumps(t["park_reason"])
         if t.get("question"):
             line += " question=%s" % json.dumps(t["question"])
         print(line)
     derived = (" derived=%s" % ",".join(st.budget_derived)) if st.budget_derived else ""
-    print("STATUS: budget %s dispatches=%d%s" % (json.dumps(st.budget, sort_keys=True),
-                                                 st.dispatches, derived))
+    # evidence_gate=off: the plan declares no verification block, so a passing verify and
+    # review is all a merge needs.
+    gate_on = ("on skill=%s" % st.verification["skill"]) if st.verification else "off"
+    print("STATUS: budget %s dispatches=%d evidence_gate=%s%s"
+          % (json.dumps(st.budget, sort_keys=True), st.dispatches, gate_on, derived))
     print(BUDGET_NOTE)
     return 0
 
@@ -1092,7 +1295,7 @@ RUN_ASK = "NEXT: run ask"
 RUN_DONE = "NEXT: run done"
 # resume's dispatch actions and the dispatch kind each one spends (see next_actions).
 DISPATCH_KIND = {"dispatch-executor": "executor", "dispatch-repair": "repair",
-                 "dispatch-reviewer": "reviewer"}
+                 "dispatch-reviewer": "reviewer", "dispatch-verifier": "verifier"}
 
 
 def _moved_after_review(t):
@@ -1109,8 +1312,10 @@ def next_actions(st):
         running                      dispatch-executor          (into the existing worktree)
         verifying, last fail verify  dispatch-repair verify     (the verify tails)
         verifying, review failed     dispatch-repair review     (review.detail)
+        verifying, evidence failed   dispatch-repair evidence   (evidence.feature, .observed)
         verifying, branch moved      verify                     (no dispatch)
         reviewing, no verdict        dispatch-reviewer <sha>    (the verified head)
+        reviewing, no evidence pass  dispatch-verifier <sha>    (evidence gate only)
         reviewing, verdict pass      merge"""
     out = []
     for tid in st.order:
@@ -1119,15 +1324,24 @@ def next_actions(st):
         if t["status"] == "running":
             out.append((tid, "dispatch-executor"))
         elif t["status"] == "verifying":
+            ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
             if review.get("verdict") == "fail":
                 out.append((tid, "dispatch-repair review"))
+            elif ev.get("reason") == "evidence-failed":
+                out.append((tid, "dispatch-repair evidence"))
             elif _moved_after_review(t):
                 out.append((tid, "verify"))
             else:
                 out.append((tid, "dispatch-repair verify"))
         elif t["status"] == "reviewing":
-            out.append((tid, "merge" if review.get("verdict") == "pass"
-                        else "dispatch-reviewer %s" % t.get("verified_head")))
+            ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
+            if review.get("verdict") != "pass":
+                out.append((tid, "dispatch-reviewer %s" % t.get("verified_head")))
+            elif st.verification and (ev.get("verdict") != "pass" or ev.get(
+                    "verified_head") != t.get("verified_head")):
+                out.append((tid, "dispatch-verifier %s" % t.get("verified_head")))
+            else:
+                out.append((tid, "merge"))
     return out
 
 
@@ -1311,6 +1525,11 @@ def cmd_start(args):
     st, t = _load_task(args, ("pending",))
     if st is None:
         return 2
+    owner = (getattr(args, "owner", None) or "").strip() or None
+    if st.verification and not owner:
+        sys.stderr.write("the evidence gate records who writes each task: start %s --owner "
+                         "<the executor's agent id>\n" % args.task)
+        return 2
     if not re.match(TASK_ID_RE, args.task):
         sys.stderr.write("task id %r cannot name a branch or a directory\n" % args.task)
         return 2
@@ -1343,11 +1562,12 @@ def cmd_start(args):
     if not ok:
         sys.stderr.write("cannot create worktree for %s: %s\n" % (args.task, _git_err(r)))
         return 2
-    st.set_status(args.task, "running", worktree=wt, branch=branch)
+    st.set_status(args.task, "running", worktree=wt, branch=branch, owner=owner,
+                  dispatched_at=_rfc3339(_now()))
     st.dispatches += 1
     st.save()
     st.log("dispatch", task=args.task, kind="executor", branch=branch, worktree=wt,
-           dispatches=st.dispatches)
+           dispatches=st.dispatches, owner=owner)
     print("START: %s %s" % (args.task, wt))
     return 0
 
@@ -1568,6 +1788,13 @@ def cmd_verify(args):
         # nothing new. It counts as a failure, so the repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the review failed",
                                "unchanged since failed review", keep_review=True)
+    ev = t.get("evidence")
+    if isinstance(ev, dict) and ev.get("reason") == "evidence-failed" \
+            and ev.get("verified_head") == head:
+        # The running app already failed on this very commit: a green verify of it
+        # proves nothing new. It counts as a failure, so the repair loop stays bounded.
+        return _verify_refused(st, args.task, "no new commit since the evidence failed",
+                               "unchanged since failed evidence", keep_evidence=True)
     if not clean:
         # Only committed work can be merged, so only committed work is proven.
         return _verify_refused(st, args.task, "uncommitted changes in %s; commit them first"
@@ -1597,7 +1824,7 @@ def cmd_verify(args):
         passed = False
     # A fresh proof replaces any earlier verdict: the reviewer judges this state.
     st.set_status(args.task, "reviewing" if passed else "verifying", verify_runs=runs,
-                  verified_head=head if passed else None, review=None)
+                  verified_head=head if passed else None, review=None, evidence=None)
     if not passed:
         _count_failure(st, args.task)
     st.save()
@@ -1612,13 +1839,15 @@ def cmd_verify(args):
     return 0 if _dispatch(st, args.task, "reviewer") else 3
 
 
-def _verify_refused(st, task, message, reason, keep_review=False):
+def _verify_refused(st, task, message, reason, keep_review=False, keep_evidence=False):
     """Fail a verify before any command runs. Counts as a failing verify. Returns 3.
 
     keep_review keeps a failed review in place, so the repair still carries the
     reviewer's detail and the same rejected commit stays refused on every retry.
     """
     fields = {} if keep_review else {"review": None}
+    if not keep_evidence:
+        fields["evidence"] = None
     st.set_status(task, "verifying", verify_runs=[], verified_head=None, **fields)
     _count_failure(st, task)
     st.save()
@@ -1709,20 +1938,338 @@ def cmd_review(args):
     reason = _wall_clock_stop(st)
     if reason:
         return _record_stop(st, reason)
+    reviewer = (getattr(args, "reviewer", None) or "").strip() or None
+    if st.verification and not reviewer:
+        sys.stderr.write("the evidence gate records who reviews: review %s --reviewer "
+                         "<the reviewer's agent id>\n" % args.task)
+        return 2
+    if reviewer and reviewer == t.get("owner"):
+        # Writer != reviewer, by recorded identity (spec 5.1 clause 4).
+        sys.stderr.write("task %s: %s wrote this task and cannot review it; dispatch a "
+                         "fresh reviewer\n" % (args.task, reviewer))
+        st.log("review_refused", task=args.task, reviewer=reviewer, reason="writer")
+        return 2
     review = {"verdict": args.verdict, "detail": args.detail, "at": _rfc3339(_now()),
-              "verified_head": t.get("verified_head")}
+              "verified_head": t.get("verified_head"), "reviewer": reviewer}
     st.set_status(args.task, "reviewing" if args.verdict == "pass" else "verifying",
                   review=review)
     if args.verdict != "pass":
         _count_failure(st, args.task)  # spec section 2.5: the same repair budget
     st.save()
     st.log("review", task=args.task, verdict=args.verdict, detail=args.detail,
-           verified_head=t.get("verified_head"))
+           verified_head=t.get("verified_head"), reviewer=reviewer)
     print("REVIEW: %s %s" % (args.task, args.verdict))
     if args.verdict != "pass":
         _send_back(st, args.task)
         return 3
+    if st.verification:
+        # The runtime verdict comes from a verifier the conductor dispatches next.
+        return 0 if _dispatch(st, args.task, "verifier") else 3
     return 0
+
+
+# ── the evidence gate (spec 5.1) ─────────────────────────────────────────────
+def _evidence_root(st):
+    return os.path.join(st.root, (st.verification or {}).get("evidence_dir")
+                        or DEFAULT_EVIDENCE_DIR)
+
+
+def _blob(st, sha, path):
+    ok, r = _git_ok(st.root, "cat-file", "blob", "%s:%s" % (sha, path))
+    return r.stdout if ok else None
+
+
+def feature_map_at(st, sha):
+    """{feature id: [anchor paths, repo-relative]} for the verify skill's features/ as
+    committed at sha, or None when git cannot list them. Read from the commit, never from
+    a working tree, so the map judged is the one that head carries."""
+    skill = st.verification["skill"]
+    ok, r = _git_ok(st.root, "ls-tree", "--name-only", "%s:%s/features" % (sha, skill))
+    if not ok:
+        return None
+    app = os.path.dirname(os.path.dirname(os.path.dirname(skill)))
+    out = {}
+    for name in r.stdout.split():
+        if not name.endswith(".md") or name == "README.md":
+            continue
+        text = _blob(st, sha, "%s/features/%s" % (skill, name)) or ""
+        fid, anchors = None, []
+        for line in text.splitlines():
+            if line.startswith("## "):
+                break
+            m = re.match(r"^- (id|anchors):\s*(.*)$", line.strip())
+            if m and m.group(1) == "id":
+                fid = m.group(2).strip()
+            elif m:
+                for a in m.group(2).split(","):
+                    a = a.strip().strip("`").split(":")[0].strip().rstrip("/")
+                    if a:
+                        anchors.append("%s/%s" % (app, a) if app else a)
+        if fid == name[:-3]:
+            out[fid] = anchors
+    return out
+
+
+def touched_features(st, t, sha):
+    """(sorted feature ids the task has to prove, unmapped declared ids, (reason, detail)
+    or None). The task declares `features`; the diff adds every feature whose anchor it
+    touches. Anchors come from the map at the merge base AND at the head: the head is the
+    writer's, and a writer who re-anchors a feature away from the files it changed must
+    not shrink its own proof obligation. A map or a diff that cannot be read fails closed."""
+    fmap = feature_map_at(st, sha)
+    if fmap is None:
+        return None, None, ("feature-map-unreadable", "cannot read %s/features at %s"
+                            % (st.verification["skill"], sha))
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return None, None, ("evidence-diff-unreadable", "no merge base of %s and %s"
+                            % (st.run_branch, sha))
+    anchors = {f: set(a) for f, a in fmap.items()}
+    for f, a in (feature_map_at(st, base) or {}).items():
+        anchors.setdefault(f, set()).update(a)
+    declared = list(t.get("features") or [])
+    unmapped = [f for f in declared if f not in anchors]
+    ok, r = _git_ok(st.root, "diff", "--no-ext-diff", "--no-renames", "--name-only",
+                    base, sha)
+    if not ok:
+        return None, None, ("evidence-diff-unreadable", "cannot diff %s..%s: %s"
+                            % (base[:12], sha[:12], _git_err(r)))
+    changed = r.stdout.split()
+    derived = {f for f, a in anchors.items()
+               if any(c == x or c.startswith(x + "/") for c in changed for x in a)}
+    return sorted(set(declared) | derived), unmapped, None
+
+
+def _inside(path, base):
+    real, rb = os.path.realpath(path), os.path.realpath(base)
+    return real == rb or real.startswith(rb + os.sep)
+
+
+def _load_record(path, base):
+    if not _inside(path, base) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return "malformed"
+    return doc if isinstance(doc, dict) else "malformed"
+
+
+def _check_record(doc, feature, sha, verifier, directory, base):
+    """None when an evidence.json proves feature at sha for verifier, else a reason."""
+    if not isinstance(doc, dict) or doc.get("schema") != EVIDENCE_SCHEMA \
+            or doc.get("kind") != "evidence" or doc.get("feature") != feature:
+        return "evidence-malformed"
+    if doc.get("sha") != sha:
+        return "evidence-sha-mismatch"
+    arts = doc.get("artifacts")
+    if not isinstance(arts, list) or not arts:
+        return "evidence-malformed"
+    for a in arts:
+        rel = a.get("path") if isinstance(a, dict) else None
+        if not isinstance(rel, str) or not rel or os.path.isabs(rel) or ".." in rel.split("/"):
+            return "evidence-malformed"
+        path = os.path.join(directory, rel)
+        if not _inside(path, base) or not os.path.isfile(path):
+            return "evidence-artifact-missing"
+        if CC.sha256_file(path) != a.get("sha256"):
+            return "evidence-artifact-altered"
+    # A well-formed failure on this head counts whoever recorded it: the app failed on
+    # this commit, and another verifier's pass must not paper over it.
+    if doc.get("result") != "pass":
+        return "evidence-failed"
+    if doc.get("verifier") != verifier:
+        return "evidence-verifier-mismatch"
+    return None
+
+
+def evidence_verdict(st, t, sha, verifier):
+    """The evidence predicate for a task's verified head. Returns
+    {ok, reason, feature, features, paths, doctor}: ok only when the verifier is not the
+    task's owner, every touched feature has a map entry, and each touched feature has a
+    passing evidence.json recorded by this verifier at exactly sha (directory name and
+    `sha` field), with every artifact present and unaltered, from an instance whose
+    doctor.json at sha is ok. Check order is fixed, so a probe sees one reason."""
+    out = {"ok": False, "reason": None, "feature": None, "features": [], "paths": [],
+           "doctor": [], "observed": None}
+    if not verifier:
+        out["reason"] = "verifier-missing"
+        return out
+    if verifier == t.get("owner"):
+        out["reason"] = "writer-is-verifier"
+        return out
+    feats, unmapped, err = touched_features(st, t, sha)
+    if err:
+        out["reason"], out["feature"] = err
+        return out
+    out["features"] = feats
+    if unmapped:
+        out["reason"], out["feature"] = "feature-unmapped", unmapped[0]
+        return out
+    if not feats:
+        out["reason"] = "no-features"
+        return out
+    base = _evidence_root(st)
+    for f in feats:
+        dirs = sorted(glob.glob(os.path.join(base, "*", f, "*")))
+        here = [d for d in dirs if os.path.basename(d) == sha and os.path.isdir(d)]
+        if not here:
+            out["reason"] = "evidence-stale-sha" if dirs else "evidence-missing"
+            out["feature"] = f
+            return out
+        # Every record at this head is judged: any failure blocks the head (and carries
+        # what its verifier saw, for the executor's repair); otherwise the first passing
+        # record by this verifier proves the feature; otherwise the first reason, in
+        # instance-name order, is reported.
+        verdicts = []
+        for d in here:
+            doc = _load_record(os.path.join(d, "evidence.json"), base)
+            why = "evidence-missing" if doc is None else \
+                _check_record(doc, f, sha, verifier, d, base)
+            verdicts.append((d, doc, why))
+        failed = [(d, doc) for d, doc, why in verdicts if why == "evidence-failed"]
+        if failed:
+            out["reason"], out["feature"] = "evidence-failed", f
+            out["observed"] = str(failed[0][1].get("observed") or "")[:TAIL]
+            return out
+        chosen = next((d for d, _, why in verdicts if why is None), None)
+        if chosen is None:
+            out["reason"], out["feature"] = verdicts[0][2], f
+            return out
+        inst = os.path.basename(os.path.dirname(os.path.dirname(chosen)))
+        dpath = os.path.join(base, inst, "doctor", sha, "doctor.json")
+        doc = _load_record(dpath, base)
+        if doc is None:
+            out["reason"], out["feature"] = "doctor-missing", f
+            return out
+        if not isinstance(doc, dict) or doc.get("kind") != "doctor" \
+                or doc.get("sha") != sha or doc.get("ok") is not True:
+            out["reason"], out["feature"] = "doctor-red", f
+            return out
+        out["paths"].append(_rel(st, os.path.join(chosen, "evidence.json")))
+        if _rel(st, dpath) not in out["doctor"]:
+            out["doctor"].append(_rel(st, dpath))
+    out["ok"] = True
+    return out
+
+
+def cmd_evidence(args):
+    """Judge the task's verified head against the evidence predicate (spec 5.1): the root's
+    independent runtime verdict. EVIDENCE: <task> pass <sha> (exit 0), or
+    EVIDENCE: <task> reject <reason> [<feature>] (exit 3)."""
+    st = _load_current(args.root)
+    if st is None:
+        return 2
+    if _finished(st):
+        return 2
+    if _stopped(st):
+        return 3
+    st, t = _load_task(args, ("reviewing",))
+    if st is None:
+        return 2
+    if not st.verification:
+        sys.stderr.write("the plan declares no verification block: this run has no "
+                         "evidence gate\n")
+        return 2
+    reason = _wall_clock_stop(st)
+    if reason:
+        return _record_stop(st, reason)
+    pinned = t.get("verified_head")
+    review = t.get("review") if isinstance(t.get("review"), dict) else {}
+    if not pinned or review.get("verdict") != "pass" or review.get("verified_head") != pinned:
+        sys.stderr.write("task %s needs a passing review of its verified commit first\n"
+                         % args.task)
+        return 2
+    if not _gated(st, "local_reversible"):  # clause 5: the grant is live at verdict time
+        return 3
+    verifier = (args.verifier or "").strip() or None
+    v = evidence_verdict(st, t, pinned, verifier)
+    record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
+              "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
+              "verified_head": pinned,
+              "features": v["features"], "paths": v["paths"], "doctor": v["doctor"],
+              "at": _rfc3339(_now())}
+    st.log("evidence", task=args.task, ok=v["ok"], reason=v["reason"], feature=v["feature"],
+           verifier=verifier, verified_head=pinned, features=v["features"], paths=v["paths"])
+    if v["ok"]:
+        st.set_status(args.task, "reviewing", evidence=record)
+        st.save()
+        print("EVIDENCE: %s pass %s" % (args.task, pinned))
+        return 0
+    print("EVIDENCE: %s reject %s%s" % (args.task, v["reason"],
+                                        " " + v["feature"] if v["feature"] else ""))
+    if v["reason"] in EVIDENCE_PARK:
+        # Not the verifier's to fix: the feature map needs verification-skill-forge's
+        # maintain mode (or the plan a feature id), or git cannot show the diff, before
+        # this task can be proven. Fail closed.
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "feature-unmapped" if v["reason"] in (
+            "feature-unmapped", "no-features") else v["reason"])
+        return 3
+    if v["reason"] == "evidence-failed":
+        # The app did the wrong thing on this head: a repair, like a failing verify.
+        st.set_status(args.task, "verifying", review=None, evidence=record)
+        _count_failure(st, args.task)
+        st.save()
+        _send_back(st, args.task)
+        return 3
+    # A verifier-side reject (EVIDENCE_REDO): another verifier records again. Redos are
+    # bounded per task by max_repairs_per_task, so one misbehaving verifier cannot drain
+    # the shared dispatch budget that other tasks need.
+    redos = int(t.get("verifier_redos") or 0) + 1
+    st.set_status(args.task, "reviewing", evidence=record, verifier_redos=redos)
+    st.save()
+    if redos > st.max_repairs():
+        _park(st, args.task, "evidence_redo_exhausted")
+        return 3
+    _dispatch(st, args.task, "verifier")
+    return 3
+
+
+def cmd_trail(args):
+    """Print the decision trail (spec 5.3), one TRAIL: <json> line per unit, and write it
+    to --out when given (a file the human may commit; the conductor never commits it)."""
+    st = _load_current(args.root)
+    if st is None:
+        return 2
+    doc = trail(st)
+    for unit in doc["units"]:
+        print("TRAIL: %s" % json.dumps(unit, sort_keys=True))
+    if args.out:
+        path = os.path.abspath(args.out)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print("TRAIL_FILE: %s" % path)
+    return 0
+
+
+def trail(st):
+    """Per unit: dispatch time, owner, worktree, verified sha, reviewer, verdict agent,
+    evidence paths and merge outcome. Walkable next to resume's NEXT: lines."""
+    units = []
+    for tid in st.order:
+        t = st.tasks[tid]
+        review = t.get("review") if isinstance(t.get("review"), dict) else {}
+        ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
+        units.append({"task": tid, "status": t["status"], "owner": t.get("owner"),
+                      "dispatched_at": t.get("dispatched_at"), "worktree": t.get("worktree"),
+                      "verified_head": t.get("verified_head"),
+                      "reviewer": review.get("reviewer"),
+                      "verdict_agent": ev.get("verifier"),
+                      "evidence": {"verdict": ev.get("verdict"), "reason": ev.get("reason"),
+                                   "paths": ev.get("paths") or [],
+                                   "doctor": ev.get("doctor") or []} if ev else None,
+                      "merge": ({"outcome": "merged", "commit": t.get("merge_commit")}
+                                if t.get("merge_commit") else
+                                {"outcome": "parked", "reason": t.get("park_reason")}
+                                if t["status"] == "parked" else
+                                {"outcome": t["status"]}),
+                      "serial_after": list(t.get("serial_after") or [])})
+    return {"run_id": st.run_id, "evidence_gate": bool(st.verification),
+            "verification": st.verification, "partition": st.partition, "units": units}
 
 
 def cmd_merge(args):
@@ -1751,6 +2298,13 @@ def cmd_merge(args):
     if not pinned or (t.get("review") or {}).get("verified_head") != pinned:
         sys.stderr.write("task %s: the review does not cover the verified commit\n" % args.task)
         return 2
+    ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
+    if st.verification and (ev.get("verdict") != "pass" or ev.get("verified_head") != pinned):
+        # Green is not safe: under the gate nothing merges before an independent verdict
+        # on this exact head.
+        sys.stderr.write("task %s has no passing evidence verdict for %s; run evidence\n"
+                         % (args.task, pinned))
+        return 2
     here = CC.current_branch(st.root)
     if here != st.run_branch:
         sys.stderr.write("%s is on %s, not the run branch %s\n" % (st.root, here, st.run_branch))
@@ -1759,7 +2313,7 @@ def cmd_merge(args):
     tip = r.stdout.strip() if ok else None
     if tip != pinned:
         # Something was committed (or the branch moved) after the proof: prove it again.
-        st.set_status(args.task, "verifying", review=None)
+        st.set_status(args.task, "verifying", review=None, evidence=None)
         st.save()
         st.log("merge", task=args.task, ok=False, reason="branch moved after verify",
                verified_head=pinned, branch_head=tip)
@@ -1784,6 +2338,20 @@ def cmd_merge(args):
         return 2
     if not _gated(st, "local_reversible"):
         return 3
+    if st.verification:
+        # The records are re-read now: one removed or altered since the verdict blocks.
+        again = evidence_verdict(st, t, pinned, ev.get("verifier"))
+        if not again["ok"]:
+            st.set_status(args.task, "reviewing", evidence=dict(
+                ev, verdict="reject", reason=again["reason"], feature=again["feature"],
+                at=_rfc3339(_now())))
+            st.save()
+            st.log("merge", task=args.task, ok=False, reason="evidence changed since the "
+                   "verdict", evidence=again["reason"], feature=again["feature"])
+            sys.stderr.write("task %s: the evidence no longer holds (%s %s); record it "
+                             "again and run evidence\n" % (args.task, again["reason"],
+                                                           again["feature"] or ""))
+            return 2
     recovered = _existing_merge(st, before, pinned)
     if recovered:
         # A crash between the root's fast-forward and st.save() left this task's merge in
@@ -2079,7 +2647,11 @@ def run_result_payload(st, plan_doc=None, integration=None):
             "review": ({"verdict": review.get("verdict"), "detail": review.get("detail")}
                        if isinstance(review, dict) else None),
             "merge_commit": t.get("merge_commit"), "park_reason": t.get("park_reason"),
-            "question": t.get("question"), "depends_on": list(t.get("depends_on") or [])})
+            "question": t.get("question"), "depends_on": list(t.get("depends_on") or []),
+            "owner": t.get("owner"),
+            "evidence": ({k: t["evidence"].get(k) for k in
+                          ("verdict", "reason", "verifier", "verified_head", "paths")}
+                         if isinstance(t.get("evidence"), dict) else None)})
     stopped = None
     if st.stopped:
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
@@ -2098,7 +2670,8 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "budget": dict(st.budget), "budget_derived": list(st.budget_derived),
         "dispatches": st.dispatches,
         "budget_note": BUDGET_NOTE_TEXT, "integration": integration,
-        "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st)}
+        "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st),
+        "evidence_gate": bool(st.verification), "trail": trail(st)["units"]}
 
 
 def _run_result_assertions(st, plan_doc, integration=None):
@@ -2697,6 +3270,10 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("trail")
+    s.add_argument("--root", default=".")
+    s.add_argument("--out", default=None)
+    s.set_defaults(fn=cmd_trail)
     s = sub.add_parser("finish")
     s.add_argument("--root", default=".")
     s.add_argument("--push-cmd", default=None)
@@ -2704,13 +3281,19 @@ def main(argv=None):
     s.add_argument("--retry-remote", action="store_true")
     s.set_defaults(fn=cmd_finish)
     for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
-                     ("merge", cmd_merge), ("park", cmd_park), ("decision", cmd_decision)):
+                     ("evidence", cmd_evidence), ("merge", cmd_merge), ("park", cmd_park),
+                     ("decision", cmd_decision)):
         s = sub.add_parser(name)
         s.add_argument("task")
         s.add_argument("--root", default=".")
+        if name == "start":
+            s.add_argument("--owner", default=None)
         if name == "review":
             s.add_argument("--verdict", required=True, choices=("pass", "fail"))
             s.add_argument("--detail", default="")
+            s.add_argument("--reviewer", default=None)
+        if name == "evidence":
+            s.add_argument("--verifier", default=None)
         if name == "park":
             s.add_argument("--reason", required=True)
         if name == "decision":

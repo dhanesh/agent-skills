@@ -44,7 +44,12 @@ not the solution.>
      terms (fast, robust, user-friendly, ...) unless a number or checkable
      bound follows in the same statement. Optional: append a
      "[where: path/or/area]" hint so the task planner can pre-fill the
-     task's Where field. -->
+     task's Where field. Unattended mode requires three more hints on every
+     requirement: "[feature: <id>, ...]" (the verify skill's feature-map ids
+     it proves), "[proof: <what an agent can drive and see>]" (never "tests
+     pass" or "builds clean") and an independence marker, "[parallel-safe]"
+     or "[after: R<n>, ...]". A requirement with no observable proof is not
+     ready to run unattended: plan it attended. -->
 - R1: <single testable "must" statement>
 - R2: <single testable "must" statement>
 
@@ -59,6 +64,12 @@ not the solution.>
      Unattended mode requires one on every criterion. -->
 - R1: <runnable check that proves R1> [cmd: <argv that runs the check>]
 - R2: <runnable check that proves R2>
+
+## Verification
+<!-- Needed whenever a requirement carries [feature: ...], and always in
+     unattended mode: the verify skill factory-conductor's evidence gate drives
+     (verification-skill-forge generates it). -->
+Verify skill: `<app>/.claude/skills/verify-<app>`
 
 ## Open questions
 - <unknown that could still change the requirements — list may be empty>

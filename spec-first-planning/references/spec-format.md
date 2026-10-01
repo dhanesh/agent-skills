@@ -33,6 +33,16 @@ A spec is one markdown file:
   matched case-insensitively. It becomes the derived task's `depends_on`
   (mapped to the task(s) that cover each id) and is stripped from the
   title the same way `[where: ...]` is.
+- **Runtime-proof hints** on a requirement, each stripped from the task title and
+  ignored by the modal and vague-term rules: `[feature: <id>, ...]` (feature-map
+  ids, lowercase kebab-case), `[proof: <observable predicate>]` (what an agent can
+  drive and see when it works) and `[parallel-safe]` (independent of every other
+  task). `[parallel-safe]` and `[after: ...]` are the two independence markers; a
+  requirement carries at most one.
+- **Verification** (optional `## Verification` section): one line
+  `Verify skill: <repo-relative verify-<app> dir>`. Required whenever a
+  requirement names a feature, because factory-conductor refuses a plan whose
+  tasks name features without it.
 - **Criterion bullets** (in `## Acceptance criteria`): `- R<n>: <check>`.
   At least one per requirement; a criterion may mention several ids
   (`covers R1 and R2`), and every id it mentions must exist. Write each
@@ -84,6 +94,7 @@ pre-mortem and the decision sweep are in `references/unattended.md`:
 | 4 | Vague term with no metric in the same statement | unfalsifiable adjective ("fast", "robust", "user-friendly", "simple", "reliable", "scalable", "efficient", "seamless", "responsive", ...). A digit, `%`, `<=`, `>=`, `≤`, or `≥` in the statement licenses the word |
 | 5 | Every requirement referenced by ≥1 criterion; no criterion references an unknown id | a requirement nothing can prove; a check proving nothing |
 | 5a | Every id in a requirement's `[after: ...]` hint names a known requirement; the after-hints as a whole contain no cycle (message: "after: hints have a cycle") | a task ordered after a requirement that doesn't exist, or a dependency loop no schedule can satisfy |
+| 5c | Every `[feature: ...]` id is lowercase kebab-case; a spec that names a feature has a `## Verification` section whose `Verify skill:` is a repo-relative `verify-<app>` path; no requirement is both `[parallel-safe]` and `[after: ...]` | a plan the evidence gate cannot run, or contradictory independence markers |
 | 5b | A criterion's `[cmd: ...]` hint ends the criterion, parses with `shlex`, is non-empty, and passes the C6 command rule (the vendored `contract_check`) | a command no machine can run, or one that names an interpreter or an absolute path |
 | 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
 | 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
@@ -116,7 +127,11 @@ Recommended line's `(decision: ...)`) must name a decision that exists in
 
 Runs every `--converged` rule above, plus: `## Decisions` is present,
 non-empty, its grammar is well-formed, and every decision's answer is
-non-empty; and every acceptance criterion carries a `[cmd: ...]` hint. A
+non-empty; every acceptance criterion carries a `[cmd: ...]` hint; the spec has a
+`Verify skill:`; and every requirement carries `[feature: ...]`, a `[proof: ...]`
+that is not only about tests, builds, CI or lint ("all tests pass", "the build is
+clean", "it compiles" fail), and an independence marker. A requirement that cannot
+state an observable predicate is not unattended work: plan it attended. A
 grant exists only for runs a machine can prove: factory-conductor refuses a
 plan with a null verify command at `init`.
 
@@ -162,6 +177,10 @@ TASKS_RESULT: PASS|FAIL (k/n requirements covered by m task(s))
 }
 ```
 
+`features`, `predicate` and `independence` (`"parallel-safe"`, or the task ids of
+its `[after: ...]` hint) appear only when the requirement carried those hints, and the
+plan payload gains `verification: {"skill": <path>}` when the spec has a
+`Verify skill:` line.
 `where` appears only when the requirement carried a `[where: ...]` hint;
 `depends_on` appears only when it carried an `[after: ...]` hint that
 resolved to at least one covering task; `verify_commands` (one argv or

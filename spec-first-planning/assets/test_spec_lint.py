@@ -368,8 +368,17 @@ p
 
 # FULL carries a [cmd: ...] hint on its criterion: --unattended requires one on every
 # acceptance criterion (a grant exists only for machine-proven runs).
+# It also carries the runtime-proof hints unattended mode requires on every requirement
+# ([feature: ...], an observable [proof: ...], an independence marker) and the
+# ## Verification section naming the verify skill.
 FULL = LIGHT.replace("RT2 [NOT_SATISFIED]", "RT2 [SPECIFICATION_READY]").replace(
-    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n") + """
+    "expect exit 0.\n", "expect exit 0. [cmd: {python} -m pytest -k rows]\n").replace(
+    "- R1: The export must include every row.",
+    "- R1: The export must include every row. [feature: export-download] "
+    "[proof: the downloaded CSV lists every seeded row] [parallel-safe]") + """
+## Verification
+Verify skill: `.claude/skills/verify-export`
+
 ## Tensions
 - TN1 [trade_off]: Streaming vs. atomic write. (between: B1, T1; status: resolved; strategy: Partition)
 
@@ -640,6 +649,66 @@ class ConvergedRules(unittest.TestCase):
             self.assertEqual(run().returncode, 0)
             self.assertEqual(run("--converged").returncode, 1)
             self.assertEqual(run("--unattended").returncode, 1)
+
+
+class RuntimeProofRules(unittest.TestCase):
+    """Spec 6: unattended work names its feature ids, an observable predicate and an
+    independence marker; tests passing is not a predicate."""
+
+    def lint(self, text, mode="unattended"):
+        return spec_lint.lint(text, mode)
+
+    def test_full_spec_carries_every_hint(self):
+        self.assertEqual(self.lint(FULL), [])
+
+    def test_missing_proof_routes_to_attended(self):
+        t = FULL.replace(" [proof: the downloaded CSV lists every seeded row]", "")
+        issues = self.lint(t)
+        self.assertTrue(any("no [proof: ...]" in i and "attended" in i for i in issues), issues)
+        self.assertEqual(self.lint(t, "converged"), [])
+
+    def test_tests_pass_is_not_a_predicate(self):
+        for bad in ("all tests pass", "unit tests are green", "the build is clean",
+                    "CI passes", "it compiles", "lint passes"):
+            t = FULL.replace("the downloaded CSV lists every seeded row", bad)
+            self.assertTrue(any("not observable at runtime" in i for i in self.lint(t)), bad)
+
+    def test_an_observation_that_mentions_tests_is_fine(self):
+        t = FULL.replace("the downloaded CSV lists every seeded row",
+                         "the report page shows 3 test rows after upload")
+        self.assertEqual(self.lint(t), [])
+
+    def test_missing_feature_fails(self):
+        t = FULL.replace("[feature: export-download] ", "")
+        self.assertTrue(any("no [feature:" in i for i in self.lint(t)))
+
+    def test_missing_independence_marker_fails(self):
+        t = FULL.replace(" [parallel-safe]", "")
+        self.assertTrue(any("no independence marker" in i for i in self.lint(t)))
+
+    def test_missing_verify_skill_fails_everywhere(self):
+        t = FULL.replace("## Verification\nVerify skill: `.claude/skills/verify-export`\n", "")
+        self.assertTrue(any("Verification" in i for i in self.lint(t, "light")))
+
+    def test_malformed_feature_and_bad_skill_path_fail(self):
+        t = FULL.replace("export-download", "Export_Download").replace(
+            ".claude/skills/verify-export", "../elsewhere")
+        issues = self.lint(t, "light")
+        self.assertTrue(any("malformed id 'Export_Download'" in i for i in issues))
+        self.assertTrue(any("repo-relative verify-<app>" in i for i in issues))
+
+    def test_parallel_safe_and_after_conflict(self):
+        t = FULL.replace("[parallel-safe]", "[parallel-safe] [after: R1]")
+        self.assertTrue(any("both [parallel-safe] and [after" in i
+                            for i in self.lint(t, "light")))
+
+    def test_hints_do_not_satisfy_the_modal_rule_or_trip_vague_terms(self):
+        t = FULL.replace("The export must include every row.",
+                         "The export includes every row.").replace(
+            "the downloaded CSV lists every seeded row", "the export must be fast")
+        issues = self.lint(t, "light")
+        self.assertTrue(any("lacks a modal obligation" in i for i in issues))
+        self.assertFalse(any("vague term" in i for i in issues))
 
 
 if __name__ == "__main__":

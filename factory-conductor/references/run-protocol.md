@@ -27,13 +27,15 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `init --plan <envelope> [--budget JSON]` | `RUN: <run-id>`; on stderr, `FAIL:` lines for a refused plan, and a `warning:` when `origin` has no copy of the base branch | 0; 2 invalid plan, budget or branch; 3 `GATE: ASK` |
 | `gate --action <class>` | `GATE: COVERED id=… class=… gate=…` or `GATE: ASK reason=…` | 0 covered; 3 ask |
 | `next [--max N]` | `READY: <ids>`, nothing, or `STOP: <reason>` | 0; 3 stop; 2 finished |
-| `start <task>` | `START: <task> <worktree>` | 0; 2 not ready, parallel limit, dispatch budget spent with work in flight; 3 gate or stop |
+| `start <task> [--owner ID]` | `START: <task> <worktree>` (under the evidence gate `--owner` is required, exit 2 without it) | 0; 2 not ready, parallel limit, dispatch budget spent with work in flight; 3 gate or stop |
 | `verify <task>` | `VERIFY: <task> ok\|fail <argv>` per command, then `VERIFY: <task> pass <sha>` or `VERIFY: <task> fail` | 0 pass; 3 fail, park or stop; 2 refused |
-| `review <task> --verdict pass\|fail [--detail T]` | `REVIEW: <task> pass\|fail` | 0 pass; 3 fail or park; 2 refused |
-| `merge <task>` | `MERGE: <task> <sha>` | 0; 3 conflict or no commits (parked), or stop; 2 refused, or a fast-forward git refused with the root unchanged (the task stays `reviewing`) |
+| `review <task> --verdict pass\|fail [--detail T] [--reviewer ID]` | `REVIEW: <task> pass\|fail` (under the gate `--reviewer` is required; the owner's id is refused, exit 2) | 0 pass; 3 fail or park; 2 refused |
+| `evidence <task> --verifier ID` | `EVIDENCE: <task> pass <sha>` or `EVIDENCE: <task> reject <reason> [<feature>]` (see "Evidence gate") | 0 pass; 3 reject, park or gate; 2 refused (no gate, no passing review) |
+| `merge <task>` | `MERGE: <task> <sha>` (under the gate: only with a passing evidence verdict on the pinned sha, whose records still hold) | 0; 3 conflict or no commits (parked), or stop; 2 refused, or a fast-forward git refused with the root unchanged (the task stays `reviewing`) |
 | `park <task> --reason R` | `PARK: <task> <reason>` | 0; 2 refused |
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
-| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (ending ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
+| `trail [--out FILE]` | one `TRAIL: <json>` per task (dispatch time, owner, worktree, verified head, reviewer, verdict agent, evidence, merge outcome), `TRAIL_FILE: <path>` with `--out` | 0 |
+| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [evidence=pass\|reject:<reason>] [owner="…"] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (` evidence_gate=on skill=<dir>` or ` evidence_gate=off`, then ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
 | `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
@@ -61,7 +63,7 @@ key exits 2, and a key the grant does not set can be added. An unknown key in `-
 | Key | Enforced by |
 |---|---|
 | `wall_clock_min` (when set) | `next`, `start`, `verify`, `review`, `merge`: `STOP: budget_wall_clock` once that many minutes have passed since `init` |
-| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
+| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt (× 3 under the evidence gate: one verifier too). A verifier dispatch is spent at each passing review and each redo-able evidence reject. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
 | `max_repairs_per_task` (2 by default) | every failing verify or review after the first is a repair; at the cap the task parks with `verify_red_after_repairs` |
 | `max_parallel` | `start` refuses past it; `next --max` is clamped to it |
 | `max_tokens`, `max_usd` | recorded, not enforced: the runtime does not expose usage to the tool |
@@ -272,6 +274,53 @@ done or the integration was red, and, for an integration skipped because the gra
   `finish --retry-remote` still runs pending remote steps (and a skipped integration), and
   `init` starts a new run.
 
+## Evidence gate
+
+A plan payload may carry `"verification": {"skill": "<repo-relative verify-<app> dir>",
+"evidence_dir": ".verify"}` (`evidence_dir` optional). `init` then requires every task to
+carry `features` (a non-empty list of feature-map ids), refuses a skill directory without
+`SKILL.md` and `features/`, and makes `<root>/.verify` and `<root>/.verify-run` ignore
+themselves. A plan that names `features` on any task without the block is refused (exit 2):
+the gate cannot be dropped by leaving the block out.
+
+`evidence <task> --verifier ID` runs on a `reviewing` task whose review passed on its
+verified head. Checks, in order; the first that fails is the reject reason:
+
+| # | Check | Reject reason | What happens |
+|---|---|---|---|
+| 1 | the grant covers `local_reversible` | `GATE: ASK` | stop `grant_ask` (exit 3) |
+| 2 | a verifier id was given | `verifier-missing` | a verifier dispatch is spent; stays `reviewing` |
+| 3 | verifier ≠ the owner recorded at `start` | `writer-is-verifier` | as above |
+| 4 | each declared feature has `features/<id>.md` (with a matching `- id:`) at the verified head, read from git | `feature-unmapped <id>` | parked `feature-unmapped` (maintain mode) |
+| 5 | the touched set (declared ∪ features whose `- anchors:` the diff `run_branch...head` touches) is not empty | `no-features` | parked `feature-unmapped` |
+| 6 | a `.verify/*/<feature>/<head>/` directory exists | `evidence-missing`, or `evidence-stale-sha` when only other heads have one | verifier dispatch |
+| 7 | its `evidence.json` is `verify-evidence/v1`, kind `evidence`, this feature | `evidence-malformed` | verifier dispatch |
+| 8 | its `sha` equals the head | `evidence-sha-mismatch` | verifier dispatch |
+| 9 | its `verifier` equals `--verifier` | `evidence-verifier-mismatch` | verifier dispatch |
+| 10 | every artifact exists inside the evidence dir with its sha256 | `evidence-artifact-missing`, `evidence-artifact-altered` | verifier dispatch |
+| 11 | `result` is `pass` | `evidence-failed` | back to `verifying`: a repair on the task's repair budget; the record keeps the verifier's `observed` text, `resume` prints `dispatch-repair evidence`, and `verify` refuses the same commit |
+| 12 | `<instance>/doctor/<head>/doctor.json` exists, kind `doctor`, same `sha`, `ok: true` | `doctor-missing`, `doctor-red` | verifier dispatch |
+
+A pass records `tasks.<task>.evidence` (`verdict`, `verifier`, `verified_head`, `features`,
+`paths`, `doctor`, `at`) and logs an `evidence` event. `merge` refuses (exit 2) without a
+passing verdict on the pinned head; after its grant gate it re-runs checks 4–12 against
+the files as they are, and on a failure records the reject and exits 2. A commit after the
+verdict makes `merge` clear the review and the evidence ("verify again"). `verify` clears
+the evidence on every new proof.
+
+## Independence partition and the trail
+
+`init` logs `partition` on its `init` event: `{mode: evidence|legacy, waves, serialized:
+[{task, after, reason}]}`. A pair of tasks with no dependency path is serialized for
+`shared files` (their `where` paths overlap), `shared feature <ids>`, or, under the gate
+only, `files unknown` (a task names no `where` and is not `independence: "parallel-safe"`).
+Each task's `serial_after` lists its predecessors; `ready` offers it only once they are all
+`proven`, `parked` or `blocked`. A legacy plan (no gate) keeps its old behaviour: only
+overlapping `where` paths or shared features serialize.
+
+`trail` prints the per-unit record; the run-result payload carries the same list as
+`trail`, plus `evidence_gate`, and each task's `owner` and `evidence`.
+
 ## Task statuses and stop reasons
 
 Statuses: `pending`, `running` (started), `verifying` (verify failed, awaiting repair),
@@ -327,7 +376,9 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `NEXT: <task> dispatch-repair review` | `verifying` after a failed review | send the executor `tasks.<task>.review.detail`, then `conductor verify <task>` on its report |
 | `NEXT: <task> dispatch-reviewer <sha>` | `reviewing`, no verdict | dispatch a reviewer on `<sha>`, the verified head, then `conductor review` |
 | `NEXT: <task> verify` | `verifying`, last verify passed, no review (merge found the branch moved) | `conductor verify <task>`; nothing is dispatched |
-| `NEXT: <task> merge` | `reviewing`, verdict pass | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
+| `NEXT: <task> dispatch-repair evidence` | `verifying` after an `evidence-failed` verdict | send the executor `tasks.<task>.evidence.feature` and `.observed` (what the verifier saw), then `conductor verify <task>` on its report; `verify` refuses the commit the evidence failed on (`unchanged since failed evidence`), so the repair is a new commit |
+| `NEXT: <task> dispatch-verifier <sha>` | `reviewing`, review pass, evidence gate on, no passing evidence verdict on `<sha>` | dispatch the verifier brief on `<sha>`, then `conductor evidence <task> --verifier <id>` |
+| `NEXT: <task> merge` | `reviewing`, verdict pass (and, under the gate, a passing evidence verdict) | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
 | `NEXT: run next` | work is in flight, or a task is ready | carry on with the loop (`conductor next`) |
 | `NEXT: run ask` | the grant asks, now or as a `grant_ask` stop it still does not lift | report it to the user and wait; once they renew the grant, run `conductor resume` again |
 | `NEXT: run finish` | the run is stopped for any other reason (its `STOP:` line says why), or nothing is in flight and nothing is ready (resume records that stop, as `next` would) | `conductor finish`; a stopped run prints no task lines, because it takes no further step and `finish` parks its in-flight tasks |
