@@ -225,6 +225,46 @@ class IdentityTests(Gate):
         self.assertEqual(rc, 2)
         self.assertIn("--owner", err)
 
+    def test_owner_later_then_owner_records_the_executor_once(self):
+        # A harness that assigns an agent id only at spawn starts the task first, then
+        # names its executor; verify waits for the name, and the name cannot be swapped.
+        self.init([task("T1", ["notes-create"])])
+        rc, out, err = self.run_cmd("start", "T1", "--owner-later")
+        self.assertEqual(rc, 0, out + err)
+        wt = out.split(" ", 2)[2].strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("x")
+        git(wt, "add", "-A")
+        git(wt, "commit", "-q", "-m", "w")
+        rc, _, err = self.run_cmd("verify", "T1")
+        self.assertEqual(rc, 2)
+        self.assertIn("owner T1 --owner", err)
+        self.assertEqual(self.state().tasks["T1"]["status"], "running")
+        rc, out, _ = self.run_cmd("owner", "T1", "--owner", "writer")
+        self.assertEqual((rc, out.strip()), (0, "OWNER: T1 writer"))
+        rc, _, err = self.run_cmd("owner", "T1", "--owner", "someone-else")
+        self.assertEqual(rc, 2)
+        self.assertIn("never replaced", err)
+        self.assertEqual(self.state().tasks["T1"]["owner"], "writer")
+        rc, out, err = self.run_cmd("verify", "T1")
+        self.assertEqual(rc, 0, out + err)
+        rc, _, err = self.run_cmd("review", "T1", "--verdict", "pass", "--reviewer", "writer")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot review", err)
+
+    def test_start_refuses_owner_and_owner_later_together(self):
+        self.init([task("T1", ["notes-create"])])
+        rc, _, err = self.run_cmd("start", "T1", "--owner", "w", "--owner-later")
+        self.assertEqual(rc, 2)
+        self.assertIn("not both", err)
+        self.assertEqual(self.state().tasks["T1"]["status"], "pending")
+
+    def test_owner_needs_a_running_task(self):
+        self.init([task("T1", ["notes-create"])])
+        rc, _, err = self.run_cmd("owner", "T1", "--owner", "w")
+        self.assertEqual(rc, 2)
+        self.assertIn("pending", err)
+
     def test_the_writer_cannot_review(self):
         self.init([task("T1", ["notes-create"])])
         rc, out, _ = self.run_cmd("start", "T1", "--owner", "writer")

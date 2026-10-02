@@ -115,8 +115,9 @@ and skip what the conversation has already answered:
    `max_dispatches` (how many agent dispatches the run may make: executors, repairs and
    reviewers, and verifiers under the evidence gate; this is the only real cost cap; when
    the user gives none, factory-conductor derives it at `init` as tasks × 2 × (1 +
-   `max_repairs_per_task`), one executor and one reviewer per attempt, × 3 with a verifier
-   under the evidence gate, so leaving it out still bounds the run), `max_repairs_per_task`
+   `max_repairs_per_task`), one executor and one reviewer per attempt, or tasks × 3 × (1 +
+   `max_repairs_per_task`) under the evidence gate, which adds a verifier, so leaving it out
+   still bounds the run), `max_repairs_per_task`
    (default 2) and
    `max_parallel` (tasks in flight at once, default 2). Tokens and dollars
    (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose

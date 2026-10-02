@@ -57,6 +57,12 @@ A spec is one markdown file:
   It becomes the derived verify step's `command` and is stripped from its
   text; a token inside it (`grep R9 x`) is not a requirement reference.
   Example: `- R2: row parity holds. [cmd: {python} tests/compare_export.py fixtures/report.json]`.
+  A test-runner filter (`cargo test <name>`, `pytest -k <name>`, `go test -run <name>`)
+  exits 0 when it matches no test at all, so a misnamed or missing test passes as proof.
+  Name the filter in the criterion's text as the test the executor has to write, and pair
+  it with a criterion whose command fails when the behaviour is absent (the whole suite, or
+  a script that drives the binary), because a filter alone cannot tell an empty run from
+  a real pass.
   Optional in light and converged mode; `--unattended` requires it on every
   criterion.
 - **Open questions**: the section must exist; its list may be empty.

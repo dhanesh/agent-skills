@@ -294,6 +294,18 @@ class GitTests(unittest.TestCase):
         self.assertEqual(self.task(st)["merge_commit"],
                          C.git(self.root, "rev-parse", "HEAD").stdout.strip())
 
+    def test_the_merge_commit_subject_is_a_conventional_commit(self):
+        # A repository that lints commit messages (commitlint) lints the run branch's merge
+        # commits too; "conductor: T1" failed its type rule in a live trial.
+        st = self.state()
+        C.main(["start", "T1", "--root", self.root])
+        commit_in(self.wt(st), "b.txt", "b\n")
+        self.through_review(st)
+        self.assertEqual(C.main(["merge", "T1", "--root", self.root]), 0)
+        subject = C.git(self.root, "log", "-1", "--format=%s").stdout.strip()
+        self.assertEqual(subject, "chore(factory): merge task T1")
+        self.assertRegex(subject, r"^[a-z]+(\([a-z0-9-]+\))?: \S")
+
     def test_merge_deletes_the_task_branch(self):
         st = self.state()
         C.main(["start", "T1", "--root", self.root])

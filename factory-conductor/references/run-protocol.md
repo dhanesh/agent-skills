@@ -27,7 +27,8 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `init --plan <envelope> [--budget JSON]` | `RUN: <run-id>`; on stderr, `FAIL:` lines for a refused plan, and a `warning:` when `origin` has no copy of the base branch | 0; 2 invalid plan, budget or branch; 3 `GATE: ASK` |
 | `gate --action <class>` | `GATE: COVERED id=… class=… gate=…` or `GATE: ASK reason=…` | 0 covered; 3 ask |
 | `next [--max N]` | `READY: <ids>`, nothing, or `STOP: <reason>` | 0; 3 stop; 2 finished |
-| `start <task> [--owner ID]` | `START: <task> <worktree>` (under the evidence gate `--owner` is required, exit 2 without it) | 0; 2 not ready, parallel limit, dispatch budget spent with work in flight; 3 gate or stop |
+| `start <task> [--owner ID \| --owner-later]` | `START: <task> <worktree>` (under the evidence gate `--owner` or `--owner-later` is required, exit 2 without either or with both) | 0; 2 not ready, parallel limit, dispatch budget spent with work in flight; 3 gate or stop |
+| `owner <task> --owner ID` | `OWNER: <task> <id>`: records the executor of a task started with `--owner-later`, once; `verify` refuses a gated task with no owner | 0; 2 not running, no id, or an owner already recorded |
 | `verify <task>` | `VERIFY: <task> ok\|fail <argv>` per command, then `VERIFY: <task> pass <sha>` or `VERIFY: <task> fail` | 0 pass; 3 fail, park or stop; 2 refused |
 | `review <task> --verdict pass\|fail [--detail T] [--reviewer ID]` | `REVIEW: <task> pass\|fail` (under the gate `--reviewer` is required; the owner's id is refused, exit 2) | 0 pass; 3 fail or park; 2 refused |
 | `evidence <task> --verifier ID` | `EVIDENCE: <task> pass <sha>` or `EVIDENCE: <task> reject <reason> [<feature>]` (see "Evidence gate") | 0 pass; 3 reject, park or gate; 2 refused (no gate, no passing review) |
@@ -63,7 +64,7 @@ key exits 2, and a key the grant does not set can be added. An unknown key in `-
 | Key | Enforced by |
 |---|---|
 | `wall_clock_min` (when set) | `next`, `start`, `verify`, `review`, `merge`: `STOP: budget_wall_clock` once that many minutes have passed since `init` |
-| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt (× 3 under the evidence gate: one verifier too). A verifier dispatch is spent at each passing review and each redo-able evidence reject. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
+| `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt, or tasks × 3 × (1 + `max_repairs_per_task`) under the evidence gate, which adds one verifier per attempt. A verifier dispatch is spent at each passing review and each redo-able evidence reject. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
 | `max_repairs_per_task` (2 by default) | every failing verify or review after the first is a repair; at the cap the task parks with `verify_red_after_repairs` |
 | `max_parallel` | `start` refuses past it; `next --max` is clamped to it |
 | `max_tokens`, `max_usd` | recorded, not enforced: the runtime does not expose usage to the tool |
@@ -151,7 +152,7 @@ repair budget as a failing verify and sends the task back.
 Needs a passing verify and a passing review on the same pinned sha, the task branch still at
 that sha (otherwise the task goes back to `verifying`, exit 2), and the root on the run branch,
 clean, with no merge in progress (a tracked edit in the root exits 2 and leaves the task
-`reviewing`). The `--no-ff` merge of the pinned sha runs in an isolated clone; the root then
+`reviewing`). The `--no-ff` merge of the pinned sha, with the Conventional Commits subject `chore(factory): merge task <task>` (a repository that lints commit messages lints these too), runs in an isolated clone; the root then
 fetches the merge commit (with `GIT_ALLOW_PROTOCOL=file`, so a planted `insteadOf` cannot
 turn the fetch into an `ext::` command) and fast-forwards to it. A fast-forward git refuses
 while the root HEAD has not moved (an untracked file in the way, say) logs `merge` with
@@ -300,6 +301,8 @@ verified head. Checks, in order; the first that fails is the reject reason:
 | 10 | every artifact exists inside the evidence dir with its sha256 | `evidence-artifact-missing`, `evidence-artifact-altered` | verifier dispatch |
 | 11 | `result` is `pass` | `evidence-failed` | back to `verifying`: a repair on the task's repair budget; the record keeps the verifier's `observed` text, `resume` prints `dispatch-repair evidence`, and `verify` refuses the same commit |
 | 12 | `<instance>/doctor/<head>/doctor.json` exists, kind `doctor`, same `sha`, `ok: true` | `doctor-missing`, `doctor-red` | verifier dispatch |
+
+Every instance's record for a feature at the head is judged: a well-formed failing record blocks the head whoever recorded it (`evidence-failed`), and otherwise the first passing record by this verifier proves the feature. Records from other verifiers at the same head (a placeholder id, say) do not block a pass and are not cited.
 
 A pass records `tasks.<task>.evidence` (`verdict`, `verifier`, `verified_head`, `features`,
 `paths`, `doctor`, `at`) and logs an `evidence` event. `merge` refuses (exit 2) without a

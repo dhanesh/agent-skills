@@ -47,7 +47,8 @@ You can stop a run at any time by revoking the grant
 - **Cost is always bounded, by dispatches and by wall clock.** Dispatches (executor, repair and
   reviewer, as the tool records them) are always capped: when the grant and `init --budget`
   set no `max_dispatches`, `init` derives tasks × 2 × (1 + `max_repairs_per_task`), one
-  executor and one reviewer per attempt, and `status` shows it as derived. Each dispatch
+  executor and one reviewer per attempt (tasks × 3 × (1 + `max_repairs_per_task`) under the
+  evidence gate, which adds a verifier), and `status` shows it as derived. Each dispatch
   `resume` asks for after a crash counts too. The wall clock is capped by `wall_clock_min`
   when set, and always by the grant's expiry: at most 7 days from the newest grant covering
   the plan. Repairs per task (2 by default) and parallelism (2 by default) are enforced too.

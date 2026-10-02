@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.2.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -88,7 +88,8 @@ If any of them fails, stop and tell the user which one and why; do not repair a 
 yourself. Read the grant's `budget` too: `max_repairs_per_task` defaults to 2 and
 `max_parallel` to 2. When neither the grant nor `init --budget` sets `max_dispatches`,
 `init` derives it by default as tasks × 2 × (1 + `max_repairs_per_task`), one executor and
-one reviewer per attempt, and `status` marks it derived; you SHOULD tell the user that cap
+one reviewer per attempt (tasks × 3 × (1 + `max_repairs_per_task`) under the evidence gate,
+which adds a verifier per attempt), and `status` marks it derived; you SHOULD tell the user that cap
 before the run starts. When the grant sets no `max_dispatches`, `--budget` can set a value
 above the derived one: the tighten-only rule covers only keys the grant sets.
 `wall_clock_min` is enforced when set, and the grant's expiry caps the wall clock in any case:
@@ -107,7 +108,11 @@ Each step is one command. Read its output lines, not just the exit code.
    new is ready, or `STOP: <reason>` (exit 3).
 3. **Start.** For each ready task, `conductor start <task> --owner <executor id>` prints
    `START: <task> <worktree>`. The owner is the agent id your harness gives the executor you
-   are about to dispatch; the evidence gate refuses a start without one. It creates the task branch `<run_branch>--<task>` in that
+   are about to dispatch; the evidence gate refuses a start without one. If your harness
+   assigns that id only when it spawns the agent, run `conductor start <task> --owner-later`,
+   dispatch the executor, then `conductor owner <task> --owner <its id>` straight away: the
+   owner is recorded once and never replaced, because a swapped owner could let the writer
+   pass as its own verifier, and `verify` refuses a gated task whose owner is not recorded. It creates the task branch `<run_branch>--<task>` in that
    worktree and logs a `dispatch`. An exit 2 for the parallel limit or a spent dispatch budget
    means skip that start and carry on with the tasks in flight.
 4. **Dispatch the executor.** Send a fresh subagent the executor brief below, filled in, and
@@ -169,8 +174,8 @@ not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
 **Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
 the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
-as `in_flight_at_stop`. A `GATE: ASK`, or `REMOTE: pending …` (exit 3), means the grant does
-not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
+as `in_flight_at_stop`. A `GATE: ASK`, followed by `REMOTE: pending …` (exit 3) naming the push, the PR or
+both, means the grant does not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
 steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line means the push or
 the PR command failed: report its stderr, and retry at most once. `INTEGRATION: fail <task>
 <command>` lines and `STOP: integration_red` (exit 3) mean tasks that each passed alone break
@@ -291,6 +296,8 @@ Task: <title>; requirement: <requirement text>
 Constraints: <the plan's constraints; the grant's decisions and defaults>
 Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>>
 
+Building or running the code to check a claim is fine; leave every tracked file as it is.
+
 Answer two questions about the diff:
 1. Does it satisfy the requirement?
 2. Does it do anything the task did not ask for?
@@ -303,6 +310,12 @@ Report: Verdict: pass | fail, then one line of detail.
 Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` and `<evidence_dir>` are the
 plan's `verification.skill` and `verification.evidence_dir` (`.verify` by default); `<features>` is the task's `features` plus every feature whose source
 anchor the diff touches (`conductor evidence` names a missing one in its reject line).
+
+If your harness assigns the verifier's id only when it spawns the agent, add one line to the
+brief saying its id arrives in a follow-up message and that it records nothing until then,
+and send the id at once. Never fill `--verifier` with a placeholder, because a record under
+a placeholder id fails the gate's verifier match and the verifier has to drive everything
+again under its real id.
 
 ```text
 You are verifying task <id> of an approved plan at commit <sha>. You did not write this

@@ -54,7 +54,8 @@ wall_clock_min (from init; checked by next, start, verify, review and merge),
 max_dispatches (one per executor start, per repair send-back after a failing verify or
 review, and per reviewer after a passing verify; a task that needs a dispatch past the
 cap parks with budget_dispatches; when neither the grant nor --budget sets it, init
-derives n_tasks * 2 * (1 + max_repairs_per_task), records it in the state and in
+derives n_tasks * per_attempt * (1 + max_repairs_per_task), per_attempt being 2
+(executor, reviewer) or 3 under the evidence gate (plus a verifier), records it in the state and in
 budget_derived, and logs derived: true on the init event, so cost is always bounded),
 max_repairs_per_task (every failing verify or review
 after the first is a repair; at the cap the task parks with verify_red_after_repairs, and
@@ -215,7 +216,7 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.1.0"
+CONDUCTOR_VERSION = "1.2.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -571,6 +572,12 @@ class State:
         (init records the effective value; this covers a state built without init)."""
         cap = self.budget.get("max_repairs_per_task")
         return DEFAULT_REPAIRS if cap is None else int(cap)
+
+
+# The run branch's merge commit for a task. Conventional Commits form, because a repository
+# that lints commit messages (commitlint in CI) lints these too, and a bare "conductor: T1"
+# fails its type rule.
+MERGE_MESSAGE = "chore(factory): merge task %s"
 
 
 def derived_max_dispatches(n_tasks, max_repairs, per_attempt=2):
@@ -1526,9 +1533,15 @@ def cmd_start(args):
     if st is None:
         return 2
     owner = (getattr(args, "owner", None) or "").strip() or None
-    if st.verification and not owner:
+    later = bool(getattr(args, "owner_later", False))
+    if owner and later:
+        sys.stderr.write("give --owner or --owner-later, not both\n")
+        return 2
+    if st.verification and not owner and not later:
         sys.stderr.write("the evidence gate records who writes each task: start %s --owner "
-                         "<the executor's agent id>\n" % args.task)
+                         "<the executor's agent id>, or --owner-later and then `owner %s "
+                         "--owner <id>` once your harness has assigned it\n"
+                         % (args.task, args.task))
         return 2
     if not re.match(TASK_ID_RE, args.task):
         sys.stderr.write("task id %r cannot name a branch or a directory\n" % args.task)
@@ -1569,6 +1582,34 @@ def cmd_start(args):
     st.log("dispatch", task=args.task, kind="executor", branch=branch, worktree=wt,
            dispatches=st.dispatches, owner=owner)
     print("START: %s %s" % (args.task, wt))
+    return 0
+
+
+def cmd_owner(args):
+    """Record the executor of a task started with --owner-later, once. A harness that only
+    assigns an agent id when it spawns the agent cannot name it before `start` creates
+    the worktree the brief points at; this closes that gap without letting an owner be
+    swapped later (a swap could make the writer pass as its own verifier)."""
+    st = _load_current(args.root)
+    if st is None:
+        return 2
+    if _finished(st):
+        return 2
+    st, t = _load_task(args, ("running",))
+    if st is None:
+        return 2
+    owner = (args.owner or "").strip()
+    if not owner:
+        sys.stderr.write("owner %s needs --owner <the executor's agent id>\n" % args.task)
+        return 2
+    if t.get("owner"):
+        sys.stderr.write("task %s already has the owner %s; an owner is recorded once and "
+                         "never replaced\n" % (args.task, json.dumps(t["owner"])))
+        return 2
+    t["owner"] = owner
+    st.save()
+    st.log("owner", task=args.task, owner=owner)
+    print("OWNER: %s %s" % (args.task, owner))
     return 0
 
 
@@ -1757,6 +1798,11 @@ def cmd_verify(args):
         return 3
     st, t = _load_task(args, ("running", "verifying"))
     if st is None:
+        return 2
+    if st.verification and not t.get("owner"):
+        sys.stderr.write("task %s has no recorded owner: run `owner %s --owner <the "
+                         "executor's agent id>` before verify, so the evidence gate can tell "
+                         "the writer from its verifier\n" % (args.task, args.task))
         return 2
     reason = _wall_clock_stop(st)
     if reason:
@@ -2471,7 +2517,7 @@ def _merge_in_clone(st, task, clone, before, pinned):
         _park(st, task, "no-commits")
         return 3, None
     # Merge the pinned sha, never the branch name: exactly the commit that was proven.
-    ok, r = _git_ok(clone, "merge", "--no-ff", "--no-edit", "-m", "conductor: %s" % task,
+    ok, r = _git_ok(clone, "merge", "--no-ff", "--no-edit", "-m", MERGE_MESSAGE % task,
                     pinned, env=isolated_env(**_merge_identity(st.root)))
     if not ok:
         detail = _git_err(r)
@@ -3189,6 +3235,14 @@ def _retry_skipped(st, path, push_cmd, pr_cmd):
     return _finish_remote(st, payload, env_rel, push_cmd, pr_cmd)
 
 
+def _print_pending(st):
+    """After a remote step's gate asks, name every step still pending, so a bare GATE: ASK
+    line is never the only clue to which of push and PR is waiting."""
+    pending = _pending_remote(st)
+    if pending:
+        print("REMOTE: pending %s (run finish --retry-remote)" % " ".join(pending))
+
+
 def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
     """gate push_branch -> push -> gate open_pr -> PR, skipping a step already recorded
     as done in st.finished. The first ASK or failure ends it (3)."""
@@ -3197,6 +3251,7 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
     if not st.finished.get("pushed"):
         ok, _ = _gate_logged(st, "push_branch")
         if not ok:
+            _print_pending(st)
             return 3
         here = CC.current_branch(st.root)
         if here != st.run_branch:
@@ -3231,6 +3286,7 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
     if not st.finished.get("pr"):
         ok, _ = _gate_logged(st, "open_pr")
         if not ok:
+            _print_pending(st)
             return 3
         fd, body_path = tempfile.mkstemp(dir=st.dir, prefix=".pr-body.", suffix=".md")
         try:
@@ -3280,6 +3336,11 @@ def main(argv=None):
     s.add_argument("--pr-cmd", default=None)
     s.add_argument("--retry-remote", action="store_true")
     s.set_defaults(fn=cmd_finish)
+    s = sub.add_parser("owner")
+    s.add_argument("task")
+    s.add_argument("--root", default=".")
+    s.add_argument("--owner", required=True)
+    s.set_defaults(fn=cmd_owner)
     for name, fn in (("start", cmd_start), ("verify", cmd_verify), ("review", cmd_review),
                      ("evidence", cmd_evidence), ("merge", cmd_merge), ("park", cmd_park),
                      ("decision", cmd_decision)):
@@ -3288,6 +3349,7 @@ def main(argv=None):
         s.add_argument("--root", default=".")
         if name == "start":
             s.add_argument("--owner", default=None)
+            s.add_argument("--owner-later", action="store_true")
         if name == "review":
             s.add_argument("--verdict", required=True, choices=("pass", "fail"))
             s.add_argument("--detail", default="")
