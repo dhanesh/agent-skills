@@ -115,14 +115,28 @@ npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-
 ```
 
 You need Python 3.10 or newer, git 2.31 or newer, an agent harness that can dispatch subagents
-(Claude Code can), and the `gh` CLI for the PR step.
+(Claude Code can), and the `gh` CLI for the PR step (see "Without `gh`" below).
 
+**Start the factory.** Say "unattended" in so many words: `spec-first-planning` runs a light,
+attended pass by default and never escalates by itself, and only the unattended mode ends in
+a grant the conductor can run under. On a working branch (step 1), ask:
+
+```text
+Use spec-first-planning in unattended mode to plan: <your feature, in a sentence or two>.
+When the grant is written, hand the plan to factory-conductor and run it.
+```
+
+0. **(Evidence-gated runs only) Generate the verify skill first.** Before planning, ask
+   `verification-skill-forge` to "make a verify skill for this app" and let it finish its live
+   run. The plan's `[feature: …]` hints name entries in that skill's feature map, so the map
+   has to exist before the spec does.
 1. **Plan unattended and approve the grant.** On a working branch that is not your default
-   branch (for example `git switch -c factory/work`), ask `spec-first-planning` to plan the
-   feature unattended. It runs the full planning loop, asks every decision up front, writes the
-   plan as a `task-plan/v1` envelope, and shows you the grant: the action classes it covers,
-   the branch pattern, the expiry (7 days at most) and the budget. Say yes, and it writes the
-   grant. Push that working branch (`git push -u origin <branch>`): the PR targets it.
+   branch (for example `git switch -c factory/work`; any name but `factory/<plan-slug>`, which
+   the conductor creates as its run branch), give the prompt above. The skill runs the full
+   planning loop, asks every decision up front in one batched round, writes the plan as a
+   `task-plan/v1` envelope, and shows you the grant: the action classes it covers, the branch
+   pattern, the expiry (7 days at most) and the budget. Say yes, and it writes the grant. Push
+   that working branch (`git push -u origin <branch>`): the PR targets it.
 2. **`conductor init`.** `spec-first-planning` hands the plan to `factory-conductor`, or you
    say "run the plan". The conductor checks the plan, the grant and the branch, then runs
    `conductor init --plan <envelope>`, which creates the run branch `factory/<plan-slug>`.
@@ -152,6 +166,30 @@ npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-
 **What stays with you:** merging the PR; answering parked questions; renewing the grant if it
 lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI
 configuration, which no grant covers and which always asks you.
+
+**Without `gh`.** The conductor pushes the run branch and then runs `gh pr create`. With no
+`gh` on the machine, `finish` prints `REMOTE: pending pr` and stops there: the run is complete
+and the branch is pushed. Open the PR yourself from `factory/<plan-slug>` against your working
+branch, using the run report the agent gives you (or `conductor trail` and the `run-result/v1`
+envelope it names) as the body. A grant whose `open_pr` gate is `ask` stops at the same point
+by design, so the agent asks you before any PR is opened.
+
+**Harness notes.**
+
+- **Keep the run state out of commits.** The spec, the plan envelope and the run's state live
+  under your working tree but are never committed, and the grant is listed in
+  `.git/info/exclude` so a commit cannot carry it. A harness hook that insists on a clean tree
+  (some "commit before you stop" hooks do) will keep asking; add `/.skill-contract/` and your
+  spec directory to `.git/info/exclude` rather than committing them, since a committed grant
+  covers nothing.
+- **Permission classifiers may refuse a step.** An auto-approval mode can decline something
+  the factory would otherwise do, such as running an installer that edits your agent's global
+  instructions. The agent then stops and tells you; it does not route around the refusal, and
+  you decide whether to allow it.
+- **Agent ids at spawn.** Harnesses that only assign a subagent's id when it starts (Claude
+  Code does) use `conductor start <task> --owner-later` and then `conductor owner <task>
+  --owner <id>`; the agent does this for you, and verify refuses a task until its owner is
+  recorded.
 
 ### What happens when you install a subset
 
