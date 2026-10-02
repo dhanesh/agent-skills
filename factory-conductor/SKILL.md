@@ -318,6 +318,10 @@ Report: Verdict: pass | fail, then one line of detail.
 Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` and `<evidence_dir>` are the
 plan's `verification.skill` and `verification.evidence_dir` (`.verify` by default); `<features>` is the task's `features` plus every feature whose source
 anchor the diff touches (`conductor evidence` names a missing one in its reject line).
+`<predicate>` is the task's `predicate`, the plan's `[proof: …]` statement. Give it to the
+verifier to drive directly, beside the recipes: a task that edits its own feature's recipe
+also wrote the script its verifier follows, so a recipe alone can step around the
+writer's bug, while the predicate came from the spec the human approved.
 
 If your harness assigns the verifier's id only when it spawns the agent, add one line to the
 brief saying its id arrives in a follow-up message and that it records nothing until then,
@@ -336,6 +340,9 @@ your own.
 For each feature in <features>: follow the verify skill's Launch and Doctor, drive the
 feature's recipe in features/<id>.md, capture the action, the resulting state and its side
 effects, and record it with the skill's verify_evidence.py record, --verifier <your id>.
+The approved proof for this task is: <predicate>. Drive it yourself through the same
+harness even where the recipe does not, capture it as an artifact of the task's first
+feature, and record that feature as a fail if the running app does not show it.
 Then run the skill's Cleanup. Evidence stays.
 
 Report: Verdict: pass | fail, then one line per feature: <id> <evidence path> <observed>.
