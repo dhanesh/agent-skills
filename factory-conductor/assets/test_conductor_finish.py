@@ -522,6 +522,17 @@ class FinishTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual([r["what"] for r in self.records()], ["push", "pr"])
 
+    def test_the_first_finish_names_the_pending_remote_step_when_a_gate_asks(self):
+        # In a live trial the first finish printed only "GATE: ASK ... reason=gate-ask":
+        # nothing said whether the push or the PR was waiting.
+        self.run_plan(policy={"read_only": "auto", "local_reversible": "grant",
+                              "push_branch": "grant"})
+        rc, out = self.finish()
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: ASK", out)
+        self.assertIn("REMOTE: pending pr (run finish --retry-remote)", out)
+        self.assertNotIn("pending push", out)
+
     def test_retry_remote_refuses_an_envelope_changed_since_finish(self):
         self.run_plan(policy={"read_only": "auto", "local_reversible": "grant"})
         rc, out = self.finish()

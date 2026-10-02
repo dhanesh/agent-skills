@@ -1051,7 +1051,8 @@ class NonGitStopTests(unittest.TestCase):
 @unittest.skipUnless(__import__("shutil").which("git"), "git not installed")
 class DerivedDispatchBudgetTests(unittest.TestCase):
     """G2: an unattended run's cost is always bounded. With no max_dispatches from the
-    grant or --budget, init derives n_tasks * 2 * (1 + max_repairs_per_task): one
+    grant or --budget, init derives n_tasks * 2 * (1 + max_repairs_per_task) (3 per attempt
+    under the evidence gate): one
     executor and one reviewer per attempt."""
 
     make = FixRound1Tests.make

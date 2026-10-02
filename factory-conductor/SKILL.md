@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.2.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -88,7 +88,8 @@ If any of them fails, stop and tell the user which one and why; do not repair a 
 yourself. Read the grant's `budget` too: `max_repairs_per_task` defaults to 2 and
 `max_parallel` to 2. When neither the grant nor `init --budget` sets `max_dispatches`,
 `init` derives it by default as tasks × 2 × (1 + `max_repairs_per_task`), one executor and
-one reviewer per attempt, and `status` marks it derived; you SHOULD tell the user that cap
+one reviewer per attempt (tasks × 3 × (1 + `max_repairs_per_task`) under the evidence gate,
+which adds a verifier per attempt), and `status` marks it derived; you SHOULD tell the user that cap
 before the run starts. When the grant sets no `max_dispatches`, `--budget` can set a value
 above the derived one: the tighten-only rule covers only keys the grant sets.
 `wall_clock_min` is enforced when set, and the grant's expiry caps the wall clock in any case:
@@ -107,14 +108,20 @@ Each step is one command. Read its output lines, not just the exit code.
    new is ready, or `STOP: <reason>` (exit 3).
 3. **Start.** For each ready task, `conductor start <task> --owner <executor id>` prints
    `START: <task> <worktree>`. The owner is the agent id your harness gives the executor you
-   are about to dispatch; the evidence gate refuses a start without one. It creates the task branch `<run_branch>--<task>` in that
+   are about to dispatch; the evidence gate refuses a start without one. If your harness
+   assigns that id only when it spawns the agent, run `conductor start <task> --owner-later`,
+   dispatch the executor, then `conductor owner <task> --owner <its id>` straight away: the
+   owner is recorded once and never replaced, because a swapped owner could let the writer
+   pass as its own verifier, and `verify` refuses a gated task whose owner is not recorded. It creates the task branch `<run_branch>--<task>` in that
    worktree and logs a `dispatch`. An exit 2 for the parallel limit or a spent dispatch budget
    means skip that start and carry on with the tasks in flight.
 4. **Dispatch the executor.** Send a fresh subagent the executor brief below, filled in, and
    nothing more. Ready tasks run in parallel, up to `max_parallel` (2 by default).
 5. **Verify.** On a `DONE` report, `conductor verify <task>`. It re-reads the task's commands
    from the pinned plan envelope and runs them in an isolated clone of the committed worktree
-   head. That run is the proof. An uncommitted change or a symlink that escapes the tree fails
+   head. That run is the proof. A test command that exits 0 but whose runner reports that no
+   test ran (cargo, go, unittest, jest/vitest, mocha; pytest already exits 5) fails its step,
+   printed as `(ran no tests: …)`, because it proves nothing. An uncommitted change or a symlink that escapes the tree fails
    it. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
    `VERIFY: <task> fail` (exit 3) sends it back: resume the same executor with the failing
    `VERIFY:` lines and the output tails in `state.json` under
@@ -169,8 +176,8 @@ not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
 **Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
 the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
-as `in_flight_at_stop`. A `GATE: ASK`, or `REMOTE: pending …` (exit 3), means the grant does
-not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
+as `in_flight_at_stop`. A `GATE: ASK`, followed by `REMOTE: pending …` (exit 3) naming the push, the PR or
+both, means the grant does not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
 steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line means the push or
 the PR command failed: report its stderr, and retry at most once. `INTEGRATION: fail <task>
 <command>` lines and `STOP: integration_red` (exit 3) mean tasks that each passed alone break
@@ -281,15 +288,23 @@ Concerns: <none, or one line each; for NEEDS_DECISION the question; for BLOCKED 
 and switches off external diff drivers, text conversion, binary attributes, colour, fsmonitor
 and hooks. That neutralises the known config, attribute and replace-ref tricks an executor could
 plant in the shared git directory; the §7a assumptions in "What the proof is worth" still
-apply.
+apply. Paste the diff's output when it is short; for a long one, give the reviewer that exact
+command to run itself instead, since it only reads, and a hand-copied diff drifts from the
+real one. Give the reviewer every verify step of the task with its pinned command: in a live
+trial the reviewer was the only check that noticed a pinned test filter matching no test.
 
 ```text
 You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
 dispatch subagents or edit any file.
 
 Task: <title>; requirement: <requirement text>
+Acceptance criteria, each with the command the plan pins as its proof: <each verify step's
+text and command>. A pinned command proves its criterion only if what it runs asserts that
+behaviour; a test filter that names no existing test proves nothing.
 Constraints: <the plan's constraints; the grant's decisions and defaults>
-Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>>
+Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>, or that exact command for you to run>
+
+Building or running the code to check a claim is fine; leave every tracked file as it is.
 
 Answer two questions about the diff:
 1. Does it satisfy the requirement?
@@ -303,6 +318,16 @@ Report: Verdict: pass | fail, then one line of detail.
 Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` and `<evidence_dir>` are the
 plan's `verification.skill` and `verification.evidence_dir` (`.verify` by default); `<features>` is the task's `features` plus every feature whose source
 anchor the diff touches (`conductor evidence` names a missing one in its reject line).
+`<predicate>` is the task's `predicate`, the plan's `[proof: …]` statement. Give it to the
+verifier to drive directly, beside the recipes: a task that edits its own feature's recipe
+also wrote the script its verifier follows, so a recipe alone can step around the
+writer's bug, while the predicate came from the spec the human approved.
+
+If your harness assigns the verifier's id only when it spawns the agent, add one line to the
+brief saying its id arrives in a follow-up message and that it records nothing until then,
+and send the id at once. Never fill `--verifier` with a placeholder, because a record under
+a placeholder id fails the gate's verifier match and the verifier has to drive everything
+again under its real id.
 
 ```text
 You are verifying task <id> of an approved plan at commit <sha>. You did not write this
@@ -315,6 +340,9 @@ your own.
 For each feature in <features>: follow the verify skill's Launch and Doctor, drive the
 feature's recipe in features/<id>.md, capture the action, the resulting state and its side
 effects, and record it with the skill's verify_evidence.py record, --verifier <your id>.
+The approved proof for this task is: <predicate>. Drive it yourself through the same
+harness even where the recipe does not, capture it as an artifact of the task's first
+feature, and record that feature as a fail if the running app does not show it.
 Then run the skill's Cleanup. Evidence stays.
 
 Report: Verdict: pass | fail, then one line per feature: <id> <evidence path> <observed>.
