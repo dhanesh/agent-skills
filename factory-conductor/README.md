@@ -30,7 +30,7 @@ Install it next to `spec-first-planning`, which produces what it consumes.
    paths.
 2. Switch to a branch the grant covers that is not the default branch and not the run branch
    the conductor will create (`factory/<plan-slug>`, from the plan title), for example
-   `factory/base`, and push it: `git push -u origin factory/base`. The PR the run opens
+   `factory/work`, and push it: `git push -u origin factory/work`. The PR the run opens
    targets that branch, and the conductor pushes only its own run branch (`init` warns when
    `origin` has no copy of the base).
 3. Ask the agent to "run the plan unattended". It runs `conductor init`, then loops
