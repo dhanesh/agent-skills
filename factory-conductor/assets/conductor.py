@@ -1939,6 +1939,33 @@ def _send_back(st, task):
     _dispatch(st, task, "repair")
 
 
+# A test runner that exits 0 after running no test at all (a name filter that matched
+# nothing) proves nothing, yet looks exactly like a pass. These are the zero-test
+# signatures of common runners; a command whose output matches one is a failed step.
+# pytest needs no entry: it already exits 5 when it collects nothing.
+_CARGO_RESULT = re.compile(r"^test result: \w+\. (\d+) passed; (\d+) failed;", re.M)
+_GO_OK = re.compile(r"^ok\s+\S+.*$", re.M)
+
+
+def _ran_no_tests(out, err):
+    """The runner's own words for "no test ran", or None. Only consulted after exit 0."""
+    text = (out or "") + "\n" + (err or "")
+    cargo = _CARGO_RESULT.findall(text)
+    if cargo and sum(int(p) + int(f) for p, f in cargo) == 0:
+        return "cargo test ran 0 tests"
+    go_ok = _GO_OK.findall(text)
+    if go_ok and all("[no tests to run]" in line for line in go_ok):
+        return "go test: no tests to run"
+    if re.search(r"^Ran 0 tests in ", text, re.M):
+        return "unittest ran 0 tests"
+    if re.search(r"^No tests found", text, re.M):
+        return "no tests found"
+    if re.search(r"^\s*0 passing\b", text, re.M) and not re.search(r"^\s*[1-9]\d* failing",
+                                                                   text, re.M):
+        return "mocha: 0 passing"
+    return None
+
+
 def _run_steps(task, steps, checkout, quiet=False):
     """Run each verify step in checkout; one record per step, printing VERIFY: lines
     (none when quiet: finish's integration re-run prints its own INTEGRATION: lines)."""
@@ -1958,10 +1985,17 @@ def _run_steps(task, steps, checkout, quiet=False):
             else:
                 rc, out, err = _run_verify(argv, checkout, env=verify_env())
         ok = rc == 0
-        runs.append({"command": argv, "ok": ok, "returncode": rc,
-                     "stdout_tail": _tail(out), "stderr_tail": _tail(err)})
+        empty = _ran_no_tests(out, err) if ok else None
+        record = {"command": argv, "ok": ok and not empty, "returncode": rc,
+                  "stdout_tail": _tail(out), "stderr_tail": _tail(err)}
+        if empty:
+            # Exit 0, but nothing was tested: the step proves nothing, so it fails.
+            ok = False
+            record["no_tests"] = empty
+        runs.append(record)
         if not quiet:
-            print("VERIFY: %s %s %s" % (task, "ok" if ok else "fail", _shown(argv)))
+            print("VERIFY: %s %s %s%s" % (task, "ok" if ok else "fail", _shown(argv),
+                                         " (ran no tests: %s)" % empty if empty else ""))
     return runs
 
 

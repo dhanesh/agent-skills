@@ -73,6 +73,48 @@ class GitTests(unittest.TestCase):
         st = C.State.load(st.state_path)
         self.assertFalse(st.tasks["T1"]["verify_runs"][0]["ok"])
 
+    def test_a_test_command_that_ran_no_tests_fails_verify(self):
+        # A live trial's `cargo test ... tsv_escapes` matched no test name, exited 0 and
+        # was recorded as proof. Each runner's own zero-test words now fail the step.
+        outputs = {
+            "cargo": "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; "
+                     "0 measured; 41 filtered out; finished in 0.00s\n",
+            "go": "ok  \texample.com/pkg\t0.003s [no tests to run]\n",
+            "unittest": "\n------\nRan 0 tests in 0.000s\n\nOK\n",
+            "jest": "No tests found, exiting with code 0\n",
+            "mocha": "\n\n  0 passing (1ms)\n\n",
+        }
+        for runner, text in outputs.items():
+            with self.subTest(runner=runner):
+                st = self.state(verify=[{"text": runner, "command": [
+                    "{python}", "-c", "import sys; sys.stdout.write(%r)" % text]}])
+                C.main(["start", "T1", "--root", self.root])
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = C.main(["verify", "T1", "--root", self.root])
+                self.assertEqual(rc, 3, out.getvalue())
+                self.assertIn("ran no tests", out.getvalue())
+                run = C.State.load(st.state_path).tasks["T1"]["verify_runs"][0]
+                self.assertFalse(run["ok"])
+                self.assertEqual(run["returncode"], 0)
+                self.assertTrue(run["no_tests"])
+
+    def test_a_test_command_that_ran_tests_still_passes(self):
+        outputs = [
+            "test result: ok. 0 passed; 0 failed; 0 ignored\n"
+            "test result: ok. 3 passed; 0 failed; 0 ignored\n",  # doc-tests empty, unit 3
+            "ok  \ta/b\t0.01s\nok  \ta/c\t0.01s [no tests to run]\n",  # one package ran
+            "Ran 4 tests in 0.010s\n\nOK\n",
+            "  10 passing (5ms)\n",
+            "plain output from a non-test command\n",
+        ]
+        for text in outputs:
+            with self.subTest(text=text):
+                st = self.state(verify=[{"text": "t", "command": [
+                    "{python}", "-c", "import sys; sys.stdout.write(%r)" % text]}])
+                C.main(["start", "T1", "--root", self.root])
+                self.assertEqual(C.main(["verify", "T1", "--root", self.root]), 0)
+
     def test_a_task_with_an_unrunnable_verify_is_parked(self):
         # White-box: init refuses a null command, so this state is built with
         # new_run (no init) to reach verify's defence-in-depth park.

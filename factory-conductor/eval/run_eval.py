@@ -12,7 +12,7 @@ One shared three-task run (dep_order_and_finish_arm) carries three assertions at
 a dependency runs in the right order, `finish` writes an envelope check-envelope
 validates, and a task whose verify never passes is never merged — because driving it
 once covers all three (see docs/eval-standard.md: "share one fixture setup where you
-can"). Six more short scenarios each isolate one negative requirement: a decision parks
+can"). Seven more short scenarios each isolate one negative requirement: a decision parks
 a task without stopping the run; a REVOKED grant stops the run at the next gate
 (GATE: ASK reason=revoked) and, as its own separate fixture, an EXPIRED grant does too
 (GATE: ASK reason=expired) — these are distinct check-grant outcomes, kept as distinct
@@ -329,6 +329,29 @@ def null_verify_is_refused_at_init_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def vacuous_test_command_cannot_prove_a_task_arm():
+    """A test filter that names no test exits 0 having tested nothing; a live trial
+    recorded exactly that as proof. verify must fail it, so the task cannot merge."""
+    root = TK.repo()
+    try:
+        empty = ("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; "
+                 "0 measured; 41 filtered out; finished in 0.00s\n")
+        plan_env = TK.write_plan_envelope(root, plan=plan(task("T1", [], [
+            "{python}", "-c", "import sys; sys.stdout.write(%r)" % empty])))
+        TK.write_grant(root, plan_env)
+        run(["init", "--plan", plan_env, "--root", root])
+        run(["start", "T1", "--root", root])
+        commit_in(wt(root, "T1"), "t1.txt", "work\n")
+        rc, out, _ = run(["verify", "T1", "--root", root])
+        mrc, _, _ = run(["merge", "T1", "--root", root])
+        check("NEGATIVE: a verify command that exits 0 after running no tests fails the "
+              "step (VERIFY ... ran no tests) and the task cannot merge",
+              rc == 3 and "ran no tests" in out and mrc == 2
+              and status(root, "T1") == "verifying", out.strip()[-160:])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 # Each task adds one file to d/ (which holds base.txt): alone each sees two files, merged
 # the run branch holds three.
 EXACTLY_TWO = ["{python}", "-c", "import os,sys; sys.exit(0 if len(os.listdir('d')) == 2 else 1)"]
@@ -439,6 +462,7 @@ def main():
     merge_conflict_parks_and_run_branch_stays_clean_arm()
     merge_refuses_a_task_not_in_reviewing_status_arm()
     null_verify_is_refused_at_init_arm()
+    vacuous_test_command_cannot_prove_a_task_arm()
     integration_red_is_never_pushed_arm()
     evidence_gate_arm()
 

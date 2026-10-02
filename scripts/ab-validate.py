@@ -240,6 +240,9 @@ SINCE_EVIDENCE_GATE = "b1b0917"  # the evidence-gated factory: verification-skil
 # (b1b0917), factory-conductor 1.1.0's evidence gate, partition and trail (c644629) and
 # spec-first-planning 2.3.0's runtime-proof hints (1e9f843). One constant for the
 # campaign: it lands at one merge, so every row of it becomes HELD* together.
+SINCE_TRIAL_FIXES = "4af6d2b"  # factory-conductor 1.2.0, from two live graph_d trials:
+# Conventional Commits merge subjects, --owner-later + owner, the REMOTE: line after a
+# remote gate asks, and verify failing a test command that ran no tests.
 SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
 # quotes no current sentence; `removed` in the line column marks deleted text.
 
@@ -6412,6 +6415,94 @@ def _vsf_accepts(tree, mutate):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+_CARGO_EMPTY = ("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; "
+                "0 measured; 41 filtered out; finished in 0.00s\n")
+_CARGO_THREE = "running 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored\n"
+
+
+def _tf_verify_passes(tree, output):
+    """1 when the tree's conductor passes verify for a step whose command exits 0 after
+    printing `output`, 0 when it fails the step; None (PROBE_ERRORS) on a broken fixture."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        cmd = ["{python}", "-c", "import sys; sys.stdout.write(%r)" % output]
+        plan_env = _fc_fixture(CC, root, {"T1": cmd}, {"local_reversible": "grant"})
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        if run("init", "--plan", plan_env).returncode != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "zero-test probe: init failed"))
+            return None
+        started = run("start", "T1")
+        wt = next((l.split(" ", 2)[2].strip() for l in started.stdout.splitlines()
+                   if l.startswith("START: T1 ")), None)
+        if not wt:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "zero-test probe: start failed"))
+            return None
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        return 1 if run("verify", "T1").returncode == 0 else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _tf_bad_merge_subject(tree):
+    """1 when the merge commit a one-task run leaves on its run branch has a subject that
+    fails Conventional Commits (`type(scope)?: subject`), 0 when it passes; None when no
+    merge commit was made (PROBE_ERRORS)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        _fc_one_proven(conductor, CC, root, ["true"], {"local_reversible": "grant"})
+        r = subprocess.run(["git", "-C", root, "log", "-1", "--merges", "--format=%s"],
+                           capture_output=True, text=True)
+        subject = r.stdout.strip()
+        if not subject:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "merge-subject probe: no merge commit on the run branch"))
+            return None
+        ok = re.match(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
+                      r"(\([a-z0-9-]+\))?: \S", subject)
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_trial_fixes(old, new):
+    s = "factory-conductor"
+    if _tf_verify_passes(new, _CARGO_THREE) != 1:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "zero-test sanity check failed: a step that ran 3 tests did "
+                             "not pass verify"))
+    a, b = _tf_verify_passes(old, _CARGO_EMPTY), _tf_verify_passes(new, _CARGO_EMPTY)
+    row(s, "verify steps passed after running no tests (lower=better)", a, b,
+        b == 0 and a is not None and a >= b,
+        "a cargo test filter matching no test name exits 0; a live trial recorded it as "
+        "proof. verify now fails a step whose runner reports that no test ran. "
+        "Sanity-checked: the same step reporting 3 passed tests DOES pass",
+        kind="delta" if a == 1 else "guard", since=SINCE_TRIAL_FIXES)
+    a, b = _tf_bad_merge_subject(old), _tf_bad_merge_subject(new)
+    row(s, "run-branch merge subjects failing Conventional Commits (lower=better)", a, b,
+        b == 0 and a is not None and a >= b,
+        "`conductor: T1` failed commitlint's type rule in a target repo's CI; merges are "
+        "now `chore(factory): merge task T1`",
+        kind="delta" if a == 1 else "guard", since=SINCE_TRIAL_FIXES)
+
+
 def check_verification_forge(old, new):
     s = "verification-skill-forge"
     if _vsf_accepts(new, lambda root: None) != 1:
@@ -6670,6 +6761,7 @@ def main():
         check_evidence_gate(old, REPO)
         check_verification_forge(old, REPO)
         check_runtime_proof_planning(old, REPO)
+        check_factory_trial_fixes(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

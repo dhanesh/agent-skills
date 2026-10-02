@@ -115,6 +115,12 @@ Re-reads the task's verify commands from the pinned plan envelope, which must st
 sha256 recorded at `init`; state.json is never the source of the commands. Then:
 
 - the worktree must be clean and committed: an uncommitted or untracked file fails the verify;
+- a command that exits 0 while its test runner reports that no test ran fails its step and
+  records `no_tests` (cargo: every `test result:` line shows 0 passed and 0 failed; go: every
+  `ok` line says `[no tests to run]`; unittest: `Ran 0 tests`; jest/vitest: `No tests found`;
+  mocha: `0 passing` with no failures). pytest needs no rule: it exits 5 when it collects
+  nothing. A plan whose filter names no test cannot pass verify, so its repair is a test
+  with that name, not a vacuous green;
 - the commands run as argv lists (never a shell), with `{python}` resolved, in a fresh isolated
   clone of the worktree's head, checked out with no inherited config, attributes, hooks or
   filters, and removed afterwards;

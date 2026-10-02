@@ -119,7 +119,9 @@ Each step is one command. Read its output lines, not just the exit code.
    nothing more. Ready tasks run in parallel, up to `max_parallel` (2 by default).
 5. **Verify.** On a `DONE` report, `conductor verify <task>`. It re-reads the task's commands
    from the pinned plan envelope and runs them in an isolated clone of the committed worktree
-   head. That run is the proof. An uncommitted change or a symlink that escapes the tree fails
+   head. That run is the proof. A test command that exits 0 but whose runner reports that no
+   test ran (cargo, go, unittest, jest/vitest, mocha; pytest already exits 5) fails its step,
+   printed as `(ran no tests: …)`, because it proves nothing. An uncommitted change or a symlink that escapes the tree fails
    it. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
    `VERIFY: <task> fail` (exit 3) sends it back: resume the same executor with the failing
    `VERIFY:` lines and the output tails in `state.json` under
@@ -286,15 +288,21 @@ Concerns: <none, or one line each; for NEEDS_DECISION the question; for BLOCKED 
 and switches off external diff drivers, text conversion, binary attributes, colour, fsmonitor
 and hooks. That neutralises the known config, attribute and replace-ref tricks an executor could
 plant in the shared git directory; the §7a assumptions in "What the proof is worth" still
-apply.
+apply. Paste the diff's output when it is short; for a long one, give the reviewer that exact
+command to run itself instead, since it only reads, and a hand-copied diff drifts from the
+real one. Give the reviewer every verify step of the task with its pinned command: in a live
+trial the reviewer was the only check that noticed a pinned test filter matching no test.
 
 ```text
 You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
 dispatch subagents or edit any file.
 
 Task: <title>; requirement: <requirement text>
+Acceptance criteria, each with the command the plan pins as its proof: <each verify step's
+text and command>. A pinned command proves its criterion only if what it runs asserts that
+behaviour; a test filter that names no existing test proves nothing.
 Constraints: <the plan's constraints; the grant's decisions and defaults>
-Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>>
+Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>, or that exact command for you to run>
 
 Building or running the code to check a claim is fine; leave every tracked file as it is.
 

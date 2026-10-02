@@ -59,10 +59,11 @@ A spec is one markdown file:
   Example: `- R2: row parity holds. [cmd: {python} tests/compare_export.py fixtures/report.json]`.
   A test-runner filter (`cargo test <name>`, `pytest -k <name>`, `go test -run <name>`)
   exits 0 when it matches no test at all, so a misnamed or missing test passes as proof.
-  Name the filter in the criterion's text as the test the executor has to write, and pair
-  it with a criterion whose command fails when the behaviour is absent (the whole suite, or
-  a script that drives the binary), because a filter alone cannot tell an empty run from
-  a real pass.
+  Name the filter in the criterion's text as the test the executor has to write.
+  factory-conductor fails a step whose runner reports that no test ran (cargo, go,
+  unittest, jest/vitest, mocha), so a misnamed test sends the task back for repair instead
+  of passing; with any other runner, pair the filter with a command that fails when the
+  behaviour is absent.
   Optional in light and converged mode; `--unattended` requires it on every
   criterion.
 - **Open questions**: the section must exist; its list may be empty.
