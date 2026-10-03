@@ -62,7 +62,8 @@
   - `ACTION_CLASSES` with `"deploy_staging"` and `"push_tag"`.
   - `grant_for_subject(root, subject) -> path | None`.
   - `revoke_all(root, now=None) -> list[str]`, returning the revoked ids.
-  - `ci_tag_triggers(root, rev="HEAD") -> bool | None`, where None means git cannot say.
+  - `ci_tag_triggers(root, rev="HEAD") -> bool | None`, where None means git cannot say. It fails closed (see Step 3).
+  - `argv_problems(argv, allowed_tokens) -> list[str]`: the shell/launcher refusals moved out of `reentry_problems`, which now calls it. Existing re-entry tests MUST still pass unchanged.
   - `worktree_ok(root, worktree) -> bool`.
   - `check_grant(..., worktree=None)`, plus the CLI flags `--worktree` and `revoke-grant --id`.
   - The release grant rule: if `payload.release` is present, `release.version` MUST match `^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$`.
@@ -104,16 +105,28 @@ class ReleaseCheckerTests(unittest.TestCase):
         # an unrelated repo's path as --worktree -> ASK "worktree"
         ...
 
-    def test_tag_push_is_deploy_when_ci_has_tag_triggers(self):
+    def test_tag_push_is_deploy_when_ci_may_run_on_tags(self):
+        # fail closed: explicit tag triggers AND configs that run on tags by default
         for path, text in ((".github/workflows/rel.yml", "on:\n  push:\n    tags: ['v*']\n"),
+                           (".github/workflows/a.yml", "on: push\njobs: {}\n"),
+                           (".github/workflows/b.yml", "on: [push]\njobs: {}\n"),
+                           (".github/workflows/c.yml", "on:\n  create:\njobs: {}\n"),
                            (".gitlab-ci.yml", "deploy:\n  rules:\n    - if: $CI_COMMIT_TAG\n"),
+                           (".gitlab-ci.yml", "deploy:\n  script: ./ship\n"),       # no rules: runs on tags
+                           ("Jenkinsfile", "pipeline { agent any }\n"),
+                           (".buildkite/pipeline.yml", "steps:\n  - command: ./ship\n"),
                            (".circleci/config.yml", "filters:\n  tags:\n    only: /^v.*/\n")):
             with self.subTest(path=path):
                 # commit `text` at `path`; push_tag granted -> ASK reason ci-tag
                 ...
 
-    def test_tag_push_is_grantable_without_tag_triggers(self):
-        # a workflow with on: push: branches only -> push_tag COVERED
+    def test_tag_push_is_grantable_only_when_proven_tag_free(self):
+        # COVERED for: no CI config at all; a GitHub workflow with `on: push: branches: [main]`
+        # and no create/tags; a CircleCI config with no `tags` filter.
+        ...
+
+    def test_tag_patterns_compile_on_this_python(self):
+        import importlib; importlib.reload(CC)   # a mid-pattern (?m) raises re.error on 3.11+
         ...
 
     def test_release_version_must_be_semver(self):
@@ -137,17 +150,31 @@ class ReleaseCheckerTests(unittest.TestCase):
 ACTION_CLASSES = ("read_only", "local_reversible", "push_branch", "open_pr", "deploy_staging",
                   "push_tag", "merge", "deploy", "spend", "external_message", "delete")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$")
-# Tag triggers, matched without a YAML parser: fail closed, any trigger-position mention counts.
-TAG_TRIGGER_RES = (
-    re.compile(r"(?m)^\s*tags\s*:"),                  # GitHub on.push.tags, CircleCI filters.tags
-    re.compile(r"\$CI_COMMIT_TAG|\bonly\s*:\s*\[?\s*tags\b|(?m)^\s*-\s*tags\s*$"),  # GitLab
-    re.compile(r"\btag\s*:\s*['\"]?v?\*|\bbuildkite_tag\b|\btags\s*=", re.IGNORECASE),
-)
+# Tag triggers fail closed: every CI config counts as tag-triggered unless it is a format whose
+# no-tag default is known AND the scan proves it is restricted. A false positive costs one extra
+# ask; a false negative would let a grant cover a production deploy.
+GH_BRANCH_ONLY_PUSH = re.compile(r"^\s*push\s*:\s*\n(?:\s+.*\n)*?\s+branches(?:-ignore)?\s*:", re.M)
+GH_TAGGY = re.compile(r"^\s*(tags(?:-ignore)?|create|release|workflow_run)\s*:|\bon\s*:\s*\[?[^\n]*\b(push|create|release)\b", re.M)
+
+
+def _ci_file_tag_triggered(path, text):
+    """True unless `path` is a format with a known no-tag default and `text` proves it."""
+    if path.startswith(".circleci/"):
+        return bool(re.search(r"^\s*tags\s*:", text, re.M))      # CircleCI ignores tags by default
+    if path.startswith(".github/workflows/"):
+        if GH_TAGGY.search(text) and not GH_BRANCH_ONLY_PUSH.search(text):
+            return True                                            # on: push / [push] / create / tags
+        if re.search(r"^\s*(tags(?:-ignore)?|create|release)\s*:", text, re.M):
+            return True
+        return not GH_BRANCH_ONLY_PUSH.search(text) and bool(re.search(r"\bpush\b", text))
+    if path.startswith(".github/actions/"):
+        return False                                               # composite actions have no triggers
+    return True     # GitLab (jobs run on tags unless ruled out), Jenkins, Buildkite, Drone, Azure, ...
 
 
 def ci_tag_triggers(root, rev="HEAD"):
-    """True when any CI config file at `rev` declares a tag trigger, False when none does,
-    None when git cannot list the tree (callers fail closed)."""
+    """True when any CI config file at `rev` may run on a tag push, False when every one is
+    proven not to, None when git cannot list or read the tree (callers fail closed)."""
     r = _git(root, "ls-tree", "-r", "-z", "--name-only", rev)
     if r is None or r.returncode != 0:
         return None
@@ -156,10 +183,16 @@ def ci_tag_triggers(root, rev="HEAD"):
             b = _git(root, "show", "%s:%s" % (rev, path))
             if b is None or b.returncode != 0:
                 return None
-            text = b.stdout.decode("utf-8", "replace")
-            if any(rx.search(text) for rx in TAG_TRIGGER_RES):
+            if _ci_file_tag_triggered(path, b.stdout.decode("utf-8", "replace")):
                 return True
     return False
+
+
+def argv_problems(argv, allowed_tokens):
+    """Problems with one argv list: not a non-empty list of strings, a shell or launcher
+    (the same refusals reentry_problems applies to agent_cmd), or a `{token}` outside
+    `allowed_tokens`. Shared by re-entry and release-conductor recipes."""
+    ...  # move the argv checks out of reentry_problems into here; reentry_problems calls it
 
 
 def worktree_ok(root, worktree):
@@ -233,10 +266,10 @@ CLI changes:
 
 - [ ] **Step 4: Make factory-conductor select its own grant.** In `conductor.py` `_reentry_block(root)`, take the run's plan subject:
   - change the signature to `_reentry_block(root, plan_rel)`;
-  - use `CC.grant_for_subject(root, plan_rel) or CC.latest_grant(root)`;
+  - use `CC.grant_for_subject(root, plan_rel)` with **no fallback** to `latest_grant` (D9: another plan's grant must never enable this run's re-entry); no grant pinning the plan means re-entry is disabled;
   - pass `plan_subject(st)` from `_watch_locked` and `cmd_reentry`.
 
-  Add this test to `test_conductor_reentry.py`: a newer unrelated grant pinning a different file does not make `watch` print `disabled` for the run, whose own grant carries a `reentry` block.
+  Add two tests to `test_conductor_reentry.py`: (a) a newer unrelated grant pinning a different file does not make `watch` print `disabled` for the run, whose own grant carries a `reentry` block; (b) when no grant pins the run's plan but another plan's grant carries a `reentry` block, `watch` reports re-entry disabled.
 
 - [ ] **Step 5: Run and vendor.**
 
@@ -267,7 +300,7 @@ git commit -m "feat(skill-contract): deploy_staging and push_tag classes, --work
   - `STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deploy", "deploying", "deployed", "verified", "prod_failed", "rolling_back", "rolled_back", "outcome_unknown")`.
   - `run_lock(root)`, a repo-wide lock at `.skill-contract/releases/.lock`, copied from `factory-conductor/assets/reentry.py` `run_lock` with a cross-reference comment, the same way `waves()` was copied.
   - `load_recipe(root, rev=None) -> (recipe | None, problems: list[str])`. When `rev` is given, it reads `git show <rev>:.release/recipe.json`.
-  - `recipe_sha(root, rev=None) -> str`.
+  - `recipe_sha(root, rev=None) -> str`: sha256 of the file bytes (working tree) or of the `git show <rev>:.release/recipe.json` bytes, so an unchanged committed recipe gives exactly `CC.sha256_file` of the working file.
   - `expand(argv, values) -> list[str]`, which replaces only whole `{version}`, `{commit}` and `{env}` tokens.
   - `run_cmd(argv, cwd, timeout) -> {"rc", "out_tail", "err_tail", "timed_out"}`. It uses `start_new_session` and kills the process group on timeout, as conductor's `_run_verify` does.
 
@@ -277,6 +310,7 @@ git commit -m "feat(skill-contract): deploy_staging and push_tag classes, --work
 import json, os, subprocess, sys, tempfile, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import release as RL
+import contract_check as CC
 from release_testkit import repo, write_recipe, GIT
 
 GOOD = {"build": ["true"], "deploy_staging": ["true"], "deploy_prod": ["true"],
@@ -305,6 +339,8 @@ class RecipeTests(unittest.TestCase):
         write_recipe(root, dict(GOOD, deploy_prod=["false"]))         # uncommitted edit
         self.assertEqual(RL.load_recipe(root, rev=sha)[0]["deploy_prod"], ["true"])
         self.assertNotEqual(RL.recipe_sha(root, rev=sha), RL.recipe_sha(root))
+        write_recipe(root, GOOD)                                       # back to the committed bytes
+        self.assertEqual(RL.recipe_sha(root, rev=sha), CC.sha256_file(os.path.join(root, ".release", "recipe.json")))
 
 class StateTests(unittest.TestCase):
     def test_new_save_load_and_append_only_log(self):
@@ -347,7 +383,7 @@ if __name__ == "__main__":
 - [ ] **Step 3: Implement** `release.py`:
   - **The state file.** `Release` keeps the fields `version`, `base_commit`, `status`, `release_commit`, `recipe_sha`, `artifact_sha`, `rollback_target`, `approved_by` and `evidence`. Save it the way factory-conductor's `State.save` does: a temp file, then `os.replace`, then `fsync` the directory.
   - **The log.** `log()` appends one JSON line per event, as factory-conductor's `State.log` does.
-  - **Recipe validation** checks each argv with `CC.reentry_problems({"agent_cmd": argv + ["{prompt}"]})` minus the `{prompt}` rule. Do not duplicate the shell and launcher logic: wrap it, filter out the `{prompt}` messages, and then check that the tokens are only `{version}`, `{commit}` and `{env}`.
+  - **Recipe validation** checks each argv with `CC.argv_problems(argv, {"version", "commit", "env"})` (Task 1). Do not duplicate the shell and launcher logic.
   - **The lock and process helpers** are copied from factory-conductor, as the interface block above says.
 
   Every function carries a docstring. Use `CC` (the vendored `contract_check`) for `sha256_file` and the envelope writers.
@@ -386,6 +422,7 @@ if __name__ == "__main__":
   - `prep` without `--approved-by` exits 2.
   - `prep` while another release under `.skill-contract/releases/` is unfinished exits 2 and names it.
   - `prep` with an invalid recipe exits 2, printing the problems.
+  - `prep` with an uncommitted or dirty `.release/recipe.json` exits 2 (`recipe-uncommitted`): the grant MUST pin a digest some commit has.
 
 - [ ] **Step 2: Run them and see them fail.**
 
@@ -463,14 +500,15 @@ if __name__ == "__main__":
 4. Run `deploy_prod` in an isolated checkout of `release_commit`. When `tag_deploys` is set, push the tag `v<version>` instead.
 5. On rc 0, set `deployed`; otherwise set `prod_failed`.
 
-**Crash recovery.** On load, a status of `deploying` or `rolling_back` becomes `outcome_unknown`, and the tool prints `NEXT: verify-prod then ask the human`. **`deploy` never re-runs `deploy_prod` from `outcome_unknown`.**
+**Crash recovery.** A status of `deploying` or `rolling_back` becomes `outcome_unknown` only when a command acquires the run lock and finds it (a plain `load` or `status` read MUST NOT demote it, or a read during a live deploy would flip it), and the tool prints `NEXT: verify-prod then ask the human`. **`deploy` never re-runs `deploy_prod` from `outcome_unknown`.**
 
 - [ ] **Step 1: Write the failing tests:**
   - each refusal, including the allowlist matcher cases `Bash`, `Bash(*)`, `Bash(vercel *)` against `vercel deploy --prod`, and `Bash(git *)`, which does not match;
   - an unattended run waits;
   - an attended run runs the stub, which writes a marker; the status is `deployed`; `approved_by` is recorded; the rollback target is taken from the probe;
   - a simulated crash: write `deploying` to the state, then call `deploy` again. The marker count stays at 1 and the status is `outcome_unknown`;
-  - when `tag_deploys` is set, the tag is pushed under the yes and not before it.
+  - when `tag_deploys` is set, the tag is pushed under the yes and not before it;
+  - while a subprocess holds the run lock with status `deploying`, `Release.load` and `status` leave the status `deploying`.
 
 - [ ] **Steps 2–5:** run the tests and see them fail, implement, run them again, then commit `feat(release-conductor): deploy — one explicit yes, never unattended, never re-run after a crash`.
 
@@ -576,7 +614,8 @@ The `release-result/v1` envelope:
      - with `rebuild`, staging verified the same source but not the same bytes;
      - the recipe's commands run with the user's own credentials;
      - nothing triggers `stage` automatically;
-     - production checks are only as good as `prod_smoke`.
+     - production checks are only as good as `prod_smoke`;
+    - CI tag-trigger detection fails closed, so an unrecognised CI config makes a tag push ask; a false positive only costs one extra ask.
    - **Contract block:** it consumes `autonomy-grant/v1` and provides `release-result/v1`.
 2. **`references/release-protocol.md`:**
    - every command, line and exit code;
