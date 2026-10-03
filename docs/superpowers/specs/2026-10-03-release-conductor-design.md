@@ -23,6 +23,14 @@
 | D7 | **A release grant pins the recipe's sha and the target version.** Every release gate checks against the recipe. Amended after spec review: the merged release commit does not exist when the grant is written, so the version stands in for it (Jev 0.58). `stage` then checks that the merged commit carries that version. | 0.72 / 0.58 | A release-plan envelope (0.28); a second grant pinning the merged commit (0.30); a release block in the factory grant (0.12) |
 | D8 | **`release stage` runs when a session invokes it.** Nothing triggers it automatically after the human merges. An automatic trigger is a later item. | 1.00 | Reuse scheduled re-entry now (0.00) |
 
+**Decisions added while planning (2026-10-03, owner, with Jev):**
+
+| # | Decision | Jev | Rejected |
+|---|---|---|---|
+| D9 | **Grants coexist, selected by subject.** `check-grant --subject X` selects the newest live grant that pins X, so a factory grant and a release grant can both be live. Factory-conductor's `watch` reads the grant that pins its run's plan. `revoke-grant` with no id revokes **all** live grants, so the kill switch stops everything; `--id` revokes one. | 0.54 | One grant per repo (0.46) |
+| D10 | **Only `release prep` writes the release grant**, with the human present. Its subjects are the recipe and a release intent file, `.skill-contract/releases/<version>/intent.json`, which is git-ignored and holds the version and the base commit. Pinning the recipe's digest turns a recipe change into the existing `stale` ask. `stage` then runs unattended under that grant. The planning interview records only release defaults: the bump level, and whether to grant staging and tag pushes. This amends D7 and AC6. | 1.00 | The interview writes it (0.00) |
+| D11 | **Staging and production are checked by recipe-declared commands.** The recipe lists `staging_checks` and `prod_smoke` as argv lists (HTTP probes or scripts). release-conductor runs them and records SHA-bound evidence itself. Verify skills stay local-only: before staging, the project's verify skill runs its **full** check set **locally** on the release commit, through a verifier other than the release driver, the same evidence predicate factory-conductor uses. | 0.89 | Teach verify skills remote targets (0.10); defer behavioural checks (0.01) |
+
 **Jev's System One calls:**
 - `release stage` runs on a non-default `release/<version>-stage` branch (1.00).
 - The version bump is a recipe field, which a single release may override (0.99).
