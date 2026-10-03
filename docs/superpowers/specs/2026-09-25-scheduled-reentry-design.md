@@ -105,6 +105,9 @@ Tests render the plist, the units and the crontab into a temp directory through 
 ## 5. Stop rules, budget and honesty
 
 - A new stop reason, `reentry_exhausted`, is added to `STOP_REASONS` and to the run-result schema enum. It ends the run the same way any other stop does: the next driver, or the human, runs `finish`.
+  - `watch` records it quietly, so it prints only its own `REENTRY: exhausted` line.
+  - A stop already in place is kept as `stopped.previous`.
+  - It is terminal. Every later tick prints `exhausted` until `finish` ends the run, and the timer then removes itself on `done`.
 - **Cost stays bounded** by the dispatch cap, which re-dispatches count against, and by `max_reentries`.
 - **What the SKILL states plainly:**
   - re-entry needs the machine to be on and the user to be logged in (launchd agents and systemd user timers);
