@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.3.0"
+  version: "2.4.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -185,6 +185,8 @@ for it rather than taking it from git config or inventing one. It prints `GRANT:
 alone: `write_grant.py` lists it in `.git/info/exclude`, and `check-grant` treats a committed
 grant as covering nothing. Then give the user the revoke command:
 `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`.
+The grant can also carry consent to scheduled re-entry (`answers.reentry`), so a timer resumes
+the run if the session dies; see `references/unattended.md`.
 
 Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are
 never covered by a grant and will always ask: you MUST ask the user right before any of them,

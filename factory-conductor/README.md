@@ -17,7 +17,8 @@ This is step 4 of the collection's [software factory](../README.md#software-fact
 npx skills add dhanesh/agent-skills --skill factory-conductor
 ```
 
-Install it next to `spec-first-planning`, which produces what it consumes.
+Install it next to `spec-first-planning`, which produces what it consumes. The conductor
+needs macOS or Linux; it does not start on Windows.
 
 ## Usage
 
@@ -38,6 +39,16 @@ Install it next to `spec-first-planning`, which produces what it consumes.
    then `finish`.
 4. Read the run report: proven tasks with merge commits, parked tasks with reasons or the
    questions they need you to answer, blocked tasks, the stop reason and the budget spent.
+
+**Scheduled re-entry (optional).** If you answer the planner's re-entry question, the grant
+carries a `reentry` block with your own agent command (an argv list with `{prompt}`, never a
+shell). The conductor then runs `conductor reentry install`, and a timer on this machine
+(launchd, a systemd user timer, or cron) calls `conductor watch` every `interval_min`. If
+the session dies, `watch` starts your agent with a fixed resume prompt, once the run has been
+idle for `stall_min`, at most `max_reentries` times, and never while a live session drives
+it, the run waits on you, or the grant no longer covers it. A run lock and a lease keep two
+drivers from writing at once. `conductor reentry status` shows the timer and the attempts;
+`conductor reentry uninstall` removes the timer, and a finished run removes its own.
 
 You can stop a run at any time by revoking the grant
 (`contract_check.py revoke-grant --root <repo>`): the next gate asks and the run stops.
@@ -72,6 +83,12 @@ You can stop a run at any time by revoking the grant
   spends one from the cap, and when the grant has lapsed it says `NEXT: run ask`: the run
   waits for you to renew the grant rather than ending itself. On a finished run it says
   whether a push or PR is still pending (`run finish`) or nothing is left (`run done`).
+- **Re-entry is local, not hosted.** The timer runs on this machine, only while it is on and
+  you are logged in (a systemd user timer needs `loginctl enable-linger` to survive logout;
+  the conductor needs macOS or Linux and does not start on Windows), and the agent it starts
+  has your permissions. A session that is
+  alive but idle past `stall_min`, with no conductor call, no worktree change and, under the
+  evidence gate, no new verifier record, can get a second driver: the run lock keeps the record intact, and the dispatch cap bounds the waste.
 - **Green is not safe: the evidence gate.** When the plan declares a verify skill (a
   `verification` block; spec-first-planning writes it, verification-skill-forge generates
   the skill), a task merges only after `conductor evidence` passes its verified head: a
@@ -102,7 +119,9 @@ You can stop a run at any time by revoking the grant
   reviewer briefs, stop and park rules, and the skill-contract block.
 - `references/run-protocol.md` — every `conductor.py` command with its output and exit codes,
   the state and log formats, resume, and a worked three-task example.
-- `assets/conductor.py` — the state tool; `assets/contract_check.py` — the vendored
+- `assets/conductor.py` — the state tool; `assets/reentry.py` — the run lock, the lease and
+  the `watch` decision; `assets/reentry_timer.py` — the launchd, systemd and cron timers;
+  `assets/contract_check.py` — the vendored
   skill-contract checker; `assets/schemas/run-result.v1.json` — the payload schema;
   `assets/test_conductor_*.py` — the stdlib test suites.
 - `eval/run_eval.py` — the outcome eval (see the repo's docs/eval-standard.md).

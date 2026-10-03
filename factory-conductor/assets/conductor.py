@@ -187,6 +187,7 @@ if sys.version_info < (3, 10):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import contextlib  # noqa: E402
 import datetime as _dt  # noqa: E402
 import fnmatch  # noqa: E402
 import glob  # noqa: E402
@@ -203,6 +204,7 @@ import tempfile  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract_check as CC  # noqa: E402  (the vendored skill-contract checker, same dir)
+import reentry as R  # noqa: E402  (the run lock and the lease, same dir)
 
 RUN_ID_RE = r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z"
 STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", "blocked")
@@ -210,13 +212,14 @@ STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", 
 # integration_red is recorded by finish: the merged run branch failed a proven task's
 # own checks, so it is never pushed.
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
-                "new_human_decision", "no_ready_tasks", "integration_red")
+                "new_human_decision", "no_ready_tasks", "integration_red",
+                "reentry_exhausted")
 DEFAULT_PARALLEL = 2
 DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.2.0"
+CONDUCTOR_VERSION = "1.3.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -507,7 +510,8 @@ class State:
         return record
 
     def last_event(self):
-        """The last complete event in the log, or None. A torn trailing line is skipped."""
+        """The last complete event in the log, or None. A torn line, or one that is not
+        a JSON object, is skipped."""
         try:
             with open(self.log_path, encoding="utf-8") as f:
                 lines = f.read().splitlines()
@@ -515,10 +519,30 @@ class State:
             return None
         for line in reversed(lines):
             try:
-                return json.loads(line)
+                rec = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(rec, dict):
+                return rec
         return None
+
+    def events(self):
+        """Every complete event in the log, oldest first. A torn line, or one that is
+        not a JSON object, is skipped."""
+        try:
+            with open(self.log_path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except FileNotFoundError:
+            return []
+        out = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                out.append(rec)
+        return out
 
     def set_status(self, task, status, **fields):
         """Set a task's status and fields. Parking a task blocks every transitive dependent."""
@@ -1035,12 +1059,14 @@ def check_stop(st):
     return None
 
 
-def _record_stop(st, reason, **detail):
-    """Record the run as stopped, log `stop`, print STOP: <reason>. Returns 3."""
+def _record_stop(st, reason, quiet=False, **detail):
+    """Record the run as stopped, log `stop`, print STOP: <reason> (unless quiet, for a
+    command whose output contract is one line of its own). Returns 3."""
     st.stopped = dict(detail, reason=reason, at=_rfc3339(_now()))
     st.save()
     st.log("stop", reason=reason, **detail)
-    print("STOP: %s" % reason)
+    if not quiet:
+        print("STOP: %s" % reason)
     return 3
 
 
@@ -1224,6 +1250,7 @@ def cmd_init(args):
         _git_ok(root, "checkout", "-q", base)
         _git_ok(root, "branch", "-D", run_branch)
         return _init_fail("cannot create the run under %s: %s" % (root, e))
+    _renew_lease(st.dir)
     st.log("gate", action="local_reversible", ok=True, result=last, exit=rc)
     if unknown:
         st.log("budget_warning", grant=gid, unknown_keys=unknown)
@@ -3340,6 +3367,248 @@ def _finish_remote(st, payload, env_rel, push_cmd, pr_cmd):
     return 0
 
 
+# watch's wait for the run lock. A timer tick must never hang: a lock held longer means
+# another conductor command is running right now, which is a live run.
+WATCH_LOCK_TIMEOUT = 5
+
+
+def _idle_min(st):
+    """Minutes since the last complete log event (a huge number when there is none)."""
+    last = st.last_event()
+    try:
+        at = _dt.datetime.strptime(last["at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc)
+    except (TypeError, KeyError, ValueError):
+        return 10 ** 6
+    idle = (_now() - at).total_seconds() / 60
+    if idle < 0:
+        # a stamp in the future (a clock step): judge by when the log was last written,
+        # rather than suppress re-entry until the clock catches up
+        try:
+            idle = max(0.0, (_now().timestamp() - os.stat(st.log_path).st_mtime) / 60)
+        except OSError:
+            idle = 0.0
+    return idle
+
+
+def _reentry_block(root):
+    """The newest grant's valid reentry block with the defaults filled in, or None.
+    Whether that grant covers the run at all is the gate's call, not this one's."""
+    path = CC.latest_grant(root)
+    doc, err = CC.load_envelope(path) if path else (None, ["no grant"])
+    pred = (doc or {}).get("predicate") if isinstance(doc, dict) else None
+    pay = pred.get("payload") if isinstance(pred, dict) else None
+    block = pay.get("reentry") if isinstance(pay, dict) else None
+    if err or not block or CC.reentry_problems(block):
+        return None
+    return dict(CC.REENTRY_DEFAULTS, **block)
+
+
+def cmd_watch(args):
+    """One re-entry check (spec: scheduled re-entry, section 3). Prints exactly one
+    REENTRY: line and exits 0 or 2, whatever goes wrong.
+
+    watch takes the run lock itself, for at most WATCH_LOCK_TIMEOUT seconds, and never
+    renews the lease: it is a timer, not a driver.
+
+    A timer names its run (--run). When that run is missing or finished, or a newer
+    run has started under the root, the run's timer is removed and watch prints
+    `REENTRY: done` (missing or finished) or `REENTRY: superseded` (not the newest):
+    an abandoned run's timer never outlives it. Without --run, watch checks the newest
+    run, as before."""
+    root = os.path.abspath(args.root)
+    d = current_run(root)
+    if getattr(args, "run", None) is not None:
+        try:
+            gone = _watch_named_run(root, args.run, d)
+        except (OSError, ValueError) as e:
+            sys.stderr.write("watch: %s: %s\n" % (e.__class__.__name__, e))
+            print("REENTRY: failed")
+            return 2
+        if gone:
+            print("REENTRY: %s" % gone)
+            return 0
+    if d is None:
+        print("REENTRY: no-run")
+        return 0
+    try:
+        with R.run_lock(d, timeout=WATCH_LOCK_TIMEOUT):
+            try:
+                return _watch_locked(root, d)
+            except Exception as e:  # noqa: BLE001  the one-line contract is binding
+                sys.stderr.write("watch: %s: %s\n" % (e.__class__.__name__, e))
+                print("REENTRY: failed")
+                return 2
+    except R.RunLocked:
+        print("REENTRY: live")  # another conductor command is running right now
+        return 0
+    except OSError as e:  # the lock file itself cannot be opened
+        sys.stderr.write("watch: cannot take the run lock in %s: %s\n" % (d, e))
+        print("REENTRY: failed")
+        return 2
+
+
+def _watch_named_run(root, run_id, newest):
+    """None when run_id is the newest run under root (watch goes on as usual); else
+    removes run_id's timer and returns the word to print: "done" for a missing or
+    finished run, "superseded" for an unfinished run a newer one replaced. Raises
+    ValueError for a malformed run id (nothing is touched) and OSError when the
+    timer cannot be removed."""
+    d = run_dir(root, run_id)  # ValueError on anything that is not a run id
+    if newest is not None and os.path.realpath(newest) == os.path.realpath(d):
+        return None
+    word = "done"
+    if os.path.isfile(os.path.join(d, STATE_FILE)):
+        try:
+            finished = bool(State.load(os.path.join(d, STATE_FILE)).finished)
+        except StateError:
+            finished = False
+        word = "done" if finished else "superseded"
+    import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+    T.uninstall(run_id)
+    return word
+
+
+def _watch_locked(root, d):
+    try:
+        st = State.load(os.path.join(d, STATE_FILE))
+    except StateError as e:
+        sys.stderr.write("cannot read the run state in %s: %s\n" % (d, e))
+        print("REENTRY: failed")
+        return 2
+    block = _reentry_block(root)
+    rc, last = gate(root, "local_reversible", plan_subject(st))
+    covered, _ = gate_line(rc, last)  # the judgment every gate makes; nothing is logged
+    worktrees = [t["worktree"] for t in st.tasks.values()
+                 if t.get("status") in ACTIVE and t.get("worktree")]
+    if st.verification and any(t.get("status") in ACTIVE for t in st.tasks.values()):
+        # Under the evidence gate a verifier writes its records to the evidence dir and
+        # its run state to .verify-run, both in the root, never in the worktree: a
+        # session waiting on a long verifier is as live as one waiting on an executor.
+        worktrees += [os.path.join(root, st.verification.get("evidence_dir")
+                                   or DEFAULT_EVIDENCE_DIR),
+                      os.path.join(root, ".verify-run")]
+    stall =(block or CC.REENTRY_DEFAULTS)["stall_min"]
+    old_lease = R.read_lease(d)
+    live = R.lease_live(d, old_lease, stall, worktrees)
+    # an attempt is logged before its spawn (ok null) and again with its outcome: count n
+    count = len({e.get("n") for e in st.events() if e.get("event") == "reentry"})
+    reason = (st.stopped or {}).get("reason")
+    verdict = R.decide(bool(st.finished), reason, covered, block, live, _idle_min(st), count)
+    if verdict == "done":
+        import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+        T.uninstall(st.run_id)
+    if verdict == "exhausted" and reason != "reentry_exhausted":
+        extra = {"previous": reason} if st.stopped else {}
+        _record_stop(st, "reentry_exhausted", quiet=True,
+                     detail="max_reentries=%d" % block["max_reentries"], **extra)
+    if verdict != "start":
+        print("REENTRY: %s" % verdict)
+        return 0
+    return _start_agent(root, d, st, block, count + 1, old_lease)
+
+
+def _start_agent(root, d, st, block, n, old_lease):
+    """Log the attempt, spawn, lease, log the outcome -- in that order, so an attempt
+    that cannot be counted never starts, and an agent that cannot be leased is killed.
+    Either way at most one agent drives the run, and every started one counts."""
+    # the log records the argv with {prompt} left unexpanded: the prompt never reaches it
+    shown = [root if a == "{root}" else a for a in block["agent_cmd"]]
+    try:
+        st.log("reentry", n=n, ok=None, argv=shown, replaced=old_lease)
+    except (OSError, ValueError) as e:
+        sys.stderr.write("watch: cannot log the attempt: %s\n" % e)
+        print("REENTRY: failed")
+        return 2
+    argv = R.expand_agent_cmd(block["agent_cmd"], root)
+    try:
+        pid = R.spawn(argv, root, os.path.join(d, "reentry-%d.log" % n), n)
+    except (OSError, ValueError, TypeError) as e:
+        st.log("reentry", n=n, ok=False, error=str(e))
+        print("REENTRY: failed")
+        return 2
+    try:
+        R.set_reentry_lease(d, n, pid)
+    except Exception:  # noqa: BLE001  an unleased agent must not keep running
+        with contextlib.suppress(Exception):
+            os.killpg(pid, signal.SIGKILL)
+        st.log("reentry", n=n, ok=False, pid=pid, error="lease write failed")
+        print("REENTRY: failed")
+        return 2
+    st.log("reentry", n=n, ok=True, pid=pid)
+    print("REENTRY: started %d pid=%d" % (n, pid))
+    return 0
+
+
+def watch_argv(root, run_id):
+    """The absolute argv a timer runs: this interpreter, this conductor.py, watch, for
+    run_id. A timer runs with no working directory to rely on, so every path in this
+    argv is absolute; --run lets a superseded run's timer remove itself."""
+    return [sys.executable, os.path.abspath(__file__), "watch", "--root",
+            os.path.abspath(root), "--run", run_id]
+
+
+def cmd_reentry(args):
+    """reentry install|uninstall|status: the run's watch timer (install needs the grant's
+    reentry block and a COVERED local_reversible gate).
+
+    An ASK gate on install is logged and printed (_gate_logged) but never stops the
+    run: only watch's own stall logic decides that. Any OSError from T.install (an
+    unsupported platform, or a loader that failed) is reported as REENTRY: failed;
+    T.install has already removed whatever files it wrote, and no install event is
+    logged. status and uninstall report the same way on an OSError from T (a swept
+    kind that failed, e.g. a cron read error) -- never a traceback."""
+    import reentry_timer as T  # noqa: E402  (same dir; imported only when needed)
+    root = os.path.abspath(args.root)
+    st = _load_current(root)
+    if st is None:
+        return 2
+    if args.action == "status":
+        try:
+            timer_line = ", ".join(T.installed(st.run_id)) or "none"
+            last = next((e for e in reversed(st.events()) if e.get("event") == "reentry"), None)
+        except OSError as e:
+            sys.stderr.write("%s\n" % e)
+            print("REENTRY: failed")
+            return 2
+        print("REENTRY: timer %s" % timer_line)
+        print("REENTRY: lease %s" % json.dumps(R.read_lease(st.dir), sort_keys=True))
+        print("REENTRY: count %d" % len({e.get("n") for e in st.events()
+                                         if e.get("event") == "reentry"}))
+        print("REENTRY: last %s" % (json.dumps(last, sort_keys=True, separators=(",", ":"))
+                                    if last else "none"))
+        return 0
+    if args.action == "uninstall":
+        try:
+            T.uninstall(st.run_id)
+        except OSError as e:
+            sys.stderr.write("%s\n" % e)
+            print("REENTRY: failed")
+            return 2
+        st.log("reentry_timer", action="uninstall")
+        print("REENTRY: uninstalled")
+        return 0
+    block = _reentry_block(root)
+    if block is None:
+        print("REENTRY: disabled")
+        return 3
+    ok, _line = _gate_logged(st, "local_reversible")  # prints GATE: ...; never stops the run
+    if not ok:
+        return 3
+    # the timer's own PATH is minimal (launchd: /usr/bin:/bin:/usr/sbin:/sbin, cron:
+    # /usr/bin:/bin): the agent, the plan's tools and their python3 need this one
+    path = os.environ.get("PATH") or os.defpath
+    try:
+        T.install(st.run_id, watch_argv(root, st.run_id), block["interval_min"], path=path)
+    except OSError as e:
+        sys.stderr.write("%s\n" % e)
+        print("REENTRY: failed")
+        return 2
+    st.log("reentry_timer", action="install", interval_min=block["interval_min"], path=path)
+    print("REENTRY: installed every %d min" % block["interval_min"])
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="conductor.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -3360,6 +3629,14 @@ def main(argv=None):
         s = sub.add_parser(name)
         s.add_argument("--root", default=".")
         s.set_defaults(fn=fn)
+    s = sub.add_parser("watch")
+    s.add_argument("--root", default=".")
+    s.add_argument("--run", default=None)
+    s.set_defaults(fn=cmd_watch, no_lock=True)  # takes the lock itself; never renews the lease
+    s = sub.add_parser("reentry")
+    s.add_argument("action", choices=("install", "uninstall", "status"))
+    s.add_argument("--root", default=".")
+    s.set_defaults(fn=cmd_reentry)
     s = sub.add_parser("trail")
     s.add_argument("--root", default=".")
     s.add_argument("--out", default=None)
@@ -3399,7 +3676,31 @@ def main(argv=None):
         args = p.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
-    return args.fn(args)
+    if args.cmd == "init" or getattr(args, "no_lock", False):
+        return args.fn(args)
+    d = current_run(os.path.abspath(args.root))
+    if d is None:
+        return args.fn(args)
+    # Every command on a run holds its lock, so two drivers (a session and a scheduled
+    # re-entry) never interleave writes to state.json or the log, then renews the lease.
+    try:
+        with R.run_lock(d):
+            rc = args.fn(args)
+            _renew_lease(d)
+            return rc
+    except R.RunLocked:
+        sys.stderr.write("run locked: another conductor command holds %s\n"
+                         % os.path.join(d, R.LOCK_FILE))
+        return 2
+
+
+def _renew_lease(run_dir):
+    """Renew the run's lease. A failed lease write never turns a command's outcome into
+    a traceback: the lease is a liveness hint, and state.json is the record."""
+    try:
+        R.renew_lease(run_dir)
+    except OSError as e:
+        sys.stderr.write("warning: cannot renew the lease in %s: %s\n" % (run_dir, e))
 
 
 if __name__ == "__main__":

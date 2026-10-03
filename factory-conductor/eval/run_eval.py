@@ -27,6 +27,13 @@ merged result passes, which DOES push to the scratch bare origin. The evidence-g
 drives one gated task per case through the gate suite's fixtures: fresh, independent,
 SHA-bound evidence with a green doctor merges; evidence from another head, a verdict from
 the writer, a red doctor and an artifact removed after the verdict never do.
+
+The scheduled re-entry checks (`conductor watch`) share one fixture shape, a one-task
+run aged past stall_min under a grant with a reentry block: one watch starts exactly one
+stub agent (it sleeps at most 2 s), and a second tick sees it live; and, as negatives,
+nothing starts while a reentry lease's pid lives, on a grant_ask stop, under a revoked
+grant, or past max_reentries (which records reentry_exhausted), and a grant whose
+agent_cmd is a shell is invalid. Every timer call goes to a temp home, dry-run, as cron.
 """
 import contextlib
 import hashlib
@@ -34,8 +41,11 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import time
+from datetime import timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -43,6 +53,7 @@ ASSETS = os.path.join(SKILL, "assets")
 sys.path.insert(0, ASSETS)
 import conductor as C  # noqa: E402
 import contract_check as CC  # noqa: E402
+import reentry as R  # noqa: E402
 import conductor_testkit as TK  # noqa: E402
 
 _checks = []
@@ -412,6 +423,176 @@ def integration_red_is_never_pushed_arm():
           "red: rc=%r pushed=%r; green: rc=%r pushed=%r" % (rc, pushed, g_rc, g_pushed))
 
 
+# ── scheduled re-entry (conductor watch) ─────────────────────────────────────
+# A stub agent: appends its FACTORY_CONDUCTOR_REENTRY attempt number to a marker file,
+# then sleeps (at most 2 s), so "exactly one agent started" is a line count.
+REENTRY_STUB = ("import os,sys,time;open(sys.argv[1],'a').write(os.environ.get("
+                "'FACTORY_CONDUCTOR_REENTRY','?')+'\\n');time.sleep(float(sys.argv[2]))")
+_TIMER_ENV = ("FACTORY_CONDUCTOR_TIMER_HOME", "FACTORY_CONDUCTOR_TIMER_DRYRUN",
+              "FACTORY_CONDUCTOR_TIMER_KIND")
+
+
+@contextlib.contextmanager
+def _timer_sandbox():
+    """Every timer call watch could make goes to a temp home, dry-run, as cron: the
+    real LaunchAgents, systemd units and crontab are never touched."""
+    old = {k: os.environ.get(k) for k in _TIMER_ENV}
+    os.environ.update({"FACTORY_CONDUCTOR_TIMER_HOME": TK.tmpdir(),
+                       "FACTORY_CONDUCTOR_TIMER_DRYRUN": "1",
+                       "FACTORY_CONDUCTOR_TIMER_KIND": "cron"})
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+class _Stalled:
+    """A one-task run whose grant carries a reentry block, aged past stall_min: the
+    lease, the log's last event and the log file are 45 minutes old."""
+
+    def __init__(self, sleep=2, **block):
+        self.root = TK.repo()
+        self.st, self.plan = TK.new_run(self.root, plan(task("T1", [], ["true"])))
+        self.marker = os.path.join(TK.tmpdir(), "started")
+        b = {"agent_cmd": [sys.executable, "-c", REENTRY_STUB, self.marker, str(sleep),
+                           "{prompt}"], "stall_min": 30, "max_reentries": 2}
+        b.update(block)
+        self.block = b
+        TK.write_grant(self.root, self.plan, reentry=b)
+        self.age()
+
+    def age(self, minutes=45):
+        then = C._now() - timedelta(minutes=minutes)
+        R.renew_lease(self.st.dir, now=then)
+        with open(self.st.log_path, "a") as f:
+            f.write(json.dumps({"at": then.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "event": "aged"}) + "\n")
+        old = then.timestamp()
+        for name in (self.st.log_path, os.path.join(self.st.dir, R.LEASE_FILE)):
+            os.utime(name, (old, old))
+
+    def watch(self):
+        rc, out, err = run(["watch", "--root", self.root])
+        return rc, out.strip()
+
+    def state(self):
+        return C.State.load(self.st.state_path)
+
+    def attempts(self):
+        return len({e.get("n") for e in self.state().events() if e.get("event") == "reentry"})
+
+    def marker_lines(self, settle=0.0):
+        end = time.monotonic() + settle
+        while True:
+            lines = []
+            if os.path.exists(self.marker):
+                with open(self.marker) as fh:
+                    lines = fh.read().split()
+            if lines or time.monotonic() >= end:
+                return lines
+            time.sleep(0.05)
+
+    def wait_dead(self, deadline=10):
+        pid = (R.read_lease(self.st.dir) or {}).get("pid")
+        end = time.monotonic() + deadline
+        while R.pid_alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+
+    def close(self):
+        pids = {e.get("pid") for e in self.state().events() if e.get("event") == "reentry"}
+        pids.add((R.read_lease(self.st.dir) or {}).get("pid"))
+        for pid in pids:
+            if pid != os.getpid() and R.pid_alive(pid):
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def reentry_arms():
+    with _timer_sandbox():
+        # positive: one watch on a stalled run starts exactly one agent
+        f = _Stalled()
+        try:
+            rc, out = f.watch()
+            lines = f.marker_lines(settle=10)
+            again = f.watch()  # its pid lives: a second tick must not start another
+            time.sleep(0.2)
+            check("reentry: a stalled run with a reentry block starts exactly one agent",
+                  rc == 0 and out.startswith("REENTRY: started 1 pid=")
+                  and f.marker_lines() == ["1"] and lines == ["1"]
+                  and again == (0, "REENTRY: live") and f.attempts() == 1,
+                  "out=%r again=%r marker=%r" % (out, again, f.marker_lines()))
+        finally:
+            f.close()
+
+        # a reentry lease whose pid lives (this very process) is a driver
+        f = _Stalled()
+        try:
+            R.set_reentry_lease(f.st.dir, 1, os.getpid())
+            got = f.watch()
+            check("NEGATIVE: reentry never starts while a reentry lease's pid lives",
+                  got == (0, "REENTRY: live") and f.attempts() == 0
+                  and f.marker_lines(settle=0.3) == [], "got=%r" % (got,))
+        finally:
+            f.close()
+
+        f = _Stalled()
+        try:
+            st = f.state()
+            st.stopped = {"reason": "grant_ask", "at": "t", "detail": "x"}
+            st.save()
+            f.age()
+            got = f.watch()
+            check("NEGATIVE: reentry never starts on grant_ask (waiting on the human)",
+                  got == (0, "REENTRY: waiting-human") and f.attempts() == 0
+                  and f.marker_lines(settle=0.3) == [], "got=%r" % (got,))
+        finally:
+            f.close()
+
+        f = _Stalled()
+        try:
+            TK.revoke(f.root)
+            f.age()
+            got = f.watch()
+            check("NEGATIVE: reentry never starts under a revoked grant",
+                  got == (0, "REENTRY: ask") and f.attempts() == 0
+                  and f.marker_lines(settle=0.3) == [], "got=%r" % (got,))
+        finally:
+            f.close()
+
+        f = _Stalled(sleep=0, max_reentries=1)
+        try:
+            first = f.watch()
+            f.marker_lines(settle=10)
+            f.wait_dead()
+            f.age()
+            got = f.watch()
+            stopped = (f.state().stopped or {}).get("reason")
+            check("NEGATIVE: reentry never starts beyond max_reentries (and records "
+                  "reentry_exhausted)",
+                  first[1].startswith("REENTRY: started 1 ")
+                  and got == (0, "REENTRY: exhausted") and stopped == "reentry_exhausted"
+                  and f.attempts() == 1 and f.marker_lines() == ["1"],
+                  "first=%r got=%r stopped=%r" % (first, got, stopped))
+        finally:
+            f.close()
+
+        f = _Stalled(agent_cmd=["sh", "-c", "x", "{prompt}"])
+        try:
+            problems = CC.reentry_problems(f.block)
+            got = f.watch()
+            check("NEGATIVE: a grant whose agent_cmd is a shell is invalid (no re-entry)",
+                  any("shell" in p for p in problems) and got == (0, "REENTRY: ask")
+                  and f.attempts() == 0 and f.marker_lines(settle=0.3) == [],
+                  "problems=%r got=%r" % (problems, got))
+        finally:
+            f.close()
+
+
 def _gated_run(case):
     """One gated task driven to its evidence verdict, with the evidence `case` plants.
     Returns (evidence exit, merge exit, proven?)."""
@@ -464,6 +645,7 @@ def main():
     null_verify_is_refused_at_init_arm()
     vacuous_test_command_cannot_prove_a_task_arm()
     integration_red_is_never_pushed_arm()
+    reentry_arms()
     evidence_gate_arm()
 
     n, k = len(_checks), sum(_checks)

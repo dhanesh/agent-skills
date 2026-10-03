@@ -114,8 +114,9 @@ writes the plan and the grant, and `factory-conductor` runs it. Nothing else is 
 npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor
 ```
 
-You need Python 3.10 or newer, git 2.31 or newer, an agent harness that can dispatch subagents
-(Claude Code can), and the `gh` CLI for the PR step (see "Without `gh`" below).
+You need macOS or Linux (the conductor does not start on Windows), Python 3.10 or newer, git
+2.31 or newer, an agent harness that can dispatch subagents (Claude Code can), and the `gh` CLI
+for the PR step (see "Without `gh`" below).
 
 **Start the factory.** Say "unattended" in so many words: `spec-first-planning` runs a light,
 attended pass by default and never escalates by itself, and only the unattended mode ends in
@@ -144,6 +145,9 @@ When the grant is written, hand the plan to factory-conductor and run it.
    worktree, re-runs the task's verify commands itself, has a fresh reviewer judge the diff
    against the requirement, and merges only what passed both. If the session dies, a new one
    picks the run up with `conductor resume`.
+4. **(Optional) re-entry.** Consent to re-entry in the grant (the planner asks for your agent
+   command); the conductor installs a timer that resumes the run with that command if the
+   session dies.
 
 **What you get back:** one open PR from `factory/<plan-slug>` against your working branch,
 holding every task that passed verify and review, re-verified together on the merged branch
@@ -166,6 +170,9 @@ npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-
 **What stays with you:** merging the PR; answering parked questions; renewing the grant if it
 lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI
 configuration, which no grant covers and which always asks you.
+
+**One limit:** re-entry runs on this machine and needs it on, with you logged in. It is not
+a hosted service.
 
 **Without `gh`.** The conductor pushes the run branch and then runs `gh pr create`. With no
 `gh` on the machine, `finish` prints `REMOTE: pending pr` and stops there: the run is complete

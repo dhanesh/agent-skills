@@ -426,6 +426,97 @@ class TestCli(WriteGrantBase):
 
 
 
+class TestReentry(WriteGrantBase):
+    """Task 5: the grant can carry consent to scheduled re-entry, from answers.reentry.
+    `reentry_problems`/`REENTRY_DEFAULTS` are Task 1's, in contract_check.py — this only
+    checks that write_grant.py wires answers.reentry into the payload and refuses to
+    duplicate the vendored checker's rules."""
+
+    _write_answers = TestCli._write_answers
+    cli = TestCli.cli
+
+    def _run_write(self, answers):
+        """Run the CLI end to end; return (stdout, the written statement dict)."""
+        answers_path = self._write_answers(answers)
+        r = self.cli("--root", self.root, "--spec", "docs/spec.md", "--plan", self.plan_path,
+                     "--answers", answers_path, "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        lines = r.stdout.strip().splitlines()
+        path = next(ln for ln in lines if ln.startswith("GRANT: "))[len("GRANT: "):]
+        with open(path, encoding="utf-8") as f:
+            st = json.load(f)
+        return r.stdout, st
+
+    def test_a_reentry_block_is_written_and_shown_back(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["claude", "-p", "{prompt}"],
+                                              "interval_min": 10})
+        out, st = self._run_write(answers)
+        self.assertEqual(st["predicate"]["payload"]["reentry"]["agent_cmd"],
+                         ["claude", "-p", "{prompt}"])
+        self.assertIn("REENTRY: claude -p '{prompt}' every 10 min", out)
+
+    WARN = ("warning: agent_cmd[0] is not an absolute path; the timer's PATH is the one "
+            "captured at reentry install")
+
+    def _cli_write(self, answers):
+        r = self.cli("--root", self.root, "--spec", "docs/spec.md", "--plan", self.plan_path,
+                     "--answers", self._write_answers(answers), "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def test_a_relative_agent_cmd_warns_about_the_timer_path(self):
+        # final wave C1: a timer runs with a minimal PATH; a bare name resolves only on
+        # the PATH captured at `reentry install`, so an absolute path is recommended
+        r = self._cli_write(dict(self.answers, reentry={"agent_cmd": ["claude", "-p",
+                                                                      "{prompt}"]}))
+        self.assertIn(self.WARN, r.stderr)
+
+    def test_an_absolute_agent_cmd_does_not_warn(self):
+        r = self._cli_write(dict(self.answers, reentry={
+            "agent_cmd": ["/usr/local/bin/claude", "-p", "{prompt}"]}))
+        self.assertNotIn("warning: agent_cmd", r.stderr + r.stdout)
+
+    def test_reentry_gets_default_values_it_does_not_supply(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["claude", "-p", "{prompt}"]})
+        _, st = self._run_write(answers)
+        self.assertEqual(st["predicate"]["payload"]["reentry"],
+                         {"agent_cmd": ["claude", "-p", "{prompt}"],
+                          "interval_min": 10, "stall_min": 30, "max_reentries": 5})
+
+    def test_no_reentry_means_no_block(self):
+        out, st = self._run_write(self.answers)
+        self.assertNotIn("reentry", st["predicate"]["payload"])
+        self.assertNotIn("REENTRY:", out)
+
+    def test_a_shell_agent_cmd_is_refused_by_the_cli(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["bash", "-c", "{prompt}"]})
+        answers_path = self._write_answers(answers)
+        r = self.cli("--root", self.root, "--spec", "docs/spec.md", "--plan", self.plan_path,
+                     "--answers", answers_path, "--accepted-by", "Dana")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REFUSED:", r.stdout)
+        self.assertIn("answers.reentry", r.stdout)
+
+    def test_a_shell_agent_cmd_is_refused(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["bash", "-c", "{prompt}"]})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("answers.reentry", str(cm.exception))
+        self.assertIn("shell", str(cm.exception))
+
+    def test_a_missing_prompt_token_is_refused(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["claude", "-p", "hi"]})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("{prompt}", str(cm.exception))
+
+    def test_statement_has_no_grant_violations(self):
+        answers = dict(self.answers, reentry={"agent_cmd": ["claude", "-p", "{prompt}"]})
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertEqual(contract_check.check_statement(st), [])
+        self.assertEqual(contract_check.grant_violations(st), [])
+
+
 class TestGitExclude(WriteGrantBase):
     """A grant is one person's acceptance: write_grant keeps it out of commits (I1)."""
 

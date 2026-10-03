@@ -73,6 +73,14 @@ clean"), and an independence marker (`[parallel-safe]` or `[after: R1]`), plus a
 factory-conductor's evidence gate in force. A requirement that cannot state an observable
 predicate is refused: plan it attended. verification-skill-forge generates the verify skill.
 
+**Scheduled re-entry consent (2.4.0).** The decision sweep can ask whether a timer on the
+user's machine should resume a stalled run. A yes becomes `answers.reentry` (`agent_cmd` as
+an argv list with `{prompt}`, plus `interval_min`, `stall_min` and `max_reentries`);
+`write_grant.py` checks it with the vendored `contract_check.reentry_problems` (no shell, no
+launcher wrapping one, `{prompt}` exactly once) and echoes it back as `REENTRY: <argv> every
+<n> min`. Left out, no `reentry` block is written and nothing re-enters. Details:
+`references/unattended.md`.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 

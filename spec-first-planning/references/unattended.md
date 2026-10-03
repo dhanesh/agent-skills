@@ -123,21 +123,39 @@ and skip what the conversation has already answered:
    (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
    usage. Also ask which events should stop the run (`stop_on`): it is recorded but not
    enforced by factory-conductor 1.0.0, whose own stop rules apply.
-8. **System One use.** May the run consult a System One model such as Jev for
+8. **Re-entry (optional).** Ask: "If this session dies, should a timer on this machine
+   resume the run? If so, give the exact agent command, as an argv list with `{prompt}`
+   where the resume prompt goes." Show the argv back before the yes. It becomes
+   `answers.reentry` (`agent_cmd`, optional `interval_min` 10, `stall_min` 30,
+   `max_reentries` 5). `agent_cmd` carries `{prompt}` exactly once and can carry `{root}`
+   (the repository root), each as a whole argument. It is a plain agent binary: a shell
+   (`sh`, `bash`, `zsh`, …) or a launcher wrapping one (`env bash …`, `sudo sh …`) makes
+   the checker reject the whole grant, because a shell would turn the argv back into an
+   evaluated string. The ranges are `interval_min` 5–60, `stall_min` 15–240 and at least
+   twice `interval_min`, and `max_reentries` 1–20; a value outside them also rejects the
+   grant. Recommend the user's agent in headless mode, by absolute path (`command -v
+   claude` prints it: a timer runs with the PATH captured at `reentry install`, and
+   `write_grant.py` warns on a bare name), with an explicit tool allowlist that lets it
+   drive the whole run: `python3 <abs>/conductor.py …`, the subagent tool (`Agent` in
+   Claude Code), the plan's verify programs, git and file edits (see the example below).
+   Warn against any permission-bypass flag, because the resumed agent acts with the
+   user's own permissions and no one watches it. Without an answer, no block is written and nothing
+   re-enters.
+9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
-9. **Runtime proof.** For each requirement: which verify-skill features prove it
-   (`[feature: ...]`), what an agent will drive and see when it works (`[proof: ...]`),
-   and whether it can run beside the others (`[parallel-safe]`) or after which ones
-   (`[after: ...]`). Name the verify skill in `## Verification`; if the app has none,
-   run verification-skill-forge first. Where Manifold has converged, its anchored
-   constraints supply the predicates: `forge.py coverage` lists each one with its proof.
-   A requirement with no observable predicate ("tests pass" is not one) leaves the
-   unattended plan: plan it attended.
-10. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
-   glob such as `factory/*`, and start the run on a branch that matches it, e.g.
-   `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
-   factory-conductor creates as its run branch.
+10. **Runtime proof.** For each requirement: which verify-skill features prove it
+    (`[feature: ...]`), what an agent will drive and see when it works (`[proof: ...]`),
+    and whether it can run beside the others (`[parallel-safe]`) or after which ones
+    (`[after: ...]`). Name the verify skill in `## Verification`; if the app has none,
+    run verification-skill-forge first. Where Manifold has converged, its anchored
+    constraints supply the predicates: `forge.py coverage` lists each one with its proof.
+    A requirement with no observable predicate ("tests pass" is not one) leaves the
+    unattended plan: plan it attended.
+11. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
+    glob such as `factory/*`, and start the run on a branch that matches it, e.g.
+    `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
+    factory-conductor creates as its run branch.
 
 ### Action classes and their gates
 
@@ -192,9 +210,9 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
 
 ## answers.json
 
-`write_grant.py` accepts exactly these 7 keys and refuses any other:
+`write_grant.py` accepts exactly these 8 keys and refuses any other:
 `branch_pattern`, `gate_policy` and `expires_at` are required, and `budget`,
-`stop_on`, `defaults` and `system_one` are optional. A filled example:
+`stop_on`, `defaults`, `system_one` and `reentry` are optional. A filled example:
 
 ```json
 {
@@ -227,9 +245,26 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
     "allowed": true,
     "decision_kinds": ["naming", "test-case selection"],
     "data_sent": "file names and requirement text only, never source code or secrets"
+  },
+  "reentry": {
+    "agent_cmd": ["/Users/you/.local/bin/claude", "-p", "{prompt}", "--allowedTools",
+                  "Read,Edit,Write,Glob,Grep,Agent,Bash(python3 /Users/you/.claude/skills/factory-conductor/assets/conductor.py *),Bash(git *),Bash(python3 -m pytest *)"],
+    "interval_min": 10
   }
 }
 ```
+
+In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
+the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's
+own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own.
+Claude Code matches each `Bash(...)` rule against the literal command text, before any
+variable is expanded. A resumed agent therefore writes the conductor's absolute path out in
+each command, as factory-conductor's "Scheduled re-entry" section says, so give the rule that
+same absolute path. A rule written with `$SKILL_DIR` would never match, and every conductor
+call would be refused. Under the evidence gate the resumed agent also dispatches verifiers,
+which inherit this allowlist: add rules for the verify skill's Launch, Doctor and Cleanup
+commands and its `verify_evidence.py record`, or every verifier the resumed agent sends is
+refused and the task is parked once its redos run out (`evidence_redo_exhausted`).
 
 `expires_at` is RFC 3339 in UTC, in the future, and no more than 7 days after the grant
 is written. Set it from the user's answer, not from this example.

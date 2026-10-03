@@ -43,7 +43,14 @@ here.
 `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1`. Its subjects pin the
 spec and the task-plan envelope it was approved for; its payload carries `scope`
 (`repo`, `branch_pattern`), `decisions`, `defaults`, `gate_policy` (action class → `auto`, `grant`
-or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one` and `revoked`. The action classes are:
+or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one`, `revoked`, and the
+following optional field:
+
+| Field | Type | Description |
+|---|---|---|
+| `reentry` | object, optional | Consent to scheduled re-entry (factory-conductor): `agent_cmd` (argv list, `{prompt}` exactly once, `{root}` optional, no shell as `agent_cmd[0]`; a launcher such as `env` or `sudo` in front of a shell is refused too), `interval_min` 5–60 (default 10), `stall_min` 15–240 and ≥ 2 × interval (default 30), `max_reentries` 1–20 (default 5). The checker refuses a malformed block (C10). |
+
+The action classes are:
 
 | Class | Examples | Reversibility | Most permissive gate |
 |---|---|---|---|
