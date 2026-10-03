@@ -20,7 +20,7 @@
 | D4 | **Rollback asks.** A failed production check stops and asks for the human's yes to roll back. | 0.52 | Automatic if pre-approved at deploy (0.44); always automatic (0.04) |
 | D5 | **A8 amended for staging only:** a new grantable class, `deploy_staging`. Production deploy stays never grantable. | 0.96 | Staging always asks (0.04) |
 | D6 | **A tag push is deploy class whenever the repo's CI config has tag triggers**, as the checker detects them. Otherwise it is a grantable `push_tag`. The recipe's own flag never decides. | 0.97 / 0.91 | Always ask (0.03); trust the recipe flag (0.09) |
-| D7 | **A release grant pins the recipe's sha and the release commit.** Every release gate checks against the recipe. | 0.72 | A release-plan envelope (0.28) |
+| D7 | **A release grant pins the recipe's sha and the target version.** Every release gate checks against the recipe. Amended after spec review: the merged release commit does not exist when the grant is written, so the version stands in for it (Jev 0.58). `stage` then checks that the merged commit carries that version. | 0.72 / 0.58 | A release-plan envelope (0.28); a second grant pinning the merged commit (0.30); a release block in the factory grant (0.12) |
 | D8 | **`release stage` runs when a session invokes it.** Nothing triggers it automatically after the human merges. An automatic trigger is a later item. | 1.00 | Reuse scheduled re-entry now (0.00) |
 
 **Jev's System One calls:**
@@ -42,6 +42,7 @@
   - `version_probe`: a command, or a URL, that reports the version or commit deployed in an environment. It is called with `{env}` set to `staging` or `prod`.
 - **`version`**: `{"file": …, "key": …}` or `{"cmd": [...]}`, plus `"bump": "patch" | "minor" | "major"`, the default level.
 - **`artifact`**: `"rebuild"`, or `{"path": …}` when production can deploy the staged build itself. In the second case its sha256 is recorded at stage and checked at deploy.
+- **`deploy_timeout`**: how long a deploy may take to go live, in seconds; the default is 600. Deploys are often asynchronous, and with CI deploying on tag the push only starts one.
 - **`verify_skill`**: the project's verify skill, as made by verification-skill-forge.
 - **`prod_smoke`**: the named checks of that verify skill that are read-only, and so safe to run against production. Nothing outside this list ever runs against production.
 
@@ -59,7 +60,7 @@
 1. **`release prep`**
    - Works from the commit at the tip of the default branch.
    - Bumps the version by the recipe's level. `--bump` overrides it for this release.
-   - Writes a changelog section from the titles of PRs merged since the last tag. Those titles are executor-written, so they are neutralised the same way factory-conductor's PR body is.
+   - Writes a changelog section from the titles of PRs merged since the last tag. The titles come from local `git log` merge-commit subjects, so no `gh` and no network are needed. They are executor-written, so they are neutralised the same way factory-conductor's PR body is.
    - Commits to `release/<version>`, pushes the branch, and opens the release PR. The classes are `local_reversible`, `push_branch` and `open_pr`.
    - **The human merges the release PR.**
 2. **`release stage`**
@@ -74,26 +75,47 @@
    - when the recipe deploys an artifact, its sha256 is unchanged;
    - `check-grant --action deploy` answers ASK, which a covering answer would make a bug.
 
-   Before it runs, it records the **rollback target**: the version and commit from the previous `release-result/v1`.
+   Before it runs, it records the **rollback target**: what production runs now. That is the production `version_probe`'s answer, or failing that the previous `release-result/v1`, or failing both, "none". A project that was in production before it adopted the skill then still gets a real target.
 
    - **When the human is present:** it shows the version, commit, staging evidence, recipe sha, the exact deploy and rollback argv, and the rollback target. For a first release it shows "no previous release, nothing to roll back to" instead. It asks for an explicit yes for this release, then runs `deploy_prod` from an isolated checkout through the harness's own permission prompt. The yes is recorded in the release record as **CLAIMED**, because a shell-capable agent can forge in-session approval.
    - **When unattended:** it stops at `awaiting_deploy` with the command ready.
    - **When CI deploys on tag:** the tag push is the production deploy, under the same refusals and the same yes (D6).
 4. **`release verify-prod`**
-   - Runs the production `version_probe`, then `health`, then only the `prod_smoke` checks.
-   - Fails at once when the probe does not report the pinned commit or version, because otherwise a healthy old deploy would pass.
+   - Polls the production `version_probe` until it reports the pinned commit or version, or until `deploy_timeout` expires. A deploy still in progress is not a failure.
+   - Only a timeout, or a different version that is not the old one, counts as `prod_failed`. Production still running the old version past the timeout fails too, because otherwise a healthy old deploy would pass.
+   - Then runs `health` and only the `prod_smoke` checks.
    - On pass, the release is `verified`, and the tool writes `release-result/v1`.
    - On fail, the release is `prod_failed`. It stops, shows what failed, and asks for the human's yes to run `rollback` (deploy class, the same yes as a deploy). It then checks production again with the probe set to the rollback target.
+
+**Tags.** `release stage` pushes the `v<version>` tag on the merged release commit once staging passes. The class is decided as follows:
+- `push_tag` when the repo's CI has no tag triggers;
+- `deploy`, held for the production yes, when it does (D6). In that case the tag is pushed inside `release deploy` and nowhere else.
+
+**The grant (D7, amended).**
+- **Who writes it.** `release prep` writes the release grant with the human's yes. In an unattended run, the planning interview writes it from the user's answers.
+- **What it covers.**
+  - **Subjects:** the recipe's sha and the target version string.
+  - **Classes:** `local_reversible`, `push_branch` and `open_pr` for `release/<version>`, plus `deploy_staging` and `push_tag` for that version.
+  - **Lifetime:** at most 7 days, like every grant.
+- **How `stage` checks it.** `stage` refuses when the merged commit's version is not the pinned version, or when the recipe's sha has changed.
+
+**Branch checks for stage.** The user's checkout usually sits on the default branch after the merge, and `check-grant --root` judges the branch at the root. So the checker gains `--worktree <path>`:
+- it verifies that the path is a worktree of the same repository (the same git common dir);
+- it then judges that worktree's branch, while still finding grants and running the tracked-grant probe at `--root`.
+
+A plain `--branch` argument would let a caller claim any branch, so it is not offered. Release gates pass the `release/<version>-stage` worktree.
 
 **New pieces outside this skill:**
 - The reference checker (`contract_check.py`) gains:
   - a release grant shape, pinning the recipe sha and the release commit;
   - action classes `deploy_staging` and `push_tag`;
-  - tag-trigger detection in CI config, which forces a tag push to `deploy` class.
+  - tag-trigger detection in CI config, which forces a tag push to `deploy` class;
+  - `--worktree <path>`, verified as a worktree of the same repo.
 
   The checker is re-vendored to every adopter. SKILL-contract `SPEC.md` registers `release-result/v1` and the release grant shape, and documents the A8 amendment.
 - spec-first-planning's unattended interview gains two optional questions: grant staging deploys, and grant tag pushes.
-- `write_grant.py` refuses a grant whose `reentry.agent_cmd` allowlist would match the recipe's `deploy_prod` or `rollback` argv. That makes "production commands never appear in a headless allowlist" a mechanical rule where it can be checked.
+- `write_grant.py` refuses a grant whose `reentry.agent_cmd` allowlist would match the recipe's `deploy_prod` or `rollback` argv. That gives an early warning.
+- At release time, `release deploy` and `release stage` also refuse while any active grant's `reentry.agent_cmd` allowlist matches those argv. The recipe may not have existed when the grant was written, and it can change afterwards. Together these make "production commands never appear in a headless allowlist" a mechanical rule where it can be checked.
 
 ## 3. Evidence, failures and honesty
 
@@ -124,11 +146,13 @@
   - validates the release grant shape;
   - adds `deploy_staging` and `push_tag`;
   - forces `deploy` for a tag push when CI config has tag triggers;
+  - verifies `--worktree` and judges the worktree's branch;
   - is re-vendored byte-identical, with `make contract` passing.
 - **AC2.** `release.py` has unit tests for:
   - every state transition;
   - each refusal in `release deploy`;
-  - the version-probe mismatch;
+  - the version-probe mismatch, and polling up to `deploy_timeout` for an asynchronous deploy;
+  - a rollback target taken from the live probe;
   - the artifact sha check;
   - the recipe-change ask;
   - crash recovery to `outcome_unknown` without re-running the command;
@@ -143,7 +167,8 @@
   - `verify-prod` fails on a version mismatch;
   - rollback asks;
   - a crash in `deploying` never re-runs the command;
-  - `write_grant` refuses a production command in the allowlist.
+  - `write_grant`, and `release deploy` at release time, refuse a production command in a headless allowlist;
+  - `stage` refuses a merged commit whose version differs from the grant's pinned version.
 - **AC4.** An end-to-end test runs `prep` through `verify-prod` against a local server standing in for staging and production, with a version endpoint and stub deploy commands that write marker files. No test touches a real target.
 - **AC5.** A/B:
   - "releases reaching verified production" goes 0 → 1;
