@@ -33,6 +33,17 @@ and the commands built on them:
     probe, runs staging_checks, and pushes (or, when CI runs on tags, holds) the
     v<version> tag. Every gate names the stage worktree (release/<v>-stage). A re-run
     resumes from the first unfinished step; any failure is stage_failed.
+  - `deploy --root R --approved-by NAME [--unattended] [--remote NAME]` is the production
+    deploy (class `deploy`, never grantable). It refuses unless the release is staged,
+    its evidence is for the release commit, the recipe and build checkout (and
+    artifact) are unchanged since stage, the deploy gate does NOT answer COVERED, and no
+    live grant's headless allowlist could run deploy_prod or rollback. Unattended, or
+    without the human's yes, it waits at awaiting_deploy with the command ready.
+    Otherwise it records the rollback target and the CLAIMED yes, then runs deploy_prod
+    once in wt-build (or, when CI deploys on tags, pushes v<version>). A crash leaves
+    `deploying`, which the next locked command turns into outcome_unknown -- never into
+    a second run.
+  - `status --root R` prints each release's status. It reads only: no lock, no change.
 
 A release's local, git-ignored state lives at
 <root>/.skill-contract/releases/<version>/ -- state.json (rewritten atomically) and
@@ -83,6 +94,10 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # "deployed", "live", "probe", "checks", "checks_done", "tag", "failure"}), so a re-run
 # resumes from the first unfinished step; tag_deploys: true when the CI config at the
 # release commit may run on a tag (D6), so the tag push is held for `deploy`.
+# approved_by: the production yes, {"name", "status": "CLAIMED"} (a shell-capable agent
+# can forge an in-session yes, so it is never recorded as verified). rollback_target:
+# what production ran before `deploy`, {"source": "probe"|"release-result"|"none",
+# "version": str|None, "commit": str|None} -- source "none" means nothing to roll back to.
 RELEASE_FIELDS = ("release_commit", "recipe_sha", "artifact_sha", "rollback_target",
                   "approved_by", "evidence", "driver", "bump", "grant", "prep", "stage",
                   "tag_deploys")
@@ -1915,6 +1930,15 @@ def _stage_steps(root, rel, recipe, commit, args):
             if _artifact_sha(build_dir, st["artifact"]["path"]) != st["artifact"]["sha256"]:
                 return _stage_fail(rel, "deploy_staging", "artifact-altered",
                                    "%s changed since the build" % st["artifact"]["path"])
+        # R20: stage is the grant-driven step an unattended agent runs; while any live
+        # grant's headless allowlist could reach production, refuse before staging too.
+        exposed = exposing_grants(root, recipe, v, commit)
+        if exposed:
+            rel.log("refused", reason="allowlist-exposes-prod", grants=exposed)
+            raise Refused("allowlist-exposes-prod: live grant(s) %s let a headless agent "
+                          "run deploy_prod or rollback; revoke them (check-grant "
+                          "revoke-grant --id) or narrow their --allowedTools"
+                          % ", ".join(exposed))
         rc = _stage_gate(root, rel, "deploy_staging", wt, commit)
         if rc is not None:
             return rc
@@ -2005,6 +2029,402 @@ def _stage_tag(root, rel, wt, commit, remote):
     return None
 
 
+# ── deploy (spec section 2, step 3; decisions D3/D6/D7/D9/D10, R18/R20) ──────────
+PROD_ENV = "production"  # {env} for every production command (stage uses "staging")
+DEPLOY_ACTION = "deploy"  # in CC.IRREVERSIBLE_CLASSES: a grant never covers it (A8)
+CRASHED = ("deploying", "rolling_back")  # a command was mid-flight in these
+NEXT_UNKNOWN = "verify-prod then ask the human"
+RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/release-result/v1"
+_SEMVER_LOOSE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)\Z")
+
+
+def _split_rules(allowed_tools_str):
+    """An --allowedTools value split into rules: on commas outside parentheses (a
+    Bash(...) glob may itself carry a comma), each rule stripped, empties dropped."""
+    rules, depth, cur = [], 0, []
+    for ch in allowed_tools_str or "":
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        if ch == "," and depth == 0:
+            rules.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    rules.append("".join(cur))
+    return [r.strip() for r in rules if r.strip()]
+
+
+def allowlist_matches(allowed_tools_str, argv):
+    """True when a Claude Code --allowedTools value would let a headless agent run argv
+    without a prompt. Rules split on commas outside parentheses; `Bash` and `Bash(*)`
+    match every command; `Bash(<glob>)` is matched with fnmatch against shlex.join(argv)
+    -- and, failing closed, against " ".join(argv) and both with argv[0] reduced to its
+    basename, since an agent may type the command either way; the legacy
+    `Bash(<prefix>:*)` form is a prefix match on those same strings. Other tools never
+    match. Shared with spec-first-planning's write_grant.py (Task 7), which copies it:
+    keep the two in step."""
+    import fnmatch
+    import shlex
+    argv = list(argv)
+    forms = {shlex.join(argv), " ".join(argv)}
+    if argv:
+        short = [os.path.basename(argv[0])] + argv[1:]
+        forms |= {shlex.join(short), " ".join(short)}
+    for rule in _split_rules(allowed_tools_str):
+        if rule in ("Bash", "Bash(*)"):
+            return True
+        m = re.match(r"^Bash\((.*)\)\Z", rule, re.S)
+        if not m:
+            continue
+        pat = m.group(1).strip()
+        if pat.endswith(":*"):
+            prefix = pat[:-2]
+            if any(f.startswith(prefix) for f in forms):
+                return True
+        elif any(fnmatch.fnmatch(f, pat) for f in forms):
+            return True
+    return False
+
+
+ALLOWED_TOOLS_FLAGS = ("--allowedTools", "--allowed-tools")
+
+
+def agent_cmd_exposes(agent_cmd, argv):
+    """True when a re-entry agent_cmd would let its headless agent run argv unprompted:
+    its --allowedTools (or --allowed-tools) value -- `--flag=value`, or every argument
+    after the flag up to the next option, since Claude Code takes the list as several
+    arguments too -- matches argv (allowlist_matches), or it bypasses permission prompts
+    altogether (--dangerously-skip-permissions, --permission-mode bypassPermissions)."""
+    if not isinstance(agent_cmd, list):
+        return False
+    values = []
+    i = 0
+    while i < len(agent_cmd):
+        a = agent_cmd[i] if isinstance(agent_cmd[i], str) else ""
+        if a == "--dangerously-skip-permissions" or a == "--permission-mode=bypassPermissions":
+            return True
+        if a == "--permission-mode" and i + 1 < len(agent_cmd) \
+                and agent_cmd[i + 1] == "bypassPermissions":
+            return True
+        flag, eq, val = a.partition("=")
+        if flag in ALLOWED_TOOLS_FLAGS:
+            if eq:
+                values.append(val)
+            else:
+                j = i + 1
+                while j < len(agent_cmd) and isinstance(agent_cmd[j], str) \
+                        and not agent_cmd[j].startswith("-"):
+                    values.append(agent_cmd[j])
+                    j += 1
+                i = j
+                continue
+        i += 1
+    return any(allowlist_matches(v, argv) for v in values)
+
+
+def exposing_grants(root, recipe, version, commit):
+    """Ids of every live grant under root whose reentry.agent_cmd could run the recipe's
+    deploy_prod or rollback (expanded with this release's values, and as written).
+    Live = a head no revision supersedes (CC._live_heads) that is not revoked; an
+    EXPIRED grant still counts (fail closed: a scheduler may still launch its agent,
+    and revoking it is one command)."""
+    values = {"version": version, "commit": commit, "env": PROD_ENV}
+    argvs = [recipe["deploy_prod"], recipe["rollback"]]
+    argvs += [expand(a, values) for a in argvs]
+    out = []
+    for _, _, st in CC._live_heads(root):
+        payload = st["predicate"].get("payload") or {}
+        if payload.get("revoked"):
+            continue
+        cmd = (payload.get("reentry") or {}).get("agent_cmd") \
+            if isinstance(payload.get("reentry"), dict) else None
+        if any(agent_cmd_exposes(cmd, a) for a in argvs):
+            out.append(st["predicate"]["id"])
+    return sorted(out)
+
+
+def recover_crash(rel):
+    """Run under the run lock only. A release left `deploying` or `rolling_back` by a
+    command that is no longer running (it held the lock we now hold) has an unknown
+    outcome: mark it outcome_unknown, saved and logged. Never re-runs anything -- a
+    deploy command is not known to be idempotent (spec section 3). True when the
+    release is (now) outcome_unknown; the caller prints STOP/NEXT and exits 3. A plain
+    load or `status` must never do this: they would demote a deploy that is live."""
+    if rel.status in CRASHED:
+        was = rel.status
+        rel.set_status("outcome_unknown")
+        rel.save()
+        rel.log("outcome_unknown", was=was)
+        print("STOP: outcome-unknown: release %s was %s when its command stopped; the "
+              "command is never re-run" % (rel.version, was))
+        print("NEXT: %s" % NEXT_UNKNOWN)
+        return True
+    if rel.status == "outcome_unknown":
+        print("STOP: outcome-unknown: release %s's last production command never recorded "
+              "its end; it is never re-run" % rel.version)
+        print("NEXT: %s" % NEXT_UNKNOWN)
+        return True
+    return False
+
+
+def _probe_target(out):
+    """{"version", "commit"} that a production probe's output reports, or None."""
+    version = commit = None
+    for tok in _PROBE_TOKEN.findall(out or ""):
+        tok = tok.rstrip(".")
+        m = _SEMVER_LOOSE.match(tok)
+        if m and version is None:
+            version = m.group(1)
+        elif _HEX.match(tok.lower()) and commit is None and not tok.isdigit():
+            commit = tok.lower()
+    return {"version": version, "commit": commit} if (version or commit) else None
+
+
+def _last_result_target(root, version):
+    """{"version", "commit"} of what the newest release-result/v1 under root left in
+    production (another release's), or None. Task 6 writes that kind: outcome
+    "verified" leaves its own version; "rolled_back" leaves its rollback_target."""
+    best = None
+    d = CC.envelope_dir(root)
+    try:
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        return None
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        st, err = CC.load_envelope(os.path.join(d, name))
+        if err or not isinstance(st, dict) or st.get("predicateType") != RESULT_KIND \
+                or CC.check_statement(st):
+            continue
+        pred = st["predicate"]
+        p = pred.get("payload") or {}
+        left = p.get("rollback_target") if p.get("outcome") == "rolled_back" else p
+        if not isinstance(left, dict) or p.get("version") == version:
+            continue
+        v, c = left.get("version"), left.get("commit")
+        if not (isinstance(v, str) or isinstance(c, str)):
+            continue
+        if best is None or pred["generatedAtTime"] > best[0]:
+            best = (pred["generatedAtTime"], {"version": v if isinstance(v, str) else None,
+                                              "commit": c if isinstance(c, str) else None})
+    return best[1] if best else None
+
+
+def rollback_target(root, rel, recipe, build_dir):
+    """What production runs now (spec section 2): the production version_probe's answer
+    (one poll, bounded by PROBE_CMD_TIMEOUT and deploy_timeout), else the newest
+    release-result/v1's version, else source "none". A probe already reporting THIS
+    release is no target to roll back to, so it falls through."""
+    values = {"version": rel.version, "commit": rel.release_commit, "env": PROD_ENV}
+    timeout = min(PROBE_CMD_TIMEOUT, recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT))
+    res = run_cmd(expand(recipe["version_probe"], values), build_dir, timeout)
+    rel.log("rollback_probe", rc=res["rc"], timed_out=res["timed_out"])
+    if res["rc"] == 0 and not probe_reports(res["out_tail"], rel.version, rel.release_commit):
+        got = _probe_target(res["out_tail"])
+        if got:
+            return dict(got, source="probe")
+    got = _last_result_target(root, rel.version)
+    if got:
+        return dict(got, source="release-result")
+    return {"source": "none", "version": None, "commit": None}
+
+
+def _deploy_release(root):
+    """The one unfinished release `deploy` may act on. Refused otherwise."""
+    busy = unfinished_releases(root)
+    if len(busy) != 1:
+        raise Refused("no single unfinished release to deploy (unfinished: %s)"
+                      % (", ".join("%s (%s)" % (v, s or "no state") for v, s in busy)
+                         or "none"))
+    try:
+        return Release.load(root, busy[0][0])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused("cannot load release %s: %s" % (busy[0][0], e))
+
+
+def cmd_deploy(args):
+    """The production deploy (spec section 2, step 3). Exit 0 deployed (NEXT: verify-prod);
+    2 refused (nothing ran, status unchanged); 3 waiting for the human's yes
+    (awaiting_deploy), the deploy failed (prod_failed), the outcome of an earlier run is
+    unknown, or the lock is held."""
+    root = os.path.abspath(args.root)
+    name = None
+    try:
+        if args.approved_by is not None:
+            name = _clean_name(args.approved_by, "--approved-by")
+        if not re.match(REMOTE_NAME_RE, args.remote or ""):
+            raise Refused("--remote %r must be a remote name" % args.remote)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    try:
+        with run_lock(root):
+            return _deploy_locked(root, args, name)
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _deploy_refuse(rel, reason, detail):
+    """Print and log a refusal; nothing ran and the status is unchanged. Returns 2."""
+    print("RELEASE: refused: %s: %s" % (reason, detail))
+    rel.log("refused", reason=reason)
+    return 2
+
+
+def _deploy_locked(root, args, name):
+    try:
+        rel = _deploy_release(root)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    if recover_crash(rel):
+        return 3
+    v, commit, st = rel.version, rel.release_commit, rel.stage or {}
+    if rel.status not in ("staged", "awaiting_deploy"):
+        return _deploy_refuse(rel, "not-staged", "release %s is %s, not staged"
+                              % (v, rel.status))
+    ev = rel.evidence or {}
+    if not commit or ev.get("verdict") != "pass" or ev.get("commit") != commit \
+            or st.get("commit") != commit:
+        return _deploy_refuse(rel, "evidence", "no passing staging evidence for the "
+                              "release commit %s" % commit)
+    recipe, problems = load_recipe(root, rev=commit)
+    try:
+        at_commit = recipe_sha(root, rev=commit)
+    except ValueError:
+        at_commit = None
+    if problems or not rel.recipe_sha or at_commit != rel.recipe_sha:
+        return _deploy_refuse(rel, "recipe-changed", "the recipe at %s is not the one "
+                              "staged (sha %s)" % (commit[:12], rel.recipe_sha))
+    build_dir = os.path.join(rel.dir, BUILD_WT)
+    if _build_tree(build_dir) != st.get("build_tree"):
+        return _deploy_refuse(rel, "build-tree-changed", "the build checkout %s moved off "
+                              "%s or its tracked files changed since stage"
+                              % (build_dir, commit[:12]))
+    art = st.get("artifact")
+    if art and (_artifact_sha(build_dir, art["path"]) != art["sha256"]
+                or rel.artifact_sha != art["sha256"]):
+        return _deploy_refuse(rel, "artifact-altered", "%s changed since stage" % art["path"])
+    wt = os.path.join(rel.dir, STAGE_WT)
+    rep = _gate(root, DEPLOY_ACTION, wt, (rel.grant or {}).get("id") or "")
+    print("GATE: %s %s %s" % (DEPLOY_ACTION, rep["status"], rep["reason"]))
+    rel.log("gate", action=DEPLOY_ACTION, status=rep["status"], reason=rep["reason"],
+            ok=rep["status"] != "COVERED")
+    if rep["status"] == "COVERED":
+        return _deploy_refuse(rel, "deploy-covered", "check-grant answered COVERED for "
+                              "deploy, which no grant may cover (A8): a checker bug")
+    exposed = exposing_grants(root, recipe, v, commit)
+    if exposed:
+        return _deploy_refuse(rel, "allowlist-exposes-prod", "live grant(s) %s let a "
+                              "headless agent run deploy_prod or rollback; revoke them "
+                              "(check-grant revoke-grant --id) or narrow their "
+                              "--allowedTools" % ", ".join(exposed))
+    values = {"version": v, "commit": commit, "env": PROD_ENV}
+    tag = "v%s" % v
+    if rel.tag_deploys:
+        argv = ["git", "push", args.remote, "%s:refs/tags/%s" % (commit, tag)]
+    else:
+        argv = expand(recipe["deploy_prod"], values)
+    if args.unattended or name is None:
+        _deploy_summary(rel, recipe, argv, None, None)
+        rel.set_status("awaiting_deploy")
+        rel.save()
+        rel.log("awaiting_deploy", unattended=bool(args.unattended))
+        print("STOP: waiting-human")
+        print("NEXT: run deploy with the human")
+        return 3
+    target = rollback_target(root, rel, recipe, build_dir)
+    approval = {"name": name, "status": "CLAIMED"}
+    _deploy_summary(rel, recipe, argv, target, approval)
+    rel.set_status("deploying", approved_by=approval, rollback_target=target)
+    rel.save()
+    rel.log("deploying", approved_by=approval, rollback_target=target, command=argv)
+    if rel.tag_deploys:
+        ok, res = _run_remote(argv, wt if os.path.isdir(wt) else root,
+                              _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
+        rc, timed_out = res["rc"], res["rc"] is None
+        if ok:
+            st["tag"] = "pushed"
+    else:
+        res = run_cmd(argv, build_dir, CMD_TIMEOUT)
+        rc, timed_out = res["rc"], res["timed_out"]
+        st["deploy_prod"] = _cmd_record(argv, res)  # tails stay in local state only
+    rel.log("deploy_prod", rc=rc, timed_out=timed_out, tag=rel.tag_deploys or False)
+    if rc != 0:
+        rel.set_status("prod_failed", stage=st)
+        rel.save()
+        print("DEPLOY: %s fail %s" % (v, commit))
+        print("STOP: deploy-failed: %s exited %s%s" % (
+            "the tag push" if rel.tag_deploys else "deploy_prod", rc,
+            " (timed out: production may be part-way deployed)" if timed_out else ""))
+        print("NEXT: %s" % NEXT_UNKNOWN)
+        return 3
+    rel.set_status("deployed", stage=st)
+    rel.save()
+    rel.log("deployed", commit=commit)
+    print("DEPLOY: %s deployed %s" % (v, commit))
+    print("NEXT: verify-prod")
+    return 0
+
+
+def _deploy_summary(rel, recipe, argv, target, approval):
+    """What the human says yes to (spec section 2): version, commit, evidence, recipe
+    sha, the exact deploy and rollback argv, the rollback target, and the CLAIMED yes.
+    `target` None: not probed yet (nothing runs before the yes)."""
+    import shlex
+    ev = rel.evidence or {}
+    print("DEPLOY: %s %s" % (rel.version, rel.release_commit))
+    print("  evidence: %d evidence records (%s) by %s at %s"
+          % (len(ev.get("paths") or []), ", ".join(ev.get("features") or []),
+             ev.get("verifier"), ev.get("commit")))
+    print("  recipe: sha256 %s" % rel.recipe_sha)
+    art = (rel.stage or {}).get("artifact")
+    print("  artifact: %s" % ("%s sha256 %s" % (art["path"], art["sha256"]) if art else
+                              "rebuild: staging verified the same source, not the same bytes"))
+    print("  deploy: %s%s" % (shlex.join(argv), " (CI deploys on this tag: the push is the "
+                                                "production deploy)" if rel.tag_deploys else ""))
+    if target is None:
+        print("  rollback: %s (target probed when the human says yes)"
+              % shlex.join(recipe["rollback"]))
+    elif target["source"] == "none":
+        print("  rollback: no rollback target: no previous release, nothing to roll back to")
+    else:
+        tv = {"env": PROD_ENV}
+        tv.update({k: target[k] for k in ("version", "commit") if target.get(k)})
+        print("  rollback: %s (target %s %s, from %s)"
+              % (shlex.join(expand(recipe["rollback"], tv)), target.get("version") or "-",
+                 target.get("commit") or "-", target["source"]))
+    if approval:
+        print("  approval: %s (%s)" % (approval["name"], approval["status"]))
+
+
+def cmd_status(args):
+    """Print each release's status. Read-only: no lock, no state change -- a status read
+    during a live deploy must never demote it (only a locked command does that)."""
+    root = os.path.abspath(args.root)
+    try:
+        names = sorted(os.listdir(_releases_dir(root)))
+    except FileNotFoundError:
+        names = []
+    shown = 0
+    for name in names:
+        if not os.path.isdir(os.path.join(_releases_dir(root), name)):
+            continue
+        try:
+            status = Release.load(root, name).status
+        except (OSError, ValueError, KeyError, TypeError):
+            status = "unreadable"
+        print("RELEASE: %s %s" % (name, status))
+        shown += 1
+    if not shown:
+        print("RELEASE: none")
+    return 0
+
+
 def build_parser():
     import argparse
     ap = argparse.ArgumentParser(prog="release.py", description="release-conductor")
@@ -2031,6 +2451,17 @@ def build_parser():
                    help="judge the verifier's evidence for the release commit, then go on")
     p.add_argument("--verifier", help="the independent verifier's id (with --evidence)")
     p.add_argument("--remote", default="origin", help="where the tag is pushed (origin)")
+    p = sub.add_parser("deploy", help="the production deploy: only with the human's yes")
+    p.add_argument("--root", required=True)
+    # Not required: without it the release waits at awaiting_deploy (exit 3), not exit 2.
+    p.add_argument("--approved-by", dest="approved_by",
+                   help="the human, present now, who said yes to THIS production deploy")
+    p.add_argument("--unattended", action="store_true",
+                   help="no human is present: wait at awaiting_deploy, run nothing")
+    p.add_argument("--remote", default="origin",
+                   help="where the tag is pushed when CI deploys on tags (origin)")
+    p = sub.add_parser("status", help="print each release's status (read-only)")
+    p.add_argument("--root", required=True)
     return ap
 
 
@@ -2040,7 +2471,8 @@ def main(argv=None):
         args = build_parser().parse_args(argv)
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
-    return {"init": cmd_init, "prep": cmd_prep, "stage": cmd_stage}[args.cmd](args)
+    return {"init": cmd_init, "prep": cmd_prep, "stage": cmd_stage, "deploy": cmd_deploy,
+            "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":
