@@ -203,8 +203,23 @@ The payload schema is `factory-conductor/assets/schemas/run-result.v1.json`.
 
 **The release result.** A release result is an envelope of kind
 `https://github.com/dhanesh/agent-skills/skill-contract/release-result/v1`, which
-`release-conductor` produces when a release reaches an end state. This section registers the kind
-name; its payload schema ships with release-conductor.
+`release-conductor` produces when a release reaches an end state: `release.py verify-prod` writes
+it with `outcome: "verified"` once production reports the release and its health and `prod_smoke`
+checks pass, and `release.py rollback` writes it with `outcome: "rolled_back"` once production
+reports the rollback target again. Its subjects pin the recipe by the digest recorded for the
+release commit (not the live working file, which may have changed since), the release's
+`intent.json`, and the local, append-only `release-log.jsonl` by the digest of its first
+`log_bytes` bytes, which end with the terminal event; events appended later (the grant
+revocation) leave that prefix unchanged, so a whole-file mismatch is not tampering. Its payload
+carries `version`, `commit`, `recipe_sha`, `artifact_sha` (null for a rebuild, with an
+`artifact_note` saying staging verified the same source, not the same bytes), a `staging`
+evidence summary (verifier, features, evidence paths, staging probe and check exit codes),
+`production` (the deploy, probe, health and smoke results as exit codes only), `rollback_target`,
+`approved_by` (the production yes, `CLAIMED`), `rollback` (its own `CLAIMED` yes, exit code and
+probe, or null), `log_sha256`, `log_bytes` and `outcome`. Command output never appears in it:
+deploy output can carry secrets, so tails stay in the release's git-ignored local state. It
+carries no assertions. The payload schema is
+`release-conductor/assets/schemas/release-result.v1.json`.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 

@@ -43,6 +43,17 @@ and the commands built on them:
     once in wt-build (or, when CI deploys on tags, pushes v<version>). A crash leaves
     `deploying`, which the next locked command turns into outcome_unknown -- never into
     a second run.
+  - `verify-prod --root R` proves production runs the release (deployed, outcome_unknown,
+    or a prod_failed deploy not yet judged): it polls the production version probe up to
+    deploy_timeout (still the rollback target: not-live; another version: wrong-version),
+    then runs health and each prod_smoke argv -- staging_checks never run against
+    production. A pass is `verified` and writes release-result/v1 (rc values only, never
+    output tails); a fail is prod_failed with NEXT: ask the human to roll back.
+  - `rollback --root R --approved-by NAME [--unattended]` rolls production back to the
+    recorded rollback target, only with the human's in-session yes (CLAIMED; class
+    `deploy`, never grantable). It sets rolling_back before the command runs, polls the
+    probe for the target, and on success is rolled_back with release-result/v1; any
+    other end is outcome_unknown, never re-run by itself.
   - `status --root R` prints each release's status. It reads only: no lock, no change.
 
 A release's local, git-ignored state lives at
@@ -98,9 +109,13 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # can forge an in-session yes, so it is never recorded as verified). rollback_target:
 # what production ran before `deploy`, {"source": "probe"|"release-result"|"none",
 # "version": str|None, "commit": str|None} -- source "none" means nothing to roll back to.
+# prod: verify-prod's local record ({"probe", "health", "smoke", "failure"}, with output
+# tails -- local only); rollback: the rollback's ({"approved_by", "argv", "target", "rc",
+# "out_tail", "err_tail", "timed_out", "probe"}); result: the release-result/v1 envelope
+# written at the end ({"id", "path", "sha256", "outcome"}).
 RELEASE_FIELDS = ("release_commit", "recipe_sha", "artifact_sha", "rollback_target",
                   "approved_by", "evidence", "driver", "bump", "grant", "prep", "stage",
-                  "tag_deploys")
+                  "tag_deploys", "prod", "rollback", "result")
 
 TAIL = 2000  # a run_cmd output tail, the same size conductor.py's _tail uses
 
@@ -469,6 +484,9 @@ class Release:
         self.prep = data.get("prep")
         self.stage = data.get("stage")
         self.tag_deploys = data.get("tag_deploys")
+        self.prod = data.get("prod")
+        self.rollback = data.get("rollback")
+        self.result = data.get("result")
 
     @property
     def dir(self):
@@ -515,7 +533,8 @@ class Release:
                 "rollback_target": self.rollback_target, "approved_by": self.approved_by,
                 "evidence": self.evidence, "driver": self.driver, "bump": self.bump,
                 "grant": self.grant, "prep": self.prep, "stage": self.stage,
-                "tag_deploys": self.tag_deploys}
+                "tag_deploys": self.tag_deploys, "prod": self.prod,
+                "rollback": self.rollback, "result": self.result}
 
     def save(self):
         """Write state.json atomically: a temp file in self.dir, then os.replace,
@@ -1660,9 +1679,13 @@ def _cmd_record(argv, res):
             "err_tail": res["err_tail"]}
 
 
-def _poll_probe(argv, cwd, version, commit, timeout):
+def _poll_probe(argv, cwd, version, commit, timeout, match=None):
     """Run the version probe every PROBE_INTERVAL seconds until its output reports the
-    version or commit, or `timeout` seconds pass. (live, {rc, out_tail, err_tail, polls})."""
+    version or commit (or, with `match`, until match(output) is true), or `timeout`
+    seconds pass. (live, {rc, out_tail, err_tail, polls})."""
+    if match is None:
+        def match(out):
+            return probe_reports(out, version, commit)
     deadline = time.monotonic() + timeout
     polls = 0
     while True:
@@ -1671,7 +1694,7 @@ def _poll_probe(argv, cwd, version, commit, timeout):
         polls += 1
         last = {"rc": res["rc"], "out_tail": res["out_tail"], "err_tail": res["err_tail"],
                 "polls": polls}
-        if res["rc"] == 0 and probe_reports(res["out_tail"], version, commit):
+        if res["rc"] == 0 and match(res["out_tail"]):
             return True, last
         if time.monotonic() + PROBE_INTERVAL > deadline:
             return False, last
@@ -2493,6 +2516,415 @@ def _deploy_summary(rel, recipe, argv, target, approval):
         print("  approval: %s (%s)" % (approval["name"], approval["status"]))
 
 
+# ── verify-prod and rollback (spec section 2, step 4; decisions D4/D11) ──────────
+PROD_WT = "wt-prod"  # the isolated checkout of the release commit prod commands run in
+NEXT_ROLLBACK = "ask the human to roll back"
+# The statuses verify-prod judges: a deploy that finished, one whose outcome is unknown
+# (a crash or a timeout mid-deploy), and a deploy that failed with no verify-prod
+# judgement yet (deploy's own NEXT: line sends it here). A prod_failed that verify-prod
+# itself judged is final: a flaky check must not be retried into `verified`.
+VERIFIABLE = ("deployed", "outcome_unknown", "prod_failed")
+ROLLBACKABLE = ("prod_failed", "outcome_unknown")
+
+
+def _reports_target(out, target):
+    """True when a probe's output reports the rollback target's version or commit. A
+    target with neither reports nothing (probe_reports would match a bare `v`)."""
+    t = target or {}
+    v, c = t.get("version"), t.get("commit")
+    if not (isinstance(v, str) and v) and not (isinstance(c, str) and c):
+        return False
+    return probe_reports(out, v if isinstance(v, str) and v else "\0",
+                         c if isinstance(c, str) and c else "\0")
+
+
+def _prod_release(root, what):
+    """The one unfinished release; Refused when there is not exactly one."""
+    busy = unfinished_releases(root)
+    if len(busy) != 1:
+        raise Refused("no single unfinished release to %s (unfinished: %s)"
+                      % (what, ", ".join("%s (%s)" % (v, s or "no state") for v, s in busy)
+                         or "none"))
+    try:
+        return Release.load(root, busy[0][0])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused("cannot load release %s: %s" % (busy[0][0], e))
+
+
+def _prod_recipe(root, rel):
+    """The recipe pinned at the release commit; Refused unless it is the one staged."""
+    commit = rel.release_commit
+    if not commit:
+        raise Refused("release %s has no release commit" % rel.version)
+    recipe, problems = load_recipe(root, rev=commit)
+    try:
+        at_commit = recipe_sha(root, rev=commit)
+    except ValueError:
+        at_commit = None
+    if problems or not rel.recipe_sha or at_commit != rel.recipe_sha:
+        raise Refused("recipe-changed: the recipe at %s is not the one staged (sha %s)"
+                      % (commit[:12], rel.recipe_sha))
+    return recipe
+
+
+def _prod_checkout(root, rel):
+    """A fresh, detached checkout of the release commit (wt-prod) for production
+    commands: isolated from the build checkout and from the user's working tree."""
+    path = os.path.join(rel.dir, PROD_WT)
+    _add_worktree(root, path, rel.release_commit)
+    return path
+
+
+def _revoke_release_grant(rel):
+    """The release is finished: revoke its grant (as _stage_fail and _cleanup_prep do),
+    so it does not stay live covering staging deploys and tag pushes for days."""
+    gid = (rel.grant or {}).get("id")
+    if not gid:
+        return
+    try:
+        CC.revoke_grant(rel.root, gid)
+        rel.log("grant_revoked", id=gid)
+    except (OSError, ValueError) as e:
+        print("WARNING: could not revoke the release grant %s: %s; revoke it with "
+              "check-grant's revoke-grant --id" % (gid, e))
+
+
+def _rc_only(rec):
+    """{"rc"} of a command record, or None: never a tail, never an argv."""
+    return {"rc": rec.get("rc")} if isinstance(rec, dict) else None
+
+
+def _probe_only(rec):
+    """{"rc", "polls", "live"} of a probe record, or None."""
+    if not isinstance(rec, dict):
+        return None
+    return {"rc": rec.get("rc"), "polls": rec.get("polls") or 1, "live": bool(rec.get("live"))}
+
+
+def result_payload(rel, outcome):
+    """The release-result/v1 payload (schemas/release-result.v1.json), built field by
+    field from metadata and exit codes. Never rel.to_dict() or rel.stage wholesale: the
+    stage, deploy, prod and rollback records hold output tails, which can carry secrets
+    and stay in the local state (spec section 3). log_sha256/log_bytes are filled in by
+    the caller once the terminal event is in the log."""
+    st, ev = rel.stage or {}, rel.evidence or {}
+    sprobe = st.get("probe")
+    payload = {
+        "version": rel.version,
+        "commit": rel.release_commit,
+        "recipe_sha": rel.recipe_sha,
+        "artifact_sha": rel.artifact_sha,
+        "staging": {
+            "verdict": ev.get("verdict"), "verifier": ev.get("verifier"),
+            "commit": ev.get("commit"), "features": list(ev.get("features") or []),
+            "evidence_paths": list(ev.get("paths") or []),
+            "probe": ({"rc": sprobe.get("rc"), "polls": sprobe.get("polls")}
+                      if isinstance(sprobe, dict) else None),
+            "checks": [_rc_only(c) for c in st.get("checks") or []]},
+        "production": None,
+        "rollback_target": ({k: (rel.rollback_target or {}).get(k)
+                             for k in ("source", "version", "commit")}
+                            if rel.rollback_target else None),
+        "approved_by": ({"name": rel.approved_by.get("name"), "status": "CLAIMED"}
+                        if isinstance(rel.approved_by, dict) else None),
+        "rollback": None,
+        "log_sha256": None,
+        "log_bytes": None,
+        "outcome": outcome,
+    }
+    if not st.get("artifact"):
+        payload["artifact_note"] = "rebuild: staging verified the same source, not the same bytes"
+    if isinstance(rel.prod, dict):
+        p = rel.prod
+        payload["production"] = {
+            "deploy": _rc_only(st.get("deploy_prod")),
+            "probe": _probe_only(p.get("probe")), "health": _rc_only(p.get("health")),
+            "smoke": [_rc_only(c) for c in p.get("smoke") or []],
+            "failure": (p.get("failure") or {}).get("reason")}
+    if isinstance(rel.rollback, dict):
+        r = rel.rollback
+        payload["rollback"] = {"approved_by": {"name": (r.get("approved_by") or {}).get("name"),
+                                               "status": "CLAIMED"},
+                               "rc": r.get("rc"), "probe": _probe_only(r.get("probe"))}
+    return payload
+
+
+def write_result(root, rel, outcome):
+    """Log the terminal event, then write release-result/v1 pinning the recipe (the
+    digest recorded for the release commit), the intent file and the release log up to
+    and including that event (log_sha256/log_bytes). Then set `outcome` as the status,
+    save, and revoke the release grant (that revocation is logged after the prefix).
+    Returns the envelope path, or None (printed) when the statement fails the checker."""
+    payload = result_payload(rel, outcome)
+    rel.log(outcome, commit=rel.release_commit)
+    with open(rel.log_path, "rb") as f:
+        data = f.read()
+    payload["log_sha256"] = hashlib.sha256(data).hexdigest()
+    payload["log_bytes"] = len(data)
+    base = "%s/%s" % (RELEASES_DIR, rel.version)
+    intent_rel = "%s/%s" % (base, INTENT_FILE)
+    st = CC.build_statement(RESULT_KIND, SKILL_NAME, SKILL_VERSION, root, [], payload)
+    subjects = [{"name": RECIPE_PATH, "digest": {"sha256": rel.recipe_sha}}]
+    if os.path.isfile(os.path.join(root, *intent_rel.split("/"))):
+        subjects.append(CC.pin(root, intent_rel))
+    subjects.append({"name": "%s/release-log.jsonl" % base,
+                     "digest": {"sha256": payload["log_sha256"]}})
+    st["subject"] = subjects
+    viol = CC.check_statement(st)
+    if viol:
+        for n, detail in viol:
+            print("FAIL: C%d: %s" % (n, detail))
+        print("STOP: result-invalid: the release-result envelope fails the checker")
+        return None
+    path = CC.write_envelope(root, st)
+    rel.set_status(outcome, result={"id": st["predicate"]["id"],
+                                    "path": os.path.relpath(path, root),
+                                    "sha256": CC.sha256_file(path), "outcome": outcome})
+    rel.save()
+    rel.log("result", id=st["predicate"]["id"], path=os.path.relpath(path, root))
+    _revoke_release_grant(rel)
+    return path
+
+
+def _demote_crash(rel):
+    """Under the run lock: a release left `deploying` or `rolling_back` by a command no
+    longer running becomes outcome_unknown (saved, logged); its command never re-runs."""
+    if rel.status in CRASHED:
+        was = rel.status
+        rel.set_status("outcome_unknown")
+        rel.save()
+        rel.log("outcome_unknown", was=was)
+        print("PROD: %s outcome-unknown (was %s; the command is never re-run)"
+              % (rel.version, was))
+
+
+def cmd_verify_prod(args):
+    """Prove production runs the release (spec section 2, step 4). Exit 0 verified
+    (release-result/v1 written); 2 refused (nothing ran); 3 prod_failed (NEXT: ask the
+    human to roll back), or the lock is held."""
+    root = os.path.abspath(args.root)
+    try:
+        with run_lock(root):
+            return _verify_locked(root)
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _verify_locked(root):
+    try:
+        rel = _prod_release(root, "verify")
+        _demote_crash(rel)
+        if rel.status not in VERIFIABLE or (rel.status == "prod_failed" and rel.prod):
+            raise Refused("release %s is %s; verify-prod judges a deployed release (or one "
+                          "whose outcome is unknown) once" % (rel.version, rel.status))
+        recipe = _prod_recipe(root, rel)
+        cwd = _prod_checkout(root, rel)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    v, commit = rel.version, rel.release_commit
+    values = {"version": v, "commit": commit, "env": PROD_ENV}
+    timeout = recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT)
+    prod = {"probe": None, "health": None, "smoke": [], "failure": None}
+    rel.prod = prod
+    rel.log("verify_prod", status=rel.status)
+    argv = expand(recipe["version_probe"], values)
+    live, last = _poll_probe(argv, cwd, v, commit, timeout)
+    prod["probe"] = dict(last, argv=argv, live=live)
+    rel.log("prod_probe", live=live, polls=last["polls"], rc=last["rc"])
+    if not live:
+        old = last["rc"] == 0 and _reports_target(last["out_tail"], rel.rollback_target)
+        other = last["rc"] == 0 and _probe_target(last["out_tail"]) is not None
+        reason = "wrong-version" if other and not old else "not-live"
+        return _prod_fail(rel, recipe, reason, "the production version probe did not "
+                          "report %s or %s within %ss" % (v, commit[:12], timeout))
+    hargv = expand(recipe["health"], values)
+    res = run_cmd(hargv, cwd, CMD_TIMEOUT)
+    prod["health"] = _cmd_record(hargv, res)
+    rel.log("prod_health", rc=res["rc"], timed_out=res["timed_out"])
+    if res["rc"] != 0:
+        return _prod_fail(rel, recipe, "health-failed", "health exited %s" % res["rc"])
+    for i, check in enumerate(recipe["prod_smoke"]):  # prod_smoke only (D11)
+        cargv = expand(check, values)
+        res = run_cmd(cargv, cwd, CMD_TIMEOUT)
+        prod["smoke"].append(_cmd_record(cargv, res))
+        rel.log("prod_smoke", index=i, rc=res["rc"], timed_out=res["timed_out"])
+        if res["rc"] != 0:
+            return _prod_fail(rel, recipe, "smoke-failed",
+                              "prod_smoke check %d exited %s" % (i, res["rc"]))
+    rel.save()
+    path = write_result(root, rel, "verified")
+    if path is None:
+        return 3
+    print("PROD: %s verified" % v)
+    print("RESULT: %s" % os.path.relpath(path, root))
+    return 0
+
+
+def _prod_fail(rel, recipe, reason, detail):
+    """prod_failed with the reason; shows what failed and the rollback the human may say
+    yes to. Never rolls back by itself (D4). Returns 3."""
+    import shlex
+    rel.prod["failure"] = {"reason": reason, "detail": detail}
+    rel.set_status("prod_failed", prod=rel.prod)
+    rel.save()
+    rel.log("prod_failed", reason=reason)
+    print("PROD: %s fail %s" % (rel.version, reason))
+    print("STOP: prod-failed: %s" % detail)
+    target = rel.rollback_target or {}
+    if target.get("source") in (None, "none"):
+        print("  rollback: no rollback target: no previous release, nothing to roll back to")
+        print("NEXT: ask the human (there is nothing to roll back to)")
+        return 3
+    try:
+        shown = shlex.join(_rollback_argv(recipe, target))
+    except Refused as e:
+        shown = "cannot be expanded: %s" % e
+    print("  rollback: %s (target %s %s, from %s)" % (shown, target.get("version") or "-",
+                                                     target.get("commit") or "-",
+                                                     target["source"]))
+    print("NEXT: %s" % NEXT_ROLLBACK)
+    return 3
+
+
+def _rollback_argv(recipe, target):
+    """The recipe's rollback argv with {version}/{commit} from the target ({env}
+    production). Refused when it needs a value the target lacks, or a value is unsafe."""
+    values = {"env": PROD_ENV}
+    values.update({k: target[k] for k in ("version", "commit")
+                   if isinstance(target.get(k), str) and target[k]})
+    needed = {m.group(1) for a in recipe["rollback"] for m in _EXPAND_TOKEN.finditer(a)}
+    missing = sorted(needed - set(values))
+    if missing:
+        raise Refused("target-incomplete: the rollback needs {%s}, which the target lacks"
+                      % "}, {".join(missing))
+    try:
+        return expand(recipe["rollback"], values)
+    except ValueError as e:
+        raise Refused("target-unsafe: %s" % e)
+
+
+def cmd_rollback(args):
+    """Roll production back to the release's rollback target, only with the human's yes
+    (D4; class deploy, never grantable). Exit 0 rolled_back (release-result/v1 written);
+    2 refused (no target, wrong status, covered gate, exposed allowlist); 3 waiting for
+    the human's yes, the rollback's outcome is unknown, or the lock is held."""
+    root = os.path.abspath(args.root)
+    name = None
+    try:
+        if args.approved_by is not None:
+            name = _clean_name(args.approved_by, "--approved-by")
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    try:
+        with run_lock(root):
+            return _rollback_locked(root, args, name)
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _rollback_locked(root, args, name):
+    import shlex
+    try:
+        rel = _prod_release(root, "roll back")
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    if rel.status in CRASHED and recover_crash(rel):
+        return 3  # a rollback (or deploy) died mid-flight: never re-run by itself
+    v = rel.version
+    if rel.status not in ROLLBACKABLE:
+        return _deploy_refuse(rel, "not-failed", "release %s is %s; rollback needs "
+                              "prod_failed or outcome_unknown" % (v, rel.status))
+    target = rel.rollback_target or {}
+    if target.get("source") in (None, "none"):
+        print("ROLLBACK: no target")
+        print("RELEASE: refused: release %s recorded no rollback target: no previous "
+              "release, nothing to roll back to" % v)
+        rel.log("refused", reason="no-target")
+        return 2
+    try:
+        recipe = _prod_recipe(root, rel)
+        argv = _rollback_argv(recipe, target)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        rel.log("refused", reason=str(e).split(":")[0])
+        return 2
+    print("ROLLBACK: %s to %s %s (from %s)" % (v, target.get("version") or "-",
+                                               target.get("commit") or "-", target["source"]))
+    print("  rollback: %s" % shlex.join(argv))
+    if args.unattended or name is None:
+        rel.log("rollback_waiting", unattended=bool(args.unattended))
+        print("STOP: waiting-human")
+        print("NEXT: run rollback with the human")
+        return 3
+    wt = os.path.join(rel.dir, STAGE_WT)
+    rep = _gate(root, DEPLOY_ACTION, wt, (rel.grant or {}).get("id") or "")
+    print("GATE: %s %s %s" % (DEPLOY_ACTION, rep["status"], rep["reason"]))
+    rel.log("gate", action=DEPLOY_ACTION, status=rep["status"], reason=rep["reason"],
+            ok=rep["status"] != "COVERED")
+    if rep["status"] == "COVERED":
+        return _deploy_refuse(rel, "deploy-covered", "check-grant answered COVERED for "
+                              "deploy, which no grant may cover (A8): a checker bug")
+    exposed = exposing_grants(root, recipe, v, rel.release_commit, [argv])
+    if exposed:
+        return _deploy_refuse(rel, "allowlist-exposes-prod", "live grant(s) %s let a "
+                              "headless agent run the rollback or the production deploy; "
+                              "revoke them (check-grant revoke-grant --id) or narrow their "
+                              "--allowedTools" % ", ".join(exposed))
+    try:
+        cwd = _prod_checkout(root, rel)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    approval = {"name": name, "status": "CLAIMED"}
+    record = {"approved_by": approval, "argv": argv, "target": dict(target), "rc": None,
+              "probe": None}
+    rel.set_status("rolling_back", rollback=record)
+    rel.save()  # before the command runs: a crash leaves rolling_back, never a re-run
+    rel.log("rolling_back", approved_by=approval, target=dict(target), command=argv)
+    res = run_cmd(argv, cwd, CMD_TIMEOUT)
+    record.update(rc=res["rc"], out_tail=res["out_tail"], err_tail=res["err_tail"],
+                  timed_out=res["timed_out"])
+    rel.log("rollback_cmd", rc=res["rc"], timed_out=res["timed_out"])
+    if res["rc"] != 0:
+        return _rollback_unknown(rel, "rollback %s" % ("timed out and was killed"
+                                                       if res["timed_out"] else
+                                                       "exited %s" % res["rc"]))
+    values = {"version": v, "commit": rel.release_commit, "env": PROD_ENV}
+    pargv = expand(recipe["version_probe"], values)
+    timeout = recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT)
+    live, last = _poll_probe(pargv, cwd, None, None, timeout,
+                             match=lambda out: _reports_target(out, target))
+    record["probe"] = dict(last, argv=pargv, live=live)
+    rel.log("rollback_probe_after", live=live, polls=last["polls"], rc=last["rc"])
+    if not live:
+        return _rollback_unknown(rel, "the production probe did not report the target "
+                                 "within %ss" % timeout)
+    rel.save()
+    path = write_result(root, rel, "rolled_back")
+    if path is None:
+        return 3
+    print("ROLLBACK: %s rolled-back %s" % (v, target.get("version") or target.get("commit")))
+    print("RESULT: %s" % os.path.relpath(path, root))
+    return 0
+
+
+def _rollback_unknown(rel, detail):
+    """The rollback ran and did not provably land: outcome_unknown, never re-run
+    automatically. Returns 3."""
+    rel.set_status("outcome_unknown", rollback=rel.rollback)
+    rel.save()
+    rel.log("outcome_unknown", was="rolling_back", reason=detail)
+    print("ROLLBACK: %s unknown" % rel.version)
+    print("STOP: outcome-unknown: %s; it is never re-run by itself" % detail)
+    print("NEXT: %s" % NEXT_UNKNOWN)
+    return 3
+
+
 def cmd_status(args):
     """Print each release's status. Read-only: no lock, no state change -- a status read
     during a live deploy must never demote it (only a locked command does that)."""
@@ -2551,6 +2983,15 @@ def build_parser():
                    help="no human is present: wait at awaiting_deploy, run nothing")
     p.add_argument("--remote", default="origin",
                    help="where the tag is pushed when CI deploys on tags (origin)")
+    p = sub.add_parser("verify-prod", help="prove production runs the release, then "
+                       "health and prod_smoke; write release-result/v1")
+    p.add_argument("--root", required=True)
+    p = sub.add_parser("rollback", help="roll production back: only with the human's yes")
+    p.add_argument("--root", required=True)
+    p.add_argument("--approved-by", dest="approved_by",
+                   help="the human, present now, who said yes to THIS rollback")
+    p.add_argument("--unattended", action="store_true",
+                   help="no human is present: show the rollback, run nothing")
     p = sub.add_parser("status", help="print each release's status (read-only)")
     p.add_argument("--root", required=True)
     return ap
@@ -2563,6 +3004,7 @@ def main(argv=None):
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
     return {"init": cmd_init, "prep": cmd_prep, "stage": cmd_stage, "deploy": cmd_deploy,
+            "verify-prod": cmd_verify_prod, "rollback": cmd_rollback,
             "status": cmd_status}[args.cmd](args)
 
 
