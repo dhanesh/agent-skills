@@ -31,7 +31,7 @@ needs macOS or Linux; it does not start on Windows.
    paths.
 2. Switch to a branch the grant covers that is not the default branch and not the run branch
    the conductor will create (`factory/<plan-slug>`, from the plan title), for example
-   `factory/base`, and push it: `git push -u origin factory/base`. The PR the run opens
+   `factory/work`, and push it: `git push -u origin factory/work`. The PR the run opens
    targets that branch, and the conductor pushes only its own run branch (`init` warns when
    `origin` has no copy of the base).
 3. Ask the agent to "run the plan unattended". It runs `conductor init`, then loops
@@ -58,7 +58,8 @@ You can stop a run at any time by revoking the grant
 - **Cost is always bounded, by dispatches and by wall clock.** Dispatches (executor, repair and
   reviewer, as the tool records them) are always capped: when the grant and `init --budget`
   set no `max_dispatches`, `init` derives tasks × 2 × (1 + `max_repairs_per_task`), one
-  executor and one reviewer per attempt, and `status` shows it as derived. Each dispatch
+  executor and one reviewer per attempt (tasks × 3 × (1 + `max_repairs_per_task`) under the
+  evidence gate, which adds a verifier), and `status` shows it as derived. Each dispatch
   `resume` asks for after a crash counts too. The wall clock is capped by `wall_clock_min`
   when set, and always by the grant's expiry: at most 7 days from the newest grant covering
   the plan. Repairs per task (2 by default) and parallelism (2 by default) are enforced too.
@@ -88,6 +89,23 @@ You can stop a run at any time by revoking the grant
   has your permissions. A session that is
   alive but idle past `stall_min`, with no conductor call and no worktree change, can get a
   second driver: the run lock keeps the record intact, and the dispatch cap bounds the waste.
+- **Green is not safe: the evidence gate.** When the plan declares a verify skill (a
+  `verification` block; spec-first-planning writes it, verification-skill-forge generates
+  the skill), a task merges only after `conductor evidence` passes its verified head: a
+  verifier other than the owner recorded at `start` drove the running app and recorded
+  `.verify/<instance>/<feature>/<sha>/evidence.json` for every touched feature (declared,
+  plus every feature whose source anchor the diff touches), bound to that exact commit,
+  with intact artifacts and a green doctor. Stale-SHA, forged-SHA, writer-verified,
+  doctor-red, unmapped-feature and missing-artifact evidence is rejected, `merge` re-reads
+  the records and re-checks the grant, and a commit after the verdict forces a new proof.
+  Identities are the agent ids the conductor session passes, so writer ≠ verifier holds as
+  far as that session is honest; the same-user residuals below still apply. A plan without
+  the block runs as before, and `status` says `evidence_gate=off`.
+- **Fan-out is partitioned first.** `init` records which tasks may run side by side before
+  anything is dispatched: tasks that share files or a feature, or, under the gate, whose
+  files are unknown, run one after the other. `conductor trail` prints the per-task
+  decision trail (owner, worktree, verified commit, reviewer, verdict agent, evidence,
+  merge outcome).
 - **Claims, not proof, to a receiver.** The run result's assertions read as CLAIMED to anyone
   else until they re-run them (`check-envelope --rerun`) or CI on the pushed branch reports them.
 - **Same-user residuals.** A hostile executor running as your OS user could forge the run's

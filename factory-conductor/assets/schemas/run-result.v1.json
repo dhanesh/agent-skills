@@ -108,7 +108,14 @@
           "merge_commit": {"type": ["string", "null"]},
           "park_reason": {"type": ["string", "null"]},
           "question": {"type": ["string", "null"]},
-          "depends_on": {"type": "array", "items": {"type": "string"}}
+          "depends_on": {"type": "array", "items": {"type": "string"}},
+          "owner": {"type": ["string", "null"], "description": "The executor's agent id, recorded at start (--owner)."},
+          "evidence": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "object", "required": ["verdict"], "properties": {"verdict": {"type": "string", "enum": ["pass", "reject"]}, "reason": {"type": ["string", "null"]}, "verifier": {"type": ["string", "null"]}, "verified_head": {"type": ["string", "null"]}, "paths": {"type": "array", "items": {"type": "string"}}}}
+            ]
+          }
         }
       }
     },
@@ -122,6 +129,28 @@
           "task": {"type": "string"},
           "path": {"type": "string"},
           "reason": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "evidence_gate": {"type": "boolean", "description": "True when the plan declared a verification block, so every merge needed a passing evidence verdict (spec 5.1). Absent from results written before factory-conductor 1.1.0."},
+    "trail": {
+      "type": "array",
+      "description": "The decision trail (spec 5.3), as `conductor trail` prints it: per task, dispatch time, owner, worktree, verified head, reviewer, verdict agent, evidence and merge outcome.",
+      "items": {
+        "type": "object",
+        "required": ["task", "status"],
+        "properties": {
+          "task": {"type": "string"},
+          "status": {"type": "string"},
+          "owner": {"type": ["string", "null"]},
+          "dispatched_at": {"type": ["string", "null"]},
+          "worktree": {"type": ["string", "null"]},
+          "verified_head": {"type": ["string", "null"]},
+          "reviewer": {"type": ["string", "null"]},
+          "verdict_agent": {"type": ["string", "null"]},
+          "evidence": {"type": ["object", "null"]},
+          "merge": {"type": "object"},
+          "serial_after": {"type": "array", "items": {"type": "string"}}
         }
       }
     }

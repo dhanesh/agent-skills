@@ -236,6 +236,13 @@ SINCE_BCP14_REGISTRY = "b4eb06e"  # gates: bcp14-registry.sh -- every capitalise
 # SKILL.md prose, every skill has a register section; plus the Jev backfill.
 SINCE_PP5_REASONS = "b314fca"  # gates: PP-5 asks every never/always/MUST NOT for a
 # stated reason (scripts/gates/pp5_reasons.py) and stops counting hedges.
+SINCE_EVIDENCE_GATE = "b1b0917"  # the evidence-gated factory: verification-skill-forge
+# (b1b0917), factory-conductor 1.1.0's evidence gate, partition and trail (c644629) and
+# spec-first-planning 2.3.0's runtime-proof hints (1e9f843). One constant for the
+# campaign: it lands at one merge, so every row of it becomes HELD* together.
+SINCE_TRIAL_FIXES = "4af6d2b"  # factory-conductor 1.2.0, from two live graph_d trials:
+# Conventional Commits merge subjects, --owner-later + owner, the REMOTE: line after a
+# remote gate asks, and verify failing a test command that ran no tests.
 SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row that
 # quotes no current sentence; `removed` in the line column marks deleted text.
 SINCE_REENTRY = "c676d92"  # factory-conductor: scheduled re-entry Task 2 -- the run
@@ -5316,6 +5323,76 @@ _FC_GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                 GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
 
 
+_FC_FEATURE = """# {fid}: {fid}
+
+- id: {fid}
+- proven: no
+- anchors: {anchors}
+
+## What it is
+
+x
+
+## How to reach it
+
+x
+
+## Drive it
+
+```sh
+true
+```
+
+Expect exit 0.
+
+## Proof
+
+x
+
+## Gotchas
+
+x
+"""
+
+
+def _fc_verify_skill(root, features, rel=".claude/skills/verify-app"):
+    """Write (uncommitted) a verify skill at rel whose map holds features {id: anchors}."""
+    d = os.path.join(root, *rel.split("/"))
+    os.makedirs(os.path.join(d, "features"), exist_ok=True)
+    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: %s\ndescription: x\n---\n" % os.path.basename(rel))
+    with open(os.path.join(d, "features", "README.md"), "w", encoding="utf-8") as f:
+        f.write("".join("- [%s](%s.md)\n" % (k, k) for k in features))
+    for fid, anchors in features.items():
+        with open(os.path.join(d, "features", fid + ".md"), "w", encoding="utf-8") as f:
+            f.write(_FC_FEATURE.format(fid=fid, anchors=anchors))
+
+
+def _fc_record(root, feature, sha, verifier="verifier", instance="a", result="pass",
+               sha_field=None, doctor_ok=True):
+    """Lay down a verify-evidence/v1 record (and its instance's doctor) as
+    verification-skill-forge's verify_evidence.py writes them. Returns its directory."""
+    d = os.path.join(root, ".verify", instance, feature, sha)
+    os.makedirs(d, exist_ok=True)
+    body = b'{"status": 201}\n'
+    with open(os.path.join(d, "capture.json"), "wb") as f:
+        f.write(body)
+    with open(os.path.join(d, "evidence.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": instance,
+                   "feature": feature, "sha": sha_field or sha, "verifier": verifier,
+                   "result": result, "action": "a", "observed": "o", "side_effects": ["s"],
+                   "artifacts": [{"path": "capture.json",
+                                  "sha256": hashlib.sha256(body).hexdigest()}],
+                   "captured_at": _now_z()}, f)
+    dd = os.path.join(root, ".verify", instance, "doctor", sha)
+    os.makedirs(dd, exist_ok=True)
+    with open(os.path.join(dd, "doctor.json"), "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "doctor", "instance": instance,
+                   "sha": sha, "ok": doctor_ok, "checks": {"port": "pass"},
+                   "verifier": verifier, "captured_at": _now_z()}, f)
+    return d
+
+
 def _fc_status_proven(run, ids):
     """The task ids among `ids` that the conductor's `status` reports as proven."""
     merged = set()
@@ -5327,10 +5404,19 @@ def _fc_status_proven(run, ids):
     return merged
 
 
-def _fc_drive(run, ids):
-    """start, commit real work, verify, review and merge each task in turn."""
+def _fc_gated(run):
+    """True when the run is under factory-conductor's evidence gate (1.1.0+): `status`
+    says evidence_gate=on. A baseline conductor never says it, so it is driven as before."""
+    return "evidence_gate=on" in run("status").stdout
+
+
+def _fc_drive(run, ids, record=None):
+    """start, commit real work, verify, review and merge each task in turn. Under the
+    evidence gate the driver also names the owner and the reviewer, calls record(tid, sha)
+    to lay down the verifier's evidence, and asks for the evidence verdict before merge."""
+    gated = _fc_gated(run)
     for tid in ids:
-        started = run("start", tid)
+        started = run("start", tid, *(["--owner", "writer"] if gated else []))
         wt = None
         for line in started.stdout.splitlines():
             if line.startswith("START: %s " % tid):
@@ -5344,8 +5430,13 @@ def _fc_drive(run, ids):
             subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
             subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
                            capture_output=True, env=_FC_GENV)
-        if run("verify", tid).returncode == 0:
-            run("review", tid, "--verdict", "pass")
+        verified = run("verify", tid)
+        if verified.returncode == 0:
+            run("review", tid, "--verdict", "pass",
+                *(["--reviewer", "reviewer"] if gated else []))
+            if gated and record is not None:
+                record(tid, verified.stdout.split()[-1])
+                run("evidence", tid, "--verifier", "verifier")
             run("merge", tid)
 
 
@@ -5427,10 +5518,13 @@ Users cannot export rows.
 - RT2 [SPECIFICATION_READY]: The writer streams. (parent: RT1; maps_to: T1; reqs: R1; confidence: 0.6; check: test -f t1.txt)
 
 ## Requirements
-- R1: The export must include every row.
+- R1: The export must include every row. [feature: export-rows] [proof: the export file exists in the checkout] [parallel-safe]
 
 ## Acceptance criteria
 - R1: the exported file exists. [cmd: test -f t1.txt]
+
+## Verification
+Verify skill: `.claude/skills/verify-export`
 
 ## Open questions
 
@@ -5470,6 +5564,9 @@ def _fc_planner_run(tree):
         os.makedirs(os.path.join(root, "docs"))
         with open(os.path.join(root, "docs", "spec.md"), "w", encoding="utf-8") as f:
             f.write(_FC_PLANNER_SPEC)
+        # The verify skill the spec names (spec-first-planning 2.3.0 requires one for an
+        # unattended plan; a baseline ignores it): one feature anchored on t1.txt.
+        _fc_verify_skill(root, {"export-rows": "t1.txt"}, rel=".claude/skills/verify-export")
         subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
         subprocess.run(["git", "-C", root, "commit", "-q", "-m", "spec"], check=True,
                        capture_output=True, env=_FC_GENV)
@@ -5509,7 +5606,7 @@ def _fc_planner_run(tree):
         with open(env[0], encoding="utf-8") as f:
             ids = [t["id"] for t in json.load(f)["predicate"]["payload"]["tasks"]]
         run("init", "--plan", env[0])
-        _fc_drive(run, ids)
+        _fc_drive(run, ids, lambda tid, sha: _fc_record(root, "export-rows", sha))
         proven = _fc_status_proven(run, ids)
         run("finish")
         return 1 if proven else 0
@@ -6146,6 +6243,672 @@ def check_factory_conductor_reentry(old, new):
         g = _fc_reentry_probe(new, CC, R, conductor, **kwargs)
         row(s, dimension, ga, g, g == 0, note, kind="guard")
 
+
+# ── the evidence-gated factory ──────────────────────────────────────────────
+_EG_FEATURES = {"notes-create": "t1.txt", "notes-list": "t2.txt"}
+
+
+def _eg_fixture(CC, root, tasks, policy=None):
+    """A repo on factory/p with a committed verify skill (_EG_FEATURES) and a gated plan:
+    tasks is [(id, [features], extra task keys)]. Returns the plan envelope path."""
+    subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+    os.makedirs(os.path.join(root, "docs"))
+    with open(os.path.join(root, "docs", "spec.md"), "w", encoding="utf-8") as f:
+        f.write("# Spec\n")
+    _fc_verify_skill(root, _EG_FEATURES)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True, env=_FC_GENV)
+    subprocess.run(["git", "-C", root, "checkout", "-q", "-b", "factory/p"], check=True,
+                   capture_output=True)
+    with open(os.path.join(root, ".git", "info", "exclude"), "a", encoding="utf-8") as f:
+        f.write("/.skill-contract/envelopes/\n")
+    payload = {"title": "Gate", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
+               "verification": {"skill": ".claude/skills/verify-app"},
+               "tasks": [dict({"id": i, "requirement_ids": ["R1"], "title": i,
+                               "verify": [{"text": "t", "command": ["true"]}],
+                               "depends_on": [], "features": feats}, **extra)
+                         for i, feats, extra in tasks]}
+    plan_env = CC.write_envelope(root, CC.build_statement(
+        "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1",
+        "spec-first-planning", "2.3.0", root, ["docs/spec.md"], payload))
+    _fc_write_grant(CC, root, plan_env, policy or _FC_LOCAL)
+    return plan_env
+
+
+def _eg_case(tree, case):
+    """1 when the tree's conductor merges task T1 under `case`, else 0. T1 proves
+    notes-create (anchored on t1.txt, its work). Under the gate the driver records the
+    evidence the case calls for; a baseline conductor has no gate and is driven as before.
+
+      good              fresh, independent, SHA-bound evidence and a green doctor
+      stale             evidence recorded on the run branch's head, not T1's
+      forged            T1's directory, but a `sha` field naming another real commit
+      doctor-red        the instance's doctor is red
+      unmapped          T1 declares notes-delete, which the map does not have
+      writer            the writer records the evidence and asks for the verdict
+      artifact-removed  an artifact is removed after the verdict
+      grant-lapsed      the grant lapses between the verdict and the merge
+      backdoor          a commit lands on T1's branch after the verdict"""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        feats = ["notes-delete"] if case == "unmapped" else ["notes-create"]
+        plan_env = _eg_fixture(CC, root, [("T1", feats, {})])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        base = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True,
+                              text=True).stdout.strip()
+        gated = _fc_gated(run)
+        started = run("start", "T1", *(["--owner", "writer"] if gated else []))
+        wt = started.stdout.split(" ", 2)[2].strip() if started.returncode == 0 else None
+        if not wt:
+            return 0
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        v = run("verify", "T1")
+        if v.returncode != 0:
+            return 0
+        sha = v.stdout.split()[-1]
+        run("review", "T1", "--verdict", "pass", *(["--reviewer", "reviewer"] if gated else []))
+        verifier = "writer" if case == "writer" else "verifier"
+        d = _fc_record(root, feats[0], base if case == "stale" else sha, verifier=verifier,
+                       sha_field=base if case == "forged" else None,
+                       doctor_ok=case != "doctor-red")
+        if gated:
+            run("evidence", "T1", "--verifier", verifier)
+        if case == "artifact-removed":
+            os.remove(os.path.join(d, "capture.json"))
+        elif case == "grant-lapsed":
+            _fc_write_grant(CC, root, plan_env, _FC_LOCAL, expires=timedelta(minutes=-5),
+                            after=2)
+        elif case == "backdoor":
+            with open(os.path.join(wt, "backdoor.txt"), "w") as f:
+                f.write("x\n")
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "late"], check=True,
+                           capture_output=True, env=_FC_GENV)
+        run("merge", "T1")
+        return 1 if "T1" in _fc_status_proven(run, ["T1"]) else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _eg_resume_merges_unverified(tree):
+    """1 when, after a passing review under a gated plan, `resume` tells a fresh session
+    to merge (no runtime verdict exists), 0 when it asks for a verifier."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], {})])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        gated = _fc_gated(run)
+        wt = run("start", "T1", *(["--owner", "w"] if gated else [])).stdout.split(" ", 2)[2]
+        wt = wt.strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        run("verify", "T1")
+        run("review", "T1", "--verdict", "pass", *(["--reviewer", "r"] if gated else []))
+        out = run("resume").stdout
+        if "NEXT: T1 merge" in out:
+            return 1
+        return 0 if "NEXT: T1 dispatch-verifier" in out else None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _eg_offered_together(tree, extra=None):
+    """How many tasks `next` offers at once for two gated tasks that prove different
+    features; extra (task keys) applies to both, e.g. disjoint where + parallel-safe."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        e1 = dict(extra or {}, **({"where": "t1.txt"} if extra else {}))
+        e2 = dict(extra or {}, **({"where": "t2.txt"} if extra else {}))
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], e1),
+                                          ("T2", ["notes-list"], e2)])
+        r = subprocess.run([sys.executable, "-I", conductor, "init", "--plan", plan_env,
+                            "--root", root], capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            return None
+        out = subprocess.run([sys.executable, "-I", conductor, "next", "--root", root],
+                             capture_output=True, text=True, timeout=300).stdout
+        line = [x for x in out.splitlines() if x.startswith("READY:")]
+        return len(line[0].split()[1:]) if line else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _eg_parallel_lost(tree):
+    """Two owners cut from the same base, both proven, merged one after the other: the
+    number of proven tasks whose work is NOT on the run branch afterwards (probe 1)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        both = {"independence": "parallel-safe"}
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], dict(both, where="t1.txt")),
+                                          ("T2", ["notes-list"], dict(both, where="t2.txt"))])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        gated = _fc_gated(run)
+        heads = {}
+        for tid in ("T1", "T2"):  # both started before either merges: the same base
+            wt = run("start", tid, *(["--owner", "w" + tid] if gated else [])).stdout
+            wt = wt.split(" ", 2)[2].strip()
+            with open(os.path.join(wt, tid.lower() + ".txt"), "w") as f:
+                f.write("done\n")
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                           capture_output=True, env=_FC_GENV)
+            heads[tid] = run("verify", tid).stdout.split()[-1]
+            run("review", tid, "--verdict", "pass", *(["--reviewer", "r"] if gated else []))
+            if gated:
+                _fc_record(root, "notes-create" if tid == "T1" else "notes-list", heads[tid])
+                run("evidence", tid, "--verifier", "verifier")
+        for tid in ("T1", "T2"):
+            run("merge", tid)
+        proven = _fc_status_proven(run, ["T1", "T2"])
+        if proven != {"T1", "T2"}:
+            return None
+        lost = 0
+        for tid, sha in heads.items():
+            r = subprocess.run(["git", "-C", root, "merge-base", "--is-ancestor", sha,
+                                "factory/gate"], capture_output=True)
+            lost += 1 if r.returncode != 0 else 0
+        return lost
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _eg_lost_worktree_stranded(tree):
+    """1 when a gated task whose worktree vanished mid-run is left in flight by `resume`
+    (the walker never parks it), 0 when resume parks it worktree-missing (probe 4)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 0
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], {})])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        gated = _fc_gated(run)
+        wt = run("start", "T1", *(["--owner", "w"] if gated else [])).stdout.split(" ", 2)[2]
+        shutil.rmtree(wt.strip())
+        out = run("resume").stdout
+        return 0 if "PARK: T1 worktree-missing" in out and "NEXT: run" in out else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _eg_failure_lost(tree):
+    """1 when the running app's failure never reaches T1's executor: the task merges anyway
+    (a baseline has no gate), or a fresh session's `resume` sends it to verify or merge
+    instead of back to its executor. 0 when resume prints dispatch-repair evidence and
+    re-verifying the failed commit is refused."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return 1
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        plan_env = _eg_fixture(CC, root, [("T1", ["notes-create"], {})])
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        run("init", "--plan", plan_env)
+        gated = _fc_gated(run)
+        wt = run("start", "T1", *(["--owner", "w"] if gated else [])).stdout.split(" ", 2)[2]
+        wt = wt.strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        sha = run("verify", "T1").stdout.split()[-1]
+        run("review", "T1", "--verdict", "pass", *(["--reviewer", "r"] if gated else []))
+        _fc_record(root, "notes-create", sha, result="fail")
+        if not gated:
+            run("merge", "T1")
+            return 1 if "T1" in _fc_status_proven(run, ["T1"]) else 0
+        run("evidence", "T1", "--verifier", "verifier")
+        if "NEXT: T1 dispatch-repair evidence" not in run("resume").stdout:
+            return 1
+        return 0 if run("verify", "T1").returncode == 3 else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_evidence_gate(old, new):
+    s = "factory-conductor"
+
+    def merged(tree, case):
+        """_eg_case, sanity-checked: in the new tree the SAME fixture with good evidence
+        MUST merge, or a 0 here would prove nothing (PROBE_ERRORS, None)."""
+        if tree == new and _eg_case(new, "good") != 1:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "evidence-gate sanity check failed: fresh, independent "
+                                 "evidence did not merge T1"))
+            return None
+        return _eg_case(tree, case)
+
+    cases = (
+        ("stale", "merges on evidence recorded on a stale SHA (spec 5.1)"),
+        ("forged", "merges on a hand-forged record whose sha names another commit (probe 3)"),
+        ("doctor-red", "merges on evidence whose instance doctor is red (spec 5.1)"),
+        ("unmapped", "merges of a task whose feature has no map entry (spec 5.1)"),
+        ("writer", "merges verified by the agent that wrote the code (probe 7)"),
+        ("artifact-removed", "merges after an evidence artifact was removed (spec 7 step 2)"),
+    )
+    for case, label in cases:
+        a, b = merged(old, case), merged(new, case)
+        row(s, label + " (lower=better)", a, b, b == 0 and (a is not None and a >= b),
+            "the baseline merges on a green verify and review alone; the gate rejects the "
+            "head (EVIDENCE: reject ...). Sanity-checked: the same fixture with fresh, "
+            "independent evidence DOES merge",
+            kind="delta" if a == 1 else "guard", since=SINCE_EVIDENCE_GATE)
+    for case, label, why in (
+            ("grant-lapsed", "merges after the grant lapsed between verdict and merge "
+             "(probe 5)", "merge re-runs check-grant, as it did before the gate"),
+            ("backdoor", "merges of a head committed after the verdict (probes 2, 10)",
+             "merge refuses a branch that moved past the proven head and clears the "
+             "verdict, so the rebased or backdoored head needs a new proof")):
+        a, b = merged(old, case), merged(new, case)
+        row(s, label + " (lower=better)", a, b, b == 0 and (a is not None and a >= b), why,
+            kind="delta" if a == 1 else "guard", since=SINCE_EVIDENCE_GATE)
+
+    a, b = _eg_failure_lost(old), _eg_failure_lost(new)
+    row(s, "runtime failures that never reach the task's executor (lower=better)", a, b,
+        a == 1 and b == 0,
+        "evidence-failed sends the task back with the verifier's observation, resume prints "
+        "`dispatch-repair evidence` (it printed `verify`, which re-proved the failed commit "
+        "and looped), and verify refuses the commit the app failed on",
+        since=SINCE_EVIDENCE_GATE)
+
+    a, b = _eg_resume_merges_unverified(old), _eg_resume_merges_unverified(new)
+    row(s, "resumes that send a reviewed head to merge with no runtime verdict "
+        "(lower=better)", a, b, a == 1 and b == 0,
+        "a fresh session following NEXT: lines is told to dispatch a verifier "
+        "(NEXT: T1 dispatch-verifier <sha>), not to merge", since=SINCE_EVIDENCE_GATE)
+
+    safe = {"independence": "parallel-safe"}
+    sanity = _eg_offered_together(new, safe)
+    if sanity != 2:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "partition sanity check failed: two disjoint parallel-safe "
+                             "tasks were not offered together (%r)" % sanity))
+    a, b = _eg_offered_together(old), _eg_offered_together(new)
+    row(s, "gated tasks with unknown files offered side by side (lower=better)", a, b,
+        a == 2 and b == 1,
+        "init computes the independence partition before any dispatch: two tasks that name "
+        "no files cannot be shown disjoint, so they run one after the other. Sanity-checked: "
+        "the same pair with disjoint `where` and parallel-safe IS offered together",
+        since=SINCE_EVIDENCE_GATE)
+
+    a, b = _eg_parallel_lost(old), _eg_parallel_lost(new)
+    row(s, "proven work lost when two owners land on the same base (probe 1)", a, b,
+        b == 0 and a is not None and a >= b,
+        "merges serialize through `merge`, each a --no-ff merge of the pinned head, so the "
+        "second owner's work lands on top of the first's", kind="guard")
+
+    a, b = _eg_lost_worktree_stranded(old), _eg_lost_worktree_stranded(new)
+    row(s, "gated tasks stranded after a worktree is lost mid-run (probe 4)", a, b,
+        b == 0 and a is not None and a >= b,
+        "resume parks the task worktree-missing and the walk goes on", kind="guard")
+
+
+# ── verification-skill-forge ────────────────────────────────────────────────
+_VSF_SKILL = os.path.join(".claude", "skills", "verify-notes")
+
+
+def _vsf_repo(tmp, name="app"):
+    """The new tree's fixture notes app, copied and committed: the same fixture for both
+    arms (a baseline has no forge and no fixture)."""
+    root = os.path.join(tmp, name)
+    shutil.copytree(os.path.join(REPO, "verification-skill-forge", "eval", "fixtures",
+                                 "notes-app"), root)
+    subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", "x"], check=True,
+                   capture_output=True, env=_FC_GENV)
+    return root
+
+
+def _vsf(tree, *argv):
+    forge = os.path.join(tree, "verification-skill-forge", "assets", "forge.py")
+    if not os.path.isfile(forge):
+        return None
+    return subprocess.run([sys.executable, "-I", forge, *argv], capture_output=True,
+                          text=True, timeout=120)
+
+
+def _vsf_edit(root, rel, old, new):
+    path = os.path.join(root, _VSF_SKILL, rel)
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text.replace(old, new, 1))
+
+
+def _vsf_accepts(tree, mutate):
+    """1 when the tree accepts the mutated fixture's verify skill (a tree with no forge
+    accepts anything), 0 when its lint rejects it."""
+    tmp = tempfile.mkdtemp()
+    try:
+        root = _vsf_repo(tmp)
+        mutate(root)
+        r = _vsf(tree, "lint", os.path.join(root, _VSF_SKILL))
+        return 1 if r is None or r.returncode == 0 else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+_CARGO_EMPTY = ("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; "
+                "0 measured; 41 filtered out; finished in 0.00s\n")
+_CARGO_THREE = "running 3 tests\n...\ntest result: ok. 3 passed; 0 failed; 0 ignored\n"
+
+
+def _tf_verify_passes(tree, output):
+    """1 when the tree's conductor passes verify for a step whose command exits 0 after
+    printing `output`, 0 when it fails the step; None (PROBE_ERRORS) on a broken fixture."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        cmd = ["{python}", "-c", "import sys; sys.stdout.write(%r)" % output]
+        plan_env = _fc_fixture(CC, root, {"T1": cmd}, {"local_reversible": "grant"})
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        if run("init", "--plan", plan_env).returncode != 0:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "zero-test probe: init failed"))
+            return None
+        started = run("start", "T1")
+        wt = next((l.split(" ", 2)[2].strip() for l in started.stdout.splitlines()
+                   if l.startswith("START: T1 ")), None)
+        if not wt:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "zero-test probe: start failed"))
+            return None
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "work"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        return 1 if run("verify", "T1").returncode == 0 else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _tf_bad_merge_subject(tree):
+    """1 when the merge commit a one-task run leaves on its run branch has a subject that
+    fails Conventional Commits (`type(scope)?: subject`), 0 when it passes; None when no
+    merge commit was made (PROBE_ERRORS)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    try:
+        _fc_one_proven(conductor, CC, root, ["true"], {"local_reversible": "grant"})
+        r = subprocess.run(["git", "-C", root, "log", "-1", "--merges", "--format=%s"],
+                           capture_output=True, text=True)
+        subject = r.stdout.strip()
+        if not subject:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "merge-subject probe: no merge commit on the run branch"))
+            return None
+        ok = re.match(r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
+                      r"(\([a-z0-9-]+\))?: \S", subject)
+        return 0 if ok else 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_factory_trial_fixes(old, new):
+    s = "factory-conductor"
+    if _tf_verify_passes(new, _CARGO_THREE) != 1:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "zero-test sanity check failed: a step that ran 3 tests did "
+                             "not pass verify"))
+    a, b = _tf_verify_passes(old, _CARGO_EMPTY), _tf_verify_passes(new, _CARGO_EMPTY)
+    row(s, "verify steps passed after running no tests (lower=better)", a, b,
+        b == 0 and a is not None and a >= b,
+        "a cargo test filter matching no test name exits 0; a live trial recorded it as "
+        "proof. verify now fails a step whose runner reports that no test ran. "
+        "Sanity-checked: the same step reporting 3 passed tests DOES pass",
+        kind="delta" if a == 1 else "guard", since=SINCE_TRIAL_FIXES)
+    a, b = _tf_bad_merge_subject(old), _tf_bad_merge_subject(new)
+    row(s, "run-branch merge subjects failing Conventional Commits (lower=better)", a, b,
+        b == 0 and a is not None and a >= b,
+        "`conductor: T1` failed commitlint's type rule in a target repo's CI; merges are "
+        "now `chore(factory): merge task T1`",
+        kind="delta" if a == 1 else "guard", since=SINCE_TRIAL_FIXES)
+
+
+def check_verification_forge(old, new):
+    s = "verification-skill-forge"
+    if _vsf_accepts(new, lambda root: None) != 1:
+        PROBE_ERRORS.append((new, "verification-skill-forge/assets/forge.py",
+                             "forge sanity check failed: the golden fixture skill did not lint"))
+
+    def dead_anchor(root):
+        _vsf_edit(root, os.path.join("features", "notes-list.md"), "- proven: no",
+                  "- proven: " + "b" * 40)
+        os.remove(os.path.join(root, "app.py"))
+
+    def placeholder(root):
+        _vsf_edit(root, "SKILL.md", "## Drive\n", "## Drive\n\nFILL: real selectors\n")
+
+    def evidence_deleting_cleanup(root):
+        _vsf_edit(root, "SKILL.md", 'rm -rf ".verify-run/$INSTANCE"', "rm -rf .verify")
+
+    for mutate, label in (
+            (dead_anchor, "verify skills accepted whose proven feature's source is gone "
+             "(probe 6)"),
+            (placeholder, "verify skills accepted with unfilled placeholder sections"),
+            (evidence_deleting_cleanup, "verify skills accepted whose cleanup deletes "
+             "evidence")):
+        a, b = _vsf_accepts(old, mutate), _vsf_accepts(new, mutate)
+        row(s, label + " (lower=better)", a, b, a == 1 and b == 0,
+            "forge.py lint rejects it; sanity-checked: the unmutated fixture lints clean",
+            since=SINCE_EVIDENCE_GATE)
+
+    def bent_map(tree):
+        """1 when a map rewritten to match a bug (proof edited, no source change) passes
+        the tree's maintain guard (a tree with no forge has none), else 0 (probe 8)."""
+        tmp = tempfile.mkdtemp()
+        try:
+            root = _vsf_repo(tmp)
+            _vsf_edit(root, os.path.join("features", "notes-create.md"),
+                      "The response is 201", "The response is 500")
+            r = _vsf(tree, "check-maintain", os.path.join(root, _VSF_SKILL), "--base", "HEAD")
+            return 1 if r is None or r.returncode == 0 else 0
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    a, b = bent_map(old), bent_map(new)
+    row(s, "maintain passes that rewrite the feature map to match a bug (probe 8) "
+        "(lower=better)", a, b, a == 1 and b == 0,
+        "check-maintain fails a feature whose Proof changed while none of its anchors did; "
+        "the bug goes to forge.py finding instead", since=SINCE_EVIDENCE_GATE)
+
+    def port_collision(tree):
+        """1 when a second owner can claim the port the first holds (no recorder, or a
+        claim that succeeds), 0 when it is refused (probe 9)."""
+        rec = os.path.join(tree, "verification-skill-forge", "assets", "verify_evidence.py")
+        if not os.path.isfile(rec):
+            return 1
+        tmp = tempfile.mkdtemp()
+        try:
+            root = _vsf_repo(tmp)
+            r = subprocess.run([sys.executable, "-I", rec, "port", "--instance", "a",
+                                "--worktree", root], capture_output=True, text=True)
+            port = r.stdout.split()[1] if r.returncode == 0 else None
+            if port is None:
+                return None
+            r = subprocess.run([sys.executable, "-I", rec, "claim", "--instance", "b",
+                                "--port", port, "--worktree", root], capture_output=True,
+                               text=True)
+            return 0 if r.returncode == 3 else 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    a, b = port_collision(old), port_collision(new)
+    row(s, "instance ports two owners can both claim (probe 9) (lower=better)", a, b,
+        a == 1 and b == 0, "verify_evidence.py claims each port with an O_EXCL lock",
+        since=SINCE_EVIDENCE_GATE)
+
+    def unreported(tree):
+        """Anchored Manifold constraints with no observable proof that the tree does NOT
+        name. The fixture's manifold anchors B1 (proven by notes-create) and S1 (proven by
+        nothing): a tree without the join names neither gap."""
+        tmp = tempfile.mkdtemp()
+        try:
+            root = _vsf_repo(tmp)
+            md = os.path.join(root, ".manifold")
+            os.makedirs(md)
+            with open(os.path.join(md, "notes.json"), "w") as f:
+                json.dump({"schema_version": 3, "feature": "notes", "phase": "ANCHORED",
+                           "constraints": {"business": [{"id": "B1", "type": "invariant"}],
+                                           "security": [{"id": "S1", "type": "invariant"}]},
+                           "anchors": {"required_truths": [
+                               {"id": "RT-1", "maps_to": ["B1", "S1"]}]}}, f)
+            r = _vsf(tree, "coverage", os.path.join(root, _VSF_SKILL))
+            if r is None:
+                return 1
+            return 0 if "UNCOVERED: notes:S1" in r.stdout else 1
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    a, b = unreported(old), unreported(new)
+    row(s, "anchored Manifold constraints with no proof left unreported (lower=better)",
+        a, b, a == 1 and b == 0,
+        "forge.py coverage lists every anchored constraint no feature proves: the "
+        "verification backlog", since=SINCE_EVIDENCE_GATE)
+
+
+_SFP_UNATTENDED = """# Spec: Export
+
+## Problem
+p
+
+## Users
+- u
+
+## Goals
+- g
+
+## Non-goals
+- n
+
+## Constraints
+- B1 [invariant]: No row is lost.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Every row reaches the file. (parent: OUTCOME; maps_to: B1; reqs: R1; confidence: 0.8; check: true)
+
+## Requirements
+- R1: The export must include every row. [feature: export-rows] [proof: PROOF] [parallel-safe]
+
+## Acceptance criteria
+- R1: the exported file exists. [cmd: test -f t1.txt]
+
+## Verification
+Verify skill: `.claude/skills/verify-export`
+
+## Open questions
+
+## Tensions
+- none
+
+## Solution options
+- OPT-A: Stream. (complexity: Low; reversibility: TWO_WAY; satisfies: RT1)
+- OPT-B: Buffer. (complexity: Medium; reversibility: TWO_WAY; satisfies: RT1)
+Recommended: OPT-A — lowest complexity.
+
+## Iterations
+- I1: converged.
+
+## Decisions
+- D1: May the export add a dependency? -> no (source: sweep)
+"""
+
+
+def check_runtime_proof_planning(old, new):
+    s = "spec-first-planning"
+
+    def accepted(tree, proof):
+        tmp = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmp, "spec.md")
+            text = _SFP_UNATTENDED.replace("PROOF", proof)
+            if not proof:
+                text = text.replace(" [proof: ]", "")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            r = subprocess.run([sys.executable, "-I", os.path.join(
+                tree, "spec-first-planning", "assets", "spec_lint.py"), "--unattended", path],
+                capture_output=True, text=True, timeout=120)
+            return 1 if r.returncode == 0 else 0
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    if accepted(new, "the downloaded CSV lists every seeded row") != 1:
+        PROBE_ERRORS.append((new, "spec-first-planning/assets/spec_lint.py",
+                             "runtime-proof sanity check failed: an unattended spec with an "
+                             "observable proof did not lint"))
+    for proof, label in (("all tests pass", "unattended specs accepted whose only proof is "
+                          "'all tests pass' (spec 6)"),
+                         ("", "unattended specs accepted with no observable proof (spec 6)")):
+        a, b = accepted(old, proof), accepted(new, proof)
+        row(s, label + " (lower=better)", a, b, a == 1 and b == 0,
+            "--unattended routes such work to attended mode; sanity-checked: the same spec "
+            "with an observable [proof: ...] lints clean", since=SINCE_EVIDENCE_GATE)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -6221,6 +6984,10 @@ def main():
         check_factory_conductor_q3(old, REPO)
         check_factory_conductor_q3_review(old, REPO)
         check_factory_conductor_reentry(old, REPO)
+        check_evidence_gate(old, REPO)
+        check_verification_forge(old, REPO)
+        check_runtime_proof_planning(old, REPO)
+        check_factory_trial_fixes(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

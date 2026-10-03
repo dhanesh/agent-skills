@@ -64,7 +64,7 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
-SKILL_VERSION = "2.3.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
+SKILL_VERSION = "2.4.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
 USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
@@ -178,7 +178,9 @@ def derive_plan(text):
         # [after: ...] is lifted into depends_on (resolved below, once every
         # requirement has a task id) and stripped from the title exactly like
         # [where: ...] is.
-        title = spec_lint.AFTER_RE.sub("", WHERE_RE.sub("", rtext)).strip().rstrip(".")
+        title = spec_lint.strip_proof_hints(
+            spec_lint.AFTER_RE.sub("", WHERE_RE.sub("", rtext))).strip().rstrip(".")
+        title = re.sub(r"\s{2,}", " ", title)
         tasks.append(
             {
                 "id": "T%d" % tnum,
@@ -189,6 +191,9 @@ def derive_plan(text):
                 "_verify_cmds": [cmd for _, cmd in pairs],
                 "_where": where_m.group(1).strip() if where_m else "",
                 "_after": spec["after"].get(num, []),
+                "_features": spec["features"].get(num, []),
+                "_proof": spec["proofs"].get(num),
+                "_parallel_safe": spec["parallel_safe"].get(num, False),
             }
         )
         coverage[rid] = ["T%d" % tnum]
@@ -213,7 +218,24 @@ def derive_plan(text):
         "constraints": spec["constraints"],
         "required_truths": spec["truths"],
         "decisions": spec["decisions"],
+        "verify_skill": spec["verify_skill"],
     }
+
+
+def _proof_fields(t):
+    """The runtime-proof keys a task carries, only when its requirement had the hints:
+    `features`, `predicate`, and `independence` ("parallel-safe", or the task ids it
+    depends on). A spec without them derives byte-identical plans."""
+    out = {}
+    if t["_features"]:
+        out["features"] = list(t["_features"])
+    if t["_proof"]:
+        out["predicate"] = t["_proof"]
+    if t["_parallel_safe"]:
+        out["independence"] = "parallel-safe"
+    elif t["_after"] and t.get("depends_on"):
+        out["independence"] = list(t["depends_on"])
+    return out
 
 
 def to_json(plan):
@@ -232,6 +254,7 @@ def to_json(plan):
             jt["depends_on"] = t["depends_on"]
         if any(c is not None for c in t["_verify_cmds"]):
             jt["verify_commands"] = t["_verify_cmds"]
+        jt.update(_proof_fields(t))
         out_tasks.append(jt)
     return {
         "tasks": out_tasks,
@@ -284,6 +307,7 @@ def to_task_plan_payload(plan, spec_rel):
             jt["where"] = t["_where"]
         if t.get("depends_on"):
             jt["depends_on"] = t["depends_on"]
+        jt.update(_proof_fields(t))
         tasks.append(jt)
     payload = {"title": plan["title"], "spec": spec_rel, "tasks": tasks,
               "coverage": plan["coverage"], "uncovered": plan["uncovered"]}
@@ -294,6 +318,9 @@ def to_task_plan_payload(plan, spec_rel):
         truths = [{k: v for k, v in t.items() if k != "num"} for t in plan["required_truths"]]
         if all(_truth_well_formed(t) for t in truths):
             payload["required_truths"] = truths
+    if plan.get("verify_skill"):
+        # factory-conductor runs a plan with this block under its evidence gate.
+        payload["verification"] = {"skill": plan["verify_skill"]}
     if plan.get("decisions"):
         payload["decisions"] = [{"id": d["id"], "question": d["question"], "answer": d["answer"],
                                  "source": d["source"]} for d in plan["decisions"]]

@@ -343,7 +343,7 @@ class TestEnvelope(unittest.TestCase):
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
 
     def test_skill_version_is_2_3_0(self):
-        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.3.0")
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.4.0")
 
 
 # C1: GOOD with a [cmd: ...] hint on R1's criterion and on one of R2's two.
@@ -656,6 +656,47 @@ class TestWavesCli(unittest.TestCase):
         r = self._run(cyclic, "--waves")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("ERROR:", r.stderr)
+
+
+class TestRuntimeProofFields(unittest.TestCase):
+    """Spec 6: tasks carry features, an observable predicate and an independence marker,
+    and the plan carries the verify skill factory-conductor's evidence gate needs."""
+
+    def payload(self, text=FULL):
+        return spec_to_tasks.to_task_plan_payload(spec_to_tasks.derive_plan(text),
+                                                  "docs/spec.md")
+
+    def test_fields_reach_the_payload(self):
+        p = self.payload()
+        t = p["tasks"][0]
+        self.assertEqual(t["features"], ["export-download"])
+        self.assertEqual(t["predicate"], "the downloaded CSV lists every seeded row")
+        self.assertEqual(t["independence"], "parallel-safe")
+        self.assertEqual(t["title"], "The export must include every row")
+        self.assertEqual(p["verification"], {"skill": ".claude/skills/verify-export"})
+        self.assertEqual(spec_to_tasks.payload_errors(p), [])
+
+    def test_after_hint_is_the_independence_marker(self):
+        text = FULL.replace(
+            "- R1: The export must include every row. [feature: export-download] "
+            "[proof: the downloaded CSV lists every seeded row] [parallel-safe]",
+            "- R1: The export must include every row. [feature: export-download] "
+            "[proof: the downloaded CSV lists every seeded row] [parallel-safe]\n"
+            "- R2: The export must name the file. [feature: export-download] "
+            "[proof: the download is named report.csv] [after: R1]").replace(
+            "## Open questions", "- R2: the download is named report.csv. "
+            "[cmd: {python} -c pass]\n\n## Open questions", 1)
+        tasks = {t["id"]: t for t in self.payload(text)["tasks"]}
+        self.assertEqual(tasks["T2"]["independence"], ["T1"])
+        self.assertEqual(spec_to_tasks.to_json(spec_to_tasks.derive_plan(text))["tasks"][1]
+                         ["independence"], ["T1"])
+
+    def test_a_spec_without_hints_derives_no_new_keys(self):
+        from test_spec_lint import LIGHT
+        p = self.payload(LIGHT)
+        self.assertNotIn("verification", p)
+        for key in ("features", "predicate", "independence"):
+            self.assertNotIn(key, p["tasks"][0])
 
 
 if __name__ == "__main__":

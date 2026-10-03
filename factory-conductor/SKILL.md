@@ -8,14 +8,15 @@ description: >-
   from depends_on, gives each task its own git worktree, re-runs every task's verify commands
   itself as the proof, records an independent reviewer's verdict, merges proven tasks into one
   run branch, enforces the wall-clock, dispatch, repair and parallel budgets, parks what fails,
-  and ends with a run-result envelope, a pushed branch and an open PR. Merging the PR stays with
-  the human. Not the planner (spec-first-planning), not the loop designer
+  and ends with a run-result envelope, a pushed branch and an open PR. When the plan declares a
+  verify skill, an evidence gate holds each merge until a verifier other than the writer
+  records SHA-bound runtime evidence for every touched feature. Merging the PR stays human. Not the planner (spec-first-planning), not the loop designer
   (crafting-self-prompting-loops).
 license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.3.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -48,8 +49,9 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --root <repo>`,
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
-`MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`, `REENTRY:`,
-and `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
+`EVIDENCE:`, `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`,
+`TRAIL:`, `REENTRY:`, and
+`REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
 and it comes before every exit-2 rule below: from any command, `run locked` on stderr
@@ -92,7 +94,8 @@ If any of them fails, stop and tell the user which one and why; do not repair a 
 yourself. Read the grant's `budget` too: `max_repairs_per_task` defaults to 2 and
 `max_parallel` to 2. When neither the grant nor `init --budget` sets `max_dispatches`,
 `init` derives it by default as tasks × 2 × (1 + `max_repairs_per_task`), one executor and
-one reviewer per attempt, and `status` marks it derived; you SHOULD tell the user that cap
+one reviewer per attempt (tasks × 3 × (1 + `max_repairs_per_task`) under the evidence gate,
+which adds a verifier per attempt), and `status` marks it derived; you SHOULD tell the user that cap
 before the run starts. When the grant sets no `max_dispatches`, `--budget` can set a value
 above the derived one: the tighten-only rule covers only keys the grant sets.
 `wall_clock_min` is enforced when set, and the grant's expiry caps the wall clock in any case:
@@ -110,34 +113,53 @@ Each step is one command. Read its output lines, not just the exit code.
    carries a `reentry` block, install its timer now (see "Scheduled re-entry").
 2. **Next.** `conductor next` prints `READY: T1 T3`, nothing when work is in flight and nothing
    new is ready, or `STOP: <reason>` (exit 3).
-3. **Start.** For each ready task, `conductor start <task>` prints
-   `START: <task> <worktree>`. It creates the task branch `<run_branch>--<task>` in that
+3. **Start.** For each ready task, `conductor start <task> --owner <executor id>` prints
+   `START: <task> <worktree>`. The owner is the agent id your harness gives the executor you
+   are about to dispatch; the evidence gate refuses a start without one. If your harness
+   assigns that id only when it spawns the agent, run `conductor start <task> --owner-later`,
+   dispatch the executor, then `conductor owner <task> --owner <its id>` straight away: the
+   owner is recorded once and never replaced, because a swapped owner could let the writer
+   pass as its own verifier, and `verify` refuses a gated task whose owner is not recorded. It creates the task branch `<run_branch>--<task>` in that
    worktree and logs a `dispatch`. An exit 2 for the parallel limit or a spent dispatch budget
    means skip that start and carry on with the tasks in flight.
 4. **Dispatch the executor.** Send a fresh subagent the executor brief below, filled in, and
    nothing more. Ready tasks run in parallel, up to `max_parallel` (2 by default).
 5. **Verify.** On a `DONE` report, `conductor verify <task>`. It re-reads the task's commands
    from the pinned plan envelope and runs them in an isolated clone of the committed worktree
-   head. That run is the proof. An uncommitted change or a symlink that escapes the tree fails
+   head. That run is the proof. A test command that exits 0 but whose runner reports that no
+   test ran (cargo, go, unittest, jest/vitest, mocha; pytest already exits 5) fails its step,
+   printed as `(ran no tests: …)`, because it proves nothing. An uncommitted change or a symlink that escapes the tree fails
    it. `VERIFY: <task> pass <sha>` names the proven commit and moves the task to review.
    `VERIFY: <task> fail` (exit 3) sends it back: resume the same executor with the failing
    `VERIFY:` lines and the output tails in `state.json` under
    `tasks.<task>.verify_runs[].stdout_tail` and `stderr_tail`, then verify again.
 6. **Review.** Dispatch a reviewer with the reviewer brief below, using the `<sha>` from the
    pass line. The reviewer MUST be a fresh subagent, not the executor that wrote the code.
-   Record its answer with `conductor review <task> --verdict pass|fail --detail "<one line>"`.
+   Record its answer with
+   `conductor review <task> --verdict pass|fail --detail "<one line>" --reviewer <its id>`
+   (the id is required under the evidence gate, and the owner's id is refused).
    A `fail` (exit 3) goes back to the executor with the reviewer's detail, on the same repair
    budget, then through verify and review again. The repair has to be a new commit: `verify`
    fails the commit the reviewer rejected.
-7. **Merge.** `conductor merge <task>` needs a pass from both verify and review on the same
-   pinned commit. It prints `MERGE: <task> <sha>`. A conflict prints
+7. **Evidence (gated runs only).** When `status` shows `evidence_gate=on`, dispatch a fresh
+   verifier with the verifier brief below on the same `<sha>`, then run
+   `conductor evidence <task> --verifier <its id>`. `EVIDENCE: <task> pass <sha>` lets the
+   task merge. `EVIDENCE: <task> reject <reason>` (exit 3) means: `feature-unmapped` parks
+   the task (run verification-skill-forge's maintain mode, then a new run);
+   `evidence-failed` sends it back to its executor as a repair, with the verifier's
+   observation (`tasks.<task>.evidence.observed` in `state.json`), and the repair has to be a
+   new commit; any other reason dispatches a new verifier (the conductor has already
+   counted the dispatch). The reasons are listed in "The evidence gate" below.
+8. **Merge.** `conductor merge <task>` needs a pass from both verify and review on the same
+   pinned commit, and under the gate a passing evidence verdict on it too; it re-reads the
+   evidence files and refuses (exit 2) when one was removed or altered since the verdict. It prints `MERGE: <task> <sha>`. A conflict prints
    `PARK: <task> merge-conflict`, and a task with no commit of its own
    `PARK: <task> no-commits` (both exit 3); the run goes on. Exit 2 with "verify again" means
    the branch moved after the proof: verify again. Exit 2 with "run merge again" means git
    refused the fast-forward and the run branch is unchanged (an untracked file in the way, say):
    the task stays `reviewing`, so park it with that line unless the cause is plainly transient.
-8. **Repeat** from step 2 until the run stops.
-9. **Finish.** `conductor finish` first gates `local_reversible` and re-runs every proven
+9. **Repeat** from step 2 until the run stops.
+10. **Finish.** `conductor finish` first gates `local_reversible` and re-runs every proven
    task's verify commands on the merged run branch (`INTEGRATION: pass <sha>`), then writes
    the `run-result/v1` envelope (`FINISH: <path>`), then gates `push_branch` and pushes exactly
    that verified commit, then gates `open_pr` and opens the PR against the base branch. See
@@ -146,7 +168,7 @@ Each step is one command. Read its output lines, not just the exit code.
 **Reading any step's output.**
 
 - `STOP: <reason>` from any command (`next`, but also `start`, `verify`, `review`, `merge` or
-  `resume`, for example when the wall clock runs out) ends the loop: go to step 9. From
+  `resume`, for example when the wall clock runs out) ends the loop: go to step 10. From
   `resume`, follow its `NEXT:` line instead: `NEXT: run ask` waits for a renewed grant.
 - `PARK: <task> <reason>` means that task is done for this run; carry on with the rest.
 - An exit 2 that the step's own instruction above does not cover, such as the root being off
@@ -161,8 +183,8 @@ not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
 **Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
 the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
-as `in_flight_at_stop`. A `GATE: ASK`, or `REMOTE: pending …` (exit 3), means the grant does
-not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
+as `in_flight_at_stop`. A `GATE: ASK`, followed by `REMOTE: pending …` (exit 3) naming the push, the PR or
+both, means the grant does not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
 steps once a grant covers them. An exit 3 from `finish` with no `GATE:` line means the push or
 the PR command failed: report its stderr, and retry at most once. `INTEGRATION: fail <task>
 <command>` lines and `STOP: integration_red` (exit 3) mean tasks that each passed alone break
@@ -212,6 +234,12 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   `tasks.<task>.review.detail` from `state.json`, then verify on its report.
 - `NEXT: <task> dispatch-reviewer <sha>`: dispatch a reviewer on that commit, then record its
   verdict with `conductor review`.
+- `NEXT: <task> dispatch-repair evidence`: the running app failed the task's proof. Send the
+  executor `tasks.<task>.evidence.feature` and `.observed` from `state.json` (what the verifier
+  saw), then verify on its report. `verify` refuses the commit the evidence failed on, so the
+  repair has to be a new commit.
+- `NEXT: <task> dispatch-verifier <sha>`: the reviewer passed it but no evidence verdict
+  covers that commit. Dispatch the verifier brief, then `conductor evidence <task>`.
 - `NEXT: <task> verify`: `merge` found the task's branch moved past the proven commit. Run
   `conductor verify <task>`; nothing is dispatched.
 - `NEXT: <task> merge`: run `conductor merge <task>`. If a crash hit after the merge reached
@@ -226,7 +254,8 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   its gate now covers it: run `conductor finish --retry-remote`.
 - `NEXT: run done`: the run is finished and nothing is left to run: report it.
 
-Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer` line spends one dispatch
+Each `dispatch-executor`, `dispatch-repair`, `dispatch-reviewer` and `dispatch-verifier` line
+spends one dispatch
 from `max_dispatches` when `resume` prints it, even when a failed verify already counted one
 for the same repair. That is conservative: every `resume` call that asks for a dispatch
 spends one, so a session that keeps crashing still stops. A task past the cap prints
@@ -265,7 +294,7 @@ after a crash" and stops at `NEXT: run ask` or `NEXT: run done`. Each timer name
 
 Every conductor command except `init` and `watch` takes the run lock, and every command
 except `watch` renews the lease (`init` too, though it takes no lock), so two drivers never
-write at once. Read-only commands renew it as well: a human who runs `status`, `resume` or
+write at once. Read-only commands renew it as well: a human who runs `status`, `resume`, `trail` or
 `reentry status` delays re-entry by up to `stall_min`, which errs on the safe side. A command that finds the lock held waits for it, up to
 900 s, and says so on stderr after 2 s. The rule in "Hands off" covers `lease.json` and
 `.lock` too: they are how a live session tells the timer not to start a second driver. The
@@ -329,15 +358,23 @@ Concerns: <none, or one line each; for NEEDS_DECISION the question; for BLOCKED 
 and switches off external diff drivers, text conversion, binary attributes, colour, fsmonitor
 and hooks. That neutralises the known config, attribute and replace-ref tricks an executor could
 plant in the shared git directory; the §7a assumptions in "What the proof is worth" still
-apply.
+apply. Paste the diff's output when it is short; for a long one, give the reviewer that exact
+command to run itself instead, since it only reads, and a hand-copied diff drifts from the
+real one. Give the reviewer every verify step of the task with its pinned command: in a live
+trial the reviewer was the only check that noticed a pinned test filter matching no test.
 
 ```text
 You are reviewing task <id> of an approved plan. You did not write this code. You MUST NOT
 dispatch subagents or edit any file.
 
 Task: <title>; requirement: <requirement text>
+Acceptance criteria, each with the command the plan pins as its proof: <each verify step's
+text and command>. A pinned command proves its criterion only if what it runs asserts that
+behaviour; a test filter that names no existing test proves nothing.
 Constraints: <the plan's constraints; the grant's decisions and defaults>
-Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>>
+Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --text --no-color <run_branch>...<sha>, or that exact command for you to run>
+
+Building or running the code to check a claim is fine; leave every tracked file as it is.
 
 Answer two questions about the diff:
 1. Does it satisfy the requirement?
@@ -345,6 +382,91 @@ Answer two questions about the diff:
 Verdict: pass only if the answer to 1 is yes and to 2 is no; otherwise fail.
 Report: Verdict: pass | fail, then one line of detail.
 ```
+
+## The verifier brief
+
+Under the evidence gate only. `<sha>` is the reviewed commit; `<skill>` and `<evidence_dir>` are the
+plan's `verification.skill` and `verification.evidence_dir` (`.verify` by default); `<features>` is the task's `features` plus every feature whose source
+anchor the diff touches (`conductor evidence` names a missing one in its reject line).
+`<predicate>` is the task's `predicate`, the plan's `[proof: …]` statement. Give it to the
+verifier to drive directly, beside the recipes: a task that edits its own feature's recipe
+also wrote the script its verifier follows, so a recipe alone can step around the
+writer's bug, while the predicate came from the spec the human approved.
+
+If your harness assigns the verifier's id only when it spawns the agent, add one line to the
+brief saying its id arrives in a follow-up message and that it records nothing until then,
+and send the id at once. Never fill `--verifier` with a placeholder, because a record under
+a placeholder id fails the gate's verifier match and the verifier has to drive everything
+again under its real id.
+
+```text
+You are verifying task <id> of an approved plan at commit <sha>. You did not write this
+code. You MUST NOT edit or commit files, or dispatch subagents. You MUST NOT use test-only
+endpoints or internal setters.
+
+Worktree: <absolute worktree path> (its HEAD is <sha>). Verify skill: <worktree>/<skill>.
+Export VERIFY_EVIDENCE_DIR=<absolute root>/<evidence_dir> and use an instance name of
+your own.
+For each feature in <features>: follow the verify skill's Launch and Doctor, drive the
+feature's recipe in features/<id>.md, capture the action, the resulting state and its side
+effects, and record it with the skill's verify_evidence.py record, --verifier <your id>.
+The approved proof for this task is: <predicate>. Drive it yourself through the same
+harness even where the recipe does not, capture it as an artifact of the task's first
+feature, and record that feature as a fail if the running app does not show it.
+Then run the skill's Cleanup. Evidence stays.
+
+Report: Verdict: pass | fail, then one line per feature: <id> <evidence path> <observed>.
+```
+
+## The evidence gate
+
+A plan that carries a `verification` block (spec-first-planning writes it; the verify skill
+comes from verification-skill-forge) runs under the gate, and `status` says
+`evidence_gate=on`. A plan with no block runs as before and `status` says
+`evidence_gate=off`: report that, because a green verify and review is then all a merge
+needed. `init` refuses a plan whose tasks name features without the block, and a gated plan
+with a task that names none.
+
+`conductor evidence` passes a verified head only when, in this order:
+
+1. the grant covers `local_reversible` now;
+2. the verifier is not the owner recorded at `start` (`writer-is-verifier`);
+3. every feature the task declares has a map entry at that commit (`feature-unmapped`);
+4. each touched feature (declared, plus every feature whose anchor the diff touches) has a
+   `.verify/<instance>/<feature>/<sha>/evidence.json` for exactly this head
+   (`evidence-missing`, or `evidence-stale-sha` when only other heads have one), whose `sha`
+   field matches (`evidence-sha-mismatch`), recorded by this verifier
+   (`evidence-verifier-mismatch`), with every artifact present and unaltered
+   (`evidence-artifact-missing`, `evidence-artifact-altered`) and a passing result
+   (`evidence-failed`);
+5. that instance's `doctor.json` for the same head is ok (`doctor-missing`, `doctor-red`).
+
+`merge` re-checks the grant and re-reads the records. A commit after the verdict (a
+rebase, a backdoor) moves the branch past the proven head, so `merge` clears the review and
+the verdict and asks for a new verify. Identity is what you pass: you MUST pass the id your
+harness gave each subagent, because the tool can only compare the ids it is given, and an
+id you invent turns writer ≠ verifier back into a convention.
+
+## Fan-out
+
+`init` computes the independence partition before any dispatch and logs it on the `init`
+event: two tasks with no dependency between them are serialized when their `where` paths
+overlap or they prove a shared feature, and, under the gate, when either names no `where`
+and is not marked `parallel-safe`. A serialized task is not offered before its predecessor
+is proven, parked or blocked. Everything else runs side by side up to `max_parallel`, each
+owner in its own worktree with its own verify-skill instance. Verdicts run in parallel;
+merges go one at a time through `merge`, and a merge conflict parks the task rather than
+rebasing it. A stack is a chain of `depends_on`: a dependent never starts before its
+dependency is proven, so a gap stops everything above it.
+
+## Automated reviewers and broken skills
+
+When a bot (a review bot, a security scanner, a CI advisory) comments on the PR or the run,
+judge each comment on its merits: fix a real bug through a new task or run, and dismiss a
+non-issue or a nitpick with a concrete, recorded reason. Churning code to silence a nitpick
+is a failure, not compliance. If a skill breaks mid-run, park the task it blocks with the
+failure as the reason, keep the run going, and report the break so it is fixed in its own
+change rather than worked around in silence.
 
 ## Stop and park rules
 
@@ -367,7 +489,8 @@ Report: Verdict: pass | fail, then one line of detail.
   config makes the push and the PR ask (`ci-config`), because CI runs with the repository's
   secrets. `watch` stops it with `reentry_exhausted` once `max_reentries` agents have
   started.
-- **What parks a task.** Repairs reaching `max_repairs_per_task` (2 by default) park it with
+- **What parks a task.** An evidence verdict of `feature-unmapped` parks it with that
+  reason. Repairs reaching `max_repairs_per_task` (2 by default) park it with
   `verify_red_after_repairs`; a dispatch it needs past `max_dispatches` parks it with
   `budget_dispatches`. `max_dispatches` counts every executor, repair and reviewer dispatch the
   tool records.
@@ -381,7 +504,11 @@ integration result (`INTEGRATION: pass <sha>`, the failing lines, or `skipped`),
 budget spent, and, when the grant allows re-entry, the attempt count from
 `conductor reentry status`.
 The report MUST state that `max_tokens` and `max_usd` were recorded, not enforced, as
-`conductor status` does. Name the grant id and each action class the run used.
+`conductor status` does. Name the grant id and each action class the run used. Say whether
+the evidence gate was on; when it was, give each proven task's evidence paths and verdict
+agent. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
+owner, worktree, verified commit, reviewer, verdict agent, evidence paths, merge outcome);
+offer it to the user to commit when the stakes warrant an audit record.
 
 ## Verify and repair
 
@@ -456,6 +583,8 @@ them.
 
 - **Not the planner.** The spec, the plan and the grant come from spec-first-planning.
 - **Not the loop designer.** Designing a loop, or auditing one, is crafting-self-prompting-loops.
+- **Not the verify skill's author.** A feature with no map entry parks; verification-skill-forge
+  writes and maintains the verify skill.
 - **Not a merger.** The conductor merges tasks into its own run branch only. You MUST leave
   merging the run branch or the PR into the default branch to the human; a grant cannot cover
   `merge`.

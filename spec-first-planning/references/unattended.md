@@ -113,9 +113,11 @@ and skip what the conversation has already answered:
    below). One working day is a sensible default.
 7. **Budget.** Ask for `wall_clock_min` (minutes from the start of the run),
    `max_dispatches` (how many agent dispatches the run may make: executors, repairs and
-   reviewers; this is the only real cost cap; when the user gives none, factory-conductor
-   derives it at `init` as tasks × 2 × (1 + `max_repairs_per_task`), one executor and one
-   reviewer per attempt, so leaving it out still bounds the run), `max_repairs_per_task`
+   reviewers, and verifiers under the evidence gate; this is the only real cost cap; when
+   the user gives none, factory-conductor derives it at `init` as tasks × 2 × (1 +
+   `max_repairs_per_task`), one executor and one reviewer per attempt, or tasks × 3 × (1 +
+   `max_repairs_per_task`) under the evidence gate, which adds a verifier, so leaving it out
+   still bounds the run), `max_repairs_per_task`
    (default 2) and
    `max_parallel` (tasks in flight at once, default 2). Tokens and dollars
    (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
@@ -142,7 +144,15 @@ and skip what the conversation has already answered:
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
-10. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
+10. **Runtime proof.** For each requirement: which verify-skill features prove it
+    (`[feature: ...]`), what an agent will drive and see when it works (`[proof: ...]`),
+    and whether it can run beside the others (`[parallel-safe]`) or after which ones
+    (`[after: ...]`). Name the verify skill in `## Verification`; if the app has none,
+    run verification-skill-forge first. Where Manifold has converged, its anchored
+    constraints supply the predicates: `forge.py coverage` lists each one with its proof.
+    A requirement with no observable predicate ("tests pass" is not one) leaves the
+    unattended plan: plan it attended.
+11. **Branch.** Which branches the grant covers (`branch_pattern`). Use a work-branch
     glob such as `factory/*`, and start the run on a branch that matches it, e.g.
     `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
     factory-conductor creates as its run branch.
@@ -251,7 +261,10 @@ Claude Code matches each `Bash(...)` rule against the literal command text, befo
 variable is expanded. A resumed agent therefore writes the conductor's absolute path out in
 each command, as factory-conductor's "Scheduled re-entry" section says, so give the rule that
 same absolute path. A rule written with `$SKILL_DIR` would never match, and every conductor
-call would be refused.
+call would be refused. Under the evidence gate the resumed agent also dispatches verifiers,
+which inherit this allowlist: add rules for the verify skill's Launch, Doctor and Cleanup
+commands and its `verify_evidence.py record`, or every verifier the resumed agent sends is
+refused and the task is parked once its redos run out (`evidence_redo_exhausted`).
 
 `expires_at` is RFC 3339 in UTC, in the future, and no more than 7 days after the grant
 is written. Set it from the user's answer, not from this example.

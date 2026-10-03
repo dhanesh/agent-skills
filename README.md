@@ -32,6 +32,7 @@ npx skills add dhanesh/agent-skills --skill starlight-handbook-kit
 npx skills add dhanesh/agent-skills --skill test-safety-net
 npx skills add dhanesh/agent-skills --skill tmux-agent-herdr-lite
 npx skills add dhanesh/agent-skills --skill mockstar-mock
+npx skills add dhanesh/agent-skills --skill verification-skill-forge
 npx skills add dhanesh/agent-skills --skill verifier-installer
 npx skills add dhanesh/agent-skills --skill world-model-ledger
 ```
@@ -62,7 +63,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Requirements / spec | `spec-first-planning` | covered |
 | Design / plan | `spec-first-planning`, `clean-code` (architecture), `ai-migration-operating-model` (migrations) | partly |
 | Build / execute | `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
-| Test / verify | `verifier-installer`, `test-safety-net`. Nothing checks built work against the spec's acceptance criteria. | partly |
+| Test / verify | `verifier-installer`, `test-safety-net`; `verification-skill-forge` generates a verify skill that drives the running app and records SHA-bound evidence, which `factory-conductor`'s evidence gate requires before a merge | partly |
 | Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
 | Release / deploy | none (`agent-ready-rails` only audits deploy safety) | missing |
 | Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
@@ -115,14 +116,28 @@ npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-
 
 You need macOS or Linux (the conductor does not start on Windows), Python 3.10 or newer, git
 2.31 or newer, an agent harness that can dispatch subagents (Claude Code can), and the `gh` CLI
-for the PR step.
+for the PR step (see "Without `gh`" below).
 
+**Start the factory.** Say "unattended" in so many words: `spec-first-planning` runs a light,
+attended pass by default and never escalates by itself, and only the unattended mode ends in
+a grant the conductor can run under. On a working branch (step 1), ask:
+
+```text
+Use spec-first-planning in unattended mode to plan: <your feature, in a sentence or two>.
+When the grant is written, hand the plan to factory-conductor and run it.
+```
+
+0. **(Evidence-gated runs only) Generate the verify skill first.** Before planning, ask
+   `verification-skill-forge` to "make a verify skill for this app" and let it finish its live
+   run. The plan's `[feature: …]` hints name entries in that skill's feature map, so the map
+   has to exist before the spec does.
 1. **Plan unattended and approve the grant.** On a working branch that is not your default
-   branch (for example `git switch -c factory/work`), ask `spec-first-planning` to plan the
-   feature unattended. It runs the full planning loop, asks every decision up front, writes the
-   plan as a `task-plan/v1` envelope, and shows you the grant: the action classes it covers,
-   the branch pattern, the expiry (7 days at most) and the budget. Say yes, and it writes the
-   grant. Push that working branch (`git push -u origin <branch>`): the PR targets it.
+   branch (for example `git switch -c factory/work`; any name but `factory/<plan-slug>`, which
+   the conductor creates as its run branch), give the prompt above. The skill runs the full
+   planning loop, asks every decision up front in one batched round, writes the plan as a
+   `task-plan/v1` envelope, and shows you the grant: the action classes it covers, the branch
+   pattern, the expiry (7 days at most) and the budget. Say yes, and it writes the grant. Push
+   that working branch (`git push -u origin <branch>`): the PR targets it.
 2. **`conductor init`.** `spec-first-planning` hands the plan to `factory-conductor`, or you
    say "run the plan". The conductor checks the plan, the grant and the branch, then runs
    `conductor init --plan <envelope>`, which creates the run branch `factory/<plan-slug>`.
@@ -140,12 +155,48 @@ before the push. The PR body and a `run-result/v1` envelope list each task's pro
 parked task with its reason or its open question. If proven tasks break each other once merged,
 nothing is pushed and the run says which checks failed.
 
+**Evidence-gated runs (optional, recommended).** Tests passing is not verification. Add
+`verification-skill-forge`, let it generate a `verify-<app>` skill for your app, and plan
+unattended with `[feature: …]` and `[proof: …]` on every requirement. The plan then carries a
+`verification` block and the conductor merges a task only after a verifier other than its
+writer has driven the running app and recorded evidence bound to that exact commit, for
+every feature the diff touches. Without the block the conductor runs as before and says
+`evidence_gate=off`.
+
+```bash
+npx skills add dhanesh/agent-skills --skill spec-first-planning --skill factory-conductor --skill verification-skill-forge
+```
+
 **What stays with you:** merging the PR; answering parked questions; renewing the grant if it
 lapses mid-run; and every merge, deploy, spend, external message, delete, or change to CI
 configuration, which no grant covers and which always asks you.
 
 **One limit:** re-entry runs on this machine and needs it on, with you logged in. It is not
 a hosted service.
+
+**Without `gh`.** The conductor pushes the run branch and then runs `gh pr create`. With no
+`gh` on the machine, `finish` prints `REMOTE: pending pr` and stops there: the run is complete
+and the branch is pushed. Open the PR yourself from `factory/<plan-slug>` against your working
+branch, using the run report the agent gives you (or `conductor trail` and the `run-result/v1`
+envelope it names) as the body. A grant whose `open_pr` gate is `ask` stops at the same point
+by design, so the agent asks you before any PR is opened.
+
+**Harness notes.**
+
+- **Keep the run state out of commits.** The spec, the plan envelope and the run's state live
+  under your working tree but are never committed, and the grant is listed in
+  `.git/info/exclude` so a commit cannot carry it. A harness hook that insists on a clean tree
+  (some "commit before you stop" hooks do) will keep asking; add `/.skill-contract/` and your
+  spec directory to `.git/info/exclude` rather than committing them, since a committed grant
+  covers nothing.
+- **Permission classifiers may refuse a step.** An auto-approval mode can decline something
+  the factory would otherwise do, such as running an installer that edits your agent's global
+  instructions. The agent then stops and tells you; it does not route around the refusal, and
+  you decide whether to allow it.
+- **Agent ids at spawn.** Harnesses that only assign a subagent's id when it starts (Claude
+  Code does) use `conductor start <task> --owner-later` and then `conductor owner <task>
+  --owner <id>`; the agent does this for you, and verify refuses a task until its owner is
+  recorded.
 
 ### What happens when you install a subset
 
@@ -233,6 +284,7 @@ The design and the gap analysis are in
 | [`tmux-agent-herdr-lite`](tmux-agent-herdr-lite/) | tmux cockpit with Zellij-like human ergonomics and Herdr-like agent supervision — menus, dashboard, pane navigation, blocked/working/done status detection, and jump-to-status navigation. |
 | [`mockstar-mock`](mockstar-mock/) | Generate a runnable mockstar mock server from a service's specs/docs — OpenAPI, Postman, HAR, curl, GraphQL, and prose docs (md/pdf/docx/url) — normalized into one Endpoint Inventory, full-fidelity (scenarios/handlers/webhooks), Tier 2-enhanced, boot-and-smoke verified, with a provenance + coverage report. |
 | [`repo2skill`](repo2skill/) | The skill-authoring skill: scaffolds a new gate-passing Agent Skill (standard frontmatter, PP-conformant SKILL.md skeleton, README, test stub, outcome-eval stub) and walks the semantic review checklist the mechanical gates can't judge. The source of this repo's vendored gate scripts, now shipped. |
+| [`verification-skill-forge`](verification-skill-forge/) | Generates and maintains a project-local `verify-<app>` skill that drives the real running app the way a user does and records SHA-bound evidence (tests passing is not verification): Launch/Doctor/Drive/Evidence/Cleanup filled from the repo, per-instance ports so owners run side by side, a feature map with source anchors, a linter that rejects placeholder skills, a Manifold join that names every anchored constraint with no observable proof, and a maintain guard that fails a map rewritten to match a bug. factory-conductor's evidence gate reads its records. |
 | [`verifier-installer`](verifier-installer/) | Action-taking sibling of `agent-ready-rails`: detects a repo's stack(s) with a deterministic collector, then installs the missing runnable-verifier loop — format/build/test commands plus a CI workflow that runs them — and proves the loop red→green before handing back. |
 | [`test-safety-net`](test-safety-net/) | Authors unit tests into a Python, node/TypeScript, Go or Rust codebase that has none, so an agent can change it safely — each stack end to end on the last five versions of its language, proven in CI. Ranks units by blast radius and churn, then writes characterization tests that pin current behaviour — each one proved able to FAIL before it is kept, so the suite is a real change-detector, not green noise — and proves every test under a per-stack runtime guard that fails it on any real I/O. Code that dials out (network/DB/filesystem in the constructor) is triaged, never netted with a mocked test; it becomes a ranked seam list for `clean-code`. Fills the loop `verifier-installer` installs. |
 | [`knowledge-gardener`](knowledge-gardener/) | Completes the knowledge trilogy (`feynman-walkthrough` creates, `okf-site-kit` publishes, this maintains): sweeps Open Knowledge Format bundles, reports per-subject FRESH/STALE/UNKNOWN drift against pinned source fingerprints, drives diff-aware refreshes and re-pins, and regenerates any published site. |
