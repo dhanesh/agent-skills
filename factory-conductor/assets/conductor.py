@@ -3391,10 +3391,12 @@ def _idle_min(st):
     return idle
 
 
-def _reentry_block(root):
-    """The newest grant's valid reentry block with the defaults filled in, or None.
-    Whether that grant covers the run at all is the gate's call, not this one's."""
-    path = CC.latest_grant(root)
+def _reentry_block(root, plan_rel):
+    """The valid reentry block, defaults filled in, of the grant that pins this run's plan
+    (`plan_rel`, root-relative), or None. Grants coexist (D9): another plan's grant, or a
+    release grant, never enables this run's re-entry, so there is no fallback to the
+    newest grant. Whether the grant covers the run at all is the gate's call, not this one's."""
+    path = CC.grant_for_subject(root, plan_rel)
     doc, err = CC.load_envelope(path) if path else (None, ["no grant"])
     pred = (doc or {}).get("predicate") if isinstance(doc, dict) else None
     pay = pred.get("payload") if isinstance(pred, dict) else None
@@ -3476,7 +3478,7 @@ def _watch_locked(root, d):
         sys.stderr.write("cannot read the run state in %s: %s\n" % (d, e))
         print("REENTRY: failed")
         return 2
-    block = _reentry_block(root)
+    block = _reentry_block(root, plan_subject(st))
     rc, last = gate(root, "local_reversible", plan_subject(st))
     covered, _ = gate_line(rc, last)  # the judgment every gate makes; nothing is logged
     worktrees = [t["worktree"] for t in st.tasks.values()
@@ -3588,7 +3590,7 @@ def cmd_reentry(args):
         st.log("reentry_timer", action="uninstall")
         print("REENTRY: uninstalled")
         return 0
-    block = _reentry_block(root)
+    block = _reentry_block(root, plan_subject(st))
     if block is None:
         print("REENTRY: disabled")
         return 3

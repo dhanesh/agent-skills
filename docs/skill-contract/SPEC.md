@@ -49,6 +49,7 @@ following optional field:
 | Field | Type | Description |
 |---|---|---|
 | `reentry` | object, optional | Consent to scheduled re-entry (factory-conductor): `agent_cmd` (argv list, `{prompt}` exactly once, `{root}` optional, no shell as `agent_cmd[0]`; a launcher such as `env` or `sudo` in front of a shell is refused too), `interval_min` 5–60 (default 10), `stall_min` 15–240 and ≥ 2 × interval (default 30), `max_reentries` 1–20 (default 5). The checker refuses a malformed block (C10). |
+| `release` | object, optional | Marks a release grant (release-conductor): exactly `{"version": "<semver>"}`, the version `MAJOR.MINOR.PATCH` with an optional `-pre` or `+build` suffix. A release grant's subjects pin the release recipe and the release intent file instead of a spec and a plan. The checker refuses any other shape (C10). |
 
 The action classes are:
 
@@ -58,6 +59,8 @@ The action classes are:
 | `local_reversible` | change tracked files, or commit on a local branch; hand an envelope to a local skill | local | `auto` |
 | `push_branch` | push a non-default branch | remote, reversible | `grant` |
 | `open_pr` | open or update a pull request | remote, reversible | `grant` |
+| `deploy_staging` | deploy to a staging environment (release-conductor) | remote, redeployable | `grant` |
+| `push_tag` | push a release tag whose CI cannot run on tags | remote, reversible | `grant` |
 | `merge` | merge to a default or protected branch | irreversible or externally visible | `ask` only |
 | `deploy` | release, publish, deploy | irreversible or externally visible | `ask` only |
 | `spend` | any paid API or resource beyond the budget | irreversible | `ask` only |
@@ -69,7 +72,16 @@ The action classes are:
   the grant invalid.
 - A grant MUST NOT cover `merge`, `deploy`, `spend`, `external_message` or `delete`: any gate
   other than `ask` on one of them makes the grant invalid, so those actions always ask the human
-  when they happen.
+  when they happen. The amendment for release-conductor makes `deploy_staging` and `push_tag`
+  grantable; a production deploy is still `deploy` and stays never grantable.
+- A tag push whose CI may run on tags is `deploy`, not `push_tag`. The checker reads every CI
+  configuration file at the HEAD being judged and answers ASK `ci-tag` unless each one is a
+  format whose no-tag default is known and provably excludes tags: a GitHub Actions workflow
+  whose top-level `on:` lists only events a tag push cannot fire (a `push` counts only with a
+  `branches` or `branches-ignore` filter and no `tags` or `tags-ignore`), a composite action,
+  or a CircleCI config with no `tags` filter. Every other CI system counts as tag-triggered, and
+  so does anything the scan cannot read. When git cannot list or read the tree, the checker
+  answers ASK `ci-tag` too.
 - A grant is never signed. A payload carrying `require_signature` is invalid, and a `.sig` file
   beside a grant changes nothing.
 - A grant MUST pin at least 2 distinct subjects: the spec and the task-plan envelope it was
@@ -77,6 +89,10 @@ The action classes are:
 - A grant MUST carry exactly one `grant-accepted` assertion whose `assertedBy` names a human; a
   grant attributed to a skill is invalid.
 - A receiver MUST treat a revoked, superseded, expired or stale grant as not covering anything.
+- Grants coexist and are selected by subject: a factory grant pins a spec and a plan, a release
+  grant a recipe and an intent file. `check-grant --subject X` judges the newest grant that pins
+  `X` and that no revision supersedes; with no `--subject` it judges the newest such grant of
+  all. When grants exist but none pins `X`, the answer is ASK `subject`.
 - A grant is one user's acceptance and MUST NOT be committed; a receiver MUST treat a tracked
   grant as not covering anything. Committed, one person's yes would cover every clone. Tracked
   means tracked by whichever repository holds the grant file — a nested repository or submodule
@@ -103,11 +119,11 @@ These floors live in the checker, and no grant can lower them:
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
 name, and MUST NOT force-push.
 
-A push or pull request whose commits add or change CI configuration (`.github/workflows/`,
+A push, pull request, tag push or staging deploy whose commits add or change CI configuration (`.github/workflows/`,
 `.github/actions/`, `.gitlab-ci.yml`, `.circleci/`, `azure-pipelines.yml`, `Jenkinsfile`,
 `.buildkite/`, `bitbucket-pipelines.yml`, `.drone.yml`, `.travis.yml`) runs that configuration
-with the repository's secrets; it is not `push_branch` or `open_pr`: it is `deploy`, and the
-checker answers ASK `ci-config`. The commits compared are those on HEAD since its merge base with
+with the repository's secrets; it is not `push_branch`, `open_pr`, `push_tag` or
+`deploy_staging`: it is `deploy`, and the checker answers ASK `ci-config`. The commits compared are those on HEAD since its merge base with
 each default branch (every commit on HEAD when no default branch exists); when git cannot say, the
 checker answers ASK `ci-config` too.
 
@@ -116,19 +132,26 @@ still run on a granted push. The repository owner controls those; the grant does
 
 A revocation is a revision (`wasRevisionOf` names the grant) whose payload has `revoked: true`
 and whose `assertions` list is empty: it only tightens, so anyone may write it
-(`contract_check.py revoke-grant`). A grant is superseded when any grant envelope names it in
+(`contract_check.py revoke-grant`). `revoke-grant` with no id revokes every live grant, so one
+command stops every run in the repository; `revoke-grant --id <id>` revokes one. A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
 superseded, not expired, not living past the 7-day floor, subjects not stale, the path given as
-`--subject` (when there is one) pinned among the grant's subjects, git can report the
+`--subject` (when there is one) pinned among the grant's subjects, the path given as
+`--worktree` (when there is one) a worktree of the same repository (`worktree`), git can report the
 branch (`branch-unknown`), HEAD not detached, not on a default branch, the current git branch
 matches `branch_pattern`, the grant file not tracked by git, the class's gate is `auto` or
-`grant`, and, for `push_branch` and `open_pr`, no commit since the default branch touching CI
-configuration. The git checks are skipped only when no `.git` exists in `root` or any parent. An
-`ASK` names the first failing check as its reason (`revoked`, `superseded`, `expired`, `lifetime`,
-`stale`, `subject`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask`
-or `ci-config`). The conformance vectors run outside git, so `tracked` and `ci-config` are proven by
-the reference checker's unit and end-to-end tests instead. It prints
+`grant`, for `push_tag`, no CI configuration that may run on tags (`ci-tag`), and, for
+`push_branch`, `open_pr`, `push_tag` and `deploy_staging`, no commit since the default branch
+touching CI configuration. With `--worktree`, the branch, default-branch, `ci-tag` and `ci-config`
+checks judge the worktree, while the grant is still found, and the tracked probe still runs, at
+`root`; a caller cannot name a branch any other way. The git checks other than `ci-tag` are skipped
+only when no `.git` exists in the judged directory or any parent. An `ASK` names the first failing
+check as its reason (`revoked`, `superseded`, `expired`, `lifetime`, `stale`, `subject`,
+`worktree`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask`,
+`ci-tag` or `ci-config`). The conformance vectors run outside git, so `tracked`, `worktree` and `ci-config` are proven
+by the reference checker's unit and end-to-end tests instead, and a `push_tag` vector answers
+`ci-tag`. It prints
 `GRANT: COVERED id=… class=… gate=auto|grant` on success and exits 0 `COVERED`, 3 `ASK` or `NONE`, 2 `INVALID`, 1 on a usage error; a caller proceeds
 only on exit 0.
 
@@ -136,9 +159,10 @@ only on exit 0.
 agent with a shell on the same machine can forge a grant. Signing would not fix that, because the
 same agent can edit whatever list of trusted keys the checker reads, and even an `sk-` "hardware"
 key can be emulated in software. The same limit applies to transcript roles. That is why a grant
-covers only reversible actions (`read_only`, `local_reversible`, `push_branch`, `open_pr`) and why
-the floors live in the checker rather than in the grant: an unattended run goes as far as an open
-pull request, and a human merges.
+covers only reversible actions (`read_only`, `local_reversible`, `push_branch`, `open_pr`, and
+for a release `deploy_staging` and a `push_tag` that CI cannot turn into a deploy) and why the
+floors live in the checker rather than in the grant: an unattended run goes as far as an open
+pull request or a staging deploy, and a human merges and deploys to production.
 
 **The run result.** A run result is an envelope of kind
 `https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1`. `factory-conductor`
@@ -158,6 +182,11 @@ under commandment 7 the checker reads each one as `CLAIMED` until a receiver re-
 `PROVEN` once it has, or once CI reports the check on the pushed run branch (an assertion that
 carries a `run_url`).
 The payload schema is `factory-conductor/assets/schemas/run-result.v1.json`.
+
+**The release result.** A release result is an envelope of kind
+`https://github.com/dhanesh/agent-skills/skill-contract/release-result/v1`, which
+`release-conductor` produces when a release reaches an end state. This section registers the kind
+name; its payload schema ships with release-conductor.
 
 **The `## Contract` block** is a fenced block whose info string is `json skill-contract`:
 

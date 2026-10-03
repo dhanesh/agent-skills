@@ -434,6 +434,22 @@ def grant_cases():
         ("c10", "valid", "case-folded-default-branch-asks",
          grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
                       branch="Main")),
+        ("c10", "valid", "deploy-staging-covered",
+         grant_vector(grant(policy={"deploy_staging": "grant"}), "deploy_staging", "COVERED")),
+        # A tag push is deploy unless git proves the CI cannot run on tags; with no git to
+        # ask (as here), the checker fails closed.
+        ("c10", "valid", "push-tag-unprovable-asks",
+         grant_vector(grant(policy={"push_tag": "grant"}), "push_tag", "ASK", "ci-tag")),
+        ("c10", "valid", "release-grant-covered",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "release", {"version": "1.2.0-rc.1"}), g), "local_reversible", "COVERED")),
+        ("c10", "invalid", "deploy-staging-auto",
+         grant_vector(grant(policy={"deploy_staging": "auto"}), "deploy_staging", "INVALID")),
+        ("c10", "invalid", "push-tag-auto",
+         grant_vector(grant(policy={"push_tag": "auto"}), "push_tag", "INVALID")),
+        ("c10", "invalid", "release-version-not-semver",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "release", {"version": "v1.2"}), g), "local_reversible", "INVALID")),
         ("c10", "invalid", "one-subject",
          grant_vector(mutate(lambda s: s.__setitem__("subject", s["subject"][:1]), g),
                       "local_reversible", "INVALID")),

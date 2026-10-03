@@ -10,14 +10,18 @@ byte-identical into their assets/ (`make contract-vendor`).
                                             [--rerun] [--json]                 C3-C7, C9
     contract_check.py discover --kind URI [--from SKILL_DIR] [--json]          C8
     contract_check.py check-grant [FILE] --root DIR --action CLASS
-                                         [--subject PATH] [--json]             C10
-    contract_check.py revoke-grant [ID] --root DIR                             C10
+                                         [--subject PATH] [--worktree PATH]
+                                         [--json]                              C10
+    contract_check.py revoke-grant [--id ID] --root DIR                        C10
 
 Exit 0 pass, 2 a commandment is violated, 1 usage or internal error. The last
 line is always CONTRACT_RESULT: PASS or CONTRACT_RESULT: FAIL (C<n>, ...).
 
 check-grant exits 0 COVERED, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is GRANT: ...
-A caller proceeds only on exit 0. revoke-grant prints REVOKED: <path> and exits 0.
+A caller proceeds only on exit 0. --subject selects the newest live grant that pins that
+path. revoke-grant with no id revokes every live grant (the kill switch) and prints one
+REVOKED: <id> line each; with --id (or a positional ID) it revokes that grant and prints
+REVOKED: <path>. It exits 0, or 1 when there is nothing to revoke.
 """
 import sys
 
@@ -58,8 +62,11 @@ SKILL_DIR_RE = re.compile(r"^\{skill_dir:(?P<name>[a-z0-9]+(?:-[a-z0-9]+)*)\}")
 PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
 BARE_PYTHON_RE = re.compile(r"^(?:python[0-9.]*|py)(?:\.exe)?$", re.IGNORECASE)
 GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1"
-ACTION_CLASSES = ("read_only", "local_reversible", "push_branch", "open_pr", "merge",
-                  "deploy", "spend", "external_message", "delete")
+# A8 as amended for release-conductor: deploy_staging and push_tag are grantable (at most
+# `grant`); production `deploy` stays ask-only, and a tag push whose CI may run on tags is
+# `deploy`, never `push_tag` (check_grant answers ASK ci-tag).
+ACTION_CLASSES = ("read_only", "local_reversible", "push_branch", "open_pr", "deploy_staging",
+                  "push_tag", "merge", "deploy", "spend", "external_message", "delete")
 LOCAL_CLASSES = frozenset({"read_only", "local_reversible"})
 GATES = ("auto", "grant", "ask")
 # Checker-held floors (A7): no grant can lower these.
@@ -68,6 +75,7 @@ IRREVERSIBLE_CLASSES = frozenset({"merge", "deploy", "spend", "external_message"
 MAX_GRANT_LIFETIME = timedelta(days=7)
 FALLBACK_DEFAULT_BRANCHES = frozenset({"main", "master"})
 ENVELOPE_MAX_BYTES = 1024 * 1024
+SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?\Z")
 DETACHED = "HEAD"  # what current_branch reports for a detached HEAD
 
 
@@ -699,12 +707,46 @@ def _reentry_cmd_token(s):
     return os.path.splitext(os.path.basename(s))[0].lower()
 
 
+def argv_problems(argv, allowed_tokens):
+    """Problems with one argv list; [] when it is fine. Shared by re-entry (agent_cmd) and
+    release-conductor recipes, so both refuse the same things:
+
+      - anything but a non-empty list of non-empty strings (a string would be a shell line);
+      - a NUL byte, which exec cannot carry;
+      - a shell as argv[0], compared by basename with any extension stripped, since a shell
+        turns the argv back into an evaluated string;
+      - a launcher (env, sudo, ...) as argv[0] with a shell anywhere after it;
+      - a `{token}` that is not a whole element named in `allowed_tokens`.
+
+    Messages carry no field name: the caller prefixes its own."""
+    if not (isinstance(argv, list) and argv and all(isinstance(a, str) and a for a in argv)):
+        return ["must be a non-empty list of non-empty strings"]
+    out = []
+    if any("\x00" in a for a in argv):
+        out.append("must not contain a NUL byte")
+    head = _reentry_cmd_token(argv[0])
+    if head in SHELLS:
+        out.append("must not start with a shell (%s)" % argv[0])
+    elif head in LAUNCHERS:
+        wrapped = next((a for a in argv[1:] if _reentry_cmd_token(a) in SHELLS), None)
+        if wrapped is not None:
+            out.append("must not launch a shell through a launcher (%s)" % wrapped)
+    allowed = sorted(allowed_tokens)
+    bad = [t for a in argv for t in _REENTRY_TOKEN.findall(a)
+           if not (a == t and t in allowed_tokens)]
+    if bad:
+        names = (" and ".join([", ".join(allowed[:-1]), allowed[-1]]) if len(allowed) > 1
+                 else allowed[0] if allowed else "no")
+        out.append("may carry only whole %s tokens: %s" % (names, ", ".join(sorted(set(bad)))))
+    return out
+
+
 def reentry_problems(block):
     """Problems with an autonomy grant's optional payload.reentry block; [] when valid.
 
     agent_cmd is an argv list, never a shell (a shell would turn the argv back into an
     evaluated string) and never a launcher (env, sudo, ...) wrapping one, with {prompt}
-    exactly once and {root} optional."""
+    exactly once and {root} optional (argv_problems holds the shared refusals)."""
     if not isinstance(block, dict):
         return ["must be an object"]
     out = []
@@ -712,25 +754,11 @@ def reentry_problems(block):
     if unknown:
         out.append("unknown key(s): %s" % ", ".join(sorted(unknown)))
     cmd = block.get("agent_cmd")
-    if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) and a for a in cmd)):
-        out.append("agent_cmd must be a non-empty list of non-empty strings")
-    else:
-        if any("\x00" in a for a in cmd):
-            out.append("agent_cmd must not contain a NUL byte")
-        head = _reentry_cmd_token(cmd[0])
-        if head in SHELLS:
-            out.append("agent_cmd must not start with a shell (%s)" % cmd[0])
-        elif head in LAUNCHERS:
-            wrapped = next((a for a in cmd[1:] if _reentry_cmd_token(a) in SHELLS), None)
-            if wrapped is not None:
-                out.append("agent_cmd must not launch a shell through a launcher (%s)" % wrapped)
-        if cmd.count("{prompt}") != 1:
-            out.append("agent_cmd must contain the {prompt} token exactly once")
-        bad = [t for a in cmd for t in _REENTRY_TOKEN.findall(a)
-               if not (a == t and t in ("{prompt}", "{root}"))]
-        if bad:
-            out.append("agent_cmd may carry only whole {prompt} and {root} tokens: %s"
-                       % ", ".join(sorted(set(bad))))
+    problems = argv_problems(cmd, {"{prompt}", "{root}"})
+    out.extend("agent_cmd " + v for v in problems)
+    shape_ok = not problems or not problems[0].startswith("must be a non-empty list")
+    if shape_ok and cmd.count("{prompt}") != 1:
+        out.append("agent_cmd must contain the {prompt} token exactly once")
     vals = dict(REENTRY_DEFAULTS)
     bad_keys = set()
     for key, (lo, hi) in REENTRY_RANGES.items():
@@ -772,6 +800,11 @@ def grant_violations(st):
         out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
     if "reentry" in p:
         out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
+    if "release" in p:  # a release grant (release-conductor) pins the version it releases
+        rel = p["release"]
+        if not (isinstance(rel, dict) and set(rel) == {"version"}
+                and isinstance(rel.get("version"), str) and SEMVER_RE.match(rel["version"])):
+            out.append("payload.release must be {\"version\": <semver>} (release.version)")
     try:
         expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
                               else "")
@@ -858,6 +891,33 @@ def latest_grant(root):
     heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
              for p, st in _grant_envelopes(root) if st["predicate"]["id"] not in revised]
     return max(heads)[2] if heads else None
+
+
+def grant_for_subject(root, subject):
+    """The newest valid-shaped grant that no revision supersedes and that pins `subject`
+    (a root-relative path), or None. Grants coexist (a factory grant pins its spec and
+    plan, a release grant its recipe and intent), so each caller names what it acts for.
+    A revoked revision pins the same subjects, so a revoked grant is found as revoked and
+    an older grant for the same subject never takes its place."""
+    key = _subject_key(subject)
+    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
+    heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
+             for p, st in _grant_envelopes(root)
+             if st["predicate"]["id"] not in revised
+             and key in {_subject_key(s.get("name", "")) for s in st.get("subject") or []}]
+    return max(heads)[2] if heads else None
+
+
+def revoke_all(root, now=None):
+    """Revoke every live grant under root (the kill switch); returns the revoked ids.
+    Live means not superseded and not already a revocation. [] when nothing is live."""
+    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
+    ids = sorted(st["predicate"]["id"] for _, st in _grant_envelopes(root)
+                 if st["predicate"]["id"] not in revised
+                 and not (st["predicate"].get("payload") or {}).get("revoked"))
+    for gid in ids:
+        revoke_grant(root, gid, now=now)
+    return ids
 
 
 GIT_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
@@ -984,6 +1044,168 @@ def is_ci_config(rel):
     return rel.startswith(CI_CONFIG_DIRS) or rel.rsplit("/", 1)[-1] in CI_CONFIG_FILES
 
 
+# A tag push runs every CI config whose triggers include tags, and a CI that deploys on tag
+# makes the tag push the production deploy. Detection fails closed: a CI config counts as
+# tag-triggered unless it is a format whose no-tag default is known AND the scan proves its
+# triggers exclude tags. A false positive costs one extra ask; a false negative would let a
+# grant cover a production deploy. Regex flags go in flags=, never mid-pattern (3.11+).
+#
+# GitHub Actions events a tag push cannot fire. `push` is absent: an unfiltered push, or one
+# filtered only by paths (path filters are not evaluated for tags), runs on tags. Any event
+# not listed (create, release, workflow_run, check_suite, status, ...) counts as tag-triggered.
+GH_TAG_FREE_EVENTS = frozenset({
+    "pull_request", "pull_request_target", "pull_request_review", "pull_request_review_comment",
+    "workflow_dispatch", "workflow_call", "schedule", "issues", "issue_comment", "label",
+    "milestone", "discussion", "discussion_comment", "merge_group", "page_build", "project",
+    "project_card", "project_column", "public", "watch", "fork", "gollum",
+    "branch_protection_rule", "repository_dispatch", "delete"})
+GH_ON_KEY = re.compile(r"""^(?:on|"on"|'on')[ ]*:(?P<val>.*)\Z""")
+GH_MAP_KEY = re.compile(r"""^(?P<key>[A-Za-z_][A-Za-z0-9_-]*|"[^"]*"|'[^']*')[ ]*:(?P<val>.*)\Z""")
+GH_SEQ_ITEM = re.compile(r"^-[ ]+(?P<val>.*)\Z")
+GH_EVENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+CIRCLECI_TAGS = re.compile(r"^[ \t-]*tags[ \t]*:", flags=re.M)
+
+
+def _yaml_lines(text):
+    """[(indent, content)] for each line that is not blank or a whole-line comment, with a
+    trailing ` #` comment cut. None when a line indents with a tab (YAML forbids it, so the
+    file cannot be read with confidence)."""
+    out = []
+    for raw in text.split("\n"):  # YAML 1.2 breaks lines only at LF and CR
+        raw = raw.rstrip("\r")
+        body = raw.lstrip(" ")
+        if body.startswith("\t"):
+            return None
+        if not body.strip() or body.startswith("#"):
+            continue
+        cut = re.search(r"[ \t]#", body)
+        out.append((len(raw) - len(body), (body[:cut.start()] if cut else body).rstrip()))
+    return out
+
+
+def _gh_inline_events(val):
+    """Event names from an inline `on:` value (`push`, `[push, pull_request]`), or None
+    when the value has any other shape (a flow mapping, an anchor, ...)."""
+    v = val.strip()
+    if v.startswith("[") and v.endswith("]"):
+        names = [n.strip().strip("\"'") for n in v[1:-1].split(",")]
+        names = [n for n in names if n]
+    else:
+        names = [v.strip("\"'")]
+    return names if all(GH_EVENT_NAME.match(n) for n in names) else None
+
+
+def _gh_block(lines, i):
+    """The lines indented deeper than lines[i], which follow it."""
+    j = i + 1
+    while j < len(lines) and lines[j][0] > lines[i][0]:
+        j += 1
+    return lines[i + 1:j]
+
+
+def _gh_push_tag_free(children):
+    """True only when a block-form `push:` names branches or branches-ignore and neither
+    tags nor tags-ignore: GitHub then never runs it for a tag."""
+    if not children:
+        return False  # `push:` with no filters runs on every push, tags included
+    ind = children[0][0]
+    keys = set()
+    for n, c in children:
+        if n < ind:
+            return False
+        if n == ind:
+            m = GH_MAP_KEY.match(c)
+            if not m:
+                return False
+            keys.add(m.group("key").strip("\"'"))
+    return bool(keys & {"branches", "branches-ignore"}) and not keys & {"tags", "tags-ignore"}
+
+
+def _gh_workflow_tag_triggered(text):
+    """True unless the workflow's top-level `on:` provably excludes tag pushes."""
+    lines = _yaml_lines(text)
+    if lines is None:
+        return True
+    tops = [i for i, (n, c) in enumerate(lines) if n == 0 and GH_ON_KEY.match(c)]
+    if len(tops) != 1:
+        return True  # no trigger key, or more than one: cannot read it
+    i = tops[0]
+    val = GH_ON_KEY.match(lines[i][1]).group("val").strip()
+    block = _gh_block(lines, i)
+    if val:
+        events = _gh_inline_events(val)
+        return block != [] or events is None or any(e not in GH_TAG_FREE_EVENTS for e in events)
+    if not block:
+        return True
+    ind = block[0][0]
+    k = 0
+    while k < len(block):
+        n, c = block[k]
+        if n != ind:
+            return True  # an indentation the scan does not understand
+        seq = GH_SEQ_ITEM.match(c)
+        m = GH_MAP_KEY.match(c)
+        children = _gh_block(block, k)
+        if seq:
+            events = _gh_inline_events(seq.group("val"))
+            if children or events is None or any(e not in GH_TAG_FREE_EVENTS for e in events):
+                return True
+        elif m:
+            event, inline = m.group("key").strip("\"'"), m.group("val").strip()
+            if event == "push":
+                if inline or not _gh_push_tag_free(children):
+                    return True
+            elif event not in GH_TAG_FREE_EVENTS:
+                return True
+        else:
+            return True
+        k += 1 + len(children)
+    return False
+
+
+def _ci_file_tag_triggered(path, text):
+    """True unless `path` is a format with a known no-tag default and `text` proves it."""
+    if path.startswith(".github/actions/"):
+        return False  # composite and local actions have no triggers of their own
+    if path.startswith(".github/workflows/"):
+        if not path.endswith((".yml", ".yaml")):
+            return False  # GitHub reads only .yml and .yaml workflow files
+        return _gh_workflow_tag_triggered(text)
+    if path.startswith(".circleci/"):
+        return bool(CIRCLECI_TAGS.search(text))  # CircleCI builds no tag without a tags filter
+    return True  # GitLab (jobs run on tags unless ruled out), Jenkins, Buildkite, Drone, ...
+
+
+def ci_tag_triggers(root, rev="HEAD"):
+    """True when any CI config file at `rev` may run on a tag push, False when every one is
+    proven not to, None when git cannot list or read the tree (callers fail closed)."""
+    r = _git(root, "ls-tree", "-r", "-z", "--full-tree", "--name-only", rev)
+    if r is None or r.returncode != 0:
+        return None
+    for path in r.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        if path and is_ci_config(path):
+            b = _git(root, "cat-file", "blob", "%s:%s" % (rev, path))
+            if b is None or b.returncode != 0:
+                return None
+            if _ci_file_tag_triggered(path, b.stdout.decode("utf-8", "replace")):
+                return True
+    return False
+
+
+def worktree_ok(root, worktree):
+    """True when `worktree` is a git work tree of the same repository as `root` (the same
+    git common dir), so a caller cannot name an unrelated repository's branch."""
+    def common(d):
+        if not os.path.isdir(d):
+            return None
+        r = _git(d, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if r is None or r.returncode != 0 or not r.stdout.strip():
+            return None
+        return os.path.realpath(r.stdout.strip().decode("utf-8", "surrogateescape"))
+    a, b = common(root), common(worktree)
+    return a is not None and a == b
+
+
 def changed_since_default(root, default_branches):
     """Paths the commits on HEAD change relative to the default branch, or None when git
     cannot say. Each local or origin ref named like a default branch contributes the diff
@@ -1025,11 +1247,18 @@ def _subject_key(name):
 
 
 def check_grant(root, action, path=None, now=None, branch=None, default_branches=None,
-                subject=None):
+                subject=None, worktree=None):
     """Commandment 10: does a grant cover `action`? First failing check wins.
 
     subject: an optional path (relative to root, or absolute) that must be one of the
     grant's subjects, e.g. the plan envelope about to be handed off under the grant.
+    Without `path`, it also selects the grant: the newest live grant that pins it
+    (grant_for_subject). When no grant pins it, the newest grant is loaded only so the
+    answer is ASK `subject`: that grant cannot cover, since it does not pin the subject.
+
+    worktree: an optional git worktree of the same repository whose branch, default-branch
+    and CI checks are judged instead of root's; grants are still found, and the
+    tracked-grant probe still runs, at root. Any other path answers ASK `worktree`.
 
     default_branches: the repo's default branch names; None detects them
     (origin/HEAD, else main and master).
@@ -1039,7 +1268,12 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
     """
     rep = {"status": "NONE", "id": None, "reason": None, "gate": None,
            "path": None, "violations": []}
-    path = path or latest_grant(root)
+    rel = None
+    if subject is not None:
+        rel = (os.path.relpath(os.path.realpath(subject), os.path.realpath(root))
+               if os.path.isabs(subject) else subject)
+    if not path:
+        path = (grant_for_subject(root, rel) if rel is not None else None) or latest_grant(root)
     if path is None:
         rep["reason"] = "no-grant"
         return rep
@@ -1070,13 +1304,14 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
         return ask("lifetime")
     if stale_names(root, st["subject"]):
         return ask("stale")
-    if subject is not None:
-        rel = (os.path.relpath(os.path.realpath(subject), os.path.realpath(root))
-               if os.path.isabs(subject) else subject)
+    if rel is not None:
         if _subject_key(rel) not in {_subject_key(s["name"]) for s in st["subject"]}:
             return ask("subject")  # the grant was approved for other files
-    in_git = in_git_work_tree(root)
-    branch = branch if branch is not None else current_branch(root)
+    if worktree is not None and not worktree_ok(root, worktree):
+        return ask("worktree")  # not a worktree of this repository: its branch proves nothing
+    probe = worktree if worktree is not None else root
+    in_git = in_git_work_tree(probe)
+    branch = branch if branch is not None else current_branch(probe)
     if branch is None and in_git:
         return ask("branch-unknown")  # inside git but git cannot answer: fail closed
     if branch == DETACHED:
@@ -1085,7 +1320,7 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
         return ask("detached")
     if branch is not None:
         if default_branches is None:
-            default_branches = detect_default_branches(root)
+            default_branches = detect_default_branches(probe)
         if _branch_key(branch) in {_branch_key(b) for b in default_branches}:
             return ask("default-branch")
         if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
@@ -1096,10 +1331,14 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
     rep["gate"] = gate
     if gate not in ("auto", "grant"):
         return ask("gate-ask")
-    if in_git and action in ("push_branch", "open_pr"):
+    if action == "push_tag":
+        tagged = ci_tag_triggers(probe, "HEAD")
+        if tagged is None or tagged:
+            return ask("ci-tag")  # pushing the tag would deploy: deploy class, never granted
+    if in_git and action in ("push_branch", "open_pr", "push_tag", "deploy_staging"):
         if default_branches is None:
-            default_branches = detect_default_branches(root)
-        changed = changed_since_default(root, default_branches)
+            default_branches = detect_default_branches(probe)
+        changed = changed_since_default(probe, default_branches)
         if changed is None or any(is_ci_config(c) for c in changed):
             return ask("ci-config")  # CI runs with the repo's secrets: that push is deploy
     rep["status"] = "COVERED"
@@ -1167,10 +1406,14 @@ def build_parser():
     p.add_argument("file", nargs="?")
     p.add_argument("--root", required=True)
     p.add_argument("--action", required=True)
-    p.add_argument("--subject", help="a path the grant must pin (e.g. the plan being handed off)")
+    p.add_argument("--subject", help="a path the grant must pin (e.g. the plan being handed"
+                   " off); selects the newest live grant that pins it")
+    p.add_argument("--worktree", help="a worktree of the same repository whose branch is judged")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("revoke-grant", help="commandment 10: revoke the newest (or named) grant")
-    p.add_argument("id", nargs="?")
+    p = sub.add_parser("revoke-grant",
+                       help="commandment 10: revoke every live grant, or the one named by --id")
+    p.add_argument("id", nargs="?", help="same as --id")
+    p.add_argument("--id", dest="id_opt", metavar="ID")
     p.add_argument("--root", required=True)
     return ap
 
@@ -1220,7 +1463,8 @@ def main(argv=None):
         if a.action not in ACTION_CLASSES:
             print("usage: --action must be one of %s" % ", ".join(ACTION_CLASSES), file=sys.stderr)
             return 1
-        rep = check_grant(a.root, a.action, path=a.file, subject=a.subject)
+        rep = check_grant(a.root, a.action, path=a.file, subject=a.subject,
+                          worktree=a.worktree)
         if a.json:
             print(json.dumps(rep, sort_keys=True))
         for v in rep["violations"]:
@@ -1237,8 +1481,19 @@ def main(argv=None):
         print("GRANT: ASK id=%s reason=%s" % (rep["id"], rep["reason"]))
         return 3
     if a.cmd == "revoke-grant":
+        if a.id is not None and a.id_opt is not None and a.id != a.id_opt:
+            print("usage: give one grant id, not two", file=sys.stderr)
+            return 1
+        gid = a.id_opt if a.id_opt is not None else a.id
         try:
-            print("REVOKED: %s" % revoke_grant(a.root, a.id))
+            if gid is not None:
+                print("REVOKED: %s" % revoke_grant(a.root, gid))
+                return 0
+            ids = revoke_all(a.root)
+            if not ids:
+                raise ValueError("no live grant to revoke under %s" % envelope_dir(a.root))
+            for i in ids:
+                print("REVOKED: %s" % i)
             return 0
         except (ValueError, OSError) as exc:
             print("ERROR: %s" % exc, file=sys.stderr)
