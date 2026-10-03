@@ -140,7 +140,11 @@ and skip what the conversation has already answered:
    Claude Code), the plan's verify programs, git and file edits (see the example below).
    Warn against any permission-bypass flag, because the resumed agent acts with the
    user's own permissions and no one watches it. Without an answer, no block is written and nothing
-   re-enters.
+   re-enters. When the project has a `.release/recipe.json` (release-conductor),
+   `write_grant.py` also refuses an `agent_cmd` allowlist that would let the resumed
+   agent run the recipe's `deploy_prod` or `rollback` unprompted — never put those
+   commands, or a glob wide enough to reach them, in this allowlist; a release always
+   goes through `release prep`'s own grant, with the human present (design spec D10).
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
@@ -156,6 +160,19 @@ and skip what the conversation has already answered:
     glob such as `factory/*`, and start the run on a branch that matches it, e.g.
     `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
     factory-conductor creates as its run branch.
+12. **Release defaults (optional, only when the project uses release-conductor).** Ask:
+    "When this work is released, what bump level — patch, minor or major? May the run
+    grant staging deploys? May it grant tag pushes?" The answer becomes
+    `answers.release_defaults`: exactly `{"bump": "patch"|"minor"|"major",
+    "grant_staging": bool, "grant_tag": bool}`. This interview never writes the release
+    grant itself — only `release prep` does that, with the human present (design spec
+    D10), because production and the recipe it reads may both be unknown or stale by
+    the time the run reaches release. Its subjects are the recipe and a release intent
+    file, not this spec and plan. To apply a recorded default at `release prep`, pass
+    `--bump <bump>` and, when `grant_staging` or `grant_tag` is false, a `--policy-file`
+    declining the matching class (`deploy_staging` for staging, `push_tag` for tag
+    pushes — `_load_policy` in release.py grants every class by default and a policy
+    file may only decline, never widen).
 
 ### Action classes and their gates
 
@@ -210,9 +227,10 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
 
 ## answers.json
 
-`write_grant.py` accepts exactly these 8 keys and refuses any other:
+`write_grant.py` accepts exactly these 9 keys and refuses any other:
 `branch_pattern`, `gate_policy` and `expires_at` are required, and `budget`,
-`stop_on`, `defaults`, `system_one` and `reentry` are optional. A filled example:
+`stop_on`, `defaults`, `system_one`, `reentry` and `release_defaults` are optional. A
+filled example:
 
 ```json
 {
@@ -250,9 +268,17 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
     "agent_cmd": ["/Users/you/.local/bin/claude", "-p", "{prompt}", "--allowedTools",
                   "Read,Edit,Write,Glob,Grep,Agent,Bash(python3 /Users/you/.claude/skills/factory-conductor/assets/conductor.py *),Bash(git *),Bash(python3 -m pytest *)"],
     "interval_min": 10
+  },
+  "release_defaults": {
+    "bump": "patch",
+    "grant_staging": true,
+    "grant_tag": false
   }
 }
 ```
+
+`release_defaults` is omitted on a project that does not use release-conductor. When it is
+given, it is exactly `bump`, `grant_staging` and `grant_tag` — no subset, no extra key.
 
 In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
 the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's

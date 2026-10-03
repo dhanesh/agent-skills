@@ -18,7 +18,7 @@ Usage:
 path (after following symlinks) must resolve inside --root, or the run is refused — a
 symlink pointing out of the root does not count as "inside".
 
-answers.json keys (only these 8 are recognised; any other key is refused):
+answers.json keys (only these 9 are recognised; any other key is refused):
     branch_pattern (str, required)   -- a glob, e.g. "factory/*"
     gate_policy    (dict, required)  -- action class -> "auto" | "grant" | "ask"
     expires_at     (str, required)   -- RFC 3339 UTC, in the future, at most 7 days after
@@ -31,13 +31,26 @@ answers.json keys (only these 8 are recognised; any other key is refused):
                                         contract_check.reentry_problems (agent_cmd, plus
                                         contract_check.REENTRY_DEFAULTS' interval_min,
                                         stall_min, max_reentries). Absent means no block
-                                        is written.
+                                        is written. When a .release/recipe.json exists
+                                        under --root, agent_cmd's --allowedTools (or a
+                                        permission-bypass flag) is refused when it would
+                                        let an unattended agent run the recipe's
+                                        deploy_prod or rollback (design spec D10): the
+                                        release grant itself is written only by
+                                        `release prep`, with the human present.
+    release_defaults (dict, optional) -- exactly {"bump": "patch"|"minor"|"major",
+                                        "grant_staging": bool, "grant_tag": bool}; the
+                                        unattended interview's release defaults (design
+                                        spec D10). Written into the grant payload as
+                                        `release_defaults` for a later `release prep` to
+                                        read; absent means no key is written.
 
 Exit 0: prints "GRANT: <path>" as its last line. When <root>/.git is a directory, it first
     appends GRANT_EXCLUDE to <root>/.git/info/exclude (once) and says so: a grant is one
     person's acceptance, and check-grant treats a tracked grant as covering nothing.
 Exit 1: refused; prints "REFUSED: <reason>" (a GrantRefused: the spec, the plan, the
-    answers, or the resulting statement failed a check).
+    answers, the re-entry allowlist's reach into production, or the resulting statement
+    failed a check).
 Exit 2: usage error (an unreadable or malformed --answers file, or one missing a required
     key; a bad CLI invocation).
 
@@ -47,8 +60,10 @@ floor on callers that only want GrantRefused or the constants.
 """
 
 import argparse
+import fnmatch
 import json
 import os
+import re
 import shlex
 import sys
 import unicodedata
@@ -63,8 +78,11 @@ USAGE = ("usage: write_grant.py --root DIR --spec REL_SPEC --plan PLAN_ENVELOPE_
 
 KNOWN_ANSWER_KEYS = frozenset({
     "branch_pattern", "gate_policy", "expires_at", "budget", "stop_on", "defaults", "system_one",
-    "reentry",
+    "reentry", "release_defaults",
 })
+
+RELEASE_BUMP_LEVELS = ("patch", "minor", "major")  # mirrors release.py's BUMP_LEVELS (~line 198)
+RELEASE_DEFAULTS_KEYS = frozenset({"bump", "grant_staging", "grant_tag"})
 
 
 # Keeps every grant out of commits in this clone (skill-contract SPEC: a grant MUST NOT be
@@ -138,6 +156,216 @@ def _check_answer_shapes(contract_check, answers):
             raise GrantRefused("answers.reentry: " + "; ".join(problems))
 
 
+def _check_release_defaults(answers):
+    """answers.release_defaults, when given, must carry exactly {"bump", "grant_staging",
+    "grant_tag"} (design spec D10: "the planning interview records only release
+    defaults: the bump level, and whether to grant staging and tag pushes") -- no
+    subset, no extra key, so a later `release prep` reads a complete, well-shaped
+    default rather than guessing a missing one."""
+    if "release_defaults" not in answers:
+        return
+    rd = answers["release_defaults"]
+    if not isinstance(rd, dict):
+        raise GrantRefused("answers.release_defaults must be an object")
+    unknown = sorted(set(rd) - RELEASE_DEFAULTS_KEYS)
+    if unknown:
+        raise GrantRefused("answers.release_defaults: unknown key(s): %s" % ", ".join(unknown))
+    missing = sorted(RELEASE_DEFAULTS_KEYS - set(rd))
+    if missing:
+        raise GrantRefused("answers.release_defaults is missing %s" % ", ".join(missing))
+    if rd["bump"] not in RELEASE_BUMP_LEVELS:
+        raise GrantRefused("answers.release_defaults.bump must be one of %s"
+                           % ", ".join(RELEASE_BUMP_LEVELS))
+    for key in ("grant_staging", "grant_tag"):
+        if not isinstance(rd[key], bool):
+            raise GrantRefused("answers.release_defaults.%s must be a boolean" % key)
+
+
+# ── The production-allowlist refusal (design spec D10, "the allowlist paragraph") ───────
+# Copied from release-conductor/assets/release.py's `_split_rules` (~line 2070),
+# `allowlist_matches` (~line 2094) and `agent_cmd_exposes` (~line 2143), byte-for-byte in
+# logic, because skills do not import each other. release.py's own docstring for
+# `allowlist_matches` says so too ("Shared with spec-first-planning's write_grant.py
+# (Task 7), which copies it: keep the two in step"). Any fix to the matcher there
+# (notably R29's fail-closed malformed-list handling) must be ported here too.
+ALLOWED_TOOLS_FLAGS = ("--allowedTools", "--allowed-tools")
+
+
+def _split_rules(allowed_tools_str):
+    """(rules, balanced) for an --allowedTools value: split on commas AND whitespace
+    outside parentheses (Claude Code accepts a comma- or space-separated list; a
+    Bash(...) glob may itself carry either), each rule stripped, empties dropped.
+    balanced is False when a `)` closes nothing or a `(` is never closed -- then the
+    split cannot be trusted (a stray `(` swallows every rule after it)."""
+    rules, depth, cur, balanced = [], 0, [], True
+    for ch in allowed_tools_str or "":
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth:
+                depth -= 1
+            else:
+                balanced = False
+        if (ch == "," or ch.isspace()) and depth == 0:
+            rules.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    rules.append("".join(cur))
+    return [r.strip() for r in rules if r.strip()], balanced and depth == 0
+
+
+def allowlist_matches(allowed_tools_str, argv):
+    """True when a Claude Code --allowedTools value would let a headless agent run argv
+    without a prompt. Rules split on commas and whitespace outside parentheses; runs of
+    whitespace in a pattern or a command compare as one space; `Bash` and `Bash(*)`
+    match every command; `Bash(<glob>)` is matched with fnmatch against shlex.join(argv)
+    -- and, failing closed, against " ".join(argv) and both with argv[0] reduced to its
+    basename, since an agent may type the command either way; the legacy
+    `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
+    itself be a glob: fnmatch against prefix + "*"). Other tools never
+    match. A malformed list fails CLOSED (R29) and counts as matching: unbalanced
+    parentheses anywhere, or a rule that starts with the word `Bash` but is not exactly
+    `Bash` or `Bash(...)` -- we cannot tell what Claude Code would make of it. (A longer
+    tool name such as BashOutput is another tool, not a malformed Bash rule.) Copied from
+    release-conductor's assets/release.py (Task 7): keep the two in step."""
+    def norm(text):
+        return " ".join(text.split())  # runs of whitespace compare as one space
+    argv = list(argv)
+    forms = {shlex.join(argv), " ".join(argv)}
+    if argv:
+        short = [os.path.basename(argv[0])] + argv[1:]
+        forms |= {shlex.join(short), " ".join(short)}
+    forms |= {norm(f) for f in forms}
+    rules, balanced = _split_rules(allowed_tools_str)
+    if not balanced:
+        return True
+    for rule in rules:
+        if rule in ("Bash", "Bash(*)"):
+            return True
+        m = re.match(r"^Bash\((.*)\)\Z", rule, re.S)
+        if not m:
+            if re.match(r"^Bash(?![A-Za-z0-9_])", rule):
+                return True  # Bash-something we cannot parse: fail closed
+            continue
+        pat = norm(m.group(1))
+        if pat.endswith(":*"):
+            prefix = pat[:-2]  # itself a glob: Bash(*:*) and Bash(npx *:*) match too
+            if any(f.startswith(prefix) or fnmatch.fnmatch(f, prefix + "*") for f in forms):
+                return True
+        elif any(fnmatch.fnmatch(f, pat) for f in forms):
+            return True
+    return False
+
+
+def agent_cmd_exposes(agent_cmd, argv):
+    """True when a re-entry agent_cmd would let its headless agent run argv unprompted:
+    its --allowedTools (or --allowed-tools) value -- `--flag=value`, or every argument
+    after the flag up to the next option, since Claude Code takes the list as several
+    arguments too -- matches argv (allowlist_matches), or it bypasses permission prompts
+    altogether (--dangerously-skip-permissions, --permission-mode bypassPermissions).
+    Copied from release-conductor's assets/release.py (Task 7): keep the two in step."""
+    if not isinstance(agent_cmd, list):
+        return False
+    values = []
+    i = 0
+    while i < len(agent_cmd):
+        a = agent_cmd[i] if isinstance(agent_cmd[i], str) else ""
+        if a == "--dangerously-skip-permissions" or a == "--permission-mode=bypassPermissions":
+            return True
+        if a == "--permission-mode" and i + 1 < len(agent_cmd) \
+                and agent_cmd[i + 1] == "bypassPermissions":
+            return True
+        flag, eq, val = a.partition("=")
+        if flag in ALLOWED_TOOLS_FLAGS:
+            if eq:
+                values.append(val)
+            else:
+                j = i + 1
+                while j < len(agent_cmd) and isinstance(agent_cmd[j], str) \
+                        and not agent_cmd[j].startswith("-"):
+                    values.append(agent_cmd[j])
+                    j += 1
+                i = j
+                continue
+        i += 1
+    return any(allowlist_matches(v, argv) for v in values)
+
+
+RELEASE_RECIPE_REL = ".release/recipe.json"
+_EXPAND_TOKEN = re.compile(r"\{(version|commit|env)\}")
+# version/commit/env placeholders: a real release's values aren't known yet when a grant
+# is written, so a fixed, glob-safe stand-in is substituted instead. Mirrors release.py's
+# `expand` (~line 342) for just this token set, narrowly, rather than importing it.
+_PLACEHOLDER_VALUES = {"version": "0.0.0", "commit": "0" * 40, "env": "production"}
+
+
+def _expand_placeholder(argv):
+    """argv with every {version}/{commit}/{env} token replaced by _PLACEHOLDER_VALUES."""
+    return [_EXPAND_TOKEN.sub(lambda m: _PLACEHOLDER_VALUES[m.group(1)], a) for a in argv]
+
+
+def _production_argvs(root):
+    """[argv, ...] write_grant must refuse an exposing re-entry allowlist against: the
+    repo's .release/recipe.json (release-conductor, design spec D10) `deploy_prod` and
+    `rollback` argv, each checked both as the raw template (an allowlist could glob on
+    the literal {version}/{commit}/{env} braces) and with those tokens expanded to a
+    fixed placeholder (_expand_placeholder) -- so either spelling an allowlist author
+    might have used is caught (R29's fail-closed spirit in release.py). None when there
+    is no recipe file: a repo without release-conductor has nothing to check.
+
+    Raises GrantRefused when the recipe exists but cannot be read, is not valid JSON, or
+    does not carry a well-formed deploy_prod/rollback argv list -- fail closed rather
+    than silently treat an unreadable recipe as "nothing to check"."""
+    path = os.path.join(root, *RELEASE_RECIPE_REL.split("/"))
+    if not os.path.lexists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GrantRefused("cannot read %s: %s" % (RELEASE_RECIPE_REL, exc))
+    try:
+        recipe = json.loads(raw)
+    except ValueError as exc:
+        raise GrantRefused("%s is not valid JSON: %s" % (RELEASE_RECIPE_REL, exc))
+    if not isinstance(recipe, dict):
+        raise GrantRefused("%s must be a JSON object" % RELEASE_RECIPE_REL)
+    argvs = []
+    for key in ("deploy_prod", "rollback"):
+        argv = recipe.get(key)
+        if not (isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv)):
+            raise GrantRefused("%s's %r must be a non-empty list of strings to check the "
+                               "production allowlist against" % (RELEASE_RECIPE_REL, key))
+        argvs.append(argv)
+        argvs.append(_expand_placeholder(argv))
+    return argvs
+
+
+def _check_production_allowlist(root, answers):
+    """Refuse when answers.reentry.agent_cmd would let the unattended agent it
+    reinstalls run the repo's production deploy or rollback (design spec D10): a release
+    grant is written only by `release prep`, with the human present, so an unattended
+    interview's own re-entry grant must never reach production by way of its allowlist.
+    A no-op when answers carries no reentry.agent_cmd: there is then no allowlist of this
+    grant's own to check (release prep's own grant, written separately, is covered by
+    release.py's own refusal at stage/deploy time)."""
+    reentry = answers.get("reentry")
+    agent_cmd = reentry.get("agent_cmd") if isinstance(reentry, dict) else None
+    if not isinstance(agent_cmd, list):
+        return
+    argvs = _production_argvs(root)
+    if not argvs:
+        return
+    for argv in argvs:
+        if agent_cmd_exposes(agent_cmd, argv):
+            raise GrantRefused(
+                "answers.reentry.agent_cmd's allowlist would let an unattended agent run "
+                "the repo's production deploy or rollback (%s); the release grant itself "
+                "is written only by `release prep`, with the human present"
+                % RELEASE_RECIPE_REL)
+
+
 def _check_accepted_by(accepted_by):
     if not (isinstance(accepted_by, str) and accepted_by.strip()):
         raise GrantRefused("--accepted-by must name the human who said yes")
@@ -180,17 +408,22 @@ def _validate_plan(contract_check, root, spec_rel, spec_path, plan_rel):
 def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
     """Build (but do not write) the autonomy-grant/v1 statement.
 
-    Raises GrantRefused when: an answers key is unrecognised or malformed, --accepted-by
-    is blank or carries a control character, expires_at is not a valid RFC 3339 timestamp
-    in the future, the spec cannot be read or is not decision-closed, --plan is not a
-    fresh task-plan/v1 envelope for exactly this spec, or the resulting statement fails
-    contract_check's structural (C3-C6) or grant-specific (C10) checks — including the
-    7-day lifetime cap, which grant_violations enforces.
+    Raises GrantRefused when: an answers key is unrecognised or malformed,
+    answers.release_defaults is not exactly {bump, grant_staging, grant_tag} well shaped,
+    answers.reentry.agent_cmd's allowlist would reach the repo's .release/recipe.json
+    deploy_prod or rollback, --accepted-by is blank or carries a control character,
+    expires_at is not a valid RFC 3339 timestamp in the future, the spec cannot be read or
+    is not decision-closed, --plan is not a fresh task-plan/v1 envelope for exactly this
+    spec, or the resulting statement fails contract_check's structural (C3-C6) or
+    grant-specific (C10) checks — including the 7-day lifetime cap, which
+    grant_violations enforces.
     """
     import contract_check  # lazy: needs Python >= 3.10 (see the module docstring)
 
     _check_unknown_keys(answers)
     _check_answer_shapes(contract_check, answers)
+    _check_release_defaults(answers)
+    _check_production_allowlist(root, answers)
     _check_accepted_by(accepted_by)
 
     now = now or contract_check.utc_now()
@@ -226,6 +459,8 @@ def build_grant(root, spec_rel, plan_rel, answers, accepted_by, now=None):
         "system_one": answers.get("system_one", {"allowed": False}),
         "revoked": False,
         **({"reentry": dict(contract_check.REENTRY_DEFAULTS, **reentry)} if reentry else {}),
+        **({"release_defaults": answers["release_defaults"]}
+           if "release_defaults" in answers else {}),
     }
     accepted = {"test": "grant-accepted", "assertedBy": {"human": accepted_by.strip()},
                 "result": {"outcome": "passed"},

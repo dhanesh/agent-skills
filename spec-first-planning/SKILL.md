@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.4.0"
+  version: "2.5.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -186,7 +186,12 @@ alone: `write_grant.py` lists it in `.git/info/exclude`, and `check-grant` treat
 grant as covering nothing. Then give the user the revoke command:
 `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`.
 The grant can also carry consent to scheduled re-entry (`answers.reentry`), so a timer resumes
-the run if the session dies; see `references/unattended.md`.
+the run if the session dies; see `references/unattended.md`. `write_grant.py` refuses a
+re-entry allowlist that would let the resumed agent run the repo's `.release/recipe.json`
+`deploy_prod` or `rollback` unprompted. On a project that releases with release-conductor,
+the interview also records `answers.release_defaults` (bump level, whether to grant staging
+and tag pushes) for a later `release prep` — it never writes the release grant itself, which
+is written only by `release prep`, with the human present.
 
 Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are
 never covered by a grant and will always ask: you MUST ask the user right before any of them,

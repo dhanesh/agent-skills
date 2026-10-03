@@ -51,6 +51,7 @@ following optional field:
 |---|---|---|
 | `reentry` | object, optional | Consent to scheduled re-entry (factory-conductor): `agent_cmd` (argv list, `{prompt}` exactly once, `{root}` optional, no shell as `agent_cmd[0]`; a launcher such as `env` or `sudo` in front of a shell is refused too), `interval_min` 5–60 (default 10), `stall_min` 15–240 and ≥ 2 × interval (default 30), `max_reentries` 1–20 (default 5). The checker refuses a malformed block (C10). |
 | `release` | object, optional | Marks a release grant (release-conductor): exactly `{"version": "<semver>"}`, the version `MAJOR.MINOR.PATCH` with an optional `-pre` or `+build` suffix. A release grant's subjects pin the release recipe and the release intent file instead of a spec and a plan. The checker refuses any other shape (C10). |
+| `release_defaults` | object, optional | Non-normative: spec-first-planning's unattended interview records only release defaults here — exactly `{"bump": "patch"\|"minor"\|"major", "grant_staging": bool, "grant_tag": bool}` — for a later `release prep` to apply; it never writes a release grant itself (`release` above), which `release prep` writes separately, with the human present. `write_grant.py` validates this shape strictly before writing it; the reference checker does not (there is no payload-key allowlist, so an unknown key here is not itself a C10 violation). |
 
 The action classes are:
 
