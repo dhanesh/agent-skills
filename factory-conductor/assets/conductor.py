@@ -3481,7 +3481,14 @@ def _watch_locked(root, d):
     covered, _ = gate_line(rc, last)  # the judgment every gate makes; nothing is logged
     worktrees = [t["worktree"] for t in st.tasks.values()
                  if t.get("status") in ACTIVE and t.get("worktree")]
-    stall = (block or CC.REENTRY_DEFAULTS)["stall_min"]
+    if st.verification and any(t.get("status") in ACTIVE for t in st.tasks.values()):
+        # Under the evidence gate a verifier writes its records to the evidence dir and
+        # its run state to .verify-run, both in the root, never in the worktree: a
+        # session waiting on a long verifier is as live as one waiting on an executor.
+        worktrees += [os.path.join(root, st.verification.get("evidence_dir")
+                                   or DEFAULT_EVIDENCE_DIR),
+                      os.path.join(root, ".verify-run")]
+    stall =(block or CC.REENTRY_DEFAULTS)["stall_min"]
     old_lease = R.read_lease(d)
     live = R.lease_live(d, old_lease, stall, worktrees)
     # an attempt is logged before its spawn (ok null) and again with its outcome: count n

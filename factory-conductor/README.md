@@ -87,8 +87,8 @@ You can stop a run at any time by revoking the grant
   you are logged in (a systemd user timer needs `loginctl enable-linger` to survive logout;
   the conductor needs macOS or Linux and does not start on Windows), and the agent it starts
   has your permissions. A session that is
-  alive but idle past `stall_min`, with no conductor call and no worktree change, can get a
-  second driver: the run lock keeps the record intact, and the dispatch cap bounds the waste.
+  alive but idle past `stall_min`, with no conductor call, no worktree change and, under the
+  evidence gate, no new verifier record, can get a second driver: the run lock keeps the record intact, and the dispatch cap bounds the waste.
 - **Green is not safe: the evidence gate.** When the plan declares a verify skill (a
   `verification` block; spec-first-planning writes it, verification-skill-forge generates
   the skill), a task merges only after `conductor evidence` passes its verified head: a

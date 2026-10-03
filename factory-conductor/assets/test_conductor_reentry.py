@@ -790,6 +790,56 @@ class WatchTests(unittest.TestCase):
                 self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
                 self.assertEqual(self.reentry_events(), [])
 
+    def _gated_reviewing(self, evidence_dir=None):
+        """T1 `reviewing` under the evidence gate, with an old worktree, an old session
+        lease and an old log: only a verifier could be working now."""
+        self.grant()
+        wt = tmpdir()
+        st = C.State.load(self.st.state_path)
+        st.verification = {"skill": ".claude/skills/verify-app",
+                           "evidence_dir": evidence_dir or ".verify"}
+        st.tasks["T1"].update(status="reviewing", worktree=wt)
+        st.save()
+        old = time.time() - 45 * 60
+        os.utime(wt, (old, old))
+        for d in (evidence_dir or ".verify", ".verify-run"):
+            os.makedirs(os.path.join(self.root, d), exist_ok=True)
+            os.utime(os.path.join(self.root, d), (old, old))
+        self.age()
+
+    def _assert_fresh_record_is_live(self, evdir, *sub):
+        # A verifier records into <root>/<evidence_dir> and keeps its run state in
+        # <root>/.verify-run, never in the worktree: a session waiting on it is live.
+        self._gated_reviewing(evdir)
+        base = os.path.join(self.root, evdir or ".verify-run", *sub)
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, "evidence.json"), "w") as f:
+            f.write("{}")  # the verifier is recording
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: live"))
+        self.assertEqual(self.reentry_events(), [])
+
+    def test_a_fresh_evidence_record_under_the_gate_is_live(self):
+        self._assert_fresh_record_is_live(".verify", "inst", "notes-create", "abc")
+
+    def test_a_fresh_record_in_a_custom_evidence_dir_is_live(self):
+        self._assert_fresh_record_is_live(".evidence", "inst", "doctor", "abc")
+
+    def test_fresh_verifier_run_state_under_the_gate_is_live(self):
+        self._assert_fresh_record_is_live(None)
+
+    def test_old_evidence_under_the_gate_does_not_hold_the_run(self):
+        # evidence from an earlier task is not a live verifier: the run still re-enters
+        self._gated_reviewing()
+        d = os.path.join(self.root, ".verify", "inst", "notes-create", "abc")
+        os.makedirs(d)
+        old = time.time() - 45 * 60
+        for name in (d, os.path.dirname(d), os.path.dirname(os.path.dirname(d)),
+                     os.path.join(self.root, ".verify")):
+            os.utime(name, (old, old))
+        rc, out = run_watch(self.root)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("REENTRY: started 1 "), out)
+
     def test_a_held_run_lock_is_live_within_seconds(self):
         self.grant()
         self.age()

@@ -314,8 +314,9 @@ command with the user's own permissions: it is not a hosted service. launchd (ma
 the timer only while the user is logged in, and a systemd user timer stops at logout
 unless lingering is on (`loginctl enable-linger`). cron cannot run a repository whose
 path holds a literal `\%`, so that install fails. A session that is alive but has made no
-conductor call and no worktree change for `stall_min` looks stalled, and can get a second
-driver. The run lock prevents corruption, and the existing guards limit the cost to wasted
+conductor call and no worktree change for `stall_min` (under the evidence gate, no new
+record in the evidence directory or `.verify-run` either, where a verifier writes) looks
+stalled, and can get a second driver. The run lock prevents corruption, and the existing guards limit the cost to wasted
 dispatches; that session's run can also be ended by `reentry_exhausted` once
 `max_reentries` such agents have started. The resume prompt quotes the root inside
 backticks, so a root that holds a backtick garbles the prompt's code span; it reaches no

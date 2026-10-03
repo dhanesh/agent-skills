@@ -303,7 +303,10 @@ calls the conductor on its own run blocks on the run lock until that command's o
 - A **session** lease (`holder: "session"`, `pid: null`) is written by any command. It is
   live while `renewed_at` is within `stall_min`, or while a file in an in-flight task's
   worktree (or that worktree's git index or `logs/HEAD`) changed within `stall_min`: an
-  executor can work for a long time without calling the conductor.
+  executor can work for a long time without calling the conductor. Under the evidence
+  gate, while a task is in flight, a file changed within `stall_min` under
+  `<root>/<evidence_dir>` or `<root>/.verify-run` counts too: a verifier records there,
+  never in the worktree, and the session waiting on it is live.
 - A **reentry** lease (`holder: "reentry"`, the agent's `pid` and attempt number `n`) is
   written by `watch` after it starts an agent. It is live exactly while that pid lives on
   this host. No other command takes it over while the pid lives, not even a human's

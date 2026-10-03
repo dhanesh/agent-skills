@@ -403,5 +403,14 @@ class Hardening(unittest.TestCase):
         self.assertTrue(rid.startswith("run-20260101T120000Z-"), rid)
 
 
+class VersionPin(unittest.TestCase):
+    def test_conductor_version_matches_skill_md(self):
+        # run-result/v1 envelopes attribute themselves to CONDUCTOR_VERSION: it must be
+        # the version SKILL.md ships, or every run report names the wrong release
+        skill_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SKILL.md")
+        with open(skill_md, encoding="utf-8") as f:
+            self.assertIn('  version: "%s"\n' % C.CONDUCTOR_VERSION, f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

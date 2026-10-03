@@ -6063,7 +6063,8 @@ def _fc_reentry_run_dir(root):
 
 
 def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=False,
-                      prior_attempt=False, max_reentries=2, fresh_lease=False):
+                      prior_attempt=False, max_reentries=2, fresh_lease=False,
+                      verifier_recording=False):
     """One `watch` tick against a fresh T1-only reentry fixture in `tree`. Returns 1 when
     the marker file appears (the agent started), 0 when it does not, None (PROBE_ERRORS)
     on a setup failure -- a broken fixture proves nothing either way.
@@ -6078,7 +6079,10 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
     stall_min, as test_conductor_reentry_e2e.py does; `fresh_lease` then renews the
     lease now, so a live session lease is the only barrier; `revoke` revokes the grant
     once T1 is started; `prior_attempt` appends an aged reentry(n=1) log line so the
-    attempt count already meets max_reentries.
+    attempt count already meets max_reentries; `verifier_recording` puts the run under
+    the evidence gate with T1 `reviewing` (state.json edited directly: the gate's own
+    fixtures are not needed to reach watch) and writes a record into <root>/.verify
+    now, as a verifier does while the session waits on it.
 
     Each guard fixture passes every other `decide` check, so deleting that guard's own
     check from reentry.decide makes it start (mutation-proven, see the guards in
@@ -6141,6 +6145,19 @@ def _fc_reentry_probe(tree, CC, R, conductor, *, ask=False, age=False, revoke=Fa
                         os.utime(base, (old_ts, old_ts))
         if fresh_lease:
             R.renew_lease(run_dir)  # a session renewed its lease just now
+        if verifier_recording:
+            sp = os.path.join(run_dir, "state.json")
+            with open(sp, encoding="utf-8") as f:
+                doc = json.load(f)
+            doc["verification"] = {"skill": ".claude/skills/verify-app",
+                                   "evidence_dir": ".verify"}
+            doc["tasks"]["T1"]["status"] = "reviewing"
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            rec = os.path.join(root, ".verify", "inst", "notes-create", "head")
+            os.makedirs(rec, exist_ok=True)
+            with open(os.path.join(rec, "evidence.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
         if prior_attempt:
             with open(os.path.join(run_dir, "autonomy-log.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps({"at": old_stamp, "event": "reentry", "n": 1,
@@ -6176,9 +6193,11 @@ def _fc_has_watch(tree):
     return os.path.isfile(os.path.join(assets, "reentry.py")) and 'add_parser("watch")' in src
 
 
-# The four guards: (dimension, note, the probe's kwargs). Each fixture passes every other
+# The guards: (dimension, note, the probe's kwargs). Each fixture passes every other
 # check in reentry.decide, so only the guard's own check stops the start: deleting that
-# check from decide turns its 0 into a 1 (the mutation proof in the final review).
+# check from decide turns its 0 into a 1 (the mutation proof in the final review). The
+# verifier guard's own check is watch's evidence-dir liveness in conductor.py, not decide:
+# without it, that fixture starts.
 _FC_REENTRY_GUARDS = (
     ("an agent started while another driver's lease is still live",
      "watch never starts a second driver while a session lease is live: the log and "
@@ -6195,6 +6214,10 @@ _FC_REENTRY_GUARDS = (
      "watch refuses an aged, stalled run once the attempt count already meets "
      "max_reentries",
      dict(age=True, prior_attempt=True, max_reentries=1)),
+    ("an agent started while a gated run's verifier is recording",
+     "under the evidence gate a verifier writes to <root>/.verify, never the worktree: "
+     "a session waiting on it, with an aged lease, log and worktree, is live",
+     dict(age=True, verifier_recording=True)),
 )
 
 
@@ -6232,7 +6255,8 @@ def check_factory_conductor_reentry(old, new):
 
     for (dimension, note, kwargs), ga in zip(_FC_REENTRY_GUARDS, old_guards):
         note += ("; sanity-checked against the aged fixture above, which DOES start, "
-                 "and mutation-proven: without its own check in reentry.decide it starts")
+                 "and mutation-proven: without its own check (in reentry.decide; for the verifier "
+                 "guard, watch's evidence-dir liveness) it starts")
         if b != 1:
             PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
                                  "reentry guard sanity check failed for %r: the healthy "
