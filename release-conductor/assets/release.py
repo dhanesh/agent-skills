@@ -1707,6 +1707,9 @@ def _stage_commit(root, rel, args, pinned, gversion):
         raise Refused("invalid recipe at the base commit: %s" % problems[0])
     vfile, keys = _version_key(base_recipe)
     known = (rel.stage or {}).get("commit")
+    branch, tip = _default_branch(root)
+    merge_next = ("merge the release PR and update local %s (git pull), then run stage"
+                  % branch)
     if args.commit:
         commit = _resolve_commit(root, args.commit)
         if commit is None:
@@ -1717,12 +1720,17 @@ def _stage_commit(root, rel, args, pinned, gversion):
     elif known:
         commit = known
     else:
-        branch, tip = _default_branch(root)
         commit = find_release_commit(root, tip, rel.base_commit, gversion, vfile, keys)
         if commit is None:
             raise Stop("not-merged", "no commit on %s since %s sets %s to %s"
                        % (branch, rel.base_commit[:12], vfile, gversion),
-                       "merge the release PR, then run stage (or pass --commit SHA)")
+                       merge_next + " (or pass --commit SHA)")
+    # The human's merge is the checkpoint before staging: a --commit (say, the release
+    # branch's own tip) must already be on the default branch, or stage would deploy and
+    # tag a commit nobody merged.
+    anc = _git(root, "merge-base", "--is-ancestor", commit, tip)
+    if anc is None or anc.returncode != 0:
+        raise Stop("not-merged", "%s is not on %s" % (commit[:12], branch), merge_next)
     got = _version_at(root, commit, vfile, keys)
     if got != gversion:
         raise Stop("version-mismatch", "%s at %s says %r; the grant pins version %s"

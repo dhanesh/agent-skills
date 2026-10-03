@@ -66,13 +66,12 @@ class StageBase(unittest.TestCase):
         with open(self.probe_file, "w") as f:
             f.write("1.1.0\n")
         self.build_marker = os.path.join(self.d, "build.marker")
-        self.deploy_marker = os.path.join(self.d, "deploy.marker")
         self.check_marker = os.path.join(self.d, "check.marker")
         py = sys.executable
         self.recipe = {
             "build": [py, "-c", APPEND, self.build_marker, "{commit}"],
-            # the staging deploy goes live: the probe file (served over http) gets the
-            # version, and a marker records the run
+            # the staging deploy goes live: the probe file (also served over http) gets
+            # the version, so it doubles as the deploy's marker
             "deploy_staging": [py, "-c", WRITE, os.path.join(self.www, "version-{env}.txt"),
                                "{version}"],
             "deploy_prod": ["true"], "rollback": ["true", "{version}"], "health": ["true"],
@@ -209,6 +208,16 @@ class HappyPathTests(StageBase):
         self.assertIn("STOP: not-merged", out)
         self.assertEqual(self.rel().status, "prepped")
         self.assertEqual(self.lines(self.build_marker), [])
+
+    def test_an_unmerged_commit_named_by_commit_stops(self):
+        root, _ = self.make(merge=False)
+        rc, out, _ = self.stage("--commit", "release/1.2.0")  # version and recipe match
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: not-merged", out)
+        self.assertIn("NEXT: merge the release PR and update local main", out)
+        self.assertEqual(self.rel().status, "prepped")
+        self.assertEqual(self.lines(self.build_marker), [])
+        self.assertFalse(os.path.exists(self.stage_wt()))
 
     def test_an_artifact_path_is_hashed_at_build(self):
         root, commit = self.make(build=[sys.executable, "-c", DIST, "{version}"],
