@@ -98,6 +98,16 @@ class AllowlistMatchTests(unittest.TestCase):
                                              ["npx", "vercel", "deploy", "--prod"]))
         self.assertTrue(RL.allowlist_matches("Bash(vercel   deploy:*)", self.PROD))
 
+    def test_a_malformed_list_fails_closed(self):  # R29
+        argv = ["npx", "vercel", "deploy", "--prod"]
+        for rules in ("Bash(npx vercel *", "Read( Bash", "Foo( Bash(npx *)",
+                      "Bash(npx *))", "Bash((npx *)", "Bash)(npx *)", "Read,Bash x"):
+            with self.subTest(rules=rules):
+                self.assertTrue(RL.allowlist_matches(rules, argv))
+        # a longer tool name is another tool, and balanced inner parentheses are fine
+        self.assertFalse(RL.allowlist_matches("BashOutput,Read", argv))
+        self.assertFalse(RL.allowlist_matches("Bash(git log (x) *)", argv))
+
     def test_agent_cmd_allowlist_reads_every_spelling(self):
         P = self.PROD
         for cmd in ([CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(vercel *)"],
@@ -466,7 +476,8 @@ class TagDeployTests(DeployBase):
 
     def test_an_allowlist_reaching_the_tag_push_refuses_in_tag_mode_only(self):  # R27
         self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
-        for rules in ("Read,Bash(git *)", "Bash(git push:*)"):
+        for rules in ("Read,Bash(git *)", "Bash(git push:*)", "Bash(git push origin v*)",
+                      "Bash(git push origin refs/tags/*)"):
             with self.subTest(rules=rules):
                 gid = plant_grant(self.root, rules)
                 self.assert_refused(*self.deploy()[:2], "allowlist-exposes-prod")
@@ -487,7 +498,7 @@ class StageAllowlistTests(DeployBase):
         _, commit = self.make(ci="on:\n  push:\n    tags: ['v*']\n")
         self.assertEqual(self.stage()[0], 0)
         self.record_all(commit)
-        gid = plant_grant(self.root, "Bash(git push:*)")
+        gid = plant_grant(self.root, "Bash(git push origin v*)")
         rc, out, _ = self.evidence()
         self.assertEqual(rc, 2, out)
         self.assertIn("allowlist-exposes-prod", out)
