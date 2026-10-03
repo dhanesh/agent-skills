@@ -9,15 +9,22 @@ small writer helpers so the state tests never hand-build git repos themselves.
 - write_recipe(root, recipe, commit=False): writes .release/recipe.json, optionally
   committing it (for recipe_sha's rev= tests);
 - GIT: the git identity env, used because CI has no git identity configured;
+- serve(directory): a local http.server in a thread, standing in for a staging target;
+- write_evidence(root, sha, feature, verifier, ...): a verify-evidence/v1 record and the
+  instance's doctor.json, the shapes verification-skill-forge's recorder writes;
 - tmpdir(): tempfile.mkdtemp(), removed (with everything under it) at process exit.
 """
 import atexit
+import functools
+import hashlib
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -76,4 +83,56 @@ def write_recipe(root, recipe, commit=False):
         subprocess.run(["git", "-C", root, "add", "-A", ".release"], check=True)
         subprocess.run(["git", "-C", root, "commit", "-q", "-m", "recipe"], check=True,
                        env=dict(os.environ, **GIT))
+    return path
+
+
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    """SimpleHTTPRequestHandler without the per-request stderr log line."""
+
+    def log_message(self, *args):
+        pass
+
+
+def serve(directory):
+    """A local http.server serving `directory` from a daemon thread on 127.0.0.1 (a free
+    port), standing in for a staging target: tests never touch a real one. Returns the
+    base URL (no trailing slash); the server is shut down at process exit."""
+    handler = functools.partial(_QuietHandler, directory=directory)
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+    @atexit.register
+    def _stop():
+        httpd.shutdown()
+        httpd.server_close()
+    return "http://127.0.0.1:%d" % httpd.server_address[1]
+
+
+def write_evidence(root, sha, feature, verifier, result="pass", instance="i1",
+                   doctor_ok=True):
+    """A verify-evidence/v1 record for `feature` at `sha` under <root>/.verify, in the
+    shape verification-skill-forge/assets/verify_evidence.py's `record` writes (one
+    artifact, pinned by sha256), plus the instance's doctor.json at that sha (its
+    `doctor` command's shape). Returns the evidence.json path."""
+    base = os.path.join(root, ".verify", instance)
+    out = os.path.join(base, feature, sha)
+    os.makedirs(out, exist_ok=True)
+    art = os.path.join(out, "shot.txt")
+    with open(art, "w", encoding="utf-8") as f:
+        f.write("observed %s at %s\n" % (feature, sha))
+    with open(art, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    path = os.path.join(out, "evidence.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": instance,
+                   "feature": feature, "sha": sha, "verifier": verifier, "result": result,
+                   "action": "a", "observed": "o", "side_effects": ["none: test"],
+                   "artifacts": [{"path": "shot.txt", "sha256": digest}],
+                   "captured_at": "2026-10-04T00:00:00Z"}, f)
+    dpath = os.path.join(base, "doctor", sha, "doctor.json")
+    os.makedirs(os.path.dirname(dpath), exist_ok=True)
+    with open(dpath, "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "doctor", "instance": instance,
+                   "sha": sha, "ok": doctor_ok, "checks": {"process": "pass"},
+                   "verifier": verifier, "captured_at": "2026-10-04T00:00:00Z"}, f)
     return path

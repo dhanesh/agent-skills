@@ -13,7 +13,7 @@ commands are built on:
     interleave writes;
   - the release state file and its append-only log (`Release`).
 
-and the first two commands built on them:
+and the commands built on them:
 
   - `init --root R --answers FILE` writes the validated recipe (never overwriting one);
   - `prep --root R --approved-by NAME --driver ID [--bump L] [--policy-file F]
@@ -21,7 +21,18 @@ and the first two commands built on them:
     the human accepts (D10), commits the version bump and changelog on release/<version>
     in the worktree .skill-contract/releases/<version>/wt-prep, then pushes it and opens
     the release PR, each step gated by check-grant (subject the recipe, worktree the
-    prep worktree) and run only on COVERED.
+    prep worktree) and run only on COVERED;
+  - `stage --root R [--commit SHA] [--evidence --verifier ID] [--remote NAME]` finds the
+    merged release commit (where the default branch's version file became the grant's
+    release.version), refuses when its version or its recipe differs from what the
+    grant pinned (STOP: version-mismatch / recipe-changed, before anything from the
+    recipe runs), builds it in an isolated checkout (wt-build), and stops at
+    staging_verify with NEXT: dispatch-verifier <commit>; `--evidence` judges the
+    verifier's records (factory-conductor's evidence predicate, every mapped feature,
+    a verifier other than the driver), then deploys to staging, polls the version
+    probe, runs staging_checks, and pushes (or, when CI runs on tags, holds) the
+    v<version> tag. Every gate names the stage worktree (release/<v>-stage). A re-run
+    resumes from the first unfinished step; any failure is stage_failed.
 
 A release's local, git-ignored state lives at
 <root>/.skill-contract/releases/<version>/ -- state.json (rewritten atomically) and
@@ -40,6 +51,7 @@ if sys.version_info < (3, 10):
 import contextlib  # noqa: E402
 import datetime as _dt  # noqa: E402
 import fcntl  # noqa: E402
+import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
@@ -67,8 +79,13 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # bump: the level prep used; grant: {"id", "accepted_by"} of the release grant prep wrote
 # (accepted_by is the human who accepted the GRANT -- not approved_by, which is the
 # production deploy's yes); prep: {"branch", "commit", "pushed", "pr"}, prep's progress.
+# stage: stage's progress ({"commit", "worktree", "build_dir", "built", "artifact",
+# "deployed", "live", "probe", "checks", "checks_done", "tag", "failure"}), so a re-run
+# resumes from the first unfinished step; tag_deploys: true when the CI config at the
+# release commit may run on a tag (D6), so the tag push is held for `deploy`.
 RELEASE_FIELDS = ("release_commit", "recipe_sha", "artifact_sha", "rollback_target",
-                  "approved_by", "evidence", "driver", "bump", "grant", "prep")
+                  "approved_by", "evidence", "driver", "bump", "grant", "prep", "stage",
+                  "tag_deploys")
 
 TAIL = 2000  # a run_cmd output tail, the same size conductor.py's _tail uses
 
@@ -432,6 +449,8 @@ class Release:
         self.bump = data.get("bump")
         self.grant = data.get("grant")
         self.prep = data.get("prep")
+        self.stage = data.get("stage")
+        self.tag_deploys = data.get("tag_deploys")
 
     @property
     def dir(self):
@@ -477,7 +496,8 @@ class Release:
                 "recipe_sha": self.recipe_sha, "artifact_sha": self.artifact_sha,
                 "rollback_target": self.rollback_target, "approved_by": self.approved_by,
                 "evidence": self.evidence, "driver": self.driver, "bump": self.bump,
-                "grant": self.grant, "prep": self.prep}
+                "grant": self.grant, "prep": self.prep, "stage": self.stage,
+                "tag_deploys": self.tag_deploys}
 
     def save(self):
         """Write state.json atomically: a temp file in self.dir, then os.replace,
@@ -1236,6 +1256,652 @@ def _prep_remote(root, rel, push_cmd, pr_cmd):
     return 0
 
 
+# ── stage (spec section 2, step 2; decisions D6/D7/D10/D11) ──────────────────────
+STAGE_WT = "wt-stage"  # the stage worktree, on release/<v>-stage, where the verifier works
+BUILD_WT = "wt-build"  # the isolated checkout build and deploy_staging run in
+STAGE_ENV = "staging"  # {env} for every staging command (verify-prod uses "production")
+PROBE_INTERVAL = 2.0  # seconds between version-probe polls; read at call time (tests shorten it)
+PROBE_CMD_TIMEOUT = 30  # one probe run, at most (capped by what is left of deploy_timeout)
+CMD_TIMEOUT = 3600  # build, deploy_staging and each staging check
+COMMIT_SCAN = 1000  # first-parent commits stage walks back looking for the release commit
+EVIDENCE_DIR = ".verify"  # <root>/.verify: where the verifier records (VERIFY_EVIDENCE_DIR)
+RESUME_STAGE = "fix what stopped it, then re-run stage to resume"
+
+
+def _sleep(seconds):
+    """time.sleep, behind a module name so a test can stand in for the wait between
+    probe polls (and change the probed file at an exact poll) without racing a timer."""
+    time.sleep(seconds)
+
+
+_PROBE_TOKEN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]*")
+_HEX = re.compile(r"^[0-9a-f]{7,40}\Z")
+
+
+def probe_reports(out, version, commit):
+    """True when a version probe's output reports `version` or `commit`: some token of it
+    (a run of [0-9A-Za-z._+-], trailing dots dropped) is exactly the version, `v` plus the
+    version, or a 7-to-40 hex prefix of the commit. A prerelease (1.2.0-rc.1), build
+    metadata (1.2.0+b), or a longer version (11.2.0, 1.2.0.1) is not the version."""
+    for tok in _PROBE_TOKEN.findall(out or ""):
+        tok = tok.rstrip(".")
+        if tok in (version, "v" + version):
+            return True
+        low = tok.lower()
+        if _HEX.match(low) and commit.startswith(low):
+            return True
+    return False
+
+
+# ── The evidence predicate ───────────────────────────────────────────────────────
+# Copied from factory-conductor/assets/conductor.py (feature_map_at, _inside,
+# _load_record, _check_record, evidence_verdict), adapted for a release (D11): the head
+# is the release commit; the verifier must not be the release driver (prep's --driver);
+# and the features to prove are EVERY feature the verify skill maps at that commit (the
+# full check set), not the ones a task's diff touches. Keep the two in step: a fix to
+# one belongs in the other. The records are the ones verification-skill-forge's
+# verify_evidence.py writes, at <root>/.verify/<instance>/<feature>/<sha>/evidence.json,
+# with each instance's doctor result at <root>/.verify/<instance>/doctor/<sha>/doctor.json.
+EVIDENCE_SCHEMA = "verify-evidence/v1"
+
+
+def feature_map_at(root, skill, sha):
+    """{feature id: [anchor paths]} for the verify skill's features/ as committed at sha,
+    or None when git cannot list them. Read from the commit, never from a working tree,
+    so the map judged is the one the release commit carries."""
+    r = _git(root, "ls-tree", "--name-only", "%s:%s/features" % (sha, skill))
+    if r is None or r.returncode != 0:
+        return None
+    app = os.path.dirname(os.path.dirname(os.path.dirname(skill)))
+    out = {}
+    for name in r.stdout.split():
+        if not name.endswith(".md") or name == "README.md":
+            continue
+        b = _git(root, "cat-file", "blob", "%s:%s/features/%s" % (sha, skill, name))
+        text = b.stdout if b is not None and b.returncode == 0 else ""
+        fid, anchors = None, []
+        for line in text.splitlines():
+            if line.startswith("## "):
+                break
+            m = re.match(r"^- (id|anchors):\s*(.*)$", line.strip())
+            if m and m.group(1) == "id":
+                fid = m.group(2).strip()
+            elif m:
+                for a in m.group(2).split(","):
+                    a = a.strip().strip("`").split(":")[0].strip().rstrip("/")
+                    if a:
+                        anchors.append("%s/%s" % (app, a) if app else a)
+        if fid == name[:-3]:
+            out[fid] = anchors
+    return out
+
+
+def _inside(path, base):
+    real, rb = os.path.realpath(path), os.path.realpath(base)
+    return real == rb or real.startswith(rb + os.sep)
+
+
+def _load_record(path, base):
+    if not _inside(path, base) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return "malformed"
+    return doc if isinstance(doc, dict) else "malformed"
+
+
+def _check_record(doc, feature, sha, verifier, directory, base):
+    """None when an evidence.json proves feature at sha for verifier, else a reason."""
+    if not isinstance(doc, dict) or doc.get("schema") != EVIDENCE_SCHEMA \
+            or doc.get("kind") != "evidence" or doc.get("feature") != feature:
+        return "evidence-malformed"
+    if doc.get("sha") != sha:
+        return "evidence-sha-mismatch"
+    arts = doc.get("artifacts")
+    if not isinstance(arts, list) or not arts:
+        return "evidence-malformed"
+    for a in arts:
+        rel = a.get("path") if isinstance(a, dict) else None
+        if not isinstance(rel, str) or not rel or os.path.isabs(rel) or ".." in rel.split("/"):
+            return "evidence-malformed"
+        path = os.path.join(directory, rel)
+        if not _inside(path, base) or not os.path.isfile(path):
+            return "evidence-artifact-missing"
+        if CC.sha256_file(path) != a.get("sha256"):
+            return "evidence-artifact-altered"
+    # A well-formed failure on this commit counts whoever recorded it: the app failed on
+    # this commit, and another verifier's pass must not paper over it.
+    if doc.get("result") != "pass":
+        return "evidence-failed"
+    if doc.get("verifier") != verifier:
+        return "evidence-verifier-mismatch"
+    return None
+
+
+def evidence_verdict(root, skill, sha, verifier, driver):
+    """The evidence predicate for a release commit. Returns {ok, reason, feature,
+    features, paths, doctor, observed}: ok only when the verifier is not the release
+    driver, the verify skill maps at least one feature at sha, and every mapped feature
+    has a passing evidence.json recorded by this verifier at exactly sha (directory name
+    and `sha` field), with every artifact present and unaltered, from an instance whose
+    doctor.json at sha is ok. Check order is fixed, so a probe sees one reason."""
+    out = {"ok": False, "reason": None, "feature": None, "features": [], "paths": [],
+           "doctor": [], "observed": None}
+    if not verifier:
+        out["reason"] = "verifier-missing"
+        return out
+    if verifier == driver:
+        out["reason"] = "driver-is-verifier"
+        return out
+    fmap = feature_map_at(root, skill, sha)
+    if fmap is None:
+        out["reason"] = "feature-map-unreadable"
+        return out
+    feats = sorted(fmap)
+    out["features"] = feats
+    if not feats:
+        out["reason"] = "no-features"
+        return out
+    base = os.path.join(root, EVIDENCE_DIR)
+    for f in feats:
+        dirs = sorted(glob.glob(os.path.join(glob.escape(base), "*", f, "*")))
+        here = [d for d in dirs if os.path.basename(d) == sha and os.path.isdir(d)]
+        if not here:
+            out["reason"] = "evidence-stale-sha" if dirs else "evidence-missing"
+            out["feature"] = f
+            return out
+        verdicts = []
+        for d in here:
+            doc = _load_record(os.path.join(d, "evidence.json"), base)
+            why = "evidence-missing" if doc is None else \
+                _check_record(doc, f, sha, verifier, d, base)
+            verdicts.append((d, doc, why))
+        failed = [(d, doc) for d, doc, why in verdicts if why == "evidence-failed"]
+        if failed:
+            out["reason"], out["feature"] = "evidence-failed", f
+            out["observed"] = str(failed[0][1].get("observed") or "")[:TAIL]
+            return out
+        chosen = next((d for d, _, why in verdicts if why is None), None)
+        if chosen is None:
+            out["reason"], out["feature"] = verdicts[0][2], f
+            return out
+        inst = os.path.basename(os.path.dirname(os.path.dirname(chosen)))
+        dpath = os.path.join(base, inst, "doctor", sha, "doctor.json")
+        doc = _load_record(dpath, base)
+        if doc is None:
+            out["reason"], out["feature"] = "doctor-missing", f
+            return out
+        if not isinstance(doc, dict) or doc.get("kind") != "doctor" \
+                or doc.get("sha") != sha or doc.get("ok") is not True:
+            out["reason"], out["feature"] = "doctor-red", f
+            return out
+        out["paths"].append(os.path.relpath(os.path.join(chosen, "evidence.json"), root))
+        drel = os.path.relpath(dpath, root)
+        if drel not in out["doctor"]:
+            out["doctor"].append(drel)
+    out["ok"] = True
+    return out
+
+
+# ── stage's steps ────────────────────────────────────────────────────────────────
+class Stop(Exception):
+    """stage must stop (exit 3) without changing the release's status: `reason` is the
+    STOP: line's word, `detail` says why, `nxt` is the NEXT: line (or None)."""
+
+    def __init__(self, reason, detail, nxt=None):
+        super().__init__(detail)
+        self.reason, self.detail, self.nxt = reason, detail, nxt
+
+
+def _grant_pins(root, rel):
+    """(grant path, the recipe digest the release grant pinned, its release.version).
+    Refused when the grant prep wrote cannot be read."""
+    gid = (rel.grant or {}).get("id")
+    if not gid:
+        raise Refused("release %s has no grant; run prep" % rel.version)
+    path = _grant_path(root, gid)
+    st, errs = CC.load_envelope(path)
+    if errs or not isinstance(st, dict):
+        raise Refused("cannot read the release grant %s" % path)
+    pinned = next((s.get("digest", {}).get("sha256") for s in st.get("subject") or []
+                   if isinstance(s, dict) and s.get("name") == RECIPE_PATH), None)
+    version = ((st.get("predicate") or {}).get("payload") or {}).get("release", {})
+    if not pinned or not isinstance(version, dict) or version.get("version") != rel.version:
+        raise Refused("the release grant %s does not pin %s and version %s"
+                      % (gid, RECIPE_PATH, rel.version))
+    return path, pinned, version["version"]
+
+
+def _version_at(root, sha, vfile, keys):
+    """The version the {"file","key"} version file holds at commit sha, or None."""
+    r = _git(root, "show", "%s:%s" % (sha, vfile))
+    if r is None or r.returncode != 0:
+        return None
+    try:
+        return _read_version(r.stdout, keys, vfile)[1]
+    except Refused:
+        return None
+
+
+def _resolve_commit(root, rev):
+    """The full sha `rev` names, or None."""
+    r = _git(root, "rev-parse", "-q", "--verify", "%s^{commit}" % rev)
+    return r.stdout.strip() if r is not None and r.returncode == 0 and r.stdout.strip() else None
+
+
+def find_release_commit(root, tip, base, version, vfile, keys):
+    """The merged release commit: walking the default branch's first-parent history from
+    `tip` back to `base` (prep's base commit, exclusive), the newest commit at which the
+    version file BECOMES `version` (its first parent's version is not `version`). That is
+    the release PR's merge (or squash, or rebased) commit. Later work landing on the
+    default branch keeps the version but was never in the release PR, so main's tip is
+    not the release. None when no such commit lies between tip and base."""
+    r = _git(root, "rev-list", "--first-parent", "--max-count=%d" % COMMIT_SCAN, tip)
+    if r is None or r.returncode != 0:
+        return None
+    chain = []
+    for sha in r.stdout.split():
+        if sha == base:
+            break
+        chain.append(sha)
+    else:
+        return None  # base is not on the first-parent chain: the caller passes --commit
+    vers = [_version_at(root, c, vfile, keys) for c in chain] + [
+        _version_at(root, base, vfile, keys)]
+    for i, sha in enumerate(chain):
+        if vers[i] == version and vers[i + 1] != version:
+            return sha
+    return None
+
+
+def _head(wt):
+    r = _git(wt, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+    return r.stdout.strip() if r is not None and r.returncode == 0 else None
+
+
+def _stage_gate(root, rel, action, wt, commit):
+    """check-grant for `action` with the grant prep wrote (R18): subject the recipe,
+    worktree the stage worktree, whose HEAD must still be the release commit (a verifier
+    working there must not move what the branch, ci-config and tag probes judge).
+    None on COVERED; else the exit code (3) after printing GATE:/STOP:/NEXT:."""
+    head = _head(wt)
+    if head != commit:
+        print("STOP: head-moved: the stage worktree %s is at %s, not the release commit %s"
+              % (wt, head, commit))
+        print("NEXT: reset %s to %s, then re-run stage" % (wt, commit))
+        rel.log("stop", reason="head-moved", head=head, commit=commit)
+        return 3
+    rep = _gate(root, action, wt, rel.grant["id"])
+    if rep["status"] != "COVERED":
+        return _gate_stop(rel, action, rep, RESUME_STAGE)
+    print("GATE: %s COVERED" % action)
+    rel.log("gate", action=action, status="COVERED", reason=None, ok=True)
+    return None
+
+
+def _stage_fail(rel, step, reason, detail):
+    """Fail the stage: status stage_failed with {step, reason, detail}, saved and logged.
+    The release is finished; a new prep supersedes it. Returns 3."""
+    st = rel.stage
+    st["failure"] = {"step": step, "reason": reason, "detail": detail}
+    rel.set_status("stage_failed", stage=st)
+    rel.save()
+    rel.log("stage_failed", step=step, reason=reason)
+    print("STAGE: %s fail %s" % (rel.version, reason))
+    print("STOP: %s: %s" % (reason, detail))
+    return 3
+
+
+def _add_worktree(root, path, commit, branch=None):
+    """git worktree add at `path`, checking out `commit` on a new `branch` (or detached).
+    A leftover of an interrupted run is removed first."""
+    if os.path.lexists(path):
+        _git(root, "worktree", "remove", "--force", path)
+        shutil.rmtree(path, ignore_errors=True)
+    _git(root, "worktree", "prune")
+    if branch:
+        _git_ok(root, "worktree", "add", "-q", "-b", branch, path, commit)
+    else:
+        _git_ok(root, "worktree", "add", "-q", "--detach", path, commit)
+
+
+def _stage_worktree(root, rel, commit):
+    """The stage worktree on release/<v>-stage at the release commit: created on the first
+    run, reused on a resume (where its HEAD must still be the commit, checked by every
+    gate). Refused when the branch exists but no stage of this release made it."""
+    wt = os.path.join(rel.dir, STAGE_WT)
+    branch = "release/%s-stage" % rel.version
+    if os.path.isdir(wt) and rel.stage.get("worktree") == wt:
+        return wt
+    exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % branch)
+    if exists is not None and exists.returncode == 0:
+        if exists.stdout.strip() != commit:
+            raise Refused("branch %s already exists at another commit" % branch)
+        _git(root, "branch", "-D", branch)  # an interrupted first run's, at this commit
+    _add_worktree(root, wt, commit, branch)
+    return wt
+
+
+def _artifact_sha(build_dir, artifact):
+    """sha256 of the {"path"} artifact under the build checkout, or None when it is
+    missing, a symlink, or outside the checkout."""
+    if not CC.safe_path(artifact):
+        return None
+    path = os.path.join(build_dir, *artifact.split("/"))
+    if os.path.islink(path) or not os.path.isfile(path) or not _inside(path, build_dir):
+        return None
+    return CC.sha256_file(path)
+
+
+def _cmd_record(argv, res):
+    """{argv, rc, out_tail, err_tail} for one staging command. Tails stay in local state:
+    deploy output can carry secrets (spec section 3), so never in a log or an envelope."""
+    return {"argv": argv, "rc": res["rc"], "out_tail": res["out_tail"],
+            "err_tail": res["err_tail"]}
+
+
+def _poll_probe(argv, cwd, version, commit, timeout):
+    """Run the version probe every PROBE_INTERVAL seconds until its output reports the
+    version or commit, or `timeout` seconds pass. (live, {rc, out_tail, err_tail, polls})."""
+    deadline = time.monotonic() + timeout
+    polls = 0
+    while True:
+        left = max(1.0, min(PROBE_CMD_TIMEOUT, deadline - time.monotonic()))
+        res = run_cmd(argv, cwd, left)
+        polls += 1
+        last = {"rc": res["rc"], "out_tail": res["out_tail"], "err_tail": res["err_tail"],
+                "polls": polls}
+        if res["rc"] == 0 and probe_reports(res["out_tail"], version, commit):
+            return True, last
+        if time.monotonic() + PROBE_INTERVAL > deadline:
+            return False, last
+        _sleep(PROBE_INTERVAL)
+
+
+def cmd_stage(args):
+    """Stage the merged release (spec section 2, step 2). Exit 0: built and waiting for a
+    verifier (NEXT: dispatch-verifier <commit>), or staged (STAGE: <v> pass <commit>); 2
+    refused (no release to stage, bad input); 3 stopped: a gate did not answer COVERED,
+    the commit or recipe does not match the grant, the evidence was rejected, the lock
+    is held, or the stage failed (status stage_failed)."""
+    root = os.path.abspath(args.root)
+    if args.evidence and not (args.verifier or "").strip():
+        print("RELEASE: refused: --evidence needs --verifier ID (the independent verifier)")
+        return 2
+    if not re.match(REMOTE_NAME_RE, args.remote or ""):
+        print("RELEASE: refused: --remote %r must be a remote name" % args.remote)
+        return 2
+    try:
+        with run_lock(root):
+            return _stage_locked(root, args)
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _stage_release(root):
+    """The one release `stage` may act on: unfinished, and prepped or further along in
+    stage. Refused otherwise."""
+    busy = unfinished_releases(root)
+    ours = [(v, s) for v, s in busy if s in ("prepped", "staging_verify", "staged")]
+    if len(busy) != 1 or len(ours) != 1:
+        raise Refused("no single prepped release to stage (unfinished: %s)"
+                      % (", ".join("%s (%s)" % (v, s or "no state") for v, s in busy)
+                         or "none"))
+    try:
+        return Release.load(root, ours[0][0])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused("cannot load release %s: %s" % (ours[0][0], e))
+
+
+def _stage_locked(root, args):
+    try:
+        rel = _stage_release(root)
+        if rel.status == "staged":
+            print("STAGE: %s pass %s" % (rel.version, rel.release_commit))
+            print("NEXT: run deploy with the human")
+            return 0
+        prep = rel.prep or {}
+        if not (prep.get("pushed") and prep.get("pr")):
+            raise Refused("release %s has prep steps pending; re-run prep" % rel.version)
+        if args.evidence and rel.status != "staging_verify":
+            raise Refused("--evidence judges a built release (status staging_verify); "
+                          "release %s is %s: run stage first" % (rel.version, rel.status))
+        _, pinned, gversion = _grant_pins(root, rel)
+        commit = _stage_commit(root, rel, args, pinned, gversion)
+        if commit is None:
+            return 3
+        recipe, problems = load_recipe(root, rev=commit)
+        if problems:
+            raise Refused("invalid recipe at %s:\n%s" % (commit[:12], "\n".join(
+                "  - %s" % p for p in problems)))
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    except Stop as e:
+        print("STOP: %s: %s" % (e.reason, e.detail))
+        if e.nxt:
+            print("NEXT: %s" % e.nxt)
+        rel.log("stop", reason=e.reason)
+        return 3
+    try:
+        return _stage_steps(root, rel, recipe, commit, args)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+
+
+def _stage_commit(root, rel, args, pinned, gversion):
+    """The release commit, checked against the grant (D7) on every run: the version
+    file at the commit says the grant's release.version, and the recipe at the commit
+    hashes to the digest the grant pinned (a committed recipe edit can leave the root's
+    working recipe, which the gate's `stale` check reads, matching). Nothing from a
+    recipe is run before this passes. Raises Stop (exit 3, status unchanged)."""
+    if recipe_sha(root, rev=rel.base_commit) != pinned:
+        raise Stop("recipe-changed", "the recipe at the base commit %s is not the one the "
+                   "grant pinned" % rel.base_commit[:12], "re-run prep with a human")
+    base_recipe, problems = load_recipe(root, rev=rel.base_commit)
+    if problems:
+        raise Refused("invalid recipe at the base commit: %s" % problems[0])
+    vfile, keys = _version_key(base_recipe)
+    known = (rel.stage or {}).get("commit")
+    if args.commit:
+        commit = _resolve_commit(root, args.commit)
+        if commit is None:
+            raise Refused("--commit %s names no commit" % args.commit)
+        if known and commit != known:
+            raise Refused("this release is staging %s; --commit %s differs"
+                          % (known, args.commit))
+    elif known:
+        commit = known
+    else:
+        branch, tip = _default_branch(root)
+        commit = find_release_commit(root, tip, rel.base_commit, gversion, vfile, keys)
+        if commit is None:
+            raise Stop("not-merged", "no commit on %s since %s sets %s to %s"
+                       % (branch, rel.base_commit[:12], vfile, gversion),
+                       "merge the release PR, then run stage (or pass --commit SHA)")
+    got = _version_at(root, commit, vfile, keys)
+    if got != gversion:
+        raise Stop("version-mismatch", "%s at %s says %r; the grant pins version %s"
+                   % (vfile, commit[:12], got, gversion), "stage the merged release commit")
+    try:
+        at_commit = recipe_sha(root, rev=commit)
+    except ValueError as e:
+        raise Stop("recipe-changed", str(e), "re-run prep with a human")
+    if at_commit != pinned:
+        raise Stop("recipe-changed", "the recipe at %s is not the one the grant pinned; "
+                   "nothing from it runs" % commit[:12],
+                   "a recipe change needs a new prep with a human")
+    return commit
+
+
+def _stage_steps(root, rel, recipe, commit, args):
+    """stage's steps from the first unfinished one; each saves its progress."""
+    v = rel.version
+    if rel.stage is None:
+        rel.stage = {"commit": commit}
+        rel.release_commit = commit
+        rel.recipe_sha = recipe_sha(root, rev=commit)
+        rel.save()
+        rel.log("stage", commit=commit)
+    st = rel.stage
+    wt = _stage_worktree(root, rel, commit)
+    if st.get("worktree") != wt:
+        st["worktree"] = wt
+        rel.save()
+    values = {"version": v, "commit": commit, "env": STAGE_ENV}
+    build_dir = os.path.join(rel.dir, BUILD_WT)
+    artifact = recipe["artifact"]
+    if not st.get("built"):
+        rc = _stage_gate(root, rel, "local_reversible", wt, commit)
+        if rc is not None:
+            return rc
+        _add_worktree(root, build_dir, commit)
+        st["build_dir"] = build_dir
+        argv = expand(recipe["build"], {"version": v, "commit": commit})
+        res = run_cmd(argv, build_dir, CMD_TIMEOUT)
+        st["build"] = _cmd_record(argv, res)
+        rel.log("build", rc=res["rc"], timed_out=res["timed_out"])
+        if res["rc"] != 0:
+            return _stage_fail(rel, "build", "build-failed",
+                               "build exited %s" % res["rc"])
+        if isinstance(artifact, dict):
+            sha = _artifact_sha(build_dir, artifact["path"])
+            if sha is None:
+                return _stage_fail(rel, "build", "artifact-missing", "build made no "
+                                   "regular file at %s" % artifact["path"])
+            st["artifact"] = {"path": artifact["path"], "sha256": sha}
+            rel.artifact_sha = sha
+        else:
+            # Rebuild honesty (spec section 3): production rebuilds from this source, so
+            # staging verifies the same source, not the same bytes.
+            st["artifact"] = None
+            st["artifact_note"] = "rebuild: staging verifies the same source, not the same bytes"
+        st["built"] = True
+        rel.set_status("staging_verify", stage=st)
+        rel.save()
+    if not rel.evidence:
+        if not args.evidence:
+            print("STAGE: %s built %s" % (v, commit))
+            print("NEXT: dispatch-verifier %s" % commit)
+            print("  the verifier runs the verify skill %s's full check set in %s, with "
+                  "VERIFY_EVIDENCE_DIR=%s, then: stage --evidence --verifier <its id>"
+                  % (recipe["verify_skill"], wt, os.path.join(root, EVIDENCE_DIR)))
+            return 0
+        rc = _stage_gate(root, rel, "local_reversible", wt, commit)
+        if rc is not None:
+            return rc
+        verifier = args.verifier.strip()
+        ev = evidence_verdict(root, recipe["verify_skill"].rstrip("/"), commit, verifier,
+                              rel.driver)
+        rel.log("evidence", ok=ev["ok"], reason=ev["reason"], feature=ev["feature"],
+                verifier=verifier, commit=commit, features=ev["features"], paths=ev["paths"])
+        if ev["reason"] == "evidence-failed":
+            return _stage_fail(rel, "evidence", "evidence-failed", "feature %s failed "
+                               "verification at %s" % (ev["feature"], commit[:12]))
+        if not ev["ok"]:
+            print("STOP: evidence-reject %s%s" % (ev["reason"], " " + ev["feature"]
+                                                  if ev["feature"] else ""))
+            print("NEXT: dispatch-verifier %s" % commit)
+            return 3
+        rel.evidence = {"verdict": "pass", "verifier": verifier, "commit": commit,
+                        "features": ev["features"], "paths": ev["paths"],
+                        "doctor": ev["doctor"], "at": _rfc3339(_now())}
+        rel.save()
+        print("STAGE: %s evidence %s" % (v, commit))
+    timeout = recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT)
+    if not st.get("deployed"):
+        if st.get("artifact"):
+            # the verifier worked in the stage worktree, not here; still, the bytes
+            # deploy_staging ships must be the ones built
+            if _artifact_sha(build_dir, st["artifact"]["path"]) != st["artifact"]["sha256"]:
+                return _stage_fail(rel, "deploy_staging", "artifact-altered",
+                                   "%s changed since the build" % st["artifact"]["path"])
+        rc = _stage_gate(root, rel, "deploy_staging", wt, commit)
+        if rc is not None:
+            return rc
+        argv = expand(recipe["deploy_staging"], values)
+        res = run_cmd(argv, build_dir, CMD_TIMEOUT)
+        st["deploy"] = _cmd_record(argv, res)
+        rel.log("deploy_staging", rc=res["rc"], timed_out=res["timed_out"])
+        if res["rc"] != 0:
+            return _stage_fail(rel, "deploy_staging", "deploy-failed",
+                               "deploy_staging exited %s" % res["rc"])
+        st["deployed"] = True
+        rel.save()
+    if not st.get("live"):
+        argv = expand(recipe["version_probe"], values)
+        live, last = _poll_probe(argv, build_dir, v, commit, timeout)
+        st["probe"] = dict(last, argv=argv)
+        rel.log("probe", live=live, polls=last["polls"], rc=last["rc"])
+        if not live:
+            return _stage_fail(rel, "probe", "timeout", "the staging version probe did not "
+                               "report %s or %s within %ss" % (v, commit[:12], timeout))
+        st["live"] = True
+        rel.save()
+    if not st.get("checks_done"):
+        st["checks"] = []
+        for i, check in enumerate(recipe["staging_checks"]):
+            argv = expand(check, values)
+            res = run_cmd(argv, build_dir, CMD_TIMEOUT)
+            st["checks"].append(_cmd_record(argv, res))
+            rel.log("staging_check", index=i, rc=res["rc"], timed_out=res["timed_out"])
+            if res["rc"] != 0:
+                return _stage_fail(rel, "staging_checks", "check-failed",
+                                   "staging check %d exited %s" % (i, res["rc"]))
+        st["checks_done"] = True
+        rel.save()
+    if not st.get("tag"):
+        rc = _stage_tag(root, rel, wt, commit, args.remote)
+        if rc is not None:
+            return rc
+    rel.set_status("staged", stage=st)
+    rel.save()
+    rel.log("staged", commit=commit, tag=st["tag"])
+    print("STAGE: %s pass %s" % (v, commit))
+    print("NEXT: run deploy with the human")
+    return 0
+
+
+def _stage_tag(root, rel, wt, commit, remote):
+    """Push v<version> on the release commit, or hold it (D6). When the CI config at the
+    commit may run on a tag -- or git cannot say (R1) -- the tag push is the production
+    deploy: no gate is asked, no tag is made (not even locally, where a later `git push
+    --tags` would fire it), and tag_deploys is recorded for `deploy`. Otherwise gate
+    push_tag and push the explicit, non-forced refspec <commit>:refs/tags/v<version>.
+    None when done; else the exit code."""
+    st, tag = rel.stage, "v%s" % rel.version
+    tagged = CC.ci_tag_triggers(root, commit)
+    if tagged is None or tagged:
+        rel.tag_deploys = True
+        st["tag"] = "held"
+        rel.save()
+        rel.log("tag", tag=tag, held=True, reason="ci-tag")
+        print("STAGE: %s tag-held %s (CI runs on tags: the tag push is the deploy)"
+              % (rel.version, tag))
+        return None
+    rel.tag_deploys = False
+    rc = _stage_gate(root, rel, "push_tag", wt, commit)
+    if rc is not None:
+        return rc
+    argv = ["git", "push", remote, "%s:refs/tags/%s" % (commit, tag)]
+    ok, res = _run_remote(argv, wt, _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
+    rel.log("tag", tag=tag, command=argv, returncode=res["rc"], ok=ok)
+    if not ok:
+        # Staging passed; only the tag is pending. Not stage_failed: a re-run retries it.
+        rel.save()
+        print("STOP: tag-push-failed: git push of %s exited %s: %s"
+              % (tag, res["rc"], one_line(res.get("err_tail", ""))))
+        print("NEXT: %s" % RESUME_STAGE)
+        return 3
+    st["tag"] = "pushed"
+    rel.save()
+    return None
+
+
 def build_parser():
     import argparse
     ap = argparse.ArgumentParser(prog="release.py", description="release-conductor")
@@ -1254,6 +1920,14 @@ def build_parser():
     p.add_argument("--push-cmd", dest="push_cmd", help="JSON argv (default: git push -u "
                    "origin {release_branch})")
     p.add_argument("--pr-cmd", dest="pr_cmd", help="JSON argv (default: gh pr create ...)")
+    p = sub.add_parser("stage", help="build, verify locally, deploy to staging, check, tag")
+    p.add_argument("--root", required=True)
+    p.add_argument("--commit", help="the merged release commit (default: found on the "
+                   "default branch)")
+    p.add_argument("--evidence", action="store_true",
+                   help="judge the verifier's evidence for the release commit, then go on")
+    p.add_argument("--verifier", help="the independent verifier's id (with --evidence)")
+    p.add_argument("--remote", default="origin", help="where the tag is pushed (origin)")
     return ap
 
 
@@ -1263,7 +1937,7 @@ def main(argv=None):
         args = build_parser().parse_args(argv)
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
-    return {"init": cmd_init, "prep": cmd_prep}[args.cmd](args)
+    return {"init": cmd_init, "prep": cmd_prep, "stage": cmd_stage}[args.cmd](args)
 
 
 if __name__ == "__main__":
