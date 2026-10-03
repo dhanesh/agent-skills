@@ -33,6 +33,28 @@ class RecipeTests(unittest.TestCase):
         write_recipe(root, GOOD)                                       # back to the committed bytes
         self.assertEqual(RL.recipe_sha(root, rev=sha), CC.sha256_file(os.path.join(root, ".release", "recipe.json")))
 
+class ExpandTests(unittest.TestCase):
+    def test_a_whole_token_is_replaced(self):
+        self.assertEqual(RL.expand(["true", "{version}"], {"version": "1.2.0"}),
+                         ["true", "1.2.0"])
+
+    def test_a_token_embedded_in_a_larger_string_is_also_replaced(self):
+        # version_probe is called with {env} set to staging or prod, and the recipe
+        # may embed it in a literal path, e.g. ["cat", "probe-{env}.txt"] (the GOOD
+        # fixture above): load_recipe accepts that argv, so expand must be able to
+        # fill it in, or verify-prod would literally run `cat probe-{env}.txt`.
+        self.assertEqual(RL.expand(["cat", "probe-{env}.txt"], {"env": "staging"}),
+                         ["cat", "probe-staging.txt"])
+
+    def test_an_unrecognised_token_is_left_untouched(self):
+        self.assertEqual(RL.expand(["curl", "{home}"], {"home": "/etc"}),
+                         ["curl", "{home}"])
+
+    def test_a_values_key_outside_version_commit_env_is_ignored(self):
+        self.assertEqual(RL.expand(["true", "{version}"], {"version": "1.2.0", "extra": "x"}),
+                         ["true", "1.2.0"])
+
+
 class StateTests(unittest.TestCase):
     def test_new_save_load_and_append_only_log(self):
         root = repo(); r = RL.Release.new(root, "1.2.0", "abc")

@@ -267,15 +267,26 @@ def load_recipe(root, rev=None):
 
 
 def expand(argv, values):
-    """argv with each whole {version}, {commit} or {env} element replaced by
-    str(values["version"]), str(values["commit"]) or str(values["env"]) (only the
-    ones `values` actually carries); every other element -- including one where a
-    token is only part of the string, such as version_probe's "probe-{env}.txt" --
-    is left untouched. The argv never passes through a shell, so this is a plain list
-    substitution, the same pattern reentry.expand_agent_cmd uses for {prompt}/{root}
-    (factory-conductor/assets/reentry.py)."""
-    subs = {"{%s}" % k: str(v) for k, v in values.items() if k in ("version", "commit", "env")}
-    return [subs.get(a, a) for a in argv]
+    """argv with every occurrence of {version}, {commit} or {env} -- a whole element
+    or embedded in a larger string -- replaced by str(values["version"]),
+    str(values["commit"]) or str(values["env"]) (only the ones `values` actually
+    carries; any other key in `values`, or any other {token}, is left untouched).
+
+    This must accept the same embedded placement load_recipe's validation does
+    (_argv_problems/_neutralize_tokens, above): version_probe may read
+    ["cat", "probe-{env}.txt"], and expand has to be able to fill that in, or a
+    later `verify-prod` would literally run `cat probe-{env}.txt`. Embedded
+    substitution is safe here because the argv never passes through a shell and the
+    substituted values are tool-controlled (a semver string, a hex commit, or
+    "staging"/"prod"), never attacker-controlled shell metacharacters that would
+    matter without a shell anyway."""
+    out = []
+    for a in argv:
+        for k in ("version", "commit", "env"):
+            if k in values:
+                a = a.replace("{%s}" % k, str(values[k]))
+        out.append(a)
+    return out
 
 
 # ── The process-group-safe command runner ────────────────────────────────────────
