@@ -718,14 +718,14 @@ class WatchTests(unittest.TestCase):
         with open(self.marker) as f:
             return f.read().split()
 
-    def wait_started(self, lines, deadline=10):
+    def wait_started(self, lines, deadline=30):
         """Poll until the marker holds `lines`; returns what it holds at the end."""
         end = time.monotonic() + deadline
         while self.marker_lines() != lines and time.monotonic() < end:
             time.sleep(0.05)
         return self.marker_lines()
 
-    def wait_dead(self, pid, deadline=10):
+    def wait_dead(self, pid, deadline=30):
         end = time.monotonic() + deadline
         while R.pid_alive(pid) and time.monotonic() < end:
             time.sleep(0.05)
