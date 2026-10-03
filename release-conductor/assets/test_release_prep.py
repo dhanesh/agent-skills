@@ -1,7 +1,9 @@
-"""Tests for `release init` and `release prep` (Task 3). Stdlib only, offline: the remote
-is a local bare repository and the PR command is stubbed, so nothing touches a network
-or a real remote."""
+"""Tests for `release init` and `release prep` (Task 3; release-defaults source and
+application is Task 7's fix round 1, R33/R35). Stdlib only, offline: the remote is a
+local bare repository and the PR command is stubbed, so nothing touches a network or a
+real remote."""
 import contextlib
+import datetime as dt
 import io
 import json
 import os
@@ -119,6 +121,103 @@ class InitTests(unittest.TestCase):
             json.dump(dict(GOOD, bump="major"), f)
         self.assertEqual(run(["init", "--root", root, "--answers", ans])[0], 2)
         self.assertEqual(RL.load_recipe(root)[0]["bump"], "minor")
+
+
+def plant_planning_grant(root, release_defaults=None, revoked=False, now=None,
+                         expires_in=dt.timedelta(days=1)):
+    """A valid spec-first-planning-style autonomy grant under root (no payload.release),
+    optionally carrying release_defaults, for _release_defaults_source's tests. Mirrors
+    write_grant.build_grant's shape just enough to pass check_statement/grant_violations
+    -- asserted here, so a negative case can never pass because the grant was silently
+    malformed. Returns the grant id."""
+    d = os.path.join(root, ".skill-contract", "plan")
+    os.makedirs(d, exist_ok=True)
+    for name in ("spec.md", "plan.json"):
+        with open(os.path.join(d, name), "w") as f:
+            f.write(name + "\n")
+    subjects = [".skill-contract/plan/spec.md", ".skill-contract/plan/plan.json"]
+    now = now or CC.utc_now()
+    payload = {"scope": {"repo": ".", "branch_pattern": "factory/*"}, "decisions": [],
+               "defaults": [], "gate_policy": {"local_reversible": "grant"}, "budget": {},
+               "stop_on": [], "expires_at": RL._rfc3339(now + expires_in),
+               "system_one": {"allowed": False}, "revoked": revoked}
+    if release_defaults is not None:
+        payload["release_defaults"] = release_defaults
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana Human"},
+                "result": {"outcome": "passed"}, "subject": [CC.pin(root, s) for s in subjects],
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/write_grant.py"]}
+    st = CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "1.0.0", root, subjects,
+                            payload, [] if revoked else [accepted], now=now)
+    assert CC.check_statement(st) == [], CC.check_statement(st)
+    assert CC.grant_violations(st) == [], CC.grant_violations(st)
+    CC.write_envelope(root, st)
+    return st["predicate"]["id"]
+
+
+class ReleaseDefaultsSourceTests(unittest.TestCase):
+    """_release_defaults_source (R33, ruling R35): the newest live, non-expired,
+    well-formed planning grant that carries release_defaults and no `release` payload."""
+
+    def setUp(self):
+        self.root = repo()
+
+    def test_none_present_returns_none(self):
+        self.assertEqual(RL._release_defaults_source(self.root), (None, None))
+
+    def test_a_qualifying_grant_is_found(self):
+        gid = plant_planning_grant(self.root, {"bump": "minor", "grant_staging": True,
+                                               "grant_tag": False})
+        self.assertEqual(RL._release_defaults_source(self.root),
+                         (gid, {"bump": "minor", "grant_staging": True, "grant_tag": False}))
+
+    def test_the_newest_qualifying_grant_wins(self):
+        plant_planning_grant(self.root, {"bump": "patch", "grant_staging": True,
+                                         "grant_tag": True},
+                             now=CC.utc_now() - dt.timedelta(minutes=5))
+        gid = plant_planning_grant(self.root, {"bump": "major", "grant_staging": False,
+                                               "grant_tag": False})
+        self.assertEqual(RL._release_defaults_source(self.root)[0], gid)
+
+    def test_a_revoked_planning_grant_is_ignored(self):
+        plant_planning_grant(self.root, {"bump": "minor", "grant_staging": True,
+                                         "grant_tag": True}, revoked=True)
+        self.assertEqual(RL._release_defaults_source(self.root), (None, None))
+
+    def test_an_expired_planning_grant_is_ignored(self):
+        past = CC.utc_now() - dt.timedelta(days=2)
+        plant_planning_grant(self.root, {"bump": "minor", "grant_staging": True,
+                                         "grant_tag": True}, now=past,
+                             expires_in=dt.timedelta(days=1))
+        self.assertEqual(RL._release_defaults_source(self.root), (None, None))
+
+    def test_a_release_grant_carrying_no_defaults_is_ignored(self):
+        write_recipe(self.root, GOOD)  # build_release_grant pins RECIPE_PATH too
+        intent = ".skill-contract/releases/9.9.9/intent.json"
+        os.makedirs(os.path.join(self.root, os.path.dirname(intent)), exist_ok=True)
+        with open(os.path.join(self.root, intent), "w") as f:
+            f.write('{"version": "9.9.9"}\n')
+        st = RL.build_release_grant(self.root, "9.9.9", intent,
+                                    {c: "grant" for c in RL.RELEASE_GRANT_CLASSES},
+                                    "Dana Human", "patch", CC.utc_now())
+        CC.write_envelope(self.root, st)
+        self.assertEqual(RL._release_defaults_source(self.root), (None, None))
+
+    def test_a_release_grant_is_never_a_source_even_over_an_older_planning_grant(self):
+        # the release grant is newer, but carrying payload.release excludes it outright
+        write_recipe(self.root, GOOD)  # build_release_grant pins RECIPE_PATH too
+        plant_planning_grant(self.root, {"bump": "patch", "grant_staging": True,
+                                         "grant_tag": True})
+        intent = ".skill-contract/releases/9.9.9/intent.json"
+        os.makedirs(os.path.join(self.root, os.path.dirname(intent)), exist_ok=True)
+        with open(os.path.join(self.root, intent), "w") as f:
+            f.write('{"version": "9.9.9"}\n')
+        st = RL.build_release_grant(self.root, "9.9.9", intent,
+                                    {c: "grant" for c in RL.RELEASE_GRANT_CLASSES},
+                                    "Dana Human", "patch", CC.utc_now())
+        CC.write_envelope(self.root, st)
+        gid, defaults = RL._release_defaults_source(self.root)
+        self.assertIsNotNone(gid)
+        self.assertEqual(defaults["bump"], "patch")
 
 
 class PrepTests(unittest.TestCase):
@@ -477,6 +576,77 @@ class PrepTests(unittest.TestCase):
         rel = RL.Release.load(self.root, "1.2.0")
         self.assertTrue(rel.prep["pushed"])
         self.assertFalse(rel.prep["pr"])
+
+
+class PrepReleaseDefaultsTests(PrepTests):
+    """prep applies a planning grant's release_defaults where --bump/--policy-file leave
+    a gap (R33, ruling R35). Reuses PrepTests' fixture (GOOD recipe, bump=minor, base
+    1.1.0 -> prep's default version 1.2.0)."""
+
+    def _release_grant_payload(self, version):
+        gid = RL.Release.load(self.root, version).grant["id"]
+        st, _ = CC.load_envelope(RL._grant_path(self.root, gid))
+        return st["predicate"]["payload"]
+
+    def test_defaults_are_applied(self):
+        plant_planning_grant(self.root, {"bump": "major", "grant_staging": False,
+                                         "grant_tag": False})
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("release defaults applied from grant", out)
+        p = self._release_grant_payload("2.0.0")  # major bump from 1.1.0
+        self.assertEqual(p["release"], {"version": "2.0.0"})
+        self.assertEqual(p["gate_policy"]["deploy_staging"], "ask")
+        self.assertEqual(p["gate_policy"]["push_tag"], "ask")
+
+    def test_explicit_bump_wins_over_the_defaults(self):
+        plant_planning_grant(self.root, {"bump": "major", "grant_staging": True,
+                                         "grant_tag": True})
+        rc, out, err = self.prep("--bump", "patch")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self._release_grant_payload("1.1.1")["release"],
+                         {"version": "1.1.1"})
+
+    def test_explicit_policy_file_wins_over_the_defaults(self):
+        plant_planning_grant(self.root, {"bump": "minor", "grant_staging": False,
+                                         "grant_tag": False})
+        pol = os.path.join(tmpdir(), "policy.json")
+        with open(pol, "w") as f:
+            json.dump({"deploy_staging": "grant", "push_tag": "grant"}, f)
+        rc, out, err = self.prep("--policy-file", pol)
+        self.assertEqual(rc, 0, out + err)
+        gp = self._release_grant_payload("1.2.0")["gate_policy"]
+        self.assertEqual(gp["deploy_staging"], "grant")
+        self.assertEqual(gp["push_tag"], "grant")
+
+    def test_a_revoked_planning_grant_is_ignored_at_prep(self):
+        plant_planning_grant(self.root, {"bump": "major", "grant_staging": False,
+                                         "grant_tag": False}, revoked=True)
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no release-defaults grant found", out)
+        p = self._release_grant_payload("1.2.0")  # the recipe's own minor bump, unaffected
+        self.assertEqual(p["release"], {"version": "1.2.0"})
+        self.assertEqual(p["gate_policy"]["deploy_staging"], "grant")
+
+    def test_an_expired_planning_grant_is_ignored_at_prep(self):
+        past = CC.utc_now() - dt.timedelta(days=2)
+        plant_planning_grant(self.root, {"bump": "major", "grant_staging": False,
+                                         "grant_tag": False}, now=past,
+                             expires_in=dt.timedelta(days=1))
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no release-defaults grant found", out)
+        self.assertEqual(self._release_grant_payload("1.2.0")["release"],
+                         {"version": "1.2.0"})
+
+    def test_none_present_is_old_behaviour(self):
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no release-defaults grant found", out)
+        p = self._release_grant_payload("1.2.0")
+        self.assertEqual(p["release"], {"version": "1.2.0"})
+        self.assertEqual(p["gate_policy"]["deploy_staging"], "grant")
 
 
 if __name__ == "__main__":

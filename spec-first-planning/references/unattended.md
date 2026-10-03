@@ -168,11 +168,18 @@ and skip what the conversation has already answered:
     grant itself — only `release prep` does that, with the human present (design spec
     D10), because production and the recipe it reads may both be unknown or stale by
     the time the run reaches release. Its subjects are the recipe and a release intent
-    file, not this spec and plan. To apply a recorded default at `release prep`, pass
-    `--bump <bump>` and, when `grant_staging` or `grant_tag` is false, a `--policy-file`
-    declining the matching class (`deploy_staging` for staging, `push_tag` for tag
-    pushes — `_load_policy` in release.py grants every class by default and a policy
-    file may only decline, never widen).
+    file, not this spec and plan. `release prep` applies the recorded default itself
+    (ruling R33/R35): it looks up the newest live grant under the repo root that is not
+    revoked, not expired, passes the reference checker's own grant checks, carries
+    `release_defaults`, and carries no `release` payload (a planning grant, never
+    release-conductor's own release grant — that one never records defaults, and
+    answers a different question: this release's scope, not a standing default) — none
+    found means `release prep` falls back to the recipe's own `bump` and grants every
+    class, unchanged. `bump` fills in only when `--bump` is not given on the command
+    line; `grant_staging`/`grant_tag` decline `deploy_staging`/`push_tag` only when
+    `--policy-file` is not given. An explicit `--bump` or `--policy-file` always wins
+    outright over the recorded default. `release prep` prints and logs which grant (or
+    that none applied) the defaults came from.
 
 ### Action classes and their gates
 

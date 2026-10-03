@@ -190,8 +190,10 @@ the run if the session dies; see `references/unattended.md`. `write_grant.py` re
 re-entry allowlist that would let the resumed agent run the repo's `.release/recipe.json`
 `deploy_prod` or `rollback` unprompted. On a project that releases with release-conductor,
 the interview also records `answers.release_defaults` (bump level, whether to grant staging
-and tag pushes) for a later `release prep` — it never writes the release grant itself, which
-is written only by `release prep`, with the human present.
+and tag pushes) for `release prep` to apply later — it never writes the release grant
+itself, which is written only by `release prep`, with the human present, because
+production and the recipe it reads may both be unknown or stale by the time the run
+reaches release.
 
 Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are
 never covered by a grant and will always ask: you MUST ask the user right before any of them,

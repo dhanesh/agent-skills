@@ -17,10 +17,13 @@ and the commands built on them:
 
   - `init --root R --answers FILE` writes the validated recipe (never overwriting one);
   - `prep --root R --approved-by NAME --driver ID [--bump L] [--policy-file F]
-    [--push-cmd JSON] [--pr-cmd JSON]` writes the release intent and the release grant
-    the human accepts (D10), commits the version bump and changelog on release/<version>
-    in the worktree .skill-contract/releases/<version>/wt-prep, then pushes it and opens
-    the release PR, each step gated by check-grant (subject the recipe, worktree the
+    [--push-cmd JSON] [--pr-cmd JSON]` applies the newest live planning grant's
+    recorded release_defaults where --bump/--policy-file leave a gap (R33/R35;
+    spec-first-planning's unattended interview records them, never this skill's own
+    release grant), then writes the release intent and the release grant the human
+    accepts (D10), commits the version bump and changelog on release/<version> in the
+    worktree .skill-contract/releases/<version>/wt-prep, then pushes it and opens the
+    release PR, each step gated by check-grant (subject the recipe, worktree the
     prep worktree) and run only on COVERED;
   - `stage --root R [--commit SHA] [--evidence --verifier ID] [--remote NAME]` finds the
     merged release commit (where the default branch's version file became the grant's
@@ -896,6 +899,46 @@ def _load_policy(path):
     return policy
 
 
+def _release_defaults_source(root, now=None):
+    """(grant_id, release_defaults) from the newest live grant under root that qualifies
+    as a source of release defaults (ruling R33, settled by R35): not revoked, not
+    expired, passing the checker's own grant_violations (C10), carrying
+    payload.release_defaults, and carrying NO payload.release -- a planning grant
+    (spec-first-planning's write_grant.py) is a source; this skill's own release grant
+    (build_release_grant, which never writes release_defaults anyway) never is, even if
+    it were somehow made to carry one, because a release grant answers a different
+    question (this release's scope) than a planning grant's recorded defaults.
+
+    (None, None) when nothing qualifies: prep then applies today's behaviour unchanged
+    (--bump as given or the recipe's own; --policy-file as given or every class granted).
+
+    Candidates are enumerated with the vendored checker's own CC._live_heads (already
+    ranked by revocation/supersession through the revision chain) rather than
+    re-walking that logic here; only the extra release-defaults-specific filters are
+    applied locally."""
+    now = now or CC.utc_now()
+    candidates = []
+    for rank, _, st in CC._live_heads(root):
+        payload = st["predicate"].get("payload") or {}
+        if payload.get("revoked"):
+            continue
+        if "release" in payload or not isinstance(payload.get("release_defaults"), dict):
+            continue
+        if CC.check_statement(st) or CC.grant_violations(st):
+            continue
+        try:
+            expired = now >= CC._parse_time(payload["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            continue  # grant_violations already requires a parseable expires_at; fail closed
+        if expired:
+            continue
+        candidates.append((rank, st["predicate"]["id"], payload["release_defaults"]))
+    if not candidates:
+        return None, None
+    _, gid, defaults = max(candidates, key=lambda c: c[0])
+    return gid, defaults
+
+
 def _default_branch(root):
     """The default branch prep works from: origin/HEAD's target, else main, else master,
     whichever first exists as a local branch. Refused when none does."""
@@ -1110,7 +1153,15 @@ def _prep_checks(root, args):
                       "grant pins a digest some commit has" % (RECIPE_PATH, base_branch))
     vfile, keys = _version_key(recipe)
     _, cur = _read_version(_git_ok(root, "show", "%s:%s" % (base, vfile)), keys, vfile)
-    bump = args.bump or recipe["bump"]
+    # R33/R35: a planning grant's recorded release defaults, applied only where the
+    # human left a gap -- an explicit --bump or --policy-file always wins outright.
+    defaults_id, defaults = _release_defaults_source(root)
+    bump = args.bump or (defaults or {}).get("bump") or recipe["bump"]
+    if defaults and args.policy_file is None:
+        if defaults.get("grant_staging") is False:
+            policy["deploy_staging"] = "ask"
+        if defaults.get("grant_tag") is False:
+            policy["push_tag"] = "ask"
     try:
         version = next_version(cur, bump)
     except ValueError as e:
@@ -1122,7 +1173,7 @@ def _prep_checks(root, args):
     return {"accepted_by": accepted_by, "driver": driver, "push_cmd": push_cmd,
             "pr_cmd": pr_cmd, "policy": policy, "base_branch": base_branch, "base": base,
             "vfile": vfile, "keys": keys, "bump": bump, "version": version,
-            "branch": branch}
+            "branch": branch, "release_defaults_source": defaults_id}
 
 
 def cmd_prep(args):
@@ -1175,6 +1226,11 @@ def _prep_locked(root, args):
         exclude_grants(root)
         rel.log("grant", id=grant_id, accepted_by=c["accepted_by"],
                 path=os.path.relpath(grant_path, root))
+        defaults_source = c["release_defaults_source"]
+        print("RELEASE: release defaults applied from grant %s" % defaults_source
+              if defaults_source else
+              "RELEASE: no release-defaults grant found; using explicit flags and the recipe")
+        rel.log("release_defaults", source=defaults_source)
         _git_ok(root, "worktree", "add", "-q", "-b", branch, wt, c["base"])
         made_branch = True
         rep = _gate(root, "local_reversible", wt, grant_id)
