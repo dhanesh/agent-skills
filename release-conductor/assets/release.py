@@ -33,6 +33,7 @@ import fcntl  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
@@ -217,21 +218,27 @@ def _validate_recipe(recipe):
     timeout = recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
         problems.append("deploy_timeout must be a positive integer (seconds)")
-    if not (isinstance(recipe.get("verify_skill"), str) and recipe["verify_skill"]):
-        problems.append("verify_skill must be a non-empty string")
+    if not CC.safe_path(recipe.get("verify_skill")):
+        problems.append("verify_skill must be a relative, repo-rooted path (no leading "
+                        "'/', no '..' segment, forward slashes) -- see CC.safe_path")
     return problems
 
 
 def _recipe_bytes(root, rev=None):
     """The exact bytes of .release/recipe.json: the working file, or, when `rev` is
     given, the stdout of `git show <rev>:.release/recipe.json`. Raises OSError on an
-    unreadable working file, or ValueError when git or the show fails."""
+    unreadable working file, or ValueError when git or the show fails.
+
+    Runs with CC.git_env() (the vendored checker's own git_env, same one
+    conductor.py uses everywhere it shells out to git): os.environ with GIT_DIR,
+    GIT_WORK_TREE and friends stripped, so a GIT_DIR inherited from a caller's
+    environment cannot redirect `git -C root show` at a different repository."""
     if rev is None:
         with open(os.path.join(root, *RECIPE_PATH.split("/")), "rb") as f:
             return f.read()
     try:
         r = subprocess.run(["git", "-C", root, "show", "%s:%s" % (rev, RECIPE_PATH)],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30, env=CC.git_env())
     except (OSError, subprocess.SubprocessError) as e:
         raise ValueError("git show %s:%s failed: %s" % (rev, RECIPE_PATH, e)) from e
     if r.returncode != 0:
@@ -266,27 +273,46 @@ def load_recipe(root, rev=None):
     return recipe, _validate_recipe(recipe)
 
 
+_EXPAND_TOKEN = re.compile(r"\{(version|commit|env)\}")
+
+
 def expand(argv, values):
     """argv with every occurrence of {version}, {commit} or {env} -- a whole element
-    or embedded in a larger string -- replaced by str(values["version"]),
-    str(values["commit"]) or str(values["env"]) (only the ones `values` actually
-    carries; any other key in `values`, or any other {token}, is left untouched).
+    or embedded in a larger string -- replaced by values["version"], values["commit"]
+    or values["env"] (only the keys `values` actually carries; any other key in
+    `values`, or any other {token}, is left untouched).
+
+    Substitution is single-pass: one re.sub over each argv element matches every
+    {version}/{commit}/{env} token in that element in one scan, and the text put in
+    its place is never itself re-scanned for a token it happens to contain. Naive
+    sequential str.replace calls (replace {version}, then {commit}, then {env}) get
+    this wrong -- expand(["x-{version}"], {"version": "V-{commit}", "commit": "C"})
+    would turn into "x-V-{commit}" after the first replace, then "x-V-C" after the
+    second, silently re-expanding a value that was never meant to be a template.
+    Because a single pass cannot protect against that once two expansions are
+    combined by a caller (e.g. one release step feeding another's output back in as
+    `values`), it is refused outright: every substituted value must be a plain,
+    brace-free string (ValueError otherwise). A recipe's version/commit/env values
+    are fixed-format -- a semver string, a hex commit, "staging"/"prod" -- never a
+    template to keep expanding.
 
     This must accept the same embedded placement load_recipe's validation does
     (_argv_problems/_neutralize_tokens, above): version_probe may read
     ["cat", "probe-{env}.txt"], and expand has to be able to fill that in, or a
     later `verify-prod` would literally run `cat probe-{env}.txt`. Embedded
-    substitution is safe here because the argv never passes through a shell and the
-    substituted values are tool-controlled (a semver string, a hex commit, or
-    "staging"/"prod"), never attacker-controlled shell metacharacters that would
-    matter without a shell anyway."""
-    out = []
-    for a in argv:
-        for k in ("version", "commit", "env"):
-            if k in values:
-                a = a.replace("{%s}" % k, str(values[k]))
-        out.append(a)
-    return out
+    substitution is safe here because the argv never passes through a shell."""
+    def repl(m):
+        """The replacement for one {version}/{commit}/{env} match: the matching
+        value from `values`, or the token unchanged when `values` has no such key."""
+        key = m.group(1)
+        if key not in values:
+            return m.group(0)
+        v = values[key]
+        if not isinstance(v, str) or "{" in v or "}" in v:
+            raise ValueError("expand(): values[%r] must be a brace-free string, got %r"
+                             % (key, v))
+        return v
+    return [_EXPAND_TOKEN.sub(repl, a) for a in argv]
 
 
 # ── The process-group-safe command runner ────────────────────────────────────────

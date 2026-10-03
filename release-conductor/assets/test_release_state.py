@@ -33,6 +33,31 @@ class RecipeTests(unittest.TestCase):
         write_recipe(root, GOOD)                                       # back to the committed bytes
         self.assertEqual(RL.recipe_sha(root, rev=sha), CC.sha256_file(os.path.join(root, ".release", "recipe.json")))
 
+    def test_recipe_sha_ignores_an_inherited_GIT_DIR(self):
+        # A caller's environment (or a parent process) may leave GIT_DIR pointing at
+        # a different repository; `git -C root show` must still read root's own
+        # history, not follow GIT_DIR elsewhere.
+        root = repo(); write_recipe(root, GOOD, commit=True)
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        expected = RL.recipe_sha(root, rev=sha)
+        other = repo()  # an unrelated repo; a leaked GIT_DIR would point here instead
+        old = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = os.path.join(other, ".git")
+        try:
+            self.assertEqual(RL.recipe_sha(root, rev=sha), expected)
+            self.assertEqual(RL.load_recipe(root, rev=sha)[0]["deploy_prod"], ["true"])
+        finally:
+            if old is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = old
+
+    def test_verify_skill_must_be_a_safe_relative_path(self):
+        for bad in ("/etc/passwd", "../../secrets", "a/../b", ""):
+            with self.subTest(verify_skill=bad):
+                root = repo(); write_recipe(root, dict(GOOD, verify_skill=bad))
+                self.assertTrue(RL.load_recipe(root)[1])
+
 class ExpandTests(unittest.TestCase):
     def test_a_whole_token_is_replaced(self):
         self.assertEqual(RL.expand(["true", "{version}"], {"version": "1.2.0"}),
@@ -53,6 +78,23 @@ class ExpandTests(unittest.TestCase):
     def test_a_values_key_outside_version_commit_env_is_ignored(self):
         self.assertEqual(RL.expand(["true", "{version}"], {"version": "1.2.0", "extra": "x"}),
                          ["true", "1.2.0"])
+
+    def test_multiple_tokens_substitute_in_one_pass(self):
+        self.assertEqual(
+            RL.expand(["release-{version}-{commit}"], {"version": "1.2.0", "commit": "deadbeef"}),
+            ["release-1.2.0-deadbeef"])
+
+    def test_a_substituted_value_is_never_itself_re_expanded(self):
+        # A naive sequential str.replace (first {version}, then {commit}) would turn
+        # "x-{version}" into "x-V-{commit}" and then into "x-V-C", silently
+        # re-expanding a value that was never meant to be a template. Single-pass
+        # substitution must instead refuse a substituted value that carries a brace.
+        with self.assertRaises(ValueError):
+            RL.expand(["x-{version}"], {"version": "V-{commit}", "commit": "C"})
+
+    def test_a_non_string_substituted_value_is_refused(self):
+        with self.assertRaises(ValueError):
+            RL.expand(["{version}"], {"version": 120})
 
 
 class StateTests(unittest.TestCase):
