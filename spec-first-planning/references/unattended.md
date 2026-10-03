@@ -247,6 +247,11 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
 In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
 the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's
 own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own.
+Claude Code matches each `Bash(...)` rule against the literal command text, before any
+variable is expanded. A resumed agent therefore writes the conductor's absolute path out in
+each command, as factory-conductor's "Scheduled re-entry" section says, so give the rule that
+same absolute path. A rule written with `$SKILL_DIR` would never match, and every conductor
+call would be refused.
 
 `expires_at` is RFC 3339 in UTC, in the future, and no more than 7 days after the grant
 is written. Set it from the user's answer, not from this example.

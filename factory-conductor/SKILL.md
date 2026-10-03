@@ -246,6 +246,13 @@ and the run goes on without a timer. `REENTRY: failed` (exit 2) means no timer w
 installed (no timer kind on this system, or a loader that failed; nothing is left behind): say
 so in the run report and carry on.
 
+An agent resumed by the timer runs headless under the allowlist in `agent_cmd`. Its `Bash(...)` rules
+match the command text as written, before any variable is expanded, and a command that matches no
+rule is refused. So in a resumed session, write the conductor's absolute path out in each command,
+as `python3 /abs/path/to/factory-conductor/assets/conductor.py <command> --root <repo>`. Use no
+`$SKILL_DIR`, no `cd … &&` and no variable assignment, so each command matches the grant's
+`Bash(python3 /abs/…/conductor.py *)` rule.
+
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
 command, with a fixed resume prompt, only when the run is not finished, not waiting on the
 human, still covered by the grant, not driven by a live session, idle for `stall_min`, and
