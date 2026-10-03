@@ -364,8 +364,9 @@ def _kill_group(p):
 
 def run_cmd(argv, cwd, timeout):
     """Run argv (never a shell, no stdin) in cwd, in its own session and process
-    group, and kill that whole group when the command ends or times out -- so a
-    detached grandchild cannot outlive the result. Copies factory-conductor's
+    group, with the git redirect variables scrubbed from its environment (CC.git_env),
+    and kill that whole group when the command ends or times out -- so a detached
+    grandchild cannot outlive the result. Copies factory-conductor's
     assets/conductor.py `_run_verify`/`_kill_group` pattern.
 
     Returns {"rc", "out_tail", "err_tail", "timed_out"}: rc is the exit code, or None
@@ -373,9 +374,11 @@ def run_cmd(argv, cwd, timeout):
     characters of stdout/stderr (kept local, never logged to a release record --
     deploy output can carry secrets, spec section 3)."""
     try:
+        # CC.git_env(): a GIT_DIR (or GIT_WORK_TREE, ...) inherited from the caller must
+        # not redirect a recipe command's own git calls at another repository.
         p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, errors="replace",
-                             start_new_session=True)
+                             start_new_session=True, env=CC.git_env())
     except OSError as e:
         return {"rc": None, "out_tail": "", "err_tail": "cannot run: %s" % e, "timed_out": False}
     try:
@@ -1457,20 +1460,22 @@ class Stop(Exception):
 
 def _grant_pins(root, rel):
     """(grant path, the recipe digest the release grant pinned, its release.version).
-    Refused when the grant prep wrote cannot be read."""
+    Stop (exit 3) when the grant prep wrote is missing, unreadable or does not pin what
+    it should: only a new prep, with a human accepting a new grant, can fix that."""
+    nxt = "a new prep with a human is needed (the release grant cannot be trusted)"
     gid = (rel.grant or {}).get("id")
     if not gid:
-        raise Refused("release %s has no grant; run prep" % rel.version)
+        raise Stop("grant-unreadable", "release %s records no grant" % rel.version, nxt)
     path = _grant_path(root, gid)
     st, errs = CC.load_envelope(path)
     if errs or not isinstance(st, dict):
-        raise Refused("cannot read the release grant %s" % path)
+        raise Stop("grant-unreadable", "cannot read the release grant %s" % path, nxt)
     pinned = next((s.get("digest", {}).get("sha256") for s in st.get("subject") or []
                    if isinstance(s, dict) and s.get("name") == RECIPE_PATH), None)
     version = ((st.get("predicate") or {}).get("payload") or {}).get("release", {})
     if not pinned or not isinstance(version, dict) or version.get("version") != rel.version:
-        raise Refused("the release grant %s does not pin %s and version %s"
-                      % (gid, RECIPE_PATH, rel.version))
+        raise Stop("grant-unreadable", "the release grant %s does not pin %s and version %s"
+                   % (gid, RECIPE_PATH, rel.version), nxt)
     return path, pinned, version["version"]
 
 
@@ -1543,12 +1548,22 @@ def _stage_gate(root, rel, action, wt, commit):
 
 def _stage_fail(rel, step, reason, detail):
     """Fail the stage: status stage_failed with {step, reason, detail}, saved and logged.
-    The release is finished; a new prep supersedes it. Returns 3."""
+    The release is finished; a new prep supersedes it. Its grant is revoked (as prep's
+    _cleanup_prep does), so it does not stay live for days covering deploy_staging and
+    push_tag for a release nothing will finish. Returns 3."""
     st = rel.stage
     st["failure"] = {"step": step, "reason": reason, "detail": detail}
     rel.set_status("stage_failed", stage=st)
     rel.save()
     rel.log("stage_failed", step=step, reason=reason)
+    gid = (rel.grant or {}).get("id")
+    if gid:
+        try:
+            CC.revoke_grant(rel.root, gid)
+            rel.log("grant_revoked", id=gid)
+        except (OSError, ValueError) as e:
+            print("WARNING: could not revoke the release grant %s: %s; revoke it with "
+                  "check-grant's revoke-grant --id" % (gid, e))
     print("STAGE: %s fail %s" % (rel.version, reason))
     print("STOP: %s: %s" % (reason, detail))
     return 3
@@ -1575,13 +1590,39 @@ def _stage_worktree(root, rel, commit):
     branch = "release/%s-stage" % rel.version
     if os.path.isdir(wt) and rel.stage.get("worktree") == wt:
         return wt
+    # A worktree left by an interrupted run (or one whose directory was deleted) still
+    # holds the branch until it is removed and pruned; only then can the branch go.
+    if os.path.lexists(wt):
+        _git(root, "worktree", "remove", "--force", wt)
+        shutil.rmtree(wt, ignore_errors=True)
+    _git(root, "worktree", "prune")
     exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % branch)
     if exists is not None and exists.returncode == 0:
         if exists.stdout.strip() != commit:
             raise Refused("branch %s already exists at another commit" % branch)
-        _git(root, "branch", "-D", branch)  # an interrupted first run's, at this commit
+        gone = _git(root, "branch", "-D", branch)  # an earlier run's, at this commit
+        if gone is None or gone.returncode != 0:
+            raise Refused("cannot delete the stale branch %s: %s"
+                          % (branch, gone.stderr.strip() if gone else "git not runnable"))
     _add_worktree(root, wt, commit, branch)
     return wt
+
+
+def _build_tree(build_dir):
+    """{"head", "diff_sha256"} of the build checkout: its HEAD and a sha256 of its tracked
+    changes (`git diff --binary HEAD`), recorded at build end and compared before
+    deploy_staging. A build may change tracked files; nothing may change them after. None
+    when git cannot say."""
+    head = _head(build_dir)
+    try:
+        r = subprocess.run(["git", "-C", build_dir, *GIT_SAFE, "diff", "--no-ext-diff",
+                            "--binary", "HEAD", "--"], capture_output=True, timeout=120,
+                           env=CC.git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if head is None or r.returncode != 0:
+        return None
+    return {"head": head, "diff_sha256": hashlib.sha256(r.stdout).hexdigest()}
 
 
 def _artifact_sha(build_dir, artifact):
@@ -1630,6 +1671,14 @@ def cmd_stage(args):
     if args.evidence and not (args.verifier or "").strip():
         print("RELEASE: refused: --evidence needs --verifier ID (the independent verifier)")
         return 2
+    if args.evidence:
+        # The same rule as prep's --driver: no control or format character, so a
+        # zero-width variant of the driver's id cannot pass as another verifier.
+        try:
+            args.verifier = _clean_name(args.verifier, "--verifier")
+        except Refused as e:
+            print("RELEASE: refused: %s" % e)
+            return 2
     if not re.match(REMOTE_NAME_RE, args.remote or ""):
         print("RELEASE: refused: --remote %r must be a remote name" % args.remote)
         return 2
@@ -1641,11 +1690,34 @@ def cmd_stage(args):
         return 3
 
 
+def _failed_stages(root):
+    """[(version, failure reason)] for every stage_failed release, oldest name first."""
+    out = []
+    try:
+        names = sorted(os.listdir(_releases_dir(root)))
+    except FileNotFoundError:
+        return out
+    for name in names:
+        try:
+            r = Release.load(root, name)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if r.status == "stage_failed":
+            out.append((name, ((r.stage or {}).get("failure") or {}).get("reason")
+                        or "unknown"))
+    return out
+
+
 def _stage_release(root):
     """The one release `stage` may act on: unfinished, and prepped or further along in
     stage. Refused otherwise."""
     busy = unfinished_releases(root)
     ours = [(v, s) for v, s in busy if s in ("prepped", "staging_verify", "staged")]
+    if not busy:
+        failed = _failed_stages(root)
+        if failed:
+            raise Refused("; ".join("release %s is stage_failed (%s)" % f for f in failed)
+                          + ": a new prep with a human is needed")
     if len(busy) != 1 or len(ours) != 1:
         raise Refused("no single prepped release to stage (unfinished: %s)"
                       % (", ".join("%s (%s)" % (v, s or "no state") for v, s in busy)
@@ -1699,7 +1771,12 @@ def _stage_commit(root, rel, args, pinned, gversion):
     hashes to the digest the grant pinned (a committed recipe edit can leave the root's
     working recipe, which the gate's `stale` check reads, matching). Nothing from a
     recipe is run before this passes. Raises Stop (exit 3, status unchanged)."""
-    if recipe_sha(root, rev=rel.base_commit) != pinned:
+    try:
+        at_base = recipe_sha(root, rev=rel.base_commit)
+    except ValueError as e:
+        raise Stop("recipe-unreadable", str(e), "re-run stage once git can read %s at %s"
+                   % (RECIPE_PATH, rel.base_commit[:12]))
+    if at_base != pinned:
         raise Stop("recipe-changed", "the recipe at the base commit %s is not the one the "
                    "grant pinned" % rel.base_commit[:12], "re-run prep with a human")
     base_recipe, problems = load_recipe(root, rev=rel.base_commit)
@@ -1788,6 +1865,11 @@ def _stage_steps(root, rel, recipe, commit, args):
             # staging verifies the same source, not the same bytes.
             st["artifact"] = None
             st["artifact_note"] = "rebuild: staging verifies the same source, not the same bytes"
+        tree = _build_tree(build_dir)
+        if tree is None:
+            return _stage_fail(rel, "build", "build-tree-unreadable",
+                               "git cannot describe the build checkout %s" % build_dir)
+        st["build_tree"] = tree
         st["built"] = True
         rel.set_status("staging_verify", stage=st)
         rel.save()
@@ -1802,7 +1884,7 @@ def _stage_steps(root, rel, recipe, commit, args):
         rc = _stage_gate(root, rel, "local_reversible", wt, commit)
         if rc is not None:
             return rc
-        verifier = args.verifier.strip()
+        verifier = args.verifier
         ev = evidence_verdict(root, recipe["verify_skill"].rstrip("/"), commit, verifier,
                               rel.driver)
         rel.log("evidence", ok=ev["ok"], reason=ev["reason"], feature=ev["feature"],
@@ -1822,6 +1904,11 @@ def _stage_steps(root, rel, recipe, commit, args):
         print("STAGE: %s evidence %s" % (v, commit))
     timeout = recipe.get("deploy_timeout", DEFAULT_DEPLOY_TIMEOUT)
     if not st.get("deployed"):
+        tree = _build_tree(build_dir)
+        if tree != st.get("build_tree"):
+            return _stage_fail(rel, "deploy_staging", "build-tree-changed",
+                               "the build checkout %s moved off %s or its tracked files "
+                               "changed since the build" % (build_dir, commit[:12]))
         if st.get("artifact"):
             # the verifier worked in the stage worktree, not here; still, the bytes
             # deploy_staging ships must be the ones built
@@ -1832,6 +1919,14 @@ def _stage_steps(root, rel, recipe, commit, args):
         if rc is not None:
             return rc
         argv = expand(recipe["deploy_staging"], values)
+        if st.get("deploy_started"):
+            # An earlier attempt started and never recorded its end (a crash or a kill):
+            # staging is grantable and re-deployable, so it runs again, and says so.
+            print("STAGE: %s re-running deploy_staging after an interrupted attempt" % v)
+            rel.log("deploy_staging_rerun")
+        st["deploy_started"] = True
+        rel.save()
+        rel.log("deploy_staging_started")
         res = run_cmd(argv, build_dir, CMD_TIMEOUT)
         st["deploy"] = _cmd_record(argv, res)
         rel.log("deploy_staging", rc=res["rc"], timed_out=res["timed_out"])

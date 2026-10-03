@@ -292,8 +292,78 @@ class RefusalTests(StageBase):
         self.assertEqual(rel.status, "stage_failed")
         self.assertEqual(rel.stage["failure"]["reason"], "build-failed")
         self.assertNotIn("dispatch-verifier", out)
-        # a stage_failed release is finished: stage refuses it
-        self.assertEqual(self.stage()[0], 2)
+        # R21: the failed release's grant no longer covers anything
+        rep = CC.check_grant(self.root, "deploy_staging",
+                             path=RL._grant_path(self.root, rel.grant["id"]),
+                             subject=RL.RECIPE_PATH, worktree=self.stage_wt())
+        # named by path (as stage's gates do), the revocation supersedes the grant
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "superseded"))
+        rep = CC.check_grant(self.root, "deploy_staging", subject=RL.RECIPE_PATH,
+                             worktree=self.stage_wt())
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"))
+        # M7: a stage_failed release is finished: stage refuses it, naming why and what next
+        rc, out, _ = self.stage()
+        self.assertEqual(rc, 2)
+        self.assertIn("stage_failed (build-failed)", out)
+        self.assertIn("a new prep with a human is needed", out)
+
+    def test_an_inherited_GIT_DIR_never_reaches_a_recipe_command(self):  # R22
+        seen = os.path.join(self.d, "gitdir.marker")
+        self.make(build=[sys.executable, "-c",
+                         "import os, sys; open(sys.argv[1], 'w').write("
+                         "str('GIT_DIR' in os.environ))", seen])
+        with mock.patch.dict(os.environ, {"GIT_DIR": os.path.join(self.d, "elsewhere")}):
+            rc, out, err = self.stage()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.lines(seen), ["False"])
+
+    def test_an_uncommitted_root_recipe_edit_stops_at_the_first_gate(self):  # M8
+        root, _ = self.make()
+        write_recipe(root, dict(self.recipe, bump="patch"))  # working tree only
+        rc, out, _ = self.stage()
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: local_reversible ASK stale", out)
+        self.assertEqual(self.lines(self.build_marker), [])
+        self.assertEqual(self.rel().status, "prepped")
+
+    def test_a_base_commit_recipe_off_the_grant_stops(self):  # M8
+        self.make()
+        path = RL._grant_path(self.root, self.rel().grant["id"])
+        with open(path) as f:
+            st = json.load(f)
+        for s in st["subject"]:
+            if s["name"] == RL.RECIPE_PATH:
+                s["digest"]["sha256"] = "0" * 64
+        with open(path, "w") as f:
+            json.dump(st, f)
+        rc, out, _ = self.stage()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: recipe-changed: the recipe at the base commit", out)
+        self.assertEqual(self.lines(self.build_marker), [])
+
+    def test_an_unreadable_base_recipe_stops_without_a_traceback(self):  # M4
+        self.make()
+        real = RL.recipe_sha
+
+        def flaky(root, rev=None):
+            if rev == self.rel().base_commit:
+                raise ValueError("git show failed: boom")
+            return real(root, rev)
+        with mock.patch.object(RL, "recipe_sha", side_effect=flaky):
+            rc, out, _ = self.stage()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: recipe-unreadable", out)
+        self.assertEqual(self.lines(self.build_marker), [])
+
+    def test_an_unreadable_grant_stops_and_asks_for_a_new_prep(self):  # M7
+        self.make()
+        with open(RL._grant_path(self.root, self.rel().grant["id"]), "w") as f:
+            f.write("{not json")
+        rc, out, _ = self.stage()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: grant-unreadable", out)
+        self.assertIn("NEXT: a new prep with a human is needed", out)
+        self.assertEqual(self.lines(self.build_marker), [])
 
     def test_the_kill_switch_stops_stage(self):
         self.make()
@@ -364,6 +434,25 @@ class EvidenceTests(StageBase):
         for feat in ("login", "search"):
             write_evidence(root, commit, feat, VERIFIER, doctor_ok=False)
         self.assert_rejected(VERIFIER, "doctor-red", commit)
+
+    def test_a_zero_width_variant_of_the_driver_is_refused(self):  # M5
+        root, commit = self.built()
+        self.record_all(commit, verifier=DRIVER + "\u200b")
+        rc, out, _ = self.evidence(DRIVER + "\u200b")
+        self.assertEqual(rc, 2)
+        self.assertIn("--verifier", out)
+        self.assertIsNone(self.rel().evidence)
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
+
+    def test_a_deleted_stage_worktree_is_recreated_on_resume(self):  # M3
+        import shutil
+        root, commit = self.built()
+        shutil.rmtree(self.stage_wt())
+        self.record_all(commit)
+        rc, out, err = self.evidence()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("STAGE: 1.2.0 pass %s" % commit, out)
+        self.assertEqual(git(self.stage_wt(), "rev-parse", "HEAD").stdout.strip(), commit)
 
     def test_a_commit_in_the_stage_worktree_stops_the_next_gate(self):
         root, commit = self.built()
@@ -500,6 +589,57 @@ class StagingTests(StageBase):
         self.assertEqual(rc, 0, out + err)
         self.assertIn("STAGE: 1.2.0 pass %s" % commit, out)
         self.assertEqual(self.lines(self.build_marker), [commit])  # never rebuilt
+
+    def test_a_resume_after_an_interrupted_staging_deploy_says_so(self):  # M1
+        _, commit = self.go(policy={"deploy_staging": "ask"})
+        self.assertEqual(self.evidence()[0], 3)  # evidence passed, the deploy gate asked
+        rel = self.rel()
+        self.assertFalse(rel.stage.get("deploy_started"))  # never started behind a gate
+        rel.stage["deploy_started"] = True  # an attempt that died before recording its end
+        rel.save()
+        path = RL._grant_path(self.root, rel.grant["id"])
+        with open(path) as f:
+            st = json.load(f)
+        st["predicate"]["payload"]["gate_policy"]["deploy_staging"] = "grant"
+        with open(path, "w") as f:
+            json.dump(st, f)
+        rc, out, err = self.stage()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("STAGE: 1.2.0 re-running deploy_staging after an interrupted attempt",
+                      out)
+        events = [e["event"] for e in self.rel().events()]
+        self.assertIn("deploy_staging_rerun", events)
+        self.assertLess(events.index("deploy_staging_started"), events.index("deploy_staging"))
+
+    def test_a_first_deploy_does_not_claim_a_rerun(self):  # M1
+        self.go()
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("re-running", out)
+        self.assertTrue(self.rel().stage["deploy_started"])
+
+    def test_a_tracked_edit_in_the_build_checkout_fails_the_stage(self):  # M2
+        self.go()
+        with open(os.path.join(self.rel().stage["build_dir"], "package.json"), "a") as f:
+            f.write("\n")
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: build-tree-changed", out)
+        self.assertEqual(self.rel().status, "stage_failed")
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
+
+    def test_a_commit_in_the_build_checkout_fails_the_stage(self):  # M2
+        self.go()
+        commit_file(self.rel().stage["build_dir"], "x.txt", "x\n", "sneaky")
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: build-tree-changed", out)
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
+
+    def test_untracked_build_output_does_not_count_as_a_change(self):  # M2
+        self.go(build=[sys.executable, "-c", DIST, "{version}"])
+        rc, out, err = self.evidence()
+        self.assertEqual(rc, 0, out + err)
 
     def test_a_tag_already_at_another_commit_stops(self):
         root, commit = self.go()
