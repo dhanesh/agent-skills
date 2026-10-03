@@ -1445,6 +1445,160 @@ class ReleaseCheckerTests(unittest.TestCase):
             self.assertEqual(cc.grant_violations(st), [], good)
 
 
+class GrantRankingTests(unittest.TestCase):
+    """Task 1b: a head ranks by its chain's ORIGINAL grant, so revoking an old grant never
+    shadows a newer live one, and a revoked newest grant keeps its chain's place."""
+
+    T0 = datetime(2026, 9, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sc-rank-")
+        _write(os.path.join(self.tmp, *RECIPE.split("/")), RECIPE_TEXT)
+        self.now = self.T0 + timedelta(hours=1)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def z(t):
+        return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def release(self, version, at, gid=None, root=None):
+        """A live release grant pinning RECIPE and its own intent file, written at `at`."""
+        root = root or self.tmp
+        intent = ".skill-contract/releases/%s/intent.json" % version
+        text = '{"version": "%s"}\n' % version
+        _write(os.path.join(root, *intent.split("/")), text)
+        st = build_vectors.grant(policy=dict(RELEASE_POLICY), branch_pattern="release/*",
+                                 gid=gid or cc.new_id(cc.GRANT_KIND, at),
+                                 generated=self.z(at), expires=self.z(at + timedelta(days=7)))
+        st["subject"] = [{"name": RECIPE, "digest": {"sha256": build_vectors.sha(RECIPE_TEXT)}},
+                         {"name": intent, "digest": {"sha256": build_vectors.sha(text)}}]
+        st["predicate"]["payload"]["release"] = {"version": version}
+        _write(os.path.join(cc.envelope_dir(root), st["predicate"]["id"] + ".json"),
+               json.dumps(st))
+        return st["predicate"]["id"]
+
+    def check(self, root=None, branch="release/1.3.0"):
+        return cc.check_grant(root or self.tmp, "push_branch", subject=RECIPE, now=self.now,
+                              branch=branch)
+
+    def test_revoking_an_old_grant_does_not_shadow_a_newer_live_one(self):
+        g1 = self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        cc.revoke_grant(self.tmp, grant_id=g1, now=self.T0 + timedelta(seconds=20))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        # with no subject too: the newest chain is G2's
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+
+    def test_same_second_revocation_and_new_grant_select_the_new_grant(self):
+        t2 = self.T0 + timedelta(seconds=30)
+        for i in range(40):
+            root = tempfile.mkdtemp(prefix="sc-tie-")
+            try:
+                _write(os.path.join(root, *RECIPE.split("/")), RECIPE_TEXT)
+                g1 = self.release("1.2.0", self.T0, root=root)
+                cc.revoke_grant(root, grant_id=g1, now=t2)
+                g2 = self.release("1.3.0", t2, root=root)
+                rep = self.check(root=root)
+                self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), (i, rep))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def test_revoking_the_newest_grant_still_asks_over_an_older_live_one(self):
+        # Guard (not a RED case): a revoked newest grant is never replaced by an older one.
+        self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_revocation_whose_parent_is_gone_keeps_its_place(self):
+        # Fail closed: an unresolvable parent ranks the revocation by itself (later), never
+        # earlier, so an older live grant still does not take its place.
+        self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        os.remove(os.path.join(cc.envelope_dir(self.tmp), g2 + ".json"))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_decoy_parent_file_cannot_pull_a_revocation_down(self):
+        # A file claiming G2's id under another name is not G2: the walk resolves a parent
+        # only through <id>.json whose content carries that id.
+        g1 = self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        edir = cc.envelope_dir(self.tmp)
+        with open(os.path.join(edir, g2 + ".json")) as f:
+            real = json.load(f)
+        os.remove(os.path.join(edir, g2 + ".json"))
+        decoy = json.loads(json.dumps(real))
+        decoy["predicate"]["generatedAtTime"] = "2000-01-01T00:00:00Z"
+        _write(os.path.join(edir, "zz-decoy.json"), json.dumps(decoy))
+        mislabelled = json.loads(json.dumps(real))
+        mislabelled["predicate"]["id"] = g1
+        mislabelled["predicate"]["generatedAtTime"] = "2000-01-01T00:00:00Z"
+        _write(os.path.join(edir, g2 + ".json"), json.dumps(mislabelled))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_revision_cycle_terminates(self):
+        # H revokes A; A and B name each other: the walk from H stops at the cycle.
+        a = self.release("1.2.0", self.T0)
+        cc.revoke_grant(self.tmp, grant_id=a, now=self.T0 + timedelta(seconds=20))
+        b = self.release("1.2.0", self.T0 + timedelta(seconds=5))
+        edir = cc.envelope_dir(self.tmp)
+        for gid, parent in ((a, b), (b, a)):
+            path = os.path.join(edir, gid + ".json")
+            with open(path) as f:
+                st = json.load(f)
+            st["predicate"]["wasRevisionOf"] = parent
+            _write(path, json.dumps(st))
+        rep = self.check(branch="release/1.2.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        self.assertEqual(cc.revoke_all(self.tmp, now=self.now), [])
+
+    def test_revoke_all_still_stops_everything(self):
+        g1 = self.release("1.2.0", self.T0)
+        self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g1, now=self.T0 + timedelta(seconds=20))
+        self.assertEqual(len(cc.revoke_all(self.tmp, now=self.T0 + timedelta(seconds=30))), 1)
+        for branch in ("release/1.2.0", "release/1.3.0"):
+            rep = self.check(branch=branch)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        self.assertEqual(cc.revoke_all(self.tmp, now=self.now), [])
+
+
+class BranchPatternListTests(unittest.TestCase):
+    """Task 1b: branch_pattern may be a non-empty list of globs; any match covers."""
+
+    def test_branch_matches(self):
+        self.assertTrue(cc.branch_matches("factory/*", "factory/x"))
+        pats = ["release/1.2.1", "release/1.2.1-stage"]
+        for b in ("release/1.2.1", "release/1.2.1-stage"):
+            self.assertTrue(cc.branch_matches(pats, b), b)
+        for b in ("release/1.2.10", "release/1.2.10-stage", "release/1.2.1-x", "Release/1.2.1"):
+            self.assertFalse(cc.branch_matches(pats, b), b)
+        for bad in ([], [""], [3], None, "", 7):
+            self.assertFalse(cc.branch_matches(bad, "release/1.2.1"), bad)
+
+    def test_grant_violations_validates_the_list_form(self):
+        st = build_vectors.grant(branch_pattern=["release/1.2.1", "release/1.2.1-stage"])
+        self.assertEqual(cc.grant_violations(st), [])
+        for bad in ([], [""], ["release/1.2.1", ""], ["release/1.2.1", 3], [["x"]], "", None,
+                    {"a": "b"}):
+            with self.subTest(bad=bad):
+                st = build_vectors.grant(branch_pattern=bad)
+                self.assertTrue(cc.grant_violations(st), bad)
+
+
 class ArgvProblemsTests(unittest.TestCase):
     def test_a_recipe_argv_with_its_own_tokens(self):
         self.assertEqual(cc.argv_problems(["deploy", "--v", "{version}"], {"{version}"}), [])

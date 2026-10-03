@@ -776,6 +776,26 @@ def reentry_problems(block):
     return out
 
 
+def _branch_patterns(pattern):
+    """branch_pattern as a list of globs, or None when it is neither a non-empty string nor
+    a non-empty list of non-empty strings."""
+    if isinstance(pattern, str):
+        return [pattern] if pattern else None
+    if isinstance(pattern, list) and pattern and all(isinstance(x, str) and x for x in pattern):
+        return list(pattern)
+    return None
+
+
+def branch_matches(pattern, branch):
+    """True when `branch` matches branch_pattern: one glob, or a list of globs of which any
+    matches (fnmatchcase: case-sensitive, `*` crosses `/`). A malformed pattern matches
+    nothing. A list lets a grant name exact branches (release/1.2.1, release/1.2.1-stage)
+    where one glob (release/1.2.1*) would also cover release/1.2.10."""
+    pats = _branch_patterns(pattern)
+    return bool(pats) and isinstance(branch, str) and any(
+        fnmatch.fnmatchcase(branch, p) for p in pats)
+
+
 def grant_violations(st):
     """Grant-specific problems (after check_statement passed). [] = valid.
 
@@ -789,8 +809,9 @@ def grant_violations(st):
     p = pred.get("payload") or {}
     scope = p.get("scope")
     if not (isinstance(scope, dict) and isinstance(scope.get("repo"), str)
-            and isinstance(scope.get("branch_pattern"), str) and scope["branch_pattern"]):
-        out.append("payload.scope must be {repo, branch_pattern}")
+            and _branch_patterns(scope.get("branch_pattern"))):
+        out.append("payload.scope must be {repo, branch_pattern}: branch_pattern a non-empty"
+                   " glob or a non-empty list of non-empty globs")
     for d in p.get("decisions") if isinstance(p.get("decisions"), list) else [None]:
         if not (isinstance(d, dict) and all(isinstance(d.get(k), str) and d[k].strip()
                                             for k in ("id", "question", "answer"))):
@@ -885,36 +906,85 @@ def _revision_of(st):
     return rev if isinstance(rev, str) else None
 
 
+def _chain_root(root, st):
+    """(generatedAtTime, id) of the original grant of st's revision chain.
+
+    Walks wasRevisionOf back from st, resolving each parent only as <envelope dir>/<id>.json
+    whose content carries that id and the grant kind, so a stray file claiming an id cannot
+    stand in for it. The walk stops at a missing, unreadable or mismatched parent, a parent
+    without an RFC 3339 generatedAtTime, or a cycle, and the deepest node it resolved is the
+    root: an unresolvable parent therefore ranks a chain later, never earlier (fail closed:
+    a revocation keeps at least its own place)."""
+    d = envelope_dir(root)
+    node, seen = st, {st["predicate"]["id"]}
+    while True:
+        parent = _revision_of(node)
+        if parent is None or parent in seen or not ID_RE.match(parent):
+            break
+        seen.add(parent)
+        pst, err = load_envelope(os.path.join(d, parent + ".json"))
+        if err or not isinstance(pst, dict) or pst.get("predicateType") != GRANT_KIND \
+                or not isinstance(pst.get("predicate"), dict) \
+                or pst["predicate"].get("id") != parent \
+                or not TIME_RE.match(str(pst["predicate"].get("generatedAtTime", ""))):
+            break
+        node = pst
+    return node["predicate"]["generatedAtTime"], node["predicate"]["id"]
+
+
+def _live_heads(root):
+    """[(rank, path, statement)] for every valid-shaped grant that no revision supersedes.
+
+    A head ranks by its chain's ORIGINAL grant, not by itself: a revocation is a new head
+    with a new timestamp, and ranking it by that would let revoking an old grant shadow a
+    newer live one. rank = (root generatedAtTime, revoked, head generatedAtTime, root id,
+    head id), compared in that order:
+      - the chain whose original grant is newest wins, so a revoked newest grant keeps its
+        chain's place and an older live grant never takes it;
+      - at the same root second, a revoked head beats a live one (fail closed), then the
+        newer head; the random ids only break ties between chains that are equally new.
+    Times are RFC 3339 UTC strings of one fixed shape (TIME_RE), so they compare as text.
+    Supersession reads every grant-kind file (strict=False), so it fails closed too."""
+    everything = _grant_envelopes(root, strict=False)
+    revised = {_revision_of(st) for _, st in everything}
+    heads = []
+    for p, st in _grant_envelopes(root):
+        pred = st["predicate"]
+        if pred["id"] in revised:
+            continue
+        root_time, root_id = _chain_root(root, st)
+        revoked = bool((pred.get("payload") or {}).get("revoked"))  # truthy: fail closed
+        heads.append(((root_time, revoked, pred["generatedAtTime"], root_id, pred["id"]),
+                      p, st))
+    return heads
+
+
+def _newest(heads):
+    return max(heads, key=lambda h: h[0])[1] if heads else None
+
+
 def latest_grant(root):
-    """The path of the newest valid-shaped grant that no revision supersedes."""
-    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
-    heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
-             for p, st in _grant_envelopes(root) if st["predicate"]["id"] not in revised]
-    return max(heads)[2] if heads else None
+    """The path of the newest live head of all (see _live_heads for the ranking)."""
+    return _newest(_live_heads(root))
 
 
 def grant_for_subject(root, subject):
     """The newest valid-shaped grant that no revision supersedes and that pins `subject`
     (a root-relative path), or None. Grants coexist (a factory grant pins its spec and
     plan, a release grant its recipe and intent), so each caller names what it acts for.
-    A revoked revision pins the same subjects, so a revoked grant is found as revoked and
-    an older grant for the same subject never takes its place."""
+    A revoked revision pins the same subjects and ranks by its chain's original grant, so
+    a revoked grant is found as revoked and an older grant for the same subject never
+    takes its place."""
     key = _subject_key(subject)
-    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
-    heads = [(st["predicate"]["generatedAtTime"], st["predicate"]["id"], p)
-             for p, st in _grant_envelopes(root)
-             if st["predicate"]["id"] not in revised
-             and key in {_subject_key(s.get("name", "")) for s in st.get("subject") or []}]
-    return max(heads)[2] if heads else None
+    return _newest([h for h in _live_heads(root)
+                    if key in {_subject_key(s.get("name", "")) for s in h[2].get("subject") or []}])
 
 
 def revoke_all(root, now=None):
     """Revoke every live grant under root (the kill switch); returns the revoked ids.
     Live means not superseded and not already a revocation. [] when nothing is live."""
-    revised = {_revision_of(st) for _, st in _grant_envelopes(root, strict=False)}
-    ids = sorted(st["predicate"]["id"] for _, st in _grant_envelopes(root)
-                 if st["predicate"]["id"] not in revised
-                 and not (st["predicate"].get("payload") or {}).get("revoked"))
+    ids = sorted(st["predicate"]["id"] for _, _, st in _live_heads(root)
+                 if not (st["predicate"].get("payload") or {}).get("revoked"))
     for gid in ids:
         revoke_grant(root, gid, now=now)
     return ids
@@ -1333,7 +1403,7 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
             default_branches = detect_default_branches(probe)
         if _branch_key(branch) in {_branch_key(b) for b in default_branches}:
             return ask("default-branch")
-        if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
+        if not branch_matches(p["scope"]["branch_pattern"], branch):
             return ask("branch")
     if in_git_work_tree(root) and grant_is_tracked(root, path) is not False:
         return ask("tracked")  # committed, staged, or git cannot say: fail closed

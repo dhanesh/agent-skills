@@ -189,7 +189,6 @@ if sys.version_info < (3, 10):
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
 import datetime as _dt  # noqa: E402
-import fnmatch  # noqa: E402
 import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
@@ -1198,7 +1197,7 @@ def cmd_init(args):
     grant = gdoc["predicate"]["payload"]
     run_branch = "factory/%s" % _slug(plan.get("title"))
     pattern = grant["scope"]["branch_pattern"]
-    if not fnmatch.fnmatchcase(run_branch, pattern):
+    if not CC.branch_matches(pattern, run_branch):  # one glob, or a list of which any matches
         print("GATE: ASK id=%s reason=run-branch" % gid)
         return _init_fail("the run branch %s would not match the grant's branch_pattern %r;"
                           " the grant does not cover this run" % (run_branch, pattern), 3)

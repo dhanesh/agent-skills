@@ -565,8 +565,8 @@ FINISHED = frozenset({"verified", "rolled_back", "stage_failed"})
 RELEASE_GRANT_CLASSES = ("local_reversible", "push_branch", "open_pr", "deploy_staging",
                          "push_tag")
 # R15: the grant covers this version's branches only (release/<v>, release/<v>-stage),
-# never another release's.
-RELEASE_BRANCH_PATTERN = "release/%s*"
+# never another release's. Exact names, not a glob: release/1.2.1* would cover 1.2.10 too.
+RELEASE_BRANCH_PATTERNS = ("release/%s", "release/%s-stage")
 GRANT_LIFETIME = _dt.timedelta(days=7)  # CC.MAX_GRANT_LIFETIME: every grant's cap
 SEMVER_PLAIN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REMOTE_TIMEOUT = 300
@@ -920,10 +920,11 @@ def _write_text(path, text):
 def build_release_grant(root, version, intent_rel, policy, accepted_by, bump, now):
     """The release grant (autonomy-grant/v1, D7/D10), built like spec-first-planning's
     write_grant.build_grant: subjects the recipe and the intent file, release.version,
-    a 7-day expiry, branch_pattern release/<version>* (R15), and one grant-accepted assertion by the
-    human. Refused when the statement fails the checker's C3-C6 or C10 checks."""
+    a 7-day expiry, branch_pattern [release/<version>, release/<version>-stage] (R15), and one
+    grant-accepted assertion by the human. Refused when the statement fails the checker's
+    C3-C6 or C10 checks."""
     payload = {
-        "scope": {"repo": ".", "branch_pattern": RELEASE_BRANCH_PATTERN % version},
+        "scope": {"repo": ".", "branch_pattern": [b % version for b in RELEASE_BRANCH_PATTERNS]},
         "release": {"version": version},
         "decisions": [{"id": "release-version", "question": "Which version does this release "
                        "ship?", "answer": version, "source": "release prep"},

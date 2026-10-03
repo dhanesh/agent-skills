@@ -348,6 +348,7 @@ GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-gr
 GRANT_ID = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
 PLAN_TEXT = '{"plan": 1}\n'
 NOW = "2026-09-19T13:00:00Z"
+RELEASE_BRANCHES = ["release/1.2.1", "release/1.2.1-stage"]
 
 
 def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00:00Z",
@@ -443,6 +444,29 @@ def grant_cases():
         ("c10", "valid", "release-grant-covered",
          grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
              "release", {"version": "1.2.0-rc.1"}), g), "local_reversible", "COVERED")),
+        # branch_pattern as a list of exact branches: release/1.2.1* would also cover 1.2.10
+        ("c10", "valid", "branch-list-covered",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "COVERED",
+                      branch="release/1.2.1")),
+        ("c10", "valid", "branch-list-second-entry-covered",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "COVERED",
+                      branch="release/1.2.1-stage")),
+        ("c10", "valid", "branch-list-prefix-asks",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "ASK",
+                      "branch", branch="release/1.2.10")),
+        ("c10", "valid", "branch-list-prefix-stage-asks",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "ASK",
+                      "branch", branch="release/1.2.10-stage")),
+        ("c10", "invalid", "branch-pattern-empty-string",
+         grant_vector(grant(branch_pattern=""), "local_reversible", "INVALID")),
+        ("c10", "invalid", "branch-list-empty",
+         grant_vector(grant(branch_pattern=[]), "local_reversible", "INVALID")),
+        ("c10", "invalid", "branch-list-empty-entry",
+         grant_vector(grant(branch_pattern=["release/1.2.1", ""]), "local_reversible",
+                      "INVALID")),
+        ("c10", "invalid", "branch-list-non-string-entry",
+         grant_vector(grant(branch_pattern=["release/1.2.1", 7]), "local_reversible",
+                      "INVALID")),
         ("c10", "invalid", "deploy-staging-auto",
          grant_vector(grant(policy={"deploy_staging": "auto"}), "deploy_staging", "INVALID")),
         ("c10", "invalid", "push-tag-auto",

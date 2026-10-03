@@ -42,7 +42,8 @@ here.
 **The autonomy grant (commandment 10).** A grant is an envelope of kind
 `https://github.com/dhanesh/agent-skills/skill-contract/autonomy-grant/v1`. Its subjects pin the
 spec and the task-plan envelope it was approved for; its payload carries `scope`
-(`repo`, `branch_pattern`), `decisions`, `defaults`, `gate_policy` (action class → `auto`, `grant`
+(`repo`, `branch_pattern`: one non-empty glob, or a non-empty list of non-empty globs of which
+any may match), `decisions`, `defaults`, `gate_policy` (action class → `auto`, `grant`
 or `ask`), `budget`, `stop_on`, `expires_at` (RFC 3339 UTC), `system_one`, `revoked`, and the
 following optional field:
 
@@ -98,6 +99,14 @@ The action classes are:
   grant a recipe and an intent file. `check-grant --subject X` judges the newest grant that pins
   `X` and that no revision supersedes; with no `--subject` it judges the newest such grant of
   all. When grants exist but none pins `X`, the answer is ASK `subject`.
+- "Newest" ranks a revision chain by its original grant, not by its latest revision: a
+  revocation is a new envelope with a new `generatedAtTime`, and revoking an old grant MUST NOT
+  shadow a newer live one, while a revoked grant keeps its chain's place, so an older live grant
+  never takes it. The original grant is found by following `wasRevisionOf` through
+  `<id>.json` files whose content carries that id; the walk stops at a missing or mismatched
+  parent or a cycle, and the deepest grant reached counts as the original. Chains whose original
+  grants share a `generatedAtTime` rank a revoked head above a live one, then by the head's
+  `generatedAtTime`, then by id.
 - A grant is one user's acceptance and MUST NOT be committed; a receiver MUST treat a tracked
   grant as not covering anything. Committed, one person's yes would cover every clone. Tracked
   means tracked by whichever repository holds the grant file — a nested repository or submodule
@@ -149,8 +158,8 @@ superseded, not expired, not living past the 7-day floor, subjects not stale, th
 `--subject` (when there is one) pinned among the grant's subjects, the path given as
 `--worktree` (when there is one) a worktree of the same repository (`worktree`), git can report the
 branch (`branch-unknown`), HEAD not detached, not on a default branch, the current git branch
-matches `branch_pattern`, the grant file not tracked by git, the class's gate is `auto` or
-`grant`, for `push_tag`, no CI configuration that may run on tags (`ci-tag`), and, for
+matches `branch_pattern` (any entry of a list; `fnmatch`-style, case-sensitive, `*` crossing
+`/`), the grant file not tracked by git, the class's gate is `auto` or `grant`, for `push_tag`, no CI configuration that may run on tags (`ci-tag`), and, for
 `push_branch`, `open_pr`, `push_tag` and `deploy_staging`, no commit since the default branch
 touching CI configuration. With `--worktree`, the branch, default-branch, `ci-tag` and `ci-config`
 checks judge the worktree, while the grant is still found, and the tracked probe still runs, at

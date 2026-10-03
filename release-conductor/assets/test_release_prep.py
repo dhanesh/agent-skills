@@ -185,7 +185,7 @@ class PrepTests(unittest.TestCase):
         self.assertEqual(CC.grant_violations(st), [])
         p = st["predicate"]["payload"]
         self.assertEqual(p["release"], {"version": "1.2.0"})
-        self.assertEqual(p["scope"]["branch_pattern"], "release/1.2.0*")
+        self.assertEqual(p["scope"]["branch_pattern"], ["release/1.2.0", "release/1.2.0-stage"])
         self.assertEqual({k for k, v in p["gate_policy"].items() if v == "grant"},
                          {"local_reversible", "push_branch", "open_pr", "deploy_staging",
                           "push_tag"})
@@ -222,6 +222,28 @@ class PrepTests(unittest.TestCase):
                 rep = CC.check_grant(self.root, "push_branch",
                                      subject=".release/recipe.json", worktree=wt)
                 self.assertEqual(rep["status"], want, rep)
+
+    def test_the_grant_names_exact_branches_not_a_prefix(self):  # R15, Task 1b
+        # release/1.2.1* would also cover release/1.2.10: the grant lists the two branches
+        intent = ".skill-contract/releases/1.2.1/intent.json"
+        os.makedirs(os.path.join(self.root, os.path.dirname(intent)), exist_ok=True)
+        with open(os.path.join(self.root, intent), "w") as f:
+            f.write('{"version": "1.2.1"}\n')
+        st = RL.build_release_grant(self.root, "1.2.1", intent,
+                                    {c: "grant" for c in RL.RELEASE_GRANT_CLASSES},
+                                    "Dana Human", "patch", CC.utc_now())
+        self.assertEqual(st["predicate"]["payload"]["scope"]["branch_pattern"],
+                         ["release/1.2.1", "release/1.2.1-stage"])
+        path = CC.write_envelope(self.root, st)
+        for name, want in (("release/1.2.1", ("COVERED", None)),
+                           ("release/1.2.1-stage", ("COVERED", None)),
+                           ("release/1.2.10", ("ASK", "branch")),
+                           ("release/1.2.10-stage", ("ASK", "branch"))):
+            with self.subTest(branch=name):
+                rep = CC.check_grant(self.root, "push_branch", path=path,
+                                     subject=RL.RECIPE_PATH, branch=name,
+                                     default_branches={"main"})
+                self.assertEqual((rep["status"], rep["reason"]), want, rep)
 
     def test_the_grant_never_covers_the_default_branch_checkout(self):
         self.assertEqual(self.prep()[0], 0)
