@@ -233,7 +233,7 @@ class PrepTests(unittest.TestCase):
         self.assertIsNone(CC.grant_for_subject(self.root, ".release/recipe.json"))
 
     def test_a_blank_approver_is_refused(self):
-        for name in ("  ", "Dana\nHuman"):
+        for name in ("  ", "Dana\nHuman", "Dana\u202eHuman", "Dana\u200bHuman"):
             with self.subTest(name=name):
                 rc, _, _ = run(["prep", "--root", self.root, "--driver", "a",
                                 "--approved-by", name, "--pr-cmd", '["true"]'])
@@ -299,12 +299,29 @@ class PrepTests(unittest.TestCase):
         self.assertEqual(rc, 3, out + err)
         self.assertIn("GATE: push_branch ASK gate-ask", out)
         self.assertIn("STOP:", out)
+        self.assertNotIn("prep again", out)  # a re-run would be refused (R10)
         self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
                                 "refs/heads/release/1.2.0").returncode, 0)
         rel = RL.Release.load(self.root, "1.2.0")
         self.assertEqual(rel.status, "prepped")
         self.assertFalse(rel.prep["pushed"])
         self.assertFalse(rel.prep["pr"])
+
+    def test_prep_keeps_its_own_state_and_grant_out_of_git(self):
+        # repo() excludes /.skill-contract/ already; drop that so prep's own ignoring
+        # (the releases dir's `*` .gitignore, and GRANT_EXCLUDE) is what is tested.
+        exclude = os.path.join(self.root, ".git", "info", "exclude")
+        with open(exclude) as f:
+            kept = [ln for ln in f.read().splitlines() if ln.strip() != "/.skill-contract/"]
+        with open(exclude, "w") as f:
+            f.write("\n".join(kept) + "\n")
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(git(self.root, "status", "--porcelain", "--untracked-files=all")
+                         .stdout, "")
+        rep = CC.check_grant(self.root, "push_branch", subject=".release/recipe.json",
+                             worktree=self.wt())
+        self.assertEqual(rep["status"], "COVERED", rep)
 
     def test_a_policy_file_may_only_decline(self):
         pol = os.path.join(tmpdir(), "policy.json")

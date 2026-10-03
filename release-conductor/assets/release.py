@@ -49,6 +49,7 @@ import signal  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+import unicodedata  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract_check as CC  # noqa: E402  (the vendored skill-contract checker, same dir)
@@ -803,7 +804,9 @@ def _clean_name(name, flag):
     """name stripped; Refused when blank or carrying a control character."""
     if not (isinstance(name, str) and name.strip()):
         raise Refused("%s must name who it is" % flag)
-    if any(ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xA0 for c in name):
+    # write_grant._check_accepted_by's rule: no Unicode "C*" category at all, so a bidi
+    # override or zero-width character cannot spoof the name in assertedBy.human.
+    if any(unicodedata.category(c)[0] == "C" for c in name):
         raise Refused("%s must not contain control characters" % flag)
     return name.strip()
 
@@ -1123,8 +1126,8 @@ def _prep_locked(root, args):
                 "pushed": False, "pr": False}
     rel.save()
     rel.log("prepped", commit=commit, branch=branch)
-    by_hand = ("push %s (commit %s) and open its PR against %s by hand, or re-grant and "
-               "prep again" % (branch, commit[:12], c["base_branch"]))
+    by_hand = ("push %s (commit %s) and open its PR against %s by hand; then merge it and "
+               "run stage" % (branch, commit[:12], c["base_branch"]))
 
     rep = _gate(root, "push_branch", wt)
     if rep["status"] != "COVERED":
