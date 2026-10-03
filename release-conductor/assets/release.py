@@ -564,7 +564,9 @@ FINISHED = frozenset({"verified", "rolled_back", "stage_failed"})
 # The classes a release grant grants (D7, spec section 2); a --policy-file may only decline.
 RELEASE_GRANT_CLASSES = ("local_reversible", "push_branch", "open_pr", "deploy_staging",
                          "push_tag")
-RELEASE_BRANCH_PATTERN = "release/*"
+# R15: the grant covers this version's branches only (release/<v>, release/<v>-stage),
+# never another release's.
+RELEASE_BRANCH_PATTERN = "release/%s*"
 GRANT_LIFETIME = _dt.timedelta(days=7)  # CC.MAX_GRANT_LIFETIME: every grant's cap
 SEMVER_PLAIN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 REMOTE_TIMEOUT = 300
@@ -918,10 +920,10 @@ def _write_text(path, text):
 def build_release_grant(root, version, intent_rel, policy, accepted_by, bump, now):
     """The release grant (autonomy-grant/v1, D7/D10), built like spec-first-planning's
     write_grant.build_grant: subjects the recipe and the intent file, release.version,
-    a 7-day expiry, branch_pattern release/*, and one grant-accepted assertion by the
+    a 7-day expiry, branch_pattern release/<version>* (R15), and one grant-accepted assertion by the
     human. Refused when the statement fails the checker's C3-C6 or C10 checks."""
     payload = {
-        "scope": {"repo": ".", "branch_pattern": RELEASE_BRANCH_PATTERN},
+        "scope": {"repo": ".", "branch_pattern": RELEASE_BRANCH_PATTERN % version},
         "release": {"version": version},
         "decisions": [{"id": "release-version", "question": "Which version does this release "
                        "ship?", "answer": version, "source": "release prep"},
@@ -948,9 +950,19 @@ def build_release_grant(root, version, intent_rel, policy, accepted_by, bump, no
     return st
 
 
-def _gate(root, action, wt):
-    """check-grant for `action`, judged on the prep worktree and selected by the recipe."""
-    return CC.check_grant(root, action, subject=RECIPE_PATH, worktree=wt)
+def _grant_path(root, grant_id):
+    """The envelope path of the grant `grant_id`."""
+    return os.path.join(CC.envelope_dir(root), grant_id + ".json")
+
+
+def _gate(root, action, wt, grant_id):
+    """check-grant for `action` against the release grant prep wrote (grant_id), with
+    subject the recipe, judged on the prep worktree. The grant is named by path, not
+    left to subject selection: a revocation of an earlier failed prep's grant can carry
+    the same generatedAtTime second as this one, and would then tie with it as "newest".
+    A revocation of THIS grant is a revision of it, so it still answers ASK superseded."""
+    return CC.check_grant(root, action, path=_grant_path(root, grant_id),
+                          subject=RECIPE_PATH, worktree=wt)
 
 
 def _gate_stop(rel, action, rep, nxt):
@@ -992,21 +1004,30 @@ def cmd_init(args):
     return 0
 
 
-def _cleanup_prep(root, rel, wt, branch, made_branch):
+def _cleanup_prep(root, rel, wt, branch, made_branch, grant_id):
     """Undo a prep that failed before its commit: the worktree, the branch prep created,
-    and the release dir, so no orphan blocks the next prep (R10). The grant stays: its
-    intent file is gone, so it is stale and covers nothing."""
+    the release dir, and the grant it wrote. The grant is revoked (CC.revoke_grant), not
+    merely left stale: a later prep of the same version from the same base rewrites a
+    byte-identical intent file, which would otherwise make the old grant fresh again."""
     if os.path.isdir(wt):
         _git(root, "worktree", "remove", "--force", wt)
     _git(root, "worktree", "prune")
     if made_branch:
         _git(root, "branch", "-D", branch)
     shutil.rmtree(rel.dir, ignore_errors=True)
+    if grant_id:
+        try:
+            CC.revoke_grant(root, grant_id)
+        except (OSError, ValueError) as e:
+            print("WARNING: could not revoke the release grant %s: %s; revoke it with "
+                  "check-grant's revoke-grant --id" % (grant_id, e))
 
 
 def _prep_checks(root, args):
-    """Every refusal prep makes before it writes anything. Returns a dict of what the
-    later steps need, or raises Refused."""
+    """Every input and recipe refusal prep makes before it writes anything, and the
+    version it would release. Returns a dict of what the later steps need, or raises
+    Refused. The unfinished-release (R10) and branch-exists checks are the caller's,
+    since a re-run for a prepped release with pending steps resumes instead."""
     accepted_by = _clean_name(args.approved_by, "--approved-by")
     driver = _clean_name(args.driver, "--driver")
     try:
@@ -1027,10 +1048,6 @@ def _prep_checks(root, args):
     if dirty is None or dirty.returncode != 0 or dirty.stdout.strip() or not committed:
         raise Refused("recipe-uncommitted: %s must be committed on %s unchanged; the "
                       "grant pins a digest some commit has" % (RECIPE_PATH, base_branch))
-    busy = unfinished_releases(root)
-    if busy:
-        raise Refused("another release is unfinished: %s; finish or roll it back first"
-                      % ", ".join("%s (%s)" % (v, s or "no state") for v, s in busy))
     vfile, keys = _version_key(recipe)
     _, cur = _read_version(_git_ok(root, "show", "%s:%s" % (base, vfile)), keys, vfile)
     bump = args.bump or recipe["bump"]
@@ -1042,9 +1059,6 @@ def _prep_checks(root, args):
     why = push_cmd_problem(expand_cmd(push_cmd, {"release_branch": branch}), branch)
     if why:
         raise Refused("--push-cmd is not a push a grant covers: %s" % why)
-    exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % branch)
-    if exists is not None and exists.returncode == 0:
-        raise Refused("branch %s already exists" % branch)
     return {"accepted_by": accepted_by, "driver": driver, "push_cmd": push_cmd,
             "pr_cmd": pr_cmd, "policy": policy, "base_branch": base_branch, "base": base,
             "vfile": vfile, "keys": keys, "bump": bump, "version": version,
@@ -1052,9 +1066,11 @@ def _prep_checks(root, args):
 
 
 def cmd_prep(args):
-    """Prepare a release (spec section 2, step 1). Exit 0 prepped and PR opened; 2
-    refused before anything was written (or local work undone); 3 stopped: a gate did
-    not answer COVERED, a remote step failed, or the lock is held."""
+    """Prepare a release (spec section 2, step 1). Exit 0 prepped and PR opened (or
+    already so); 2 refused before anything was written (or local work undone); 3
+    stopped: a gate did not answer COVERED, a remote step failed, or the lock is held.
+    A re-run while this same version is `prepped` with its push or PR pending resumes
+    those steps (R12) with the grant, commit and worktree the first run made."""
     root = os.path.abspath(args.root)
     try:
         with run_lock(root):
@@ -1067,6 +1083,15 @@ def cmd_prep(args):
 def _prep_locked(root, args):
     try:
         c = _prep_checks(root, args)
+        busy = unfinished_releases(root)
+        if busy == [(c["version"], "prepped")]:
+            return _prep_resume(root, c)
+        if busy:
+            raise Refused("another release is unfinished: %s; finish or roll it back first"
+                          % ", ".join("%s (%s)" % (v, s or "no state") for v, s in busy))
+        exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % c["branch"])
+        if exists is not None and exists.returncode == 0:
+            raise Refused("branch %s already exists" % c["branch"])
     except Refused as e:
         print("RELEASE: refused: %s" % e)
         return 2
@@ -1075,6 +1100,7 @@ def _prep_locked(root, args):
     intent_rel = "%s/%s/%s" % (RELEASES_DIR, version, INTENT_FILE)
     wt = os.path.join(rel.dir, PREP_WT)
     made_branch = False
+    grant_id = None
     try:
         with open(os.path.join(rel.dir, INTENT_FILE), "x", encoding="utf-8",
                   newline="\n") as f:
@@ -1085,15 +1111,16 @@ def _prep_locked(root, args):
         st = build_release_grant(root, version, intent_rel, c["policy"], c["accepted_by"],
                                  c["bump"], now)
         grant_path = CC.write_envelope(root, st)
+        grant_id = st["predicate"]["id"]
         exclude_grants(root)
-        rel.log("grant", id=st["predicate"]["id"], accepted_by=c["accepted_by"],
+        rel.log("grant", id=grant_id, accepted_by=c["accepted_by"],
                 path=os.path.relpath(grant_path, root))
         _git_ok(root, "worktree", "add", "-q", "-b", branch, wt, c["base"])
         made_branch = True
-        rep = _gate(root, "local_reversible", wt)
+        rep = _gate(root, "local_reversible", wt, grant_id)
         if rep["status"] != "COVERED":
             rc = _gate_stop(rel, "local_reversible", rep, None)
-            _cleanup_prep(root, rel, wt, branch, made_branch)
+            _cleanup_prep(root, rel, wt, branch, made_branch, grant_id)
             return rc
         vpath = os.path.join(wt, *c["vfile"].split("/"))
         with open(vpath, encoding="utf-8") as f:
@@ -1116,57 +1143,93 @@ def _prep_locked(root, args):
     except (Refused, OSError, ValueError) as e:
         print("RELEASE: refused: %s" % e)
         rel.log("prep_failed", reason=str(e))
-        _cleanup_prep(root, rel, wt, branch, made_branch)
+        _cleanup_prep(root, rel, wt, branch, made_branch, grant_id)
         return 2
     rel.status = "prepped"
     rel.recipe_sha = recipe_sha(root)
     rel.driver, rel.bump = c["driver"], c["bump"]
-    rel.grant = {"id": st["predicate"]["id"], "accepted_by": c["accepted_by"]}
+    rel.grant = {"id": grant_id, "accepted_by": c["accepted_by"]}
     rel.prep = {"branch": branch, "base_branch": c["base_branch"], "commit": commit,
-                "pushed": False, "pr": False}
+                "section": section, "pushed": False, "pr": False}
     rel.save()
     rel.log("prepped", commit=commit, branch=branch)
-    by_hand = ("push %s (commit %s) and open its PR against %s by hand; then merge it and "
-               "run stage" % (branch, commit[:12], c["base_branch"]))
+    return _prep_remote(root, rel, c["push_cmd"], c["pr_cmd"])
 
-    rep = _gate(root, "push_branch", wt)
-    if rep["status"] != "COVERED":
-        return _gate_stop(rel, "push_branch", rep, by_hand)
-    argv = explicit_push(expand_cmd(c["push_cmd"], {"release_branch": branch}), branch, commit)
-    ok, res = _run_remote(argv, wt, _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
-    rel.log("push", command=argv, returncode=res["rc"], ok=ok)
-    if not ok:
-        print("STOP: push failed (exit %s): %s" % (res["rc"], one_line(res["err_tail"])))
-        print("NEXT: %s" % by_hand)
-        return 3
-    rel.prep["pushed"] = True
-    rel.save()
 
-    rep = _gate(root, "open_pr", wt)
-    if rep["status"] != "COVERED":
-        return _gate_stop(rel, "open_pr", rep, "open the PR for %s against %s by hand"
-                          % (branch, c["base_branch"]))
-    title = "Release %s" % version
-    body = ("%s\n\nPrepared by release-conductor from %s. A human merges this PR; then run "
-            "`release stage`.\n" % (section.rstrip("\n"), code(c["base"][:12])))
-    fd, body_path = tempfile.mkstemp(dir=rel.dir, prefix=".pr-body.", suffix=".md")
+def _prep_resume(root, c):
+    """R12: re-run prep for the release `c` names, already `prepped`. Nothing local is
+    redone -- no new intent, grant or commit; the pending push and PR steps are re-gated
+    against the grant prep wrote (same subject, same worktree) and run. A prep whose
+    push and PR both completed says so and exits 0."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(body)
-        argv = expand_cmd(c["pr_cmd"], {"release_branch": branch, "base_branch":
-                                        c["base_branch"], "title": title,
-                                        "body_file": body_path})
-        ok, res = _run_remote(argv, wt, _safe_config_env())
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(body_path)
-    rel.log("pr", command=argv, returncode=res["rc"], ok=ok)
-    if not ok:
-        print("STOP: PR command failed (exit %s): %s" % (res["rc"], one_line(res["err_tail"])))
-        print("NEXT: open the PR for %s against %s by hand" % (branch, c["base_branch"]))
-        return 3
-    rel.prep["pr"] = True
-    rel.save()
+        rel = Release.load(root, c["version"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print("RELEASE: refused: cannot load release %s: %s" % (c["version"], e))
+        return 2
+    prep, grant = rel.prep or {}, rel.grant or {}
+    if not (prep.get("commit") and prep.get("branch") == c["branch"] and grant.get("id")):
+        print("RELEASE: refused: release %s is prepped but its state has no prep commit "
+              "or grant; a human must finish it" % c["version"])
+        return 2
+    if prep.get("pushed") and prep.get("pr"):
+        print("RELEASE: %s already prepped" % c["version"])
+        print("NEXT: merge the release PR, then run stage")
+        return 0
+    rel.log("prep_resume", pushed=bool(prep.get("pushed")), pr=bool(prep.get("pr")))
+    return _prep_remote(root, rel, c["push_cmd"], c["pr_cmd"])
+
+
+def _prep_remote(root, rel, push_cmd, pr_cmd):
+    """prep's pending remote steps -- push, then the PR -- each gated by check-grant
+    with subject the recipe and worktree wt-prep (the grant prep wrote, rel.grant),
+    and run only on COVERED. Records progress in rel.prep after each step, so a stop
+    leaves state that a re-run of prep resumes from."""
+    version, prep = rel.version, rel.prep
+    branch, commit, base_branch = prep["branch"], prep["commit"], prep["base_branch"]
+    wt = os.path.join(rel.dir, PREP_WT)
+    if not os.path.isdir(wt):
+        print("RELEASE: refused: the prep worktree %s is missing" % wt)
+        return 2
+    resume = "fix what stopped it, then re-run prep to resume"
+    if not prep.get("pushed"):
+        rep = _gate(root, "push_branch", wt, rel.grant["id"])
+        if rep["status"] != "COVERED":
+            return _gate_stop(rel, "push_branch", rep, resume)
+        argv = explicit_push(expand_cmd(push_cmd, {"release_branch": branch}), branch, commit)
+        ok, res = _run_remote(argv, wt, _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
+        rel.log("push", command=argv, returncode=res["rc"], ok=ok)
+        if not ok:
+            print("STOP: push failed (exit %s): %s" % (res["rc"], one_line(res["err_tail"])))
+            print("NEXT: %s" % resume)
+            return 3
+        prep["pushed"] = True
+        rel.save()
+    if not prep.get("pr"):
+        rep = _gate(root, "open_pr", wt, rel.grant["id"])
+        if rep["status"] != "COVERED":
+            return _gate_stop(rel, "open_pr", rep, resume)
+        title = "Release %s" % version
+        body = ("%s\n\nPrepared by release-conductor from %s. A human merges this PR; then "
+                "run `release stage`.\n" % ((prep.get("section") or title).rstrip("\n"),
+                                            code(rel.base_commit[:12])))
+        fd, body_path = tempfile.mkstemp(dir=rel.dir, prefix=".pr-body.", suffix=".md")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+            argv = expand_cmd(pr_cmd, {"release_branch": branch, "base_branch": base_branch,
+                                       "title": title, "body_file": body_path})
+            ok, res = _run_remote(argv, wt, _safe_config_env())
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(body_path)
+        rel.log("pr", command=argv, returncode=res["rc"], ok=ok)
+        if not ok:
+            print("STOP: PR command failed (exit %s): %s" % (res["rc"],
+                                                            one_line(res["err_tail"])))
+            print("NEXT: %s" % resume)
+            return 3
+        prep["pr"] = True
+        rel.save()
     print("RELEASE: %s prepped" % version)
     print("NEXT: merge the release PR, then run stage")
     return 0

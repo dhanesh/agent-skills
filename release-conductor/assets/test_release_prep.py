@@ -185,7 +185,7 @@ class PrepTests(unittest.TestCase):
         self.assertEqual(CC.grant_violations(st), [])
         p = st["predicate"]["payload"]
         self.assertEqual(p["release"], {"version": "1.2.0"})
-        self.assertEqual(p["scope"]["branch_pattern"], "release/*")
+        self.assertEqual(p["scope"]["branch_pattern"], "release/1.2.0*")
         self.assertEqual({k for k, v in p["gate_policy"].items() if v == "grant"},
                          {"local_reversible", "push_branch", "open_pr", "deploy_staging",
                           "push_tag"})
@@ -207,6 +207,117 @@ class PrepTests(unittest.TestCase):
         self.assertEqual(rel.recipe_sha, RL.recipe_sha(self.root))
         self.assertTrue(rel.prep["pushed"] and rel.prep["pr"])
         self.assertEqual(rel.prep["commit"], head)
+
+    def grants(self):
+        d = CC.envelope_dir(self.root)
+        return sorted(f for f in os.listdir(d) if f.startswith("autonomy-grant"))
+
+    def test_the_grant_covers_only_this_versions_branches(self):  # R15
+        self.assertEqual(self.prep()[0], 0)
+        for name, want in (("release/1.2.0-stage", "COVERED"), ("release/1.3.0", "ASK")):
+            with self.subTest(branch=name):
+                wt = os.path.join(tmpdir(), "wt")
+                self.assertEqual(git(self.root, "worktree", "add", "-q", "-b", name, wt,
+                                     "release/1.2.0").returncode, 0)
+                rep = CC.check_grant(self.root, "push_branch",
+                                     subject=".release/recipe.json", worktree=wt)
+                self.assertEqual(rep["status"], want, rep)
+
+    def test_the_grant_never_covers_the_default_branch_checkout(self):
+        self.assertEqual(self.prep()[0], 0)
+        rep = CC.check_grant(self.root, "push_branch", subject=".release/recipe.json")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"))
+
+    def test_resume_after_a_push_ask_reuses_grant_and_commit(self):  # R12
+        pol = os.path.join(tmpdir(), "policy.json")
+        with open(pol, "w") as f:
+            json.dump({"push_branch": "ask"}, f)
+        rc, out, _ = self.prep("--policy-file", pol)
+        self.assertEqual(rc, 3)
+        self.assertIn("NEXT: fix what stopped it, then re-run prep to resume", out)
+        grants, commit = self.grants(), RL.Release.load(self.root, "1.2.0").prep["commit"]
+        rc, out, _ = self.prep()  # still declined: asks again, changes nothing
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: push_branch ASK gate-ask", out)
+        # the human lifts the decline in the grant itself
+        path = os.path.join(CC.envelope_dir(self.root), grants[0])
+        with open(path) as f:
+            st = json.load(f)
+        st["predicate"]["payload"]["gate_policy"]["push_branch"] = "grant"
+        with open(path, "w") as f:
+            json.dump(st, f)
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("RELEASE: 1.2.0 prepped", out)
+        self.assertEqual(self.grants(), grants)
+        rel = RL.Release.load(self.root, "1.2.0")
+        self.assertEqual(rel.prep["commit"], commit)
+        self.assertTrue(rel.prep["pushed"] and rel.prep["pr"])
+        self.assertEqual(git(self.bare, "rev-parse", "refs/heads/release/1.2.0").stdout.strip(),
+                         commit)
+        self.assertEqual(git(self.wt(), "rev-parse", "HEAD").stdout.strip(), commit)
+
+    def test_resume_after_a_failed_pr_runs_only_the_pr(self):  # R12
+        self.assertEqual(self.prep(pr=["false"])[0], 3)
+        grants = self.grants()
+        commit = RL.Release.load(self.root, "1.2.0").prep["commit"]
+        rc, out, err = self.prep(pr=[sys.executable, "-c",
+                                     "open(%r,'w').write('pr')" % self.pr_log])
+        self.assertEqual(rc, 0, out + err)
+        with open(self.pr_log) as f:
+            self.assertEqual(f.read(), "pr")
+        self.assertEqual(self.grants(), grants)
+        rel = RL.Release.load(self.root, "1.2.0")
+        self.assertEqual(rel.prep["commit"], commit)
+        self.assertTrue(rel.prep["pr"])
+        self.assertEqual([e["event"] for e in rel.events()].count("push"), 1)
+
+    def test_the_kill_switch_stops_a_resume(self):
+        pol = os.path.join(tmpdir(), "policy.json")
+        with open(pol, "w") as f:
+            json.dump({"open_pr": "ask"}, f)
+        self.assertEqual(self.prep("--policy-file", pol)[0], 3)
+        CC.revoke_all(self.root)
+        rc, out, _ = self.prep()
+        self.assertEqual(rc, 3)
+        self.assertIn("GATE: open_pr ASK superseded", out)
+
+    def test_a_completed_prep_rerun_says_so_and_redoes_nothing(self):
+        self.assertEqual(self.prep()[0], 0)
+        grants = self.grants()
+        rc, out, err = self.prep(pr=["false"])
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("RELEASE: 1.2.0 already prepped", out)
+        self.assertIn("NEXT: merge the release PR, then run stage", out)
+        self.assertEqual(self.grants(), grants)
+
+    def test_a_failed_local_prep_revokes_its_grant(self):  # R16a
+        # A version file that is not JSON in the worktree fails after the grant is
+        # written; re-prepping the same version from the same base would rewrite a
+        # byte-identical intent and revive an unrevoked grant.
+        with mock.patch.object(RL, "_set_version", side_effect=ValueError("boom")):
+            rc, out, _ = self.prep()
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".skill-contract",
+                                                     "releases", "1.2.0")))
+        rep = CC.check_grant(self.root, "local_reversible", subject=".release/recipe.json")
+        self.assertEqual(rep["status"], "ASK")
+        self.assertEqual(rep["reason"], "revoked")
+        # and a fresh prep of the same version still works under its own new grant
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_version_cmd_recipe_is_refused(self):  # R13
+        write_recipe(self.root, dict(GOOD, version={"cmd": ["cat", "VERSION"]}), commit=True)
+        rc, out, err = self.prep()
+        self.assertEqual(rc, 2)
+        self.assertIn("version.cmd", out + err)
+
+    def test_prep_stops_when_the_run_lock_is_held(self):
+        with mock.patch.object(RL, "LOCK_TIMEOUT", 0.3), RL.run_lock(self.root):
+            rc, out, _ = self.prep()
+        self.assertEqual(rc, 3)
+        self.assertIn("STOP: locked", out)
 
     def test_bump_override_and_existing_changelog_gets_a_new_section_on_top(self):
         with open(os.path.join(self.root, "CHANGELOG.md"), "w") as f:
