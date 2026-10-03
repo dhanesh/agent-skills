@@ -86,6 +86,18 @@ class AllowlistMatchTests(unittest.TestCase):
         self.assertTrue(RL.allowlist_matches("Bash(fly deploy *)", argv))
         self.assertTrue(RL.allowlist_matches("Bash(/opt/bin/fly deploy --app 'my app')", argv))
 
+    def test_a_space_separated_list_splits_too(self):  # fix round 1, I2
+        self.assertTrue(RL.allowlist_matches("Read Bash", self.PROD))
+        self.assertTrue(RL.allowlist_matches("Bash(git *) Bash(npx *)",
+                                             ["npx", "vercel", "deploy", "--prod"]))
+        self.assertFalse(RL.allowlist_matches("Read Edit Bash(git *)", self.PROD))
+
+    def test_a_glob_prefix_and_extra_whitespace_still_match(self):  # fix round 1, M3/M4
+        self.assertTrue(RL.allowlist_matches("Bash(*:*)", self.PROD))
+        self.assertTrue(RL.allowlist_matches("Bash(npx  vercel *)",
+                                             ["npx", "vercel", "deploy", "--prod"]))
+        self.assertTrue(RL.allowlist_matches("Bash(vercel   deploy:*)", self.PROD))
+
     def test_agent_cmd_allowlist_reads_every_spelling(self):
         P = self.PROD
         for cmd in ([CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(vercel *)"],
@@ -194,6 +206,25 @@ class AttendedDeployTests(DeployBase):
         self.assertIn("STOP: deploy-failed", out)
         self.assertIn("NEXT: verify-prod then ask the human", out)
         self.assertEqual(self.rel().status, "prod_failed")
+
+    def test_a_deploy_that_times_out_has_an_unknown_outcome(self):  # R25
+        self.staged(deploy_prod=[sys.executable, "-c", "import time; time.sleep(30)"])
+        with mock.patch.object(RL, "CMD_TIMEOUT", 0.5):
+            rc, out, _ = self.deploy()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: outcome-unknown", out)
+        self.assertIn("NEXT: verify-prod then ask the human", out.splitlines())
+        self.assertEqual(self.rel().status, "outcome_unknown")
+
+    def test_a_probe_that_edits_the_build_checkout_refuses(self):  # M1
+        py = sys.executable
+        prog = ("import sys; e = sys.argv[1]; (e == 'production') and "
+                "open('package.json', 'a').write(chr(10)); print(open(sys.argv[2]).read())")
+        self.staged(version_probe=[py, "-c", prog, "{env}",
+                                   os.path.join(self.www, "version-{env}.txt")])
+        self.set_prod("1.1.0\n")
+        rc, out, _ = self.deploy()
+        self.assert_refused(rc, out, "build-tree-changed")
 
     def test_a_simulated_crash_mid_deploy_never_reruns_the_command(self):
         self.staged()
@@ -397,7 +428,73 @@ class TagDeployTests(DeployBase):
         self.assertEqual(rel.stage["tag"], "pushed")
 
 
+    def push_mock(self, result):
+        real = RL._run_remote
+
+        def fake(argv, cwd, env):
+            if argv[:2] == ["git", "push"]:
+                return False, result
+            return real(argv, cwd, env)
+        return mock.patch.object(RL, "_run_remote", side_effect=fake)
+
+    def test_a_tag_push_that_times_out_has_an_unknown_outcome(self):  # R25
+        self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
+        with self.push_mock({"rc": None, "err_tail": "timed out", "timed_out": True}):
+            rc, out, _ = self.deploy()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: outcome-unknown", out)
+        self.assertIn("NEXT: verify-prod then ask the human", out.splitlines())
+        self.assertEqual(self.rel().status, "outcome_unknown")
+
+    def test_a_tag_push_that_cannot_start_is_a_plain_failure(self):  # M2
+        self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
+        with self.push_mock({"rc": None, "err_tail": "cannot run: no git",
+                             "timed_out": False}):
+            rc, out, _ = self.deploy()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: deploy-failed: the tag push could not start", out)
+        self.assertEqual(self.rel().status, "prod_failed")
+
+    def test_a_tag_already_on_the_remote_at_the_commit_is_called_a_no_op(self):  # M7
+        _, commit = self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
+        r = TS.git(self.root, "push", "-q", self.bare, "%s:refs/tags/v1.2.0" % commit)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rc, out, err = self.deploy()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("no-op", out)
+        self.assertIn("CI may not run again", out)
+
+    def test_an_allowlist_reaching_the_tag_push_refuses_in_tag_mode_only(self):  # R27
+        self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
+        for rules in ("Read,Bash(git *)", "Bash(git push:*)"):
+            with self.subTest(rules=rules):
+                gid = plant_grant(self.root, rules)
+                self.assert_refused(*self.deploy()[:2], "allowlist-exposes-prod")
+                self.assertIsNone(self.tag_at(self.bare))
+                CC.revoke_grant(self.root, gid)
+
+    def test_a_git_allowlist_does_not_refuse_when_the_tag_is_not_the_deploy(self):  # R27
+        self.staged()
+        self.assertFalse(self.rel().tag_deploys)
+        plant_grant(self.root, "Read,Bash(git *)")
+        rc, out, err = self.deploy()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.rel().status, "deployed")
+
+
 class StageAllowlistTests(DeployBase):
+    def test_stage_in_tag_mode_refuses_an_allowlist_reaching_the_tag_push(self):  # R27
+        _, commit = self.make(ci="on:\n  push:\n    tags: ['v*']\n")
+        self.assertEqual(self.stage()[0], 0)
+        self.record_all(commit)
+        gid = plant_grant(self.root, "Bash(git push:*)")
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("allowlist-exposes-prod", out)
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
+        CC.revoke_grant(self.root, gid)
+        self.assertEqual(self.evidence()[0], 0)
+
     def test_stage_refuses_before_deploy_staging_while_a_grant_exposes_production(self):
         _, commit = self.make()
         self.assertEqual(self.stage()[0], 0)

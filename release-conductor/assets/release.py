@@ -801,22 +801,24 @@ def _safe_config_env(**extra):
 
 
 def _run_remote(argv, cwd, env):
-    """Run one remote step (no shell, no stdin, own process group). (ok, result)."""
+    """Run one remote step (no shell, no stdin, own process group). (ok, result); result's
+    timed_out is True only when the step ran past REMOTE_TIMEOUT (and was killed), so a
+    step that could not start is told apart from one that may have reached the remote."""
     try:
         p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, errors="replace",
                              start_new_session=True, env=env)
     except OSError as e:
-        return False, {"rc": None, "err_tail": "cannot run: %s" % e}
+        return False, {"rc": None, "err_tail": "cannot run: %s" % e, "timed_out": False}
     try:
         out, err = p.communicate(timeout=REMOTE_TIMEOUT)
     except subprocess.TimeoutExpired:
         _kill_group(p)
         p.communicate()
-        return False, {"rc": None, "err_tail": "timed out"}
+        return False, {"rc": None, "err_tail": "timed out", "timed_out": True}
     _kill_group(p)
     return p.returncode == 0, {"rc": p.returncode, "out_tail": out[-TAIL:],
-                               "err_tail": err[-TAIL:]}
+                               "err_tail": err[-TAIL:], "timed_out": False}
 
 
 def exclude_grants(root):
@@ -1932,7 +1934,11 @@ def _stage_steps(root, rel, recipe, commit, args):
                                    "%s changed since the build" % st["artifact"]["path"])
         # R20: stage is the grant-driven step an unattended agent runs; while any live
         # grant's headless allowlist could reach production, refuse before staging too.
-        exposed = exposing_grants(root, recipe, v, commit)
+        # R27: when CI deploys on tags, the tag push `deploy` would run is a production
+        # command too (decided as _stage_tag will decide it; unreadable CI counts).
+        tagged = CC.ci_tag_triggers(root, commit)
+        exposed = exposing_grants(root, recipe, v, commit, _tag_push_argv(
+            args.remote, commit, v) if tagged is None or tagged else None)
         if exposed:
             rel.log("refused", reason="allowlist-exposes-prod", grants=exposed)
             raise Refused("allowlist-exposes-prod: live grant(s) %s let a headless agent "
@@ -2039,15 +2045,16 @@ _SEMVER_LOOSE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)\Z")
 
 
 def _split_rules(allowed_tools_str):
-    """An --allowedTools value split into rules: on commas outside parentheses (a
-    Bash(...) glob may itself carry a comma), each rule stripped, empties dropped."""
+    """An --allowedTools value split into rules: on commas AND whitespace outside
+    parentheses (Claude Code accepts a comma- or space-separated list; a Bash(...) glob
+    may itself carry either), each rule stripped, empties dropped."""
     rules, depth, cur = [], 0, []
     for ch in allowed_tools_str or "":
         if ch == "(":
             depth += 1
         elif ch == ")" and depth:
             depth -= 1
-        if ch == "," and depth == 0:
+        if (ch == "," or ch.isspace()) and depth == 0:
             rules.append("".join(cur))
             cur = []
         else:
@@ -2058,30 +2065,35 @@ def _split_rules(allowed_tools_str):
 
 def allowlist_matches(allowed_tools_str, argv):
     """True when a Claude Code --allowedTools value would let a headless agent run argv
-    without a prompt. Rules split on commas outside parentheses; `Bash` and `Bash(*)`
+    without a prompt. Rules split on commas and whitespace outside parentheses; runs of
+    whitespace in a pattern or a command compare as one space; `Bash` and `Bash(*)`
     match every command; `Bash(<glob>)` is matched with fnmatch against shlex.join(argv)
     -- and, failing closed, against " ".join(argv) and both with argv[0] reduced to its
     basename, since an agent may type the command either way; the legacy
-    `Bash(<prefix>:*)` form is a prefix match on those same strings. Other tools never
+    `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
+    itself be a glob: fnmatch against prefix + "*"). Other tools never
     match. Shared with spec-first-planning's write_grant.py (Task 7), which copies it:
     keep the two in step."""
     import fnmatch
     import shlex
+    def norm(text):
+        return " ".join(text.split())  # runs of whitespace compare as one space
     argv = list(argv)
     forms = {shlex.join(argv), " ".join(argv)}
     if argv:
         short = [os.path.basename(argv[0])] + argv[1:]
         forms |= {shlex.join(short), " ".join(short)}
+    forms |= {norm(f) for f in forms}
     for rule in _split_rules(allowed_tools_str):
         if rule in ("Bash", "Bash(*)"):
             return True
         m = re.match(r"^Bash\((.*)\)\Z", rule, re.S)
         if not m:
             continue
-        pat = m.group(1).strip()
+        pat = norm(m.group(1))
         if pat.endswith(":*"):
-            prefix = pat[:-2]
-            if any(f.startswith(prefix) for f in forms):
+            prefix = pat[:-2]  # itself a glob: Bash(*:*) and Bash(npx *:*) match too
+            if any(f.startswith(prefix) or fnmatch.fnmatch(f, prefix + "*") for f in forms):
                 return True
         elif any(fnmatch.fnmatch(f, pat) for f in forms):
             return True
@@ -2124,15 +2136,24 @@ def agent_cmd_exposes(agent_cmd, argv):
     return any(allowlist_matches(v, argv) for v in values)
 
 
-def exposing_grants(root, recipe, version, commit):
+def _tag_push_argv(remote, commit, version):
+    """The tag push that is the production deploy when CI deploys on tags (D6), exactly
+    as `deploy` runs it: an explicit, non-forced refspec."""
+    return ["git", "push", remote, "%s:refs/tags/v%s" % (commit, version)]
+
+
+def exposing_grants(root, recipe, version, commit, tag_push=None):
     """Ids of every live grant under root whose reentry.agent_cmd could run the recipe's
-    deploy_prod or rollback (expanded with this release's values, and as written).
+    deploy_prod or rollback (expanded with this release's values, and as written), or
+    -- when CI deploys on tags -- `tag_push`, the tag push argv that is the deploy (R27).
     Live = a head no revision supersedes (CC._live_heads) that is not revoked; an
     EXPIRED grant still counts (fail closed: a scheduler may still launch its agent,
     and revoking it is one command)."""
     values = {"version": version, "commit": commit, "env": PROD_ENV}
     argvs = [recipe["deploy_prod"], recipe["rollback"]]
     argvs += [expand(a, values) for a in argvs]
+    if tag_push:
+        argvs.append(tag_push)
     out = []
     for _, _, st in CC._live_heads(root):
         payload = st["predicate"].get("payload") or {}
@@ -2301,14 +2322,9 @@ def _deploy_locked(root, args, name):
         return _deploy_refuse(rel, "recipe-changed", "the recipe at %s is not the one "
                               "staged (sha %s)" % (commit[:12], rel.recipe_sha))
     build_dir = os.path.join(rel.dir, BUILD_WT)
-    if _build_tree(build_dir) != st.get("build_tree"):
-        return _deploy_refuse(rel, "build-tree-changed", "the build checkout %s moved off "
-                              "%s or its tracked files changed since stage"
-                              % (build_dir, commit[:12]))
-    art = st.get("artifact")
-    if art and (_artifact_sha(build_dir, art["path"]) != art["sha256"]
-                or rel.artifact_sha != art["sha256"]):
-        return _deploy_refuse(rel, "artifact-altered", "%s changed since stage" % art["path"])
+    changed = _build_changed(rel, build_dir)
+    if changed:
+        return _deploy_refuse(rel, *changed)
     wt = os.path.join(rel.dir, STAGE_WT)
     rep = _gate(root, DEPLOY_ACTION, wt, (rel.grant or {}).get("id") or "")
     print("GATE: %s %s %s" % (DEPLOY_ACTION, rep["status"], rep["reason"]))
@@ -2317,16 +2333,18 @@ def _deploy_locked(root, args, name):
     if rep["status"] == "COVERED":
         return _deploy_refuse(rel, "deploy-covered", "check-grant answered COVERED for "
                               "deploy, which no grant may cover (A8): a checker bug")
-    exposed = exposing_grants(root, recipe, v, commit)
+    exposed = exposing_grants(root, recipe, v, commit, _tag_push_argv(
+        args.remote, commit, v) if rel.tag_deploys else None)
     if exposed:
         return _deploy_refuse(rel, "allowlist-exposes-prod", "live grant(s) %s let a "
-                              "headless agent run deploy_prod or rollback; revoke them "
+                              "headless agent run the production deploy (deploy_prod, "
+                              "rollback, or the deploying tag push); revoke them "
                               "(check-grant revoke-grant --id) or narrow their "
                               "--allowedTools" % ", ".join(exposed))
     values = {"version": v, "commit": commit, "env": PROD_ENV}
     tag = "v%s" % v
     if rel.tag_deploys:
-        argv = ["git", "push", args.remote, "%s:refs/tags/%s" % (commit, tag)]
+        argv = _tag_push_argv(args.remote, commit, v)
     else:
         argv = expand(recipe["deploy_prod"], values)
     if args.unattended or name is None:
@@ -2338,15 +2356,23 @@ def _deploy_locked(root, args, name):
         print("NEXT: run deploy with the human")
         return 3
     target = rollback_target(root, rel, recipe, build_dir)
+    # M1: the probe ran in wt-build; what deploys from there must still be what staged
+    changed = _build_changed(rel, build_dir)
+    if changed:
+        return _deploy_refuse(rel, *changed)
+    noop = rel.tag_deploys and _remote_tag(root, wt, args.remote, tag) == commit
     approval = {"name": name, "status": "CLAIMED"}
     _deploy_summary(rel, recipe, argv, target, approval)
+    if noop:
+        print("  note: %s is already on %s at %s: the push will be a no-op and CI may "
+              "not run again" % (tag, args.remote, commit[:12]))
     rel.set_status("deploying", approved_by=approval, rollback_target=target)
     rel.save()
     rel.log("deploying", approved_by=approval, rollback_target=target, command=argv)
     if rel.tag_deploys:
         ok, res = _run_remote(argv, wt if os.path.isdir(wt) else root,
                               _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
-        rc, timed_out = res["rc"], res["rc"] is None
+        rc, timed_out = res["rc"], res["timed_out"]
         if ok:
             st["tag"] = "pushed"
     else:
@@ -2354,21 +2380,63 @@ def _deploy_locked(root, args, name):
         rc, timed_out = res["rc"], res["timed_out"]
         st["deploy_prod"] = _cmd_record(argv, res)  # tails stay in local state only
     rel.log("deploy_prod", rc=rc, timed_out=timed_out, tag=rel.tag_deploys or False)
+    what = "the tag push" if rel.tag_deploys else "deploy_prod"
+    if timed_out:
+        # R25: killed mid-flight, it may have reached production (or the remote): the
+        # outcome is unknown, never a known failure, and it is never re-run.
+        rel.set_status("outcome_unknown", stage=st)
+        rel.save()
+        print("DEPLOY: %s unknown %s" % (v, commit))
+        print("STOP: outcome-unknown: %s timed out and was killed; production may be "
+              "part-way deployed" % what)
+        print("NEXT: %s" % NEXT_UNKNOWN)
+        return 3
     if rc != 0:
         rel.set_status("prod_failed", stage=st)
         rel.save()
         print("DEPLOY: %s fail %s" % (v, commit))
-        print("STOP: deploy-failed: %s exited %s%s" % (
-            "the tag push" if rel.tag_deploys else "deploy_prod", rc,
-            " (timed out: production may be part-way deployed)" if timed_out else ""))
+        print("STOP: deploy-failed: %s %s" % (what, "exited %s" % rc if rc is not None
+                                              else "could not start: %s"
+                                              % one_line(res.get("err_tail", ""))))
         print("NEXT: %s" % NEXT_UNKNOWN)
         return 3
     rel.set_status("deployed", stage=st)
     rel.save()
-    rel.log("deployed", commit=commit)
-    print("DEPLOY: %s deployed %s" % (v, commit))
+    rel.log("deployed", commit=commit, noop=bool(noop))
+    print("DEPLOY: %s deployed %s%s" % (v, commit, " (no-op: %s was already on %s; CI may "
+                                        "not run again)" % (tag, args.remote) if noop else ""))
     print("NEXT: verify-prod")
     return 0
+
+
+def _build_changed(rel, build_dir):
+    """None when wt-build is still the staged build (HEAD and tracked diff, and the
+    {path} artifact's sha); else (reason, detail) for a refusal."""
+    st = rel.stage or {}
+    if _build_tree(build_dir) != st.get("build_tree"):
+        return ("build-tree-changed", "the build checkout %s moved off %s or its tracked "
+                "files changed since stage" % (build_dir, (rel.release_commit or "")[:12]))
+    art = st.get("artifact")
+    if art and (_artifact_sha(build_dir, art["path"]) != art["sha256"]
+                or rel.artifact_sha != art["sha256"]):
+        return ("artifact-altered", "%s changed since stage" % art["path"])
+    return None
+
+
+def _remote_tag(root, wt, remote, tag):
+    """The commit `tag` points at on `remote` (peeled), or None when it is absent or git
+    cannot say. A read (git ls-remote), run only after the human's yes."""
+    ok, res = _run_remote(["git", "ls-remote", remote, "refs/tags/%s" % tag,
+                           "refs/tags/%s^{}" % tag], wt if os.path.isdir(wt) else root,
+                          _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
+    if not ok:
+        return None
+    found = {}
+    for line in (res.get("out_tail") or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            found[parts[1]] = parts[0]
+    return found.get("refs/tags/%s^{}" % tag) or found.get("refs/tags/%s" % tag)
 
 
 def _deploy_summary(rel, recipe, argv, target, approval):
