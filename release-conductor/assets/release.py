@@ -2226,14 +2226,20 @@ def recover_crash(rel):
         rel.log("outcome_unknown", was=was)
         print("STOP: outcome-unknown: release %s was %s when its command stopped; the "
               "command is never re-run" % (rel.version, was))
-        print("NEXT: %s" % NEXT_UNKNOWN)
+        print("NEXT: %s" % _next_unknown(rel))
         return True
     if rel.status == "outcome_unknown":
         print("STOP: outcome-unknown: release %s's last production command never recorded "
               "its end; it is never re-run" % rel.version)
-        print("NEXT: %s" % NEXT_UNKNOWN)
+        print("NEXT: %s" % _next_unknown(rel))
         return True
     return False
+
+
+def _next_unknown(rel):
+    """The NEXT: line for an outcome_unknown release: verify-prod after a deploy; after
+    a rollback (rel.rollback is set before it runs) a human checks production by hand."""
+    return NEXT_ROLLBACK_UNKNOWN if getattr(rel, "rollback", None) else NEXT_UNKNOWN
 
 
 def _probe_target(out):
@@ -2519,6 +2525,9 @@ def _deploy_summary(rel, recipe, argv, target, approval):
 # ── verify-prod and rollback (spec section 2, step 4; decisions D4/D11) ──────────
 PROD_WT = "wt-prod"  # the isolated checkout of the release commit prod commands run in
 NEXT_ROLLBACK = "ask the human to roll back"
+# After a rollback that did not provably land (or died mid-flight): verify-prod judges a
+# deploy, not a rollback, and a second rollback needs a fresh in-session yes (R32).
+NEXT_ROLLBACK_UNKNOWN = "check production by hand; rollback again only with the human's yes"
 # The statuses verify-prod judges: a deploy that finished, one whose outcome is unknown
 # (a crash or a timeout mid-deploy), and a deploy that failed with no verify-prod
 # judgement yet (deploy's own NEXT: line sends it here). A prod_failed that verify-prod
@@ -2618,7 +2627,7 @@ def result_payload(rel, outcome):
             "verdict": ev.get("verdict"), "verifier": ev.get("verifier"),
             "commit": ev.get("commit"), "features": list(ev.get("features") or []),
             "evidence_paths": list(ev.get("paths") or []),
-            "probe": ({"rc": sprobe.get("rc"), "polls": sprobe.get("polls")}
+            "probe": ({"rc": sprobe.get("rc"), "polls": sprobe.get("polls") or 1}
                       if isinstance(sprobe, dict) else None),
             "checks": [_rc_only(c) for c in st.get("checks") or []]},
         "production": None,
@@ -2649,18 +2658,10 @@ def result_payload(rel, outcome):
     return payload
 
 
-def write_result(root, rel, outcome):
-    """Log the terminal event, then write release-result/v1 pinning the recipe (the
-    digest recorded for the release commit), the intent file and the release log up to
-    and including that event (log_sha256/log_bytes). Then set `outcome` as the status,
-    save, and revoke the release grant (that revocation is logged after the prefix).
-    Returns the envelope path, or None (printed) when the statement fails the checker."""
-    payload = result_payload(rel, outcome)
-    rel.log(outcome, commit=rel.release_commit)
-    with open(rel.log_path, "rb") as f:
-        data = f.read()
-    payload["log_sha256"] = hashlib.sha256(data).hexdigest()
-    payload["log_bytes"] = len(data)
+def _result_statement(root, rel, payload):
+    """The release-result/v1 statement for `payload`, with subjects the recipe (the
+    digest recorded for the release commit), the intent file, and the release log by
+    payload["log_sha256"] (the digest of its first log_bytes bytes)."""
     base = "%s/%s" % (RELEASES_DIR, rel.version)
     intent_rel = "%s/%s" % (base, INTENT_FILE)
     st = CC.build_statement(RESULT_KIND, SKILL_NAME, SKILL_VERSION, root, [], payload)
@@ -2670,13 +2671,60 @@ def write_result(root, rel, outcome):
     subjects.append({"name": "%s/release-log.jsonl" % base,
                      "digest": {"sha256": payload["log_sha256"]}})
     st["subject"] = subjects
-    viol = CC.check_statement(st)
-    if viol:
-        for n, detail in viol:
-            print("FAIL: C%d: %s" % (n, detail))
-        print("STOP: result-invalid: the release-result envelope fails the checker")
+    return st
+
+
+def _payload_problems(payload):
+    """What makes a payload one this tool must not publish, beyond the checker's C1-C10:
+    staging evidence that is not a pass (deploy refuses without one, so this is a bug)."""
+    if (payload.get("staging") or {}).get("verdict") != "pass":
+        return ["staging.verdict is %r, not \"pass\"" % (payload.get("staging") or {}
+                                                          ).get("verdict")]
+    return []
+
+
+def write_result(root, rel, outcome):
+    """Finish the release at `outcome` ("verified" or "rolled_back") and write its
+    release-result/v1. The statement is checked first, with a shape-only log digest, so
+    a statement the checker would refuse never leaves a terminal event in the log. Then
+    the terminal event is logged, the log digested up to and including it, and the
+    envelope written; then the status is set and saved and the release grant revoked
+    (logged after the digested prefix).
+
+    The status is set to `outcome` either way, because it is what production did: a
+    failure to build or write the envelope (checker violation, OSError) is recorded as
+    rel.result = {"outcome", "error"} with a `result_failed` event, and returns None
+    after printing STOP: result-failed. A rollback whose envelope failed is therefore
+    rolled_back with a note, never left rolling_back for recover_crash to demote into
+    an "unknown" outcome it is not. Returns the envelope path on success."""
+    payload = result_payload(rel, outcome)
+    payload["log_sha256"], payload["log_bytes"] = "0" * 64, 1  # shape only, for the check
+    problems = ["C%d: %s" % v for v in CC.check_statement(_result_statement(root, rel, payload))]
+    problems += _payload_problems(payload)
+    path = st = None
+    if not problems:
+        rel.log(outcome, commit=rel.release_commit)
+        try:
+            with open(rel.log_path, "rb") as f:
+                data = f.read()
+            payload["log_sha256"] = hashlib.sha256(data).hexdigest()
+            payload["log_bytes"] = len(data)
+            st = _result_statement(root, rel, payload)
+            path = CC.write_envelope(root, st)
+        except (OSError, ValueError) as e:
+            problems = ["cannot write the envelope: %s" % e]
+    if problems:
+        rel.set_status(outcome, result={"outcome": outcome, "error": problems[0]})
+        rel.save()
+        rel.log("result_failed", outcome=outcome, error=problems[0])
+        _revoke_release_grant(rel)
+        for p in problems:
+            print("FAIL: %s" % p)
+        print("STOP: result-failed: production is %s, but no release-result envelope was "
+              "written" % outcome.replace("_", " "))
+        print("NEXT: fix what stopped it; the release is finished, and its state.json "
+              "and release-log.jsonl hold the record")
         return None
-    path = CC.write_envelope(root, st)
     rel.set_status(outcome, result={"id": st["predicate"]["id"],
                                     "path": os.path.relpath(path, root),
                                     "sha256": CC.sha256_file(path), "outcome": outcome})
@@ -2715,9 +2763,19 @@ def _verify_locked(root):
     try:
         rel = _prod_release(root, "verify")
         _demote_crash(rel)
-        if rel.status not in VERIFIABLE or (rel.status == "prod_failed" and rel.prod):
-            raise Refused("release %s is %s; verify-prod judges a deployed release (or one "
-                          "whose outcome is unknown) once" % (rel.version, rel.status))
+        if rel.status not in VERIFIABLE:
+            raise Refused("release %s is %s; verify-prod judges a deployed release, or one "
+                          "whose deploy outcome is unknown" % (rel.version, rel.status))
+        if rel.prod or rel.rollback:
+            # R32: verify-prod judges a deploy once. After its own judgement, or once a
+            # rollback ran (or died mid-flight), production is a human's call: a re-run
+            # must not turn a failed or half-rolled-back release into `verified`.
+            raise Refused("release %s already has %s; verify-prod judges a deploy once. %s"
+                          % (rel.version, "a rollback attempt" if rel.rollback else
+                             "a verify-prod judgement (%s)" % (
+                                 (rel.prod.get("failure") or {}).get("reason") or "none"),
+                             "Check production by hand; rollback only with the human's yes"
+                             if rel.rollback else "Ask the human to roll back"))
         recipe = _prod_recipe(root, rel)
         cwd = _prod_checkout(root, rel)
     except Refused as e:
@@ -2809,7 +2867,13 @@ def cmd_rollback(args):
     """Roll production back to the release's rollback target, only with the human's yes
     (D4; class deploy, never grantable). Exit 0 rolled_back (release-result/v1 written);
     2 refused (no target, wrong status, covered gate, exposed allowlist); 3 waiting for
-    the human's yes, the rollback's outcome is unknown, or the lock is held."""
+    the human's yes, the rollback's outcome is unknown, or the lock is held.
+
+    A rollback that ends outcome_unknown (non-zero exit, timeout, the probe never
+    reporting the target, or a crash mid-flight that the next locked command demotes) is
+    never re-run by this tool. It may be run again only by a new `rollback` invocation
+    carrying a fresh in-session yes from the human (--approved-by), after they have
+    checked production by hand; verify-prod refuses such a release (R32)."""
     root = os.path.abspath(args.root)
     name = None
     try:
@@ -2921,7 +2985,7 @@ def _rollback_unknown(rel, detail):
     rel.log("outcome_unknown", was="rolling_back", reason=detail)
     print("ROLLBACK: %s unknown" % rel.version)
     print("STOP: outcome-unknown: %s; it is never re-run by itself" % detail)
-    print("NEXT: %s" % NEXT_UNKNOWN)
+    print("NEXT: %s" % NEXT_ROLLBACK_UNKNOWN)
     return 3
 
 

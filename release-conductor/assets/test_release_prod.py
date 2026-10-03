@@ -6,6 +6,7 @@ real target or a network."""
 import hashlib
 import json
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -26,6 +27,68 @@ LOUD = ("import sys; print(%r); sys.stderr.write(%r); "
 # Writes argv[2] into the probed production file argv[1], and appends it to argv[3].
 ROLL = ("import sys; open(sys.argv[1], 'w').write(sys.argv[2] + chr(10)); "
         "open(sys.argv[3], 'a').write(sys.argv[2] + chr(10))")
+
+
+_TYPES = {"object": dict, "array": list, "string": str, "boolean": bool, "null": type(None)}
+
+
+def schema_problems(value, schema, root, where="payload"):
+    """A small stdlib validator for the keywords release-result.v1.json uses: $ref
+    (#/$defs/...), oneOf, type, const, enum, pattern, minimum, required,
+    additionalProperties false, properties and items. Returns a list of problems."""
+    if "$ref" in schema:
+        name = schema["$ref"].split("/")[-1]
+        return schema_problems(value, root["$defs"][name], root, where)
+    if "oneOf" in schema:
+        ok = [s for s in schema["oneOf"] if not schema_problems(value, s, root, where)]
+        return [] if len(ok) == 1 else ["%s matches %d oneOf branches" % (where, len(ok))]
+    out = []
+    if "type" in schema:
+        types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+
+        def is_type(t):
+            if t == "integer":
+                return isinstance(value, int) and not isinstance(value, bool)
+            if t in ("string", "object", "array", "null"):
+                return isinstance(value, _TYPES[t])
+            return isinstance(value, _TYPES[t])
+        if not any(is_type(t) for t in types):
+            return ["%s: %r is not %s" % (where, value, types)]
+    if "const" in schema and value != schema["const"]:
+        out.append("%s: %r is not %r" % (where, value, schema["const"]))
+    if "enum" in schema and value not in schema["enum"]:
+        out.append("%s: %r not in %r" % (where, value, schema["enum"]))
+    if "pattern" in schema and isinstance(value, str) \
+            and not re.search(schema["pattern"], value):
+        out.append("%s: %r does not match %s" % (where, value, schema["pattern"]))
+    if "minimum" in schema and isinstance(value, int) and value < schema["minimum"]:
+        out.append("%s: %r < %r" % (where, value, schema["minimum"]))
+    if isinstance(value, dict):
+        props = schema.get("properties", {})
+        for k in schema.get("required", []):
+            if k not in value:
+                out.append("%s: missing %s" % (where, k))
+        for k, v in value.items():
+            if k in props:
+                out += schema_problems(v, props[k], root, "%s.%s" % (where, k))
+            elif schema.get("additionalProperties") is False:
+                out.append("%s: unexpected key %s" % (where, k))
+    if isinstance(value, list) and "items" in schema:
+        for i, v in enumerate(value):
+            out += schema_problems(v, schema["items"], root, "%s[%d]" % (where, i))
+    return out
+
+
+class SchemaWalkerTests(unittest.TestCase):
+    def test_the_walker_catches_nested_drift(self):
+        with open(SCHEMA, encoding="utf-8") as f:
+            schema = json.load(f)
+        prob = schema_problems({"rc": 0, "polls": None, "live": True},
+                               schema["$defs"]["probe"], schema)
+        self.assertTrue(prob)
+        prob = schema_problems({"rc": 0, "out_tail": "x"}, schema["$defs"]["result"], schema)
+        self.assertTrue(any("unexpected key out_tail" in p for p in prob))
+        self.assertEqual(schema_problems({"rc": None}, schema["$defs"]["result"], schema), [])
 
 
 class ProdBase(TD.DeployBase):
@@ -86,8 +149,7 @@ class ProdBase(TD.DeployBase):
         with open(SCHEMA, encoding="utf-8") as f:
             schema = json.load(f)
         self.assertFalse(schema["additionalProperties"])
-        self.assertLessEqual(set(schema["required"]), set(p))
-        self.assertLessEqual(set(p), set(schema["properties"]))
+        self.assertEqual(schema_problems(p, schema, schema), [])
         # the log digest covers exactly the first log_bytes bytes of the release log
         with open(self.rel().log_path, "rb") as f:
             data = f.read()
@@ -226,6 +288,41 @@ class VerifyFailTests(ProdBase):
         self.assertEqual(rc, 2, out)
         self.assertEqual(self.rel().status, "prod_failed")
 
+    def test_a_failed_rollback_cannot_be_verified_into_verified(self):  # R32
+        py = sys.executable
+        self.deployed(rollback=[py, "-c", "import sys; sys.exit(1)", "{version}"])
+        self.set_prod("1.3.0\n")
+        self.assertEqual(self.verify()[0], 3)
+        self.assertEqual(self.rel().status, "prod_failed")
+        rc, out, _ = self.rollback()
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(self.rel().status, "outcome_unknown")
+        self.assertIn("NEXT: check production by hand; rollback again only with the "
+                      "human's yes", out.splitlines())
+        self.assertNotIn("verify-prod", out)
+        self.set_prod("1.2.0\n")  # production now reports the release
+        rc, out, _ = self.verify()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("rollback attempt", out)
+        rel = self.rel()
+        self.assertEqual(rel.status, "outcome_unknown")
+        self.assertEqual(self.results(), [])
+        self.assertNotIn("grant_revoked", [e["event"] for e in rel.events()])
+
+    def test_a_crash_mid_rollback_cannot_be_verified_either(self):  # R32
+        self.deployed()
+        self.set_prod("1.3.0\n")
+        self.assertEqual(self.verify()[0], 3)
+        rel = self.rel()
+        rel.set_status("rolling_back", rollback={"approved_by": {"name": "Dana Human",
+                                                                 "status": "CLAIMED"}})
+        rel.save()
+        self.set_prod("1.2.0\n")
+        rc, out, _ = self.verify()
+        self.assertEqual(rc, 2, out)
+        self.assertEqual(self.rel().status, "outcome_unknown")  # demoted, not verified
+        self.assertEqual(self.results(), [])
+
     def test_a_staged_release_is_refused(self):
         self.staged()
         rc, out, _ = self.verify()
@@ -292,6 +389,38 @@ class RollbackTests(ProdBase):
         self.assertIn("STOP: outcome-unknown", out)
         self.assertEqual(self.rel().status, "outcome_unknown")
         self.assertEqual(len(self.lines(self.rollback_marker)), 1)
+
+    def test_a_result_that_cannot_be_written_is_recorded_not_left_rolling_back(self):  # M1
+        self.failed()
+        with mock.patch.object(CC, "write_envelope", side_effect=OSError("disk full")):
+            rc, out, _ = self.rollback()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: result-failed", out)
+        rel = self.rel()
+        self.assertEqual(rel.status, "rolled_back")
+        self.assertEqual(rel.result["outcome"], "rolled_back")
+        self.assertIn("disk full", rel.result["error"])
+        events = [e["event"] for e in rel.events()]
+        self.assertLess(events.index("rolled_back"), events.index("result_failed"))
+        self.assertNotIn("result", events)
+        self.assertEqual(self.results(), [])
+        # finished: nothing re-runs the rollback
+        self.assertEqual(self.rollback()[0], 2)
+        self.assertEqual(self.lines(self.rollback_marker), ["1.1.0"])
+
+    def test_a_result_the_checker_refuses_logs_no_terminal_event(self):  # M1
+        self.deployed()
+        self.set_prod("1.2.0\n")
+        with mock.patch.object(CC, "check_statement", return_value=[(3, "forced")]):
+            rc, out, _ = self.verify()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: result-failed", out)
+        rel = self.rel()
+        self.assertEqual(rel.status, "verified")
+        events = [e["event"] for e in rel.events()]
+        self.assertNotIn("verified", events)
+        self.assertIn("result_failed", events)
+        self.assertEqual(self.results(), [])
 
     def test_rollback_with_no_target_exits_2(self):
         self.deployed(prod=None)  # no probe answer, no earlier release-result: no target
