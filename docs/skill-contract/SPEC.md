@@ -74,14 +74,19 @@ The action classes are:
   other than `ask` on one of them makes the grant invalid, so those actions always ask the human
   when they happen. The amendment for release-conductor makes `deploy_staging` and `push_tag`
   grantable; a production deploy is still `deploy` and stays never grantable.
-- A tag push whose CI may run on tags is `deploy`, not `push_tag`. The checker reads every CI
-  configuration file at the HEAD being judged and answers ASK `ci-tag` unless each one is a
-  format whose no-tag default is known and provably excludes tags: a GitHub Actions workflow
-  whose top-level `on:` lists only events a tag push cannot fire (a `push` counts only with a
-  `branches` or `branches-ignore` filter and no `tags` or `tags-ignore`), a composite action,
-  or a CircleCI config with no `tags` filter. Every other CI system counts as tag-triggered, and
-  so does anything the scan cannot read. When git cannot list or read the tree, the checker
-  answers ASK `ci-tag` too.
+- A tag push whose CI may run on tags is `deploy`, not `push_tag`. The checker scans every file
+  at the HEAD being judged that matches the CI configuration list below, and treats each as
+  tag-triggered unless it is proven otherwise. Only three shapes are proven: a GitHub Actions
+  workflow (`.yml` or `.yaml`, any case) whose top-level `on:` lists only events a tag push
+  cannot fire (a `push` counts only with a `branches` or `branches-ignore` filter and no `tags`
+  or `tags-ignore`), a composite action under `.github/actions/`, and a CircleCI config with no
+  `tags` word anywhere in it. Every other listed format counts as tag-triggered, and so does
+  anything the scan cannot read. When any listed file is tag-triggered the checker answers ASK
+  `ci-tag`, and when git cannot list or read the tree it answers ASK `ci-tag` too.
+
+  *Non-normative.* The floor sees only the listed formats. A CI system that is not on the list,
+  or a server-side webhook that deploys when a tag arrives, is outside it: the repository owner
+  controls those, and the grant does not.
 - A grant is never signed. A payload carrying `require_signature` is invalid, and a `.sig` file
   beside a grant changes nothing.
 - A grant MUST pin at least 2 distinct subjects: the spec and the task-plan envelope it was
@@ -119,13 +124,17 @@ These floors live in the checker, and no grant can lower them:
 A caller acting under a grant MUST push only the current branch to the remote branch of the same
 name, and MUST NOT force-push.
 
-A push, pull request, tag push or staging deploy whose commits add or change CI configuration (`.github/workflows/`,
-`.github/actions/`, `.gitlab-ci.yml`, `.circleci/`, `azure-pipelines.yml`, `Jenkinsfile`,
-`.buildkite/`, `bitbucket-pipelines.yml`, `.drone.yml`, `.travis.yml`) runs that configuration
+A push, pull request, tag push or staging deploy whose commits add or change CI configuration runs that configuration
 with the repository's secrets; it is not `push_branch`, `open_pr`, `push_tag` or
 `deploy_staging`: it is `deploy`, and the checker answers ASK `ci-config`. The commits compared are those on HEAD since its merge base with
 each default branch (every commit on HEAD when no default branch exists); when git cannot say, the
-checker answers ASK `ci-config` too.
+checker answers ASK `ci-config` too. The CI configuration list is: the directories
+`.github/workflows/`, `.github/actions/`, `.circleci/`, `.buildkite/`, `.gitea/workflows/`,
+`.forgejo/workflows/`, `.woodpecker/` and `.semaphore/` at the repository top, and files named
+`.gitlab-ci.yml`, `azure-pipelines.yml`, `Jenkinsfile`, `bitbucket-pipelines.yml`, `.drone.yml`,
+`.travis.yml`, `.woodpecker.yml`, `appveyor.yml`, `.appveyor.yml`, `.cirrus.yml`,
+`cloudbuild.yaml`, `cloudbuild.yml`, `bitrise.yml`, `codemagic.yaml` or `buildspec.yml` at any
+depth.
 
 *Non-normative.* Workflows that already exist and trigger on any push, such as preview deploys,
 still run on a granted push. The repository owner controls those; the grant does not.

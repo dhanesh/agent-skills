@@ -1114,6 +1114,30 @@ TAGGED_CI = (
     (".github/workflows/i.yml", "on: {push: {branches: [main]}}\n"),  # unparsed: fail closed
     (".github/workflows/j.yml", "name: no trigger key at all\n"),
     (".github/workflows/k.yml", "on:\n  workflow_run:\n    workflows: [build]\n"),
+    # CircleCI tag filters in any YAML or JSON spelling (fix round 1)
+    (".circleci/config.yml", "jobs:\n  d:\n    filters: {tags: {only: /^v.*/}}\n"),
+    (".circleci/config.yml", '{"workflows": {"w": {"jobs": [{"d": {"filters": '
+                             '{"tags": {"only": "/v.*/"}}}}]}}}\n'),
+    (".circleci/config.yml", "filters:\n  \"tags\":\n    only: /^v.*/\n"),
+    (".circleci/config.yml", "filters:\n  'tags': {only: /^v.*/}\n"),
+    # upper-case extensions are still workflows; unknown files in workflows fail closed
+    (".github/workflows/x.YML", "on: push\n"),
+    (".github/workflows/y.Yaml", "on: [push]\n"),
+    (".github/workflows/README.md", "on: push\n"),
+    # CI systems with no known no-tag default (fix round 1: added to is_ci_config)
+    (".gitea/workflows/x.yml", "on:\n  push:\n    branches: [main]\n"),
+    (".forgejo/workflows/x.yml", "on:\n  pull_request:\n"),
+    (".woodpecker.yml", "steps: []\n"),
+    (".woodpecker/ship.yml", "steps: []\n"),
+    ("appveyor.yml", "build: off\n"),
+    (".appveyor.yml", "build: off\n"),
+    (".cirrus.yml", "task: {}\n"),
+    ("cloudbuild.yaml", "steps: []\n"),
+    ("cloudbuild.yml", "steps: []\n"),
+    (".semaphore/semaphore.yml", "version: v1.0\n"),
+    ("bitrise.yml", "workflows: {}\n"),
+    ("codemagic.yaml", "workflows: {}\n"),
+    ("buildspec.yml", "version: 0.2\n"),
 )
 TAG_FREE_CI = (
     (".github/workflows/ci.yml", "on:\n  push:\n    branches: [main]\njobs: {}\n"),
@@ -1124,7 +1148,6 @@ TAG_FREE_CI = (
                                   "    paths: ['a']\n"),
     (".circleci/config.yml", "version: 2.1\nworkflows:\n  build:\n    jobs: [test]\n"),
     (".github/actions/a/action.yml", "runs:\n  using: composite\n"),
-    (".github/workflows/README.md", "on: push\n"),  # GitHub reads only .yml/.yaml
 )
 
 
@@ -1310,6 +1333,11 @@ class ReleaseCheckerTests(unittest.TestCase):
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
         self.assertFalse(cc.worktree_ok(self.tmp, other))
         self.assertTrue(cc.worktree_ok(self.tmp, self.tmp))
+        # the repository's own git dir shares the common dir but is not a work tree
+        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=os.path.join(self.tmp, ".git"),
+                             now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
+        self.assertFalse(cc.worktree_ok(self.tmp, os.path.join(self.tmp, ".git")))
         missing = os.path.join(other, "nope")
         rep = cc.check_grant(self.tmp, "deploy_staging", worktree=missing, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
@@ -1334,6 +1362,25 @@ class ReleaseCheckerTests(unittest.TestCase):
                 # a branch push of the same commits stays grantable: no CI file changed
                 self.assertEqual(cc.check_grant(d, "push_branch", now=self.now)["status"],
                                  "COVERED")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_every_new_ci_format_is_ci_config_and_asks_ci_tag(self):
+        for rel in (".gitea/workflows/x.yml", ".forgejo/workflows/x.yml", ".woodpecker.yml",
+                    ".woodpecker/a.yml", "appveyor.yml", ".appveyor.yml", ".cirrus.yml",
+                    "cloudbuild.yaml", "cloudbuild.yml", ".semaphore/semaphore.yml",
+                    "bitrise.yml", "codemagic.yaml", "buildspec.yml", "sub/buildspec.yml"):
+            self.assertTrue(cc.is_ci_config(rel), rel)
+        for rel in ("src/.gitea/workflows/x.yml", "docs/.semaphore/x.yml", "notbitrise.yml"):
+            self.assertFalse(cc.is_ci_config(rel), rel)
+        d = self._tag_repo(".gitea/workflows/x.yml", "on:\n  pull_request:\n")
+        rep = cc.check_grant(d, "push_tag", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-tag"), rep)
+        # the extended list feeds the ci-config ask for a branch push too (fail closed)
+        _write(os.path.join(d, ".cirrus.yml"), "task: {}\n")
+        self.git(d, "add", ".cirrus.yml")
+        self.git(d, "commit", "-q", "-m", "cirrus")
+        rep = cc.check_grant(d, "push_branch", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"), rep)
 
     def test_tag_push_asks_when_git_cannot_say(self):
         # R1: None (git cannot list or read the tree) counts as tag-triggered

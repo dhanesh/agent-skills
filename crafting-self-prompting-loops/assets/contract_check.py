@@ -1034,9 +1034,13 @@ def grant_is_tracked(root, path):
 # CI configuration runs with the repository's secrets, so pushing a change to it is
 # `deploy`, not `push_branch` or `open_pr` (A8). Directories match at the repo top;
 # the file names match at any depth, since Jenkins and GitLab can point anywhere.
-CI_CONFIG_DIRS = (".github/workflows/", ".github/actions/", ".circleci/", ".buildkite/")
+CI_CONFIG_DIRS = (".github/workflows/", ".github/actions/", ".circleci/", ".buildkite/",
+                  ".gitea/workflows/", ".forgejo/workflows/", ".woodpecker/", ".semaphore/")
 CI_CONFIG_FILES = frozenset({".gitlab-ci.yml", "azure-pipelines.yml", "Jenkinsfile",
-                             "bitbucket-pipelines.yml", ".drone.yml", ".travis.yml"})
+                             "bitbucket-pipelines.yml", ".drone.yml", ".travis.yml",
+                             ".woodpecker.yml", "appveyor.yml", ".appveyor.yml", ".cirrus.yml",
+                             "cloudbuild.yaml", "cloudbuild.yml", "bitrise.yml",
+                             "codemagic.yaml", "buildspec.yml"})
 
 
 def is_ci_config(rel):
@@ -1063,7 +1067,9 @@ GH_ON_KEY = re.compile(r"""^(?:on|"on"|'on')[ ]*:(?P<val>.*)\Z""")
 GH_MAP_KEY = re.compile(r"""^(?P<key>[A-Za-z_][A-Za-z0-9_-]*|"[^"]*"|'[^']*')[ ]*:(?P<val>.*)\Z""")
 GH_SEQ_ITEM = re.compile(r"^-[ ]+(?P<val>.*)\Z")
 GH_EVENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-CIRCLECI_TAGS = re.compile(r"^[ \t-]*tags[ \t]*:", flags=re.M)
+# Any `tags` word at all: block, flow-mapping, quoted and JSON spellings of a tags filter
+# all count, and a stray `tags` elsewhere only costs one extra ask.
+CIRCLECI_TAGS = re.compile(r"\btags\b", flags=re.I)
 
 
 def _yaml_lines(text):
@@ -1168,12 +1174,12 @@ def _ci_file_tag_triggered(path, text):
     if path.startswith(".github/actions/"):
         return False  # composite and local actions have no triggers of their own
     if path.startswith(".github/workflows/"):
-        if not path.endswith((".yml", ".yaml")):
-            return False  # GitHub reads only .yml and .yaml workflow files
+        if not path.lower().endswith((".yml", ".yaml")):
+            return True  # not a file the scan can read: fail closed
         return _gh_workflow_tag_triggered(text)
     if path.startswith(".circleci/"):
         return bool(CIRCLECI_TAGS.search(text))  # CircleCI builds no tag without a tags filter
-    return True  # GitLab (jobs run on tags unless ruled out), Jenkins, Buildkite, Drone, ...
+    return True  # GitLab (jobs run on tags unless ruled out), Jenkins, Buildkite, Gitea, ...
 
 
 def ci_tag_triggers(root, rev="HEAD"):
@@ -1193,10 +1199,14 @@ def ci_tag_triggers(root, rev="HEAD"):
 
 
 def worktree_ok(root, worktree):
-    """True when `worktree` is a git work tree of the same repository as `root` (the same
-    git common dir), so a caller cannot name an unrelated repository's branch."""
+    """True when `worktree` is a git work tree (not a git dir such as `<root>/.git`) of the
+    same repository as `root` (the same git common dir), so a caller cannot name an
+    unrelated repository's branch."""
     def common(d):
         if not os.path.isdir(d):
+            return None
+        w = _git(d, "rev-parse", "--is-inside-work-tree")
+        if w is None or w.returncode != 0 or w.stdout.strip() != b"true":
             return None
         r = _git(d, "rev-parse", "--path-format=absolute", "--git-common-dir")
         if r is None or r.returncode != 0 or not r.stdout.strip():
@@ -1325,7 +1335,7 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
             return ask("default-branch")
         if not fnmatch.fnmatchcase(branch, p["scope"]["branch_pattern"]):
             return ask("branch")
-    if in_git and grant_is_tracked(root, path) is not False:
+    if in_git_work_tree(root) and grant_is_tracked(root, path) is not False:
         return ask("tracked")  # committed, staged, or git cannot say: fail closed
     gate = p["gate_policy"].get(action, "ask")
     rep["gate"] = gate
