@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 import contract_check as CC  # noqa: E402
+import reentry as R  # noqa: E402
 from conductor_testkit import GIT, repo, tmpdir, write_grant, write_plan_envelope  # noqa: E402
 
 PUSH_PR_STUB = r'''
@@ -104,6 +105,8 @@ class EndToEndTests(unittest.TestCase):
         rc, out, err = self.out(["init", "--plan", plan_env, "--root", root])
         self.assertEqual(rc, 0, err)
         self.assertTrue(out.startswith("RUN: "), out)
+        # init takes the session lease once, right after the run exists.
+        self.assertEqual(R.read_lease(C.current_run(root))["holder"], "session")
 
         # Wave one: T2 waits on T1; T1 and T3 are both ready (parallel limit 2).
         rc, out, err = self.out(["next", "--root", root])

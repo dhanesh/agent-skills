@@ -37,11 +37,11 @@
           "type": "object",
           "required": ["reason"],
           "properties": {
-            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks", "integration_red"]},
+            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks", "integration_red", "reentry_exhausted"]},
             "at": {"type": "string"},
             "detail": {"type": "string"},
             "task": {"type": "string"},
-            "previous": {"type": ["string", "null"], "description": "For integration_red: the stop reason the run had before finish found the merged result red (null when it had none)."}
+            "previous": {"type": ["string", "null"], "description": "For integration_red: the stop reason the run had before finish found the merged result red (null when it had none). For reentry_exhausted: the stop reason the run had before watch found its re-entries spent (absent when it had none)."}
           }
         }
       ]

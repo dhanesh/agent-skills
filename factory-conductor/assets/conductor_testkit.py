@@ -130,11 +130,12 @@ def _newest_grant_time(root):
 
 
 def write_grant(root, plan, policy=None, minutes=60, now=None, budget=None,
-                branch_pattern="factory/*"):
+                branch_pattern="factory/*", reentry=None):
     """A human-accepted grant pinning docs/spec.md and the plan envelope at `plan`.
 
     `minutes` sets expires_at relative to generatedAtTime; a negative value writes an
-    already-expired grant. generatedAtTime is never earlier than (and, on a tie, one
+    already-expired grant. `reentry`, when given, becomes the payload's reentry block.
+    generatedAtTime is never earlier than (and, on a tie, one
     second after) the newest grant under root, so this grant is the newest head."""
     if now is None:
         now = CC.utc_now()
@@ -148,6 +149,8 @@ def write_grant(root, plan, policy=None, minutes=60, now=None, budget=None,
            "budget": dict(budget or {}), "stop_on": [],
            "expires_at": z(now + timedelta(minutes=minutes)),
            "system_one": {"allowed": False}, "revoked": False}
+    if reentry is not None:
+        pay["reentry"] = reentry
     a = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
          "result": {"outcome": "passed"},
          "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",

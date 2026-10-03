@@ -1003,6 +1003,83 @@ class GrantTests(unittest.TestCase):
         self.assertTrue(buf.getvalue().startswith("REVOKED: "))
 
 
+class ReentryBlockTests(unittest.TestCase):
+    OK = {"agent_cmd": ["claude", "-p", "{prompt}"], "interval_min": 10,
+          "stall_min": 30, "max_reentries": 5}
+
+    def problems(self, **over):
+        b = dict(self.OK)
+        b.update(over)
+        return cc.reentry_problems(b)
+
+    def test_a_valid_block_has_no_problems(self):
+        self.assertEqual(cc.reentry_problems(dict(self.OK)), [])
+        self.assertEqual(cc.reentry_problems({"agent_cmd": ["agent", "{prompt}", "{root}"]}), [])
+
+    def test_agent_cmd_must_be_an_argv_list_with_one_prompt(self):
+        for bad in ("claude -p {prompt}", [], ["claude", "-p"], ["a", "{prompt}", "{prompt}"],
+                    ["a", "{prompt}", 3]):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.problems(agent_cmd=bad))
+
+    def test_a_nul_byte_in_any_element_is_refused(self):
+        # exec cannot carry a NUL: Popen raises ValueError, so a grant never holds one
+        for cmd in (["a\x00b", "{prompt}"], ["agent", "-p\x00", "{prompt}"]):
+            with self.subTest(cmd=cmd):
+                self.assertIn("agent_cmd must not contain a NUL byte", self.problems(agent_cmd=cmd))
+
+    def test_a_shell_is_refused_by_basename(self):
+        for sh in ("sh", "/bin/bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"):
+            with self.subTest(sh=sh):
+                self.assertTrue(self.problems(agent_cmd=[sh, "-c", "{prompt}"]))
+
+    def test_an_executable_extension_does_not_bypass_the_shell_check(self):
+        for sh in ("pwsh.exe", "cmd.exe", "powershell.exe", "bash.exe", "/bin/BASH"):
+            with self.subTest(sh=sh):
+                self.assertTrue(self.problems(agent_cmd=[sh, "-c", "{prompt}"]))
+
+    def test_a_launcher_wrapping_a_shell_is_refused(self):
+        for bad in (["env", "sh", "-c", "{prompt}"],
+                    ["/usr/bin/env", "FOO=1", "bash", "-c", "{prompt}"],
+                    ["busybox", "sh", "-c", "{prompt}"]):
+            with self.subTest(bad=bad):
+                self.assertTrue(self.problems(agent_cmd=bad))
+
+    def test_a_launcher_wrapping_a_real_agent_stays_accepted(self):
+        self.assertEqual(self.problems(agent_cmd=["env", "FOO=1", "claude", "-p", "{prompt}"]), [])
+
+    def test_only_prompt_and_root_tokens(self):
+        self.assertTrue(self.problems(agent_cmd=["a", "{prompt}", "{home}"]))
+
+    def test_numeric_ranges(self):
+        for key, bad in (("interval_min", 4), ("interval_min", 61), ("stall_min", 14),
+                         ("stall_min", 241), ("max_reentries", 0), ("max_reentries", 21),
+                         ("interval_min", "10"), ("max_reentries", True)):
+            with self.subTest(key=key, bad=bad):
+                self.assertTrue(self.problems(**{key: bad}))
+
+    def test_stall_is_at_least_twice_the_interval(self):
+        self.assertTrue(self.problems(interval_min=20, stall_min=30))
+        self.assertEqual(self.problems(interval_min=15, stall_min=30), [])
+
+    def test_the_cross_field_check_is_skipped_when_a_field_is_itself_invalid(self):
+        # interval_min=61 is out of range; stall_min=15 is in range but would fail the
+        # 2x-interval check against the (invalid) interval_min=61 -- that would be a
+        # misleading second complaint about a field that isn't actually wrong.
+        self.assertEqual(self.problems(interval_min=61, stall_min=15),
+                         ["interval_min must be an integer from 5 to 60"])
+
+    def test_unknown_keys_are_refused(self):
+        self.assertTrue(self.problems(shell=True))
+
+    def test_a_non_dict_block_is_rejected_directly(self):
+        self.assertEqual(cc.reentry_problems("nope"), ["must be an object"])
+
+    def test_a_grant_with_a_bad_block_is_invalid(self):
+        st = build_vectors.grant()
+        st["predicate"]["payload"]["reentry"] = {"agent_cmd": "sh -c x"}
+        self.assertTrue(any(v.startswith("payload.reentry") for v in cc.grant_violations(st)))
+
 
 if __name__ == "__main__":
     unittest.main()

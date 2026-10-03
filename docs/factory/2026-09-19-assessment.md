@@ -90,6 +90,24 @@ carries unit tests, eval negatives and an A/B row:
   at 7 days. The merged result is verified before the push: `finish` re-runs every proven
   task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3
   was re-judged after merge: yes 0.53 vs partly 0.45 (see the step 4 bullet above).
+- **Scheduled re-entry landed (branch `feat/scheduled-reentry`, before merge):** the session
+  hosting gap the step 4 bullet named above (Q3's top remaining limit, 0.81) is closed. A
+  grant's optional `payload.reentry` block (`agent_cmd`, `interval_min`, `stall_min`,
+  `max_reentries`) names an agent to relaunch a stalled run; a run lock and a lease
+  (`reentry.py`) say who is driving it now, so a timer tick and a live human session can
+  never interleave; `conductor watch` is the one command a timer runs — it decides done,
+  live, not-stalled, waiting-human, exhausted, disabled or start, and only `start` spawns
+  the grant's `agent_cmd` with the fixed resume prompt; a launchd agent (macOS), a
+  systemd-user timer or a cron entry (`reentry_timer.py`) installs and uninstalls per run,
+  carries the PATH captured at install, removes itself once its run is finished or
+  superseded, and is dry-runnable and POSIX-only;
+  spec-first-planning's unattended grant interview can now ask and carry re-entry consent.
+  Covered by an e2e test (an abandoned session's stalled run reaches `finish` unattended,
+  fired through the rendered timer entry under a minimal environment), eval negatives, and
+  an A/B row plus four guards (lease live, grant_ask, revoked, exhausted). Each guard's
+  fixture passes every other check, so it is mutation-proven: deleting its own check from
+  `reentry.decide` makes it start, and the healthy aged fixture starts. Q3 (AC8) is to be re-judged by Jev
+  after merge, run by the controller, against the actual merge commit.
 
 Nothing else in this document has been re-measured since.
 

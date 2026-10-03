@@ -684,6 +684,70 @@ def _parse_time(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+REENTRY_DEFAULTS = {"interval_min": 10, "stall_min": 30, "max_reentries": 5}
+REENTRY_RANGES = {"interval_min": (5, 60), "stall_min": (15, 240), "max_reentries": (1, 20)}
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "cmd", "powershell", "pwsh"}
+# A launcher that execs its remaining argv (rather than running as the agent itself) is the
+# same bypass class as a shell: it would let a shell hide behind a non-shell cmd[0].
+LAUNCHERS = {"env", "sudo", "doas", "busybox", "nohup", "timeout", "nice", "xargs", "stdbuf"}
+_REENTRY_TOKEN = re.compile(r"\{[^{}]*\}")
+
+
+def _reentry_cmd_token(s):
+    """A command-list element reduced to a comparable program name: basename, extension
+    stripped, lower-cased -- so `cmd.exe`, `CMD`, `/bin/BASH` and `bash` all compare equal."""
+    return os.path.splitext(os.path.basename(s))[0].lower()
+
+
+def reentry_problems(block):
+    """Problems with an autonomy grant's optional payload.reentry block; [] when valid.
+
+    agent_cmd is an argv list, never a shell (a shell would turn the argv back into an
+    evaluated string) and never a launcher (env, sudo, ...) wrapping one, with {prompt}
+    exactly once and {root} optional."""
+    if not isinstance(block, dict):
+        return ["must be an object"]
+    out = []
+    unknown = set(block) - {"agent_cmd"} - set(REENTRY_RANGES)
+    if unknown:
+        out.append("unknown key(s): %s" % ", ".join(sorted(unknown)))
+    cmd = block.get("agent_cmd")
+    if not (isinstance(cmd, list) and cmd and all(isinstance(a, str) and a for a in cmd)):
+        out.append("agent_cmd must be a non-empty list of non-empty strings")
+    else:
+        if any("\x00" in a for a in cmd):
+            out.append("agent_cmd must not contain a NUL byte")
+        head = _reentry_cmd_token(cmd[0])
+        if head in SHELLS:
+            out.append("agent_cmd must not start with a shell (%s)" % cmd[0])
+        elif head in LAUNCHERS:
+            wrapped = next((a for a in cmd[1:] if _reentry_cmd_token(a) in SHELLS), None)
+            if wrapped is not None:
+                out.append("agent_cmd must not launch a shell through a launcher (%s)" % wrapped)
+        if cmd.count("{prompt}") != 1:
+            out.append("agent_cmd must contain the {prompt} token exactly once")
+        bad = [t for a in cmd for t in _REENTRY_TOKEN.findall(a)
+               if not (a == t and t in ("{prompt}", "{root}"))]
+        if bad:
+            out.append("agent_cmd may carry only whole {prompt} and {root} tokens: %s"
+                       % ", ".join(sorted(set(bad))))
+    vals = dict(REENTRY_DEFAULTS)
+    bad_keys = set()
+    for key, (lo, hi) in REENTRY_RANGES.items():
+        if key in block:
+            v = block[key]
+            if not (isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi):
+                out.append("%s must be an integer from %d to %d" % (key, lo, hi))
+                bad_keys.add(key)
+                continue
+            vals[key] = v
+    # Skip the cross-field check when either field is itself invalid: comparing a fabricated
+    # default against a value the user never asked for would misreport a field that is fine.
+    if not ({"interval_min", "stall_min"} & bad_keys) and vals["stall_min"] < 2 * vals["interval_min"]:
+        out.append("stall_min must be at least 2 x interval_min")
+    return out
+
+
 def grant_violations(st):
     """Grant-specific problems (after check_statement passed). [] = valid.
 
@@ -706,6 +770,8 @@ def grant_violations(st):
             break
     if "require_signature" in p:  # A8 dropped signing: fail closed rather than ignore it
         out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
+    if "reentry" in p:
+        out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
     try:
         expires = _parse_time(p.get("expires_at") if TIME_RE.match(str(p.get("expires_at", "")))
                               else "")

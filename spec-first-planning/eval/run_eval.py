@@ -431,7 +431,10 @@ def grant_arm():
                   .strftime("%Y-%m-%dT%H:%M:%SZ"))),
             ("an expiry that is not in the future", dict(base, expires_at=_now_z())),
             ("a require_signature key (A8: no signing)",
-             dict(base, expires_at=_in_one_day(), require_signature="SIGNED"))):
+             dict(base, expires_at=_in_one_day(), require_signature="SIGNED")),
+            ("a reentry.agent_cmd that starts with a shell",
+             dict(base, expires_at=_in_one_day(),
+                  reentry={"agent_cmd": ["bash", "-c", "{prompt}"]}))):
         repo = fresh_repo()
         try:
             r = write_grant(repo, answers=answers)
@@ -441,7 +444,7 @@ def grant_arm():
             shutil.rmtree(repo, ignore_errors=True)
 
     # The answers.json example in references/unattended.md is the one agents copy:
-    # it MUST carry exactly the 7 keys write_grant.py accepts and be accepted by it.
+    # it MUST carry exactly the 8 keys write_grant.py accepts and be accepted by it.
     skill_dir = os.path.dirname(ASSETS)
     ref_path = os.path.join(skill_dir, "references", "unattended.md")
     check("references/unattended.md exists", os.path.isfile(ref_path), "")
@@ -456,15 +459,17 @@ def grant_arm():
     except ValueError:
         pass
     keys = sorted(example) if isinstance(example, dict) else []
-    check("unattended.md's answers.json example has exactly the 7 write_grant keys",
+    check("unattended.md's answers.json example has exactly the 8 write_grant keys",
           keys == sorted(["branch_pattern", "gate_policy", "expires_at", "budget",
-                          "stop_on", "defaults", "system_one"]), "keys=%s" % keys)
+                          "stop_on", "defaults", "system_one", "reentry"]), "keys=%s" % keys)
     if isinstance(example, dict):
         repo = fresh_repo()
         try:
             r = write_grant(repo, answers=dict(example, expires_at=_in_one_day()))
             check("write_grant accepts unattended.md's answers.json example",
                   r.returncode == 0, (r.stdout + r.stderr).strip()[-120:])
+            check("write_grant echoes the example's reentry block as a REENTRY: line",
+                  "REENTRY:" in r.stdout, r.stdout.strip()[-160:])
         finally:
             shutil.rmtree(repo, ignore_errors=True)
     check("unattended.md explains the 7-day cap, the default-branch floor and factory/*",
