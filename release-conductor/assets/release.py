@@ -2,7 +2,7 @@
 """release.py -- release-conductor's state tool foundations (roadmap step 5A, spec
 docs/superpowers/specs/2026-10-03-release-conductor-design.md).
 
-This module carries only the pieces later `init/prep/stage/deploy/verify-prod/rollback`
+This module carries the pieces the `init/prep/stage/deploy/verify-prod/rollback`
 commands are built on:
 
   - the release recipe (.release/recipe.json, spec section 1), loaded and validated
@@ -12,6 +12,16 @@ commands are built on:
   - a repo-wide run lock (`run_lock`, `Locked`), so two release commands never
     interleave writes;
   - the release state file and its append-only log (`Release`).
+
+and the first two commands built on them:
+
+  - `init --root R --answers FILE` writes the validated recipe (never overwriting one);
+  - `prep --root R --approved-by NAME --driver ID [--bump L] [--policy-file F]
+    [--push-cmd JSON] [--pr-cmd JSON]` writes the release intent and the release grant
+    the human accepts (D10), commits the version bump and changelog on release/<version>
+    in the worktree .skill-contract/releases/<version>/wt-prep, then pushes it and opens
+    the release PR, each step gated by check-grant (subject the recipe, worktree the
+    prep worktree) and run only on COVERED.
 
 A release's local, git-ignored state lives at
 <root>/.skill-contract/releases/<version>/ -- state.json (rewritten atomically) and
@@ -34,6 +44,7 @@ import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import shutil  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
@@ -51,8 +62,12 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 
 # A release's fields besides `status` (its own, first, argument) that set_status may
 # write; base_commit is fixed at Release.new() and never passed to set_status.
+# driver: the agent id that drove `prep` (Task 4's `stage` refuses evidence it recorded);
+# bump: the level prep used; grant: {"id", "accepted_by"} of the release grant prep wrote
+# (accepted_by is the human who accepted the GRANT -- not approved_by, which is the
+# production deploy's yes); prep: {"branch", "commit", "pushed", "pr"}, prep's progress.
 RELEASE_FIELDS = ("release_commit", "recipe_sha", "artifact_sha", "rollback_target",
-                  "approved_by", "evidence")
+                  "approved_by", "evidence", "driver", "bump", "grant", "prep")
 
 TAIL = 2000  # a run_cmd output tail, the same size conductor.py's _tail uses
 
@@ -412,6 +427,10 @@ class Release:
         self.rollback_target = data.get("rollback_target")
         self.approved_by = data.get("approved_by")
         self.evidence = data.get("evidence")
+        self.driver = data.get("driver")
+        self.bump = data.get("bump")
+        self.grant = data.get("grant")
+        self.prep = data.get("prep")
 
     @property
     def dir(self):
@@ -456,7 +475,8 @@ class Release:
                 "status": self.status, "release_commit": self.release_commit,
                 "recipe_sha": self.recipe_sha, "artifact_sha": self.artifact_sha,
                 "rollback_target": self.rollback_target, "approved_by": self.approved_by,
-                "evidence": self.evidence}
+                "evidence": self.evidence, "driver": self.driver, "bump": self.bump,
+                "grant": self.grant, "prep": self.prep}
 
     def save(self):
         """Write state.json atomically: a temp file in self.dir, then os.replace,
@@ -530,3 +550,654 @@ class Release:
         self.status = status
         for key, value in fields.items():
             setattr(self, key, value)
+
+
+# ── init and prep (spec section 2, decisions D7/D9/D10) ──────────────────────────
+SKILL_NAME = "release-conductor"
+SKILL_VERSION = "0.1.0"
+INTENT_FILE = "intent.json"
+PREP_WT = "wt-prep"
+CHANGELOG = "CHANGELOG.md"  # R11: at the repo root, a new section on top, created if absent
+# R10: a release in any other status (or one with no readable state) is unfinished.
+FINISHED = frozenset({"verified", "rolled_back", "stage_failed"})
+# The classes a release grant grants (D7, spec section 2); a --policy-file may only decline.
+RELEASE_GRANT_CLASSES = ("local_reversible", "push_branch", "open_pr", "deploy_staging",
+                         "push_tag")
+RELEASE_BRANCH_PATTERN = "release/*"
+GRANT_LIFETIME = _dt.timedelta(days=7)  # CC.MAX_GRANT_LIFETIME: every grant's cap
+SEMVER_PLAIN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+REMOTE_TIMEOUT = 300
+
+# Copied from spec-first-planning/assets/write_grant.py (GRANT_EXCLUDE, exclude_grants):
+# a grant is one person's acceptance and check-grant treats a tracked grant as covering
+# nothing, so prep keeps it out of commits in this clone via .git/info/exclude.
+GRANT_EXCLUDE = ".skill-contract/envelopes/autonomy-grant-v1-*"
+
+# Copied from factory-conductor/assets/conductor.py (DEFAULT_PUSH_CMD/DEFAULT_PR_CMD,
+# PUSH_LONG_OPTIONS, PUSH_SHORT_FLAGS, REMOTE_NAME_RE, PUSH_PROTOCOLS, GIT_SAFE), with
+# {run_branch} renamed {release_branch}: a token that is exactly {release_branch},
+# {base_branch}, {title} or {body_file} is replaced (expand_cmd).
+DEFAULT_PUSH_CMD = ["git", "push", "-u", "origin", "{release_branch}"]
+DEFAULT_PR_CMD = ["gh", "pr", "create", "--title", "{title}", "--base", "{base_branch}",
+                  "--head", "{release_branch}", "--body-file", "{body_file}"]
+PUSH_LONG_OPTIONS = frozenset({"--set-upstream", "--porcelain", "--quiet"})
+PUSH_SHORT_FLAGS = frozenset("uq")
+REMOTE_NAME_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z"
+PUSH_PROTOCOLS = "file:git:http:https:ssh"
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "-c", "core.commitGraph=false")
+
+
+class Refused(Exception):
+    """prep/init refused (exit 2): invalid input, or a precondition does not hold."""
+
+
+def next_version(cur, bump):
+    """The version after `cur` (a plain MAJOR.MINOR.PATCH) at level `bump`. ValueError for
+    a prerelease, build metadata, a leading 'v', anything else that is not plain semver,
+    or an unknown level: a release bump from a prerelease is a human's call."""
+    m = SEMVER_PLAIN.match(cur) if isinstance(cur, str) else None
+    if not m:
+        raise ValueError("%r is not a plain MAJOR.MINOR.PATCH version" % (cur,))
+    major, minor, patch = (int(x) for x in m.groups())
+    if bump == "major":
+        return "%d.0.0" % (major + 1)
+    if bump == "minor":
+        return "%d.%d.0" % (major, minor + 1)
+    if bump == "patch":
+        return "%d.%d.%d" % (major, minor, patch + 1)
+    raise ValueError("bump must be one of %s" % ", ".join(BUMP_LEVELS))
+
+
+def one_line(text):
+    """text with every run of whitespace collapsed to one space (conductor.py one_line)."""
+    return " ".join(str(text if text is not None else "").split())
+
+
+def code(text):
+    """Untrusted text as one inline code span. Copied from factory-conductor's
+    assets/conductor.py `code()`: newlines collapsed, and a backtick fence longer than any
+    backtick run inside, so it cannot open a heading, list or link, and GitHub does not
+    turn @mentions or closing keywords ("Closes #1") in it into actions."""
+    s = one_line(text)
+    runs = [len(m) for m in re.findall(r"`+", s)]
+    fence = "`" * (max(runs) + 1 if runs else 1)
+    pad = " " if s.startswith("`") or s.endswith("`") or not s else ""
+    return "%s%s%s%s%s" % (fence, pad, s, pad, fence)
+
+
+def _git(root, *args, env=None):
+    """git -C root with hooks, fsmonitor and the commit-graph off (GIT_SAFE) and the git
+    redirect variables scrubbed (CC.git_env). The CompletedProcess (text), or None when
+    git cannot be run."""
+    try:
+        return subprocess.run(["git", "-C", root, *GIT_SAFE, *args], capture_output=True,
+                              text=True, errors="replace", timeout=60,
+                              env=env if env is not None else CC.git_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _git_ok(root, *args):
+    """stdout of a git call that must succeed; Refused naming the call otherwise."""
+    r = _git(root, *args)
+    if r is None or r.returncode != 0:
+        raise Refused("git %s failed: %s" % (" ".join(args),
+                                            (r.stderr.strip() if r else "git not runnable")))
+    return r.stdout
+
+
+def changelog_lines(root, since_tag):
+    """One markdown bullet per merge commit on HEAD since `since_tag` (every merge when
+    it is None), newest first, from `git log --merges --format=%s`. Merge subjects are
+    executor-written, so each is rendered through code(): a single line, code-spanned."""
+    rng = ["%s..HEAD" % since_tag] if since_tag else ["HEAD"]
+    out = _git_ok(root, "log", "--merges", "--format=%s", *rng, "--")
+    return ["- %s" % code(s) for s in out.splitlines() if s.strip()]
+
+
+def _last_tag(root, rev):
+    """The newest v<digit>* tag reachable from rev, or None."""
+    r = _git(root, "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", rev)
+    return r.stdout.strip() if r is not None and r.returncode == 0 and r.stdout.strip() else None
+
+
+def _changelog_section(version, lines, since_tag):
+    """The changelog section prep writes for `version`."""
+    date = _now().strftime("%Y-%m-%d")
+    body = lines or ["- No merged pull requests since %s." % (since_tag or "the first commit")]
+    return "## %s (%s)\n\n%s\n" % (version, date, "\n".join(body))
+
+
+def _prepend_changelog(text, section):
+    """`text` (an existing CHANGELOG.md, or "" when absent) with `section` as its first
+    section: after a leading `# ` title line when there is one, else at the very top."""
+    if not text:
+        return "# Changelog\n\n" + section
+    first, sep, rest = text.partition("\n")
+    if first.startswith("# "):
+        return first + "\n\n" + section + "\n" + rest.lstrip("\n")
+    return section + "\n" + text
+
+
+# Copied from factory-conductor/assets/conductor.py (_cmd_arg, expand_cmd,
+# push_cmd_problem, explicit_push): the same JSON-argv validation and push allowlist,
+# with the run branch renamed the release branch.
+def _cmd_arg(text, default, flag):
+    """The argv list a --push-cmd/--pr-cmd JSON names (default when None). ValueError
+    when it is not a non-empty list of strings."""
+    if text is None:
+        return list(default)
+    cmd = json.loads(text)
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(a, str) and a for a in cmd):
+        raise ValueError("%s must be a JSON list of non-empty strings" % flag)
+    return cmd
+
+
+def expand_cmd(argv, values):
+    """argv with each token that is exactly {name} (name in values) replaced."""
+    out = []
+    for a in argv:
+        m = re.match(r"^\{([a-z_]+)\}\Z", a)
+        out.append(str(values[m.group(1)]) if m and m.group(1) in values else a)
+    return out
+
+
+def push_cmd_problem(argv, branch):
+    """None when argv (placeholders already expanded) is a push the grant can cover, else
+    why not. Only `git push [--set-upstream|--porcelain|--quiet|-u|-q ...] <remote>
+    <branch>`, with <remote> a remote name and no refspec syntax (':' or '+'): never a
+    force-push, never another branch (SPEC, commandment 10)."""
+    if argv[:2] != ["git", "push"]:
+        return "the push command must start with exactly: git push"
+    positionals = []
+    for a in argv[2:]:
+        if a.startswith("--"):
+            if a not in PUSH_LONG_OPTIONS:
+                return "option %r is not allowed (allowed: %s, -u, -q)" % (
+                    a, ", ".join(sorted(PUSH_LONG_OPTIONS)))
+        elif a.startswith("-") and len(a) > 1:
+            if not set(a[1:]) <= PUSH_SHORT_FLAGS:
+                return "short option %r is not allowed (only -u and -q)" % a
+        else:
+            positionals.append(a)
+    if len(positionals) != 2:
+        return "the push must name exactly <remote> <release_branch>, got %r" % (positionals,)
+    remote, ref = positionals
+    if not re.match(REMOTE_NAME_RE, remote):
+        return "the remote %r must be a remote name" % remote
+    if ref != branch or ":" in ref or ref.startswith("+"):
+        return "the push may only name the release branch %s, got %r" % (branch, ref)
+    return None
+
+
+def explicit_push(argv, branch, sha):
+    """An allowlisted push argv with its branch positional (the last one) rewritten to the
+    explicit, non-forced refspec <sha>:refs/heads/<branch>, so remote.<name>.push config
+    cannot remap it and only the commit prep made is pushed."""
+    out = list(argv)
+    for i in range(len(out) - 1, 1, -1):
+        if not out[i].startswith("-"):
+            if out[i] != branch:
+                raise ValueError("the last positional is not the release branch: %r" % out[i])
+            out[i] = "%s:refs/heads/%s" % (sha, branch)
+            return out
+    raise ValueError("the push names no release branch")
+
+
+def _safe_config_env(**extra):
+    """CC.git_env() carrying GIT_SAFE as GIT_CONFIG_COUNT/KEY/VALUE, so a remote step
+    whose git argv this tool does not spell (the push) also runs with hooks off
+    (conductor.py safe_config_env)."""
+    env = CC.git_env()
+    pairs = [GIT_SAFE[i + 1].split("=", 1) for i in range(0, len(GIT_SAFE), 2)]
+    env["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for i, (key, value) in enumerate(pairs):
+        env["GIT_CONFIG_KEY_%d" % i] = key
+        env["GIT_CONFIG_VALUE_%d" % i] = value
+    env.update(extra)
+    return env
+
+
+def _run_remote(argv, cwd, env):
+    """Run one remote step (no shell, no stdin, own process group). (ok, result)."""
+    try:
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, errors="replace",
+                             start_new_session=True, env=env)
+    except OSError as e:
+        return False, {"rc": None, "err_tail": "cannot run: %s" % e}
+    try:
+        out, err = p.communicate(timeout=REMOTE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _kill_group(p)
+        p.communicate()
+        return False, {"rc": None, "err_tail": "timed out"}
+    _kill_group(p)
+    return p.returncode == 0, {"rc": p.returncode, "out_tail": out[-TAIL:],
+                               "err_tail": err[-TAIL:]}
+
+
+def exclude_grants(root):
+    """Append GRANT_EXCLUDE to <root>/.git/info/exclude unless already there (copied
+    from spec-first-planning/assets/write_grant.py). True when the line is in place,
+    False when <root>/.git is not a directory."""
+    git_dir = os.path.join(root, ".git")
+    if not os.path.isdir(git_dir):
+        return False
+    path = os.path.join(git_dir, "info", "exclude")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    if GRANT_EXCLUDE in (ln.strip() for ln in text.splitlines()):
+        return True
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(("\n" if text and not text.endswith("\n") else "") + GRANT_EXCLUDE + "\n")
+    return True
+
+
+def _clean_name(name, flag):
+    """name stripped; Refused when blank or carrying a control character."""
+    if not (isinstance(name, str) and name.strip()):
+        raise Refused("%s must name who it is" % flag)
+    if any(ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xA0 for c in name):
+        raise Refused("%s must not contain control characters" % flag)
+    return name.strip()
+
+
+def _load_policy(path):
+    """The release gate policy: every RELEASE_GRANT_CLASSES class "grant", minus what the
+    user declined in `path` (a JSON object {class: "ask"|"grant"} over those classes
+    only). A policy file can only decline, never widen."""
+    policy = {c: "grant" for c in RELEASE_GRANT_CLASSES}
+    if path is None:
+        return policy
+    try:
+        with open(path, encoding="utf-8") as f:
+            given = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Refused("cannot read --policy-file %s: %s" % (path, e))
+    if not isinstance(given, dict):
+        raise Refused("--policy-file must be a JSON object {class: \"ask\"|\"grant\"}")
+    for cls, gate in given.items():
+        if cls not in RELEASE_GRANT_CLASSES:
+            raise Refused("--policy-file names %r; a release grant covers only %s"
+                          % (cls, ", ".join(RELEASE_GRANT_CLASSES)))
+        if gate not in ("ask", "grant"):
+            raise Refused("--policy-file[%r] must be \"ask\" or \"grant\"" % cls)
+        policy[cls] = gate
+    return policy
+
+
+def _default_branch(root):
+    """The default branch prep works from: origin/HEAD's target, else main, else master,
+    whichever first exists as a local branch. Refused when none does."""
+    names = []
+    r = _git(root, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    if r is not None and r.returncode == 0 and r.stdout.startswith("refs/remotes/origin/"):
+        names.append(r.stdout.strip()[len("refs/remotes/origin/"):])
+    for n in names + ["main", "master"]:
+        v = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % n)
+        if v is not None and v.returncode == 0 and v.stdout.strip():
+            return n, v.stdout.strip()
+    raise Refused("no default branch (origin/HEAD, main or master) to release from")
+
+
+def unfinished_releases(root):
+    """[(version, status)] for every release dir under .skill-contract/releases whose
+    status is not finished (R10). A dir with no readable state counts, with status None:
+    an unknown release fails closed."""
+    d = _releases_dir(root)
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        return out
+    for name in names:
+        if not os.path.isdir(os.path.join(d, name)):
+            continue  # .lock, .gitignore
+        try:
+            status = Release.load(root, name).status
+        except (OSError, ValueError, KeyError, TypeError):
+            status = None
+        if status not in FINISHED:
+            out.append((name, status))
+    return out
+
+
+def _version_key(recipe):
+    """(file, dotted key) of the recipe's {"file","key"} version; Refused for the {"cmd"}
+    form, which prep cannot bump, or an unsafe file path."""
+    v = recipe["version"]
+    if "cmd" in v:
+        raise Refused("prep bumps a {\"file\", \"key\"} version only; this recipe reads its "
+                      "version with version.cmd")
+    if not CC.safe_path(v["file"]):
+        raise Refused("version.file %r must be a relative, repo-rooted path" % v["file"])
+    return v["file"], v["key"].split(".")
+
+
+def _read_version(text, keys, where):
+    """(document, current version) from a JSON version file's text."""
+    try:
+        doc = json.loads(text)
+    except ValueError as e:
+        raise Refused("%s is not JSON: %s" % (where, e))
+    node = doc
+    for k in keys:
+        if not isinstance(node, dict) or k not in node:
+            raise Refused("%s has no %s" % (where, ".".join(keys)))
+        node = node[k]
+    if not isinstance(node, str):
+        raise Refused("%s %s is not a string" % (where, ".".join(keys)))
+    return doc, node
+
+
+def _set_version(doc, keys, version):
+    node = doc
+    for k in keys[:-1]:
+        node = node[k]
+    node[keys[-1]] = version
+
+
+def _write_text(path, text):
+    """Write text to a regular file at path; Refused when path is a symlink (a release
+    commit must not write through a link out of the worktree)."""
+    if os.path.islink(path):
+        raise Refused("%s is a symlink; prep writes only regular files" % path)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def build_release_grant(root, version, intent_rel, policy, accepted_by, bump, now):
+    """The release grant (autonomy-grant/v1, D7/D10), built like spec-first-planning's
+    write_grant.build_grant: subjects the recipe and the intent file, release.version,
+    a 7-day expiry, branch_pattern release/*, and one grant-accepted assertion by the
+    human. Refused when the statement fails the checker's C3-C6 or C10 checks."""
+    payload = {
+        "scope": {"repo": ".", "branch_pattern": RELEASE_BRANCH_PATTERN},
+        "release": {"version": version},
+        "decisions": [{"id": "release-version", "question": "Which version does this release "
+                       "ship?", "answer": version, "source": "release prep"},
+                      {"id": "release-bump", "question": "Which bump level?", "answer": bump,
+                       "source": "release prep"}],
+        "defaults": [],
+        "gate_policy": policy,
+        "budget": {},
+        "stop_on": [],
+        "expires_at": _rfc3339(now + GRANT_LIFETIME),
+        "system_one": {"allowed": False},
+        "revoked": False,
+    }
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": accepted_by},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:%s}/assets/release.py" % SKILL_NAME,
+                            "prep"],
+                "subject": [CC.pin(root, RECIPE_PATH), CC.pin(root, intent_rel)]}
+    st = CC.build_statement(CC.GRANT_KIND, SKILL_NAME, SKILL_VERSION, root,
+                            [RECIPE_PATH, intent_rel], payload, [accepted], now=now)
+    viol = ["C%d: %s" % v for v in CC.check_statement(st)] or CC.grant_violations(st)
+    if viol:
+        raise Refused("the release grant fails the checker: %s" % viol[0])
+    return st
+
+
+def _gate(root, action, wt):
+    """check-grant for `action`, judged on the prep worktree and selected by the recipe."""
+    return CC.check_grant(root, action, subject=RECIPE_PATH, worktree=wt)
+
+
+def _gate_stop(rel, action, rep, nxt):
+    """Print and log a gate that did not answer COVERED; exit code 3."""
+    print("GATE: %s %s %s" % (action, rep["status"], rep["reason"]))
+    print("STOP: gate %s answered %s (%s)" % (action, rep["status"], rep["reason"]))
+    if nxt:
+        print("NEXT: %s" % nxt)
+    rel.log("gate", action=action, status=rep["status"], reason=rep["reason"], ok=False)
+    return 3
+
+
+def cmd_init(args):
+    """Write .release/recipe.json from a JSON answers file, validated; never overwrite."""
+    root = os.path.abspath(args.root)
+    path = os.path.join(root, *RECIPE_PATH.split("/"))
+    try:
+        with open(args.answers, encoding="utf-8") as f:
+            recipe = json.load(f)
+    except (OSError, ValueError) as e:
+        print("RELEASE: refused: cannot read --answers %s: %s" % (args.answers, e))
+        return 2
+    problems = _validate_recipe(recipe)
+    if problems:
+        print("RELEASE: refused: invalid recipe")
+        for p in problems:
+            print("  - %s" % p)
+        return 2
+    if os.path.lexists(path):
+        print("RELEASE: refused: %s exists; change it in a reviewed commit, not with init"
+              % RECIPE_PATH)
+        return 2
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "x", encoding="utf-8", newline="\n") as f:
+        json.dump(recipe, f, indent=2, sort_keys=True)
+        f.write("\n")
+    print("RELEASE: recipe written")
+    print("NEXT: commit %s through a reviewed PR, then run prep" % RECIPE_PATH)
+    return 0
+
+
+def _cleanup_prep(root, rel, wt, branch, made_branch):
+    """Undo a prep that failed before its commit: the worktree, the branch prep created,
+    and the release dir, so no orphan blocks the next prep (R10). The grant stays: its
+    intent file is gone, so it is stale and covers nothing."""
+    if os.path.isdir(wt):
+        _git(root, "worktree", "remove", "--force", wt)
+    _git(root, "worktree", "prune")
+    if made_branch:
+        _git(root, "branch", "-D", branch)
+    shutil.rmtree(rel.dir, ignore_errors=True)
+
+
+def _prep_checks(root, args):
+    """Every refusal prep makes before it writes anything. Returns a dict of what the
+    later steps need, or raises Refused."""
+    accepted_by = _clean_name(args.approved_by, "--approved-by")
+    driver = _clean_name(args.driver, "--driver")
+    try:
+        push_cmd = _cmd_arg(args.push_cmd, DEFAULT_PUSH_CMD, "--push-cmd")
+        pr_cmd = _cmd_arg(args.pr_cmd, DEFAULT_PR_CMD, "--pr-cmd")
+    except ValueError as e:  # JSONDecodeError is a ValueError
+        raise Refused("invalid command: %s" % e)
+    policy = _load_policy(args.policy_file)
+    recipe, problems = load_recipe(root)
+    if problems:
+        raise Refused("invalid recipe:\n" + "\n".join("  - %s" % p for p in problems))
+    base_branch, base = _default_branch(root)
+    dirty = _git(root, "status", "--porcelain", "--untracked-files=all", "--", RECIPE_PATH)
+    try:
+        committed = recipe_sha(root, rev=base) == recipe_sha(root)
+    except (OSError, ValueError):
+        committed = False
+    if dirty is None or dirty.returncode != 0 or dirty.stdout.strip() or not committed:
+        raise Refused("recipe-uncommitted: %s must be committed on %s unchanged; the "
+                      "grant pins a digest some commit has" % (RECIPE_PATH, base_branch))
+    busy = unfinished_releases(root)
+    if busy:
+        raise Refused("another release is unfinished: %s; finish or roll it back first"
+                      % ", ".join("%s (%s)" % (v, s or "no state") for v, s in busy))
+    vfile, keys = _version_key(recipe)
+    _, cur = _read_version(_git_ok(root, "show", "%s:%s" % (base, vfile)), keys, vfile)
+    bump = args.bump or recipe["bump"]
+    try:
+        version = next_version(cur, bump)
+    except ValueError as e:
+        raise Refused("%s: %s" % (vfile, e))
+    branch = "release/%s" % version
+    why = push_cmd_problem(expand_cmd(push_cmd, {"release_branch": branch}), branch)
+    if why:
+        raise Refused("--push-cmd is not a push a grant covers: %s" % why)
+    exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % branch)
+    if exists is not None and exists.returncode == 0:
+        raise Refused("branch %s already exists" % branch)
+    return {"accepted_by": accepted_by, "driver": driver, "push_cmd": push_cmd,
+            "pr_cmd": pr_cmd, "policy": policy, "base_branch": base_branch, "base": base,
+            "vfile": vfile, "keys": keys, "bump": bump, "version": version,
+            "branch": branch}
+
+
+def cmd_prep(args):
+    """Prepare a release (spec section 2, step 1). Exit 0 prepped and PR opened; 2
+    refused before anything was written (or local work undone); 3 stopped: a gate did
+    not answer COVERED, a remote step failed, or the lock is held."""
+    root = os.path.abspath(args.root)
+    try:
+        with run_lock(root):
+            return _prep_locked(root, args)
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _prep_locked(root, args):
+    try:
+        c = _prep_checks(root, args)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    version, branch = c["version"], c["branch"]
+    rel = Release.new(root, version, c["base"])
+    intent_rel = "%s/%s/%s" % (RELEASES_DIR, version, INTENT_FILE)
+    wt = os.path.join(rel.dir, PREP_WT)
+    made_branch = False
+    try:
+        with open(os.path.join(rel.dir, INTENT_FILE), "x", encoding="utf-8",
+                  newline="\n") as f:
+            json.dump({"version": version, "base_commit": c["base"], "bump": c["bump"]}, f,
+                      indent=2, sort_keys=True)
+            f.write("\n")
+        now = CC.utc_now()
+        st = build_release_grant(root, version, intent_rel, c["policy"], c["accepted_by"],
+                                 c["bump"], now)
+        grant_path = CC.write_envelope(root, st)
+        exclude_grants(root)
+        rel.log("grant", id=st["predicate"]["id"], accepted_by=c["accepted_by"],
+                path=os.path.relpath(grant_path, root))
+        _git_ok(root, "worktree", "add", "-q", "-b", branch, wt, c["base"])
+        made_branch = True
+        rep = _gate(root, "local_reversible", wt)
+        if rep["status"] != "COVERED":
+            rc = _gate_stop(rel, "local_reversible", rep, None)
+            _cleanup_prep(root, rel, wt, branch, made_branch)
+            return rc
+        vpath = os.path.join(wt, *c["vfile"].split("/"))
+        with open(vpath, encoding="utf-8") as f:
+            doc, _ = _read_version(f.read(), c["keys"], c["vfile"])
+        _set_version(doc, c["keys"], version)
+        _write_text(vpath, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        tag = _last_tag(wt, "HEAD")
+        section = _changelog_section(version, changelog_lines(wt, tag), tag)
+        cpath = os.path.join(wt, CHANGELOG)
+        try:
+            with open(cpath, encoding="utf-8") as f:
+                old = f.read()
+        except FileNotFoundError:
+            old = ""
+        _write_text(cpath, _prepend_changelog(old, section))
+        # R3: stage exactly the version file and the changelog, by path, never -A or `.`.
+        _git_ok(wt, "add", "--", c["vfile"], CHANGELOG)
+        _git_ok(wt, "commit", "-q", "--no-verify", "-m", "release: %s" % version)
+        commit = _git_ok(wt, "rev-parse", "HEAD").strip()
+    except (Refused, OSError, ValueError) as e:
+        print("RELEASE: refused: %s" % e)
+        rel.log("prep_failed", reason=str(e))
+        _cleanup_prep(root, rel, wt, branch, made_branch)
+        return 2
+    rel.status = "prepped"
+    rel.recipe_sha = recipe_sha(root)
+    rel.driver, rel.bump = c["driver"], c["bump"]
+    rel.grant = {"id": st["predicate"]["id"], "accepted_by": c["accepted_by"]}
+    rel.prep = {"branch": branch, "base_branch": c["base_branch"], "commit": commit,
+                "pushed": False, "pr": False}
+    rel.save()
+    rel.log("prepped", commit=commit, branch=branch)
+    by_hand = ("push %s (commit %s) and open its PR against %s by hand, or re-grant and "
+               "prep again" % (branch, commit[:12], c["base_branch"]))
+
+    rep = _gate(root, "push_branch", wt)
+    if rep["status"] != "COVERED":
+        return _gate_stop(rel, "push_branch", rep, by_hand)
+    argv = explicit_push(expand_cmd(c["push_cmd"], {"release_branch": branch}), branch, commit)
+    ok, res = _run_remote(argv, wt, _safe_config_env(GIT_ALLOW_PROTOCOL=PUSH_PROTOCOLS))
+    rel.log("push", command=argv, returncode=res["rc"], ok=ok)
+    if not ok:
+        print("STOP: push failed (exit %s): %s" % (res["rc"], one_line(res["err_tail"])))
+        print("NEXT: %s" % by_hand)
+        return 3
+    rel.prep["pushed"] = True
+    rel.save()
+
+    rep = _gate(root, "open_pr", wt)
+    if rep["status"] != "COVERED":
+        return _gate_stop(rel, "open_pr", rep, "open the PR for %s against %s by hand"
+                          % (branch, c["base_branch"]))
+    title = "Release %s" % version
+    body = ("%s\n\nPrepared by release-conductor from %s. A human merges this PR; then run "
+            "`release stage`.\n" % (section.rstrip("\n"), code(c["base"][:12])))
+    fd, body_path = tempfile.mkstemp(dir=rel.dir, prefix=".pr-body.", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        argv = expand_cmd(c["pr_cmd"], {"release_branch": branch, "base_branch":
+                                        c["base_branch"], "title": title,
+                                        "body_file": body_path})
+        ok, res = _run_remote(argv, wt, _safe_config_env())
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(body_path)
+    rel.log("pr", command=argv, returncode=res["rc"], ok=ok)
+    if not ok:
+        print("STOP: PR command failed (exit %s): %s" % (res["rc"], one_line(res["err_tail"])))
+        print("NEXT: open the PR for %s against %s by hand" % (branch, c["base_branch"]))
+        return 3
+    rel.prep["pr"] = True
+    rel.save()
+    print("RELEASE: %s prepped" % version)
+    print("NEXT: merge the release PR, then run stage")
+    return 0
+
+
+def build_parser():
+    import argparse
+    ap = argparse.ArgumentParser(prog="release.py", description="release-conductor")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("init", help="write .release/recipe.json from an answers file")
+    p.add_argument("--root", required=True)
+    p.add_argument("--answers", required=True)
+    p = sub.add_parser("prep", help="write the release grant, branch, and open the PR")
+    p.add_argument("--root", required=True)
+    p.add_argument("--approved-by", required=True, dest="approved_by",
+                   help="the human, present now, who accepts the release grant")
+    p.add_argument("--driver", required=True, help="the driving agent's id")
+    p.add_argument("--bump", choices=BUMP_LEVELS, help="override the recipe's bump level")
+    p.add_argument("--policy-file", dest="policy_file",
+                   help="JSON {class: \"ask\"} declining release grant classes")
+    p.add_argument("--push-cmd", dest="push_cmd", help="JSON argv (default: git push -u "
+                   "origin {release_branch})")
+    p.add_argument("--pr-cmd", dest="pr_cmd", help="JSON argv (default: gh pr create ...)")
+    return ap
+
+
+def main(argv=None):
+    """Exit 0 ok, 2 refused or invalid, 3 must stop / needs the human."""
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 2
+    return {"init": cmd_init, "prep": cmd_prep}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
