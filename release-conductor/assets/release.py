@@ -213,7 +213,7 @@ def _neutralize_tokens(s, tokens):
     return s
 
 
-def _argv_problems(argv, tokens=RECIPE_TOKENS):
+def _argv_problems(argv, tokens=RECIPE_TOKENS):  # scan-leaks:ignore (recipe {tokens}, no secret)
     """CC.argv_problems(argv, tokens) (Task 1's shared shell/launcher/token refusals;
     never duplicated here), after neutralizing any occurrence -- whole-element or
     embedded -- of an allowed token. A recipe command may embed {version}, {commit}

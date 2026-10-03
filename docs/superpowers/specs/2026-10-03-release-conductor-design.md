@@ -47,7 +47,7 @@
   - `deploy_prod`;
   - `rollback`, which takes `{version}` or `{commit}` of the release to roll back to;
   - `health`;
-  - `version_probe`: a command, or a URL, that reports the version or commit deployed in an environment. It is called with `{env}` set to `staging` or `prod`.
+  - `version_probe`: a command, or a URL, that reports the version or commit deployed in an environment. It is called with `{env}` set to `staging` or `production`.
 - **`version`**: `{"file": …, "key": …}` or `{"cmd": [...]}`, plus `"bump": "patch" | "minor" | "major"`, the default level.
 - **`artifact`**: `"rebuild"`, or `{"path": …}` when production can deploy the staged build itself. In the second case its sha256 is recorded at stage and checked at deploy.
 - **`deploy_timeout`**: how long a deploy may take to go live, in seconds; the default is 600. Deploys are often asynchronous, and with CI deploying on tag the push only starts one.
@@ -100,10 +100,12 @@
 - `deploy`, held for the production yes, when it does (D6). In that case the tag is pushed inside `release deploy` and nowhere else.
 
 **The grant (D7, amended).**
-- **Who writes it.** `release prep` writes the release grant with the human's yes. In an unattended run, the planning interview writes it from the user's answers.
+- **Who writes it.** Only `release prep` writes the release grant, with the human's yes (D10). The planning interview records only release defaults, which prep applies.
 - **What it covers.**
   - **Subjects:** the recipe's sha and the target version string.
   - **Classes:** `local_reversible`, `push_branch` and `open_pr` for `release/<version>`, plus `deploy_staging` and `push_tag` for that version.
+  - **Branches:** `branch_pattern` is the list `["release/<version>", "release/<version>-stage"]`, exact names rather than a `release/*` glob, so the grant covers no other release's branches.
+  - **Selection:** every gate in prep, stage, deploy and rollback names the release grant by its path, with the recipe as subject and the prep or stage worktree; `revoke-grant` with no id still stops everything.
   - **Lifetime:** at most 7 days, like every grant.
 - **How `stage` checks it.** `stage` refuses when the merged commit's version is not the pinned version, or when the recipe's sha has changed.
 

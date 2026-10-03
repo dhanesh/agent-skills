@@ -20,7 +20,7 @@ import test_release_deploy as TD  # noqa: E402
 SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schemas",
                       "release-result.v1.json")
 # Neither hex nor semver, so no probe parser can mistake it for a version or a commit.
-TOKEN = "SECRET-TOKEN-zq9x"
+TOKEN = "SECRET-TOKEN-zq9x"  # scan-leaks:ignore (a planted fake, never a credential)
 # Prints the token on stdout and stderr, then appends "<args...>" to argv[1].
 LOUD = ("import sys; print(%r); sys.stderr.write(%r); "
         "open(sys.argv[1], 'a').write(' '.join(sys.argv[2:]) + chr(10))" % (TOKEN, TOKEN))

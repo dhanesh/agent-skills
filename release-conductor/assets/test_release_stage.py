@@ -653,7 +653,7 @@ class StagingTests(StageBase):
 
 
 class ProbeMatchTests(unittest.TestCase):
-    C = "0123456789abcdef0123456789abcdef01234567"
+    C = "0123456789abcdef0123456789abcdef01234567"  # scan-leaks:ignore (a fake commit sha)
 
     def test_the_version_or_the_commit_counts(self):
         for out in ("1.2.0\n", "v1.2.0", '{"version": "1.2.0"}', "version=1.2.0.",

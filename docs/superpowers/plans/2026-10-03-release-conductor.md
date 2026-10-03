@@ -96,7 +96,7 @@ class ReleaseCheckerTests(unittest.TestCase):
         ...
 
     def test_worktree_judges_the_worktree_branch(self):
-        # root on main, worktree on release/1.2.0-stage (branch_pattern "release/*"):
+        # root on main, worktree on release/1.2.0-stage (branch_pattern ["release/1.2.0", "release/1.2.0-stage"]):
         # check_grant(root, "deploy_staging", worktree=wt) -> COVERED;
         # without worktree -> ASK default-branch.
         ...
@@ -405,7 +405,7 @@ if __name__ == "__main__":
   - **`prep --root R --approved-by NAME --driver ID [--bump patch|minor|major] [--policy-file F]`** (`--driver` is the driving agent's id, stored in state so `stage` can refuse evidence recorded by the driver itself) does the following:
     - computes the next version;
     - writes `intent.json` as `{version, base_commit, bump}`;
-    - writes the **release grant**, with subjects `[".release/recipe.json", intent rel]`, `release.version`, a 7-day expiry, and `branch_pattern: "release/*"`. Its gate policy grants `local_reversible`, `push_branch`, `open_pr`, `deploy_staging` and `push_tag`, minus whatever the user declined in the policy file. It is human-accepted by `--approved-by`;
+    - writes the **release grant**, with subjects `[".release/recipe.json", intent rel]`, `release.version`, a 7-day expiry, and `branch_pattern: ["release/<version>", "release/<version>-stage"]` (exact names, not a glob: `release/1.2.1*` would cover 1.2.10 too). Its gate policy grants `local_reversible`, `push_branch`, `open_pr`, `deploy_staging` and `push_tag`, minus whatever the user declined in the policy file. It is human-accepted by `--approved-by`;
     - creates `release/<version>` from the base commit, bumps the version, and writes the changelog section;
     - commits, gates `push_branch` and pushes, then gates `open_pr` and opens the release PR;
     - prints `RELEASE: <version> prepped` and `NEXT: merge the release PR, then run stage`.
