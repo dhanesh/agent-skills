@@ -123,7 +123,12 @@ carries unit tests, eval negatives and an A/B row:
   interview records release defaults and refuses an allowlist that exposes production.
   Covered by an e2e test, eval negatives and A/B rows. The delta row is a release reaching
   verified production with only the human's production yes. Eight release guards and two
-  checker rows back it, each mutation-proven. Step 5A is to be re-judged by Jev after
+  checker rows back it. Each is mutation-proven: deleting its own refusal flips it. The two
+  layered guards are proven as layer pairs. The CI-tag push needs stage's hold and the
+  checker's ASK ci-tag both deleted. The re-run after `outcome_unknown` flips only when crash
+  recovery hands a crashed deploy back as retryable, since deploy's status floor also
+  refuses it. The fixture also asserts the demotion, so broken crash recovery fails the run.
+  Step 5A is to be re-judged by Jev after
   merge, run by the controller, against the actual merge commit. No score is claimed here.
 
 Nothing else in this document has been re-measured since.

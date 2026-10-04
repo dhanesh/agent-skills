@@ -6995,6 +6995,8 @@ elif case == "rerun":
     E.need(len(p.lines("production")) == 1, "the first deploy did not run once")
     rel = p.rel(); rel.status = "deploying"; rel.save()  # its process died mid-deploy
     p.cmd("deploy", "--approved-by", "Dana")
+    E.need(p.rel().status == "outcome_unknown",
+           "the crashed deploy was not demoted to outcome_unknown: %s" % p.rel().status)
     p.cmd("deploy")
     p.cmd("deploy", "--approved-by", "Dana")
     v = int(len(p.lines("production")) > 1)
@@ -7026,7 +7028,13 @@ def _rc_case(tree, case, arg=None):
 
 
 # (dimension, note, case, arg). Mutation-proven in Task 9's report: with the named refusal
-# deleted from release.py (or the vendored checker), the row reads 1.
+# deleted from release.py, the row reads 1 -- except two layered guards, proven as layer
+# pairs. CI-tag reads 1 only with stage's tag hold AND the vendored checker's ASK ci-tag
+# both deleted. Re-run is layered on recover_crash's demotion and deploy's
+# staged/awaiting_deploy floor: the fixture asserts the demotion (a recover_crash that is
+# neutralised, or returns a crash to a retryable state, is a probe error that fails the
+# run), and without that assertion the row stays 0 when recover_crash is merely neutralised
+# (the floor refuses) and reads 1 when it returns a crash to a retryable state.
 _RC_GUARDS = (
     ("production deploys without staging evidence",
      "a staged release whose evidence was cleared after the human saw the summary: "
@@ -7039,11 +7047,16 @@ _RC_GUARDS = (
      "never runs, even with a name", "unattended", None),
     ("CI-tag pushes (the deploy) without the production yes",
      "CI runs on v* tags, so the tag push is the deploy: stage holds the tag and an "
-     "unattended deploy pushes nothing (layered: stage's hold and the checker's ASK ci-tag)",
+     "unattended deploy pushes nothing. Layered: proven as the pair of stage's hold and the "
+     "checker's ASK ci-tag; the deploy-time half (no push without the yes) rests on the "
+     "unattended row",
      "ci-tag", None),
     ("production deploys re-run after outcome_unknown",
      "a deploy whose process died mid-flight (status deploying): the next deploy demotes it "
-     "to outcome_unknown and no later deploy, with or without the yes, re-runs it",
+     "to outcome_unknown and no later deploy, with or without the yes, re-runs it. "
+     "Layered: recover_crash's demotion and deploy's staged/awaiting_deploy floor; flips "
+     "when recover_crash returns a crash to a retryable state (the fixture also asserts the "
+     "demotion, so a broken one is a probe error, never a silent 0)",
      "rerun", None),
     ("production deploys while a live grant's allowlist reaches deploy_prod",
      "a factory grant whose headless --allowedTools is Bash: deploy refuses "
@@ -7063,8 +7076,7 @@ def check_release_conductor(old, new):
     a = _rc_case(old, "delta")
     old_guards = [_rc_case(old, case, arg) for _, _, case, arg in _RC_GUARDS]
     b = _rc_case(new, "delta")
-    if b is None and not os.path.isfile(os.path.join(new, "release-conductor", "assets",
-                                                     "release.py")):
+    if not os.path.isfile(os.path.join(new, "release-conductor", "assets", "release.py")):
         PROBE_ERRORS.append((new, "release-conductor/assets/release.py",
                              "the tree under review has no release-conductor to measure"))
     row(s, "releases reaching verified production with only the human's production yes",
