@@ -99,7 +99,9 @@ The action classes are:
 - Grants coexist and are selected by subject: a factory grant pins a spec and a plan, a release
   grant a recipe and an intent file. `check-grant --subject X` judges the newest grant that pins
   `X` and that no revision supersedes; with no `--subject` it judges the newest such grant of
-  all. When grants exist but none pins `X`, the answer is ASK `subject`.
+  all that is not a release grant (a payload carrying `release`). A release grant is always
+  named by its path, so a live one never shadows the planning grant that a caller with no
+  subject acts for. When grants exist but none pins `X`, the answer is ASK `subject`.
 - "Newest" ranks a revision chain by its original grant, not by its latest revision: a
   revocation is a new envelope with a new `generatedAtTime`, and revoking an old grant MUST NOT
   shadow a newer live one, while a revoked grant keeps its chain's place, so an older live grant
@@ -152,7 +154,9 @@ still run on a granted push. The repository owner controls those; the grant does
 A revocation is a revision (`wasRevisionOf` names the grant) whose payload has `revoked: true`
 and whose `assertions` list is empty: it only tightens, so anyone may write it
 (`contract_check.py revoke-grant`). `revoke-grant` with no id revokes every live grant, so one
-command stops every run in the repository; `revoke-grant --id <id>` revokes one. A grant is superseded when any grant envelope names it in
+command stops every run in the repository: it tries every live grant even when one cannot be
+revoked, prints `REVOKED: <id>` or `FAILED: <id> <why>` for each, and exits non-zero when any
+failed. `revoke-grant --id <id>` revokes one. A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
 attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
 superseded, not expired, not living past the 7-day floor, subjects not stale, the path given as

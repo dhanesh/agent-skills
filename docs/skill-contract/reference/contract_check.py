@@ -964,8 +964,12 @@ def _newest(heads):
 
 
 def latest_grant(root):
-    """The path of the newest live head of all (see _live_heads for the ranking)."""
-    return _newest(_live_heads(root))
+    """The path of the newest live head of all (see _live_heads for the ranking), leaving
+    out release grants (a payload carrying `release`). A release grant is always named by
+    its path, so a selection with no subject (planning work, a factory run) never lands on
+    one: a live release grant must not shadow the planning grant such a caller acts for."""
+    return _newest([h for h in _live_heads(root)
+                    if "release" not in (h[2]["predicate"].get("payload") or {})])
 
 
 def grant_for_subject(root, subject):
@@ -980,14 +984,32 @@ def grant_for_subject(root, subject):
                     if key in {_subject_key(s.get("name", "")) for s in h[2].get("subject") or []}])
 
 
+class RevokeAllFailed(Exception):
+    """revoke_all() could not revoke every live grant: `revoked` lists the ids it did
+    revoke, `failed` the (id, error) pairs it could not."""
+
+    def __init__(self, revoked, failed):
+        super().__init__("could not revoke %s" % ", ".join(i for i, _ in failed))
+        self.revoked, self.failed = revoked, failed
+
+
 def revoke_all(root, now=None):
     """Revoke every live grant under root (the kill switch); returns the revoked ids.
-    Live means not superseded and not already a revocation. [] when nothing is live."""
+    Live means not superseded and not already a revocation. [] when nothing is live.
+    One grant that cannot be revoked does not stop the rest: every live grant is tried,
+    then RevokeAllFailed (carrying both lists) is raised if any failed."""
     ids = sorted(st["predicate"]["id"] for _, _, st in _live_heads(root)
                  if not (st["predicate"].get("payload") or {}).get("revoked"))
+    revoked, failed = [], []
     for gid in ids:
-        revoke_grant(root, gid, now=now)
-    return ids
+        try:
+            revoke_grant(root, gid, now=now)
+            revoked.append(gid)
+        except (OSError, ValueError) as exc:
+            failed.append((gid, str(exc)))
+    if failed:
+        raise RevokeAllFailed(revoked, failed)
+    return revoked
 
 
 GIT_REDIRECT_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
@@ -1575,6 +1597,12 @@ def main(argv=None):
             for i in ids:
                 print("REVOKED: %s" % i)
             return 0
+        except RevokeAllFailed as exc:
+            for i in exc.revoked:
+                print("REVOKED: %s" % i)
+            for i, why in exc.failed:
+                print("FAILED: %s %s" % (i, why))
+            return 1
         except (ValueError, OSError) as exc:
             print("ERROR: %s" % exc, file=sys.stderr)
             return 1

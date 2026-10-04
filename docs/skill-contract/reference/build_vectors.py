@@ -379,11 +379,15 @@ def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00
 
 
 def grant_vector(st, action, status, reason=None, files=None, branch="factory/x", others=(),
-                 default_branch="main"):
+                 default_branch="main", select=None):
     inp = {"type": "grant", "grant": st, "action": action, "now": NOW, "branch": branch,
            "default_branch": default_branch,
            "files": files if files is not None else {"docs/spec.md": SPEC, "plan.json": PLAN_TEXT},
            "others": list(others)}
+    if select is not None:
+        # "newest": the checker selects the grant itself (no path, no subject), so the
+        # vector judges which of `grant` and `others` it picks
+        inp["select"] = select
     exp = {"status": status}
     if reason is not None:
         exp["reason"] = reason
@@ -441,6 +445,16 @@ def grant_cases():
         # ask (as here), the checker fails closed.
         ("c10", "valid", "push-tag-unprovable-asks",
          grant_vector(grant(policy={"push_tag": "grant"}), "push_tag", "ASK", "ci-tag")),
+        # A selection with no path and no subject skips release grants (they are always
+        # named by path): a newer live release grant must not shadow the planning grant.
+        ("c10", "valid", "no-subject-skips-release-grant",
+         grant_vector(g, "local_reversible", "COVERED", select="newest",
+                      others=[mutate(lambda s: (
+                          s["predicate"].__setitem__("id", "autonomy-grant-v1-20260919T120100Z-c3d4e5"),
+                          s["predicate"].__setitem__("generatedAtTime", "2026-09-19T12:01:00Z"),
+                          s["predicate"]["payload"].__setitem__("release", {"version": "1.2.1"}),
+                          s["predicate"]["payload"]["scope"].__setitem__(
+                              "branch_pattern", RELEASE_BRANCHES)), g)])),
         ("c10", "valid", "release-grant-covered",
          grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
              "release", {"version": "1.2.0-rc.1"}), g), "local_reversible", "COVERED")),

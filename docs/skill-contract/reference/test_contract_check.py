@@ -119,6 +119,8 @@ def run_grant_vector(inp, tmp):
     for st in [inp["grant"]] + inp.get("others", []):
         _write(os.path.join(edir, st["predicate"]["id"] + ".json"), json.dumps(st))
     path = os.path.join(edir, inp["grant"]["predicate"]["id"] + ".json")
+    if inp.get("select") == "newest":
+        path = None  # the checker selects the grant itself: no path, no subject
     now = datetime.strptime(inp["now"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     rep = cc.check_grant(root, inp["action"], path=path, now=now, branch=inp["branch"],
                          default_branches={inp.get("default_branch", "main")})
@@ -1235,9 +1237,10 @@ class ReleaseCheckerTests(unittest.TestCase):
                              subject=os.path.join(self.tmp, *RECIPE.split("/")),
                              now=self.now, branch="x")
         self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
-        # no subject: the newest grant, as before
+        # no subject: the newest grant that is not a release grant (R44): a release grant
+        # is always named by its path, so it never answers for planning work
         rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="x")
-        self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", build_vectors.GRANT_ID), rep)
         self.assertEqual(cc.grant_for_subject(self.tmp, "./plan.json"),
                          os.path.join(cc.envelope_dir(self.tmp), build_vectors.GRANT_ID + ".json"))
         # a subject no grant pins: nothing covers it, and the ask names the subject
@@ -1253,6 +1256,53 @@ class ReleaseCheckerTests(unittest.TestCase):
         rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
                              branch="x")
         self.assertEqual(rep["status"], "COVERED", rep)
+
+    def test_no_subject_selection_skips_a_newer_live_release_grant(self):  # R44
+        # a planning grant at T-60s on factory/*, a live release grant at T on release/*:
+        # a caller on factory/x asking with no subject is the planning grant's, COVERED
+        planning = build_vectors.grant(generated="2026-09-19T12:14:00Z")
+        self.put(self.tmp, planning)
+        self.put(self.tmp, self.release_grant())
+        self.assertEqual(cc.latest_grant(self.tmp),
+                         os.path.join(cc.envelope_dir(self.tmp), build_vectors.GRANT_ID + ".json"))
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="factory/x")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", build_vectors.GRANT_ID), rep)
+        # the release grant still answers when named by its path or selected by subject
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="release/1.2.0")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
+        # only release grants live: a no-subject selection finds nothing to cover with
+        cc.revoke_grant(self.tmp, grant_id=build_vectors.GRANT_ID, now=self.now)
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="factory/x")
+        self.assertNotEqual(rep["status"], "COVERED", rep)
+
+    def test_revoke_all_continues_past_a_grant_it_cannot_revoke(self):  # R45b
+        self.put(self.tmp, self.factory_grant(branch_pattern="*"))
+        self.put(self.tmp, self.release_grant(branch_pattern="*"))
+        real = cc.revoke_grant
+
+        def flaky(root, grant_id=None, now=None):
+            if grant_id == build_vectors.GRANT_ID:  # sorts first: the old loop stopped here
+                raise OSError("read-only file system")
+            return real(root, grant_id, now=now)
+        with mock.patch.object(cc, "revoke_grant", side_effect=flaky):
+            with self.assertRaises(cc.RevokeAllFailed) as ctx:
+                cc.revoke_all(self.tmp, now=self.now)
+            self.assertEqual(ctx.exception.revoked, [RELEASE_ID])
+            self.assertEqual([i for i, _ in ctx.exception.failed], [build_vectors.GRANT_ID])
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        # the CLI says which grant failed, still revokes the rest, and exits non-zero
+        other = self.release_grant(branch_pattern="*", version="1.3.0")
+        other["predicate"]["id"] = "autonomy-grant-v1-20260919T121600Z-f6a7b8"
+        other["predicate"]["generatedAtTime"] = "2026-09-19T12:16:00Z"
+        self.put(self.tmp, other)
+        with mock.patch.object(cc, "revoke_grant", side_effect=flaky):
+            rc, out, err = self._cli("revoke-grant", "--root", self.tmp)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("FAILED: %s read-only file system" % build_vectors.GRANT_ID, out)
+        self.assertIn("REVOKED: ", out)
 
     def _cli(self, *args):
         with contextlib.redirect_stdout(io.StringIO()) as out, \
@@ -1301,23 +1351,24 @@ class ReleaseCheckerTests(unittest.TestCase):
 
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
     def test_worktree_judges_the_worktree_branch(self):
-        # root on main, worktree on release/1.2.0-stage (branch_pattern "release/*")
+        # root on main, worktree on release/1.2.0-stage (branch_pattern "release/*"); a
+        # release grant is selected by its subject (R44: a no-subject selection skips it)
         self.init_repo(self.tmp, branch="main")
         wt = os.path.join(tempfile.mkdtemp(prefix="sc-wt-"), "stage")
         self.addCleanup(shutil.rmtree, os.path.dirname(wt), True)
         self.git(self.tmp, "worktree", "add", "-q", "-b", "release/1.2.0-stage", wt)
         self.put(self.tmp, self.release_grant())
-        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=wt, now=self.now)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=wt, now=self.now)
         self.assertEqual(rep["status"], "COVERED", rep)
-        rep = cc.check_grant(self.tmp, "deploy_staging", now=self.now)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"), rep)
         # the worktree's own branch is judged: on a branch outside the pattern it asks
         self.git(wt, "checkout", "-q", "-b", "feature/x")
-        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=wt, now=self.now)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=wt, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch"), rep)
         # the CLI takes --worktree too (exit 3 here: ASK branch)
         rc, out, _ = self._cli("check-grant", "--root", self.tmp, "--action", "deploy_staging",
-                               "--worktree", wt)
+                               "--subject", RECIPE, "--worktree", wt)
         self.assertEqual(rc, 3)
         self.assertIn("GRANT: ASK", out)
 
@@ -1329,17 +1380,17 @@ class ReleaseCheckerTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, other, True)
         self.init_repo(other, branch="release/1.2.0-stage")
         self.put(self.tmp, self.release_grant())
-        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=other, now=self.now)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=other, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
         self.assertFalse(cc.worktree_ok(self.tmp, other))
         self.assertTrue(cc.worktree_ok(self.tmp, self.tmp))
         # the repository's own git dir shares the common dir but is not a work tree
-        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=os.path.join(self.tmp, ".git"),
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=os.path.join(self.tmp, ".git"),
                              now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
         self.assertFalse(cc.worktree_ok(self.tmp, os.path.join(self.tmp, ".git")))
         missing = os.path.join(other, "nope")
-        rep = cc.check_grant(self.tmp, "deploy_staging", worktree=missing, now=self.now)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=missing, now=self.now)
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
 
     def _tag_repo(self, path, text):
@@ -1491,9 +1542,13 @@ class GrantRankingTests(unittest.TestCase):
         cc.revoke_grant(self.tmp, grant_id=g1, now=self.T0 + timedelta(seconds=20))
         rep = self.check()
         self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
-        # with no subject too: the newest chain is G2's
-        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        # over every head too: the newest chain is G2's (a no-subject selection skips
+        # release grants since R44, so the ranking itself is judged here)
+        rep = cc.check_grant(self.tmp, "push_branch", path=cc._newest(cc._live_heads(self.tmp)),
+                             now=self.now, branch="release/1.3.0")
         self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("NONE", "no-grant"), rep)
 
     def test_same_second_revocation_and_new_grant_select_the_new_grant(self):
         t2 = self.T0 + timedelta(seconds=30)
@@ -1516,7 +1571,8 @@ class GrantRankingTests(unittest.TestCase):
         cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
         rep = self.check()
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
-        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        rep = cc.check_grant(self.tmp, "push_branch", path=cc._newest(cc._live_heads(self.tmp)),
+                             now=self.now, branch="release/1.3.0")
         self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
 
     def test_a_revocation_whose_parent_is_gone_keeps_its_place(self):
