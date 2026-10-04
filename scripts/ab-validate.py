@@ -7014,6 +7014,62 @@ elif case == "failed-rollback":
         f.write("ok\n")  # the flaky smoke check would pass now
     p.cmd("verify-prod")
     v = int(p.rel().status == "verified")
+elif case == "stuck":
+    # final review R40: a human declines to ship; abandon ends it and a new prep proceeds.
+    # 1 when the stuck release still blocks the next prep.
+    p = E.Project()
+    p.staged()
+    seen_summary(p)
+    p.cmd("abandon", "--approved-by", "Dana", "--reason", "not shipping this one")
+    rc, out = p.cmd("prep", "--approved-by", "Dana", "--driver", E.DRIVER,
+                    "--pr-cmd", '["true"]')
+    v = int(not (rc == 0 and "RELEASE: 1.3.0 prepped" in out.splitlines()))
+elif case == "stage-yes":
+    # R41: the human's stage yes answers a declined push_tag (gate-ask), never a ci-tag
+    # answer, and never skips the ci-tag floor check-grant judges after the gate.
+    # 1 when a stage yes pushed the tag past either.
+    from unittest import mock
+    def declined():
+        p = E.Project()
+        p.init()
+        pol = os.path.join(p.d, "policy.json")
+        with open(pol, "w") as f:
+            json.dump({"push_tag": "ask"}, f)
+        rc, out = p.cmd("prep", "--approved-by", "Dana", "--driver", E.DRIVER,
+                        "--pr-cmd", '["true"]', "--policy-file", pol)
+        E.need(rc == 0, "prep: " + out)
+        commit = p.merge()
+        ok(p.cmd("stage"), 0, "stage")
+        p.record(commit)
+        rc, out = p.cmd("stage", "--evidence", "--verifier", E.VERIFIER)
+        E.need(rc == 3 and "GATE: push_tag ASK gate-ask" in out, "no gate-ask: " + out)
+        return p, commit
+    a, ca = declined()
+    real = RL._gate
+    def ci_tag(root, action, wt, gid):
+        rep = real(root, action, wt, gid)
+        return dict(rep, status="ASK", reason="ci-tag") if action == "push_tag" else rep
+    with mock.patch.object(RL, "_gate", side_effect=ci_tag):
+        a.cmd("stage", "--approved-by", "Dana")
+    pushed_a = a.tag() is not None
+    b, cb = declined()
+    real_ct = RL.CC.ci_tag_triggers
+    with mock.patch.object(RL.CC, "ci_tag_triggers",
+                           side_effect=lambda r, rev: True if rev == "HEAD" else real_ct(r, rev)):
+        b.cmd("stage", "--approved-by", "Dana")
+    pushed_b = b.tag() is not None
+    # sanity: unmocked, the same yes answers the gate-ask and pushes the tag
+    ok(a.cmd("stage", "--approved-by", "Dana"), 0, "stage yes (gate-ask)")
+    E.need(a.tag() == ca, "the stage yes did not push the declined tag")
+    v = int(pushed_a or pushed_b)
+elif case == "unattended-summary":
+    # R42: a summary shown only to an unattended run binds no yes. 1 when the yes that
+    # follows it deploys.
+    p = E.Project()
+    p.staged()
+    ok(p.cmd("deploy", "--unattended"), 3, "unattended deploy")
+    p.cmd("deploy", "--approved-by", "Dana")
+    v = int(p.lines("production") != [])
 print(json.dumps({"v": v}))
 """
 
@@ -7065,6 +7121,22 @@ _RC_GUARDS = (
     ("production deploys while a live grant's allowlist is malformed",
      "`Read( Bash` (unbalanced): the allowlist cannot be read, so it fails closed as "
      "exposing", "allowlist", "Read( Bash"),
+    ("production deploys while a live grant's allowlist reaches release.py itself",
+     "a factory grant allowing `Bash(python3 */release.py *)`: an agent could run "
+     "`release.py deploy --approved-by` and forge the yes (R43); deploy refuses "
+     "allowlist-exposes-prod", "allowlist", "Read,Bash(python3 */release.py *)"),
+    ("production deploys on a yes to a summary only an unattended run showed",
+     "`deploy --unattended`, then `deploy --approved-by Dana` with no attended display "
+     "between: the yes binds only to a summary a human saw (R42), so it shows the summary "
+     "again and waits", "unattended-summary", None),
+    ("releases left stuck, blocking every later prep",
+     "a staged release the human declines to ship: `abandon --approved-by Dana --reason` "
+     "ends it (R40) and the next prep (1.3.0) proceeds", "stuck", None),
+    ("tag pushes by a stage yes past ci-tag",
+     "push_tag declined (gate-ask): the human's `stage --approved-by` answers only that; a "
+     "gate answering ASK ci-tag (mocked), or the ci-tag floor check-grant judges after the "
+     "gate (mocked), still stops it (R41). Sanity-checked in the same fixture: unmocked, the "
+     "yes pushes the declined tag", "stage-yes", None),
     ("releases verify-prod turns from its own prod_failed into verified",
      "a failed smoke check, then a rollback the human approved that exits 1 "
      "(outcome_unknown), then the flaky check passes: verify-prod judges a deploy once",
@@ -7129,12 +7201,15 @@ git("checkout", "-q", "-b", "release/1.2.0")
 with open(os.path.join(root, ".git", "info", "exclude"), "a") as f:
     f.write("/.skill-contract/\n")
 base = CC.utc_now().replace(microsecond=0) - timedelta(minutes=10)
-def grant(at, policy):
-    payload = {"scope": {"repo": ".", "branch_pattern": "release/*"},
+def grant(at, policy, release=None):
+    payload = {"scope": {"repo": ".", "branch_pattern": "release/*" if release is None
+                         else ["release/%s" % release, "release/%s-stage" % release]},
                "decisions": [{"id": "D1", "question": "q", "answer": "a", "source": "sweep"}],
                "defaults": [], "gate_policy": policy, "budget": {}, "stop_on": [],
                "expires_at": (at + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                "system_one": {"allowed": False}, "revoked": False}
+    if release is not None:
+        payload["release"] = {"version": release}
     accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
                 "result": {"outcome": "passed"},
                 "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
@@ -7149,6 +7224,14 @@ if case.startswith("ci-tag"):
     grant(base, dict(LOCAL, push_tag="grant"))
     rep = CC.check_grant(root, "push_tag")
     v = int(rep["status"] == "COVERED")
+elif case.startswith("shadow"):
+    # R44: a planning grant, then a newer live release grant (scope release/9.9.9 only):
+    # a no-subject check on release/1.2.0 is the planning grant's
+    grant(base, LOCAL)
+    if case == "shadow":
+        grant(base + timedelta(seconds=10), LOCAL, release="9.9.9")
+    rep = CC.check_grant(root, "local_reversible")
+    v = int(rep["status"] != "COVERED")
 elif case.startswith("rank"):
     older = grant(base, LOCAL)
     grant(base + timedelta(seconds=10), LOCAL)  # a newer, live grant
@@ -7171,7 +7254,7 @@ def _rcc_case(tree, case):
 
 def check_release_checker(old, new):
     s = "skill-contract (release)"
-    for case, want in (("ci-tag-control", 1), ("rank-control", 0)):
+    for case, want in (("ci-tag-control", 1), ("rank-control", 0), ("shadow-control", 0)):
         v, out = _rcc_case(new, case)
         if v != want:
             PROBE_ERRORS.append((new, "docs/skill-contract/reference/contract_check.py",
@@ -7193,6 +7276,17 @@ def check_release_checker(old, new):
         "mutation-proven" % (ra.get("status"), ra.get("reason"), rb.get("status"),
                              rb.get("reason")),
         kind="delta", since=SINCE_RELEASE)
+    (a, ra), (b, rb) = _rcc_case(old, "shadow"), _rcc_case(new, "shadow")
+    row(s, "planning work shadowed by a newer live release grant (lower=better)", a, b,
+        b == 0,
+        "a planning grant, then a release grant 10 s newer whose scope is release/9.9.9: a "
+        "check-grant with no subject (crafting-self-prompting-loops, test-safety-net, "
+        "verifier-installer) skips release grants (R44), so the planning grant covers "
+        "(new: %s %s; old: %s %s). Sanity-checked: without the release grant it covers. "
+        "Guard, not a win: the baseline checker has no release grant shape to shadow with; "
+        "mutation-proven" % (rb.get("status"), rb.get("reason"), ra.get("status"),
+                             ra.get("reason")),
+        kind="guard", since=SINCE_RELEASE)
 
 
 def main():
