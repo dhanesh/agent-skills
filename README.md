@@ -57,7 +57,7 @@ in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev).
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Release / deploy row is the exception: it describes release-conductor as built and was not produced by the dated assessment, which re-judges it after this work merges.
 
 | Stage | Skills | Status |
 |---|---|---|

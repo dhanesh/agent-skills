@@ -85,7 +85,7 @@
 
    Before it runs, it records the **rollback target**: what production runs now. That is the production `version_probe`'s answer, or failing that the previous `release-result/v1`, or failing both, "none". A project that was in production before it adopted the skill then still gets a real target.
 
-   - **When the human is present:** it shows the version, commit, staging evidence, recipe sha, the exact deploy and rollback argv, and the rollback target. For a first release it shows "no previous release, nothing to roll back to" instead. It asks for an explicit yes for this release, then runs `deploy_prod` from an isolated checkout through the harness's own permission prompt. The yes is recorded in the release record as **CLAIMED**, because a shell-capable agent can forge in-session approval.
+   - **When the human is present:** it shows the version, commit, staging evidence, recipe sha, the exact deploy and rollback argv, and the rollback target. The rollback target is found by a read-only production probe that runs before the yes, so the human sees it; a `deploy --approved-by` whose target differs from the one shown waits again (R36). For a first release it shows "no previous release, nothing to roll back to" instead. It asks for an explicit yes for this release, then runs `deploy_prod` from an isolated checkout through the harness's own permission prompt. The yes is recorded in the release record as **CLAIMED**, because a shell-capable agent can forge in-session approval.
    - **When unattended:** it stops at `awaiting_deploy` with the command ready.
    - **When CI deploys on tag:** the tag push is the production deploy, under the same refusals and the same yes (D6).
 4. **`release verify-prod`**

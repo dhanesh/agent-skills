@@ -143,12 +143,21 @@ commit); `recipe-changed` (the recipe at the commit is not the one staged);
 bug); `allowlist-exposes-prod`. A release left `deploying` or `rolling_back` becomes
 `outcome_unknown` first (exit 3), and an `outcome_unknown` release is never deployed again.
 
-Without `--approved-by`, or with `--unattended`: prints the summary, sets `awaiting_deploy`
-and stops (`STOP: waiting-human`, `NEXT: run deploy with the human`, exit 3). Nothing runs, not
-even the probe.
+After the refusals, every deploy probes production once for the rollback target (read-only:
+one `version_probe` run in `wt-build`, bounded by 30 s) and re-checks the build checkout (a
+probe that edited it is refused, `build-tree-changed`). The summary always names the target:
+the expanded rollback argv with `(target <version> <commit>, from <source>)`, or "no rollback
+target: no previous release, nothing to roll back to" (R36).
 
-With the yes: probes production once for the rollback target, re-checks the build checkout,
-prints the summary with the target and `approval: <name> (CLAIMED)`, saves `deploying` (with the
+Without `--approved-by`, or with `--unattended`: prints the summary, records the target, sets
+`awaiting_deploy` and stops (`STOP: waiting-human`, `NEXT: run deploy with the human`, exit 3).
+No deploy command runs.
+
+With the yes, the yes must answer the summary the human last saw: when the release is not
+`awaiting_deploy` (no summary shown yet), or the target probed now differs from the recorded
+one, it prints the new summary with a `note:` line, records the new target, and waits again
+(`STOP: waiting-human`, exit 3, nothing run). Otherwise it prints the summary with
+`approval: <name> (CLAIMED)`, saves `deploying` (with the
 yes and the target) before the command runs, then runs `deploy_prod` once in `wt-build` with
 `{env}` = `production`, or, in tag-deploy mode, pushes `<commit>:refs/tags/v<v>`. Ends:
 `deployed` (exit 0, `NEXT: verify-prod`); `prod_failed` on a non-zero exit or a command that
@@ -175,8 +184,9 @@ envelope and revokes the release grant.
 
 Acts on `prod_failed` or `outcome_unknown`. Refused (exit 2) with no recorded target
 (`ROLLBACK: no target`), a target lacking a value the rollback argv needs
-(`target-incomplete`), a covering `deploy` gate, or an exposing allowlist. Without a yes it
-prints the argv and waits (exit 3). With one: saves `rolling_back` before the command, runs
+(`target-incomplete`), a covering `deploy` gate, an exposing allowlist, or a checkout that
+cannot be made; every one of these runs before the wait. Without a yes it prints the argv and
+waits (exit 3). With one: saves `rolling_back` before the command, runs
 `rollback` once in `wt-prod`, then polls the probe for the target. A pass is `rolled_back`
 with the result envelope; a non-zero exit, a timeout or a probe that never reports the target
 is `outcome_unknown` with `NEXT: check production by hand; rollback again only with the
@@ -316,7 +326,7 @@ DEPLOY: 1.2.0 3f2a…
   recipe: sha256 9c1e…
   artifact: rebuild: staging verified the same source, not the same bytes
   deploy: ./deploy.sh production 1.2.0
-  rollback: ./rollback.sh {version} (target probed when the human says yes)
+  rollback: ./rollback.sh 1.1.0 (target 1.1.0 -, from probe)
 STOP: waiting-human
 NEXT: run deploy with the human
 # the agent shows this to Dana and asks; Dana says yes

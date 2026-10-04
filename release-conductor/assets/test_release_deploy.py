@@ -143,9 +143,14 @@ class DeployBase(TS.StageBase):
         self.assertEqual(self.rel().status, "staged")
         return root, commit
 
-    def deploy(self, *extra, yes="Dana Human"):
+    def deploy(self, *extra, yes="Dana Human", seen=True):
+        """deploy with the human's yes. R36: a yes counts only for the summary the human
+        saw, so by default the helper first runs the waiting deploy that shows it (as the
+        SKILL does); seen=False sends the yes straight away."""
         argv = ["deploy", "--root", self.root]
         if yes is not None:
+            if seen and "--unattended" not in extra:
+                TS.run(argv + list(extra))
             argv += ["--approved-by", yes]
         return TS.run(argv + list(extra))
 
@@ -265,7 +270,7 @@ class AttendedDeployTests(DeployBase):
 
     def test_an_approver_name_with_a_control_character_is_refused(self):
         self.staged()
-        rc, out, _ = self.deploy(yes="Dana​Human")
+        rc, out, _ = self.deploy(yes="Dana​Human", seen=False)
         self.assert_refused(rc, out, "--approved-by")
 
 
@@ -286,12 +291,58 @@ class UnattendedTests(DeployBase):
                 rel = self.rel()
                 self.assertEqual(rel.status, "awaiting_deploy")
                 self.assertIsNone(rel.approved_by)
-                self.assertIsNone(rel.rollback_target)  # nothing ran, not even the probe
+                # R36: the read-only probe ran, so the summary names the target
+                self.assertEqual(rel.rollback_target["version"], "1.1.0")
+                self.assertIn("rollback.marker 1.1.0", out)
+                self.assertNotIn("target probed when", out)
         # from awaiting_deploy, the human's yes deploys
         rc, out, err = self.deploy()
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(len(self.lines(self.prod_marker)), 1)
         self.assertEqual(self.rel().status, "deployed")
+
+
+class RollbackTargetSeenTests(DeployBase):  # R36
+    def test_the_waiting_summary_says_when_there_is_nothing_to_roll_back_to(self):
+        self.staged()  # no production probe file and no earlier release
+        rc, out, _ = self.deploy(yes=None)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("no previous release, nothing to roll back to", out)
+        self.assertEqual(self.rel().rollback_target["source"], "none")
+
+    def test_a_yes_to_no_summary_waits_and_runs_nothing(self):
+        self.staged()
+        self.set_prod("1.1.0\n")
+        rc, out, _ = self.deploy(seen=False)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: waiting-human", out.splitlines())
+        self.assertIn("has not seen this summary", out)
+        self.assertEqual(self.lines(self.prod_marker), [])
+        self.assertIsNone(self.rel().approved_by)
+
+    def test_a_target_changed_since_the_summary_waits_again(self):
+        self.staged()
+        self.set_prod("1.1.0\n")
+        self.assertEqual(self.deploy(yes=None)[0], 3)
+        self.set_prod("1.0.9\n")  # production moved after the human saw the summary
+        rc, out, _ = self.deploy(seen=False)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("rollback target changed", out)
+        self.assertIn("rollback.marker 1.0.9", out)
+        self.assertEqual(self.lines(self.prod_marker), [])
+        self.assertEqual(self.rel().rollback_target["version"], "1.0.9")
+        rc, out, err = self.deploy(seen=False)  # the yes to the summary now shown
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.lines(self.prod_marker)), 1)
+
+    def test_an_unchanged_target_deploys(self):
+        self.staged()
+        self.set_prod("1.1.0\n")
+        self.assertEqual(self.deploy(yes=None)[0], 3)
+        rc, out, err = self.deploy(seen=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.lines(self.prod_marker)), 1)
+        self.assertEqual(self.rel().rollback_target["version"], "1.1.0")
 
 
 class RefusalTests(DeployBase):

@@ -53,8 +53,9 @@ written `release <command>` for short. Run it with Python 3.10 or newer. Each co
 one machine line per event (`RELEASE:`, `STAGE:`, `DEPLOY:`, `PROD:`, `ROLLBACK:`, `RESULT:`,
 `GATE:`, `NEXT:`, `STOP:`) and exits **0** for OK, **3** when the release stopped or waits for
 a human, and **2** when the step was refused or its input is invalid (nothing ran, and the
-status is unchanged). `STOP: locked` (exit 3) means another release command holds the repo's
-run lock for 900 s: run the same command again once it finishes. Only one release per
+status is unchanged). `STOP: locked` (exit 3) means another release command held the repo's
+run lock for the whole 900 s this command waited for it: run the same command again once
+that one finishes. Only one release per
 repository is unfinished at a time. Every command, line, state and exit code, the recipe
 schema, the grant and a worked example are in `references/release-protocol.md`.
 
@@ -138,17 +139,21 @@ Each step is one command. Read its output lines, not just the exit code.
 5. **Deploy, only with the human's yes.** Run `release deploy` with no `--approved-by`. It
    checks every refusal (staging evidence for this exact commit, the recipe and build checkout
    unchanged since stage, the `deploy` gate answering ASK, no headless allowlist reaching
-   production), then prints the summary (`DEPLOY: <v> <commit>`, the evidence, the recipe sha,
-   the artifact, the exact deploy and rollback argv) and waits: `STOP: waiting-human`, status
-   `awaiting_deploy`, exit 3. Show the human that summary verbatim, then ask in plain words:
-   "Deploy <v> (commit <short sha>) to production now with `<deploy argv>`? Reply yes to
-   deploy." You MUST NOT pass `--approved-by` unless the human said yes to this deploy in this
+   production), then runs the production `version_probe` once, read-only, to find the
+   rollback target (what production runs now: the probe's answer, else the last release
+   result, else none), records it, and prints the summary: `DEPLOY: <v> <commit>`, the evidence,
+   the recipe sha, the artifact, the exact deploy argv, and the exact rollback argv for that
+   target, or "no previous release, nothing to roll back to". Then it waits:
+   `STOP: waiting-human`, status `awaiting_deploy`, exit 3. Show the human that summary
+   verbatim, then ask in plain words: "Deploy <v> (commit <short sha>) to production now with
+   `<deploy argv>`? If it fails, rollback runs `<rollback argv>` (or: there is nothing to roll
+   back to). Reply yes to deploy." You MUST NOT pass `--approved-by` unless the human said yes to this deploy in this
    session, because the tool records whatever name you pass as the production yes and cannot
    tell a real one from a forged one. On their yes, run
-   `release deploy --approved-by "<their name>"`. It records the rollback target (what
-   production runs now: the production probe's answer, else the last release result, else
-   none, shown as "no previous release, nothing to roll back to"), records the yes as CLAIMED,
-   and runs `deploy_prod` once from the isolated build checkout, or pushes the tag when CI
+   `release deploy --approved-by "<their name>"`. It probes the target again: if it differs
+   from the one in the summary the human saw (or no summary was shown), it prints the new
+   summary and waits again (`STOP: waiting-human`, nothing run), and you ask again. Otherwise
+   it records the yes as CLAIMED and runs `deploy_prod` once from the isolated build checkout, or pushes the tag when CI
    deploys on tags. `DEPLOY: <v> deployed <commit>` with `NEXT: verify-prod` (exit 0) is a
    success. When no human is present, run `release deploy --unattended` instead: it shows the
    same summary and waits at `awaiting_deploy`, and the human finishes it later.
@@ -276,7 +281,9 @@ report it rather than editing state.
 
 - **The yes is CLAIMED.** The tool records the name passed to `--approved-by` as the human's
   yes, marked CLAIMED in the state and the envelope, because a shell-capable agent can forge
-  an in-session approval. The real floors are mechanical: `check-grant` never covers `deploy`
+  an in-session approval. The summary the yes answers names the rollback target, found by a
+  read-only production probe that runs before the yes; a target that moves before the yes
+  voids it. The real floors are mechanical: `check-grant` never covers `deploy`
   (deploy refuses if it ever answers COVERED), production commands may not appear in a headless
   allowlist, and the yes is on the record.
 - **A permission prompt is no gate if prompts are bypassed.** The harness's prompt before the

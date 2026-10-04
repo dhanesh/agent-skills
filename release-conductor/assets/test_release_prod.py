@@ -459,6 +459,25 @@ class RollbackTests(ProdBase):
         CC.revoke_grant(self.root, gid)
         self.assertEqual(self.rollback()[0], 0)
 
+    def test_the_rollback_refusals_come_before_the_wait(self):  # M2
+        self.failed()
+        gid = TD.plant_grant(self.root, "Bash")
+        for extra, yes in ((["--unattended"], "Dana Human"), ([], None)):
+            with self.subTest(extra=extra, yes=yes):
+                rc, out, _ = self.rollback(*extra, yes=yes)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("allowlist-exposes-prod", out)
+                self.assertNotIn("waiting-human", out)
+        CC.revoke_grant(self.root, gid)
+        covered = {"status": "COVERED", "reason": None, "id": "x", "gate": "grant",
+                   "path": None, "violations": []}
+        with mock.patch.object(CC, "check_grant", return_value=covered):
+            rc, out, _ = self.rollback(yes=None)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("deploy-covered", out)
+        self.assertNotIn("waiting-human", out)
+        self.assertEqual(self.lines(self.rollback_marker), [])
+
 
 if __name__ == "__main__":
     unittest.main()

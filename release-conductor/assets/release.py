@@ -40,10 +40,11 @@ and the commands built on them:
     deploy (class `deploy`, never grantable). It refuses unless the release is staged,
     its evidence is for the release commit, the recipe and build checkout (and
     artifact) are unchanged since stage, the deploy gate does NOT answer COVERED, and no
-    live grant's headless allowlist could run deploy_prod or rollback. Unattended, or
-    without the human's yes, it waits at awaiting_deploy with the command ready.
-    Otherwise it records the rollback target and the CLAIMED yes, then runs deploy_prod
-    once in wt-build (or, when CI deploys on tags, pushes v<version>). A crash leaves
+    live grant's headless allowlist could run deploy_prod or rollback. Then it probes the
+    rollback target (read-only) and records it with the summary. Unattended, without the
+    human's yes, or when the target differs from the one in the summary the human last
+    saw (R36), it waits at awaiting_deploy with the command ready. Otherwise it records
+    the CLAIMED yes, then runs deploy_prod once in wt-build (or, when CI deploys on tags, pushes v<version>). A crash leaves
     `deploying`, which the next locked command turns into outcome_unknown -- never into
     a second run.
   - `verify-prod --root R` proves production runs the release (deployed, outcome_unknown,
@@ -2455,19 +2456,31 @@ def _deploy_locked(root, args, name):
         argv = _tag_push_argv(args.remote, commit, v)
     else:
         argv = expand(recipe["deploy_prod"], values)
-    if args.unattended or name is None:
-        _deploy_summary(rel, recipe, argv, None, None)
-        rel.set_status("awaiting_deploy")
-        rel.save()
-        rel.log("awaiting_deploy", unattended=bool(args.unattended))
-        print("STOP: waiting-human")
-        print("NEXT: run deploy with the human")
-        return 3
+    # R36: the human says yes to a summary that names the rollback target, so the target
+    # is probed (read-only: the production version_probe, else the last release result)
+    # before the wait, recorded, and shown with the expanded rollback argv.
     target = rollback_target(root, rel, recipe, build_dir)
     # M1: the probe ran in wt-build; what deploys from there must still be what staged
     changed = _build_changed(rel, build_dir)
     if changed:
         return _deploy_refuse(rel, *changed)
+    seen = rel.rollback_target if rel.status == "awaiting_deploy" else None
+    if args.unattended or name is None or seen != target:
+        _deploy_summary(rel, recipe, argv, target, None)
+        why = "waiting"
+        if not (args.unattended or name is None):
+            # a yes given to another summary (or to none) is no yes for this one
+            why = "target-changed" if seen is not None else "summary-unseen"
+            print("  note: %s; show the human this summary and ask again"
+                  % ("the rollback target changed since the summary the human saw"
+                     if seen is not None else "the human has not seen this summary yet"))
+        rel.set_status("awaiting_deploy", rollback_target=target)
+        rel.save()
+        rel.log("awaiting_deploy", unattended=bool(args.unattended), reason=why,
+                rollback_target=target)
+        print("STOP: waiting-human")
+        print("NEXT: run deploy with the human")
+        return 3
     noop = rel.tag_deploys and _remote_tag(root, wt, args.remote, tag) == commit
     approval = {"name": name, "status": "CLAIMED"}
     _deploy_summary(rel, recipe, argv, target, approval)
@@ -2550,7 +2563,7 @@ def _remote_tag(root, wt, remote, tag):
 def _deploy_summary(rel, recipe, argv, target, approval):
     """What the human says yes to (spec section 2): version, commit, evidence, recipe
     sha, the exact deploy and rollback argv, the rollback target, and the CLAIMED yes.
-    `target` None: not probed yet (nothing runs before the yes)."""
+    `target` None: not probed (kept for callers; deploy always probes first, R36)."""
     import shlex
     ev = rel.evidence or {}
     print("DEPLOY: %s %s" % (rel.version, rel.release_commit))
@@ -2973,14 +2986,6 @@ def _rollback_locked(root, args, name):
         print("RELEASE: refused: %s" % e)
         rel.log("refused", reason=str(e).split(":")[0])
         return 2
-    print("ROLLBACK: %s to %s %s (from %s)" % (v, target.get("version") or "-",
-                                               target.get("commit") or "-", target["source"]))
-    print("  rollback: %s" % shlex.join(argv))
-    if args.unattended or name is None:
-        rel.log("rollback_waiting", unattended=bool(args.unattended))
-        print("STOP: waiting-human")
-        print("NEXT: run rollback with the human")
-        return 3
     wt = os.path.join(rel.dir, STAGE_WT)
     rep = _gate(root, DEPLOY_ACTION, wt, (rel.grant or {}).get("id") or "")
     print("GATE: %s %s %s" % (DEPLOY_ACTION, rep["status"], rep["reason"]))
@@ -3000,6 +3005,14 @@ def _rollback_locked(root, args, name):
     except Refused as e:
         print("RELEASE: refused: %s" % e)
         return 2
+    print("ROLLBACK: %s to %s %s (from %s)" % (v, target.get("version") or "-",
+                                               target.get("commit") or "-", target["source"]))
+    print("  rollback: %s" % shlex.join(argv))
+    if args.unattended or name is None:
+        rel.log("rollback_waiting", unattended=bool(args.unattended))
+        print("STOP: waiting-human")
+        print("NEXT: run rollback with the human")
+        return 3
     approval = {"name": name, "status": "CLAIMED"}
     record = {"approved_by": approval, "argv": argv, "target": dict(target), "rc": None,
               "probe": None}

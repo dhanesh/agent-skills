@@ -205,6 +205,8 @@ class Project:
     def deployed(self):
         """staged, then deployed with the human's yes. Returns the commit."""
         commit = self.staged()
+        rc, out = self.cmd("deploy")  # the summary the human says yes to (R36)
+        need(rc == 3 and "STOP: waiting-human" in out.splitlines(), "deploy wait: " + out)
         rc, out = self.cmd("deploy", "--approved-by", "Dana")
         need(rc == 0 and "DEPLOY: 1.2.0 deployed %s" % commit in out.splitlines(),
              "deploy: " + out)
@@ -256,6 +258,7 @@ class EndToEndTests(unittest.TestCase):
         rc, out = p.cmd("deploy")
         self.assertEqual(rc, 3, out)
         self.assertIn("STOP: waiting-human", out.splitlines())
+        self.assertIn("(target 1.1.0 -, from probe)", out)  # R36: the target before the yes
         self.assertEqual(p.lines("production"), [])
         rc, out = p.cmd("deploy", "--approved-by", "Dana")
         self.assertEqual(rc, 0, out)
