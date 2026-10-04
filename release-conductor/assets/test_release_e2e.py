@@ -48,10 +48,25 @@ def run(argv):
     """(rc, stdout) of release.main(argv), in-process, with the git identity env set and the
     probe interval shortened."""
     out = io.StringIO()
+    # Defence only (fix round 2): a lock or remote wait fails in seconds, visibly, rather
+    # than running into the gate's 120 s kill. The stalls seen while building the eval were
+    # macOS idle sleep (pmset log), not a wait in release.py.
     with mock.patch.dict(os.environ, GIT), mock.patch.object(RL, "PROBE_INTERVAL", 0.05), \
+            mock.patch.object(RL, "LOCK_TIMEOUT", 20), \
+            mock.patch.object(RL, "REMOTE_TIMEOUT", 30), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         rc = RL.main(argv)
     return rc, out.getvalue()
+
+
+def lock_free(root):
+    """True when this process can take the repo's run lock at once: every release command
+    released it, and no fd it opened (in this process or a child) still holds it."""
+    try:
+        with RL.run_lock(root, timeout=0):
+            return True
+    except RL.Locked:
+        return False
 
 
 def need(ok, what):
@@ -125,7 +140,9 @@ class Project:
             f.write(text + "\n")
 
     def cmd(self, *argv):
-        return run([argv[0], "--root", self.root, *argv[1:]])
+        rc, out = run([argv[0], "--root", self.root, *argv[1:]])
+        need(lock_free(self.root), "release %s left the run lock held" % argv[0])
+        return rc, out
 
     def lines(self, key):
         try:
@@ -306,6 +323,33 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(payload["rollback"]["approved_by"],
                          {"name": "Dana", "status": "CLAIMED"})
         self.assertEqual(p.rel().status, "rolled_back")
+
+
+class RunLockReleaseTests(unittest.TestCase):  # fix round 2: the eval-stall diagnosis
+    def test_every_command_releases_the_lock_even_when_it_refuses_stops_or_times_out(self):
+        p = Project()
+        p.recipe["deploy_prod"] = [sys.executable, "-c", "import time; time.sleep(30)"]
+        p.staged()  # each step's Project.cmd asserts the lock is free afterwards
+        for argv in (("deploy",), ("deploy", "--approved-by", "Dana"), ("rollback",),
+                     ("status",)):
+            with mock.patch.object(RL, "CMD_TIMEOUT", 0.5):
+                p.cmd(*argv)  # waits, a timed-out deploy (outcome_unknown), a refusal
+        self.assertEqual(p.rel().status, "outcome_unknown")
+        self.assertTrue(lock_free(p.root))
+
+    def test_a_held_lock_is_seen_and_reported_not_waited_out(self):
+        p = Project()
+        p.init()
+        with RL.run_lock(p.root):
+            self.assertFalse(lock_free(p.root))  # flock conflicts within one process
+            buf = io.StringIO()
+            with mock.patch.object(RL, "LOCK_TIMEOUT", 0.3), contextlib.redirect_stdout(buf):
+                rc = RL.main(["prep", "--root", p.root, "--approved-by", "Dana",
+                              "--driver", DRIVER])
+            out = buf.getvalue()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: locked", out)
+        self.assertTrue(lock_free(p.root))
 
 
 if __name__ == "__main__":
