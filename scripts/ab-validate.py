@@ -248,6 +248,10 @@ SINCE_BCP14_ORPHANS = "444e5f3"  # gates: bcp14_registry.py fails a register row
 SINCE_REENTRY = "c676d92"  # factory-conductor: scheduled re-entry Task 2 -- the run
 # lock and the lease reentry.py adds. Against a baseline with no `watch` the old arm is an
 # honest 0; against one that has it, the old arm runs the same fixtures (I3).
+SINCE_RELEASE = "8616448"  # release-conductor (roadmap step 5A): the campaign's FIRST
+# commit, the checker's deploy_staging/push_tag classes, tag-trigger floor and grants
+# selected by subject (ruling R5: not Task 2's commit, so the checker rows are live claims
+# too). One constant for the campaign: it lands at one merge.
 
 
 def _git_out(*args):
@@ -6933,6 +6937,251 @@ def check_runtime_proof_planning(old, new):
             "with an observable [proof: ...] lints clean", since=SINCE_EVIDENCE_GATE)
 
 
+# ── release-conductor (roadmap step 5A) ─────────────────────────────────────
+# One probe process per case, built on the skill's own shipped end-to-end fixture
+# (assets/test_release_e2e.py's Project): a temp repo at 1.1.0, a local bare origin and a
+# local http.server standing in for staging and production; release.py runs in-process with
+# the probe interval shortened through its module constant. Offline, stdlib, temp dirs only.
+# Every case prints {"v": 1} when the outcome the row counts happened, judged by its side
+# effect (the production marker, the origin's tag, the release's status), never by an exit
+# code; a fixture step that fails raises, so the probe reports an error, not an honest 0.
+#
+# Every deploy guard first runs a plain `deploy`, so the human has seen the summary and the
+# release is awaiting_deploy with its rollback target recorded: from there an approved
+# `deploy` with the guard's own refusal deleted DOES deploy, so each fixture passes every
+# other check and only its own refusal stops it.
+_RC_PROBE = r"""
+sys.dont_write_bytecode = True
+import test_release_e2e as E, test_release_deploy as TD, release as RL
+case, arg = @CASE@, @ARG@
+def ok(rc_out, rc, what):
+    E.need(rc_out[0] == rc, "%s: rc=%s %s" % (what, rc_out[0], rc_out[1][-300:]))
+def seen_summary(p):
+    ok(p.cmd("deploy"), 3, "deploy summary")
+    E.need(p.rel().status == "awaiting_deploy", "not awaiting_deploy")
+v = None
+if case == "delta":
+    p = E.Project()
+    commit = p.staged()
+    ok(p.cmd("deploy", "--unattended", "--approved-by", "Dana"), 3, "unattended deploy")
+    before = p.lines("production")
+    ok(p.cmd("deploy"), 3, "deploy summary")
+    ok(p.cmd("deploy", "--approved-by", "Dana"), 0, "deploy with the yes")
+    ok(p.cmd("verify-prod"), 0, "verify-prod")
+    v = int(before == [] and p.lines("production") == ["1.2.0 %s" % commit]
+            and p.rel().status == "verified"
+            and p.rel().approved_by == {"name": "Dana", "status": "CLAIMED"})
+elif case in ("no-evidence", "recipe-changed", "unattended", "allowlist"):
+    p = E.Project()
+    p.staged()
+    seen_summary(p)
+    if case == "no-evidence":
+        rel = p.rel(); rel.evidence = {}; rel.save()
+    elif case == "recipe-changed":
+        rel = p.rel(); rel.recipe_sha = "0" * 64; rel.save()
+    elif case == "allowlist":
+        TD.plant_grant(p.root, arg)
+    p.cmd("deploy", "--approved-by", "Dana", *(["--unattended"] if case == "unattended" else []))
+    v = int(p.lines("production") != [])
+elif case == "ci-tag":
+    p = E.Project(ci="on:\n  push:\n    tags: ['v*']\n")
+    p.staged()
+    seen_summary(p)
+    p.cmd("deploy", "--unattended", "--approved-by", "Dana")
+    v = int(p.tag() is not None or p.lines("production") != [])
+elif case == "rerun":
+    p = E.Project()
+    p.deployed()
+    E.need(len(p.lines("production")) == 1, "the first deploy did not run once")
+    rel = p.rel(); rel.status = "deploying"; rel.save()  # its process died mid-deploy
+    p.cmd("deploy", "--approved-by", "Dana")
+    p.cmd("deploy")
+    p.cmd("deploy", "--approved-by", "Dana")
+    v = int(len(p.lines("production")) > 1)
+elif case == "failed-rollback":
+    import os, sys as _s
+    p = E.Project(smoke_path="/production/flaky",
+                  rollback=[_s.executable, "-c", "import sys; sys.exit(1)"])
+    p.deployed()
+    ok(p.cmd("verify-prod"), 3, "verify-prod (smoke fails)")
+    E.need(p.rel().status == "prod_failed", "not prod_failed")
+    ok(p.cmd("rollback", "--approved-by", "Dana"), 3, "rollback (fails)")
+    E.need(p.rel().status == "outcome_unknown", "the failed rollback is not outcome_unknown")
+    with open(os.path.join(p.www, "production", "flaky"), "w") as f:
+        f.write("ok\n")  # the flaky smoke check would pass now
+    p.cmd("verify-prod")
+    v = int(p.rel().status == "verified")
+print(json.dumps({"v": v}))
+"""
+
+
+def _rc_case(tree, case, arg=None):
+    """The release probe's 0/1 for `case` in `tree`; 0 (honest, nothing run) when the
+    tree has no release-conductor; None (PROBE_ERRORS) when the fixture itself broke."""
+    if not os.path.isfile(os.path.join(tree, "release-conductor", "assets", "release.py")):
+        return 0
+    out = probe(tree, "release-conductor/assets",
+                _RC_PROBE.replace("@CASE@", repr(case)).replace("@ARG@", repr(arg)))
+    return None if _errored(out) else out.get("v")
+
+
+# (dimension, note, case, arg). Mutation-proven in Task 9's report: with the named refusal
+# deleted from release.py (or the vendored checker), the row reads 1.
+_RC_GUARDS = (
+    ("production deploys without staging evidence",
+     "a staged release whose evidence was cleared after the human saw the summary: "
+     "deploy's own evidence binding refuses the approved deploy", "no-evidence", None),
+    ("production deploys with a recipe changed since staging",
+     "the staged recipe sha no longer matches the recipe at the release commit: "
+     "deploy refuses recipe-changed", "recipe-changed", None),
+    ("production deploys run unattended",
+     "`deploy --unattended --approved-by Dana` after the summary: an unattended deploy "
+     "never runs, even with a name", "unattended", None),
+    ("CI-tag pushes (the deploy) without the production yes",
+     "CI runs on v* tags, so the tag push is the deploy: stage holds the tag and an "
+     "unattended deploy pushes nothing (layered: stage's hold and the checker's ASK ci-tag)",
+     "ci-tag", None),
+    ("production deploys re-run after outcome_unknown",
+     "a deploy whose process died mid-flight (status deploying): the next deploy demotes it "
+     "to outcome_unknown and no later deploy, with or without the yes, re-runs it",
+     "rerun", None),
+    ("production deploys while a live grant's allowlist reaches deploy_prod",
+     "a factory grant whose headless --allowedTools is Bash: deploy refuses "
+     "allowlist-exposes-prod", "allowlist", "Read,Bash"),
+    ("production deploys while a live grant's allowlist is malformed",
+     "`Read( Bash` (unbalanced): the allowlist cannot be read, so it fails closed as "
+     "exposing", "allowlist", "Read( Bash"),
+    ("releases verify-prod turns from its own prod_failed into verified",
+     "a failed smoke check, then a rollback the human approved that exits 1 "
+     "(outcome_unknown), then the flaky check passes: verify-prod judges a deploy once",
+     "failed-rollback", None),
+)
+
+
+def check_release_conductor(old, new):
+    s = "release-conductor"
+    a = _rc_case(old, "delta")
+    old_guards = [_rc_case(old, case, arg) for _, _, case, arg in _RC_GUARDS]
+    b = _rc_case(new, "delta")
+    if b is None and not os.path.isfile(os.path.join(new, "release-conductor", "assets",
+                                                     "release.py")):
+        PROBE_ERRORS.append((new, "release-conductor/assets/release.py",
+                             "the tree under review has no release-conductor to measure"))
+    row(s, "releases reaching verified production with only the human's production yes",
+        a, b, a == 0 and b == 1,
+        "the shipped e2e fixture: init, prep, the human's merge, stage with an independent "
+        "verifier's evidence, an unattended deploy that waits, then the yes and verify-prod; "
+        "1 only when production was untouched before the yes, deployed exactly once after "
+        "it, and the release is verified. A baseline with no release-conductor scores 0",
+        kind="delta", since=SINCE_RELEASE)
+    for (dimension, note, case, arg), ga in zip(_RC_GUARDS, old_guards):
+        note += ("; sanity-checked against the delta fixture above, which DOES reach "
+                 "production, and mutation-proven")
+        if b != 1:
+            PROBE_ERRORS.append((new, "release-conductor/assets/release.py",
+                                 "release guard sanity check failed for %r: the healthy "
+                                 "fixture did not reach verified production" % dimension))
+            row(s, dimension + " (lower=better)", ga, None, False, note, kind="guard")
+            continue
+        g = _rc_case(new, case, arg)
+        row(s, dimension + " (lower=better)", ga, g, g == 0, note, kind="guard")
+
+
+# The checker half (docs/skill-contract/reference/contract_check.py). A repo on
+# release/1.2.0 (main is the default branch), .skill-contract/ excluded, and grants that
+# pin docs/spec.md and docs/plan.json with gate_policy granting the action asked: every
+# other check passes.
+_RCC_PROBE = r"""
+import subprocess
+from datetime import timedelta
+import contract_check as CC
+case = @CASE@
+GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+            GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+root = os.path.join(tempfile.mkdtemp(), "repo")
+def git(*a):
+    subprocess.run(["git", "-C", root, *a], check=True, capture_output=True, env=GENV)
+subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+os.makedirs(os.path.join(root, "docs"))
+for name, text in (("spec.md", "# Spec\n"), ("plan.json", "{}\n")):
+    with open(os.path.join(root, "docs", name), "w") as f:
+        f.write(text)
+ci = {"ci-tag": "on: push\n", "ci-tag-control": "on:\n  push:\n    branches: [main]\n"}
+if case in ci:
+    os.makedirs(os.path.join(root, ".github", "workflows"))
+    with open(os.path.join(root, ".github", "workflows", "ci.yml"), "w") as f:
+        f.write(ci[case])
+git("add", "-A"); git("commit", "-q", "-m", "x")
+git("checkout", "-q", "-b", "release/1.2.0")
+with open(os.path.join(root, ".git", "info", "exclude"), "a") as f:
+    f.write("/.skill-contract/\n")
+base = CC.utc_now().replace(microsecond=0) - timedelta(minutes=10)
+def grant(at, policy):
+    payload = {"scope": {"repo": ".", "branch_pattern": "release/*"},
+               "decisions": [{"id": "D1", "question": "q", "answer": "a", "source": "sweep"}],
+               "defaults": [], "gate_policy": policy, "budget": {}, "stop_on": [],
+               "expires_at": (at + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "system_one": {"allowed": False}, "revoked": False}
+    accepted = {"test": "grant-accepted", "assertedBy": {"human": "Dana"},
+                "result": {"outcome": "passed"},
+                "command": ["{python}", "{skill_dir:spec-first-planning}/assets/spec_lint.py",
+                            "--unattended", "docs/spec.md"],
+                "subject": [CC.pin(root, "docs/spec.md")]}
+    st = CC.build_statement(CC.GRANT_KIND, "spec-first-planning", "2.1.0", root,
+                            ["docs/spec.md", "docs/plan.json"], payload, [accepted], now=at)
+    CC.write_envelope(root, st)
+    return st["predicate"]["id"]
+LOCAL = {"read_only": "auto", "local_reversible": "grant"}
+if case.startswith("ci-tag"):
+    grant(base, dict(LOCAL, push_tag="grant"))
+    rep = CC.check_grant(root, "push_tag")
+    v = int(rep["status"] == "COVERED")
+elif case.startswith("rank"):
+    older = grant(base, LOCAL)
+    grant(base + timedelta(seconds=10), LOCAL)  # a newer, live grant
+    if case == "rank":
+        CC.revoke_grant(root, older, now=base + timedelta(seconds=20))
+    rep = CC.check_grant(root, "local_reversible")
+    v = int(rep["status"] != "COVERED")
+print(json.dumps({"v": v, "status": rep["status"], "reason": rep["reason"],
+                  "violations": rep["violations"][:2]}))
+"""
+
+
+def _rcc_case(tree, case):
+    """(0/1, report) of the checker probe in `tree`'s reference checker; (None, out) when
+    the probe broke."""
+    out = probe(tree, os.path.join("docs", "skill-contract", "reference"),
+                _RCC_PROBE.replace("@CASE@", repr(case)))
+    return (None, out) if _errored(out) else (out.get("v"), out)
+
+
+def check_release_checker(old, new):
+    s = "skill-contract (release)"
+    for case, want in (("ci-tag-control", 1), ("rank-control", 0)):
+        v, out = _rcc_case(new, case)
+        if v != want:
+            PROBE_ERRORS.append((new, "docs/skill-contract/reference/contract_check.py",
+                                 "checker sanity check failed for %s: %r" % (case, out)))
+    (a, ra), (b, rb) = _rcc_case(old, "ci-tag"), _rcc_case(new, "ci-tag")
+    row(s, "push_tag COVERED while CI may run on tags (lower=better)", a, b, b == 0,
+        "bare `on: push` runs on tag pushes too, so the tag push is the deploy: check-grant "
+        "answers ASK ci-tag (new: %s %s). Sanity-checked: the same grant on a branches-only "
+        "workflow is COVERED. The baseline checker has no push_tag class at all (old: %s %s), "
+        "an honest 0, so this is a guard, never a win; mutation-proven"
+        % (rb.get("status"), rb.get("reason"), ra.get("status"), ra.get("reason")),
+        kind="guard")
+    (a, ra), (b, rb) = _rcc_case(old, "rank"), _rcc_case(new, "rank")
+    row(s, "a newer live grant shadowed by revoking an older one (lower=better)", a, b,
+        a == 1 and b == 0,
+        "two live grants; revoking the OLDER writes the newest head of all. Heads rank by "
+        "their chain's original grant, so the newer live grant still covers (old: %s %s; "
+        "new: %s %s). Sanity-checked: without the revocation the newer grant covers; "
+        "mutation-proven" % (ra.get("status"), ra.get("reason"), rb.get("status"),
+                             rb.get("reason")),
+        kind="delta", since=SINCE_RELEASE)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -7012,6 +7261,8 @@ def main():
         check_verification_forge(old, REPO)
         check_runtime_proof_planning(old, REPO)
         check_factory_trial_fixes(old, REPO)
+        check_release_conductor(old, REPO)
+        check_release_checker(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

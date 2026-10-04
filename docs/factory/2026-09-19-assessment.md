@@ -108,6 +108,23 @@ carries unit tests, eval negatives and an A/B row:
   fixture passes every other check, so it is mutation-proven: deleting its own check from
   `reentry.decide` makes it start, and the healthy aged fixture starts. Q3 (AC8) is to be re-judged by Jev
   after merge, run by the controller, against the actual merge commit.
+- **Step 5A (release-conductor) built (branch `feat/release-conductor`, before merge):**
+  `release-conductor` carries a merged change to verified production. `init` writes a
+  reviewed recipe. `prep` writes a release grant pinned to the version and the recipe, and
+  opens the release PR. After the human merges it, `stage` builds the release commit,
+  deploys it to staging and checks it. It refuses to go on without evidence that a verifier
+  other than the driver recorded at exactly that commit. Then it pushes the tag, or holds it
+  when CI runs on tags, because that push would be the deploy. `deploy` runs only with the
+  human's in-session yes to a summary that names the rollback target. A grant never covers
+  it, it never runs unattended, and it is never re-run after `outcome_unknown`. `verify-prod`
+  judges a deploy once and writes a `release-result/v1`. `rollback` also asks. The checker
+  gains the `deploy_staging` and `push_tag` classes, a tag-trigger floor, grants selected by
+  subject, ranking by chain origin, and revoke-all. spec-first-planning's unattended
+  interview records release defaults and refuses an allowlist that exposes production.
+  Covered by an e2e test, eval negatives and A/B rows. The delta row is a release reaching
+  verified production with only the human's production yes. Eight release guards and two
+  checker rows back it, each mutation-proven. Step 5A is to be re-judged by Jev after
+  merge, run by the controller, against the actual merge commit. No score is claimed here.
 
 Nothing else in this document has been re-measured since.
 
