@@ -142,8 +142,10 @@ and skip what the conversation has already answered:
    user's own permissions and no one watches it. Without an answer, no block is written and nothing
    re-enters. When the project has a `.release/recipe.json` (release-conductor),
    `write_grant.py` also refuses an `agent_cmd` allowlist that would let the resumed
-   agent run the recipe's `deploy_prod` or `rollback` unprompted — never put those
-   commands, or a glob wide enough to reach them, in this allowlist; a release always
+   agent run the recipe's `deploy_prod` or `rollback`, or release-conductor's own
+   `release.py deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule reaches those),
+   unprompted — never put those commands, or a glob wide enough to reach them, in this
+   allowlist; a release always
    goes through `release prep`'s own grant, with the human present (design spec D10).
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
@@ -179,7 +181,10 @@ and skip what the conversation has already answered:
     line; `grant_staging`/`grant_tag` decline `deploy_staging`/`push_tag` only when
     `--policy-file` is not given. An explicit `--bump` or `--policy-file` always wins
     outright over the recorded default. `release prep` prints and logs which grant (or
-    that none applied) the defaults came from.
+    that none applied) the defaults came from. A declined staging deploy or tag push is
+    not a dead end: when the release reaches that step, `release stage` stops and asks,
+    and the human's in-session yes (`release stage --approved-by <name>`) answers it.
+    Nobody edits a grant to lift a decline.
 
 ### Action classes and their gates
 
@@ -321,6 +326,10 @@ git tracks. A grant is the user's recorded yes, but an agent
 with a shell on the same machine could write one itself. So a grant only ever covers
 actions that can be undone, and a human still merges.
 
-Revoke a grant at any time with
-`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`. From then on,
-`check-grant` answers ASK, and every gated step asks again.
+Revoke this grant at any time with
+`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <grant id>`
+(the id is the grant file's name without `.json`). From then on, `check-grant` answers ASK
+for it, and every step it gated asks again. The same command with no `--id` is the kill
+switch: it revokes every live grant in the repo, an in-flight release's grant included, so
+that release stops too and ends only with `release abandon`. It tries every grant and prints
+`REVOKED: <id>` or `FAILED: <id> <why>` for each, exiting non-zero if any failed.

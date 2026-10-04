@@ -43,7 +43,9 @@ in one batched round, and shows you a grant summary. Only after your explicit ye
 `write_grant.py`. The grant covers only reversible work (reading, local edits and commits,
 pushing a work branch, opening a pull request), lasts at most 7 days, and never covers the
 default branch or a detached HEAD, so work on a branch such as `factory/*`. `merge`, `deploy`, `spend`, `external_message` and `delete` always ask. Revoke
-it with `python3 assets/contract_check.py revoke-grant --root <repo>`. Details:
+it alone with `python3 assets/contract_check.py revoke-grant --root <repo> --id <grant id>`;
+the same command with no `--id` is the kill switch, which revokes every live grant in the
+repo, an in-flight release's grant included. Details:
 `references/unattended.md`.
 
 **Task ordering (2.1.0).** A requirement's optional `[after: R2, R3]` hint (`R` matched

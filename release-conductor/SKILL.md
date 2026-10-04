@@ -79,8 +79,8 @@ gap found later costs a new prep with the human:
    Without one, run verification-skill-forge first: staging cannot be proven without it.
 3. **A clean checkout of the default branch**, up to date with `origin`, with `origin`
    configured: prep pushes `release/<version>` there and opens the PR against the default branch.
-4. **No unfinished release.** `release status` shows every release `verified`, `rolled_back`
-   or `stage_failed` (or none). prep refuses while another release is unfinished.
+4. **No unfinished release.** `release status` shows every release `verified`, `rolled_back`,
+   `stage_failed` or `abandoned` (or none). prep refuses while another release is unfinished.
 
 If any of them fails, stop and tell the user which one and why.
 
@@ -133,6 +133,12 @@ Each step is one command. Read its output lines, not just the exit code.
    `deploy_timeout`), runs every `staging_checks` argv, and pushes the `v<version>` tag, or holds
    it when CI runs on tags (`STAGE: <v> tag-held`: the tag push is then the production deploy,
    step 5). `STAGE: <v> pass <commit>` with `NEXT: run deploy with the human` ends staging.
+   When the release grant declined `deploy_staging` or `push_tag` (the human's `--policy-file`,
+   or a planning grant's release defaults), that gate answers `ASK gate-ask` with
+   `NEXT: ask the human, then re-run stage --approved-by <name>`. Ask the human whether to
+   deploy to staging (or push the tag) now; on their yes, run
+   `release stage --approved-by "<their name>"`. The yes answers only that declined gate,
+   recorded as CLAIMED: every other `ASK` reason still stops, and it is refused unattended.
    `STOP: evidence-reject <reason>` (exit 3) means dispatch a new verifier; a failing feature,
    build, deploy, probe or check is `STAGE: <v> fail <reason>` and the release is
    `stage_failed`: finished, its grant revoked; a fix needs a new change and a new prep.
@@ -150,13 +156,18 @@ Each step is one command. Read its output lines, not just the exit code.
    back to). Reply yes to deploy." You MUST NOT pass `--approved-by` unless the human said yes to this deploy in this
    session, because the tool records whatever name you pass as the production yes and cannot
    tell a real one from a forged one. On their yes, run
-   `release deploy --approved-by "<their name>"`. It probes the target again: if it differs
-   from the one in the summary the human saw (or no summary was shown), it prints the new
-   summary and waits again (`STOP: waiting-human`, nothing run), and you ask again. Otherwise
-   it records the yes as CLAIMED and runs `deploy_prod` once from the isolated build checkout, or pushes the tag when CI
-   deploys on tags. `DEPLOY: <v> deployed <commit>` with `NEXT: verify-prod` (exit 0) is a
-   success. When no human is present, run `release deploy --unattended` instead: it shows the
-   same summary and waits at `awaiting_deploy`, and the human finishes it later.
+   `release deploy --approved-by "<their name>"` with the same flags. The yes binds to the
+   whole summary: it probes the target again and recomputes the summary, and if anything in
+   it differs from what the human saw (the target, the deploy argv, the `--remote`), or no
+   attended run showed it, it prints the new summary and waits again
+   (`STOP: waiting-human`, nothing run), and you ask again. Otherwise it records the yes as
+   CLAIMED and runs `deploy_prod` once from the isolated build checkout, or pushes the tag
+   when CI deploys on tags. `DEPLOY: <v> deployed <commit>` with `NEXT: verify-prod` (exit 0)
+   is a success. When no human is present, run `release deploy --unattended` instead: it
+   shows the same summary and waits at `awaiting_deploy`. A run with
+   `FACTORY_CONDUCTOR_REENTRY` set counts as unattended too. A summary shown unattended is
+   one no human saw, so when the human returns, their session first runs `release deploy`
+   without `--approved-by`, shows them that summary, and only then passes their yes.
 6. **Verify production.** `release verify-prod` polls the production `version_probe` until it
    reports the release (a deploy still rolling out is not a failure), then runs `health` and
    every `prod_smoke` argv, and nothing else: `staging_checks` never run against production.
@@ -166,13 +177,33 @@ Each step is one command. Read its output lines, not just the exit code.
    and the rollback the human may say yes to (exit 3). verify-prod judges a deploy once: a
    re-run is refused, so a flaky check cannot be retried into `verified`.
 7. **Rollback, only with the human's yes.** Show the human the failure and the printed rollback
-   argv and target, and ask in plain words whether to roll back. The production-yes rule of
+   argv and target, and ask in plain words whether to roll back. As in step 5, first run
+   `release rollback` without `--approved-by`: it shows the rollback summary and waits, and
+   the yes binds only to a summary an attended run showed. The production-yes rule of
    step 5 applies to `--approved-by` here too. On their yes,
    `release rollback --approved-by "<their name>"` runs the recipe's `rollback` once, then
    polls the probe until it reports the target: `ROLLBACK: <v> rolled-back <target>` and
    `RESULT: <path>` (exit 0). Without a yes, or with `--unattended`, it shows the rollback and
    waits (`STOP: waiting-human`). With no recorded target it refuses (exit 2): there is nothing
    to roll back to, so tell the human.
+
+8. **Abandon, only with the human's yes.** Some releases can go nowhere else: the human
+   closed the release PR, declined to ship, or pulled the kill switch mid-release, or the
+   first release's deploy failed with nothing to roll back to. Every later prep is refused
+   while one is unfinished. Tell the human why the release is stuck and ask whether to end
+   it. On their yes, run
+   `release abandon --approved-by "<their name>" --reason "<their words>"`. It runs no recipe
+   command and touches neither production, nor the remote, nor tags: it records the release
+   `abandoned` (the yes CLAIMED), revokes its grant, and removes its worktrees and local
+   `release/<v>` branches. From `deployed`, `prod_failed` or `outcome_unknown` it says that
+   production is the human's to handle. A release left `deploying` or `rolling_back` is first
+   demoted to `outcome_unknown` (`STOP: outcome-unknown`, exit 3): the human checks production,
+   then you run abandon again. The remote branch and the release PR are left for the human to
+   close; a later prep of the same version needs that remote branch gone, and keeps the
+   abandoned record beside the new one. abandon refuses `--unattended` and a run with
+   `FACTORY_CONDUCTOR_REENTRY` set. You MUST NOT run abandon without the human's yes to ending
+   this release, because it ends the release's record for good and only a new prep with the
+   human starts another.
 
 `release status` prints every release and its status (`RELEASE: <v> <status>`). It only
 reads: it takes no lock and changes nothing, so you can run it at any time, even during a
@@ -184,6 +215,7 @@ deploy.
 |---|---|
 | `commit .release/recipe.json through a reviewed PR, then run prep` | Open a PR with the recipe for the human; prep after it merges. |
 | `merge the release PR, then run stage` | Tell the human the PR is ready; run stage after they merge it. |
+| `ask the human, then re-run stage --approved-by <name>` | The release grant declined this staging step: ask the human; on their yes, step 4's `stage --approved-by`. |
 | `fix what stopped it, then re-run prep to resume` (or `stage`) | Read the `GATE:`/`STOP:` line, report it, re-run the same command once the cause is fixed. |
 | `merge the release PR and update local <branch> (git pull), then run stage` | The release commit is not on the local default branch yet. |
 | `dispatch-verifier <commit>` | Step 3, then `stage --evidence --verifier <id>`. |
@@ -197,6 +229,12 @@ deploy.
 | `check production by hand; rollback again only with the human's yes` | A rollback failed or its outcome is unknown: report it; production is the human's to inspect. |
 | `a new prep with a human is needed …` / `re-run prep with a human` | The grant or the recipe cannot be trusted any more: report it. |
 | `fix what stopped it; the release is finished, and its state.json and release-log.jsonl hold the record` | The result envelope could not be written; the release outcome stands. |
+| `check production by hand; then re-run abandon with the human to end the release` | abandon found a crashed deploy or rollback and demoted it: report it; production is the human's to inspect. |
+| `the release is finished; a new prep may start` | abandon ended the release: report what the human still has to close (the remote branch, the PR). |
+
+A `RELEASE: refused: grant-revoked` (exit 2) from deploy or rollback means the release
+grant was revoked (the kill switch) or superseded: the release cannot go on, so report it,
+and on the human's yes end it with step 8.
 
 **Outcome unknown.** A deploy or rollback that timed out, or a command that died mid-flight,
 leaves the outcome unknown (`STOP: outcome-unknown`, status `outcome_unknown`). The tool
@@ -213,12 +251,22 @@ release live) and report to the human; after a rollback, only the human decides 
   the grant ids to the human, who revokes them
   (`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <id>`) or
   narrows their allowlist.
-- You MUST NOT run `deploy` or `rollback` with `--approved-by` when no human is present, because
+- You MUST NOT put `release.py`'s own `deploy`, `rollback` or `abandon` in a headless
+  allowlist either (a `Bash(python3 *)` rule reaches them), because an agent that can run them
+  unprompted can forge the human's yes. The same refusal covers them.
+- You MUST NOT run `deploy`, `rollback`, `abandon` or `stage` with `--approved-by` when no human is present, because
   an unattended production change is exactly what the grant floor forbids. Unattended, use
-  `--unattended`, which waits with the command ready.
+  `--unattended`, which waits with the command ready. A run with `FACTORY_CONDUCTOR_REENTRY`
+  set is unattended whatever its flags: deploy and rollback wait, abandon and
+  `stage --approved-by` refuse.
+- You MUST NOT edit a grant to lift a declined class, because that widens the human's grant
+  without them. A declined staging deploy or tag push is answered with the human's
+  in-session yes (`stage --approved-by`), never by rewriting the grant.
 - You MUST NOT edit, delete or recreate anything under `.skill-contract/releases/`, because the
   state, the log and the intent file there are the release's record that every later command
-  reads back and that `release-result/v1` pins by digest. Report a mismatch instead.
+  reads back and that `release-result/v1` pins by digest. Report a mismatch instead. A
+  release that can go nowhere else ends only through `release abandon` with the human's yes
+  (step 8).
 - You MUST NOT re-run a deploy after `outcome_unknown` by any route, or a rollback without a
   fresh yes from the human after they have checked production by hand, because a deploy
   command is not known to be idempotent and a second run could deploy twice or roll back over a
@@ -282,8 +330,10 @@ report it rather than editing state.
 - **The yes is CLAIMED.** The tool records the name passed to `--approved-by` as the human's
   yes, marked CLAIMED in the state and the envelope, because a shell-capable agent can forge
   an in-session approval. The summary the yes answers names the rollback target, found by a
-  read-only production probe that runs before the yes; a target that moves before the yes
-  voids it. The real floors are mechanical: `check-grant` never covers `deploy`
+  read-only production probe that runs before the yes. The yes binds to a digest of the
+  whole summary (the deploy or rollback argv with its remote, the rollback argv, the target,
+  the commit, the recipe and artifact sha), and only to one an attended run showed: a summary
+  that changes before the yes, or one shown only to an unattended run, voids it. The real floors are mechanical: `check-grant` never covers `deploy`
   (deploy refuses if it ever answers COVERED), production commands may not appear in a headless
   allowlist, and the yes is on the record.
 - **A permission prompt is no gate if prompts are bypassed.** The harness's prompt before the
@@ -294,8 +344,9 @@ report it rather than editing state.
   target repo's `.claude/settings*.json`, are invisible to it. It recognises Claude Code's
   `--allowedTools` and permission-bypass flags, not other agents' CLIs (Codex, Gemini), and a
   wrapper script hides what it runs. A malformed allowlist or a bypass flag counts as exposing,
-  and so does a grant allowing a broad `git push` in tag-deploy mode, which blocks the release
-  until it is narrowed.
+  and so does a grant allowing a broad `git push` in tag-deploy mode, or one reaching
+  `release.py`'s own `deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does), which
+  blocks the release until it is narrowed.
 - **CI tag-trigger detection covers listed formats.** GitHub Actions workflows and CircleCI
   are read; every other CI config is treated as tag-triggered unless proven otherwise, so a tag
   push then waits for the production yes. A false positive costs one extra ask, never a silent
@@ -314,9 +365,13 @@ report it rather than editing state.
 - **Grant edges.** Every release gate names the release grant by its path (with the recipe as
   subject and the stage or prep worktree), so another live grant cannot answer for it. A grant
   revoked and a new one written in the same second can still tie where a gate selects by
-  subject, and that gate then answers ASK revoked. `revoke-grant` with no id revokes every live
-  grant, which stops every release step at its next gate. The release grant is revoked when the
-  release ends: `verified`, `rolled_back`, `stage_failed`, or a prep that failed and was undone.
+  subject, and that gate then answers ASK revoked. `revoke-grant` with no id (the kill
+  switch) revokes every live grant, the release grant included: every gated step (prep's and
+  stage's) stops at its next gate, and deploy and rollback refuse `grant-revoked` before any
+  wait. verify-prod runs only the read-only probe, health and smoke checks, so it still runs.
+  A release stopped this way ends with abandon. The release grant is revoked when the
+  release ends: `verified`, `rolled_back`, `stage_failed`, `abandoned`, or a prep that failed
+  and was undone.
 - **Output stays local.** Command output tails can carry tokens, so they stay in the release's
   git-ignored `state.json`; the envelope, the release PR and the changelog carry exit codes and
   neutralised merge subjects only.

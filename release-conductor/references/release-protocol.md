@@ -37,12 +37,15 @@ verifier" (`NEXT: dispatch-verifier`) or "staged" (`STAGE: <v> pass`).
 | `PROD: <v> outcome-unknown (was <status>; the command is never re-run)` | verify-prod | A crashed deploy or rollback found and demoted. |
 | `ROLLBACK: <v> to <version> <commit> (from <source>)` and `  rollback: <argv>` | rollback | What the human says yes to. |
 | `ROLLBACK: <v> rolled-back <target>` / `ROLLBACK: <v> unknown` / `ROLLBACK: no target` | rollback | The rollback's end. |
+| `RELEASE: <v> abandoned (was <status>)` and `  left for the human: …` | abandon | Ended with the human's yes; the remote branch, the PR and any pushed tag are left for the human. A `  note:` line says production is the human's to handle (from `deployed`, `prod_failed` or `outcome_unknown`); `  grant: <id> already revoked` when the kill switch revoked it first. |
+| `RELEASE: archived the abandoned release <v> at <dir>` | prep | A new prep of an abandoned version keeps the old record beside the new one. |
+| `GATE: <action> ASK gate-ask answered by the human's yes: <name> (CLAIMED)` | stage --approved-by | The human answered a declined `deploy_staging` or `push_tag` (R41); logged as `gate_yes`. |
 | `RESULT: <path>` | verify-prod, rollback | The `release-result/v1` envelope, repo-relative. |
 | `GATE: <action> COVERED` / `GATE: <action> <status> <reason>` | prep, stage, deploy, rollback | A `check-grant` answer. `deploy` and `rollback` always print `GATE: deploy ASK …`. |
 | `STOP: <reason>[: <detail>]` | any | The step stopped (exit 3). |
 | `NEXT: <what to do>` | any | The next step (table below). |
 | `FAIL: <problem>` | verify-prod, rollback | Why the result envelope could not be written. |
-| `WARNING: could not revoke the release grant <id>: …` | prep, stage, verify-prod, rollback | Revoke it by hand: `contract_check.py revoke-grant --root <repo> --id <id>`. |
+| `WARNING: could not revoke the release grant <id>: …` | prep, stage, verify-prod, rollback, abandon | Revoke it by hand: `contract_check.py revoke-grant --root <repo> --id <id>`. |
 
 ## Commands
 
@@ -50,10 +53,11 @@ verifier" (`NEXT: dispatch-verifier`) or "staged" (`STAGE: <v> pass`).
 |---|---|---|
 | `init --answers FILE` | nothing yet | 0 written; 2 invalid recipe, unreadable answers, or a recipe already exists (never overwritten) |
 | `prep --approved-by NAME --driver ID [--bump L] [--policy-file F] [--push-cmd JSON] [--pr-cmd JSON]` | the default branch's tip | 0 prepped; 3 gate, push or PR stopped (re-run resumes), or lock held; 2 refused |
-| `stage [--commit SHA] [--evidence --verifier ID] [--remote NAME]` | the one prepped or staging release | 0 built or staged; 3 stop, reject, gate or `stage_failed`; 2 refused |
+| `stage [--commit SHA] [--evidence --verifier ID] [--remote NAME] [--approved-by NAME] [--unattended]` | the one prepped or staging release | 0 built or staged; 3 stop, reject, gate or `stage_failed`; 2 refused (incl. `--approved-by` unattended or under `FACTORY_CONDUCTOR_REENTRY`) |
 | `deploy [--approved-by NAME] [--unattended] [--remote NAME]` | the one unfinished release | 0 deployed; 3 waiting for the yes, `prod_failed`, `outcome_unknown`, lock held; 2 refused |
 | `verify-prod` | the one unfinished release | 0 verified; 3 `prod_failed`, result not written, lock held; 2 refused |
 | `rollback [--approved-by NAME] [--unattended]` | the one unfinished release | 0 rolled back; 3 waiting for the yes, `outcome_unknown`, result not written, lock held; 2 refused |
+| `abandon --approved-by NAME --reason TEXT [--version V] [--unattended]` | the one unfinished release (or `--version`) | 0 abandoned; 3 a crashed deploy or rollback demoted first, lock held; 2 refused (unattended, `FACTORY_CONDUCTOR_REENTRY` set, bad name or reason, no single unfinished release) |
 | `status` | every release | 0 |
 
 Every command but `init` and `status` takes the repo's run lock,
@@ -133,6 +137,17 @@ Then, each step saving its progress so a re-run resumes from the first unfinishe
 Every gate in stage names the stage worktree, and first checks its HEAD is still the release
 commit (`head-moved`, exit 3).
 
+**A declined class (R41).** When the release grant declined `deploy_staging` or `push_tag`,
+that gate answers `ASK gate-ask` and stage stops with `NEXT: ask the human, then re-run stage
+--approved-by <name>`. `stage --approved-by NAME` answers exactly that: an `ASK gate-ask` on
+`deploy_staging` or `push_tag`, recorded CLAIMED (`gate_yes` in the log). Because
+`check-grant` answers `gate-ask` before its later floors, stage then judges those itself, on
+the stage worktree: `ci-tag` for `push_tag`, `ci-config` for both; either still stops. Every
+other reason (`revoked`, `superseded`, `expired`, `stale`, `branch`, `worktree`, `tracked`,
+`default-branch`, `ci-tag`, `ci-config`, …) stops whatever the yes. `--approved-by` is refused
+(exit 2) with `--unattended` or while `FACTORY_CONDUCTOR_REENTRY` is set. Lifting a decline by
+editing the grant is never the route: it would widen the human's grant without them.
+
 ### deploy
 
 Refusals, in order (exit 2, nothing runs, status unchanged): `not-staged` (status is not
@@ -140,7 +155,10 @@ Refusals, in order (exit 2, nothing runs, status unchanged): `not-staged` (statu
 commit); `recipe-changed` (the recipe at the commit is not the one staged);
 `build-tree-changed` / `artifact-altered` (the build checkout or artifact changed since stage);
 `deploy-covered` (`check-grant` answered COVERED for `deploy`, which no grant may: a checker
-bug); `allowlist-exposes-prod`. A release left `deploying` or `rolling_back` becomes
+bug); `grant-revoked` / `grant-unreadable` (the release grant was revoked or superseded, the
+kill switch, or cannot be read: the release goes no further and ends with abandon);
+`allowlist-exposes-prod` (a live grant's allowlist reaches `deploy_prod`, `rollback`, the
+deploying tag push, or `release.py deploy|rollback|abandon` itself, R43). A release left `deploying` or `rolling_back` becomes
 `outcome_unknown` first (exit 3), and an `outcome_unknown` release is never deployed again.
 
 After the refusals, every deploy probes production once for the rollback target (read-only:
@@ -149,13 +167,16 @@ probe that edited it is refused, `build-tree-changed`). The summary always names
 the expanded rollback argv with `(target <version> <commit>, from <source>)`, or "no rollback
 target: no previous release, nothing to roll back to" (R36).
 
-Without `--approved-by`, or with `--unattended`: prints the summary, records the target, sets
-`awaiting_deploy` and stops (`STOP: waiting-human`, `NEXT: run deploy with the human`, exit 3).
-No deploy command runs.
+Without `--approved-by`, with `--unattended`, or with `FACTORY_CONDUCTOR_REENTRY` set (R43):
+prints the summary, records the target and the summary (`summary`: its sha256 and
+`shown_to_human`, true only for an attended run), sets `awaiting_deploy` and stops
+(`STOP: waiting-human`, `NEXT: run deploy with the human`, exit 3). No deploy command runs.
 
-With the yes, the yes must answer the summary the human last saw: when the release is not
-`awaiting_deploy` (no summary shown yet), or the target probed now differs from the recorded
-one, it prints the new summary with a `note:` line, records the new target, and waits again
+With the yes, the yes must answer the summary the human last saw (R42): the summary is a
+digest of the deploy argv (in tag mode, with its `--remote`), the rollback argv, the target,
+the commit, the recipe sha and the artifact sha. When the release is not `awaiting_deploy`,
+no attended run showed the summary, or the digest computed now differs from the recorded one,
+it prints the new summary with a `note:` line, records it, and waits again
 (`STOP: waiting-human`, exit 3, nothing run). Otherwise it prints the summary with
 `approval: <name> (CLAIMED)`, saves `deploying` (with the
 yes and the target) before the command runs, then runs `deploy_prod` once in `wt-build` with
@@ -185,12 +206,33 @@ envelope and revokes the release grant.
 Acts on `prod_failed` or `outcome_unknown`. Refused (exit 2) with no recorded target
 (`ROLLBACK: no target`), a target lacking a value the rollback argv needs
 (`target-incomplete`), a covering `deploy` gate, an exposing allowlist, or a checkout that
-cannot be made; every one of these runs before the wait. Without a yes it prints the argv and
-waits (exit 3). With one: saves `rolling_back` before the command, runs
+cannot be made, or a revoked release grant (`grant-revoked`); every one of these runs before
+the wait. Without a yes, unattended, or under `FACTORY_CONDUCTOR_REENTRY`, it prints the argv
+and waits (exit 3), recording the rollback summary's digest. A yes binds only to that summary
+when an attended run showed it (R42); otherwise it is shown again and waits. With a bound
+yes: saves `rolling_back` (the summary consumed) before the command, runs
 `rollback` once in `wt-prod`, then polls the probe for the target. A pass is `rolled_back`
 with the result envelope; a non-zero exit, a timeout or a probe that never reports the target
 is `outcome_unknown` with `NEXT: check production by hand; rollback again only with the
 human's yes`. Nothing re-runs it; a new `rollback --approved-by` with a fresh yes may.
+
+### abandon
+
+The one sanctioned way to end a release that can go nowhere else (R40): a release PR the
+human closed, a human who declines to ship, a kill switch mid-release, a first release whose
+deploy failed with nothing to roll back to. Human-only: `--approved-by` (CLAIMED) and
+`--reason` are required, and it is refused with `--unattended` or while
+`FACTORY_CONDUCTOR_REENTRY` is set. It takes the run lock. A release left `deploying` or
+`rolling_back` is demoted to `outcome_unknown` first and abandon stops (exit 3,
+`NEXT: check production by hand; then re-run abandon with the human to end the release`).
+Otherwise it sets `abandoned` (recording `{approved_by, reason, was, at}`), revokes the
+release grant (a `WARNING:` when it cannot; nothing to do when the kill switch already did),
+removes the release's worktrees and its local `release/<v>` and `release/<v>-stage` branches,
+and logs `abandoned`. It never runs a recipe command and never touches production, the remote
+or tags. From `deployed`, `prod_failed` or `outcome_unknown` it says production is the
+human's to handle. A later prep of any version proceeds; one of the same version needs the
+remote `release/<v>` gone (the human closes the PR and deletes it) and archives the
+abandoned directory as `<v>.abandoned-<UTC time>`.
 
 ## Stop reasons
 
@@ -203,9 +245,10 @@ human's yes`. Nothing re-runs it; a new `rollback --approved-by` with a fresh ye
 | `evidence-reject <reason> [<feature>]` | stage --evidence | `staging_verify` |
 | `build-failed`, `artifact-missing`, `build-tree-unreadable`, `evidence-failed`, `build-tree-changed`, `artifact-altered`, `deploy-failed`, `timeout`, `check-failed` | stage | `stage_failed` (grant revoked) |
 | `tag-push-failed` | stage | unchanged; a re-run retries |
+| `gate <action> answered ASK (gate-ask)` with `NEXT: ask the human, then re-run stage --approved-by <name>` | stage | unchanged; the human's yes resumes |
 | `waiting-human` | deploy, rollback | `awaiting_deploy` / unchanged |
 | `deploy-failed` | deploy | `prod_failed` |
-| `outcome-unknown` | deploy, rollback, any locked command finding a crash | `outcome_unknown` |
+| `outcome-unknown` | deploy, rollback, abandon, any locked command finding a crash | `outcome_unknown` |
 | `prod-failed` | verify-prod | `prod_failed` |
 | `result-failed` | verify-prod, rollback | `verified` / `rolled_back` all the same, with `result.error`; a `result_failed` event is logged and the grant revoked |
 | `locked` | any locked command | unchanged |
@@ -214,7 +257,8 @@ human's yes`. Nothing re-runs it; a new `rollback --approved-by` with a fresh ye
 
 `prepped → staging_verify → staged | stage_failed → awaiting_deploy → deploying → deployed →
 verified | prod_failed → rolling_back → rolled_back`, plus `outcome_unknown` from `deploying`
-or `rolling_back`. Finished: `verified`, `rolled_back`, `stage_failed`. Every other status, and
+or `rolling_back`, and `abandoned` from any unfinished status (with the human's yes).
+Finished: `verified`, `rolled_back`, `stage_failed`, `abandoned`. Every other status, and
 a release directory with no readable state, is unfinished, and only one may be.
 
 A release lives in `.skill-contract/releases/<v>/` (git-ignored by a `*` `.gitignore` the tool
