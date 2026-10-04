@@ -380,6 +380,18 @@ class RollbackSummaryTests(ProdBase):  # R42, R43, #11
         self.assertEqual(self.lines(self.rollback_marker), [])
 
 
+class KillSwitchVerifyTests(ProdBase):  # #11
+    def test_verify_prod_still_runs_after_the_kill_switch_without_a_false_warning(self):
+        self.deployed()
+        self.set_prod("1.2.0\n")
+        CC.revoke_all(self.root)
+        rc, out, err = self.verify()
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.rel().status, "verified")
+        self.assertIn("already revoked", out)
+        self.assertNotIn("WARNING", out)
+
+
 class RollbackTests(ProdBase):
     def failed(self):
         root, commit = self.deployed()

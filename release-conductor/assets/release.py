@@ -1731,14 +1731,7 @@ def _stage_fail(rel, step, reason, detail):
     rel.set_status("stage_failed", stage=st)
     rel.save()
     rel.log("stage_failed", step=step, reason=reason)
-    gid = (rel.grant or {}).get("id")
-    if gid:
-        try:
-            CC.revoke_grant(rel.root, gid)
-            rel.log("grant_revoked", id=gid)
-        except (OSError, ValueError) as e:
-            print("WARNING: could not revoke the release grant %s: %s; revoke it with "
-                  "check-grant's revoke-grant --id" % (gid, e))
+    _revoke_release_grant(rel)
     print("STAGE: %s fail %s" % (rel.version, reason))
     print("STOP: %s: %s" % (reason, detail))
     return 3
@@ -2846,6 +2839,12 @@ def _revoke_release_grant(rel):
     gid = (rel.grant or {}).get("id")
     if not gid:
         return
+    if CC.is_superseded(rel.root, gid):
+        # already revoked (the kill switch) or superseded: nothing to do, and no WARNING
+        # telling the human to revoke what is already revoked
+        print("  grant: %s already revoked" % gid)
+        rel.log("grant_already_revoked", id=gid)
+        return
     try:
         CC.revoke_grant(rel.root, gid)
         rel.log("grant_revoked", id=gid)
@@ -3338,11 +3337,7 @@ def _abandon_locked(root, version, name, reason):
                               "at": _rfc3339(_now())})
     rel.save()
     rel.log("abandoned", approved_by=approval, reason=reason, was=was)
-    gid = (rel.grant or {}).get("id")
-    if gid and CC.is_superseded(root, gid):
-        print("  grant: %s already revoked" % gid)
-    elif gid:
-        _revoke_release_grant(rel)
+    _revoke_release_grant(rel)
     for wt in (PREP_WT, STAGE_WT, BUILD_WT, PROD_WT):
         path = os.path.join(rel.dir, wt)
         if os.path.lexists(path):

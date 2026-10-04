@@ -7278,15 +7278,16 @@ def check_release_checker(old, new):
         kind="delta", since=SINCE_RELEASE)
     (a, ra), (b, rb) = _rcc_case(old, "shadow"), _rcc_case(new, "shadow")
     row(s, "planning work shadowed by a newer live release grant (lower=better)", a, b,
-        a == 1 and b == 0,
+        b == 0,
         "a planning grant, then a release grant 10 s newer whose scope is release/9.9.9: a "
         "check-grant with no subject (crafting-self-prompting-loops, test-safety-net, "
         "verifier-installer) skips release grants (R44), so the planning grant covers "
-        "(new: %s %s; old: %s %s: the baseline checker picks the newest grant of all, the "
-        "release grant, which asks). Sanity-checked: without the release grant it covers; "
-        "mutation-proven" % (rb.get("status"), rb.get("reason"), ra.get("status"),
-                             ra.get("reason")),
-        kind="delta", since=SINCE_RELEASE)
+        "(new: %s %s). Sanity-checked: without the release grant it covers. The baseline "
+        "checker cannot judge a release grant at all (old: %s %s: it picks the release grant "
+        "and finds it invalid), an honest 1 that is not shadowing, so this is a guard, never "
+        "a win; mutation-proven" % (rb.get("status"), rb.get("reason"), ra.get("status"),
+                                    ra.get("reason")),
+        kind="guard", since=SINCE_RELEASE)
 
 
 def main():
