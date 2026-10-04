@@ -123,5 +123,51 @@ class StateTests(unittest.TestCase):
         res = RL.run_cmd([sys.executable, "-c", "import time;time.sleep(30)"], tempfile.mkdtemp(), 0.5)
         self.assertTrue(res["timed_out"])
 
+
+class EvidenceCoreIdentityTests(unittest.TestCase):
+    """#10: release.py copies factory-conductor's evidence predicate. The record checks are
+    meant to match exactly: _inside, _load_record, _check_record and EVIDENCE_SCHEMA are the
+    same code (AST equal, docstrings aside). The intended differences are documented, not
+    tested for identity: evidence_verdict judges EVERY feature the verify skill maps at the
+    release commit and refuses the release driver as verifier (D11), and feature_map_at
+    takes (root, skill, sha) and reads git with release.py's own helpers instead of the
+    conductor's run state. Skipped where factory-conductor is not installed beside it."""
+
+    SHARED = ("_inside", "_load_record", "_check_record", "EVIDENCE_SCHEMA")
+
+    @staticmethod
+    def _defs(path):
+        import ast
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        out = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    node.body = body[1:]
+                out[node.name] = ast.dump(node)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        out[t.id] = ast.dump(node.value)
+        return out
+
+    def test_the_shared_record_checks_are_the_conductors(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        conductor = os.path.join(os.path.dirname(os.path.dirname(here)), "factory-conductor",
+                                 "assets", "conductor.py")
+        if not os.path.isfile(conductor):
+            self.skipTest("factory-conductor is not installed beside release-conductor")
+        ours, theirs = self._defs(os.path.join(here, "release.py")), self._defs(conductor)
+        for name in self.SHARED:
+            with self.subTest(name=name):
+                self.assertIn(name, ours)
+                self.assertEqual(ours[name], theirs.get(name),
+                                 "%s differs from conductor.py's: keep the copies in step" % name)
+
+
 if __name__ == "__main__":
     unittest.main()
