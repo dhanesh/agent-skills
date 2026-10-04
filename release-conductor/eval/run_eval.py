@@ -90,7 +90,8 @@ def full_release_arm():
     rc3, out3 = p.cmd("deploy", "--approved-by", "Dana")
     stage_ok = (rc1 == 3 and "STOP: evidence-reject evidence-stale-sha" in out1
                 and rc2 == 3 and "STOP: evidence-reject driver-is-verifier" in out2
-                and rc3 == 2 and "refused: not-staged" in out3)
+                and rc3 == 2 and "refused: not-staged" in out3
+                and p.lines("staging") == [])
     p.record(commit)  # now an independent verifier's records at the release commit
     rc, out = p.cmd("stage", "--evidence", "--verifier", E.VERIFIER)
     E.need(rc == 0 and "STAGE: 1.2.0 pass %s" % commit in out.splitlines(), "stage: " + out)
@@ -117,6 +118,13 @@ def full_release_arm():
           and p.rel().status == "awaiting_deploy" and p.rel().approved_by is None
           and "(target 1.1.0 -, from probe)" in out,
           "rc=%s status=%s prod=%r" % (rc, p.rel().status, p.lines("production")))
+    # R42: a yes binds only to a summary a human saw; the unattended display did not count
+    rcy, outy = p.cmd("deploy", "--approved-by", "Dana")
+    check("NEGATIVE: a yes after an unattended summary waits and runs nothing (no human saw "
+          "that summary)",
+          rcy == 3 and "STOP: waiting-human" in outy.splitlines()
+          and "has not seen this summary" in outy and p.lines("production") == [],
+          "rc=%s prod=%r" % (rcy, p.lines("production")))
     rc, out = p.cmd("deploy", "--approved-by", "Dana")
     deployed = rc == 0 and p.lines("production") == ["1.2.0 %s" % commit]
     checks_before = p.lines("check")
@@ -240,6 +248,7 @@ def ci_tag_arm():
     held = rel.tag_deploys is True and rel.stage.get("tag") == "held" and p.tag() is None
     rc, out = p.cmd("deploy", "--unattended", "--approved-by", "Dana")
     waited = rc == 3 and "STOP: waiting-human" in out.splitlines() and p.tag() is None
+    p.cmd("deploy")  # R42: the summary the human says yes to
     rc2, _ = p.cmd("deploy", "--approved-by", "Dana")
     check("NEGATIVE: a tag push asks when CI runs on tags: stage holds it, check-grant "
           "answers ASK ci-tag, and only the production yes pushes it",

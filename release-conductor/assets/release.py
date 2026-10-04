@@ -99,7 +99,7 @@ RECIPE_PATH = ".release/recipe.json"
 
 STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deploy",
           "deploying", "deployed", "verified", "prod_failed", "rolling_back",
-          "rolled_back", "outcome_unknown")
+          "rolled_back", "outcome_unknown", "abandoned")
 
 # A release's fields besides `status` (its own, first, argument) that set_status may
 # write; base_commit is fixed at Release.new() and never passed to set_status.
@@ -118,10 +118,14 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # prod: verify-prod's local record ({"probe", "health", "smoke", "failure"}, with output
 # tails -- local only); rollback: the rollback's ({"approved_by", "argv", "target", "rc",
 # "out_tail", "err_tail", "timed_out", "probe"}); result: the release-result/v1 envelope
-# written at the end ({"id", "path", "sha256", "outcome"}).
+# written at the end ({"id", "path", "sha256", "outcome"}). summary: the production
+# summary deploy or rollback last printed (R42), {"for": "deploy"|"rollback", "sha256",
+# "shown_to_human"}; a yes binds only to a summary shown to a human whose digest still
+# matches, and running the command consumes it (None). abandoned: `abandon`'s record
+# ({"approved_by", "reason", "was", "at"}, R40).
 RELEASE_FIELDS = ("release_commit", "recipe_sha", "artifact_sha", "rollback_target",
                   "approved_by", "evidence", "driver", "bump", "grant", "prep", "stage",
-                  "tag_deploys", "prod", "rollback", "result")
+                  "tag_deploys", "prod", "rollback", "result", "summary", "abandoned")
 
 TAIL = 2000  # a run_cmd output tail, the same size conductor.py's _tail uses
 
@@ -493,6 +497,8 @@ class Release:
         self.prod = data.get("prod")
         self.rollback = data.get("rollback")
         self.result = data.get("result")
+        self.summary = data.get("summary")
+        self.abandoned = data.get("abandoned")
 
     @property
     def dir(self):
@@ -540,7 +546,8 @@ class Release:
                 "evidence": self.evidence, "driver": self.driver, "bump": self.bump,
                 "grant": self.grant, "prep": self.prep, "stage": self.stage,
                 "tag_deploys": self.tag_deploys, "prod": self.prod,
-                "rollback": self.rollback, "result": self.result}
+                "rollback": self.rollback, "result": self.result,
+                "summary": self.summary, "abandoned": self.abandoned}
 
     def save(self):
         """Write state.json atomically: a temp file in self.dir, then os.replace,
@@ -623,7 +630,16 @@ INTENT_FILE = "intent.json"
 PREP_WT = "wt-prep"
 CHANGELOG = "CHANGELOG.md"  # R11: at the repo root, a new section on top, created if absent
 # R10: a release in any other status (or one with no readable state) is unfinished.
-FINISHED = frozenset({"verified", "rolled_back", "stage_failed"})
+# abandoned (R40): a human ended it with `abandon`; production, if touched, is theirs.
+FINISHED = frozenset({"verified", "rolled_back", "stage_failed", "abandoned"})
+# R43: a factory-conductor re-entry agent carries this variable. Set at all (even empty),
+# the run is unattended: deploy and rollback wait, abandon and stage --approved-by refuse.
+ENV_REENTRY = "FACTORY_CONDUCTOR_REENTRY"
+
+
+def _reentry():
+    """True when this process runs under a factory-conductor re-entry (R43)."""
+    return ENV_REENTRY in os.environ
 # The classes a release grant grants (D7, spec section 2); a --policy-file may only decline.
 RELEASE_GRANT_CLASSES = ("local_reversible", "push_branch", "open_pr", "deploy_staging",
                          "push_tag")
@@ -1206,6 +1222,7 @@ def _prep_locked(root, args):
         exists = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % c["branch"])
         if exists is not None and exists.returncode == 0:
             raise Refused("branch %s already exists" % c["branch"])
+        _archive_abandoned(root, c["version"])
     except Refused as e:
         print("RELEASE: refused: %s" % e)
         return 2
@@ -1273,6 +1290,29 @@ def _prep_locked(root, args):
     rel.save()
     rel.log("prepped", commit=commit, branch=branch)
     return _prep_remote(root, rel, c["push_cmd"], c["pr_cmd"])
+
+
+def _archive_abandoned(root, version):
+    """Make room for a new prep of `version` (R40): an earlier, abandoned release of the
+    same version (a release PR the human closed) is renamed to
+    <version>.abandoned-<UTC time>, so its record survives beside the new one. Any other
+    existing directory for the version refuses before prep writes anything -- prep's own
+    undo would otherwise delete another release's record."""
+    d = os.path.join(_releases_dir(root), version)
+    if not os.path.lexists(d):
+        return
+    try:
+        status = Release.load(root, version).status
+    except (OSError, ValueError, KeyError, TypeError):
+        status = None
+    if status != "abandoned":
+        raise Refused("release directory %s already exists (status %s); a human must look "
+                      "at it" % (d, status or "unreadable"))
+    dest = "%s.abandoned-%s" % (d, _now().strftime("%Y%m%dT%H%M%SZ"))
+    if os.path.lexists(dest):
+        raise Refused("cannot archive %s: %s exists" % (d, dest))
+    os.rename(d, dest)
+    print("RELEASE: archived the abandoned release %s at %s" % (version, dest))
 
 
 def _prep_resume(root, c):
@@ -1621,11 +1661,41 @@ def _head(wt):
     return r.stdout.strip() if r is not None and r.returncode == 0 else None
 
 
-def _stage_gate(root, rel, action, wt, commit):
+# R41: the classes whose declined gate (gate_policy "ask") the human may answer in the
+# session with `stage --approved-by`. Only these, and only the checker's "gate-ask".
+STAGE_YES_CLASSES = ("deploy_staging", "push_tag")
+NEXT_STAGE_YES = "ask the human, then re-run stage --approved-by <name>"
+
+
+def _floor_after_gate(action, wt):
+    """The checker's floors that check_grant judges only AFTER the gate policy (so a
+    gate-ask answer never reached them): for push_tag, CI that may run on the tag
+    (ci-tag); for deploy_staging and push_tag, CI configuration among the commits since
+    the default branch (ci-config). Mirrors check_grant exactly, on the same probe (the
+    stage worktree). The reason that stops, or None."""
+    if action == "push_tag":
+        tagged = CC.ci_tag_triggers(wt, "HEAD")
+        if tagged is None or tagged:
+            return "ci-tag"
+    if CC.in_git_work_tree(wt) and action in STAGE_YES_CLASSES:
+        changed = CC.changed_since_default(wt, CC.detect_default_branches(wt))
+        if changed is None or any(CC.is_ci_config(c) for c in changed):
+            return "ci-config"
+    return None
+
+
+def _stage_gate(root, rel, action, wt, commit, yes=None):
     """check-grant for `action` with the grant prep wrote (R18): subject the recipe,
     worktree the stage worktree, whose HEAD must still be the release commit (a verifier
     working there must not move what the branch, ci-config and tag probes judge).
-    None on COVERED; else the exit code (3) after printing GATE:/STOP:/NEXT:."""
+    None on COVERED; else the exit code (3) after printing GATE:/STOP:/NEXT:.
+
+    R41: `yes` (the human's name from `stage --approved-by`) answers an ASK only when the
+    reason is "gate-ask" (the release grant declined the class) and the class is
+    deploy_staging or push_tag; the floors check_grant would have judged after the gate
+    are then judged here (_floor_after_gate), so the yes never skips ci-tag or ci-config.
+    Any other reason (revoked, superseded, expired, stale, branch, worktree, tracked,
+    default-branch, ci-tag, ci-config, ...) stops as before, whatever the yes."""
     head = _head(wt)
     if head != commit:
         print("STOP: head-moved: the stage worktree %s is at %s, not the release commit %s"
@@ -1634,6 +1704,16 @@ def _stage_gate(root, rel, action, wt, commit):
         rel.log("stop", reason="head-moved", head=head, commit=commit)
         return 3
     rep = _gate(root, action, wt, rel.grant["id"])
+    if rep["status"] == "ASK" and rep["reason"] == "gate-ask" and action in STAGE_YES_CLASSES:
+        if not yes:
+            return _gate_stop(rel, action, rep, NEXT_STAGE_YES)
+        floor = _floor_after_gate(action, wt)
+        if floor:
+            return _gate_stop(rel, action, dict(rep, reason=floor), RESUME_STAGE)
+        approval = {"name": yes, "status": "CLAIMED"}
+        print("GATE: %s ASK gate-ask answered by the human's yes: %s (CLAIMED)" % (action, yes))
+        rel.log("gate_yes", action=action, approved_by=approval)
+        return None
     if rep["status"] != "COVERED":
         return _gate_stop(rel, action, rep, RESUME_STAGE)
     print("GATE: %s COVERED" % action)
@@ -1781,6 +1861,19 @@ def cmd_stage(args):
     if not re.match(REMOTE_NAME_RE, args.remote or ""):
         print("RELEASE: refused: --remote %r must be a remote name" % args.remote)
         return 2
+    if args.approved_by is not None:
+        # R41/R43: the yes to a declined staging deploy or tag push is a human's, given in
+        # the session; an unattended run (or a factory re-entry) cannot carry one.
+        if args.unattended or _reentry():
+            print("RELEASE: refused: --approved-by is the human's yes in this session; "
+                  "an unattended run%s cannot carry one"
+                  % (" (%s is set)" % ENV_REENTRY if _reentry() else ""))
+            return 2
+        try:
+            args.approved_by = _clean_name(args.approved_by, "--approved-by")
+        except Refused as e:
+            print("RELEASE: refused: %s" % e)
+            return 2
     try:
         with run_lock(root):
             return _stage_locked(root, args)
@@ -2027,7 +2120,7 @@ def _stage_steps(root, rel, recipe, commit, args):
                           "run deploy_prod or rollback; revoke them (check-grant "
                           "revoke-grant --id) or narrow their --allowedTools"
                           % ", ".join(exposed))
-        rc = _stage_gate(root, rel, "deploy_staging", wt, commit)
+        rc = _stage_gate(root, rel, "deploy_staging", wt, commit, yes=args.approved_by)
         if rc is not None:
             return rc
         argv = expand(recipe["deploy_staging"], values)
@@ -2070,7 +2163,7 @@ def _stage_steps(root, rel, recipe, commit, args):
         st["checks_done"] = True
         rel.save()
     if not st.get("tag"):
-        rc = _stage_tag(root, rel, wt, commit, args.remote)
+        rc = _stage_tag(root, rel, wt, commit, args.remote, yes=args.approved_by)
         if rc is not None:
             return rc
     rel.set_status("staged", stage=st)
@@ -2081,7 +2174,7 @@ def _stage_steps(root, rel, recipe, commit, args):
     return 0
 
 
-def _stage_tag(root, rel, wt, commit, remote):
+def _stage_tag(root, rel, wt, commit, remote, yes=None):
     """Push v<version> on the release commit, or hold it (D6). When the CI config at the
     commit may run on a tag -- or git cannot say (R1) -- the tag push is the production
     deploy: no gate is asked, no tag is made (not even locally, where a later `git push
@@ -2099,7 +2192,7 @@ def _stage_tag(root, rel, wt, commit, remote):
               % (rel.version, tag))
         return None
     rel.tag_deploys = False
-    rc = _stage_gate(root, rel, "push_tag", wt, commit)
+    rc = _stage_gate(root, rel, "push_tag", wt, commit, yes=yes)
     if rc is not None:
         return rc
     argv = ["git", "push", remote, "%s:refs/tags/%s" % (commit, tag)]
@@ -2477,6 +2570,9 @@ def _deploy_locked(root, args, name):
     if rep["status"] == "COVERED":
         return _deploy_refuse(rel, "deploy-covered", "check-grant answered COVERED for "
                               "deploy, which no grant may cover (A8): a checker bug")
+    stopped = _grant_stopped(rep)
+    if stopped:
+        return _deploy_refuse(rel, *stopped)
     exposed = exposing_grants(root, recipe, v, commit, _tag_push_spellings(
         args.remote, commit, v) if rel.tag_deploys else None)
     if exposed:
@@ -2499,20 +2595,31 @@ def _deploy_locked(root, args, name):
     changed = _build_changed(rel, build_dir)
     if changed:
         return _deploy_refuse(rel, *changed)
-    seen = rel.rollback_target if rel.status == "awaiting_deploy" else None
-    if args.unattended or name is None or seen != target:
+    # R42: the yes binds to the WHOLE summary the human saw (deploy argv incl. the remote,
+    # rollback argv, target, commit, recipe and artifact sha), and only to one shown by an
+    # attended run: an unattended or re-entry display records shown_to_human false.
+    digest = _summary_digest("deploy", version=v, commit=commit, recipe_sha=at_commit,
+                             artifact_sha=rel.artifact_sha, deploy=argv,
+                             tag_deploys=bool(rel.tag_deploys),
+                             rollback=_rollback_shown(recipe, target), target=target)
+    unattended = bool(args.unattended) or _reentry()
+    prior = rel.summary if rel.status == "awaiting_deploy" else None
+    if unattended or name is None or not _summary_seen(prior, "deploy", digest):
         _deploy_summary(rel, recipe, argv, target, None)
         why = "waiting"
-        if not (args.unattended or name is None):
+        if _reentry():
+            print("  note: %s is set: a re-entry run is unattended, so it shows and waits"
+                  % ENV_REENTRY)
+        elif not unattended and name is not None:
             # a yes given to another summary (or to none) is no yes for this one
-            why = "target-changed" if seen is not None else "summary-unseen"
-            print("  note: %s; show the human this summary and ask again"
-                  % ("the rollback target changed since the summary the human saw"
-                     if seen is not None else "the human has not seen this summary yet"))
-        rel.set_status("awaiting_deploy", rollback_target=target)
+            why, note = _why_unseen(prior, "deploy", rel.rollback_target, target)
+            print("  note: %s; show the human this summary and ask again" % note)
+        rel.set_status("awaiting_deploy", rollback_target=target,
+                       summary={"for": "deploy", "sha256": digest,
+                                "shown_to_human": not unattended})
         rel.save()
-        rel.log("awaiting_deploy", unattended=bool(args.unattended), reason=why,
-                rollback_target=target)
+        rel.log("awaiting_deploy", unattended=unattended, reason=why, rollback_target=target,
+                summary=digest)
         print("STOP: waiting-human")
         print("NEXT: run deploy with the human")
         return 3
@@ -2522,7 +2629,7 @@ def _deploy_locked(root, args, name):
     if noop:
         print("  note: %s is already on %s at %s: the push will be a no-op and CI may "
               "not run again" % (tag, args.remote, commit[:12]))
-    rel.set_status("deploying", approved_by=approval, rollback_target=target)
+    rel.set_status("deploying", approved_by=approval, rollback_target=target, summary=None)
     rel.save()
     rel.log("deploying", approved_by=approval, rollback_target=target, command=argv)
     if rel.tag_deploys:
@@ -2563,6 +2670,53 @@ def _deploy_locked(root, args, name):
                                         "not run again)" % (tag, args.remote) if noop else ""))
     print("NEXT: verify-prod")
     return 0
+
+
+def _summary_digest(kind, **fields):
+    """sha256 of a production summary's content (R42): what a human's yes binds to."""
+    doc = dict(fields, kind=kind)
+    return hashlib.sha256(json.dumps(doc, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _summary_seen(summary, kind, digest):
+    """True only when `summary` (rel.summary) is a `kind` summary with this digest that
+    an attended run showed to the human (R42)."""
+    return (isinstance(summary, dict) and summary.get("for") == kind
+            and summary.get("sha256") == digest and summary.get("shown_to_human") is True)
+
+
+def _why_unseen(prior, kind, prior_target, target):
+    """(log reason, note) for a yes that does not bind: why the summary must be shown again."""
+    if isinstance(prior, dict) and prior.get("for") == kind and prior.get("shown_to_human"):
+        if prior_target != target:
+            return "target-changed", ("the rollback target changed since the summary the "
+                                      "human saw")
+        return "summary-changed", "the summary changed since the human saw it"
+    return "summary-unseen", "the human has not seen this summary yet"
+
+
+def _grant_stopped(rep):
+    """(reason, detail) when the deploy gate's answer shows the release grant is no longer
+    live -- revoked or superseded (the kill switch) or unreadable -- else None (#11).
+    Production stays the human's call either way; a release whose grant was revoked
+    deploys and rolls back no more, and ends with `abandon`."""
+    if rep["status"] == "INVALID":
+        return ("grant-unreadable", "the release grant cannot be read; a human must look "
+                "at it (end the release with abandon)")
+    if rep["reason"] in ("revoked", "superseded"):
+        return ("grant-revoked", "the release grant %s is %s: the kill switch stopped this "
+                "release; end it with the human (abandon)" % (rep["id"], rep["reason"]))
+    return None
+
+
+def _rollback_shown(recipe, target):
+    """The rollback argv a deploy summary shows for `target` (expanded with what the target
+    carries), or None when there is no target."""
+    if not target or target.get("source") in (None, "none"):
+        return None
+    tv = {"env": PROD_ENV}
+    tv.update({k: target[k] for k in ("version", "commit") if target.get(k)})
+    return expand(recipe["rollback"], tv)
 
 
 def _build_changed(rel, build_dir):
@@ -2617,10 +2771,8 @@ def _deploy_summary(rel, recipe, argv, target, approval):
     elif target["source"] == "none":
         print("  rollback: no rollback target: no previous release, nothing to roll back to")
     else:
-        tv = {"env": PROD_ENV}
-        tv.update({k: target[k] for k in ("version", "commit") if target.get(k)})
         print("  rollback: %s (target %s %s, from %s)"
-              % (shlex.join(expand(recipe["rollback"], tv)), target.get("version") or "-",
+              % (shlex.join(_rollback_shown(recipe, target)), target.get("version") or "-",
                  target.get("commit") or "-", target["source"]))
     if approval:
         print("  approval: %s (%s)" % (approval["name"], approval["status"]))
@@ -3029,6 +3181,9 @@ def _rollback_locked(root, args, name):
     if rep["status"] == "COVERED":
         return _deploy_refuse(rel, "deploy-covered", "check-grant answered COVERED for "
                               "deploy, which no grant may cover (A8): a checker bug")
+    stopped = _grant_stopped(rep)
+    if stopped:
+        return _deploy_refuse(rel, *stopped)
     exposed = exposing_grants(root, recipe, v, rel.release_commit, [argv])
     if exposed:
         return _deploy_refuse(rel, "allowlist-exposes-prod", "live grant(s) %s let a "
@@ -3043,15 +3198,29 @@ def _rollback_locked(root, args, name):
     print("ROLLBACK: %s to %s %s (from %s)" % (v, target.get("version") or "-",
                                                target.get("commit") or "-", target["source"]))
     print("  rollback: %s" % shlex.join(argv))
-    if args.unattended or name is None:
-        rel.log("rollback_waiting", unattended=bool(args.unattended))
+    # R42: as for deploy, the yes binds to this rollback summary only when an attended run
+    # showed it to the human and nothing in it has changed since.
+    digest = _summary_digest("rollback", version=v, commit=rel.release_commit,
+                             recipe_sha=rel.recipe_sha, rollback=argv, target=dict(target))
+    unattended = bool(args.unattended) or _reentry()
+    if unattended or name is None or not _summary_seen(rel.summary, "rollback", digest):
+        why = "waiting"
+        if _reentry():
+            print("  note: %s is set: a re-entry run is unattended, so it shows and waits"
+                  % ENV_REENTRY)
+        elif not unattended and name is not None:
+            why, note = _why_unseen(rel.summary, "rollback", target, target)
+            print("  note: %s; show the human this rollback and ask again" % note)
+        rel.summary = {"for": "rollback", "sha256": digest, "shown_to_human": not unattended}
+        rel.save()
+        rel.log("rollback_waiting", unattended=unattended, reason=why, summary=digest)
         print("STOP: waiting-human")
         print("NEXT: run rollback with the human")
         return 3
     approval = {"name": name, "status": "CLAIMED"}
     record = {"approved_by": approval, "argv": argv, "target": dict(target), "rc": None,
               "probe": None}
-    rel.set_status("rolling_back", rollback=record)
+    rel.set_status("rolling_back", rollback=record, summary=None)
     rel.save()  # before the command runs: a crash leaves rolling_back, never a re-run
     rel.log("rolling_back", approved_by=approval, target=dict(target), command=argv)
     res = run_cmd(argv, cwd, CMD_TIMEOUT)
@@ -3091,6 +3260,108 @@ def _rollback_unknown(rel, detail):
     print("STOP: outcome-unknown: %s; it is never re-run by itself" % detail)
     print("NEXT: %s" % NEXT_ROLLBACK_UNKNOWN)
     return 3
+
+
+# ── abandon (final review, ruling R40) ─────────────────────────────────────────────
+# Production-facing statuses: abandon then says production is the human's to handle.
+PROD_TOUCHED = ("deployed", "prod_failed", "outcome_unknown")
+
+
+def cmd_abandon(args):
+    """End an unfinished release that can go nowhere else (R40): human-only, with the
+    human's CLAIMED yes and a reason. Never runs a recipe command and never touches
+    production, the remote or tags. Exit 0 abandoned; 2 refused (unattended, under a
+    factory re-entry, a bad name or reason, no single unfinished release); 3 a crashed
+    deploy or rollback was demoted to outcome_unknown first (re-run abandon once the
+    human has looked at production), or the lock is held."""
+    root = os.path.abspath(args.root)
+    try:
+        if args.unattended or _reentry():
+            raise Refused("abandon is the human's decision, taken in this session; an "
+                          "unattended run%s cannot abandon a release"
+                          % (" (%s is set)" % ENV_REENTRY if _reentry() else ""))
+        name = _clean_name(args.approved_by, "--approved-by")
+        reason = _clean_name(args.reason, "--reason")
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    try:
+        with run_lock(root):
+            return _abandon_locked(root, args.version, name, one_line(reason))
+    except Locked:
+        print("STOP: locked: another release command holds the run lock")
+        return 3
+
+
+def _abandon_release(root, version):
+    """The unfinished release abandon acts on: `version`, or the single unfinished one."""
+    busy = unfinished_releases(root)
+    if version is not None:
+        busy = [(v, st) for v, st in busy if v == version]
+    if len(busy) != 1:
+        raise Refused("no single unfinished release to abandon%s (unfinished: %s)"
+                      % (" named %s" % version if version else "",
+                         ", ".join("%s (%s)" % (v, st or "no state") for v, st in busy)
+                         or "none"))
+    if busy[0][1] is None:
+        raise Refused("release %s has no readable state; a human must look at it"
+                      % busy[0][0])
+    try:
+        return Release.load(root, busy[0][0])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Refused("cannot load release %s: %s" % (busy[0][0], e))
+
+
+def _abandon_locked(root, version, name, reason):
+    try:
+        rel = _abandon_release(root, version)
+    except Refused as e:
+        print("RELEASE: refused: %s" % e)
+        return 2
+    v = rel.version
+    if rel.status in CRASHED:
+        # A deploy or rollback that died mid-flight: its outcome is unknown and it is never
+        # re-run. Demote it, and stop: the human looks at production before ending it.
+        _demote_crash(rel)
+        print("STOP: outcome-unknown: release %s's last production command never recorded "
+              "its end; production is the human's to handle" % v)
+        print("NEXT: check production by hand; then re-run abandon with the human to end "
+              "the release")
+        return 3
+    was = rel.status
+    if was in PROD_TOUCHED:
+        print("  note: release %s is %s: production may run it, in part or in full; "
+              "production is the human's to handle (abandon changes nothing there)" % (v, was))
+    approval = {"name": name, "status": "CLAIMED"}
+    rel.set_status("abandoned", summary=None,
+                   abandoned={"approved_by": approval, "reason": reason, "was": was,
+                              "at": _rfc3339(_now())})
+    rel.save()
+    rel.log("abandoned", approved_by=approval, reason=reason, was=was)
+    gid = (rel.grant or {}).get("id")
+    if gid and CC.is_superseded(root, gid):
+        print("  grant: %s already revoked" % gid)
+    elif gid:
+        _revoke_release_grant(rel)
+    for wt in (PREP_WT, STAGE_WT, BUILD_WT, PROD_WT):
+        path = os.path.join(rel.dir, wt)
+        if os.path.lexists(path):
+            _git(root, "worktree", "remove", "--force", path)
+            shutil.rmtree(path, ignore_errors=True)
+    _git(root, "worktree", "prune")
+    for branch in ("release/%s" % v, "release/%s-stage" % v):
+        r = _git(root, "rev-parse", "-q", "--verify", "refs/heads/%s" % branch)
+        if r is None or r.returncode != 0:
+            continue
+        gone = _git(root, "branch", "-D", branch)
+        if gone is None or gone.returncode != 0:
+            print("WARNING: could not delete the local branch %s: %s"
+                  % (branch, gone.stderr.strip() if gone else "git not runnable"))
+    print("RELEASE: %s abandoned (was %s)" % (v, was))
+    print("  left for the human: the remote branch release/%s and its pull request, and any "
+          "v%s tag already pushed" % (v, v))
+    print("NEXT: the release is finished; a new prep may start")
+    return 0
 
 
 def cmd_status(args):
@@ -3142,6 +3413,11 @@ def build_parser():
                    help="judge the verifier's evidence for the release commit, then go on")
     p.add_argument("--verifier", help="the independent verifier's id (with --evidence)")
     p.add_argument("--remote", default="origin", help="where the tag is pushed (origin)")
+    p.add_argument("--approved-by", dest="approved_by",
+                   help="the human, present now, who said yes to the staging deploy or tag "
+                   "push the release grant declined (gate-ask only)")
+    p.add_argument("--unattended", action="store_true",
+                   help="no human is present (refuses --approved-by)")
     p = sub.add_parser("deploy", help="the production deploy: only with the human's yes")
     p.add_argument("--root", required=True)
     # Not required: without it the release waits at awaiting_deploy (exit 3), not exit 2.
@@ -3160,6 +3436,15 @@ def build_parser():
                    help="the human, present now, who said yes to THIS rollback")
     p.add_argument("--unattended", action="store_true",
                    help="no human is present: show the rollback, run nothing")
+    p = sub.add_parser("abandon", help="end an unfinished release: only with the human's "
+                       "yes; runs nothing")
+    p.add_argument("--root", required=True)
+    p.add_argument("--approved-by", required=True, dest="approved_by",
+                   help="the human, present now, who decided to end this release")
+    p.add_argument("--reason", required=True, help="why the human ends it (recorded)")
+    p.add_argument("--version", help="the release to abandon (default: the one unfinished)")
+    p.add_argument("--unattended", action="store_true",
+                   help="no human is present: abandon refuses")
     p = sub.add_parser("status", help="print each release's status (read-only)")
     p.add_argument("--root", required=True)
     return ap
@@ -3173,7 +3458,7 @@ def main(argv=None):
         return e.code if isinstance(e.code, int) else 2
     return {"init": cmd_init, "prep": cmd_prep, "stage": cmd_stage, "deploy": cmd_deploy,
             "verify-prod": cmd_verify_prod, "rollback": cmd_rollback,
-            "status": cmd_status}[args.cmd](args)
+            "abandon": cmd_abandon, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":

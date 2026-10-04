@@ -7007,6 +7007,7 @@ elif case == "failed-rollback":
     p.deployed()
     ok(p.cmd("verify-prod"), 3, "verify-prod (smoke fails)")
     E.need(p.rel().status == "prod_failed", "not prod_failed")
+    p.cmd("rollback")  # R42: the rollback summary the human says yes to
     ok(p.cmd("rollback", "--approved-by", "Dana"), 3, "rollback (fails)")
     E.need(p.rel().status == "outcome_unknown", "the failed rollback is not outcome_unknown")
     with open(os.path.join(p.www, "production", "flaky"), "w") as f:

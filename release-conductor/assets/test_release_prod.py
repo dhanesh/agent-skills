@@ -120,12 +120,17 @@ class ProdBase(TD.DeployBase):
         with mock.patch.object(RL, "PROBE_INTERVAL", 0.05):
             return TS.run(["verify-prod", "--root", self.root])
 
-    def rollback(self, *extra, yes="Dana Human"):
+    def rollback(self, *extra, yes="Dana Human", seen=True, reentry=None):
+        """rollback with the human's yes. R42: a yes counts only for the rollback summary
+        the human saw, so by default the helper first runs the waiting rollback that shows
+        it (as the SKILL does); seen=False sends the yes straight away."""
         argv = ["rollback", "--root", self.root]
-        if yes is not None:
-            argv += ["--approved-by", yes]
         with mock.patch.object(RL, "PROBE_INTERVAL", 0.05):
-            return TS.run(argv + list(extra))
+            if yes is not None:
+                if seen and "--unattended" not in extra:
+                    TS.run(argv + list(extra))
+                argv += ["--approved-by", yes]
+            return TS.run(argv + list(extra), reentry=reentry)
 
     def envelopes(self):
         d = CC.envelope_dir(self.root)
@@ -330,6 +335,51 @@ class VerifyFailTests(ProdBase):
         self.assertEqual(self.lines(self.health_marker), [])
 
 
+class RollbackSummaryTests(ProdBase):  # R42, R43, #11
+    def failed(self):
+        self.deployed()
+        self.set_prod("1.3.0\n")
+        self.assertEqual(self.verify()[0], 3)
+        self.assertEqual(self.rel().status, "prod_failed")
+
+    def test_a_yes_to_no_shown_rollback_summary_waits(self):
+        self.failed()
+        rc, out, _ = self.rollback(seen=False)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: waiting-human", out.splitlines())
+        self.assertEqual(self.lines(self.rollback_marker), [])
+        rc, out, err = self.rollback(seen=False)  # the yes to the summary now shown
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.rel().status, "rolled_back")
+
+    def test_an_unattended_or_reentry_display_does_not_bind_a_yes(self):
+        self.failed()
+        self.assertEqual(self.rollback("--unattended", yes=None)[0], 3)
+        rc, out, _ = self.rollback(seen=False, reentry="1")
+        self.assertEqual(rc, 3, out)
+        rc, out, _ = self.rollback(seen=False)
+        self.assertEqual(rc, 3, out)  # only now shown to a human
+        self.assertIn("has not seen this summary", out)
+        self.assertEqual(self.lines(self.rollback_marker), [])
+
+    def test_a_deploy_summary_never_authorises_a_rollback(self):
+        self.failed()
+        rel = self.rel()
+        rel.summary = {"for": "deploy", "sha256": "0" * 64, "shown_to_human": True}
+        rel.save()
+        rc, out, _ = self.rollback(seen=False)
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(self.lines(self.rollback_marker), [])
+
+    def test_rollback_refuses_once_the_release_grant_is_revoked(self):  # #11
+        self.failed()
+        CC.revoke_all(self.root)
+        rc, out, _ = self.rollback()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("grant-revoked", out)
+        self.assertEqual(self.lines(self.rollback_marker), [])
+
+
 class RollbackTests(ProdBase):
     def failed(self):
         root, commit = self.deployed()
@@ -382,9 +432,10 @@ class RollbackTests(ProdBase):
         self.assertEqual(rc, 3, out)
         self.assertEqual(self.rel().status, "outcome_unknown")
         self.assertEqual(len(self.lines(self.rollback_marker)), 1)
-        # a crash mid-rollback is demoted, never re-run, by the next locked command
+        # a crash mid-rollback is demoted, never re-run, by the next locked command (seen=False:
+        # this call IS that next command, not the helper's display run before it)
         self.edit_state(status="rolling_back")
-        rc, out, _ = self.rollback()
+        rc, out, _ = self.rollback(seen=False)
         self.assertEqual(rc, 3, out)
         self.assertIn("STOP: outcome-unknown", out)
         self.assertEqual(self.rel().status, "outcome_unknown")

@@ -33,11 +33,19 @@ def git(root, *args):
                           env=dict(os.environ, **GIT))
 
 
-def run(argv):
-    """(rc, stdout, stderr) of release.main(argv), with the git identity env set."""
+REENTRY = "FACTORY_CONDUCTOR_REENTRY"
+
+
+def run(argv, reentry=None):
+    """(rc, stdout, stderr) of release.main(argv), with the git identity env set and
+    FACTORY_CONDUCTOR_REENTRY removed (so a suite run from a re-entry session cannot flip),
+    or set to `reentry` when given (R43: the run then counts as unattended)."""
     out, err = io.StringIO(), io.StringIO()
     with mock.patch.dict(os.environ, GIT), contextlib.redirect_stdout(out), \
             contextlib.redirect_stderr(err):
+        os.environ.pop(REENTRY, None)
+        if reentry is not None:
+            os.environ[REENTRY] = reentry
         rc = RL.main(argv)
     return rc, out.getvalue(), err.getvalue()
 
@@ -568,27 +576,103 @@ class StagingTests(StageBase):
         self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
                                 "refs/tags/v1.2.0").returncode, 0)
 
-    def test_a_declined_staging_deploy_asks_then_resumes(self):  # R18
+    def test_a_declined_staging_deploy_asks_then_resumes(self):  # R18, R41
         _, commit = self.go(policy={"deploy_staging": "ask"})
         rc, out, _ = self.evidence()
         self.assertEqual(rc, 3)
         self.assertIn("GATE: deploy_staging ASK gate-ask", out)
         self.assertIn("STOP:", out)
+        self.assertIn("NEXT: ask the human, then re-run stage --approved-by <name>",
+                      out.splitlines())
         rel = self.rel()
         self.assertEqual(rel.status, "staging_verify")
         self.assertEqual(rel.evidence["verifier"], VERIFIER)  # kept: not judged again
         self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
-        # the human lifts the decline in the grant itself
-        path = RL._grant_path(self.root, rel.grant["id"])
-        with open(path) as f:
-            st = json.load(f)
-        st["predicate"]["payload"]["gate_policy"]["deploy_staging"] = "grant"
-        with open(path, "w") as f:
-            json.dump(st, f)
-        rc, out, err = self.stage()  # plain stage resumes; no --evidence needed
+        # the human says yes in the session (R41); the grant itself is never edited
+        rc, out, err = self.stage("--approved-by", "Dana Human")  # no --evidence needed
         self.assertEqual(rc, 0, out + err)
         self.assertIn("STAGE: 1.2.0 pass %s" % commit, out)
         self.assertEqual(self.lines(self.build_marker), [commit])  # never rebuilt
+        yes = [e for e in self.rel().events() if e["event"] == "gate_yes"]
+        self.assertEqual([(e["action"], e["approved_by"]) for e in yes],
+                         [("deploy_staging", {"name": "Dana Human", "status": "CLAIMED"})])
+
+    def test_a_declined_tag_push_asks_and_the_human_yes_pushes_it(self):  # R41
+        _, commit = self.go(policy={"push_tag": "ask"})
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: push_tag ASK gate-ask", out)
+        self.assertIn("NEXT: ask the human, then re-run stage --approved-by <name>",
+                      out.splitlines())
+        self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
+                                "refs/tags/v1.2.0").returncode, 0)
+        rc, out, err = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(git(self.bare, "rev-parse", "refs/tags/v1.2.0").stdout.strip(), commit)
+
+    def test_the_yes_never_answers_ci_tag(self):  # R41
+        self.go(policy={"push_tag": "ask"})
+        self.assertEqual(self.evidence()[0], 3)  # gate-ask on push_tag
+        real = RL._gate
+
+        def ci_tag(root, action, wt, grant_id):
+            rep = real(root, action, wt, grant_id)
+            if action == "push_tag":
+                rep = dict(rep, status="ASK", reason="ci-tag")
+            return rep
+        with mock.patch.object(RL, "_gate", side_effect=ci_tag):
+            rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: push_tag ASK ci-tag", out)
+        self.assertNotIn("ask the human, then re-run stage --approved-by", out)
+        self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
+                                "refs/tags/v1.2.0").returncode, 0)
+        self.assertNotIn("gate_yes", [e["event"] for e in self.rel().events()])
+
+    def test_the_yes_still_meets_the_floors_after_the_gate(self):  # R41
+        # check-grant answers gate-ask BEFORE its ci-tag and ci-config floors; a yes to the
+        # gate-ask must not skip them, so stage re-checks them itself
+        self.go(policy={"push_tag": "ask"})
+        self.assertEqual(self.evidence()[0], 3)
+        real = CC.ci_tag_triggers
+        with mock.patch.object(CC, "ci_tag_triggers",
+                               side_effect=lambda r, rev: True if rev == "HEAD" else real(r, rev)):
+            rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("ci-tag", out)
+        self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
+                                "refs/tags/v1.2.0").returncode, 0)
+
+    def test_the_yes_still_meets_the_ci_config_floor(self):  # R41
+        self.go(policy={"deploy_staging": "ask"})
+        self.assertEqual(self.evidence()[0], 3)
+        with mock.patch.object(CC, "changed_since_default",
+                               return_value=[".github/workflows/deploy.yml"]):
+            rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("ci-config", out)
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])  # staging never deployed
+
+    def test_the_yes_never_answers_a_revoked_grant(self):  # R41
+        self.go(policy={"deploy_staging": "ask"})
+        self.assertEqual(self.evidence()[0], 3)
+        CC.revoke_all(self.root)  # the kill switch
+        rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: deploy_staging ASK superseded", out)
+        self.assertIn("NEXT: %s" % RL.RESUME_STAGE, out.splitlines())
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
+
+    def test_the_stage_yes_is_refused_unattended(self):  # R41, R43
+        self.go(policy={"deploy_staging": "ask"})
+        self.assertEqual(self.evidence()[0], 3)
+        for extra, env in ((["--unattended"], None), ([], "2")):
+            with self.subTest(extra=extra, env=env):
+                rc, out, _ = run(["stage", "--root", self.root, "--approved-by", "Dana Human",
+                                  *extra], reentry=env)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("refused", out)
+                self.assertEqual(self.lines(self.probe_file), ["1.1.0"])
 
     def test_a_resume_after_an_interrupted_staging_deploy_says_so(self):  # M1
         _, commit = self.go(policy={"deploy_staging": "ask"})
@@ -597,13 +681,7 @@ class StagingTests(StageBase):
         self.assertFalse(rel.stage.get("deploy_started"))  # never started behind a gate
         rel.stage["deploy_started"] = True  # an attempt that died before recording its end
         rel.save()
-        path = RL._grant_path(self.root, rel.grant["id"])
-        with open(path) as f:
-            st = json.load(f)
-        st["predicate"]["payload"]["gate_policy"]["deploy_staging"] = "grant"
-        with open(path, "w") as f:
-            json.dump(st, f)
-        rc, out, err = self.stage()
+        rc, out, err = self.stage("--approved-by", "Dana Human")  # the human's yes (R41)
         self.assertEqual(rc, 0, out + err)
         self.assertIn("STAGE: 1.2.0 re-running deploy_staging after an interrupted attempt",
                       out)

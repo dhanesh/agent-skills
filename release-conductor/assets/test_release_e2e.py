@@ -55,6 +55,7 @@ def run(argv):
             mock.patch.object(RL, "LOCK_TIMEOUT", 20), \
             mock.patch.object(RL, "REMOTE_TIMEOUT", 30), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        os.environ.pop(RL.ENV_REENTRY, None)  # a re-entry session must not flip the run (R43)
         rc = RL.main(argv)
     return rc, out.getvalue()
 
@@ -335,6 +336,9 @@ class RunLockReleaseTests(unittest.TestCase):  # fix round 2: the eval-stall dia
             with mock.patch.object(RL, "CMD_TIMEOUT", 0.5):
                 p.cmd(*argv)  # waits, a timed-out deploy (outcome_unknown), a refusal
         self.assertEqual(p.rel().status, "outcome_unknown")
+        self.assertTrue(lock_free(p.root))
+        p.cmd("abandon", "--approved-by", "Dana", "--reason", "ends it")  # R40 too
+        self.assertEqual(p.rel().status, "abandoned")
         self.assertTrue(lock_free(p.root))
 
     def test_a_held_lock_is_seen_and_reported_not_waited_out(self):

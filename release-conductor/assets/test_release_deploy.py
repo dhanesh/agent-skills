@@ -355,6 +355,65 @@ class RollbackTargetSeenTests(DeployBase):  # R36
         self.assertEqual(self.rel().rollback_target["version"], "1.1.0")
 
 
+class SummaryBindingTests(DeployBase):  # R42, R43, #11
+    def test_a_summary_shown_only_unattended_does_not_bind_a_yes(self):
+        self.staged()
+        self.set_prod("1.1.0\n")
+        self.assertEqual(self.deploy("--unattended", yes=None)[0], 3)
+        self.assertFalse(self.rel().summary["shown_to_human"])
+        rc, out, _ = self.deploy(seen=False)  # the yes arrives; no human saw that summary
+        self.assertEqual(rc, 3, out)
+        self.assertIn("STOP: waiting-human", out.splitlines())
+        self.assertIn("has not seen this summary", out)
+        self.assertEqual(self.lines(self.prod_marker), [])
+        self.assertTrue(self.rel().summary["shown_to_human"])  # shown now, in this session
+        rc, out, err = self.deploy(seen=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.lines(self.prod_marker)), 1)
+        self.assertIsNone(self.rel().summary)  # consumed by the deploy it bound
+
+    def test_a_reentry_session_counts_as_unattended(self):  # R43
+        self.staged()
+        self.set_prod("1.1.0\n")
+        rc, out, _ = TS.run(["deploy", "--root", self.root], reentry="3")
+        self.assertEqual(rc, 3, out)
+        self.assertFalse(self.rel().summary["shown_to_human"])
+        rc, out, _ = TS.run(["deploy", "--root", self.root, "--approved-by", "Dana Human"],
+                            reentry="")  # set, even empty
+        self.assertEqual(rc, 3, out)
+        self.assertIn("FACTORY_CONDUCTOR_REENTRY", out)
+        self.assertEqual(self.lines(self.prod_marker), [])
+        self.assertIsNone(self.rel().approved_by)
+
+    def test_a_summary_with_another_remote_waits_again(self):  # R42: tag mode
+        _, commit = self.staged(ci="on:\n  push:\n    tags: ['v*']\n")
+        other = tmpdir()
+        subprocess.run(["git", "init", "-q", "--bare", other], check=True)
+        TS.git(self.root, "remote", "add", "other", other)
+        self.assertEqual(self.deploy(yes=None)[0], 3)  # the human saw: push to origin
+        rc, out, _ = self.deploy("--remote", "other", seen=False)
+        self.assertEqual(rc, 3, out)
+        self.assertIn("the summary changed since the human saw it", out)
+        self.assertIn("other", out)
+        for bare in (self.bare, other):
+            r = TS.git(bare, "rev-parse", "-q", "--verify", "refs/tags/v1.2.0")
+            self.assertNotEqual(r.returncode, 0)
+        rc, out, err = self.deploy("--remote", "other", seen=False)  # the yes to that one
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(TS.git(other, "rev-parse", "refs/tags/v1.2.0").stdout.strip(), commit)
+
+    def test_deploy_refuses_once_the_release_grant_is_revoked(self):  # #11
+        self.staged()
+        self.set_prod("1.1.0\n")
+        self.assertEqual(self.deploy(yes=None)[0], 3)  # shown, waiting
+        CC.revoke_all(self.root)  # the kill switch
+        for yes in (None, "Dana Human"):
+            with self.subTest(yes=yes):
+                rc, out, _ = self.deploy(yes=yes, seen=False)
+                self.assert_refused(rc, out, "grant-revoked", status="awaiting_deploy")
+                self.assertNotIn("waiting-human", out)
+
+
 class RefusalTests(DeployBase):
     def test_a_release_not_yet_staged_is_refused(self):
         self.make()
