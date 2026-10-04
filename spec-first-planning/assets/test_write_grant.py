@@ -588,6 +588,16 @@ class AllowlistMatchTests(unittest.TestCase):
         self.assertFalse(write_grant.allowlist_matches("BashOutput,Read", argv))
         self.assertFalse(write_grant.allowlist_matches("Bash(git log (x) *)", argv))
 
+    def test_a_rule_running_on_after_its_parentheses_close_fails_closed(self):  # R45c
+        argv = ["npx", "vercel", "deploy", "--prod"]
+        for rules in ("Bash(a)Bash(npx *)", "Read,Bash(git *)Bash(npx *)", "Bash(git *)x",
+                      "Bash(a)(npx *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(write_grant.allowlist_matches(rules, argv))
+        # separated rules are still read rule by rule
+        self.assertFalse(write_grant.allowlist_matches("Bash(a),Bash(git *)", argv))
+        self.assertFalse(write_grant.allowlist_matches("Bash(a) Bash(git *)", argv))
+
     def test_agent_cmd_allowlist_reads_every_spelling(self):
         P = self.PROD
         for cmd in ([CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(vercel *)"],
@@ -653,6 +663,33 @@ class TestProductionAllowlistRefusal(WriteGrantBase):
         st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
         self.assertEqual(st["predicate"]["payload"]["reentry"]["agent_cmd"],
                          answers["reentry"]["agent_cmd"])
+
+    def test_refused_when_allowlist_reaches_release_py_itself(self):  # R43
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        for rules in ("Read,Bash(python3 *)", "Bash(python3 */release.py *)",
+                      "Bash(python3 */release.py deploy:*)", "Bash(python3 release.py *)",
+                      "Bash(python3 * abandon *)",
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+            with self.subTest(rules=rules):
+                answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
+                with self.assertRaises(write_grant.GrantRefused):
+                    write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel,
+                                            answers, "Dana")
+        # a conductor-only python rule (the documented example) is not release.py
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(python3 /x/factory-conductor/assets/conductor.py *)"])
+        write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
+    def test_the_installed_release_py_path_is_checked_when_present(self):  # R43
+        paths = write_grant._release_py_paths()
+        here = os.path.join(os.path.dirname(os.path.dirname(HERE)), "release-conductor",
+                            "assets", "release.py")
+        self.assertEqual(paths, [here] if os.path.isfile(here) else [])
+        argvs = write_grant.release_tool_argvs(paths)
+        for cmd in ("deploy", "rollback", "abandon"):
+            self.assertIn(["python3", "release.py", cmd], argvs)
+            if paths:
+                self.assertIn(["python3", here, cmd], argvs)
 
     def test_no_recipe_means_no_check(self):
         answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash"])
@@ -834,6 +871,47 @@ class TestGitExclude(WriteGrantBase):
         r = self._run()
         self.assertFalse(os.path.exists(os.path.join(self.root, ".git")))
         self.assertNotIn("kept out of commits", r.stdout)
+
+class MatcherIdentityTests(unittest.TestCase):
+    """#10: the matcher (and R43's release.py argv list) is copied from release-conductor's
+    release.py, because skills do not import each other. When release.py is in this repo,
+    each copied function is the same code (AST equal, docstrings aside); skipped where
+    release-conductor is not installed beside this skill."""
+
+    NAMES = ("_split_rules", "allowlist_matches", "agent_cmd_exposes", "release_tool_argvs",
+             "ALLOWED_TOOLS_FLAGS", "RELEASE_TOOL_PATHS", "RELEASE_PROD_COMMANDS")
+
+    @staticmethod
+    def _defs(path):
+        import ast
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        out = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    node.body = body[1:]  # docstrings differ by design (who copies whom)
+                out[node.name] = ast.dump(node)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        out[t.id] = ast.dump(node.value)
+        return out
+
+    def test_the_copied_matcher_is_the_same_code_as_release_py(self):
+        release = os.path.join(os.path.dirname(os.path.dirname(HERE)), "release-conductor",
+                               "assets", "release.py")
+        if not os.path.isfile(release):
+            self.skipTest("release-conductor is not installed beside spec-first-planning")
+        ours, theirs = self._defs(_SCRIPT), self._defs(release)
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, ours)
+                self.assertEqual(ours[name], theirs.get(name),
+                                 "%s differs from release.py's: keep the copies in step" % name)
 
 
 if __name__ == "__main__":

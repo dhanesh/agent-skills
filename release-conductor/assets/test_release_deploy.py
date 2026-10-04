@@ -108,6 +108,16 @@ class AllowlistMatchTests(unittest.TestCase):
         self.assertFalse(RL.allowlist_matches("BashOutput,Read", argv))
         self.assertFalse(RL.allowlist_matches("Bash(git log (x) *)", argv))
 
+    def test_a_rule_running_on_after_its_parentheses_close_fails_closed(self):  # R45c
+        argv = ["npx", "vercel", "deploy", "--prod"]
+        for rules in ("Bash(a)Bash(npx *)", "Read,Bash(git *)Bash(npx *)", "Bash(git *)x",
+                      "Bash(a)(npx *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(RL.allowlist_matches(rules, argv))
+        # separated rules are still read rule by rule
+        self.assertFalse(RL.allowlist_matches("Bash(a),Bash(git *)", argv))
+        self.assertFalse(RL.allowlist_matches("Bash(a) Bash(git *)", argv))
+
     def test_agent_cmd_allowlist_reads_every_spelling(self):
         P = self.PROD
         for cmd in ([CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(vercel *)"],
@@ -405,6 +415,21 @@ class RefusalTests(DeployBase):
         rc, out, err = self.deploy()
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(self.rel().status, "deployed")
+
+    def test_an_allowlist_reaching_release_py_itself_is_refused(self):  # R43
+        self.staged()
+        here = os.path.abspath(RL.__file__)
+        for rules in ("Bash(python3 */release.py *)", "Bash(python3 %s deploy:*)" % here,
+                      "Bash(python3 release.py *)", "Read,Bash(python3 * abandon *)",
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+            with self.subTest(rules=rules):
+                gid = plant_grant(self.root, rules)
+                self.assert_refused(*self.deploy()[:2], "allowlist-exposes-prod")
+                CC.revoke_grant(self.root, gid)
+        # a python rule for another tool (factory-conductor's conductor.py) is not release.py
+        plant_grant(self.root, "Bash(python3 /x/factory-conductor/assets/conductor.py *)")
+        rc, out, err = self.deploy()
+        self.assertEqual(rc, 0, out + err)
 
     def test_a_revoked_exposing_grant_does_not_count(self):
         self.staged()

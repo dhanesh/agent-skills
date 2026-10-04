@@ -192,27 +192,32 @@ ALLOWED_TOOLS_FLAGS = ("--allowedTools", "--allowed-tools")
 
 
 def _split_rules(allowed_tools_str):
-    """(rules, balanced) for an --allowedTools value: split on commas AND whitespace
+    """(rules, well_formed) for an --allowedTools value: split on commas AND whitespace
     outside parentheses (Claude Code accepts a comma- or space-separated list; a
     Bash(...) glob may itself carry either), each rule stripped, empties dropped.
-    balanced is False when a `)` closes nothing or a `(` is never closed -- then the
-    split cannot be trusted (a stray `(` swallows every rule after it)."""
-    rules, depth, cur, balanced = [], 0, [], True
+    well_formed is False when a `)` closes nothing, a `(` is never closed, or a rule goes
+    on after its parentheses close (`Bash(a)Bash(npx *)`, R45c) -- then the split cannot
+    be trusted (a stray `(` swallows every rule after it, and a run-on rule hides the
+    second glob inside the first one's parentheses)."""
+    rules, depth, cur, well_formed, closed = [], 0, [], True, False
     for ch in allowed_tools_str or "":
+        if (ch == "," or ch.isspace()) and depth == 0:
+            rules.append("".join(cur))
+            cur, closed = [], False
+            continue
+        if closed:
+            well_formed = False  # text after the rule's parentheses closed
         if ch == "(":
             depth += 1
         elif ch == ")":
             if depth:
                 depth -= 1
+                closed = depth == 0
             else:
-                balanced = False
-        if (ch == "," or ch.isspace()) and depth == 0:
-            rules.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
+                well_formed = False
+        cur.append(ch)
     rules.append("".join(cur))
-    return [r.strip() for r in rules if r.strip()], balanced and depth == 0
+    return [r.strip() for r in rules if r.strip()], well_formed and depth == 0
 
 
 def allowlist_matches(allowed_tools_str, argv):
@@ -225,7 +230,7 @@ def allowlist_matches(allowed_tools_str, argv):
     `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
     itself be a glob: fnmatch against prefix + "*"). Other tools never
     match. A malformed list fails CLOSED (R29) and counts as matching: unbalanced
-    parentheses anywhere, or a rule that starts with the word `Bash` but is not exactly
+    parentheses anywhere, a rule that runs on after its parentheses close (R45c), or a rule that starts with the word `Bash` but is not exactly
     `Bash` or `Bash(...)` -- we cannot tell what Claude Code would make of it. (A longer
     tool name such as BashOutput is another tool, not a malformed Bash rule.) Copied from
     release-conductor's assets/release.py (Task 7): keep the two in step."""
@@ -237,8 +242,8 @@ def allowlist_matches(allowed_tools_str, argv):
         short = [os.path.basename(argv[0])] + argv[1:]
         forms |= {shlex.join(short), " ".join(short)}
     forms |= {norm(f) for f in forms}
-    rules, balanced = _split_rules(allowed_tools_str)
-    if not balanced:
+    rules, well_formed = _split_rules(allowed_tools_str)
+    if not well_formed:
         return True
     for rule in rules:
         if rule in ("Bash", "Bash(*)"):
@@ -292,6 +297,34 @@ def agent_cmd_exposes(agent_cmd, argv):
     return any(allowlist_matches(v, argv) for v in values)
 
 
+# R43: release.py's own production commands. An allowlist that lets a headless agent run
+# `python3 <...>/release.py deploy --approved-by ...` reaches production as surely as one
+# that reaches the recipe's deploy_prod: the agent could forge the yes. Each spelling an
+# allowlist author may glob on: the path the caller knows, plus generic ones (bare, the
+# skill-relative assets/ path, the $SKILL_DIR form the SKILL writes (bare and in the
+# double quotes it is typed with), and an absolute
+# install path that a `*/release.py` glob or a `python3 *` rule matches).
+RELEASE_TOOL_PATHS = ("release.py", "assets/release.py", "$SKILL_DIR/assets/release.py",
+                      '"$SKILL_DIR/assets/release.py"',
+                      "/skills/release-conductor/assets/release.py")
+RELEASE_PROD_COMMANDS = ("deploy", "rollback", "abandon")
+
+
+def release_tool_argvs(release_paths):
+    """[argv, ...]: every interpreter (python3, python, this one) x every spelling of
+    release.py (`release_paths` first, then RELEASE_TOOL_PATHS) x each production command
+    (deploy, rollback, abandon), bare and with the arguments a real call carries."""
+    paths = [p for p in release_paths if p]
+    paths += [p for p in RELEASE_TOOL_PATHS if p not in paths]
+    out = []
+    for py in [p for p in ("python3", "python", sys.executable) if p]:
+        for path in paths:
+            for cmd in RELEASE_PROD_COMMANDS:
+                out.append([py, path, cmd])
+                out.append([py, path, cmd, "--root", ".", "--approved-by", "human"])
+    return out
+
+
 RELEASE_RECIPE_REL = ".release/recipe.json"
 _EXPAND_TOKEN = re.compile(r"\{(version|commit|env)\}")
 # version/commit/env placeholders: a real release's values aren't known yet when a grant
@@ -308,7 +341,8 @@ def _expand_placeholder(argv):
 def _production_argvs(root):
     """[argv, ...] write_grant must refuse an exposing re-entry allowlist against: the
     repo's .release/recipe.json (release-conductor, design spec D10) `deploy_prod` and
-    `rollback` argv, each checked both as the raw template (an allowlist could glob on
+    `rollback` argv (and release.py's own deploy/rollback/abandon, R43), each recipe argv
+    checked both as the raw template (an allowlist could glob on
     the literal {version}/{commit}/{env} braces) and with those tokens expanded to a
     fixed placeholder (_expand_placeholder) -- so either spelling an allowlist author
     might have used is caught (R29's fail-closed spirit in release.py). None when there
@@ -339,7 +373,20 @@ def _production_argvs(root):
                                "production allowlist against" % (RELEASE_RECIPE_REL, key))
         argvs.append(argv)
         argvs.append(_expand_placeholder(argv))
+    # R43: release.py's own deploy/rollback/abandon reach production too. Its path is known
+    # when release-conductor is installed beside this skill; the generic spellings in
+    # release_tool_argvs catch `Bash(python3 *)` and `*/release.py` globs either way.
+    argvs.extend(release_tool_argvs(_release_py_paths()))
     return argvs
+
+
+def _release_py_paths():
+    """[path] of release-conductor's release.py when it is installed beside this skill
+    (skills install as sibling directories), else []."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(os.path.dirname(os.path.dirname(here)), "release-conductor",
+                        "assets", "release.py")
+    return [path] if os.path.isfile(path) else []
 
 
 def _check_production_allowlist(root, answers):

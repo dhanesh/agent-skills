@@ -77,11 +77,13 @@ if sys.version_info < (3, 10):
 import contextlib  # noqa: E402
 import datetime as _dt  # noqa: E402
 import fcntl  # noqa: E402
+import fnmatch  # noqa: E402
 import glob  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import shlex  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
 import subprocess  # noqa: E402
@@ -2125,27 +2127,32 @@ _SEMVER_LOOSE = re.compile(r"^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)\Z")
 
 
 def _split_rules(allowed_tools_str):
-    """(rules, balanced) for an --allowedTools value: split on commas AND whitespace
+    """(rules, well_formed) for an --allowedTools value: split on commas AND whitespace
     outside parentheses (Claude Code accepts a comma- or space-separated list; a
     Bash(...) glob may itself carry either), each rule stripped, empties dropped.
-    balanced is False when a `)` closes nothing or a `(` is never closed -- then the
-    split cannot be trusted (a stray `(` swallows every rule after it)."""
-    rules, depth, cur, balanced = [], 0, [], True
+    well_formed is False when a `)` closes nothing, a `(` is never closed, or a rule goes
+    on after its parentheses close (`Bash(a)Bash(npx *)`, R45c) -- then the split cannot
+    be trusted (a stray `(` swallows every rule after it, and a run-on rule hides the
+    second glob inside the first one's parentheses)."""
+    rules, depth, cur, well_formed, closed = [], 0, [], True, False
     for ch in allowed_tools_str or "":
+        if (ch == "," or ch.isspace()) and depth == 0:
+            rules.append("".join(cur))
+            cur, closed = [], False
+            continue
+        if closed:
+            well_formed = False  # text after the rule's parentheses closed
         if ch == "(":
             depth += 1
         elif ch == ")":
             if depth:
                 depth -= 1
+                closed = depth == 0
             else:
-                balanced = False
-        if (ch == "," or ch.isspace()) and depth == 0:
-            rules.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
+                well_formed = False
+        cur.append(ch)
     rules.append("".join(cur))
-    return [r.strip() for r in rules if r.strip()], balanced and depth == 0
+    return [r.strip() for r in rules if r.strip()], well_formed and depth == 0
 
 
 def allowlist_matches(allowed_tools_str, argv):
@@ -2158,13 +2165,11 @@ def allowlist_matches(allowed_tools_str, argv):
     `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
     itself be a glob: fnmatch against prefix + "*"). Other tools never
     match. A malformed list fails CLOSED (R29) and counts as matching: unbalanced
-    parentheses anywhere, or a rule that starts with the word `Bash` but is not exactly
+    parentheses anywhere, a rule that runs on after its parentheses close (R45c), or a rule that starts with the word `Bash` but is not exactly
     `Bash` or `Bash(...)` -- we cannot tell what Claude Code would make of it. (A longer
     tool name such as BashOutput is another tool, not a malformed Bash rule.) Shared
     with spec-first-planning's write_grant.py (Task 7), which copies it: keep the two
     in step."""
-    import fnmatch
-    import shlex
     def norm(text):
         return " ".join(text.split())  # runs of whitespace compare as one space
     argv = list(argv)
@@ -2173,8 +2178,8 @@ def allowlist_matches(allowed_tools_str, argv):
         short = [os.path.basename(argv[0])] + argv[1:]
         forms |= {shlex.join(short), " ".join(short)}
     forms |= {norm(f) for f in forms}
-    rules, balanced = _split_rules(allowed_tools_str)
-    if not balanced:
+    rules, well_formed = _split_rules(allowed_tools_str)
+    if not well_formed:
         return True
     for rule in rules:
         if rule in ("Bash", "Bash(*)"):
@@ -2230,6 +2235,34 @@ def agent_cmd_exposes(agent_cmd, argv):
     return any(allowlist_matches(v, argv) for v in values)
 
 
+# R43: release.py's own production commands. An allowlist that lets a headless agent run
+# `python3 <...>/release.py deploy --approved-by ...` reaches production as surely as one
+# that reaches the recipe's deploy_prod: the agent could forge the yes. Each spelling an
+# allowlist author may glob on: the path the caller knows, plus generic ones (bare, the
+# skill-relative assets/ path, the $SKILL_DIR form the SKILL writes (bare and in the
+# double quotes it is typed with), and an absolute
+# install path that a `*/release.py` glob or a `python3 *` rule matches).
+RELEASE_TOOL_PATHS = ("release.py", "assets/release.py", "$SKILL_DIR/assets/release.py",
+                      '"$SKILL_DIR/assets/release.py"',
+                      "/skills/release-conductor/assets/release.py")
+RELEASE_PROD_COMMANDS = ("deploy", "rollback", "abandon")
+
+
+def release_tool_argvs(release_paths):
+    """[argv, ...]: every interpreter (python3, python, this one) x every spelling of
+    release.py (`release_paths` first, then RELEASE_TOOL_PATHS) x each production command
+    (deploy, rollback, abandon), bare and with the arguments a real call carries."""
+    paths = [p for p in release_paths if p]
+    paths += [p for p in RELEASE_TOOL_PATHS if p not in paths]
+    out = []
+    for py in [p for p in ("python3", "python", sys.executable) if p]:
+        for path in paths:
+            for cmd in RELEASE_PROD_COMMANDS:
+                out.append([py, path, cmd])
+                out.append([py, path, cmd, "--root", ".", "--approved-by", "human"])
+    return out
+
+
 def _tag_push_argv(remote, commit, version):
     """The tag push that is the production deploy when CI deploys on tags (D6), exactly
     as `deploy` runs it: an explicit, non-forced refspec."""
@@ -2249,7 +2282,8 @@ def exposing_grants(root, recipe, version, commit, tag_push=None):
     """Ids of every live grant under root whose reentry.agent_cmd could run the recipe's
     deploy_prod or rollback (expanded with this release's values, and as written), or
     -- when CI deploys on tags -- `tag_push`, the list of tag-push argvs that are the
-    deploy (R27, R29: _tag_push_spellings).
+    deploy (R27, R29: _tag_push_spellings) -- or this tool's own production commands
+    (`release.py deploy|rollback|abandon` in every spelling, R43: release_tool_argvs).
     Live = a head no revision supersedes (CC._live_heads) that is not revoked; an
     EXPIRED grant still counts (fail closed: a scheduler may still launch its agent,
     and revoking it is one command)."""
@@ -2257,6 +2291,7 @@ def exposing_grants(root, recipe, version, commit, tag_push=None):
     argvs = [recipe["deploy_prod"], recipe["rollback"]]
     argvs += [expand(a, values) for a in argvs]
     argvs.extend(tag_push or [])
+    argvs.extend(release_tool_argvs([os.path.abspath(__file__)]))
     out = []
     for _, _, st in CC._live_heads(root):
         payload = st["predicate"].get("payload") or {}
