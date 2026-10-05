@@ -40,6 +40,7 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 | Command | Effect |
 |---|---|
 | `init --root R` | Writes `.intake/config.json` from an answers file. The agent interviews the human for it. |
+| `confirm-config --root R --by NAME` | Records the config digest the human has read and accepts. |
 | `sync --root R` | Reads every enabled source and updates the queue. |
 | `list --root R [--all]` | Prints the ranked queue. Without `--all`, only `new` and `regressed` items are shown. |
 | `show --root R <id>` | Prints one item and its quoted evidence. |
@@ -53,7 +54,7 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 
 The config lives at `.intake/config.json`. It is committed and holds no secrets. Each source is enabled or disabled.
 
-- **`release`:** reads `release-result/v1` envelopes under `.skill-contract/`, plus release state that ended `prod_failed`, `outcome_unknown`, `rolled_back` or `stage_failed`. It consumes the envelope kind, not release-conductor's internal state files, wherever an envelope exists. Releases that ended without an envelope are read from the documented `status` command's output.
+- **`release`:** reads `release-result/v1` envelopes under `.skill-contract/`, plus release state that ended `prod_failed`, `outcome_unknown`, `rolled_back`, `stage_failed` or `abandoned`. It consumes the envelope kind, not release-conductor's internal state files, wherever an envelope exists. Releases that ended without an envelope are read from the documented `status` command's output.
 - **`ci`:** the default-branch workflows to watch, read through `gh run list`.
 - **`github`:** the repo plus the labels that mark a signal (default `bug`, `incident`), read through `gh issue list`.
 - **`jira`:**
@@ -67,6 +68,14 @@ The config lives at `.intake/config.json`. It is committed and holds no secrets.
   - `max_items`.
 - **`weights`:** source weights for ranking.
 
+**The config is pinned, because a PR can edit it.** A committed config that names a host and an environment variable is an exfiltration path: a PR could point `base_url` at an attacker's host, or name `AWS_SECRET_ACCESS_KEY` as the "token", and the owner's next `sync` would send that secret. So:
+- **Hosts:**
+  - Linear's host is hardcoded (`api.linear.app`).
+  - A Jira base URL must match `https://<name>.atlassian.net`, unless the same host is also listed in an untracked local file, `.intake/hosts.local`, which a PR cannot change.
+- **Environment variable names:** they must start with `INTAKE_`. Any other name is refused.
+- **Confirmation:** `sync` refuses (`STOP: config-changed`, exit 3) when the config's sha256 differs from the digest the human last confirmed with `intake confirm-config --by NAME`. That digest is stored in the git-ignored queue directory, the same pinning idea as release-conductor's recipe.
+- **Tests:** each rule has a test.
+
 ### 1.3 Signal shape
 
 Every source normalises to one shape:
@@ -77,6 +86,10 @@ Every source normalises to one shape:
 ```
 
 - **Dedupe:** by `(source, source_id)`. A repeat raises `count` and `last_seen` and appends any new evidence, capped per item.
+- **What `source_id` is, per source:**
+  - **CI:** `workflow/job/branch`, not the run id, so repeated failures of one job are one item. Each failing run becomes evidence and raises `count`.
+  - **issue:** the issue key.
+  - **release:** the release version.
 - **Cross-source links:**
   - A Jira key or Linear id named in a GitHub issue is a *suggested* link only.
   - `link` merges two items once the human confirms.
@@ -104,20 +117,25 @@ The queue is `.skill-contract/intake/queue.json`, git-ignored, written by atomic
 | `new` | `picked` | `pick` |
 | `new` | `dismissed` | `dismiss` (needs a reason) |
 | `picked` | `planned` | a `task-plan/v1` envelope names the item id |
-| `planned` | `resolved` | a verified `release-result/v1` commit contains the plan's run-branch head (1.6) |
+| `planned` | `resolved` | a verified `release-result/v1` commit contains every proven task's merge commit (1.6) |
 | any | `resolved` | `resolve` by hand (logged with the name) |
-| `dismissed` or `resolved` | `new` + `regressed` flag | the same signal recurs after the dismissal or resolution |
+| `dismissed` or `resolved` | `new` + `regressed` flag | the signal *recurs* after the dismissal or resolution time (defined below) |
+
+**Recurrence is defined per source.** Seeing a still-open issue again is not recurrence, or every dismissed issue would come back on each sync.
+- **issue:** reopened, or updated after the dismissal or resolution time.
+- **CI:** a new failing run of that job, started after that time.
+- **release:** a new failed release after that time.
 
 A repo-wide lock guards `sync` and every state change. The lock and the atomic writes are copied from release-conductor, with a cross-reference comment, because skills cannot import each other.
 
 ### 1.6 The handoff
 
-`pick` writes an `intake-item/v1` envelope: the item's fields plus its quoted evidence, with the item id as a subject. spec-first-planning gains one input path: it accepts this envelope as the request. The drafted spec carries the item id and keeps the evidence in a fenced **"External evidence (untrusted)"** block, apart from the requirements. The task-plan envelope carries the id in its payload.
+`pick` writes an `intake-item/v1` envelope: the item's fields plus its quoted evidence, with the item id as a subject. spec-first-planning gains one input path: it accepts this envelope as the request. The drafted spec carries the item id and keeps the evidence in a fenced **"External evidence (untrusted)"** block, apart from the requirements. The task-plan envelope carries the id in a new optional payload field, `intake_items` (a list of ids), added to `task-plan.v1.json`. The field is optional, so existing plans stay valid.
 
 The loop closes without any change to factory-conductor or release-conductor. Each `sync`:
 1. finds the `task-plan/v1` envelope that names a `picked` item and marks the item `planned`;
-2. finds the `run-result/v1` that pins that plan and records its `run_branch` head commit;
-3. marks the item `resolved` once a `release-result/v1` with outcome `verified` has a commit that contains that head commit (`git merge-base --is-ancestor`).
+2. finds the `run-result/v1` that pins that plan and records the `merge_commit` of each of its proven tasks. These come from the envelope, not the live run branch, which is often deleted after merge.
+3. marks the item `resolved` once a `release-result/v1` with outcome `verified` has a commit that contains every one of those commits (`git merge-base --is-ancestor`).
 
 A squash or rebase merge breaks that ancestry. The item then stays `planned`, and `list` says so; the human closes it with `resolve`. v1 accepts this limit rather than guessing.
 
@@ -137,7 +155,8 @@ Everything read from a source is untrusted: issue bodies, titles, CI logs and ti
 2. **Nothing executable crosses the boundary.**
    - spec-first-planning MUST NOT lift a check command, a path to execute, a URL to fetch, or an install step from evidence. An untrusted issue would otherwise become code that factory-conductor runs unattended once the human approves the plan.
    - The agent writes every acceptance check from the repo.
-   - spec-first-planning's linter fails a spec when any check command contains a run of text copied from the external-evidence block (exact substring of at least 12 characters).
+   - spec-first-planning's linter fails a spec when any check command contains a run of text copied from the external-evidence block (exact substring of at least 12 characters). This check is a tripwire, not the boundary. The planning agent reads the evidence, so injected text can make it write an attacker's command in its own words, and no substring check catches that.
+   - **The real boundary is the human's approval.** For an intake-sourced plan, the approval step lists every check command verbatim, and the human approves them knowing the request came from untrusted text.
 3. **The human's approval is informed.**
    - The plan-approval step names the item and shows that the external block is untrusted.
    - Intake never starts the factory.
@@ -227,9 +246,9 @@ The negatives:
 | AC | Done when |
 |---|---|
 | AC1 | All four sources are read through read-only calls, proven against stubs that fail on any write. |
-| AC2 | The trust boundary holds in both places: intake keeps external text as quoted evidence, and spec-first-planning's linter refuses check commands copied from it. |
+| AC2 | The trust boundary holds in three places: intake keeps external text as quoted evidence; spec-first-planning's linter refuses check commands copied from it (a tripwire); the approval step lists every check command verbatim. |
 | AC3 | The loop closes: a picked item becomes a plan that names it, and a verified release containing that plan's run marks it resolved; squash merges are reported as needing a manual `resolve`. |
-| AC4 | No credential value is ever written to disk, logs or envelopes. |
+| AC4 | No credential value is ever written to disk, logs or envelopes. A config edit cannot send a credential elsewhere: the host and env-name rules hold, and sync refuses an unconfirmed config. |
 | AC5 | The eval passes, including every negative. |
 | AC6 | `make gate` and `make ab-validate` are green: 0 WORSE, 0 UNPROVEN. |
 | AC7 | After merge, Jev re-judges Q1 against the merge commit, and the score is recorded in the factory assessment. |
