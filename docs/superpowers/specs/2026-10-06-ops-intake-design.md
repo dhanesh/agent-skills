@@ -70,7 +70,8 @@ Intake accepts a closed list of formats. Each format has one strict adapter with
 
 | Format | Produced by | Status in v1 |
 |---|---|---|
-| `release-envelope` | release-conductor `release-result/v1` envelopes and `status` output, read locally | built in |
+| `release-envelope` | release-conductor `release-result/v1` envelopes under `.skill-contract/envelopes/`, read locally by `sync` | built in |
+| `release-status` | the text output of release-conductor's `status` command (`RELEASE: <version> <status>` lines), piped in by the agent | built in |
 | `gh-issues-json` | `gh issue list --json number,title,body,labels,state,updatedAt,url` | built in |
 | `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | built in |
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | built in |
