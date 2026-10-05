@@ -78,6 +78,7 @@ Intake accepts a closed list of formats. Each format has one strict adapter with
 | `jira-mcp` | the Atlassian MCP server's `searchJiraIssuesUsingJql` tool | built only when the owner supplies a real sample |
 | `jira-acli` | `acli jira workitem search --jql <JQL> --json` | built only when the owner supplies a real sample |
 | `linear-mcp` | the Linear MCP server's `list_issues` tool | built only when the owner supplies a real sample |
+| `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>`, for loop closing | built in |
 | `intake-signals-jsonl` | the user's own transform, one signal per line in the 1.3 shape | built in; marked lower trust |
 
 Rules:
@@ -155,7 +156,7 @@ The task-plan envelope carries the id in `intake_items` (a list of ids). This is
 The loop closes without any change to factory-conductor or release-conductor. Each `sync` does these steps:
 1. It finds the `task-plan/v1` envelope that names a `picked` item. It marks the item `planned`.
 2. It finds the `run-result/v1` that pins that plan. It records the `merge_commit` of each proven task in that run. These commits come from the envelope, not from the live run branch. That branch is often deleted after merge.
-3. It marks the item `resolved` when a `release-result/v1` with outcome `verified` has a commit that contains every one of those commits (`git merge-base --is-ancestor`).
+3. It marks the item `resolved` when a `release-result/v1` with outcome `verified` has a commit whose history contains every one of those commits. Intake runs no command, so the agent pipes `git rev-list <release commit>` into `intake import --format git-rev-list`.
 
 A squash or rebase merge breaks that ancestry. The item then stays `planned`, and `list` says so. The human closes the item with `resolve`. v1 accepts this limit and does not guess.
 
