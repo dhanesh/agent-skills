@@ -4,11 +4,13 @@
 Intake MUST NOT open a network connection or run a subprocess. It only reads files the
 agent hands it and writes its own queue. Stdlib only, Python 3.10+, POSIX.
 
-Exits: 0 ok; 3 import problems or a human is needed; 2 invalid config, unknown format
-or refused input. Machine lines: IMPORT:, SYNC:, ITEM:, NEXT:, STOP:.
+Exits: 0 ok; 3 import or envelope problems, or a human is needed; 2 invalid config,
+unknown format or refused input. Machine lines: IMPORT:, SYNC:, ITEM:, NEXT:, STOP:,
+PROBLEM:.
 """
 import argparse
 import contextlib
+import datetime
 import fcntl
 import hashlib
 import json
@@ -19,6 +21,17 @@ import sys
 import time
 
 import adapters
+import contract_check as CC  # the vendored skill-contract checker, same dir
+
+SKILL_NAME = "ops-intake"
+VERSION = "0.1.0"
+_KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
+INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
+PLAN_KIND = _KIND_BASE + "task-plan/v1"
+RUN_KIND = _KIND_BASE + "run-result/v1"
+RELEASE_KIND = _KIND_BASE + "release-result/v1"
+CONSUMED_KINDS = (PLAN_KIND, RUN_KIND, RELEASE_KIND)
+SHARED_ENVELOPES = ".skill-contract/envelopes"  # read by sync, never written by intake
 
 INTAKE_DIR = ".skill-contract/intake"
 CONFIG_PATH = ".intake/config.json"
@@ -246,7 +259,8 @@ def transition(item, to, by=None, reason=None, now=None):
             raise ValueError("only a dismissed or resolved item can recur, not %s" % frm)
         item["regressed"] = True
         item["recurred_at"] = now
-        item.pop("closed_at", None)
+        for k in ("closed_at", "plan", "wait"):  # an old plan never closes a new occurrence
+            item.pop(k, None)
         item.pop("state_by", None)
         item.pop("state_reason", None)
         item["state"] = "new"
@@ -279,6 +293,17 @@ class QueueError(Exception):
 
 
 _RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
+MAX_HISTORY_SHAS = 20000  # per release commit: ~0.9 MB of queue; git lists newest first
+MAX_HISTORIES = 5         # release commits kept; the oldest import is dropped first
+
+
+def _valid_history(commit, h):
+    return (isinstance(commit, str) and _SHA40_RE.match(commit) and isinstance(h, dict)
+            and isinstance(h.get("imported_at"), str) and isinstance(h.get("shas"), list)
+            and all(isinstance(x, str) and _SHA40_RE.match(x) for x in h["shas"]))
+
+
 _RUN_STRS = ("workflowName", "headBranch", "headSha", "url", "createdAt", "updatedAt")
 
 
@@ -289,10 +314,12 @@ def _valid_run(r):
 
 
 class Queue:
-    def __init__(self, root, items=None, runs=None):
+    def __init__(self, root, items=None, runs=None, histories=None):
         self.root = root
         self.items = items if items is not None else {}
         self.runs = runs if runs is not None else {}  # failing CI runs by run id
+        # imported `git rev-list <commit>` output by release commit, for loop closing
+        self.histories = histories if histories is not None else {}
 
     @classmethod
     def load(cls, root):
@@ -320,7 +347,11 @@ class Queue:
         if not isinstance(runs, dict) or not all(
                 _RUN_RE.match(rid) and _valid_run(r) for rid, r in runs.items()):
             raise QueueError(path)
-        return cls(root, items, runs)
+        histories = data.get("histories", {})
+        if not isinstance(histories, dict) or not all(
+                _valid_history(c, h) for c, h in histories.items()):
+            raise QueueError(path)
+        return cls(root, items, runs, histories)
 
     def add(self, source, source_id, title, evidence=None, now=None):
         """Add a new item, or return the existing one with the same id."""
@@ -337,7 +368,8 @@ class Queue:
         path = os.path.join(d, QUEUE_FILE)
         tmp = path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "items": self.items, "runs": self.runs}, f, indent=1, sort_keys=True)
+            json.dump({"version": 1, "items": self.items, "runs": self.runs,
+                       "histories": self.histories}, f, indent=1, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -359,11 +391,39 @@ class Queue:
 
 # -- CLI --------------------------------------------------------------------------
 def _flag(item):
-    return item["state"] + ("+regressed" if item.get("regressed") else "")
+    """The state, plus `regressed`, plus what a planned item waits on (set by sync)."""
+    flag = item["state"] + ("+regressed" if item.get("regressed") else "")
+    if item["state"] == "planned" and item.get("wait") in ("needs-history", "needs-resolve"):
+        flag += "+" + item["wait"]
+    return flag
 
 
 def _rank(item):
-    return 0  # placeholder until the ranking task
+    """The rank sync stored; 0 before the first sync."""
+    r = item.get("rank", 0)
+    return r if isinstance(r, (int, float)) and not isinstance(r, bool) else 0
+
+
+def compute_rank(item, weights, now):
+    """(severity * 100 + recency_points + min(count, 20)) * weights[source] (spec 1.4).
+    recency_points = max(0, 30 - whole days since last_seen); a future last_seen counts as
+    today, a missing one as no recency. Severity defaults to 2 (unknown), count to 1."""
+    sev = item.get("severity")
+    sev = sev if isinstance(sev, int) and not isinstance(sev, bool) and 1 <= sev <= 4 else 2
+    count = item.get("count")
+    count = count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 1
+    recency = 0
+    try:
+        days = (_parse_utc(now) - _parse_utc(item.get("last_seen"))).days
+        recency = max(0, 30 - max(0, days))
+    except (TypeError, ValueError):
+        pass
+    r = round((sev * 100 + recency + min(count, 20)) * float(weights.get(item["source"], 1.0)), 2)
+    return int(r) if r == int(r) else r
+
+
+def _parse_utc(s):
+    return datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
 
 
 def _load(root):
@@ -428,7 +488,7 @@ def cmd_list(a):
     if q is None:
         return 2
     shown = [i for i in q.items.values() if a.all or i["state"] == "new"]
-    shown.sort(key=lambda i: (-_rank(i), i["first_seen"], i["id"]))
+    shown.sort(key=lambda i: (-_rank(i), i["id"]))  # ties break on item id
     for i in shown:
         print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
     return 0
@@ -516,7 +576,6 @@ def cmd_status(a):
 # -- import and formats -----------------------------------------------------------
 EVIDENCE_CAP = 20      # evidence kept per item; the oldest is dropped first
 PROBLEM_LINES = 50     # PROBLEM: lines printed; the IMPORT: line counts all of them
-_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}\Z")
 
 
 def _bump(item, sig):
@@ -590,13 +649,18 @@ def cmd_import(a):
     cfg = _need_config(a.root)
     if cfg is None:
         return 2
+    if fmt == "release-envelope":
+        print("STOP: release-envelope is read by sync from %s; run intake sync"
+              % SHARED_ENVELOPES)
+        return 2
     if fmt == "git-rev-list":
         if a.source:
             print("STOP: git-rev-list belongs to no source; do not pass --source")
             return 2
-        if not (a.commit and _COMMIT_RE.match(a.commit)):
-            print("STOP: git-rev-list needs --commit <hex sha>")
+        if not (a.commit and _SHA40_RE.match(a.commit)):
+            print("STOP: git-rev-list needs --commit <the full 40-hex release commit>")
             return 2
+        return _import_history(a)
     else:
         src = cfg["sources"].get(a.source) if a.source else None
         if src is None:
@@ -666,22 +730,308 @@ def cmd_import(a):
     return 3 if problems else 0
 
 
+def _import_history(a):
+    """git-rev-list: store `git rev-list <commit>` output under the release commit.
+    The history must start at --commit (git lists it first). It keeps the newest
+    MAX_HISTORY_SHAS shas and the MAX_HISTORIES most recent imports; anything cut is a
+    problem, and a cut can only leave an item planned, never resolve it wrongly."""
+    raw = _read_input(a.file)
+    if raw is None:
+        return 2
+    now = _now()
+    ctx = {"source": None, "now": now}
+    _, problems = adapters.ADAPTERS["git-rev-list"](raw, ctx)
+    shas = ctx["history_out"]
+    if not shas or shas[0] != a.commit:
+        problems.append("the history does not start at --commit; nothing was stored")
+        shas = []
+    elif len(shas) > MAX_HISTORY_SHAS:
+        problems.append("%d commits over the %d kept were not stored"
+                        % (len(shas) - MAX_HISTORY_SHAS, MAX_HISTORY_SHAS))
+        shas = shas[:MAX_HISTORY_SHAS]
+    if shas:
+        try:
+            with run_lock(a.root):
+                q = _load(a.root)
+                if q is None:
+                    return 2
+                q.histories[a.commit] = {"imported_at": now, "shas": shas}
+                while len(q.histories) > MAX_HISTORIES:
+                    old = min(q.histories, key=lambda c: (q.histories[c]["imported_at"], c))
+                    del q.histories[old]
+                q.log("import", format="git-rev-list", commit=a.commit, ok=len(shas),
+                      problems=len(problems))
+                q.save()
+        except Locked:
+            print("STOP: the intake lock is held by another command")
+            return 3
+    print("IMPORT: - git-rev-list ok %d problems %d" % (len(shas), len(problems)))
+    for p in problems[:PROBLEM_LINES]:
+        print("PROBLEM: %s" % one_line(p))
+    if len(problems) > PROBLEM_LINES:
+        print("PROBLEM: and %d more" % (len(problems) - PROBLEM_LINES))
+    return 3 if problems else 0
+
+
+# -- sync -------------------------------------------------------------------------
+def _read_envelopes(root):
+    """The valid task-plan, run-result and release-result envelopes under
+    .skill-contract/envelopes/, oldest first, and the problems. Each one is a plain file
+    read, checked with CC.check_statement and a payload shape check; an invalid one is
+    a problem and is skipped. Other kinds are ignored. Problems name the file and the
+    failed rule, never the file's text."""
+    d = os.path.join(root, *SHARED_ENVELOPES.split("/"))
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".json"))
+    except FileNotFoundError:
+        return [], []
+    except OSError:
+        return [], ["cannot list %s" % SHARED_ENVELOPES]
+    out, problems = [], []
+    for name in names:
+        path = os.path.join(d, name)
+        where = "envelope %s" % code(name)
+        if os.path.islink(path) or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = f.read(CC.ENVELOPE_MAX_BYTES + 1)
+            if len(data) > CC.ENVELOPE_MAX_BYTES:
+                raise ValueError("too large")
+            raw = data.decode("utf-8")
+            st = json.loads(raw)
+        except (OSError, ValueError, RecursionError):
+            problems.append("%s: unreadable" % where)
+            continue
+        kind = st.get("predicateType") if isinstance(st, dict) else None
+        if not isinstance(kind, str):
+            problems.append("%s: not an envelope" % where)
+            continue
+        if kind not in CONSUMED_KINDS:
+            continue
+        viol = CC.check_statement(st)
+        if viol:
+            problems.append("%s: fails skill-contract %s" % (
+                where, ", ".join(sorted({"C%d" % n for n, _ in viol}))))
+            continue
+        pred = st["predicate"]
+        try:
+            rec = _envelope_record(kind, pred["payload"])
+        except ValueError as e:
+            problems.append("%s: %s" % (where, e))
+            continue
+        rec.update(kind=kind, raw=raw, id=pred["id"], at=pred["generatedAtTime"],
+                   rel="%s/%s" % (SHARED_ENVELOPES, name),
+                   sha256=hashlib.sha256(data).hexdigest(),
+                   pins={s["digest"]["sha256"] for s in st["subject"]})
+        out.append(rec)
+    out.sort(key=lambda r: (r["at"], r["id"]))
+    return out, problems
+
+
+def _envelope_record(kind, p):
+    """The fields sync uses from a payload, or ValueError with a message of our own."""
+    if kind == RELEASE_KIND:
+        version, commit, outcome = adapters.release_result(p)
+        return {"version": version, "commit": commit, "outcome": outcome}
+    if kind == PLAN_KIND:
+        items = p.get("intake_items", [])
+        if not (isinstance(items, list) and all(isinstance(x, str) for x in items)):
+            raise ValueError("task-plan intake_items must be a list of item ids")
+        return {"intake_items": items}
+    plan, tasks = p.get("plan"), p.get("tasks")
+    if not (isinstance(plan, dict) and isinstance(plan.get("id"), str)):
+        raise ValueError("run-result plan.id must be a string")
+    if not (isinstance(tasks, list) and all(
+            isinstance(t, dict) and isinstance(t.get("status"), str)
+            and (t.get("merge_commit") is None or isinstance(t.get("merge_commit"), str))
+            for t in tasks)):
+        raise ValueError("run-result tasks must carry a status and a merge_commit")
+    return {"plan_id": plan["id"], "tasks": tasks}
+
+
+def _close_loop(q, envs, now):
+    """Spec 1.6. picked -> planned when a task-plan made after the pick names the item;
+    planned -> resolved when a verified release made at or after the plan's run has a
+    history (imported with git-rev-list) holding every proven task's merge commit.
+    Returns the release commits whose history a planned item still waits on."""
+    plans = [e for e in envs if e["kind"] == PLAN_KIND]
+    runs = [e for e in envs if e["kind"] == RUN_KIND]
+    verified = [e for e in envs if e["kind"] == RELEASE_KIND and e["outcome"] == "verified"]
+    for e in plans:
+        for iid in e["intake_items"]:
+            it = q.items.get(iid)
+            if it and it["state"] == "picked" and e["at"] >= it.get("state_at", ""):
+                transition(it, "planned", now=now)
+                it["plan"] = {"id": e["id"], "path": e["rel"], "sha256": e["sha256"]}
+                q.log("planned", id=iid, plan=e["id"])
+    wanted = set()
+    for iid in sorted(q.items):
+        it = q.items[iid]
+        if it["state"] != "planned":
+            continue
+        it.pop("wait", None)
+        plan = it.get("plan")
+        if not isinstance(plan, dict):
+            continue
+        mine = [r for r in runs if plan.get("sha256") in r["pins"] and r["plan_id"] == plan.get("id")]
+        proven = [t for r in mine for t in r["tasks"] if t["status"] == "proven"]
+        if not proven or any(not t.get("merge_commit") for t in proven):
+            continue  # nothing proven, or a proven task without a merge: never resolve
+        merges = {t["merge_commit"] for t in proven}
+        since = max(r["at"] for r in mine)
+        no_history, missing = [], False
+        for rel in (v for v in verified if v["at"] >= since):
+            h = q.histories.get(rel["commit"])
+            if h is None:
+                no_history.append(rel["commit"])
+            elif merges <= set(h["shas"]):
+                transition(it, "resolved", by="release:%s" % rel["version"], now=now)
+                q.log("resolved", id=iid, by="release:%s" % rel["version"])
+                break
+            else:
+                missing = True  # a squash or rebase merge: the human resolves it
+        else:
+            if no_history:
+                it["wait"] = "needs-history"
+                wanted.update(no_history)
+            elif missing:
+                it["wait"] = "needs-resolve"
+    return wanted
+
+
 def cmd_sync(a):
-    """Task 3: print the NEXT line for each failing run whose jobs are not imported."""
-    if _need_config(a.root) is None:
+    """Read the shared envelopes, add rolled-back releases, close the loop, rank the
+    queue (spec 1.4-1.6), and print the NEXT lines for missing CI jobs and histories.
+    Exits 3 when an envelope was a problem, else 0."""
+    cfg = _need_config(a.root)
+    if cfg is None:
         return 2
     try:
         with run_lock(a.root):
             q = _load(a.root)
             if q is None:
                 return 2
-            for rid in sorted(q.runs, key=int):
-                if not q.runs[rid]["jobs_imported"]:
-                    print("NEXT: gh run view %s --json jobs | intake import --format "
-                          "gh-run-jobs-json --source ci --run %s" % (rid, rid))
+            now = _now()
+            envs, problems = _read_envelopes(a.root)
+            rel_src = cfg["sources"].get(RELEASE_SOURCE)
+            if rel_src and rel_src["enabled"] and "release-envelope" in rel_src["formats"]:
+                ctx = {"source": RELEASE_SOURCE, "now": now}
+                for e in envs:
+                    if e["kind"] == RELEASE_KIND:
+                        sigs, probs = adapters.ADAPTERS["release-envelope"](e["raw"], ctx)
+                        apply_signals(q, sigs, now)
+                        problems.extend(probs)
+            wanted = _close_loop(q, envs, now)
+            weights = cfg.get("weights", {})
+            for it in q.items.values():
+                it["rank"] = compute_rank(it, weights, now)
+            q.log("sync", envelopes=len(envs), problems=len(problems))
+            q.save()
     except Locked:
         print("STOP: the intake lock is held by another command")
         return 3
+    counts = {s: sum(1 for i in q.items.values() if i["state"] == s) for s in STATES}
+    print("SYNC: %d items %s envelopes %d problems %d" % (
+        len(q.items), " ".join("%s=%d" % kv for kv in counts.items()), len(envs), len(problems)))
+    for p in problems[:PROBLEM_LINES]:
+        print("PROBLEM: %s" % one_line(p))
+    if len(problems) > PROBLEM_LINES:
+        print("PROBLEM: and %d more" % (len(problems) - PROBLEM_LINES))
+    for rid in sorted(q.runs, key=int):
+        if not q.runs[rid]["jobs_imported"]:
+            print("NEXT: gh run view %s --json jobs | intake import --format "
+                  "gh-run-jobs-json --source ci --run %s" % (rid, rid))
+    for c in sorted(wanted):
+        print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
+    return 3 if problems else 0
+
+
+# -- pick -------------------------------------------------------------------------
+_ITEM_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
+
+
+def _write_atomic(root, rel, text, exclusive=False):
+    """Write by temp file, fsync, then an atomic rename (or, when `exclusive`, a hard
+    link that fails if the file exists, so an envelope is never overwritten)."""
+    path = os.path.join(root, *rel.split("/"))
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        if exclusive:
+            os.link(tmp, path)
+        else:
+            os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def item_payload(i):
+    """The intake-item/v1 payload (schemas/intake-item.v1.json)."""
+    evidence = []
+    for e in i.get("evidence", []):
+        if isinstance(e, dict):
+            evidence.append({k: e[k] for k in ("text", "source", "source_id", "fetched_at", "key")
+                             if k in e})
+        else:
+            evidence.append({"text": str(e)})
+    return {"item_id": i["id"], "title": i["title"], "kind": i.get("kind", "issue"),
+            "severity": i.get("severity", 2), "source": i["source"],
+            "source_id": i["source_id"], "url": i.get("url", ""),
+            "trust": i.get("trust", "normal"), "count": i.get("count", 1),
+            "first_seen": i["first_seen"], "last_seen": i.get("last_seen") or i["first_seen"],
+            "evidence": evidence}
+
+
+def cmd_pick(a):
+    """new -> picked. Writes the item snapshot (the envelope's subject) and the
+    intake-item/v1 envelope, both under the git-ignored .skill-contract/intake/, since
+    the evidence can carry customer data."""
+    if _need_config(a.root) is None:
+        return 2
+    try:
+        with run_lock(a.root):
+            q = _load(a.root)
+            i = _find(q, a.id) if q else None
+            if i is None:
+                return 2
+            if i["state"] != "new" or not _ITEM_ID_RE.match(i["id"]):
+                print("STOP: only a new item can be picked; %s is %s" % (code(i["id"]), _flag(i)))
+                return 2
+            _ensure_dir(a.root)
+            payload = item_payload(i)
+            snap_rel = "%s/items/%s.json" % (INTAKE_DIR, i["id"])
+            _write_atomic(a.root, snap_rel, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, a.root, [snap_rel],
+                                    payload)
+            viol = CC.check_statement(st)
+            if viol:
+                print("STOP: the intake-item envelope would be invalid (%s)"
+                      % ", ".join(sorted({"C%d" % n for n, _ in viol})))
+                return 2
+            env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
+            _write_atomic(a.root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
+                          exclusive=True)
+            transition(i, "picked", by=a.by)
+            i["envelope"] = env_rel
+            q.log("pick", id=a.id, by=a.by, envelope=env_rel)
+            q.save()
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+    print("NEXT: run spec-first-planning with %s" % env_rel)
     return 0
 
 
@@ -703,12 +1053,13 @@ def main(argv=None):
     s.add_argument("--by", required=True); s.add_argument("--reason", required=True)
     s = sub.add_parser("resolve"); s.add_argument("id"); s.add_argument("--by", required=True)
     s = sub.add_parser("link"); s.add_argument("id"); s.add_argument("other")
+    s = sub.add_parser("pick"); s.add_argument("id"); s.add_argument("--by", required=True)
     sub.add_parser("status")
     sub.add_parser("sync")
     sub.add_parser("formats")
     s = sub.add_parser("import"); s.add_argument("--format", required=True)
     s.add_argument("--source"); s.add_argument("--run"); s.add_argument("--commit")
-    s.add_argument("file")
+    s.add_argument("file", nargs="?", default="-")  # `-` (stdin) by default, as NEXT lines pipe
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
@@ -720,7 +1071,7 @@ def main(argv=None):
         return _change(a, "resolved")
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
             "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
-            "import": cmd_import}[a.cmd](a)
+            "import": cmd_import, "pick": cmd_pick}[a.cmd](a)
 
 
 if __name__ == "__main__":

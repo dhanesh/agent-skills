@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dhanesh/agent-skills/skill-contract/intake-item/v1",
+  "title": "skill-contract intake-item/v1 payload",
+  "description": "The predicate.payload of an intake-item/v1 envelope written by ops-intake's intake.py pick. Every string that came from a source (title, url, evidence) is untrusted data.",
+  "type": "object",
+  "required": ["item_id", "title", "kind", "severity", "source", "source_id", "url", "trust",
+               "count", "first_seen", "last_seen", "evidence"],
+  "properties": {
+    "item_id": {"type": "string", "pattern": "^I[0-9a-f]{10}$", "description": "The queue item id: I + the first 10 hex of sha256(source NUL source_id)."},
+    "title": {"type": "string", "description": "Untrusted text from the source."},
+    "kind": {"type": "string", "enum": ["release", "ci", "issue"]},
+    "severity": {"type": "integer", "minimum": 1, "maximum": 4},
+    "source": {"type": "string", "description": "The configured source name, or release."},
+    "source_id": {"type": "string", "description": "The issue key, the CI workflow/job/branch, or the release version."},
+    "url": {"type": "string", "description": "Untrusted; empty when the source has none."},
+    "trust": {"type": "string", "enum": ["normal", "low"], "description": "low for intake-signals-jsonl, whose provenance is only what the user's transform claims."},
+    "count": {"type": "integer", "minimum": 1, "description": "Distinct evidence seen for the item."},
+    "first_seen": {"type": "string", "description": "UTC RFC 3339."},
+    "last_seen": {"type": "string", "description": "UTC RFC 3339."},
+    "evidence": {
+      "type": "array",
+      "description": "Quoted, untrusted evidence, newest last, at most 20 entries.",
+      "items": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {"type": "string"},
+          "source": {"type": "string"},
+          "source_id": {"type": "string"},
+          "fetched_at": {"type": "string"},
+          "key": {"type": "string"}
+        }
+      }
+    }
+  }
+}

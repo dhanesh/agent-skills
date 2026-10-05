@@ -335,8 +335,73 @@ def adapt_gh_run_jobs(raw, ctx):
     return sigs, problems
 
 
-# Formats with no adapter yet (task 4) are absent here, so import stops on them.
+# -- release-envelope -------------------------------------------------------------
+_VERSION_RE = re.compile(r"^[!-~]{1,%d}\Z" % SOURCE_ID_CAP)  # printable ASCII, no space
+_FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}\Z")
+RELEASE_OUTCOMES = ("verified", "rolled_back")
+
+
+def release_result(payload):
+    """(version, commit, outcome) from a release-result/v1 payload. Raises ValueError."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    version, commit, outcome = payload.get("version"), payload.get("commit"), payload.get("outcome")
+    if not (isinstance(version, str) and _VERSION_RE.match(version)):
+        raise ValueError("version must be short printable ASCII with no spaces")
+    if not (isinstance(commit, str) and _FULL_COMMIT_RE.match(commit)):
+        raise ValueError("commit must be a full hex sha")
+    if outcome not in RELEASE_OUTCOMES:
+        raise ValueError("outcome must be verified or rolled_back")
+    return version, commit, outcome
+
+
+def adapt_release_envelope(raw, ctx):
+    """One release-result/v1 envelope's text, already checked against the contract by
+    the caller (intake sync). A rolled_back release gives one release signal keyed by
+    version, the same key and evidence key as release-status. A verified one gives none:
+    sync uses it to close the loop."""
+    try:
+        st = json.loads(raw)
+        pred = st["predicate"]
+        version, _commit, outcome = release_result(pred["payload"])
+        at = parse_time(pred["generatedAtTime"])
+    except ValueError as e:
+        return [], ["release-result: %s" % e]
+    except (TypeError, KeyError, RecursionError):
+        return [], ["release-result: not an envelope"]
+    if outcome != "rolled_back":
+        return [], []
+    line = "RELEASE: %s rolled_back (release-result %s)" % (version, pred.get("id"))
+    return [_signal(ctx, version, "", "release", "Release %s rolled_back" % version,
+                    _RELEASE_SEVERITY["rolled_back"], at, at, "normal",
+                    [_evidence(ctx, version, line, "%s rolled_back" % version)])], []
+
+
+# -- git-rev-list -----------------------------------------------------------------
+_SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
+
+
+def adapt_git_rev_list(raw, ctx):
+    """`git rev-list <commit>` output, one 40-hex sha per line. It gives no signal: the
+    shas, in git's order (newest first) and without repeats, go to ctx["history_out"]
+    for loop closing. A bad line is a problem."""
+    shas, problems, seen = [], [], set()
+    for n, line in enumerate(raw.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        if not _SHA40_RE.match(line):
+            problems.append("line %d: not a 40-hex sha" % n)
+        elif line not in seen:
+            seen.add(line)
+            shas.append(line)
+    ctx["history_out"] = shas
+    return [], problems
+
+
 ADAPTERS = {
+    "release-envelope": adapt_release_envelope,
+    "git-rev-list": adapt_git_rev_list,
     "gh-issues-json": adapt_gh_issues,
     "gh-runs-json": adapt_gh_runs,
     "gh-run-jobs-json": adapt_gh_run_jobs,

@@ -219,16 +219,19 @@ class ImportCommandTests(unittest.TestCase):
         root = repo()
         self.assertEqual(imp(root, "gh-issues-json", "github", fx("gh_issues_ok.json"))[0], 2)
 
-    def test_unbuilt_formats_stop_cleanly(self):
+    def test_formats_import_cannot_take_stop_cleanly(self):
+        # Task 4 built both formats: release-envelope is read by sync, not import, and
+        # git-rev-list needs the full 40-hex release commit (a short sha never matches).
         root = repo(config=CFG)
-        for fmt, src in (("release-envelope", "release"),):
-            rc, out = imp(root, fmt, src, fx("release_status_none.txt"))
-            self.assertEqual(rc, 2)
-            self.assertIn("STOP: format-not-built %s" % fmt, out)
+        rc, out = imp(root, "release-envelope", "release", fx("release_status_none.txt"))
+        self.assertEqual(rc, 2)
+        self.assertIn("STOP: release-envelope is read by sync", out)
         with no_io():
             rc, out = run(root, "import", "--format", "git-rev-list", "--commit", "abc1234",
                           fx("release_status_none.txt"))
-        self.assertEqual((rc, "STOP: format-not-built git-rev-list" in out), (2, True))
+        self.assertEqual((rc, "STOP: git-rev-list needs --commit" in out), (2, True))
+        self.assertEqual(IN.Queue.load(root).items, {})
+        self.assertEqual(IN.Queue.load(root).histories, {})
 
     def test_git_rev_list_takes_no_source(self):
         root = repo(config=CFG)
