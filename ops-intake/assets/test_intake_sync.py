@@ -60,8 +60,9 @@ def at(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def envelope(root, kind, payload, subjects, now, skill="spec-first-planning"):
-    st = CC.build_statement(kind, skill, "1.0.0", root, subjects, payload, now=at(now))
+def envelope(root, kind, payload, subjects, now, skill="spec-first-planning", rev=None):
+    st = CC.build_statement(kind, skill, "1.0.0", root, subjects, payload, now=at(now),
+                            was_revision_of=rev)
     path = CC.write_envelope(root, st)
     return path, st
 
@@ -74,23 +75,39 @@ def subject_file(root, name="docs/spec.md"):
     return name
 
 
-def plan_env(root, items, now="2026-10-07T00:00:00Z"):
+def plan_env(root, items, now="2026-10-07T00:00:00Z", rev=None):
     payload = {"title": "Fix it", "spec": "docs/spec.md", "coverage": {"R1": ["T1"]},
                "uncovered": [], "intake_items": items,
                "tasks": [{"id": "T1", "requirement_ids": ["R1"], "title": "fix",
                           "verify": [{"text": "tests", "command": ["make", "test"]}]}]}
-    return envelope(root, PLAN_KIND, payload, [subject_file(root)], now)
+    return envelope(root, PLAN_KIND, payload, [subject_file(root)], now, rev=rev)
 
 
-def run_env(root, plan_path, plan_st, tasks, now="2026-10-08T00:00:00Z", pin_plan=True):
+def run_env(root, plan_path, plan_st, tasks, now="2026-10-08T00:00:00Z", pin_plan=True,
+            stopped=None, skill="factory-conductor"):
+    """A run-result payload with every field run-result.v1.json requires (RunSchemaTest)."""
     rel = os.path.relpath(plan_path, root).replace(os.sep, "/")
-    subjects = [rel] if pin_plan else [subject_file(root)]
-    payload = {"run_id": "r1", "run_branch": "factory/r1", "base_branch": "main",
+    grant = subject_file(root, ".skill-contract/envelopes-grant/grant.json")
+    subjects = [rel, grant] if pin_plan else [subject_file(root), grant]
+    proven = [t for t in tasks if t["status"] == "proven"]
+    payload = {"run_id": "run-20261008T000000Z-a1b2c3", "run_branch": "factory/r1",
+               "base_branch": "main", "created_at": "2026-10-07T23:00:00Z",
                "plan": {"id": plan_st["predicate"]["id"], "path": rel,
                         "sha256": CC.sha256_file(plan_path), "title": "Fix it"},
-               "tasks": [dict({"verify": [], "review": None, "park_reason": None}, **t)
+               "grant": {"id": "autonomy-grant-v1-20261007T000000Z-abcdef", "path": grant,
+                         "sha256": CC.sha256_file(os.path.join(root, *grant.split("/")))},
+               "stopped": stopped, "log": ".skill-contract/runs/r1/autonomy-log.jsonl",
+               "log_sha256": "1" * 64, "log_bytes": 100,
+               "budget": {"max_dispatches": 10}, "budget_derived": ["max_dispatches"],
+               "dispatches": len(tasks), "budget_note": "max_tokens and max_usd are recorded, not enforced",
+               "integration": {"head": "2" * 40, "passed": True,
+                               "runs": [{"task": t["id"], "ok": True} for t in proven]},
+               "leftover_worktrees": [{"task": t["id"], "path": "wt/" + t["id"], "reason": None}
+                                      for t in tasks if t["status"] != "proven"],
+               "tasks": [dict({"verify": [], "review": None,
+                               "park_reason": None if t["status"] == "proven" else "budget"}, **t)
                          for t in tasks]}
-    return envelope(root, RUN_KIND, payload, subjects, now, skill="factory-conductor")
+    return envelope(root, RUN_KIND, payload, subjects, now, skill=skill)
 
 
 def release_env(root, version, commit_sha, outcome, now="2026-10-09T00:00:00Z"):
@@ -227,6 +244,23 @@ class PickTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(
             self.root, ".skill-contract", "intake", "items", self.iid + ".json")))
         self.assertEqual(intake(self.root, "pick", "Inope", "--by", "Dee")[0], 2)
+
+    def test_failed_envelope_check_leaves_no_snapshot(self):
+        with mock.patch.object(IN.CC, "check_statement", return_value=[(3, "x")]):
+            rc, out = intake(self.root, "pick", self.iid, "--by", "Dee")
+        self.assertEqual(rc, 2)
+        self.assertIn("STOP:", out)
+        self.assertFalse(os.path.exists(os.path.join(
+            self.root, ".skill-contract", "intake", "items", self.iid + ".json")))
+        self.assertEqual(env_files(self.root), [])
+        self.assertEqual(items(self.root)[self.iid]["state"], "new")
+
+    def test_existing_envelope_is_a_stop_not_a_traceback(self):
+        with mock.patch.object(IN.os, "link", side_effect=FileExistsError("x")):
+            rc, out = intake(self.root, "pick", self.iid, "--by", "Dee")
+        self.assertEqual(rc, 2)
+        self.assertIn("STOP:", out)
+        self.assertEqual(items(self.root)[self.iid]["state"], "new")
 
     def test_hostile_title_travels_only_as_data(self):
         rc, out = intake(self.root, "pick", self.iid, "--by", "Dee")
@@ -456,7 +490,7 @@ class LoopTests(unittest.TestCase):
         self.history()
         intake(self.root, "sync")
         self.assertEqual(items(self.root)[self.iid]["state"], "planned")
-        self.assertEqual(self.flag(), "planned")
+        self.assertEqual(self.flag(), "planned+needs-resolve")  # R14: a human closes it
 
     def test_proven_task_without_merge_commit_never_resolves(self):
         self.plan()
@@ -467,6 +501,133 @@ class LoopTests(unittest.TestCase):
         self.history()
         intake(self.root, "sync")
         self.assertEqual(items(self.root)[self.iid]["state"], "planned")
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+
+    def test_partial_run_never_resolves(self):
+        # R14: a budget-stopped run proved T1 and parked T2. The release holds T1's merge.
+        self.plan()
+        run_env(self.root, self.plan_path, self.plan_st,
+                [{"id": "T1", "status": "proven", "merge_commit": self.m},
+                 {"id": "T2", "status": "parked", "merge_commit": None}],
+                stopped={"reason": "budget_dispatches", "at": "2026-10-08T00:00:00Z"})
+        release_env(self.root, "2.0.0", self.r, "verified")
+        self.history()
+        rc, out = intake(self.root, "sync")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+
+    def test_latest_run_decides(self):
+        self.plan()
+        run_env(self.root, self.plan_path, self.plan_st,
+                [{"id": "T1", "status": "parked", "merge_commit": None}],
+                stopped={"reason": "budget_dispatches"}, now="2026-10-08T00:00:00Z")
+        self.run_result(self.m, now="2026-10-08T06:00:00Z")
+        release_env(self.root, "2.0.0", self.r, "verified")
+        self.history()
+        intake(self.root, "sync")
+        self.assertEqual(items(self.root)[self.iid]["state"], "resolved")
+
+    def sync_following_next(self, rounds):
+        """Sync, import every history a NEXT line asks for, repeat; the outputs."""
+        outs = []
+        for _ in range(rounds):
+            rc, out = intake(self.root, "sync")
+            outs.append(out)
+            for l in out.splitlines():
+                if l.startswith("NEXT: git rev-list"):
+                    c = l.split()[3]
+                    intake(self.root, "import", "--format", "git-rev-list", "--commit", c, "-",
+                           stdin=git(self.root, "rev-list", c))
+        return outs
+
+    def test_more_releases_than_the_cap_settle_at_needs_resolve(self):
+        self.plan()
+        self.run_result(self.s)  # squash stand-in: S is never on main
+        for i in range(IN.MAX_HISTORIES + 2):
+            c = commit(self.root, "rel%d.txt" % i)
+            release_env(self.root, "2.0.%d" % i, c, "verified", now="2026-10-09T00:00:%02dZ" % i)
+        outs = self.sync_following_next(3)
+        self.assertIn("NEXT: git rev-list", outs[0])
+        self.assertNotIn("NEXT:", outs[1])
+        self.assertNotIn("NEXT:", outs[2])
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+        self.assertEqual(IN.Queue.load(self.root).histories, {})  # none still needed
+        # A later release that does contain the merge still resolves.
+        git(self.root, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        r2 = git(self.root, "rev-parse", "HEAD").strip()
+        release_env(self.root, "2.1.0", r2, "verified", now="2026-10-10T00:00:00Z")
+        outs = self.sync_following_next(2)
+        self.assertIn("NEXT: git rev-list %s" % r2, outs[0])
+        it = items(self.root)[self.iid]
+        self.assertEqual((it["state"], it["state_by"]), ("resolved", "release:2.1.0"))
+
+    def test_release_not_in_the_clone_does_not_loop(self):
+        gone = "f" * 40
+        self.plan()
+        self.run_result(self.m)
+        release_env(self.root, "2.0.0", gone, "verified")
+        rc, out = intake(self.root, "sync")
+        self.assertIn("NEXT: git rev-list %s" % gone, out)
+        # git rev-list of an unknown commit prints nothing on stdout.
+        rc, out = intake(self.root, "import", "--format", "git-rev-list", "--commit", gone, "-",
+                         stdin="")
+        self.assertEqual(rc, 3)
+        self.assertIn("PROBLEM:", out)
+        rc, out = intake(self.root, "sync")
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+        nxt = [l for l in out.splitlines() if l.startswith("NEXT:")]
+        self.assertEqual(nxt, ["NEXT: git fetch, then re-import: git rev-list %s | intake import "
+                               "--format git-rev-list --commit %s" % (gone, gone)])
+        rc, out = intake(self.root, "sync")
+        self.assertNotIn("NEXT:", out)
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+
+    def test_envelopes_from_the_wrong_skill_are_problems(self):
+        self.plan()
+        run_env(self.root, self.plan_path, self.plan_st,
+                [{"id": "T1", "status": "proven", "merge_commit": self.m}], skill="mallory")
+        envelope(self.root, REL_KIND, {"version": "9.9.9", "commit": self.r, "outcome": "verified"},
+                 [subject_file(self.root, "a.txt")], "2026-10-09T00:00:00Z", skill="mallory")
+        self.history()
+        rc, out = intake(self.root, "sync")
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(sum(l.startswith("PROBLEM:") for l in out.splitlines()), 2, out)
+        self.assertEqual(items(self.root)[self.iid]["state"], "planned")
+
+    def test_bad_merge_commit_is_a_problem(self):
+        self.plan()
+        self.run_result("HEAD~1")
+        rc, out = intake(self.root, "sync")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("merge_commit", out)
+
+    def test_plan_before_the_pick_flags_needs_plan(self):
+        plan_env(self.root, [self.iid], now="2026-10-05T23:59:59Z")
+        intake(self.root, "sync")
+        out = intake(self.root, "list", "--all")[1]
+        self.assertIn("ITEM: %s picked+needs-plan " % self.iid, out)
+
+    def test_newer_plan_naming_the_item_takes_over(self):
+        self.plan()
+        intake(self.root, "sync")
+        p2, st2 = plan_env(self.root, [self.iid], now="2026-10-07T12:00:00Z",
+                           rev=self.plan_st["predicate"]["id"])
+        run_env(self.root, p2, st2, [{"id": "T1", "status": "proven", "merge_commit": self.m}])
+        release_env(self.root, "2.0.0", self.r, "verified")
+        self.history()
+        intake(self.root, "sync")
+        it = items(self.root)[self.iid]
+        self.assertEqual((it["state"], it["plan"]["id"]), ("resolved", st2["predicate"]["id"]))
+
+    def test_revision_that_drops_the_item_flags_plan_superseded(self):
+        self.plan()
+        intake(self.root, "sync")
+        plan_env(self.root, [], now="2026-10-07T12:00:00Z", rev=self.plan_st["predicate"]["id"])
+        self.run_result(self.m)
+        release_env(self.root, "2.0.0", self.r, "verified")
+        self.history()
+        intake(self.root, "sync")
+        self.assertEqual(self.flag(), "planned+plan-superseded")
 
     def test_run_must_pin_the_plan(self):
         self.plan()
@@ -508,6 +669,22 @@ class LoopTests(unittest.TestCase):
             self.assertEqual(run(self.root, "pick", self.iid, "--by", "Dee")[0], 0)
             run(self.root, "sync")
         self.assertEqual(items(self.root)[self.iid]["state"], "picked")
+
+
+class RunSchemaTest(unittest.TestCase):
+    def test_run_fixture_carries_every_required_field(self):
+        root = repo(config=CFG)
+        pp, pst = plan_env(root, [])
+        _, st = run_env(root, pp, pst, [{"id": "T1", "status": "parked", "merge_commit": None}],
+                        stopped={"reason": "budget_dispatches"})
+        path = os.path.join(HERE, "..", "..", "factory-conductor", "assets", "schemas",
+                            "run-result.v1.json")
+        with open(path) as f:
+            schema = json.load(f)
+        p = st["predicate"]["payload"]
+        self.assertEqual(set(schema["required"]) - set(p), set())
+        task_req = schema["properties"]["tasks"]["items"]["required"]
+        self.assertEqual(set(task_req) - set(p["tasks"][0]), set())
 
 
 if __name__ == "__main__":

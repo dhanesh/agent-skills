@@ -31,6 +31,9 @@ PLAN_KIND = _KIND_BASE + "task-plan/v1"
 RUN_KIND = _KIND_BASE + "run-result/v1"
 RELEASE_KIND = _KIND_BASE + "release-result/v1"
 CONSUMED_KINDS = (PLAN_KIND, RUN_KIND, RELEASE_KIND)
+# The only skill that may produce each consumed kind; any other producer is a problem.
+PRODUCERS = {PLAN_KIND: "spec-first-planning", RUN_KIND: "factory-conductor",
+             RELEASE_KIND: "release-conductor"}
 SHARED_ENVELOPES = ".skill-contract/envelopes"  # read by sync, never written by intake
 
 INTAKE_DIR = ".skill-contract/intake"
@@ -259,7 +262,7 @@ def transition(item, to, by=None, reason=None, now=None):
             raise ValueError("only a dismissed or resolved item can recur, not %s" % frm)
         item["regressed"] = True
         item["recurred_at"] = now
-        for k in ("closed_at", "plan", "wait"):  # an old plan never closes a new occurrence
+        for k in ("closed_at", "plan", "wait", "checked", "checked_for"):  # an old plan never closes a new occurrence
             item.pop(k, None)
         item.pop("state_by", None)
         item.pop("state_reason", None)
@@ -295,7 +298,7 @@ class QueueError(Exception):
 _RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
 MAX_HISTORY_SHAS = 20000  # per release commit: ~0.9 MB of queue; git lists newest first
-MAX_HISTORIES = 5         # release commits kept; the oldest import is dropped first
+MAX_HISTORIES = 5         # unneeded histories kept; the oldest unneeded import goes first
 
 
 def _valid_history(commit, h):
@@ -320,6 +323,8 @@ class Queue:
         self.runs = runs if runs is not None else {}  # failing CI runs by run id
         # imported `git rev-list <commit>` output by release commit, for loop closing
         self.histories = histories if histories is not None else {}
+        self.needed = []       # release commits the last sync asked a history for
+        self.unavailable = {}  # release commits whose history came back empty: {at, told}
 
     @classmethod
     def load(cls, root):
@@ -351,7 +356,18 @@ class Queue:
         if not isinstance(histories, dict) or not all(
                 _valid_history(c, h) for c, h in histories.items()):
             raise QueueError(path)
-        return cls(root, items, runs, histories)
+        needed, unavailable = data.get("needed", []), data.get("unavailable", {})
+        if not (isinstance(needed, list) and all(isinstance(c, str) and _SHA40_RE.match(c)
+                                                 for c in needed)):
+            raise QueueError(path)
+        if not (isinstance(unavailable, dict) and all(
+                isinstance(c, str) and _SHA40_RE.match(c) and isinstance(u, dict)
+                and isinstance(u.get("at"), str) and isinstance(u.get("told"), bool)
+                for c, u in unavailable.items())):
+            raise QueueError(path)
+        q = cls(root, items, runs, histories)
+        q.needed, q.unavailable = needed, unavailable
+        return q
 
     def add(self, source, source_id, title, evidence=None, now=None):
         """Add a new item, or return the existing one with the same id."""
@@ -369,7 +385,8 @@ class Queue:
         tmp = path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "items": self.items, "runs": self.runs,
-                       "histories": self.histories}, f, indent=1, sort_keys=True)
+                       "histories": self.histories, "needed": self.needed,
+                       "unavailable": self.unavailable}, f, indent=1, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -393,9 +410,16 @@ class Queue:
 def _flag(item):
     """The state, plus `regressed`, plus what a planned item waits on (set by sync)."""
     flag = item["state"] + ("+regressed" if item.get("regressed") else "")
-    if item["state"] == "planned" and item.get("wait") in ("needs-history", "needs-resolve"):
+    if item["state"] in ("picked", "planned") and item.get("wait") in WAITS:
         flag += "+" + item["wait"]
     return flag
+
+
+# What sync says an item waits on: needs-plan (picked; the plan naming it predates the
+# pick), needs-history (import a git-rev-list), needs-resolve (a human closes it: squash
+# merge, partial run, release not in the clone), plan-superseded (a revision of its plan
+# dropped it).
+WAITS = ("needs-plan", "needs-history", "needs-resolve", "plan-superseded")
 
 
 def _rank(item):
@@ -742,23 +766,33 @@ def _import_history(a):
     ctx = {"source": None, "now": now}
     _, problems = adapters.ADAPTERS["git-rev-list"](raw, ctx)
     shas = ctx["history_out"]
-    if not shas or shas[0] != a.commit:
+    unavailable = not shas and not problems  # git rev-list printed nothing: not in this clone
+    if unavailable:
+        problems.append("no commits: the release commit is not in this clone; git fetch, "
+                        "then import again")
+    elif not shas or shas[0] != a.commit:
         problems.append("the history does not start at --commit; nothing was stored")
         shas = []
     elif len(shas) > MAX_HISTORY_SHAS:
         problems.append("%d commits over the %d kept were not stored"
                         % (len(shas) - MAX_HISTORY_SHAS, MAX_HISTORY_SHAS))
         shas = shas[:MAX_HISTORY_SHAS]
-    if shas:
+    if shas or unavailable:
         try:
             with run_lock(a.root):
                 q = _load(a.root)
                 if q is None:
                     return 2
-                q.histories[a.commit] = {"imported_at": now, "shas": shas}
-                while len(q.histories) > MAX_HISTORIES:
-                    old = min(q.histories, key=lambda c: (q.histories[c]["imported_at"], c))
-                    del q.histories[old]
+                if unavailable:
+                    q.unavailable[a.commit] = {"at": now, "told": False}
+                else:
+                    q.unavailable.pop(a.commit, None)
+                    q.histories[a.commit] = {"imported_at": now, "shas": shas}
+                # Over the cap, drop the oldest history no planned item still needs.
+                spare = sorted((h["imported_at"], c) for c, h in q.histories.items()
+                               if c not in q.needed and c != a.commit)
+                while len(q.histories) > MAX_HISTORIES and spare:
+                    del q.histories[spare.pop(0)[1]]
                 q.log("import", format="git-rev-list", commit=a.commit, ok=len(shas),
                       problems=len(problems))
                 q.save()
@@ -815,18 +849,25 @@ def _read_envelopes(root):
                 where, ", ".join(sorted({"C%d" % n for n, _ in viol}))))
             continue
         pred = st["predicate"]
+        if pred["wasAttributedTo"]["skill"] != PRODUCERS[kind]:
+            problems.append("%s: not produced by %s" % (where, PRODUCERS[kind]))
+            continue
         try:
             rec = _envelope_record(kind, pred["payload"])
         except ValueError as e:
             problems.append("%s: %s" % (where, e))
             continue
         rec.update(kind=kind, raw=raw, id=pred["id"], at=pred["generatedAtTime"],
+                   rev_of=pred.get("wasRevisionOf"),
                    rel="%s/%s" % (SHARED_ENVELOPES, name),
                    sha256=hashlib.sha256(data).hexdigest(),
                    pins={s["digest"]["sha256"] for s in st["subject"]})
         out.append(rec)
     out.sort(key=lambda r: (r["at"], r["id"]))
     return out, problems
+
+
+_MERGE_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 def _envelope_record(kind, p):
@@ -844,62 +885,123 @@ def _envelope_record(kind, p):
         raise ValueError("run-result plan.id must be a string")
     if not (isinstance(tasks, list) and all(
             isinstance(t, dict) and isinstance(t.get("status"), str)
-            and (t.get("merge_commit") is None or isinstance(t.get("merge_commit"), str))
             for t in tasks)):
-        raise ValueError("run-result tasks must carry a status and a merge_commit")
+        raise ValueError("run-result tasks must carry a status")
+    if not all(t.get("merge_commit") is None or (isinstance(t["merge_commit"], str)
+               and _MERGE_RE.match(t["merge_commit"])) for t in tasks):
+        raise ValueError("run-result merge_commit must be null or a 40- or 64-hex sha")
     return {"plan_id": plan["id"], "tasks": tasks}
 
 
+def _plan_ref(e):
+    return {"id": e["id"], "path": e["rel"], "sha256": e["sha256"], "at": e["at"]}
+
+
+def _revisions(plans, pid):
+    """The task-plans that revise plan `pid`, directly or through a wasRevisionOf chain."""
+    out, todo, seen = [], [pid], {pid}
+    while todo:
+        cur = todo.pop()
+        for p in plans:
+            if p["rev_of"] == cur and p["id"] not in seen:
+                seen.add(p["id"])
+                out.append(p)
+                todo.append(p["id"])
+    return out
+
+
 def _close_loop(q, envs, now):
-    """Spec 1.6. picked -> planned when a task-plan made after the pick names the item;
-    planned -> resolved when a verified release made at or after the plan's run has a
-    history (imported with git-rev-list) holding every proven task's merge commit.
-    Returns the release commits whose history a planned item still waits on."""
+    """Spec 1.6 with rulings R13-R15. Returns (release commits to import a history for,
+    release commits not in the clone whose fetch line is due).
+
+    - picked -> planned by the newest task-plan made at or after the pick that names the
+      item; a naming plan older than the pick flags needs-plan.
+    - A planned item follows the newest naming plan; a revision of its plan that drops it
+      flags plan-superseded.
+    - The latest run-result pinning the plan (digest and id) decides. Every task must be
+      proven with a merge commit, else needs-resolve (a partial or stopped run).
+    - Each verified release made at or after that run is checked once per item: its
+      history holds every merge (resolved, by release:<version>), or it lacks one (kept
+      in `checked`, never asked for again), or its commit is not in the clone or is not
+      40-hex. When every such release is settled and none resolves: needs-resolve."""
     plans = [e for e in envs if e["kind"] == PLAN_KIND]
     runs = [e for e in envs if e["kind"] == RUN_KIND]
     verified = [e for e in envs if e["kind"] == RELEASE_KIND and e["outcome"] == "verified"]
-    for e in plans:
-        for iid in e["intake_items"]:
-            it = q.items.get(iid)
-            if it and it["state"] == "picked" and e["at"] >= it.get("state_at", ""):
-                transition(it, "planned", now=now)
-                it["plan"] = {"id": e["id"], "path": e["rel"], "sha256": e["sha256"]}
-                q.log("planned", id=iid, plan=e["id"])
-    wanted = set()
+    wanted, fetch = set(), set()
     for iid in sorted(q.items):
         it = q.items[iid]
-        if it["state"] != "planned":
+        if it["state"] not in ("picked", "planned"):
             continue
         it.pop("wait", None)
+        naming = [p for p in plans if iid in p["intake_items"]]
+        if it["state"] == "picked":
+            fresh = [p for p in naming if p["at"] >= it.get("state_at", "")]
+            if not fresh:
+                if naming:
+                    it["wait"] = "needs-plan"
+                continue
+            transition(it, "planned", now=now)
+            it["plan"] = _plan_ref(fresh[-1])
+            q.log("planned", id=iid, plan=fresh[-1]["id"])
         plan = it.get("plan")
         if not isinstance(plan, dict):
             continue
+        newer = [p for p in naming if (p["at"], p["id"]) > (plan.get("at", ""), plan.get("id", ""))
+                 and p["id"] != plan.get("id")]
+        if newer:
+            plan = it["plan"] = _plan_ref(newer[-1])
+            it.pop("checked", None)
+            q.log("replanned", id=iid, plan=plan["id"])
+        if any(iid not in p["intake_items"] for p in _revisions(plans, plan.get("id"))):
+            it["wait"] = "plan-superseded"
+            continue
         mine = [r for r in runs if plan.get("sha256") in r["pins"] and r["plan_id"] == plan.get("id")]
-        proven = [t for r in mine for t in r["tasks"] if t["status"] == "proven"]
-        if not proven or any(not t.get("merge_commit") for t in proven):
-            continue  # nothing proven, or a proven task without a merge: never resolve
-        merges = {t["merge_commit"] for t in proven}
-        since = max(r["at"] for r in mine)
-        no_history, missing = [], False
-        for rel in (v for v in verified if v["at"] >= since):
-            h = q.histories.get(rel["commit"])
-            if not _SHA40_RE.match(rel["commit"]):
-                missing = True  # a sha256 repo: git-rev-list takes 40-hex only; a human resolves
-            elif h is None:
-                no_history.append(rel["commit"])
-            elif merges <= set(h["shas"]):
-                transition(it, "resolved", by="release:%s" % rel["version"], now=now)
-                q.log("resolved", id=iid, by="release:%s" % rel["version"])
-                break
+        if not mine:
+            continue
+        run = mine[-1]  # envs are sorted oldest first: the latest run decides
+        tasks = run["tasks"]
+        if not tasks or any(t["status"] != "proven" or not t.get("merge_commit") for t in tasks):
+            it["wait"] = "needs-resolve"  # a partial or stopped run: a human closes it
+            continue
+        merges = sorted({t["merge_commit"] for t in tasks})
+        if it.get("checked_for") != merges or not isinstance(it.get("checked"), list):
+            it["checked_for"], it["checked"] = merges, []
+        checked = it["checked"]
+        no_history, settled = [], False
+        for rel in (v for v in verified if v["at"] >= run["at"]):
+            c = rel["commit"]
+            h = q.histories.get(c)
+            if c in checked or not _SHA40_RE.match(c):
+                settled = True  # lacked a merge before, or a sha256 repo git-rev-list can't take
+            elif h is not None:
+                if set(merges) <= set(h["shas"]):
+                    transition(it, "resolved", by="release:%s" % rel["version"], now=now)
+                    q.log("resolved", id=iid, by="release:%s" % rel["version"])
+                    break
+                checked.append(c)  # a squash or rebase merge: never ask for it again
+                settled = True
+            elif c in q.unavailable:
+                settled = True
+                fetch.add(c)
             else:
-                missing = True  # a squash or rebase merge: the human resolves it
+                no_history.append(c)
         else:
             if no_history:
                 it["wait"] = "needs-history"
                 wanted.update(no_history)
-            elif missing:
+            elif settled:
                 it["wait"] = "needs-resolve"
-    return wanted
+    # Every history in hand was just used: an item resolved on it or recorded it as
+    # checked. Keep none that no planned item still needs.
+    for c in [c for c in q.histories if c not in wanted]:
+        del q.histories[c]
+    q.needed = sorted(wanted)
+    for c in [c for c in q.unavailable if c not in fetch]:
+        del q.unavailable[c]
+    due = {c for c in fetch if not q.unavailable[c]["told"]}
+    for c in due:
+        q.unavailable[c]["told"] = True
+    return wanted, due
 
 
 def cmd_sync(a):
@@ -924,7 +1026,7 @@ def cmd_sync(a):
                         sigs, probs = adapters.ADAPTERS["release-envelope"](e["raw"], ctx)
                         apply_signals(q, sigs, now)
                         problems.extend(probs)
-            wanted = _close_loop(q, envs, now)
+            wanted, fetch = _close_loop(q, envs, now)
             weights = cfg.get("weights", {})
             for it in q.items.values():
                 it["rank"] = compute_rank(it, weights, now)
@@ -946,6 +1048,9 @@ def cmd_sync(a):
                   "gh-run-jobs-json --source ci --run %s" % (rid, rid))
     for c in sorted(wanted):
         print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
+    for c in sorted(fetch):  # printed once per commit: the item is needs-resolve meanwhile
+        print("NEXT: git fetch, then re-import: git rev-list %s | intake import --format "
+              "git-rev-list --commit %s" % (c, c))
     return 3 if problems else 0
 
 
@@ -1018,13 +1123,23 @@ def cmd_pick(a):
             st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, a.root, [snap_rel],
                                     payload)
             viol = CC.check_statement(st)
-            if viol:
-                print("STOP: the intake-item envelope would be invalid (%s)"
-                      % ", ".join(sorted({"C%d" % n for n, _ in viol})))
-                return 2
             env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
-            _write_atomic(a.root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
-                          exclusive=True)
+            written = False
+            try:
+                if viol:
+                    print("STOP: the intake-item envelope would be invalid (%s)"
+                          % ", ".join(sorted({"C%d" % n for n, _ in viol})))
+                    return 2
+                _write_atomic(a.root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
+                              exclusive=True)
+                written = True
+            except FileExistsError:
+                print("STOP: an envelope already exists at %s; pick again" % env_rel)
+                return 2
+            finally:
+                if not written:  # no envelope: drop the snapshot it would have pinned
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(os.path.join(a.root, *snap_rel.split("/")))
             transition(i, "picked", by=a.by)
             i["envelope"] = env_rel
             q.log("pick", id=a.id, by=a.by, envelope=env_rel)
