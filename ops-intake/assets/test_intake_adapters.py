@@ -221,8 +221,7 @@ class ImportCommandTests(unittest.TestCase):
 
     def test_unbuilt_formats_stop_cleanly(self):
         root = repo(config=CFG)
-        for fmt, src in (("gh-runs-json", "ci"), ("gh-run-jobs-json", "ci"),
-                         ("release-envelope", "release")):
+        for fmt, src in (("release-envelope", "release"),):
             rc, out = imp(root, fmt, src, fx("release_status_none.txt"))
             self.assertEqual(rc, 2)
             self.assertIn("STOP: format-not-built %s" % fmt, out)

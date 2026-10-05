@@ -273,10 +273,21 @@ class QueueError(Exception):
     """The queue file is unreadable or not an intake queue."""
 
 
+_RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
+_RUN_STRS = ("workflowName", "headBranch", "headSha", "url", "createdAt", "updatedAt")
+
+
+def _valid_run(r):
+    return (isinstance(r, dict) and all(isinstance(r.get(k), str) for k in _RUN_STRS)
+            and isinstance(r.get("attempt"), int) and not isinstance(r.get("attempt"), bool)
+            and isinstance(r.get("jobs_imported"), bool))
+
+
 class Queue:
-    def __init__(self, root, items=None):
+    def __init__(self, root, items=None, runs=None):
         self.root = root
         self.items = items if items is not None else {}
+        self.runs = runs if runs is not None else {}  # failing CI runs by run id
 
     @classmethod
     def load(cls, root):
@@ -300,7 +311,11 @@ class Queue:
             it.setdefault("id", iid)
             it.setdefault("first_seen", "")
             it.setdefault("regressed", False)
-        return cls(root, items)
+        runs = data.get("runs", {})
+        if not isinstance(runs, dict) or not all(
+                _RUN_RE.match(rid) and _valid_run(r) for rid, r in runs.items()):
+            raise QueueError(path)
+        return cls(root, items, runs)
 
     def add(self, source, source_id, title, evidence=None, now=None):
         """Add a new item, or return the existing one with the same id."""
@@ -317,7 +332,7 @@ class Queue:
         path = os.path.join(d, QUEUE_FILE)
         tmp = path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "items": self.items}, f, indent=1, sort_keys=True)
+            json.dump({"version": 1, "items": self.items, "runs": self.runs}, f, indent=1, sort_keys=True)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -497,7 +512,6 @@ def cmd_status(a):
 EVIDENCE_CAP = 20      # evidence kept per item; the oldest is dropped first
 PROBLEM_LINES = 50     # PROBLEM: lines printed; the IMPORT: line counts all of them
 _COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}\Z")
-_RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
 
 
 def _bump(item, sig):
@@ -593,11 +607,25 @@ def cmd_import(a):
     if fmt not in adapters.ADAPTERS:
         print("STOP: format-not-built %s" % fmt)
         return 2
+    if fmt == "gh-run-jobs-json" and a.run is None:
+        print("STOP: gh-run-jobs-json needs --run <run id>")
+        return 2
     raw = _read_input(a.file)
     if raw is None:
         return 2
     now = _now()
-    ctx = {"source": a.source, "now": now, "run": a.run}
+    ctx = {"source": a.source, "now": now, "run": a.run, "runs_out": {}}
+    if fmt in ("gh-runs-json", "gh-run-jobs-json"):
+        ci = cfg.get("ci", {})
+        ctx["default_branch"] = ci.get("default_branch", "main")
+        ctx["workflows"] = ci.get("workflows", [])
+        q0 = _load(a.root)
+        if q0 is None:
+            return 2
+        ctx["runs"] = q0.runs
+        if fmt == "gh-run-jobs-json" and a.run not in q0.runs:
+            print("STOP: run-not-imported %s" % a.run)
+            return 2
     signals, problems = adapters.ADAPTERS[fmt](raw, ctx)
     if len(signals) > adapters.MAX_SIGNALS:
         problems.append("%d records over the %d per import were not imported"
@@ -608,6 +636,12 @@ def cmd_import(a):
             q = _load(a.root)
             if q is None:
                 return 2
+            if fmt == "gh-run-jobs-json":
+                if a.run not in q.runs:
+                    print("STOP: run-not-imported %s" % a.run)
+                    return 2
+                q.runs[a.run]["jobs_imported"] = True
+            q.runs.update(ctx["runs_out"])
             apply_signals(q, signals, now)
             q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
             q.save()
@@ -620,6 +654,25 @@ def cmd_import(a):
     if len(problems) > PROBLEM_LINES:
         print("PROBLEM: and %d more" % (len(problems) - PROBLEM_LINES))
     return 3 if problems else 0
+
+
+def cmd_sync(a):
+    """Task 3: print the NEXT line for each failing run whose jobs are not imported."""
+    if _need_config(a.root) is None:
+        return 2
+    try:
+        with run_lock(a.root):
+            q = _load(a.root)
+            if q is None:
+                return 2
+            for rid in sorted(q.runs, key=int):
+                if not q.runs[rid]["jobs_imported"]:
+                    print("NEXT: gh run view %s --json jobs | intake import --format "
+                          "gh-run-jobs-json --source ci --run %s" % (rid, rid))
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    return 0
 
 
 def cmd_formats(a):
@@ -641,6 +694,7 @@ def main(argv=None):
     s = sub.add_parser("resolve"); s.add_argument("id"); s.add_argument("--by", required=True)
     s = sub.add_parser("link"); s.add_argument("id"); s.add_argument("other")
     sub.add_parser("status")
+    sub.add_parser("sync")
     sub.add_parser("formats")
     s = sub.add_parser("import"); s.add_argument("--format", required=True)
     s.add_argument("--source"); s.add_argument("--run"); s.add_argument("--commit")
@@ -655,7 +709,7 @@ def main(argv=None):
     if a.cmd == "resolve":
         return _change(a, "resolved")
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
-            "status": cmd_status, "formats": cmd_formats,
+            "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
             "import": cmd_import}[a.cmd](a)
 
 

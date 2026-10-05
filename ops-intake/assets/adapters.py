@@ -192,9 +192,149 @@ def adapt_release_status(raw, ctx):
     return sigs, problems
 
 
-# Formats with no adapter yet (tasks 3 and 4) are absent here, so import stops on them.
+# -- gh-runs-json and gh-run-jobs-json --------------------------------------------
+CI_FAILURES = ("failure", "timed_out", "startup_failure")
+_STATUSES = ("completed", "in_progress", "queued", "requested", "waiting", "pending")
+_CONCLUSIONS = ("success", "failure", "cancelled", "skipped", "neutral", "timed_out",
+                "action_required", "stale", "startup_failure")
+
+
+def _text(rec, k, cap=URL_CAP):
+    v = rec.get(k)
+    if not (isinstance(v, str) and v and len(v) <= cap):
+        raise ValueError("%s must be a non-empty string of at most %d characters" % (k, cap))
+    return v
+
+
+def _int(rec, k, default=None):
+    v = rec.get(k, default)
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        raise ValueError("%s must be a positive integer" % k)
+    return v
+
+
+def _json_list(raw):
+    try:
+        data = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None, "input is not valid JSON"
+    return data, None
+
+
+def _one_run(rec, ctx):
+    """(run id, run record) for a failing run on the default branch, or None to skip."""
+    if not isinstance(rec, dict):
+        raise ValueError("not an object")
+    if rec.get("headBranch") != ctx["default_branch"]:
+        return None
+    wanted = ctx.get("workflows")
+    if wanted and rec.get("workflowName") not in wanted:
+        return None
+    status, concl = rec.get("status"), rec.get("conclusion")
+    if status not in _STATUSES:
+        raise ValueError("unknown status value")
+    if status != "completed":
+        return None
+    if concl not in _CONCLUSIONS:
+        raise ValueError("unknown conclusion value")
+    if concl not in CI_FAILURES:
+        return None
+    rid = _int(rec, "databaseId")
+    run = {"workflowName": _text(rec, "workflowName", 100), "headBranch": rec["headBranch"],
+           "headSha": _text(rec, "headSha", 64), "url": _text(rec, "url"),
+           "createdAt": parse_time(rec.get("createdAt")),
+           "updatedAt": parse_time(rec.get("updatedAt")),
+           "attempt": _int(rec, "attempt", 1), "jobs_imported": False}
+    return str(rid), run
+
+
+def adapt_gh_runs(raw, ctx):
+    """No signals: failing runs go to ctx['runs_out'] and wait for their jobs."""
+    data, err = _json_list(raw)
+    if err:
+        return [], [err]
+    if not isinstance(data, list):
+        return [], ["input must be a JSON array"]
+    problems = []
+    for i, rec in enumerate(data):
+        try:
+            got = _one_run(rec, ctx)
+        except ValueError as e:
+            problems.append("record %d: %s" % (i, e))
+            continue
+        except Exception:  # backstop: one odd record never aborts the import
+            problems.append("record %d: unreadable record" % i)
+            continue
+        if got:
+            rid, run = got
+            old = ctx["runs"].get(rid)
+            if old and old.get("attempt") == run["attempt"]:
+                run["jobs_imported"] = bool(old.get("jobs_imported"))
+            ctx["runs_out"][rid] = run
+    return [], problems
+
+
+def _one_job(rec, run, ctx):
+    if not isinstance(rec, dict):
+        raise ValueError("not an object")
+    status, concl = rec.get("status"), rec.get("conclusion")
+    if status not in _STATUSES:
+        raise ValueError("unknown status value")
+    if status != "completed":
+        return None
+    if concl not in _CONCLUSIONS:
+        raise ValueError("unknown conclusion value")
+    if concl not in CI_FAILURES:
+        return None
+    jid = _int(rec, "databaseId")
+    name = _text(rec, "name", 100)
+    url = _text(rec, "url")
+    done = parse_time(rec.get("completedAt")) if rec.get("completedAt") else run["updatedAt"]
+    steps = rec.get("steps", [])
+    if not isinstance(steps, list):
+        raise ValueError("steps must be a list")
+    failed = [st["name"] for st in steps if isinstance(st, dict)
+              and isinstance(st.get("name"), str) and st.get("conclusion") in CI_FAILURES]
+    sid = "%s/%s/%s" % (run["workflowName"], name, run["headBranch"])
+    if len(sid) > SOURCE_ID_CAP:
+        raise ValueError("source id longer than %d characters" % SOURCE_ID_CAP)
+    key = "%s:%s:%s" % (ctx["run"], run["attempt"], jid)
+    text = "failed steps: %s" % (", ".join(failed) if failed else "(none recorded)")
+    title = "%s / %s failing on %s" % (run["workflowName"], name, run["headBranch"])
+    return _signal(ctx, sid, url, "ci", title, 3, done, done, "normal",
+                   [_evidence(ctx, sid, text, key)])
+
+
+def adapt_gh_run_jobs(raw, ctx):
+    run = ctx["runs"].get(ctx["run"])
+    if run is None:
+        return [], ["run %s was not imported" % ctx["run"]]
+    data, err = _json_list(raw)
+    if err:
+        return [], [err]
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, list):
+        return [], ["input must be an object with a jobs array"]
+    sigs, problems = [], []
+    for i, rec in enumerate(jobs):
+        try:
+            s = _one_job(rec, run, ctx)
+        except ValueError as e:
+            problems.append("job %d: %s" % (i, e))
+            continue
+        except Exception:  # backstop: one odd job never aborts the import
+            problems.append("job %d: unreadable record" % i)
+            continue
+        if s:
+            sigs.append(s)
+    return sigs, problems
+
+
+# Formats with no adapter yet (task 4) are absent here, so import stops on them.
 ADAPTERS = {
     "gh-issues-json": adapt_gh_issues,
+    "gh-runs-json": adapt_gh_runs,
+    "gh-run-jobs-json": adapt_gh_run_jobs,
     "intake-signals-jsonl": adapt_jsonl,
     "release-status": adapt_release_status,
 }

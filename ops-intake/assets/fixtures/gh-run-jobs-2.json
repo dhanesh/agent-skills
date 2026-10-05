@@ -1,0 +1,23 @@
+{
+ "jobs": [
+  {
+   "completedAt": "2026-10-06T10:05:00Z",
+   "conclusion": "failure",
+   "databaseId": 9101,
+   "name": "gate (ubuntu-latest)",
+   "startedAt": "2026-10-06T10:05:00Z",
+   "status": "completed",
+   "steps": [
+    {
+     "name": "make gate",
+     "conclusion": "failure",
+     "number": 1,
+     "status": "completed",
+     "startedAt": "2026-10-06T10:05:00Z",
+     "completedAt": "2026-10-06T10:05:00Z"
+    }
+   ],
+   "url": "https://github.com/o/r/actions/runs/1/job/9101"
+  }
+ ]
+}

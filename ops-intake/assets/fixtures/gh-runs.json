@@ -1,0 +1,93 @@
+[
+ {
+  "databaseId": 1001,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "failure",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1001",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1002,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "success",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1002",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1003,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "cancelled",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1003",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1004,
+  "workflowName": "gate",
+  "headBranch": "dev",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "failure",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1004",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1005,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "failure",
+  "createdAt": "2026-10-06T10:00:00Z",
+  "updatedAt": "2026-10-06T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1005",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1006,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "exploded",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1006",
+  "attempt": 1
+ },
+ {
+  "databaseId": 1007,
+  "workflowName": "gate",
+  "headBranch": "main",
+  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event": "push",
+  "status": "in_progress",
+  "conclusion": "",
+  "createdAt": "2026-10-05T10:00:00Z",
+  "updatedAt": "2026-10-05T10:00:00Z",
+  "url": "https://github.com/o/r/actions/runs/1007",
+  "attempt": 1
+ }
+]

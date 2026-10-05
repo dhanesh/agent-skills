@@ -1,0 +1,60 @@
+{
+ "jobs": [
+  {
+   "completedAt": "2026-10-05T10:05:00Z",
+   "conclusion": "failure",
+   "databaseId": 9001,
+   "name": "gate (ubuntu-latest)",
+   "startedAt": "2026-10-05T10:05:00Z",
+   "status": "completed",
+   "steps": [
+    {
+     "name": "Set up job",
+     "conclusion": "success",
+     "number": 1,
+     "status": "completed",
+     "startedAt": "2026-10-05T10:05:00Z",
+     "completedAt": "2026-10-05T10:05:00Z"
+    },
+    {
+     "name": "make gate",
+     "conclusion": "failure",
+     "number": 2,
+     "status": "completed",
+     "startedAt": "2026-10-05T10:05:00Z",
+     "completedAt": "2026-10-05T10:05:00Z"
+    }
+   ],
+   "url": "https://github.com/o/r/actions/runs/1/job/9001"
+  },
+  {
+   "completedAt": "2026-10-05T10:06:00Z",
+   "conclusion": "success",
+   "databaseId": 9002,
+   "name": "gate (macos-latest)",
+   "startedAt": "2026-10-05T10:06:00Z",
+   "status": "completed",
+   "steps": [
+    {
+     "name": "make gate",
+     "conclusion": "success",
+     "number": 1,
+     "status": "completed",
+     "startedAt": "2026-10-05T10:06:00Z",
+     "completedAt": "2026-10-05T10:06:00Z"
+    }
+   ],
+   "url": "https://github.com/o/r/actions/runs/1/job/9002"
+  },
+  {
+   "completedAt": "2026-10-05T10:06:00Z",
+   "conclusion": "cancelled",
+   "databaseId": 9003,
+   "name": "lint",
+   "startedAt": "2026-10-05T10:06:00Z",
+   "status": "completed",
+   "steps": [],
+   "url": "https://github.com/o/r/actions/runs/1/job/9003"
+  }
+ ]
+}
