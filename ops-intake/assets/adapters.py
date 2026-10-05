@@ -13,11 +13,13 @@ import re
 
 EVIDENCE_TEXT_CAP = 4000
 TITLE_CAP = 500
+MAX_SIGNALS = 5000      # per import; intake reports the rest as one problem
+SOURCE_ID_CAP, URL_CAP, KEY_CAP = 200, 2000, 200
 
 _TIME_RE = re.compile(
-    r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?(Z|[+-]\d\d:\d\d|[+-]\d\d\d\d)\Z")
+    r"^([0-9]{4}-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9])(\.[0-9]+)?(Z|[+-][0-9][0-9]:[0-9][0-9]|[+-][0-9][0-9][0-9][0-9])\Z")
 _SEMVER_RE = re.compile(
-    r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\Z")
+    r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\Z")
 _RELEASE_RE = re.compile(r"^RELEASE: (\S+) (\S+)\Z")
 _RELEASE_SEVERITY = {"prod_failed": 4, "outcome_unknown": 4, "rolled_back": 3,
                      "stage_failed": 3, "abandoned": 2}
@@ -34,6 +36,13 @@ def parse_time(s):
         raise ValueError("not an RFC 3339 timestamp")
     base, _frac, zone = m.groups()
     dt = datetime.datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")  # ValueError if out of range
+    try:
+        return _shift(dt, zone)
+    except OverflowError:
+        raise ValueError("timestamp out of range")
+
+
+def _shift(dt, zone):
     if zone != "Z":
         digits = zone[1:].replace(":", "")
         hh, mm = int(digits[:2]), int(digits[2:])
@@ -94,7 +103,7 @@ def _one_issue(rec, ctx):
 def adapt_gh_issues(raw, ctx):
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return [], ["input is not valid JSON"]
     if not isinstance(data, list):
         return [], ["input must be a JSON array"]
@@ -104,6 +113,8 @@ def adapt_gh_issues(raw, ctx):
             sigs.append(_one_issue(rec, ctx))
         except ValueError as e:
             problems.append("record %d: %s" % (i, e))
+        except Exception:  # backstop: one odd record never aborts the import
+            problems.append("record %d: unreadable record" % i)
     return sigs, problems
 
 
@@ -116,8 +127,10 @@ def _one_jsonl(rec, ctx):
     for k in ("source_id", "title"):
         if not (isinstance(rec.get(k), str) and rec[k]):
             raise ValueError("%s must be a non-empty string" % k)
-    if not isinstance(rec.get("url", ""), str):
-        raise ValueError("url must be a string")
+    if not isinstance(rec.get("url", ""), str) or len(rec.get("url", "")) > URL_CAP:
+        raise ValueError("url must be a string of at most %d characters" % URL_CAP)
+    if len(rec["source_id"]) > SOURCE_ID_CAP:
+        raise ValueError("source_id longer than %d characters" % SOURCE_ID_CAP)
     if rec.get("kind") not in KINDS:
         raise ValueError("kind must be release, ci or issue")
     sev = rec.get("severity")
@@ -134,8 +147,8 @@ def _one_jsonl(rec, ctx):
         key = e.get("key")
         if key is None:
             key = hashlib.sha256(e["text"].encode("utf-8")).hexdigest()[:12]
-        if not isinstance(key, str):
-            raise ValueError("evidence key must be a string")
+        if not isinstance(key, str) or len(key) > KEY_CAP:
+            raise ValueError("evidence key must be a string of at most %d characters" % KEY_CAP)
         evidence.append(_evidence(ctx, rec["source_id"], e["text"], key))
     # Whatever the record says about trust is ignored: this format is always low.
     return _signal(ctx, rec["source_id"], rec.get("url", ""), rec["kind"], rec["title"],
@@ -149,8 +162,10 @@ def adapt_jsonl(raw, ctx):
             continue
         try:
             sigs.append(_one_jsonl(json.loads(line), ctx))
-        except ValueError as e:
-            problems.append("line %d: %s" % (n, e))
+        except (ValueError, RecursionError) as e:
+            problems.append("line %d: %s" % (n, e if isinstance(e, ValueError) else "nested too deeply"))
+        except Exception:  # backstop: one odd line never aborts the import
+            problems.append("line %d: unreadable record" % n)
     return sigs, problems
 
 

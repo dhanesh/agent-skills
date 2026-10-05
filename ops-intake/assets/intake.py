@@ -539,7 +539,7 @@ def apply_signals(queue, signals, now):
                   and not sig.get("closed") and it.get("closed_at")
                   and sig["last_seen"] > it["closed_at"])
         _bump(it, sig)
-        it["severity"] = max(it.get("severity", 0), sig["severity"])
+        it["severity"] = max(it.get("severity", 0), sig["severity"])  # only rises on merge, by design
         if sig.get("closed"):
             it["closed"] = True
         elif "closed" in it:
@@ -599,6 +599,10 @@ def cmd_import(a):
     now = _now()
     ctx = {"source": a.source, "now": now, "run": a.run}
     signals, problems = adapters.ADAPTERS[fmt](raw, ctx)
+    if len(signals) > adapters.MAX_SIGNALS:
+        problems.append("%d records over the %d per import were not imported"
+                        % (len(signals) - adapters.MAX_SIGNALS, adapters.MAX_SIGNALS))
+        signals = signals[:adapters.MAX_SIGNALS]
     try:
         with run_lock(a.root):
             q = _load(a.root)

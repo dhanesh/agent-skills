@@ -53,6 +53,62 @@ class ParseTimeTests(unittest.TestCase):
                     AD.parse_time(bad)
 
 
+class HardeningTests(unittest.TestCase):
+    def test_date_range_edges_are_value_errors(self):
+        for bad in ("0001-01-01T00:00:00+05:00", "9999-12-31T23:59:59-05:00"):
+            with self.assertRaises(ValueError):
+                AD.parse_time(bad)
+
+    def test_unicode_digits_refused(self):
+        with self.assertRaises(ValueError):
+            AD.parse_time("\u0662026-10-05T08:20:45Z")
+        sigs, _ = AD.ADAPTERS["release-status"]("RELEASE: \u0661.2.0 prod_failed\n",
+                                                dict(CTX, source="release"))
+        self.assertEqual(sigs, [])
+
+    def test_nested_json_is_a_problem_not_a_traceback(self):
+        deep = "[" * 100000
+        sigs, problems = AD.ADAPTERS["gh-issues-json"](deep, CTX)
+        self.assertEqual((sigs, len(problems)), ([], 1))
+        line = '{"a":' * 100000
+        ok = read("signals_ok.jsonl").splitlines()[0]
+        sigs, problems = AD.ADAPTERS["intake-signals-jsonl"](line + "\n" + ok, dict(CTX, source="jira"))
+        self.assertEqual((len(sigs), len(problems)), (1, 1))
+
+    def test_nested_json_import_exits_3(self):
+        root = repo(config=CFG)
+        f = write(root, "d.json", "[" * 100000)
+        self.assertEqual(imp(root, "gh-issues-json", "github", f)[0], 3)
+
+    def test_labels_not_a_list_is_a_problem(self):
+        issue = json.loads(read("gh_issues_ok.json"))[:1]
+        for bad in ("bug", 5, {"name": "bug"}, None):
+            issue[0]["labels"] = bad
+            sigs, problems = AD.ADAPTERS["gh-issues-json"](json.dumps(issue), CTX)
+            self.assertEqual((sigs, len(problems)), ([], 1), bad)
+
+    def test_oversized_jsonl_fields_refused(self):
+        base = json.loads(read("signals_ok.jsonl").splitlines()[0])
+        for patch in ({"source_id": "x" * 201}, {"url": "u" * 2001},
+                      {"evidence": [{"text": "t", "key": "k" * 201}]}):
+            sigs, problems = AD.ADAPTERS["intake-signals-jsonl"](
+                json.dumps(dict(base, **patch)), dict(CTX, source="jira"))
+            self.assertEqual((sigs, len(problems)), ([], 1), list(patch))
+
+    def test_signals_per_import_are_capped(self):
+        root = repo(config=CFG)
+        old = AD.MAX_SIGNALS
+        AD.MAX_SIGNALS = 2
+        try:
+            f = write(root, "i.json", read("gh_issues_ok.json"))
+            rc, out = imp(root, "gh-issues-json", "github", f)
+        finally:
+            AD.MAX_SIGNALS = old
+        self.assertEqual(rc, 3)
+        self.assertIn("ok 2 problems 1", out)
+        self.assertEqual(len(IN.Queue.load(root).items), 2)
+
+
 class GhIssuesTests(unittest.TestCase):
     def adapt(self, raw):
         return AD.ADAPTERS["gh-issues-json"](raw, CTX)
