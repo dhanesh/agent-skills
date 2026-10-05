@@ -124,8 +124,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    light pass. Add `--converged` before the path for the full loop, or `--unattended` in
    unattended mode. Fix every `FAIL:` line (each names the requirement and the defect:
    missing section, id gap, missing modal, vague term with no metric, requirement with no
-   criterion, a constraint no truth maps to, a `[cmd: ...]` that does not parse or breaks
-   the command rule) and rerun until it prints `LINT_RESULT: PASS`.
+   criterion, a constraint no truth maps to, a `[cmd: ...]` that does not parse, breaks
+   the command rule or holds a hidden or control character) and rerun until it prints `LINT_RESULT: PASS`.
    Repair by making statements more checkable, not by deleting the inconvenient ones — if a
    requirement truly can't be kept, move it to Non-goals or Open questions so the decision
    stays visible. Each pass of the full loop adds one line to the

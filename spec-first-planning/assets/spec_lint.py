@@ -68,6 +68,7 @@ import os
 import re
 import shlex
 import sys
+import unicodedata
 from collections import OrderedDict
 
 REQUIRED_SECTIONS = (
@@ -229,17 +230,47 @@ def code(text):
     return "%s%s%s%s%s" % (fence, pad, s, pad, fence)
 
 
+# Characters that can make a command look different from what runs: controls (Cc, which
+# includes NUL and ESC), format characters (Cf: bidi overrides, zero-width spaces), line
+# and paragraph separators, private-use and surrogate code points, and every space
+# separator but U+0020. A [cmd: ...] holding one fails the lint (rule 5b).
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+
+
+def is_hidden_char(ch):
+    """True when ch can hide or disguise what a command line shows."""
+    cat = unicodedata.category(ch)
+    return cat in _HIDDEN_CATEGORIES or (cat == "Zs" and ch != " ")
+
+
+def hidden_chars(text):
+    """The distinct hidden characters in text as U+XXXX names, in order of appearance."""
+    return list(dict.fromkeys("U+%04X" % ord(ch) for ch in text if is_hidden_char(ch)))
+
+
+def _fold(text):
+    """text for the copy tripwire: NFKC, case folded and whitespace normalised, so case
+    and compatibility forms (fullwidth letters, ligatures) do not hide a copy."""
+    return one_line(unicodedata.normalize("NFKC", str(text)).casefold())
+
+
+def _visible(text):
+    """text with every hidden character written as \\uXXXX, so a message can quote it."""
+    return "".join("\\u%04x" % ord(ch) if is_hidden_char(ch) else ch for ch in text)
+
+
 def copied_evidence(raw, argv, evidence):
     """The longest run of TRIPWIRE_MIN or more characters that a [cmd: ...] hint shares
-    with the evidence block, or None. Both sides are whitespace normalised. The command
-    is checked as written (raw) and as its argv joined with spaces, so shell quoting
-    does not hide a copy; the longest run wins, and a tie goes to the raw form, then to
-    the earliest position."""
-    ev = one_line(evidence)
+    with the evidence block, or None. Both sides are NFKC normalised, case folded and
+    whitespace normalised (_fold), and the run is returned in that folded form. The
+    command is checked as written (raw) and as its argv joined with spaces, so shell
+    quoting does not hide a copy; the longest run wins, and a tie goes to the raw form,
+    then to the earliest position."""
+    ev = _fold(evidence)
     if not ev:
         return None
     best = None
-    for cand in (one_line(raw), " ".join(argv or [])):
+    for cand in (_fold(raw), _fold(" ".join(argv or []))):
         for i in range(len(cand) - TRIPWIRE_MIN + 1):
             j = i + TRIPWIRE_MIN
             if cand[i:j] not in ev:
@@ -1020,6 +1051,13 @@ def lint(text, mode="light"):
     for (ctext, _refs, _owner), raw in zip(spec["criteria"], spec["commands"]):
         if raw is None:
             continue
+        hidden = hidden_chars(raw)
+        if hidden:
+            # The human approves the command as it is shown; a control, format or odd
+            # space character can make the shown line differ from the argv that runs.
+            issues.append("acceptance criterion [cmd: ...] contains a hidden or control "
+                          "character %s: '%s'" % (", ".join(hidden), _visible(ctext[:60])))
+            continue
         argv, why = command_argv(raw)
         if why:
             issues.append("acceptance criterion [cmd: ...] %s: '%s'" % (why, ctext[:60]))
@@ -1034,6 +1072,9 @@ def lint(text, mode="light"):
         issues.append("## Intake bullet is not an intake item id (I + 10 hex): %s" % code(token))
     if spec["intake"] and not spec["intake_items"] and not spec["malformed_intake"]:
         issues.append("section '## Intake' names no intake item id ('- I<10 hex>')")
+    if spec["evidence"] and not spec["intake"]:
+        issues.append("a spec with '## External evidence (untrusted)' needs its '## Intake' "
+                      "section, as intake_request.py wrote it")
     if spec["intake"] and not spec["evidence"]:
         issues.append("a spec with '## Intake' needs its '## External evidence (untrusted)' "
                       "section, as intake_request.py wrote it")

@@ -447,6 +447,10 @@ def write_task_plan_envelope(plan, spec_path, root):
 def show_command(argv):
     """argv as one shell-style line: an argument is quoted only when it needs it, so
     {python} and {skill_dir:...} placeholders read as the spec wrote them."""
+    # Defence in depth (spec_lint already fails such a command): a hidden or control
+    # character is written as \uXXXX, so the line the human approves cannot be
+    # redrawn, reordered or padded by what it contains.
+    argv = [spec_lint._visible(a) for a in argv]
     return " ".join(a if re.fullmatch(r"[\w@%+=:,./{}-]+", a) else shlex.quote(a)
                     for a in argv)
 

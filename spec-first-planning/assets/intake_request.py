@@ -120,7 +120,15 @@ def main(argv):
     except Refused as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 2
-    sys.stdout.write(skeleton(p))
+    text = skeleton(p)
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        print("ERROR: the envelope holds text that is not valid Unicode (a lone surrogate)",
+              file=sys.stderr)
+        return 2
+    sys.stdout.flush()
+    sys.stdout.buffer.write(data)
     return 0
 
 
