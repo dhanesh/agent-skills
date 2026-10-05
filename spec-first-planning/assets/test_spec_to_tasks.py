@@ -342,8 +342,8 @@ class TestEnvelope(unittest.TestCase):
         with open(os.path.join(_HERE, "..", "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('version: "%s"' % spec_to_tasks.SKILL_VERSION, f.read())
 
-    def test_skill_version_is_2_5_0(self):
-        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.5.0")
+    def test_skill_version_is_2_6_0(self):
+        self.assertEqual(spec_to_tasks.SKILL_VERSION, "2.6.0")
 
 
 # C1: GOOD with a [cmd: ...] hint on R1's criterion and on one of R2's two.
