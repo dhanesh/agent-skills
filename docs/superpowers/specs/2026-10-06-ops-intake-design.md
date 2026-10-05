@@ -57,7 +57,7 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 The config is at `.intake/config.json`. It is committed and holds no secrets. It holds only data, never a command:
 - **`sources`:** for each source name, its enabled flag and its format. Example: `{"jira": {"enabled": true, "format": "jira-mcp"}}`.
 - **`github`:** the repo and the labels that mark a signal (default `bug`, `incident`). The agent uses these values when it runs `gh`.
-- **`ci`:** the workflows on the default branch to watch.
+- **`ci`:** the default branch name and the workflows on it to watch.
 - **`jira`:** one JQL query. The agent uses it when it calls the MCP tool or `acli`.
 - **`linear`:** a team key or filter.
 - **`weights`:** source weights for ranking.
@@ -72,17 +72,21 @@ Intake accepts a closed list of formats. Each format has one strict adapter with
 |---|---|---|
 | `release-envelope` | release-conductor `release-result/v1` envelopes and `status` output, read locally | built in |
 | `gh-issues-json` | `gh issue list --json number,title,body,labels,state,updatedAt,url` | built in |
-| `gh-runs-json` | `gh run list --json databaseId,workflowName,headBranch,conclusion,createdAt,url` | built in |
-| `jira-mcp` | the Atlassian MCP server's issue search tool | built from a real sample |
-| `jira-acli` | `acli` Jira issue search with JSON output | built from a real sample |
-| `linear-mcp` | the Linear MCP server's issue list tool | built from a real sample |
+| `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | built in |
+| `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | built in |
+| `jira-mcp` | the Atlassian MCP server's `searchJiraIssuesUsingJql` tool | built only when the owner supplies a real sample |
+| `jira-acli` | `acli jira workitem search --jql <JQL> --json` | built only when the owner supplies a real sample |
+| `linear-mcp` | the Linear MCP server's `list_issues` tool | built only when the owner supplies a real sample |
 | `intake-signals-jsonl` | the user's own transform, one signal per line in the 1.3 shape | built in; marked lower trust |
 
 Rules:
 - **Unknown format:** `import` refuses it (exit 2).
 - **Malformed record:** the adapter reports it as a problem and continues with the next record.
 - **Provenance:** every signal keeps `source`, `source_id` and `url`.
-- **No guessed shapes:** the Jira and Linear adapters are written only from a real, redacted sample. The owner supplies each sample from their own MCP server or `acli`. The redacted sample becomes the adapter's test fixture. If a sample is missing, that adapter is not built, and its format stays out of the list.
+- **CI jobs:** `gh run list` has no job field. So a failing run becomes an item only after its jobs are imported. `sync` prints, for each failing run without jobs, `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source ci --run <id>`. The jobs output has no workflow or branch, so intake joins it to the imported run by run id. A failure is `status` `completed` with `conclusion` `failure`, `timed_out` or `startup_failure`.
+- **Default branch:** the `gh` output does not name it, so the `ci` config holds it.
+- **Timestamps:** adapters accept RFC 3339 and the `+0000` offset form (no colon).
+- **No guessed shapes:** the Jira and Linear adapters are written only from a real, redacted sample. The format research (`2026-10-06-ops-intake-formats.md`) found no documented output for these three. The owner supplies each sample from their own MCP server or `acli`. Until then, Jira and Linear data can come in through `intake-signals-jsonl`. The redacted sample becomes the adapter's test fixture. If a sample is missing, that adapter is not built, and its format stays out of the list.
 - **Lower trust:** a signal from `intake-signals-jsonl` shows `trust: low` in `list` and in the envelope. Its provenance is only what the user's transform claims.
 
 **The pipeline:** source output → format adapter → signal → queue → `pick` → `intake-item/v1`. The `intake-item/v1` envelope is the format that spec-first-planning reads. spec-first-planning reads these fields from it: `item_id`, `title`, `kind`, `severity`, `source`, `source_id`, `url`, `trust`, `count`, `first_seen`, `last_seen` and `evidence`.
