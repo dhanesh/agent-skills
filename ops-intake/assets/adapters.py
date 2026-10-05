@@ -298,7 +298,11 @@ def _one_job(rec, run, ctx):
     sid = "%s/%s/%s" % (run["workflowName"], name, run["headBranch"])
     if len(sid) > SOURCE_ID_CAP:
         raise ValueError("source id longer than %d characters" % SOURCE_ID_CAP)
-    key = "%s:%s:%s" % (ctx["run"], run["attempt"], jid)
+    # gh 2.98.0 job objects carry no attempt; use theirs if present, else the run's.
+    att = rec["attempt"] if "attempt" in rec else run["attempt"]
+    if not isinstance(att, int) or isinstance(att, bool) or att < 1:
+        raise ValueError("attempt must be a positive integer")
+    key = "%s:%s:%s" % (ctx["run"], att, jid)
     text = "failed steps: %s" % (", ".join(failed) if failed else "(none recorded)")
     title = "%s / %s failing on %s" % (run["workflowName"], name, run["headBranch"])
     return _signal(ctx, sid, url, "ci", title, 3, done, done, "normal",
@@ -315,6 +319,7 @@ def adapt_gh_run_jobs(raw, ctx):
     jobs = data.get("jobs") if isinstance(data, dict) else None
     if not isinstance(jobs, list):
         return [], ["input must be an object with a jobs array"]
+    ctx["jobs_ok"] = True
     sigs, problems = [], []
     for i, rec in enumerate(jobs):
         try:

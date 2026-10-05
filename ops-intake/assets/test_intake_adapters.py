@@ -11,7 +11,7 @@ CFG = {"sources": {"github": {"enabled": True, "formats": ["gh-issues-json"]},
                    "off": {"enabled": False, "formats": ["gh-issues-json"]},
                    "ci": {"enabled": True, "formats": ["gh-runs-json", "gh-run-jobs-json"]},
                    "release": {"enabled": True, "formats": ["release-envelope", "release-status"]}},
-       "github": {"repo": "o/r"}}
+       "github": {"repo": "o/r"}, "ci": {"default_branch": "main"}}
 
 
 def fx(name):

@@ -177,6 +177,78 @@ class CiTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("STOP: queue-unreadable", out)
 
+    def test_bad_jobs_payload_keeps_the_next_line(self):
+        self.runs()
+        for raw in ("not json", "{}", '{"jobs": 5}'):
+            p = os.path.join(self.root, "b.json")
+            with open(p, "w") as f:
+                f.write(raw)
+            self.assertEqual(imp(self.root, "gh-run-jobs-json", p, "--run", "1001")[0], 3)
+            self.assertIn("--run 1001", sync(self.root)[1])
+
+    def test_truncated_jobs_import_keeps_the_next_line(self):
+        self.runs()
+        jobs = [{"databaseId": i, "name": "j%d" % i, "status": "completed",
+                 "conclusion": "failure", "url": "u", "completedAt": "2026-10-05T10:05:00Z"}
+                for i in range(1, 5)]
+        p = os.path.join(self.root, "j.json")
+        with open(p, "w") as f:
+            json.dump({"jobs": jobs}, f)
+        import adapters
+        old, adapters.MAX_SIGNALS = adapters.MAX_SIGNALS, 2
+        try:
+            rc, _ = imp(self.root, "gh-run-jobs-json", p, "--run", "1001")
+        finally:
+            adapters.MAX_SIGNALS = old
+        self.assertEqual(rc, 3)
+        self.assertIn("--run 1001", sync(self.root)[1])
+
+    def test_per_job_problem_still_marks_imported(self):
+        self.runs()
+        p = os.path.join(self.root, "j.json")
+        with open(p, "w") as f:
+            json.dump({"jobs": [5]}, f)
+        imp(self.root, "gh-run-jobs-json", p, "--run", "1001")
+        self.assertNotIn("--run 1001", sync(self.root)[1])
+
+    def test_default_branch_required_for_ci_formats(self):
+        for cfg in ({"sources": CFG["sources"]}, dict(CFG, ci={"workflows": ["a"]})):
+            root = repo(config=cfg)
+            rc, out = imp(root, "gh-runs-json", fx("gh-runs.json"))
+            self.assertEqual(rc, 2)
+            self.assertIn("STOP: config: ci.default_branch is required", out)
+        ok = {"sources": {"jira": {"enabled": True, "formats": ["intake-signals-jsonl"]}}}
+        self.assertEqual(IN.config_problems(ok), [])
+
+    def test_first_seen_is_earliest_whatever_the_import_order(self):
+        self.runs()
+        imp(self.root, "gh-run-jobs-json", fx("gh-run-jobs-2.json"), "--run", "1005")
+        imp(self.root, "gh-run-jobs-json", fx("gh-run-jobs.json"), "--run", "1001")
+        it = list(items(self.root).values())[0]
+        self.assertEqual((it["first_seen"], it["last_seen"]),
+                         ("2026-10-05T10:05:00Z", "2026-10-06T10:05:00Z"))
+
+    def test_job_attempt_wins_else_run_attempt(self):
+        self.runs()
+        p = os.path.join(self.root, "j.json")
+        base = {"name": "x", "status": "completed", "conclusion": "failure", "url": "u"}
+        with open(p, "w") as f:
+            json.dump({"jobs": [dict(base, databaseId=1, attempt=3), dict(base, databaseId=2)]}, f)
+        imp(self.root, "gh-run-jobs-json", p, "--run", "1001")
+        keys = {e["key"] for e in list(items(self.root).values())[0]["evidence"]}
+        self.assertEqual(keys, {"1001:3:1", "1001:1:2"})
+
+    def test_missing_completed_at_falls_back_to_run_updated_at(self):
+        self.runs()
+        p = os.path.join(self.root, "j.json")
+        with open(p, "w") as f:
+            json.dump({"jobs": [{"databaseId": 1, "name": "x", "status": "completed",
+                                 "conclusion": "failure", "url": "u"}]}, f)
+        imp(self.root, "gh-run-jobs-json", p, "--run", "1001")
+        it = list(items(self.root).values())[0]
+        self.assertEqual((it["first_seen"], it["last_seen"]),
+                         ("2026-10-05T10:00:00Z", "2026-10-05T10:00:00Z"))
+
 
 if __name__ == "__main__":
     unittest.main()

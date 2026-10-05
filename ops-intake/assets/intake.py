@@ -188,6 +188,11 @@ def config_problems(cfg):
                 problems.append("source %s: %s is reserved for the release formats, and "
                                 "those formats are allowed only there"
                                 % (code(name), code(RELEASE_SOURCE)))
+    ci_formats = any(isinstance(s, dict) and isinstance(s.get("formats"), list)
+                     and ("gh-runs-json" in s["formats"] or "gh-run-jobs-json" in s["formats"])
+                     for s in sources.values())
+    if ci_formats and not (isinstance(cfg.get("ci"), dict) and "default_branch" in cfg["ci"]):
+        problems.append("ci.default_branch is required when a source lists a CI format")
     for sec in ("github", "ci", "jira", "linear"):
         if sec in cfg:
             _check_section(sec, cfg[sec], problems)
@@ -526,6 +531,8 @@ def _bump(item, sig):
     del item["evidence"][:-EVIDENCE_CAP]
     if sig["last_seen"] > item.get("last_seen", ""):
         item["last_seen"] = sig["last_seen"]
+    if not item.get("first_seen") or sig["first_seen"] < item["first_seen"]:
+        item["first_seen"] = sig["first_seen"]  # earliest seen wins
 
 
 def apply_signals(queue, signals, now):
@@ -616,8 +623,8 @@ def cmd_import(a):
     now = _now()
     ctx = {"source": a.source, "now": now, "run": a.run, "runs_out": {}}
     if fmt in ("gh-runs-json", "gh-run-jobs-json"):
-        ci = cfg.get("ci", {})
-        ctx["default_branch"] = ci.get("default_branch", "main")
+        ci = cfg["ci"]  # config validation requires ci.default_branch for these formats
+        ctx["default_branch"] = ci["default_branch"]
         ctx["workflows"] = ci.get("workflows", [])
         q0 = _load(a.root)
         if q0 is None:
@@ -627,6 +634,7 @@ def cmd_import(a):
             print("STOP: run-not-imported %s" % a.run)
             return 2
     signals, problems = adapters.ADAPTERS[fmt](raw, ctx)
+    n_signals = len(signals)
     if len(signals) > adapters.MAX_SIGNALS:
         problems.append("%d records over the %d per import were not imported"
                         % (len(signals) - adapters.MAX_SIGNALS, adapters.MAX_SIGNALS))
@@ -640,7 +648,9 @@ def cmd_import(a):
                 if a.run not in q.runs:
                     print("STOP: run-not-imported %s" % a.run)
                     return 2
-                q.runs[a.run]["jobs_imported"] = True
+                # Only a well-formed, complete payload retires the run's NEXT line.
+                if ctx.get("jobs_ok") and len(signals) == n_signals:
+                    q.runs[a.run]["jobs_imported"] = True
             q.runs.update(ctx["runs_out"])
             apply_signals(q, signals, now)
             q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
