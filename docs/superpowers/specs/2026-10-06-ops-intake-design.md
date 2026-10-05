@@ -15,7 +15,7 @@ Today nothing carries what happens in production back into planning.
 - GitHub issues,
 - Jira or Linear issues.
 
-When the human picks an item, intake hands it to spec-first-planning as a typed request with quoted evidence. spec-first-planning drafts the spec and plan. The human approves them as today. A verified release that names the item marks it resolved. Intake only reads from each source. It sends nothing anywhere. It never starts the factory itself.
+Every source reaches intake through a CLI, an MCP server or a local file. The agent runs the CLI or calls the MCP tool. Intake only parses what the agent gives it. Intake accepts a closed list of formats, and each format has one adapter. When the human picks an item, intake hands it to spec-first-planning as a typed request with quoted evidence. spec-first-planning drafts the spec and plan. The human approves them as today. A verified release that names the item marks it resolved. Intake runs no command and opens no network connection. It holds no tokens. It sends nothing anywhere. It never starts the factory itself.
 
 **Decision support:** Jev (`jev-latest`) gave input on every owner decision. An Opus advisor reviewed the approach and the safety constraints.
 
@@ -25,8 +25,9 @@ When the human picks an item, intake hands it to spec-first-planning as a typed 
 |---|---|---|---|
 | D1 | **Triage and draft.** Intake collects, dedupes and ranks signals. For an item the human picks, it produces the request from which spec-first-planning drafts a spec and plan. The human's plan approval still starts the factory. | 0.79 | Auto-fix narrow classes (0.12); ranked queue only (0.09) |
 | D2 | **Sources in v1:** release records, failing CI on the default branch, GitHub issues, and Jira or Linear issues. | 0.84 / 0.76 / 0.76 | Generic recipe adapters (0.38): deferred |
-| D3 | **Jira and Linear through built-in REST readers.** The tool calls Jira REST and Linear GraphQL with `urllib`. The token comes from an environment variable named in the config. | 0.58 | Generic JSON import (0.24); vendor CLIs (0.11); the agent's MCP servers (0.07) |
-| D4 | **On demand only in v1.** A scheduled sweep is deferred until token storage at timer time is settled. | 0.71 | Opt-in sweep in v1 (0.29). An earlier, lopsided framing scored the sweep 1.00, and the owner was told. |
+| D3 | **MCP servers and CLIs are the ingestion channels. Intake holds no tokens.** The owner uses the Atlassian MCP server, the Linear MCP server and the Atlassian CLI (`acli`). The CLIs and MCP servers own authentication. Intake accepts only supported formats, and one adapter per format turns source data into the intake shape. (Amended at spec review, 2026-10-06. It replaces the first choice, built-in REST readers with a token from an environment variable, Jev 0.58.) | owner decision | Built-in REST readers with tokens (0.58, chosen first, then replaced) |
+| D6 | **The agent runs every CLI and MCP tool.** It pipes the output into `intake import`. Intake never runs a command or opens a connection. So a config edit cannot run code, and the human's permission prompts stay the control. | 0.80 | Intake runs `gh` itself through fixed built-in commands (0.20) |
+| D4 | **On demand only in v1.** A scheduled sweep is deferred. Under D3 and D6 a sweep would need an agent to run the CLIs and MCP tools, so it is a later design. | 0.71 | Opt-in sweep in v1 (0.29). An earlier, lopsided framing scored the sweep 1.00, and the owner was told. |
 | D5 | **A new `ops-intake` skill.** It hands a picked item to spec-first-planning as an `intake-item/v1` envelope, so spec-first-planning stays the only spec writer. | 1.00 (lopsided; the advisor's reasoning concurs) | An intake mode inside spec-first-planning; extending bug-autopsy |
 
 ## 1. Components and data
@@ -40,8 +41,9 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 | Command | Effect |
 |---|---|
 | `init --root R` | Writes `.intake/config.json` from an answers file. The agent interviews the human to get the answers. |
-| `confirm-config --root R --by NAME` | Records the config digest that the human has read and accepts. |
-| `sync --root R` | Reads every enabled source and updates the queue. |
+| `import --root R --format FMT --source NAME FILE` | Parses one source output file (or `-` for stdin) with the adapter for `FMT`. It adds the signals to the queue. |
+| `sync --root R` | Reads the local release envelopes, applies recurrence and the loop-closing rules (1.6), and ranks the queue. |
+| `formats` | Lists the supported formats and the command or MCP tool that produces each one. |
 | `list --root R [--all]` | Prints the ranked queue. Without `--all`, it shows only `new` and `regressed` items. |
 | `show --root R <id>` | Prints one item and its quoted evidence. |
 | `pick --root R <id> --by NAME` | Writes the `intake-item/v1` envelope and marks the item `picked`. |
@@ -52,32 +54,38 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 
 ### 1.2 Config
 
-The config is at `.intake/config.json`. It is committed and holds no secrets. The config enables or disables each source.
-
-- **`release`:** reads `release-result/v1` envelopes under `.skill-contract/`. It also reads release state that ended `prod_failed`, `outcome_unknown`, `rolled_back`, `stage_failed` or `abandoned`. Where an envelope exists, it reads the envelope kind, not the internal state files of release-conductor. For a release that ended without an envelope, it reads the output of the documented `status` command.
-- **`ci`:** the workflows on the default branch to watch. The tool reads this source with `gh run list`.
-- **`github`:** the repo and the labels that mark a signal (default `bug`, `incident`). The tool reads this source with `gh issue list`.
-- **`jira`:**
-  - the base URL;
-  - one JQL query;
-  - the *names* of the environment variables that hold the account email and the API token;
-  - `max_items`.
-- **`linear`:**
-  - a team key or filter;
-  - the *name* of the environment variable for the API key;
-  - `max_items`.
+The config is at `.intake/config.json`. It is committed and holds no secrets. It holds only data, never a command:
+- **`sources`:** for each source name, its enabled flag and its format. Example: `{"jira": {"enabled": true, "format": "jira-mcp"}}`.
+- **`github`:** the repo and the labels that mark a signal (default `bug`, `incident`). The agent uses these values when it runs `gh`.
+- **`ci`:** the workflows on the default branch to watch.
+- **`jira`:** one JQL query. The agent uses it when it calls the MCP tool or `acli`.
+- **`linear`:** a team key or filter.
 - **`weights`:** source weights for ranking.
 
-**The config is pinned, because a PR can edit it.** The config is committed, and it names a host and an environment variable. That makes it an exfiltration path. A PR could point `base_url` at an attacker's host. Or it could name `AWS_SECRET_ACCESS_KEY` as the "token". The owner's next `sync` would then send that secret. So:
-- **Hosts:**
-  - Linear's host is hardcoded (`api.linear.app`).
-  - A Jira base URL must match `https://<name>.atlassian.net`. The only exception is a host that is also listed in `.intake/hosts.local`. That local file is untracked, and a PR cannot change it.
-- **Environment variable names:** they must start with `INTAKE_`. The tool refuses any other name.
-- **Confirmation:**
-  - `sync` refuses (`STOP: config-changed`, exit 3) when the config's sha256 differs from the confirmed digest.
-  - The confirmed digest is the one the human last confirmed with `intake confirm-config --by NAME`.
-  - The tool stores that digest in the git-ignored queue directory. This is the same pinning idea as release-conductor's recipe.
-- **Tests:** each rule has a test.
+A PR can edit the config. That is safe here, because the config holds no command, no host and no credential name. The worst edit changes which data the agent asks for, and the agent's permission prompts still show every command and MCP call.
+
+### 1.2a Formats and adapters
+
+Intake accepts a closed list of formats. Each format has one strict adapter with the interface `adapt(raw) -> (signals, problems)`.
+
+| Format | Produced by | Status in v1 |
+|---|---|---|
+| `release-envelope` | release-conductor `release-result/v1` envelopes and `status` output, read locally | built in |
+| `gh-issues-json` | `gh issue list --json number,title,body,labels,state,updatedAt,url` | built in |
+| `gh-runs-json` | `gh run list --json databaseId,workflowName,headBranch,conclusion,createdAt,url` | built in |
+| `jira-mcp` | the Atlassian MCP server's issue search tool | built from a real sample |
+| `jira-acli` | `acli` Jira issue search with JSON output | built from a real sample |
+| `linear-mcp` | the Linear MCP server's issue list tool | built from a real sample |
+| `intake-signals-jsonl` | the user's own transform, one signal per line in the 1.3 shape | built in; marked lower trust |
+
+Rules:
+- **Unknown format:** `import` refuses it (exit 2).
+- **Malformed record:** the adapter reports it as a problem and continues with the next record.
+- **Provenance:** every signal keeps `source`, `source_id` and `url`.
+- **No guessed shapes:** the Jira and Linear adapters are written only from a real, redacted sample. The owner supplies each sample from their own MCP server or `acli`. The redacted sample becomes the adapter's test fixture. If a sample is missing, that adapter is not built, and its format stays out of the list.
+- **Lower trust:** a signal from `intake-signals-jsonl` shows `trust: low` in `list` and in the envelope. Its provenance is only what the user's transform claims.
+
+**The pipeline:** source output → format adapter → signal → queue → `pick` → `intake-item/v1`. The `intake-item/v1` envelope is the format that spec-first-planning reads. spec-first-planning reads these fields from it: `item_id`, `title`, `kind`, `severity`, `source`, `source_id`, `url`, `trust`, `count`, `first_seen`, `last_seen` and `evidence`.
 
 ### 1.3 Signal shape
 
@@ -148,7 +156,7 @@ A squash or rebase merge breaks that ancestry. The item then stays `planned`, an
 
 `docs/skill-contract/SPEC.md` registers the `intake-item/v1` kind.
 
-## 2. Trust boundary and credentials
+## 2. Trust boundary
 
 Everything the tool reads from a source is untrusted. This includes issue bodies, titles, CI logs and ticket fields. Anyone can file an issue on a public repo. This section follows the two-channel rule of crafting-self-prompting-loops: trusted instructions and untrusted data never share a channel.
 
@@ -168,16 +176,17 @@ Everything the tool reads from a source is untrusted. This includes issue bodies
 3. **The human's approval is informed.**
    - The plan-approval step names the item. It also shows that the external block is untrusted.
    - Intake never starts the factory.
-4. **Credentials.**
-   - The tool reads the Jira credentials (email and API token) and the Linear API key from environment variables that the config names. Their values MUST NOT be written to the config, the queue, the log or any envelope. The reason: agents read those files, and some of the files are committed.
-   - If a variable is missing, the result is `SYNC: <source> skipped no-credentials`. This is not an error.
-   - Requests go only to the configured base URL, over HTTPS, with a timeout. They paginate up to `max_items`.
-5. **Read-only.**
-   - `gh` runs only read verbs: `run list`, `issue list`, and `api` with GET.
-   - Jira calls are GET only.
-   - Linear calls are GraphQL `query` documents. The tool refuses to send any document that contains a `mutation` operation. The reason: writing to a tracker is an external message, and that class is never grantable.
+4. **No credentials, no network, no commands.**
+   - Intake holds no token. The CLIs and MCP servers own authentication.
+   - Intake MUST NOT open a network connection or run a subprocess, because then a config edit or a hostile record could make it act. Everything it reads comes from a file, stdin or a local envelope.
+5. **Untrusted text can reach the agent before intake sees it.**
+   - **CLI:** the agent redirects CLI output straight into a file or a pipe for `import`. It does not read the output first. That keeps untrusted text out of the agent's context.
+   - **MCP:** an MCP tool result lands in the agent's context before intake can neutralise it. Intake cannot fix this. The SKILL tells the agent to treat that result as data only, and the approval step that lists every check command verbatim stays the backstop.
+6. **Read-only.**
+   - The agent uses only read and search commands and MCP tools: `gh issue list`, `gh run list`, the MCP search and read tools, and `acli` search.
+   - Intake cannot enforce this for MCP calls or CLIs, because the agent makes those calls. The human's permission prompts are the real control. The honesty section of the SKILL says so.
    - Intake never comments, labels, assigns, transitions or closes anything. "Resolved" is local state only.
-6. **No data leaves the machine,** other than the source reads themselves. The tool sends nothing to Jev or to any other service.
+7. **No data leaves the machine** through intake. The tool sends nothing to Jev or to any other service.
 
 ## 3. Flow, states and failures
 
@@ -185,21 +194,22 @@ Everything the tool reads from a source is untrusted. This includes issue bodies
 
 When the human asks something like "what broke?":
 
-1. `intake sync`, then `intake list`. The agent shows the top items in plain words.
-2. The human picks an item, or does nothing. The agent MUST NOT pick or dismiss for the human, because choosing what to work on is the human's decision.
-3. `intake pick <id> --by <human>` writes the envelope. It prints `NEXT: run spec-first-planning with <envelope path>`.
-4. spec-first-planning drafts the spec and plan from the envelope. The human approves them as today. Then factory-conductor and release-conductor continue.
+1. For each enabled source, the agent runs the CLI or calls the MCP tool. It pipes the output into `intake import --format <fmt> --source <name>`. `intake formats` lists the command or tool for each format.
+2. `intake sync`, then `intake list`. The agent shows the top items in plain words.
+3. The human picks an item, or does nothing. The agent MUST NOT pick or dismiss for the human, because choosing what to work on is the human's decision.
+4. `intake pick <id> --by <human>` writes the envelope. It prints `NEXT: run spec-first-planning with <envelope path>`.
+5. spec-first-planning drafts the spec and plan from the envelope. The human approves them as today. Then factory-conductor and release-conductor continue.
 
 ### 3.2 Failures, per source
 
-- **Per-source result:** each source prints `SYNC: <source> ok <n> | skipped <why> | failed <why>`.
+- **Per-import result:** each `import` prints `IMPORT: <source> <format> ok <n> problems <m>`.
 - **A failed source:** it keeps its last items. It does not block the other sources.
-- **No `gh`:** if `gh` is missing or not logged in, `ci` and `github` report `skipped`.
+- **A missing source:** if the agent cannot run a CLI or reach an MCP server, it reports that source as skipped to the human. The queue keeps that source's last items.
 - **Exit codes:**
-  - 0 when every enabled source is ok;
-  - 3 when some were skipped or failed;
-  - 2 for an invalid config or refused input.
-- **Machine lines:** `SYNC:`, `ITEM: <id> <state> <rank> <title>`, `NEXT:`, `STOP:`.
+  - 0 when the command succeeds;
+  - 3 when an import had problem records;
+  - 2 for an invalid config, an unknown format or refused input.
+- **Machine lines:** `IMPORT:`, `SYNC:`, `ITEM: <id> <state> <rank> <title>`, `NEXT:`, `STOP:`.
 
 ## 4. Testing, gates, acceptance
 
@@ -207,10 +217,13 @@ When the human asks something like "what broke?":
 
 Tests are offline and stdlib-only.
 
-- **`gh`:** a stub `gh` on PATH serves canned JSON. Any write verb or non-GET `api` call fails the test.
-- **Jira and Linear:**
-  - A local `http.server` covers pagination, 401, timeouts and malformed JSON.
-  - A test asserts that the tool refuses a `mutation` document before it sends any request.
+- **No network, no commands:** a test patches `socket` and `subprocess` to raise. Every intake command still works.
+- **Adapters:** each format has fixtures:
+  - a valid file;
+  - a file with one malformed record (the others still import);
+  - an unknown format (refused, exit 2).
+  The `gh` fixtures come from documented `gh --json` output. The `jira-mcp`, `jira-acli` and `linear-mcp` fixtures are the owner's redacted real samples.
+- **Lower trust:** an `intake-signals-jsonl` signal shows `trust: low` in `list` and in the envelope.
 - **Release:** the tests use real `release-result/v1` envelopes. The tests build them with the vendored checker.
 - **Hostile text:** fixtures with:
   - a markdown heading;
@@ -220,7 +233,6 @@ Tests are offline and stdlib-only.
   - an issue body carrying `curl … | sh`.
 
   Tests assert two things. First, these appear only as quoted evidence in `list`, `show` and the envelope. Second, spec-first-planning's linter fails a spec whose check command contains them.
-- **Credentials:** a planted fake token is absent from every file that intake writes.
 - **Other properties:**
   - the order is deterministic;
   - the lock holds;
@@ -231,14 +243,14 @@ Tests are offline and stdlib-only.
 
 `eval/run_eval.py` runs in under 60 s on Ubuntu.
 
-The positive case: four stubbed sources go through `sync` and `pick` to an envelope that spec-first-planning accepts. A verified `release-result/v1` then resolves the item.
+The positive case: fixture files for every supported format go through `import`, `sync` and `pick` to an envelope that spec-first-planning accepts. A verified `release-result/v1` then resolves the item.
 
 The negatives:
-- no write verb or mutation is ever sent;
-- no token reaches disk;
+- intake opens no socket and runs no subprocess;
+- an unknown format is refused;
 - hostile text never reaches a check command;
 - a dismissed item stays dismissed unless it recurs;
-- a failed source does not drop the others.
+- a malformed record does not drop the other records.
 
 ### 4.3 Gates
 
@@ -253,10 +265,10 @@ The negatives:
 
 | AC | Done when |
 |---|---|
-| AC1 | All four sources are read through read-only calls, proven against stubs that fail on any write. |
+| AC1 | Every supported format imports through its adapter from a fixture. The Jira and Linear fixtures are redacted real samples. An unknown format is refused. |
 | AC2 | The trust boundary holds in three places: intake keeps external text as quoted evidence; spec-first-planning's linter refuses check commands copied from it (a tripwire); the approval step lists every check command verbatim. |
 | AC3 | The loop closes: a picked item becomes a plan that names it, and a verified release containing that plan's run marks it resolved; squash merges are reported as needing a manual `resolve`. |
-| AC4 | No credential value is ever written to disk, logs or envelopes. A config edit cannot send a credential elsewhere: the host and env-name rules hold, and sync refuses an unconfirmed config. |
+| AC4 | Intake opens no socket and runs no subprocess, proven by a test that makes both raise. The config holds no command, host or credential name. |
 | AC5 | The eval passes, including every negative. |
 | AC6 | `make gate` and `make ab-validate` are green: 0 WORSE, 0 UNPROVEN. |
 | AC7 | After merge, Jev re-judges Q1 against the merge commit, and the score is recorded in the factory assessment. |
