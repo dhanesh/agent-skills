@@ -456,6 +456,8 @@ The template (`assets/Dockerfile.template`) copies `mocks/` into `/config/mocks`
 
 **Air-gap fallback (Stage 0 runtime resolution):** if `docker manifest inspect <image>` fails due to no network but the image is already present locally, `docker image inspect <image>` is sufficient to treat docker as available. The coverage report notes whether the image ref was verified remotely or resolved from the local cache.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## References
 
 - `references/input-adapters.md` — per-format extraction rules and merge/dedupe logic.

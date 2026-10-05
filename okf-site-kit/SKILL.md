@@ -92,6 +92,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
    lost; tell the user so before regenerating. For continuous publishing, the emitted
    `--deploy-workflow` rebuilds on every push to `main`.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## What the generator handles
 
 Every OKF bundle dialect observed in the wild is covered — the survey, with sources and

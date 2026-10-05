@@ -53,6 +53,8 @@ Does a site with this pattern already exist (astro.config.mjs + templates/topic.
             └── One more page in a cluster  → add a TOPIC (one .mdx from the template + sidebar item)
 ```
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ---
 
 ## Mode A — Scaffold a new setup

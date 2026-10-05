@@ -157,6 +157,8 @@ the corrected edge — unverified/contradicted mass converts to validated mass, 
 normative correctness improves over time. The loop is detailed in
 `references/contradiction-loop.md`.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## The invariants (do not weaken these)
 
 1. **Code observation MUST NOT raise normative confidence.** This is the whole point:

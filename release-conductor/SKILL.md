@@ -317,6 +317,8 @@ probe, health and smoke results, the rollback target, and the CLAIMED yes with t
 stopped release, the `STOP:` line, the `NEXT:` line and what the human has to decide. Say
 whether the artifact was rebuilt (staging then verified the same source, not the same bytes).
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Verify and repair
 
 Before you report, run `release status` and check that it shows the status your last command

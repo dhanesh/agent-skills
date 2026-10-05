@@ -107,6 +107,8 @@ items someone can actually tick off — plus the updated bundle index, log entry
 re-pinned fingerprints. The chat walkthrough of the failure is the tour; the persisted
 post-mortem is the artifact that outlives it.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Revisit across sessions
 
 The post-mortem is a living record, not a filing. When a session opens on a subject

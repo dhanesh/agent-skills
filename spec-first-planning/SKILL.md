@@ -224,6 +224,8 @@ the user with the coverage table, remaining Open questions, and your suggested e
 order. Add the envelope path from step 6, and propose the handoff when a consumer is
 installed. In unattended mode, add the grant path and the revoke command.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Contract
 
 This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).

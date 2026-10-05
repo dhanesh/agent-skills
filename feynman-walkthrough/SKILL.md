@@ -187,6 +187,8 @@ outputs that evidence it:
 - optionally, on opt-in only: a dated review schedule and self-quiz questions grafted
   onto the explainer.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## How to behave
 
 - **Explain first.** When the learner is confused, give the answer and then deepen it —

@@ -153,6 +153,8 @@ The loop now runs, but its `test` rail proves only the smoke test this skill wro
 mean the codebase is netted. Point the owner at `test-safety-net` to fill it with real,
 change-detecting tests.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Guardrails
 
 - **Read-only until step 2's confirmation (or a covering grant)** — detection never writes;

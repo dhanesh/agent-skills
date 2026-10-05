@@ -550,6 +550,8 @@ from a different module). Qualified forms are exact: `mod.name` counts, `buf.nam
 the user already has a real call-graph tool, it computes that half of the score better. This is an
 **optional** upgrade, never a dependency — nothing here or in the eval requires one.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Contract
 
 This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).
