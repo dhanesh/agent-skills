@@ -42,6 +42,7 @@ make test-integration           # the `# gate: integration` shell suites (needs 
 make eval                       # just the outcome evals (docs/eval-standard.md)
 make frontmatter                # just the metadata-standard check
 make bcp14                      # just the BCP 14 register check
+make ste                        # advisory 80% STE hints on changed .md files (docs/writing-style.md); never fails
 make contract                   # skill-contract: reference checker vectors + end-to-end handoff
 make contract-vendor            # copy the reference checker into every adopting skill
 make playbook PLAYBOOK_FLAGS=--strict   # promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures; fails a fresh repo2skill scaffold by design
@@ -131,6 +132,17 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
 4. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
 5. Commit on a branch and open a PR (CI runs `make gate`). Fill in the PR template,
    including the semantic-review checklist for any SKILL.md you touched.
+
+## Writing for humans: 80% STE
+
+Write all text for people about 80% of the way to ASD-STE100 Simplified Technical
+English. This covers specs, plans, PR bodies, reports, READMEs and `references/` files
+that you write or change. Use short sentences, common words and active voice. Put one
+action in each instruction. Do not use Latin abbreviations. The rules, scope and
+cautions are in [`docs/writing-style.md`](docs/writing-style.md).
+
+Do not rewrite SKILL.md prompt bodies into STE. Capitalised BCP 14 keywords stay as
+defined terms. Run `make ste` for advisory hints on the Markdown files that you changed.
 
 ## Sibling skills for auditing this kind of work
 
