@@ -176,7 +176,7 @@ Everything the tool reads from a source is untrusted. This includes issue bodies
 2. **Nothing executable crosses the boundary.**
    - spec-first-planning MUST NOT lift a check command, a path to execute, a URL to fetch, or an install step from evidence. Otherwise an untrusted issue would become code that factory-conductor runs unattended after the human approves the plan.
    - The agent writes every acceptance check from the repo.
-   - spec-first-planning's linter fails a spec when any check command contains text copied from the external-evidence block. The test is an exact substring of at least 12 characters.
+   - spec-first-planning warns when any check command contains text copied from the external-evidence block. The warning prints next to that command's `CHECK_COMMAND:` line and names the copied text. The lint still passes, because bug reports often name the failing test file, and an honest check reuses it (owner decision, Jev 0.95 over a hard failure). The test is an exact substring of at least 12 characters.
    - This check is a tripwire, not the boundary. The planning agent reads the evidence. So injected text can make it write an attacker's command in its own words. No substring check catches that.
    - **The real boundary is the human's approval.** For a plan that comes from intake, the approval step lists every check command verbatim. The human approves those commands and knows that the request came from untrusted text.
 3. **The human's approval is informed.**
@@ -272,7 +272,7 @@ The negatives:
 | AC | Done when |
 |---|---|
 | AC1 | Every supported format imports through its adapter from a fixture. The Jira and Linear fixtures are redacted real samples. An unknown format is refused. |
-| AC2 | The trust boundary holds in three places: intake keeps external text as quoted evidence; spec-first-planning's linter refuses check commands copied from it (a tripwire); the approval step lists every check command verbatim. |
+| AC2 | The trust boundary holds in three places: intake keeps external text as quoted evidence; a check command copied from it carries a warning next to its line; the approval step lists every check command verbatim. |
 | AC3 | The loop closes: a picked item becomes a plan that names it, and a verified release containing that plan's run marks it resolved; squash merges are reported as needing a manual `resolve`. |
 | AC4 | Intake opens no socket and runs no subprocess, proven by a test that makes both raise. The config holds no command, host or credential name. |
 | AC5 | The eval passes, including every negative. |
