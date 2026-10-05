@@ -112,7 +112,7 @@ def run_lock(root, timeout=None):
 
 
 # -- Config -----------------------------------------------------------------------
-_REPO_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 _TOP_KEYS = {"sources", "github", "ci", "jira", "linear", "weights"}
 
 
