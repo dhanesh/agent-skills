@@ -119,6 +119,8 @@ def run_grant_vector(inp, tmp):
     for st in [inp["grant"]] + inp.get("others", []):
         _write(os.path.join(edir, st["predicate"]["id"] + ".json"), json.dumps(st))
     path = os.path.join(edir, inp["grant"]["predicate"]["id"] + ".json")
+    if inp.get("select") == "newest":
+        path = None  # the checker selects the grant itself: no path, no subject
     now = datetime.strptime(inp["now"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     rep = cc.check_grant(root, inp["action"], path=path, now=now, branch=inp["branch"],
                          default_branches={inp.get("default_branch", "main")})
@@ -572,8 +574,10 @@ class GrantTests(unittest.TestCase):
     def test_irreversible_classes_are_exactly_the_a8_five(self):
         self.assertEqual(cc.IRREVERSIBLE_CLASSES,
                          {"merge", "deploy", "spend", "external_message", "delete"})
+        # A8 as amended for release-conductor: staging deploys and tag pushes are grantable
         self.assertEqual(set(cc.ACTION_CLASSES) - cc.IRREVERSIBLE_CLASSES,
-                         {"read_only", "local_reversible", "push_branch", "open_pr"})
+                         {"read_only", "local_reversible", "push_branch", "open_pr",
+                          "deploy_staging", "push_tag"})
 
     def test_a_require_signature_field_makes_the_grant_invalid(self):
         for req in ({}, {"local_reversible": "SIGNED"}):
@@ -1079,6 +1083,593 @@ class ReentryBlockTests(unittest.TestCase):
         st = build_vectors.grant()
         st["predicate"]["payload"]["reentry"] = {"agent_cmd": "sh -c x"}
         self.assertTrue(any(v.startswith("payload.reentry") for v in cc.grant_violations(st)))
+
+
+GIT_ENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+RELEASE_ID = "autonomy-grant-v1-20260919T121500Z-e5f6a7"
+RECIPE = "release/recipe.json"
+INTENT = ".skill-contract/releases/1.2.0/intent.json"
+RECIPE_TEXT = '{"recipe": 1}\n'
+INTENT_TEXT = '{"version": "1.2.0", "base": "abc"}\n'
+RELEASE_POLICY = {"local_reversible": "grant", "push_branch": "grant", "open_pr": "grant",
+                  "deploy_staging": "grant", "push_tag": "grant"}
+# Fail closed: explicit tag triggers AND configs that run on tags by default.
+TAGGED_CI = (
+    (".github/workflows/rel.yml", "on:\n  push:\n    tags: ['v*']\n"),
+    (".github/workflows/a.yml", "on: push\njobs: {}\n"),
+    (".github/workflows/b.yml", "on: [push]\njobs: {}\n"),
+    (".github/workflows/c.yml", "on:\n  create:\njobs: {}\n"),
+    (".gitlab-ci.yml", "deploy:\n  rules:\n    - if: $CI_COMMIT_TAG\n"),
+    (".gitlab-ci.yml", "deploy:\n  script: ./ship\n"),  # no rules: runs on tags
+    ("Jenkinsfile", "pipeline { agent any }\n"),
+    (".buildkite/pipeline.yml", "steps:\n  - command: ./ship\n"),
+    (".circleci/config.yml", "filters:\n  tags:\n    only: /^v.*/\n"),
+    # an unfiltered push must not borrow a sibling trigger's branches filter
+    (".github/workflows/d.yml", "on:\n  push:\n  pull_request:\n    branches: [main]\njobs: {}\n"),
+    # path filters are not evaluated for tag pushes
+    (".github/workflows/e.yml", "on:\n  push:\n    paths: ['src/**']\njobs: {}\n"),
+    (".github/workflows/f.yml", "on:\n  push:\n    branches: [main]\n  release:\n"
+                                "    types: [published]\njobs: {}\n"),
+    (".github/workflows/g.yml", "on:\n  push:\n    branches: [main]\n    tags-ignore: ['x']\n"),
+    (".github/workflows/h.yml", "on:\n  - pull_request\n  - push\n"),
+    (".github/workflows/i.yml", "on: {push: {branches: [main]}}\n"),  # unparsed: fail closed
+    (".github/workflows/j.yml", "name: no trigger key at all\n"),
+    (".github/workflows/k.yml", "on:\n  workflow_run:\n    workflows: [build]\n"),
+    # CircleCI tag filters in any YAML or JSON spelling (fix round 1)
+    (".circleci/config.yml", "jobs:\n  d:\n    filters: {tags: {only: /^v.*/}}\n"),
+    (".circleci/config.yml", '{"workflows": {"w": {"jobs": [{"d": {"filters": '
+                             '{"tags": {"only": "/v.*/"}}}}]}}}\n'),
+    (".circleci/config.yml", "filters:\n  \"tags\":\n    only: /^v.*/\n"),
+    (".circleci/config.yml", "filters:\n  'tags': {only: /^v.*/}\n"),
+    # upper-case extensions are still workflows; unknown files in workflows fail closed
+    (".github/workflows/x.YML", "on: push\n"),
+    (".github/workflows/y.Yaml", "on: [push]\n"),
+    (".github/workflows/README.md", "on: push\n"),
+    # CI systems with no known no-tag default (fix round 1: added to is_ci_config)
+    (".gitea/workflows/x.yml", "on:\n  push:\n    branches: [main]\n"),
+    (".forgejo/workflows/x.yml", "on:\n  pull_request:\n"),
+    (".woodpecker.yml", "steps: []\n"),
+    (".woodpecker/ship.yml", "steps: []\n"),
+    ("appveyor.yml", "build: off\n"),
+    (".appveyor.yml", "build: off\n"),
+    (".cirrus.yml", "task: {}\n"),
+    ("cloudbuild.yaml", "steps: []\n"),
+    ("cloudbuild.yml", "steps: []\n"),
+    (".semaphore/semaphore.yml", "version: v1.0\n"),
+    ("bitrise.yml", "workflows: {}\n"),
+    ("codemagic.yaml", "workflows: {}\n"),
+    ("buildspec.yml", "version: 0.2\n"),
+)
+TAG_FREE_CI = (
+    (".github/workflows/ci.yml", "on:\n  push:\n    branches: [main]\njobs: {}\n"),
+    (".github/workflows/pr.yml", "\"on\":\n  pull_request:\n    branches: [main]\n"
+                                 "  workflow_dispatch:\njobs:\n  release:\n"
+                                 "    steps:\n      - run: git push origin HEAD\n"),
+    (".github/workflows/ign.yml", "on:\n  push:\n    # comment\n    branches-ignore: [x]\n"
+                                  "    paths: ['a']\n"),
+    (".circleci/config.yml", "version: 2.1\nworkflows:\n  build:\n    jobs: [test]\n"),
+    (".github/actions/a/action.yml", "runs:\n  using: composite\n"),
+)
+
+
+class ReleaseCheckerTests(unittest.TestCase):
+    """Task 1 of release-conductor: deploy_staging and push_tag, --worktree, the CI
+    tag-trigger floor, grants selected by subject, revoke-all, the release grant shape."""
+
+    def setUp(self):
+        self.tmp = self.repo_dir()
+        self.now = datetime(2026, 9, 19, 13, 0, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def repo_dir():
+        d = tempfile.mkdtemp(prefix="sc-release-")
+        _write(os.path.join(d, "docs", "spec.md"), build_vectors.SPEC)
+        _write(os.path.join(d, "plan.json"), build_vectors.PLAN_TEXT)
+        _write(os.path.join(d, *RECIPE.split("/")), RECIPE_TEXT)
+        _write(os.path.join(d, *INTENT.split("/")), INTENT_TEXT)
+        return d
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def put(root, st):
+        path = os.path.join(cc.envelope_dir(root), st["predicate"]["id"] + ".json")
+        _write(path, json.dumps(st))
+        return path
+
+    @staticmethod
+    def git(cwd, *args):
+        return subprocess.run(["git", "-C", cwd] + list(args), check=True,
+                              capture_output=True, text=True, env=GIT_ENV)
+
+    def init_repo(self, root, files=(), branch="factory/x"):
+        """root as a repo: `files` committed on main, then HEAD on `branch`."""
+        self.git(root, "init", "-q", "-b", "main")
+        for rel, text in files:
+            _write(os.path.join(root, *rel.split("/")), text)
+            self.git(root, "add", "-f", rel)
+        self.git(root, "commit", "-q", "--allow-empty", "-m", "x")
+        if branch != "main":
+            self.git(root, "checkout", "-q", "-b", branch)
+
+    @staticmethod
+    def release_grant(branch_pattern="release/*", policy=None, version="1.2.0"):
+        st = build_vectors.grant(policy=dict(RELEASE_POLICY) if policy is None else policy,
+                                 branch_pattern=branch_pattern, gid=RELEASE_ID,
+                                 generated="2026-09-19T12:15:00Z")
+        st["subject"] = [{"name": RECIPE, "digest": {"sha256": build_vectors.sha(RECIPE_TEXT)}},
+                         {"name": INTENT, "digest": {"sha256": build_vectors.sha(INTENT_TEXT)}}]
+        st["predicate"]["payload"]["release"] = {"version": version}
+        return st
+
+    @staticmethod
+    def factory_grant(branch_pattern="factory/*", policy=None):
+        return build_vectors.grant(branch_pattern=branch_pattern, policy=policy)
+
+    def test_new_classes_are_grantable(self):
+        self.assertIn("deploy_staging", cc.ACTION_CLASSES)
+        self.assertIn("push_tag", cc.ACTION_CLASSES)
+        self.assertNotIn("deploy_staging", cc.IRREVERSIBLE_CLASSES)
+        self.assertNotIn("push_tag", cc.IRREVERSIBLE_CLASSES)
+        st = build_vectors.grant()
+        st["predicate"]["payload"]["gate_policy"]["deploy_staging"] = "grant"
+        st["predicate"]["payload"]["gate_policy"]["push_tag"] = "grant"
+        self.assertEqual(cc.grant_violations(st), [])
+        st["predicate"]["payload"]["gate_policy"]["deploy"] = "grant"
+        self.assertTrue(cc.grant_violations(st))  # deploy stays never-grantable
+        for cls in ("deploy_staging", "push_tag"):
+            st = build_vectors.grant(policy={cls: "auto"})
+            self.assertTrue(cc.grant_violations(st), cls)  # remote: at most grant
+
+    def test_subject_selects_its_own_grant(self):
+        # two live grants: factory (spec+plan) and release (recipe+intent), release newer
+        self.put(self.tmp, self.factory_grant(branch_pattern="*"))
+        self.put(self.tmp, self.release_grant(branch_pattern="*"))
+        rep = cc.check_grant(self.tmp, "local_reversible", subject="plan.json",
+                             now=self.now, branch="factory/x")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", build_vectors.GRANT_ID), rep)
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="release/1.2.0-stage")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
+        rep = cc.check_grant(self.tmp, "local_reversible",
+                             subject=os.path.join(self.tmp, *RECIPE.split("/")),
+                             now=self.now, branch="x")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
+        # no subject: the newest grant that is not a release grant (R44): a release grant
+        # is always named by its path, so it never answers for planning work
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="x")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", build_vectors.GRANT_ID), rep)
+        self.assertEqual(cc.grant_for_subject(self.tmp, "./plan.json"),
+                         os.path.join(cc.envelope_dir(self.tmp), build_vectors.GRANT_ID + ".json"))
+        # a subject no grant pins: nothing covers it, and the ask names the subject
+        self.assertIsNone(cc.grant_for_subject(self.tmp, "other.json"))
+        rep = cc.check_grant(self.tmp, "local_reversible", subject="other.json",
+                             now=self.now, branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "subject"), rep)
+        # the factory grant's own revocation is selected for its subject: never an older grant
+        cc.revoke_grant(self.tmp, grant_id=build_vectors.GRANT_ID, now=self.now)
+        rep = cc.check_grant(self.tmp, "local_reversible", subject="plan.json",
+                             now=self.now, branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="x")
+        self.assertEqual(rep["status"], "COVERED", rep)
+
+    def test_no_subject_selection_skips_a_newer_live_release_grant(self):  # R44
+        # a planning grant at T-60s on factory/*, a live release grant at T on release/*:
+        # a caller on factory/x asking with no subject is the planning grant's, COVERED
+        planning = build_vectors.grant(generated="2026-09-19T12:14:00Z")
+        self.put(self.tmp, planning)
+        self.put(self.tmp, self.release_grant())
+        self.assertEqual(cc.latest_grant(self.tmp),
+                         os.path.join(cc.envelope_dir(self.tmp), build_vectors.GRANT_ID + ".json"))
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="factory/x")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", build_vectors.GRANT_ID), rep)
+        # the release grant still answers when named by its path or selected by subject
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="release/1.2.0")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", RELEASE_ID), rep)
+        # only release grants live: a no-subject selection finds nothing to cover with
+        cc.revoke_grant(self.tmp, grant_id=build_vectors.GRANT_ID, now=self.now)
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="factory/x")
+        self.assertNotEqual(rep["status"], "COVERED", rep)
+
+    def test_revoke_all_continues_past_a_grant_it_cannot_revoke(self):  # R45b
+        self.put(self.tmp, self.factory_grant(branch_pattern="*"))
+        self.put(self.tmp, self.release_grant(branch_pattern="*"))
+        real = cc.revoke_grant
+
+        def flaky(root, grant_id=None, now=None):
+            if grant_id == build_vectors.GRANT_ID:  # sorts first: the old loop stopped here
+                raise OSError("read-only file system")
+            return real(root, grant_id, now=now)
+        with mock.patch.object(cc, "revoke_grant", side_effect=flaky):
+            with self.assertRaises(cc.RevokeAllFailed) as ctx:
+                cc.revoke_all(self.tmp, now=self.now)
+            self.assertEqual(ctx.exception.revoked, [RELEASE_ID])
+            self.assertEqual([i for i, _ in ctx.exception.failed], [build_vectors.GRANT_ID])
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        # the CLI says which grant failed, still revokes the rest, and exits non-zero
+        other = self.release_grant(branch_pattern="*", version="1.3.0")
+        other["predicate"]["id"] = "autonomy-grant-v1-20260919T121600Z-f6a7b8"
+        other["predicate"]["generatedAtTime"] = "2026-09-19T12:16:00Z"
+        self.put(self.tmp, other)
+        with mock.patch.object(cc, "revoke_grant", side_effect=flaky):
+            rc, out, err = self._cli("revoke-grant", "--root", self.tmp)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("FAILED: %s read-only file system" % build_vectors.GRANT_ID, out)
+        self.assertIn("REVOKED: ", out)
+
+    def _cli(self, *args):
+        with contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = cc.main(list(args))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_revoke_with_no_id_revokes_every_live_grant(self):
+        # two live grants; revoke-grant (no id) -> both ASK revoked for their subjects
+        self.put(self.tmp, self.factory_grant(branch_pattern="*"))
+        self.put(self.tmp, self.release_grant(branch_pattern="*"))
+        rc, out, err = self._cli("revoke-grant", "--root", self.tmp)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(sorted(out.split()),
+                         sorted(["REVOKED:", build_vectors.GRANT_ID, "REVOKED:", RELEASE_ID]))
+        for subject in ("plan.json", RECIPE):
+            rep = cc.check_grant(self.tmp, "local_reversible", subject=subject,
+                                 now=self.now, branch="x")
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), subject)
+        rep = cc.check_grant(self.tmp, "local_reversible", now=self.now, branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"))
+        # nothing live is left to revoke: the same usage-level failure as before
+        self.assertEqual(cc.revoke_all(self.tmp, now=self.now), [])
+        rc, out, err = self._cli("revoke-grant", "--root", self.tmp)
+        self.assertEqual(rc, 1, out + err)
+
+    def test_revoke_with_an_id_revokes_only_that_grant(self):
+        self.put(self.tmp, self.factory_grant(branch_pattern="*"))
+        self.put(self.tmp, self.release_grant(branch_pattern="*"))
+        rc, out, err = self._cli("revoke-grant", "--root", self.tmp, "--id", RELEASE_ID)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertTrue(out.startswith("REVOKED: "), out)
+        rep = cc.check_grant(self.tmp, "local_reversible", subject=RECIPE, now=self.now,
+                             branch="x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"))
+        rep = cc.check_grant(self.tmp, "local_reversible", subject="plan.json", now=self.now,
+                             branch="x")
+        self.assertEqual(rep["status"], "COVERED", rep)
+        # the positional id still works, and conflicting ids are a usage error
+        rc, _, _ = self._cli("revoke-grant", "--root", self.tmp, build_vectors.GRANT_ID,
+                             "--id", RELEASE_ID)
+        self.assertEqual(rc, 1)
+        rc, out, err = self._cli("revoke-grant", "--root", self.tmp, build_vectors.GRANT_ID)
+        self.assertEqual(rc, 0, out + err)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_worktree_judges_the_worktree_branch(self):
+        # root on main, worktree on release/1.2.0-stage (branch_pattern "release/*"); a
+        # release grant is selected by its subject (R44: a no-subject selection skips it)
+        self.init_repo(self.tmp, branch="main")
+        wt = os.path.join(tempfile.mkdtemp(prefix="sc-wt-"), "stage")
+        self.addCleanup(shutil.rmtree, os.path.dirname(wt), True)
+        self.git(self.tmp, "worktree", "add", "-q", "-b", "release/1.2.0-stage", wt)
+        self.put(self.tmp, self.release_grant())
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=wt, now=self.now)
+        self.assertEqual(rep["status"], "COVERED", rep)
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "default-branch"), rep)
+        # the worktree's own branch is judged: on a branch outside the pattern it asks
+        self.git(wt, "checkout", "-q", "-b", "feature/x")
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=wt, now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "branch"), rep)
+        # the CLI takes --worktree too (exit 3 here: ASK branch)
+        rc, out, _ = self._cli("check-grant", "--root", self.tmp, "--action", "deploy_staging",
+                               "--subject", RECIPE, "--worktree", wt)
+        self.assertEqual(rc, 3)
+        self.assertIn("GRANT: ASK", out)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_worktree_must_share_the_repository(self):
+        # an unrelated repo's path as --worktree -> ASK "worktree"
+        self.init_repo(self.tmp, branch="main")
+        other = tempfile.mkdtemp(prefix="sc-other-")
+        self.addCleanup(shutil.rmtree, other, True)
+        self.init_repo(other, branch="release/1.2.0-stage")
+        self.put(self.tmp, self.release_grant())
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=other, now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
+        self.assertFalse(cc.worktree_ok(self.tmp, other))
+        self.assertTrue(cc.worktree_ok(self.tmp, self.tmp))
+        # the repository's own git dir shares the common dir but is not a work tree
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=os.path.join(self.tmp, ".git"),
+                             now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
+        self.assertFalse(cc.worktree_ok(self.tmp, os.path.join(self.tmp, ".git")))
+        missing = os.path.join(other, "nope")
+        rep = cc.check_grant(self.tmp, "deploy_staging", subject=RECIPE, worktree=missing, now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "worktree"), rep)
+
+    def _tag_repo(self, path, text):
+        """A fresh repo holding `text` at `path` on main, HEAD on factory/x, and an
+        untracked grant that grants push_tag."""
+        d = self.repo_dir()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.init_repo(d, files=[(path, text)] if path else ())
+        self.put(d, self.factory_grant(policy={"push_tag": "grant", "push_branch": "grant"}))
+        return d
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_tag_push_is_deploy_when_ci_may_run_on_tags(self):
+        for path, text in TAGGED_CI:
+            with self.subTest(path=path, text=text):
+                d = self._tag_repo(path, text)
+                self.assertIs(cc.ci_tag_triggers(d), True)
+                rep = cc.check_grant(d, "push_tag", now=self.now)
+                self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-tag"), rep)
+                # a branch push of the same commits stays grantable: no CI file changed
+                self.assertEqual(cc.check_grant(d, "push_branch", now=self.now)["status"],
+                                 "COVERED")
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_every_new_ci_format_is_ci_config_and_asks_ci_tag(self):
+        for rel in (".gitea/workflows/x.yml", ".forgejo/workflows/x.yml", ".woodpecker.yml",
+                    ".woodpecker/a.yml", "appveyor.yml", ".appveyor.yml", ".cirrus.yml",
+                    "cloudbuild.yaml", "cloudbuild.yml", ".semaphore/semaphore.yml",
+                    "bitrise.yml", "codemagic.yaml", "buildspec.yml", "sub/buildspec.yml"):
+            self.assertTrue(cc.is_ci_config(rel), rel)
+        for rel in ("src/.gitea/workflows/x.yml", "docs/.semaphore/x.yml", "notbitrise.yml"):
+            self.assertFalse(cc.is_ci_config(rel), rel)
+        d = self._tag_repo(".gitea/workflows/x.yml", "on:\n  pull_request:\n")
+        rep = cc.check_grant(d, "push_tag", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-tag"), rep)
+        # the extended list feeds the ci-config ask for a branch push too (fail closed)
+        _write(os.path.join(d, ".cirrus.yml"), "task: {}\n")
+        self.git(d, "add", ".cirrus.yml")
+        self.git(d, "commit", "-q", "-m", "cirrus")
+        rep = cc.check_grant(d, "push_branch", now=self.now)
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"), rep)
+
+    def test_tag_push_asks_when_git_cannot_say(self):
+        # R1: None (git cannot list or read the tree) counts as tag-triggered
+        self.put(self.tmp, self.factory_grant(policy={"push_tag": "grant"}))
+        with mock.patch.object(cc, "ci_tag_triggers", return_value=None):
+            rep = cc.check_grant(self.tmp, "push_tag", now=self.now, branch="factory/x")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-tag"))
+        self.assertIsNone(cc.ci_tag_triggers(self.tmp))  # not a repo: git cannot say
+        with mock.patch.object(cc.subprocess, "run", side_effect=OSError("no git")):
+            self.assertIsNone(cc.ci_tag_triggers(self.tmp))
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_tag_push_is_grantable_only_when_proven_tag_free(self):
+        for path, text in ((None, None),) + TAG_FREE_CI:
+            with self.subTest(path=path, text=text):
+                d = self._tag_repo(path, text)
+                self.assertIs(cc.ci_tag_triggers(d), False)
+                rep = cc.check_grant(d, "push_tag", now=self.now)
+                self.assertEqual(rep["status"], "COVERED", rep)
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_a_tag_or_staging_push_whose_commits_touch_ci_config_asks_ci_config(self):
+        d = self._tag_repo(None, None)
+        self.put(d, build_vectors.grant(policy={"push_tag": "grant", "deploy_staging": "grant"},
+                                        gid="autonomy-grant-v1-20260919T121000Z-0a0b0c",
+                                        generated="2026-09-19T12:10:00Z"))
+        _write(os.path.join(d, ".circleci", "config.yml"), "version: 2.1\n")
+        self.git(d, "add", ".circleci/config.yml")
+        self.git(d, "commit", "-q", "-m", "ci")
+        self.assertIs(cc.ci_tag_triggers(d), False)
+        for action in ("push_tag", "deploy_staging"):
+            rep = cc.check_grant(d, action, now=self.now)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "ci-config"), action)
+
+    def test_tag_patterns_compile_on_this_python(self):
+        import importlib
+        import re
+        importlib.reload(cc)  # a mid-pattern (?m) raises re.error on 3.11+
+        pats = [v for v in vars(cc).values() if isinstance(v, re.Pattern)]
+        self.assertTrue(pats)
+        for p in pats:
+            self.assertNotRegex(p.pattern[1:], r"\(\?[aiLmsux]+\)", p.pattern)
+        # every inline re.search on the tag path runs on this interpreter without re.error
+        for path, text in TAGGED_CI:
+            self.assertIs(cc._ci_file_tag_triggered(path, text), True, (path, text))
+        for path, text in TAG_FREE_CI:
+            self.assertIs(cc._ci_file_tag_triggered(path, text), False, (path, text))
+
+    def test_release_version_must_be_semver(self):
+        st = build_vectors.grant()
+        st["predicate"]["payload"]["release"] = {"version": "v1.2"}
+        self.assertTrue(any("release.version" in v for v in cc.grant_violations(st)))
+        for bad in ("1.2", "01.2.3x", "1.2.3 ", {"v": 1}, None, 1):
+            st["predicate"]["payload"]["release"] = {"version": bad}
+            self.assertTrue(cc.grant_violations(st), bad)
+        st["predicate"]["payload"]["release"] = {"version": "1.2.0", "extra": 1}
+        self.assertTrue(cc.grant_violations(st))
+        st["predicate"]["payload"]["release"] = "1.2.0"
+        self.assertTrue(cc.grant_violations(st))
+        for good in ("1.2.0", "10.0.1-rc.1", "1.2.3+build.5"):
+            st["predicate"]["payload"]["release"] = {"version": good}
+            self.assertEqual(cc.grant_violations(st), [], good)
+
+
+class GrantRankingTests(unittest.TestCase):
+    """Task 1b: a head ranks by its chain's ORIGINAL grant, so revoking an old grant never
+    shadows a newer live one, and a revoked newest grant keeps its chain's place."""
+
+    T0 = datetime(2026, 9, 19, 12, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sc-rank-")
+        _write(os.path.join(self.tmp, *RECIPE.split("/")), RECIPE_TEXT)
+        self.now = self.T0 + timedelta(hours=1)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def z(t):
+        return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def release(self, version, at, gid=None, root=None):
+        """A live release grant pinning RECIPE and its own intent file, written at `at`."""
+        root = root or self.tmp
+        intent = ".skill-contract/releases/%s/intent.json" % version
+        text = '{"version": "%s"}\n' % version
+        _write(os.path.join(root, *intent.split("/")), text)
+        st = build_vectors.grant(policy=dict(RELEASE_POLICY), branch_pattern="release/*",
+                                 gid=gid or cc.new_id(cc.GRANT_KIND, at),
+                                 generated=self.z(at), expires=self.z(at + timedelta(days=7)))
+        st["subject"] = [{"name": RECIPE, "digest": {"sha256": build_vectors.sha(RECIPE_TEXT)}},
+                         {"name": intent, "digest": {"sha256": build_vectors.sha(text)}}]
+        st["predicate"]["payload"]["release"] = {"version": version}
+        _write(os.path.join(cc.envelope_dir(root), st["predicate"]["id"] + ".json"),
+               json.dumps(st))
+        return st["predicate"]["id"]
+
+    def check(self, root=None, branch="release/1.3.0"):
+        return cc.check_grant(root or self.tmp, "push_branch", subject=RECIPE, now=self.now,
+                              branch=branch)
+
+    def test_revoking_an_old_grant_does_not_shadow_a_newer_live_one(self):
+        g1 = self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        cc.revoke_grant(self.tmp, grant_id=g1, now=self.T0 + timedelta(seconds=20))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        # over every head too: the newest chain is G2's (a no-subject selection skips
+        # release grants since R44, so the ranking itself is judged here)
+        rep = cc.check_grant(self.tmp, "push_branch", path=cc._newest(cc._live_heads(self.tmp)),
+                             now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), rep)
+        rep = cc.check_grant(self.tmp, "push_branch", now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("NONE", "no-grant"), rep)
+
+    def test_same_second_revocation_and_new_grant_select_the_new_grant(self):
+        t2 = self.T0 + timedelta(seconds=30)
+        for i in range(40):
+            root = tempfile.mkdtemp(prefix="sc-tie-")
+            try:
+                _write(os.path.join(root, *RECIPE.split("/")), RECIPE_TEXT)
+                g1 = self.release("1.2.0", self.T0, root=root)
+                cc.revoke_grant(root, grant_id=g1, now=t2)
+                g2 = self.release("1.3.0", t2, root=root)
+                rep = self.check(root=root)
+                self.assertEqual((rep["status"], rep["id"]), ("COVERED", g2), (i, rep))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def test_revoking_the_newest_grant_still_asks_over_an_older_live_one(self):
+        # Guard (not a RED case): a revoked newest grant is never replaced by an older one.
+        self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        rep = cc.check_grant(self.tmp, "push_branch", path=cc._newest(cc._live_heads(self.tmp)),
+                             now=self.now, branch="release/1.3.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_revocation_whose_parent_is_gone_keeps_its_place(self):
+        # Fail closed: an unresolvable parent ranks the revocation by itself (later), never
+        # earlier, so an older live grant still does not take its place.
+        self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        os.remove(os.path.join(cc.envelope_dir(self.tmp), g2 + ".json"))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_decoy_parent_file_cannot_pull_a_revocation_down(self):
+        # A file claiming G2's id under another name is not G2: the walk resolves a parent
+        # only through <id>.json whose content carries that id.
+        g1 = self.release("1.2.0", self.T0)
+        g2 = self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g2, now=self.T0 + timedelta(seconds=20))
+        edir = cc.envelope_dir(self.tmp)
+        with open(os.path.join(edir, g2 + ".json")) as f:
+            real = json.load(f)
+        os.remove(os.path.join(edir, g2 + ".json"))
+        decoy = json.loads(json.dumps(real))
+        decoy["predicate"]["generatedAtTime"] = "2000-01-01T00:00:00Z"
+        _write(os.path.join(edir, "zz-decoy.json"), json.dumps(decoy))
+        mislabelled = json.loads(json.dumps(real))
+        mislabelled["predicate"]["id"] = g1
+        mislabelled["predicate"]["generatedAtTime"] = "2000-01-01T00:00:00Z"
+        _write(os.path.join(edir, g2 + ".json"), json.dumps(mislabelled))
+        rep = self.check()
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+
+    def test_a_revision_cycle_terminates(self):
+        # H revokes A; A and B name each other: the walk from H stops at the cycle.
+        a = self.release("1.2.0", self.T0)
+        cc.revoke_grant(self.tmp, grant_id=a, now=self.T0 + timedelta(seconds=20))
+        b = self.release("1.2.0", self.T0 + timedelta(seconds=5))
+        edir = cc.envelope_dir(self.tmp)
+        for gid, parent in ((a, b), (b, a)):
+            path = os.path.join(edir, gid + ".json")
+            with open(path) as f:
+                st = json.load(f)
+            st["predicate"]["wasRevisionOf"] = parent
+            _write(path, json.dumps(st))
+        rep = self.check(branch="release/1.2.0")
+        self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        self.assertEqual(cc.revoke_all(self.tmp, now=self.now), [])
+
+    def test_revoke_all_still_stops_everything(self):
+        g1 = self.release("1.2.0", self.T0)
+        self.release("1.3.0", self.T0 + timedelta(seconds=10))
+        cc.revoke_grant(self.tmp, grant_id=g1, now=self.T0 + timedelta(seconds=20))
+        self.assertEqual(len(cc.revoke_all(self.tmp, now=self.T0 + timedelta(seconds=30))), 1)
+        for branch in ("release/1.2.0", "release/1.3.0"):
+            rep = self.check(branch=branch)
+            self.assertEqual((rep["status"], rep["reason"]), ("ASK", "revoked"), rep)
+        self.assertEqual(cc.revoke_all(self.tmp, now=self.now), [])
+
+
+class BranchPatternListTests(unittest.TestCase):
+    """Task 1b: branch_pattern may be a non-empty list of globs; any match covers."""
+
+    def test_branch_matches(self):
+        self.assertTrue(cc.branch_matches("factory/*", "factory/x"))
+        pats = ["release/1.2.1", "release/1.2.1-stage"]
+        for b in ("release/1.2.1", "release/1.2.1-stage"):
+            self.assertTrue(cc.branch_matches(pats, b), b)
+        for b in ("release/1.2.10", "release/1.2.10-stage", "release/1.2.1-x", "Release/1.2.1"):
+            self.assertFalse(cc.branch_matches(pats, b), b)
+        for bad in ([], [""], [3], None, "", 7):
+            self.assertFalse(cc.branch_matches(bad, "release/1.2.1"), bad)
+
+    def test_grant_violations_validates_the_list_form(self):
+        st = build_vectors.grant(branch_pattern=["release/1.2.1", "release/1.2.1-stage"])
+        self.assertEqual(cc.grant_violations(st), [])
+        for bad in ([], [""], ["release/1.2.1", ""], ["release/1.2.1", 3], [["x"]], "", None,
+                    {"a": "b"}):
+            with self.subTest(bad=bad):
+                st = build_vectors.grant(branch_pattern=bad)
+                self.assertTrue(cc.grant_violations(st), bad)
+
+
+class ArgvProblemsTests(unittest.TestCase):
+    def test_a_recipe_argv_with_its_own_tokens(self):
+        self.assertEqual(cc.argv_problems(["deploy", "--v", "{version}"], {"{version}"}), [])
+        self.assertTrue(cc.argv_problems(["deploy", "{version}"], set()))
+        self.assertTrue(cc.argv_problems(["deploy", "v{version}"], {"{version}"}))
+        self.assertTrue(cc.argv_problems(["deploy", "{home}"], {"{version}"}))
+
+    def test_the_shared_refusals(self):
+        for bad in ([], "deploy x", ["a", 3], ["a", ""], ["bash", "-c", "x"],
+                    ["/usr/bin/env", "X=1", "sh", "-c", "x"], ["a\x00b"], ["cmd.exe", "/c"]):
+            with self.subTest(bad=bad):
+                self.assertTrue(cc.argv_problems(bad, set()))
+        self.assertEqual(cc.argv_problems(["env", "X=1", "./ship"], set()), [])
+        self.assertEqual(cc.argv_problems("x", set()),
+                         ["must be a non-empty list of non-empty strings"])
 
 
 if __name__ == "__main__":

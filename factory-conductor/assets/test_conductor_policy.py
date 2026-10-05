@@ -187,6 +187,23 @@ class InitTests(unittest.TestCase):
         self.assertIn("reason=branch", out)
         self.assertIsNone(C.current_run(self.root))
 
+    def test_init_accepts_a_list_branch_pattern_naming_the_run_branch(self):
+        # branch_pattern may be a list of globs (skill-contract SPEC): any entry matches
+        plan = write_plan_envelope(self.root, ONE_OK)  # title T: run branch factory/t
+        write_grant(self.root, plan, branch_pattern=["factory/p", "factory/t"])
+        rc, out, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.head(), "factory/t")
+
+    def test_init_refuses_a_list_branch_pattern_without_the_run_branch(self):
+        plan = write_plan_envelope(self.root, ONE_OK)
+        write_grant(self.root, plan, branch_pattern=["factory/p", "factory/q"])
+        rc, out, err = self.run_main(["init", "--plan", plan, "--root", self.root])
+        self.assertEqual(rc, 3, out + err)
+        self.assertIn("reason=run-branch", out)
+        self.assertEqual(self.head(), "factory/p")
+        self.assertIsNone(C.current_run(self.root))
+
     def test_init_refuses_when_the_run_branch_would_not_match_the_pattern(self):
         plan = write_plan_envelope(self.root, ONE_OK)  # title T: run branch factory/t
         write_grant(self.root, plan, branch_pattern="factory/p")

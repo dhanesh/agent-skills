@@ -5,7 +5,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reentry as R
 import reentry_timer as T
 import conductor as C
-from conductor_testkit import GIT, new_run, repo, revoke, tmpdir, write_grant
+from conductor_testkit import (GIT, new_run, repo, revoke, tmpdir, write_grant,
+                               write_plan_envelope)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOLDER = ("import sys,time;sys.path.insert(0,%r);import reentry as R\n"
@@ -908,6 +909,34 @@ class WatchTests(unittest.TestCase):
         self.age()
         self.assertEqual(run_watch(self.root), (0, "REENTRY: ask"))
         self.assert_nothing_started()
+
+    # D9: grants coexist, selected by subject. watch reads the grant that pins its run's
+    # plan, never merely the newest grant in the repo.
+    def test_a_newer_grant_for_another_plan_does_not_disable_this_runs_reentry(self):
+        self.grant()  # the run's own grant carries the reentry block
+        other = write_plan_envelope(self.root, plan=PLAN)
+        write_grant(self.root, other)  # newer, pins another plan, no reentry block
+        self.age()
+        rc, out = run_watch(self.root)
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, r"^REENTRY: started 1 pid=\d+$")
+        self.assertEqual(self.wait_started(["1"]), ["1"])
+
+    def test_another_plans_reentry_block_never_enables_this_run(self):
+        # the run's own grant (new_run's) has no reentry block; a newer grant for another
+        # plan carries one: re-entry stays disabled for this run
+        other = write_plan_envelope(self.root, plan=PLAN)
+        b = {"agent_cmd": [sys.executable, "-c", STUB, self.marker, "30", "{prompt}"],
+             "stall_min": 30, "max_reentries": 2}
+        write_grant(self.root, other, reentry=b)
+        self.age()
+        self.assertEqual(run_watch(self.root), (0, "REENTRY: disabled"))
+        self.assert_nothing_started()
+        # with no grant pinning a plan at all, there is no block: no fallback to another's
+        lonely = write_plan_envelope(self.root, plan=PLAN)
+        rel = os.path.relpath(lonely, self.root)
+        self.assertIsNone(C._reentry_block(self.root, rel))
+        self.assertIsNotNone(C._reentry_block(self.root, os.path.relpath(other, self.root)))
 
     def test_exhaustion_records_a_stop(self):
         self.grant(sleep=0, max_reentries=1)

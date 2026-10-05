@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dhanesh/agent-skills/skill-contract/release-result/v1",
+  "title": "skill-contract release-result/v1 payload",
+  "description": "The predicate.payload of a release-result/v1 envelope, written by release.py verify-prod (outcome verified) or release.py rollback (outcome rolled_back). Its subjects pin the release recipe (by the digest recorded for the release commit, not the live working file), the release's intent.json, and the release log by the digest of its first log_bytes bytes. Command output tails never appear here: every command result is an exit code (rc) at most, because deploy output can carry secrets; tails stay in the release's local, git-ignored state.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "commit", "recipe_sha", "artifact_sha", "staging", "production", "rollback_target", "approved_by", "rollback", "log_sha256", "log_bytes", "outcome"],
+  "$defs": {
+    "rc": {"type": ["integer", "null"], "description": "A command's exit code; null when it timed out or could not start."},
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rc"],
+      "properties": {"rc": {"$ref": "#/$defs/rc"}}
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rc", "polls", "live"],
+      "properties": {
+        "rc": {"$ref": "#/$defs/rc"},
+        "polls": {"type": "integer", "minimum": 1},
+        "live": {"type": "boolean", "description": "True when the probe reported the version it was polled for."}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": {"type": "string"},
+        "status": {"const": "CLAIMED", "description": "A shell-capable agent can forge an in-session yes, so it is never recorded as verified."}
+      }
+    }
+  },
+  "properties": {
+    "version": {"type": "string", "description": "The release version."},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$", "description": "The merged release commit."},
+    "recipe_sha": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of .release/recipe.json at the release commit."},
+    "artifact_sha": {"type": ["string", "null"], "description": "sha256 of the {path} artifact staged and deployed; null when the recipe rebuilds (see artifact_note)."},
+    "artifact_note": {"type": "string", "description": "Present for a rebuild recipe: staging verified the same source, not the same bytes."},
+    "staging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "verifier", "commit", "features", "evidence_paths", "probe", "checks"],
+      "description": "The staging evidence summary: who verified which features at which commit, and the staging probe and checks as exit codes.",
+      "properties": {
+        "verdict": {"const": "pass"},
+        "verifier": {"type": "string"},
+        "commit": {"type": "string"},
+        "features": {"type": "array", "items": {"type": "string"}},
+        "evidence_paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative evidence.json paths (local, under .verify/)."},
+        "probe": {"type": ["object", "null"], "additionalProperties": false, "properties": {"rc": {"$ref": "#/$defs/rc"}, "polls": {"type": "integer"}}},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/result"}}
+      }
+    },
+    "production": {
+      "description": "verify-prod's results; null when no verify-prod judgement was recorded (a rollback from outcome_unknown).",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deploy", "probe", "health", "smoke", "failure"],
+          "properties": {
+            "deploy": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/result"}], "description": "deploy_prod's exit code; null when the tag push was the deploy."},
+            "probe": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/probe"}]},
+            "health": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/result"}]},
+            "smoke": {"type": "array", "items": {"$ref": "#/$defs/result"}},
+            "failure": {"type": ["string", "null"], "enum": [null, "not-live", "wrong-version", "health-failed", "smoke-failed"]}
+          }
+        }
+      ]
+    },
+    "rollback_target": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "description": "What production ran before the deploy. Outcome rolled_back means production now runs this.",
+      "properties": {
+        "source": {"type": "string", "enum": ["probe", "release-result", "none"]},
+        "version": {"type": ["string", "null"]},
+        "commit": {"type": ["string", "null"]}
+      }
+    },
+    "approved_by": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/approval"}], "description": "The human's yes to the production deploy."},
+    "rollback": {
+      "description": "The rollback, when one ran; null otherwise.",
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["approved_by", "rc", "probe"],
+          "properties": {
+            "approved_by": {"$ref": "#/$defs/approval"},
+            "rc": {"$ref": "#/$defs/rc"},
+            "probe": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/probe"}]}
+          }
+        }
+      ]
+    },
+    "log_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of release-log.jsonl's first log_bytes bytes, which end with the verified or rolled_back event. The log is append-only, so later events (the grant revocation) never change that prefix."},
+    "log_bytes": {"type": "integer", "minimum": 1},
+    "outcome": {"type": "string", "enum": ["verified", "rolled_back"]}
+  }
+}

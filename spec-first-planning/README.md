@@ -43,7 +43,9 @@ in one batched round, and shows you a grant summary. Only after your explicit ye
 `write_grant.py`. The grant covers only reversible work (reading, local edits and commits,
 pushing a work branch, opening a pull request), lasts at most 7 days, and never covers the
 default branch or a detached HEAD, so work on a branch such as `factory/*`. `merge`, `deploy`, `spend`, `external_message` and `delete` always ask. Revoke
-it with `python3 assets/contract_check.py revoke-grant --root <repo>`. Details:
+it alone with `python3 assets/contract_check.py revoke-grant --root <repo> --id <grant id>`;
+the same command with no `--id` is the kill switch, which revokes every live grant in the
+repo, an in-flight release's grant included. Details:
 `references/unattended.md`.
 
 **Task ordering (2.1.0).** A requirement's optional `[after: R2, R3]` hint (`R` matched
@@ -80,6 +82,16 @@ an argv list with `{prompt}`, plus `interval_min`, `stall_min` and `max_reentrie
 launcher wrapping one, `{prompt}` exactly once) and echoes it back as `REENTRY: <argv> every
 <n> min`. Left out, no `reentry` block is written and nothing re-enters. Details:
 `references/unattended.md`.
+
+**Release defaults and a production-allowlist refusal (2.5.0).** On a project that releases
+with release-conductor, the decision sweep can also ask for `answers.release_defaults`
+(exactly `{"bump", "grant_staging", "grant_tag"}`), written into the grant payload for a
+later `release prep` to apply — the interview never writes the release grant itself, which
+is written only by `release prep`, with the human present. `write_grant.py` also refuses a
+`reentry.agent_cmd` whose `--allowedTools` (or a permission-bypass flag) would let the
+resumed agent run the repo's `.release/recipe.json` `deploy_prod` or `rollback` unprompted,
+checking both the recipe's raw argv template and its `{version}`/`{commit}`/`{env}` tokens
+expanded to a fixed placeholder. Details: `references/unattended.md`.
 
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.

@@ -38,6 +38,17 @@ GOOD_ANSWERS = {
     "gate_policy": {"read_only": "auto", "local_reversible": "grant"},
 }
 
+CLAUDE = "/usr/local/bin/claude"
+
+
+def _write_recipe(root, deploy_prod, rollback):
+    """A minimal .release/recipe.json carrying only the two keys write_grant's
+    production-allowlist check reads."""
+    d = os.path.join(root, ".release")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "recipe.json"), "w", encoding="utf-8") as f:
+        json.dump({"deploy_prod": deploy_prod, "rollback": rollback}, f)
+
 
 class WriteGrantBase(unittest.TestCase):
     """A temp repo with docs/spec.md = FULL and a written task-plan envelope."""
@@ -517,6 +528,299 @@ class TestReentry(WriteGrantBase):
         self.assertEqual(contract_check.grant_violations(st), [])
 
 
+class AllowlistMatchTests(unittest.TestCase):
+    """Ported verbatim from release-conductor/assets/test_release_deploy.py's
+    AllowlistMatchTests (Task 5/R29), s/RL\\./write_grant./: the matcher is copied
+    byte-for-byte in logic (Task 7), so its own test suite must come along too and
+    stay in step with release.py's."""
+
+    PROD = ["vercel", "deploy", "--prod"]
+
+    def test_bash_and_bash_star_match_everything(self):
+        for rules in ("Bash", "Bash(*)", "Read,Bash", "Read, Bash(*) ,Edit"):
+            with self.subTest(rules=rules):
+                self.assertTrue(write_grant.allowlist_matches(rules, self.PROD))
+
+    def test_a_glob_that_covers_the_command_matches(self):
+        self.assertTrue(write_grant.allowlist_matches("Read,Bash(vercel *)", self.PROD))
+        self.assertTrue(write_grant.allowlist_matches("Bash(vercel deploy*)", self.PROD))
+
+    def test_a_glob_for_another_program_does_not(self):
+        self.assertFalse(write_grant.allowlist_matches("Bash(git *)", self.PROD))
+        self.assertFalse(write_grant.allowlist_matches("Read,Edit,Bash(python3 -m pytest *)",
+                                                        self.PROD))
+        self.assertFalse(write_grant.allowlist_matches("", self.PROD))
+
+    def test_commas_inside_parentheses_do_not_split(self):
+        self.assertTrue(write_grant.allowlist_matches("Bash(x, y),Bash(vercel *)", self.PROD))
+        self.assertFalse(write_grant.allowlist_matches("Bash(git a,b *)", self.PROD))
+
+    def test_the_legacy_prefix_form_is_a_prefix_match(self):
+        self.assertTrue(write_grant.allowlist_matches("Bash(vercel:*)", self.PROD))
+        self.assertTrue(write_grant.allowlist_matches("Bash(vercel deploy:*)", self.PROD))
+        self.assertFalse(write_grant.allowlist_matches("Bash(git push:*)", self.PROD))
+
+    def test_quoting_and_the_program_basename_are_both_tried(self):
+        argv = ["/opt/bin/fly", "deploy", "--app", "my app"]
+        self.assertTrue(write_grant.allowlist_matches("Bash(fly deploy *)", argv))
+        self.assertTrue(write_grant.allowlist_matches(
+            "Bash(/opt/bin/fly deploy --app 'my app')", argv))
+
+    def test_a_space_separated_list_splits_too(self):  # fix round 1, I2
+        self.assertTrue(write_grant.allowlist_matches("Read Bash", self.PROD))
+        self.assertTrue(write_grant.allowlist_matches(
+            "Bash(git *) Bash(npx *)", ["npx", "vercel", "deploy", "--prod"]))
+        self.assertFalse(write_grant.allowlist_matches("Read Edit Bash(git *)", self.PROD))
+
+    def test_a_glob_prefix_and_extra_whitespace_still_match(self):  # fix round 1, M3/M4
+        self.assertTrue(write_grant.allowlist_matches("Bash(*:*)", self.PROD))
+        self.assertTrue(write_grant.allowlist_matches(
+            "Bash(npx  vercel *)", ["npx", "vercel", "deploy", "--prod"]))
+        self.assertTrue(write_grant.allowlist_matches("Bash(vercel   deploy:*)", self.PROD))
+
+    def test_a_malformed_list_fails_closed(self):  # R29
+        argv = ["npx", "vercel", "deploy", "--prod"]
+        for rules in ("Bash(npx vercel *", "Read( Bash", "Foo( Bash(npx *)",
+                      "Bash(npx *))", "Bash((npx *)", "Bash)(npx *)", "Read,Bash x"):
+            with self.subTest(rules=rules):
+                self.assertTrue(write_grant.allowlist_matches(rules, argv))
+        # a longer tool name is another tool, and balanced inner parentheses are fine
+        self.assertFalse(write_grant.allowlist_matches("BashOutput,Read", argv))
+        self.assertFalse(write_grant.allowlist_matches("Bash(git log (x) *)", argv))
+
+    def test_a_rule_running_on_after_its_parentheses_close_fails_closed(self):  # R45c
+        argv = ["npx", "vercel", "deploy", "--prod"]
+        for rules in ("Bash(a)Bash(npx *)", "Read,Bash(git *)Bash(npx *)", "Bash(git *)x",
+                      "Bash(a)(npx *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(write_grant.allowlist_matches(rules, argv))
+        # separated rules are still read rule by rule
+        self.assertFalse(write_grant.allowlist_matches("Bash(a),Bash(git *)", argv))
+        self.assertFalse(write_grant.allowlist_matches("Bash(a) Bash(git *)", argv))
+
+    def test_agent_cmd_allowlist_reads_every_spelling(self):
+        P = self.PROD
+        for cmd in ([CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(vercel *)"],
+                    [CLAUDE, "-p", "{prompt}", "--allowed-tools", "Read", "Bash(vercel *)"],
+                    [CLAUDE, "-p", "{prompt}", "--allowedTools=Bash(vercel *)"],
+                    [CLAUDE, "-p", "{prompt}", "--dangerously-skip-permissions"],
+                    [CLAUDE, "-p", "{prompt}", "--permission-mode", "bypassPermissions"]):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(write_grant.agent_cmd_exposes(cmd, P))
+        self.assertFalse(write_grant.agent_cmd_exposes(
+            [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *)"], P))
+        self.assertFalse(write_grant.agent_cmd_exposes([CLAUDE, "-p", "{prompt}"], P))
+
+
+class TestProductionAllowlistRefusal(WriteGrantBase):
+    """Task 7: write_grant refuses a grant whose reentry.agent_cmd allowlist would let an
+    unattended agent run the repo's .release/recipe.json deploy_prod or rollback (design
+    spec D10, "the allowlist paragraph")."""
+
+    def _answers(self, agent_cmd):
+        return dict(self.answers, reentry={"agent_cmd": agent_cmd})
+
+    def test_refused_when_allowlist_matches_deploy_prod_raw_template(self):
+        _write_recipe(self.root, ["fly", "deploy", "--env", "{env}"], ["fly", "rollback"])
+        # "?env?" (no literal brace -- reentry_problems forbids an embedded {token} that
+        # is not a whole {prompt}/{root} element) globs the *unexpanded* "{env}" (5 chars:
+        # '{' + env + '}') but not the expanded "production" (10 chars): this rule can
+        # only be reached through the raw-template form of the check.
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(fly deploy --env ?env?)"])
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("production deploy or rollback", str(cm.exception))
+        self.assertIn("release prep", str(cm.exception))
+
+    def test_refused_when_allowlist_matches_deploy_prod_expanded_only(self):
+        _write_recipe(self.root, ["fly", "deploy", "--env", "{env}"], ["fly", "rollback"])
+        # the rule names the expanded form; the raw template ({env} literal) does not
+        # match it, so only the expanded-placeholder check can catch this.
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(fly deploy --env production)"])
+        with self.assertRaises(write_grant.GrantRefused):
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
+    def test_refused_when_allowlist_matches_rollback(self):
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["ssh", "prod", "rollback",
+                                                               "{version}"])
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(ssh prod rollback *)"])
+        with self.assertRaises(write_grant.GrantRefused):
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
+    def test_refused_on_permission_bypass_flag_with_recipe_present(self):
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--dangerously-skip-permissions"])
+        with self.assertRaises(write_grant.GrantRefused):
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
+    def test_grant_written_when_allowlist_does_not_match(self):
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Read,Edit,Bash(git *)"])
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertEqual(st["predicate"]["payload"]["reentry"]["agent_cmd"],
+                         answers["reentry"]["agent_cmd"])
+
+    def test_refused_when_allowlist_reaches_release_py_itself(self):  # R43
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        for rules in ("Read,Bash(python3 *)", "Bash(python3 */release.py *)",
+                      "Bash(python3 */release.py deploy:*)", "Bash(python3 release.py *)",
+                      "Bash(python3 * abandon *)",
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+            with self.subTest(rules=rules):
+                answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
+                with self.assertRaises(write_grant.GrantRefused):
+                    write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel,
+                                            answers, "Dana")
+        # a conductor-only python rule (the documented example) is not release.py
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(python3 /x/factory-conductor/assets/conductor.py *)"])
+        write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
+    def test_the_installed_release_py_path_is_checked_when_present(self):  # R43
+        paths = write_grant._release_py_paths()
+        here = os.path.join(os.path.dirname(os.path.dirname(HERE)), "release-conductor",
+                            "assets", "release.py")
+        self.assertEqual(paths, [here] if os.path.isfile(here) else [])
+        argvs = write_grant.release_tool_argvs(paths)
+        for cmd in ("deploy", "rollback", "abandon"):
+            self.assertIn(["python3", "release.py", cmd], argvs)
+            if paths:
+                self.assertIn(["python3", here, cmd], argvs)
+
+    def test_no_recipe_means_no_check(self):
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash"])
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("reentry", st["predicate"]["payload"])
+
+    def test_no_reentry_means_no_check_even_with_exposing_recipe(self):
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, self.answers,
+                                     "Dana")
+        self.assertNotIn("reentry", st["predicate"]["payload"])
+
+    def test_recipe_invalid_json_is_refused(self):
+        os.makedirs(os.path.join(self.root, ".release"), exist_ok=True)
+        with open(os.path.join(self.root, ".release", "recipe.json"), "w",
+                 encoding="utf-8") as f:
+            f.write("{not json")
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash(git *)"])
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn(".release/recipe.json", str(cm.exception))
+        self.assertIn("not valid JSON", str(cm.exception))
+
+    def test_recipe_non_utf8_is_refused_not_a_traceback(self):
+        os.makedirs(os.path.join(self.root, ".release"), exist_ok=True)
+        with open(os.path.join(self.root, ".release", "recipe.json"), "wb") as f:
+            f.write(b"\xff\xfe\x00bad")
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash(git *)"])
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn(".release/recipe.json", str(cm.exception))
+
+    def test_recipe_missing_deploy_prod_is_refused(self):
+        os.makedirs(os.path.join(self.root, ".release"), exist_ok=True)
+        with open(os.path.join(self.root, ".release", "recipe.json"), "w",
+                 encoding="utf-8") as f:
+            json.dump({"rollback": ["fly", "rollback"]}, f)
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash(git *)"])
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("deploy_prod", str(cm.exception))
+
+    def test_recipe_deploy_prod_not_a_list_is_refused(self):
+        os.makedirs(os.path.join(self.root, ".release"), exist_ok=True)
+        with open(os.path.join(self.root, ".release", "recipe.json"), "w",
+                 encoding="utf-8") as f:
+            json.dump({"deploy_prod": "fly deploy", "rollback": ["fly", "rollback"]}, f)
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", "Bash(git *)"])
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("deploy_prod", str(cm.exception))
+
+    def test_cli_refuses_a_matching_allowlist(self):
+        _write_recipe(self.root, ["fly", "deploy", "--prod"], ["fly", "rollback"])
+        answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
+                                 "Bash(fly deploy *)"])
+        answers_path = os.path.join(self.root, "answers.json")
+        with open(answers_path, "w", encoding="utf-8") as f:
+            json.dump(answers, f)
+        r = subprocess.run([sys.executable, _SCRIPT, "--root", self.root, "--spec",
+                           "docs/spec.md", "--plan", self.plan_path, "--answers", answers_path,
+                           "--accepted-by", "Dana"], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("REFUSED:", r.stdout)
+        self.assertIn("production deploy or rollback", r.stdout)
+
+
+class TestReleaseDefaults(WriteGrantBase):
+    """Task 7: answers.release_defaults (optional) is validated strictly and written into
+    the grant payload verbatim, for a later `release prep` to read."""
+
+    def test_written_into_payload(self):
+        answers = dict(self.answers, release_defaults={"bump": "minor", "grant_staging": True,
+                                                        "grant_tag": False})
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertEqual(st["predicate"]["payload"]["release_defaults"],
+                         {"bump": "minor", "grant_staging": True, "grant_tag": False})
+
+    def test_absent_when_not_given(self):
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, self.answers,
+                                     "Dana")
+        self.assertNotIn("release_defaults", st["predicate"]["payload"])
+
+    def test_missing_key_is_refused(self):
+        answers = dict(self.answers, release_defaults={"bump": "minor", "grant_staging": True})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("grant_tag", str(cm.exception))
+
+    def test_extra_key_is_refused(self):
+        answers = dict(self.answers, release_defaults={"bump": "minor", "grant_staging": True,
+                                                        "grant_tag": False, "extra": 1})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("extra", str(cm.exception))
+
+    def test_bad_bump_is_refused(self):
+        answers = dict(self.answers, release_defaults={"bump": "huge", "grant_staging": True,
+                                                        "grant_tag": False})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("bump", str(cm.exception))
+
+    def test_non_bool_grant_staging_is_refused(self):
+        answers = dict(self.answers, release_defaults={"bump": "patch", "grant_staging": "yes",
+                                                        "grant_tag": False})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("grant_staging", str(cm.exception))
+
+    def test_non_bool_grant_tag_is_refused(self):
+        answers = dict(self.answers, release_defaults={"bump": "patch", "grant_staging": True,
+                                                        "grant_tag": 1})
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("grant_tag", str(cm.exception))
+
+    def test_not_an_object_is_refused(self):
+        answers = dict(self.answers, release_defaults="patch")
+        with self.assertRaises(write_grant.GrantRefused) as cm:
+            write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertIn("release_defaults", str(cm.exception))
+
+    def test_statement_has_no_violations(self):
+        answers = dict(self.answers, release_defaults={"bump": "major", "grant_staging": False,
+                                                        "grant_tag": True})
+        st = write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        self.assertEqual(contract_check.check_statement(st), [])
+        self.assertEqual(contract_check.grant_violations(st), [])
+
+
 class TestGitExclude(WriteGrantBase):
     """A grant is one person's acceptance: write_grant keeps it out of commits (I1)."""
 
@@ -567,6 +871,47 @@ class TestGitExclude(WriteGrantBase):
         r = self._run()
         self.assertFalse(os.path.exists(os.path.join(self.root, ".git")))
         self.assertNotIn("kept out of commits", r.stdout)
+
+class MatcherIdentityTests(unittest.TestCase):
+    """#10: the matcher (and R43's release.py argv list) is copied from release-conductor's
+    release.py, because skills do not import each other. When release.py is in this repo,
+    each copied function is the same code (AST equal, docstrings aside); skipped where
+    release-conductor is not installed beside this skill."""
+
+    NAMES = ("_split_rules", "allowlist_matches", "agent_cmd_exposes", "release_tool_argvs",
+             "ALLOWED_TOOLS_FLAGS", "RELEASE_TOOL_PATHS", "RELEASE_PROD_COMMANDS")
+
+    @staticmethod
+    def _defs(path):
+        import ast
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        out = {}
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) \
+                        and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    node.body = body[1:]  # docstrings differ by design (who copies whom)
+                out[node.name] = ast.dump(node)
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        out[t.id] = ast.dump(node.value)
+        return out
+
+    def test_the_copied_matcher_is_the_same_code_as_release_py(self):
+        release = os.path.join(os.path.dirname(os.path.dirname(HERE)), "release-conductor",
+                               "assets", "release.py")
+        if not os.path.isfile(release):
+            self.skipTest("release-conductor is not installed beside spec-first-planning")
+        ours, theirs = self._defs(_SCRIPT), self._defs(release)
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, ours)
+                self.assertEqual(ours[name], theirs.get(name),
+                                 "%s differs from release.py's: keep the copies in step" % name)
 
 
 if __name__ == "__main__":

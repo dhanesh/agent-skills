@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.4.0"
+  version: "2.5.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -183,10 +183,22 @@ python3 "$SKILL_DIR/assets/write_grant.py" --root <repo> --spec <spec> --plan <e
 for it rather than taking it from git config or inventing one. It prints `GRANT: <path>`, or
 `REFUSED: <reason>` when the spec, the plan or the answers fail a check. The grant is yours
 alone: `write_grant.py` lists it in `.git/info/exclude`, and `check-grant` treats a committed
-grant as covering nothing. Then give the user the revoke command:
-`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`.
+grant as covering nothing. Then give the user the revoke commands: this grant alone,
+`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <grant id>`
+(the id is the file name in `GRANT: <path>`, without `.json`); or the kill switch, the same
+command with no `--id`, which revokes every live grant in the repo, an in-flight release's
+grant included.
+`write_grant.py` also refuses a re-entry allowlist that reaches release-conductor's own
+`release.py deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does).
 The grant can also carry consent to scheduled re-entry (`answers.reentry`), so a timer resumes
-the run if the session dies; see `references/unattended.md`.
+the run if the session dies; see `references/unattended.md`. `write_grant.py` refuses a
+re-entry allowlist that would let the resumed agent run the repo's `.release/recipe.json`
+`deploy_prod` or `rollback` unprompted. On a project that releases with release-conductor,
+the interview also records `answers.release_defaults` (bump level, whether to grant staging
+and tag pushes) for `release prep` to apply later — it never writes the release grant
+itself, which is written only by `release prep`, with the human present, because
+production and the recipe it reads may both be unknown or stale by the time the run
+reaches release.
 
 Tell the user plainly that `merge`, `deploy`, `spend`, `external_message` and `delete` are
 never covered by a grant and will always ask: you MUST ask the user right before any of them,

@@ -348,6 +348,7 @@ GRANT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/autonomy-gr
 GRANT_ID = "autonomy-grant-v1-20260919T120000Z-a1b2c3"
 PLAN_TEXT = '{"plan": 1}\n'
 NOW = "2026-09-19T13:00:00Z"
+RELEASE_BRANCHES = ["release/1.2.1", "release/1.2.1-stage"]
 
 
 def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00:00Z",
@@ -378,11 +379,15 @@ def grant(policy=None, attributed=None, revoked=False, expires="2026-09-20T12:00
 
 
 def grant_vector(st, action, status, reason=None, files=None, branch="factory/x", others=(),
-                 default_branch="main"):
+                 default_branch="main", select=None):
     inp = {"type": "grant", "grant": st, "action": action, "now": NOW, "branch": branch,
            "default_branch": default_branch,
            "files": files if files is not None else {"docs/spec.md": SPEC, "plan.json": PLAN_TEXT},
            "others": list(others)}
+    if select is not None:
+        # "newest": the checker selects the grant itself (no path, no subject), so the
+        # vector judges which of `grant` and `others` it picks
+        inp["select"] = select
     exp = {"status": status}
     if reason is not None:
         exp["reason"] = reason
@@ -434,6 +439,55 @@ def grant_cases():
         ("c10", "valid", "case-folded-default-branch-asks",
          grant_vector(grant(branch_pattern="*"), "local_reversible", "ASK", "default-branch",
                       branch="Main")),
+        ("c10", "valid", "deploy-staging-covered",
+         grant_vector(grant(policy={"deploy_staging": "grant"}), "deploy_staging", "COVERED")),
+        # A tag push is deploy unless git proves the CI cannot run on tags; with no git to
+        # ask (as here), the checker fails closed.
+        ("c10", "valid", "push-tag-unprovable-asks",
+         grant_vector(grant(policy={"push_tag": "grant"}), "push_tag", "ASK", "ci-tag")),
+        # A selection with no path and no subject skips release grants (they are always
+        # named by path): a newer live release grant must not shadow the planning grant.
+        ("c10", "valid", "no-subject-skips-release-grant",
+         grant_vector(g, "local_reversible", "COVERED", select="newest",
+                      others=[mutate(lambda s: (
+                          s["predicate"].__setitem__("id", "autonomy-grant-v1-20260919T120100Z-c3d4e5"),
+                          s["predicate"].__setitem__("generatedAtTime", "2026-09-19T12:01:00Z"),
+                          s["predicate"]["payload"].__setitem__("release", {"version": "1.2.1"}),
+                          s["predicate"]["payload"]["scope"].__setitem__(
+                              "branch_pattern", RELEASE_BRANCHES)), g)])),
+        ("c10", "valid", "release-grant-covered",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "release", {"version": "1.2.0-rc.1"}), g), "local_reversible", "COVERED")),
+        # branch_pattern as a list of exact branches: release/1.2.1* would also cover 1.2.10
+        ("c10", "valid", "branch-list-covered",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "COVERED",
+                      branch="release/1.2.1")),
+        ("c10", "valid", "branch-list-second-entry-covered",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "COVERED",
+                      branch="release/1.2.1-stage")),
+        ("c10", "valid", "branch-list-prefix-asks",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "ASK",
+                      "branch", branch="release/1.2.10")),
+        ("c10", "valid", "branch-list-prefix-stage-asks",
+         grant_vector(grant(branch_pattern=RELEASE_BRANCHES), "local_reversible", "ASK",
+                      "branch", branch="release/1.2.10-stage")),
+        ("c10", "invalid", "branch-pattern-empty-string",
+         grant_vector(grant(branch_pattern=""), "local_reversible", "INVALID")),
+        ("c10", "invalid", "branch-list-empty",
+         grant_vector(grant(branch_pattern=[]), "local_reversible", "INVALID")),
+        ("c10", "invalid", "branch-list-empty-entry",
+         grant_vector(grant(branch_pattern=["release/1.2.1", ""]), "local_reversible",
+                      "INVALID")),
+        ("c10", "invalid", "branch-list-non-string-entry",
+         grant_vector(grant(branch_pattern=["release/1.2.1", 7]), "local_reversible",
+                      "INVALID")),
+        ("c10", "invalid", "deploy-staging-auto",
+         grant_vector(grant(policy={"deploy_staging": "auto"}), "deploy_staging", "INVALID")),
+        ("c10", "invalid", "push-tag-auto",
+         grant_vector(grant(policy={"push_tag": "auto"}), "push_tag", "INVALID")),
+        ("c10", "invalid", "release-version-not-semver",
+         grant_vector(mutate(lambda s: s["predicate"]["payload"].__setitem__(
+             "release", {"version": "v1.2"}), g), "local_reversible", "INVALID")),
         ("c10", "invalid", "one-subject",
          grant_vector(mutate(lambda s: s.__setitem__("subject", s["subject"][:1]), g),
                       "local_reversible", "INVALID")),

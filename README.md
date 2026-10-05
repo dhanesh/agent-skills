@@ -25,6 +25,7 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough
 npx skills add dhanesh/agent-skills --skill jev-agent-setup
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
 npx skills add dhanesh/agent-skills --skill okf-site-kit
+npx skills add dhanesh/agent-skills --skill release-conductor
 npx skills add dhanesh/agent-skills --skill repo2skill
 npx skills add dhanesh/agent-skills --skill security-posture-audit
 npx skills add dhanesh/agent-skills --skill spec-first-planning
@@ -49,13 +50,14 @@ The long-term aim of this collection is an autonomous software factory for an in
 idea → spec → build → verify → review → release → operate → support → growth. **Today it is a
 set of skills a human orchestrates, not yet autonomous.** You choose the next skill and confirm
 each handoff. The build step can now run unattended from an approved plan to an open PR (see
-[Unattended mode](#unattended-mode-partial)), but release, operations and everything after stay
-with you. The evidence behind this section, and the gaps, are
+[Unattended mode](#unattended-mode-partial)), and a merged change can be carried to verified
+production with your single production yes (see [Release](#release-merged-change-to-production)).
+Operations and everything after stay with you. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev).
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Release / deploy row is the exception: it describes release-conductor as built and was not produced by the dated assessment, which re-judges it after this work merges.
 
 | Stage | Skills | Status |
 |---|---|---|
@@ -65,7 +67,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Build / execute | `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
 | Test / verify | `verifier-installer`, `test-safety-net`; `verification-skill-forge` generates a verify skill that drives the running app and records SHA-bound evidence, which `factory-conductor`'s evidence gate requires before a merge | partly |
 | Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
-| Release / deploy | none (`agent-ready-rails` only audits deploy safety) | missing |
+| Release / deploy | `release-conductor` preps the release PR, stages the merged commit behind an independent verifier's evidence, deploys to production only on your explicit yes, proves production runs it, and rolls back only on your yes. Limits: the yes is claimed, not proven; production checks are only as good as your `prod_smoke` list; with a rebuild, staging verified the same source, not the same bytes; nothing starts `stage` after your merge | covered, with limits |
 | Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
 | Support / feedback | none | missing |
 | Growth / monetise | none | missing |
@@ -202,9 +204,11 @@ by design, so the agent asks you before any PR is opened.
 
 - **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
   time and hand off a validated envelope, after asking you first unless a grant covers it. Today
-  five skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
+  six skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
   and `spec-first-planning` → `factory-conductor` (a `task-plan/v1` envelope, with its
-  `autonomy-grant/v1`), which returns a `run-result/v1` envelope.
+  `autonomy-grant/v1`), which returns a `run-result/v1` envelope. `release-conductor` consumes
+  its own release grant (and a planning grant's release defaults) and provides a
+  `release-result/v1` envelope.
 - **A missing consumer is not an error.** The producer reports `NO_CONSUMER`, gives you the
   envelope path, and finishes normally.
 - **Every other link between skills is prose.** A skill says "use X next". If X is not installed,
@@ -212,18 +216,44 @@ by design, so the agent asks you before any PR is opened.
 - **Reinstall copies installed before the contract merged.** They carry no contract block, so
   discovery cannot see them.
 
+### Release: merged change to production
+
+`release-conductor` carries what you merged to verified production. Once per project it writes
+a release recipe (`.release/recipe.json`: your build, staging and production deploy, rollback,
+health, version probe, staging checks and read-only production smoke checks), which you merge
+like any other change. Then, per release:
+
+1. `prep`, with your yes to a release grant (staging deploys and tag pushes for this version
+   only, 7 days), bumps the version, writes the changelog and opens the release PR. You merge it.
+2. `stage` builds the merged commit, waits for a verifier other than the agent to record
+   evidence for every feature of your verify skill (from `verification-skill-forge`) at exactly
+   that commit, deploys to staging, checks the version there, runs the staging checks and tags.
+3. `deploy` shows you the version, commit, evidence, recipe digest and the exact deploy and
+   rollback commands, and deploys only after your explicit yes for this release.
+4. `verify-prod` proves production reports the release and runs only the smoke checks; a
+   failure asks you before `rollback` runs.
+
+No grant ever covers a production deploy or a rollback, and the tool refuses to release while
+any grant's headless allowlist could reach them. A deploy whose outcome is unknown is never
+re-run. Your yes is recorded as claimed, because an agent with a shell could forge it.
+
+```bash
+npx skills add dhanesh/agent-skills --skill verification-skill-forge --skill release-conductor
+```
+
 ### Unattended mode: partial
 
 `spec-first-planning` 2.x can plan unattended, and — after you say yes — write a
 skill-contract [autonomy grant](docs/skill-contract/SPEC.md): a spec-linked envelope that
-covers chosen action classes, on branches matching a pattern, for at most 7 days. Five skills honour it:
+covers chosen action classes, on branches matching a pattern, for at most 7 days. Six skills honour it:
 `spec-first-planning`, `crafting-self-prompting-loops`, `verifier-installer` and
 `test-safety-net` each call `check-grant` before falling back to their own ask, and
-`factory-conductor` calls it before every consequential step of an unattended run.
+`factory-conductor` and `release-conductor` call it before every consequential step.
 
 What a grant can and cannot do:
 
-- it covers only reversible work: local edits and commits, pushing a branch, opening a PR;
+- it covers only reversible work: local edits and commits, pushing a branch, opening a PR, and,
+  in a release grant, a staging deploy and a tag push your CI does not deploy from;
 - merge, deploy, spending money, sending an external message, and deleting always ask you —
   no grant can change that;
 - there is no signing: no `require_signature`, no `.sig`, no signature levels;
@@ -292,6 +322,7 @@ The design and the gap analysis are in
 | [`security-posture-audit`](security-posture-audit/) | Read-only, offline security *hygiene* audit — dependency pinning, committed env/key files, debug/permissive flags, insecure transports, risky CI patterns — severity-graded with file:line evidence and honest not-covered boundaries. Not a CVE scanner or SAST; completes the trust family alongside `scan-leaks` and `base-in-reality`. |
 | [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
 | [`factory-conductor`](factory-conductor/) | Runs an approved task plan unattended, from its first task to an open PR, inside a user-approved autonomy grant. The session dispatches a fresh executor per task and a fresh reviewer per finished task; a stdlib state tool schedules waves from `depends_on`, re-runs each task's own verify commands as the proof, merges only what passed both into one run branch, enforces wall-clock, dispatch, repair and parallel budgets (tokens and dollars are recorded, not enforced), parks what fails, and ends with a `run-result/v1` envelope, a pushed branch and a PR. Merging the PR stays with the human. |
+| [`release-conductor`](release-conductor/) | Carries a merged change to verified production. A stdlib state tool drives a per-project release recipe: prep bumps the version and opens the release PR under a release grant you accept; after your merge, stage builds the merged commit, holds it for an independent verifier's SHA-bound evidence, deploys to staging and checks it; deploy runs the production deploy only with your explicit yes for this release; verify-prod proves production runs the commit with read-only smoke checks; rollback asks too. Ends with a `release-result/v1` envelope. |
 | [`jev-agent-setup`](jev-agent-setup/) | Machine-wide Jev (TypeSafe System One) setup for every coding agent: installs the `jev` CLI (JSON in, typed Noul/Choice/Score out) and a managed BCP 14 instruction block into the global files of Claude Code, Codex, Gemini CLI and `~/.agents/AGENTS.md`, so agents offload rank/classify/yes-no decisions to Jev. Idempotent, marker-bounded, backs up before first touch, `--check` for drift, optional mirror mode that copies CLAUDE.md to the other agents. Complements `typesafe-ai`, which covers building Jev into applications. |
 | [`world-model-ledger`](world-model-ledger/) | Install a persistent, SQLite-backed world model for a coding agent — entities (symbols/files/modules/real-world referents), interactions, and constraints, each with two confidence axes (observed vs normative), a validation status, and PROV-style evidence. Code-observed relationships are never treated as ground truth: only oracle evidence (tests/CI/docs/human) raises normative confidence. Four lifecycle hooks retrieve validated/unverified/contradicted items before edits, update records without inventing facts, and consolidate on Stop; detects contradictions, proposes located fixes, and improves normative correctness over time. Every triple is validated against a predicate ontology (RDFS-style domain/range) before it enters the ledger — hallucinated verbs and semantically impossible pairings are rejected, not stored. Ships a 116-test install gate. |
 

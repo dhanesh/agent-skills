@@ -140,7 +140,13 @@ and skip what the conversation has already answered:
    Claude Code), the plan's verify programs, git and file edits (see the example below).
    Warn against any permission-bypass flag, because the resumed agent acts with the
    user's own permissions and no one watches it. Without an answer, no block is written and nothing
-   re-enters.
+   re-enters. When the project has a `.release/recipe.json` (release-conductor),
+   `write_grant.py` also refuses an `agent_cmd` allowlist that would let the resumed
+   agent run the recipe's `deploy_prod` or `rollback`, or release-conductor's own
+   `release.py deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule reaches those),
+   unprompted — never put those commands, or a glob wide enough to reach them, in this
+   allowlist; a release always
+   goes through `release prep`'s own grant, with the human present (design spec D10).
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?
@@ -156,6 +162,29 @@ and skip what the conversation has already answered:
     glob such as `factory/*`, and start the run on a branch that matches it, e.g.
     `git switch -c factory/work` — any name but `factory/<plan-slug>`, which
     factory-conductor creates as its run branch.
+12. **Release defaults (optional, only when the project uses release-conductor).** Ask:
+    "When this work is released, what bump level — patch, minor or major? May the run
+    grant staging deploys? May it grant tag pushes?" The answer becomes
+    `answers.release_defaults`: exactly `{"bump": "patch"|"minor"|"major",
+    "grant_staging": bool, "grant_tag": bool}`. This interview never writes the release
+    grant itself — only `release prep` does that, with the human present (design spec
+    D10), because production and the recipe it reads may both be unknown or stale by
+    the time the run reaches release. Its subjects are the recipe and a release intent
+    file, not this spec and plan. `release prep` applies the recorded default itself
+    (ruling R33/R35): it looks up the newest live grant under the repo root that is not
+    revoked, not expired, passes the reference checker's own grant checks, carries
+    `release_defaults`, and carries no `release` payload (a planning grant, never
+    release-conductor's own release grant — that one never records defaults, and
+    answers a different question: this release's scope, not a standing default) — none
+    found means `release prep` falls back to the recipe's own `bump` and grants every
+    class, unchanged. `bump` fills in only when `--bump` is not given on the command
+    line; `grant_staging`/`grant_tag` decline `deploy_staging`/`push_tag` only when
+    `--policy-file` is not given. An explicit `--bump` or `--policy-file` always wins
+    outright over the recorded default. `release prep` prints and logs which grant (or
+    that none applied) the defaults came from. A declined staging deploy or tag push is
+    not a dead end: when the release reaches that step, `release stage` stops and asks,
+    and the human's in-session yes (`release stage --approved-by <name>`) answers it.
+    Nobody edits a grant to lift a decline.
 
 ### Action classes and their gates
 
@@ -210,9 +239,10 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
 
 ## answers.json
 
-`write_grant.py` accepts exactly these 8 keys and refuses any other:
+`write_grant.py` accepts exactly these 9 keys and refuses any other:
 `branch_pattern`, `gate_policy` and `expires_at` are required, and `budget`,
-`stop_on`, `defaults`, `system_one` and `reentry` are optional. A filled example:
+`stop_on`, `defaults`, `system_one`, `reentry` and `release_defaults` are optional. A
+filled example:
 
 ```json
 {
@@ -250,9 +280,17 @@ Then wait for an explicit yes. Only then write the answers file and run `write_g
     "agent_cmd": ["/Users/you/.local/bin/claude", "-p", "{prompt}", "--allowedTools",
                   "Read,Edit,Write,Glob,Grep,Agent,Bash(python3 /Users/you/.claude/skills/factory-conductor/assets/conductor.py *),Bash(git *),Bash(python3 -m pytest *)"],
     "interval_min": 10
+  },
+  "release_defaults": {
+    "bump": "patch",
+    "grant_staging": true,
+    "grant_tag": false
   }
 }
 ```
+
+`release_defaults` is omitted on a project that does not use release-conductor. When it is
+given, it is exactly `bump`, `grant_staging` and `grant_tag` — no subset, no extra key.
 
 In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
 the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's
@@ -288,6 +326,10 @@ git tracks. A grant is the user's recorded yes, but an agent
 with a shell on the same machine could write one itself. So a grant only ever covers
 actions that can be undone, and a human still merges.
 
-Revoke a grant at any time with
-`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo>`. From then on,
-`check-grant` answers ASK, and every gated step asks again.
+Revoke this grant at any time with
+`python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <grant id>`
+(the id is the grant file's name without `.json`). From then on, `check-grant` answers ASK
+for it, and every step it gated asks again. The same command with no `--id` is the kill
+switch: it revokes every live grant in the repo, an in-flight release's grant included, so
+that release stops too and ends only with `release abandon`. It tries every grant and prints
+`REVOKED: <id>` or `FAILED: <id> <why>` for each, exiting non-zero if any failed.

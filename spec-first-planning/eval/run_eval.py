@@ -16,7 +16,11 @@ against write_grant.py, and checks the SKILL.md gate text. The waves arm
 (3 waves, the right critical path) and its --envelope payload (T4's
 depends_on), then checks that a cycle, an unknown id, and a malformed id
 in an [after: ...] hint each fail spec_lint.py with the specific message
-(NEGATIVE fixtures). Stdlib-only, offline, no repo writes.
+(NEGATIVE fixtures). The release-defaults arm (2.5.0) checks that write_grant.py refuses
+a malformed answers.release_defaults and a reentry.agent_cmd allowlist wide enough to run
+a fixture .release/recipe.json's deploy_prod (NEGATIVE fixtures), and that the
+unattended.md answers.json example carries release_defaults too. Stdlib-only, offline, no
+repo writes.
 """
 
 import json
@@ -434,7 +438,13 @@ def grant_arm():
              dict(base, expires_at=_in_one_day(), require_signature="SIGNED")),
             ("a reentry.agent_cmd that starts with a shell",
              dict(base, expires_at=_in_one_day(),
-                  reentry={"agent_cmd": ["bash", "-c", "{prompt}"]}))):
+                  reentry={"agent_cmd": ["bash", "-c", "{prompt}"]})),
+            ("a release_defaults missing grant_tag",
+             dict(base, expires_at=_in_one_day(),
+                  release_defaults={"bump": "patch", "grant_staging": True})),
+            ("a release_defaults.bump outside patch/minor/major",
+             dict(base, expires_at=_in_one_day(),
+                  release_defaults={"bump": "huge", "grant_staging": True, "grant_tag": False}))):
         repo = fresh_repo()
         try:
             r = write_grant(repo, answers=answers)
@@ -443,8 +453,28 @@ def grant_arm():
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 
+    # Task 7 (design spec D10): an agent_cmd allowlist wide enough to run a
+    # .release/recipe.json's deploy_prod is refused, even though the recipe's own grant
+    # (release prep's) is unrelated to this one.
+    repo = fresh_repo()
+    try:
+        os.makedirs(os.path.join(repo, ".release"), exist_ok=True)
+        with open(os.path.join(repo, ".release", "recipe.json"), "w", encoding="utf-8") as f:
+            json.dump({"deploy_prod": ["fly", "deploy", "--prod"],
+                      "rollback": ["fly", "rollback"]}, f)
+        answers = dict(base, expires_at=_in_one_day(),
+                       reentry={"agent_cmd": ["claude", "-p", "{prompt}", "--allowedTools",
+                                              "Bash(fly deploy *)"]})
+        r = write_grant(repo, answers=answers)
+        check("NEGATIVE: write_grant refuses a reentry allowlist reaching "
+              ".release/recipe.json's deploy_prod",
+              r.returncode == 1 and "production deploy or rollback" in r.stdout,
+              (r.stdout + r.stderr).strip()[-160:])
+    finally:
+        shutil.rmtree(repo, ignore_errors=True)
+
     # The answers.json example in references/unattended.md is the one agents copy:
-    # it MUST carry exactly the 8 keys write_grant.py accepts and be accepted by it.
+    # it MUST carry exactly the 9 keys write_grant.py accepts and be accepted by it.
     skill_dir = os.path.dirname(ASSETS)
     ref_path = os.path.join(skill_dir, "references", "unattended.md")
     check("references/unattended.md exists", os.path.isfile(ref_path), "")
@@ -459,9 +489,10 @@ def grant_arm():
     except ValueError:
         pass
     keys = sorted(example) if isinstance(example, dict) else []
-    check("unattended.md's answers.json example has exactly the 8 write_grant keys",
+    check("unattended.md's answers.json example has exactly the 9 write_grant keys",
           keys == sorted(["branch_pattern", "gate_policy", "expires_at", "budget",
-                          "stop_on", "defaults", "system_one", "reentry"]), "keys=%s" % keys)
+                          "stop_on", "defaults", "system_one", "reentry", "release_defaults"]),
+          "keys=%s" % keys)
     if isinstance(example, dict):
         repo = fresh_repo()
         try:
