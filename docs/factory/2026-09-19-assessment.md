@@ -90,7 +90,7 @@ carries unit tests, eval negatives and an A/B row:
   at 7 days. The merged result is verified before the push: `finish` re-runs every proven
   task's checks on the merged run branch and never pushes a red one (`integration_red`). Q3
   was re-judged after merge: yes 0.53 vs partly 0.45 (see the step 4 bullet above).
-- **Scheduled re-entry landed (branch `feat/scheduled-reentry`, before merge):** the session
+- **Scheduled re-entry landed (PR #68, merged 2026-10-03 as `44bb46a`):** the session
   hosting gap the step 4 bullet named above (Q3's top remaining limit, 0.81) is closed. A
   grant's optional `payload.reentry` block (`agent_cmd`, `interval_min`, `stall_min`,
   `max_reentries`) names an agent to relaunch a stalled run; a run lock and a lease
@@ -106,8 +106,21 @@ carries unit tests, eval negatives and an A/B row:
   fired through the rendered timer entry under a minimal environment), eval negatives, and
   an A/B row plus four guards (lease live, grant_ask, revoked, exhausted). Each guard's
   fixture passes every other check, so it is mutation-proven: deleting its own check from
-  `reentry.decide` makes it start, and the healthy aged fixture starts. Q3 (AC8) is to be re-judged by Jev
-  after merge, run by the controller, against the actual merge commit.
+  `reentry.decide` makes it start, and the healthy aged fixture starts. **Jev re-judgement after merge (AC8, 2026-10-03, against merge commit `44bb46a`, `jev-latest`):**
+
+  | Question | Before re-entry | After merge |
+  |---|---|---|
+  | Q1 | partly 0.96 | partly 0.97 |
+  | Q2 | yes 0.99 | yes 1.00 |
+  | Q3 | partly 0.55 / yes 0.44 | **yes 0.69** / partly 0.31 |
+  | Plan to open PR without the human | 0.75 | 0.83 |
+  | Complete factory | 0.04 | 0.04 |
+
+  Q3 reads yes for the first time. The top remaining Q3 limit is that re-entry needs the
+  machine on and the user logged in (0.63). Behind it come a live but idle session getting
+  a second driver (0.12) and proof only as strong as the spec's checks (0.10). Q1 and the
+  complete factory stay where they were until roadmap steps 5 and 6 exist. Jev picks step
+  5, release/deploy and operations intake, as the next work (0.96).
 - **Step 5A (release-conductor) built (branch `feat/release-conductor`, before merge):**
   `release-conductor` carries a merged change to verified production. `init` writes a
   reviewed recipe. `prep` writes a release grant pinned to the version and the recipe, and
