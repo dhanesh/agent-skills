@@ -1,0 +1,7 @@
+[{"number": 7, "title": "good one", "body": "x", "labels": [], "state": "OPEN",
+  "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z", "url": "https://github.com/o/r/issues/7"},
+ {"number": "eight", "title": "bad number", "body": "x", "labels": [], "state": "OPEN",
+  "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z", "url": "https://github.com/o/r/issues/8"},
+ {"number": 9, "title": "bad time", "body": "x", "labels": [], "state": "OPEN",
+  "createdAt": "05/10/2026", "updatedAt": "2026-10-02T00:00:00Z", "url": "https://github.com/o/r/issues/9"},
+ "not an object"]

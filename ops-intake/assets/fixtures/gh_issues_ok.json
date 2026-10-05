@@ -1,0 +1,8 @@
+[{"number": 7, "title": "boom on login", "body": "Steps: click login.", "labels": [{"id": "L1", "name": "bug", "description": "", "color": "d73a4a"}],
+  "state": "OPEN", "stateReason": "", "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z",
+  "closedAt": null, "url": "https://github.com/o/r/issues/7", "author": {"id": "U1", "is_bot": false, "login": "ann", "name": ""}},
+ {"number": 8, "title": "outage", "body": "", "labels": [{"name": "incident"}],
+  "state": "CLOSED", "stateReason": "COMPLETED", "createdAt": "2026-10-03T08:20:45+05:30", "updatedAt": "2026-10-04T08:20:45.000+0000",
+  "closedAt": "2026-10-04T08:20:45Z", "url": "https://github.com/o/r/issues/8", "author": {"is_bot": true, "login": "app/x"}},
+ {"number": 9, "title": "question", "body": null, "labels": [],
+  "state": "OPEN", "createdAt": "2026-10-03T00:00:00Z", "updatedAt": "2026-10-03T00:00:00Z", "url": "https://github.com/o/r/issues/9"}]

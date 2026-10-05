@@ -170,19 +170,21 @@ class IoTests(unittest.TestCase):
     def test_intake_imports_nothing_that_can_reach_out(self):
         banned = {"socket", "subprocess", "urllib", "http", "ftplib", "smtplib", "ssl",
                   "requests", "asyncio", "importlib"}
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intake.py")
-        tree = ast.parse(open(path).read())
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                names = [x.name for x in n.names]
-            elif isinstance(n, ast.ImportFrom):
-                names = [n.module or ""]
-            else:
-                if isinstance(n, ast.Name) and n.id == "__import__":
-                    self.fail("__import__ used")
-                continue
-            for name in names:
-                self.assertNotIn(name.split(".")[0], banned)
+        here = os.path.dirname(os.path.abspath(__file__))
+        for mod in ("intake.py", "adapters.py"):
+            with open(os.path.join(here, mod)) as f:
+                tree = ast.parse(f.read())
+            for n in ast.walk(tree):
+                if isinstance(n, ast.Import):
+                    names = [x.name for x in n.names]
+                elif isinstance(n, ast.ImportFrom):
+                    names = [n.module or ""]
+                else:
+                    if isinstance(n, ast.Name) and n.id == "__import__":
+                        self.fail("__import__ used in " + mod)
+                    continue
+                for name in names:
+                    self.assertNotIn(name.split(".")[0], banned, mod)
 
 class LockTests(unittest.TestCase):
     def test_lock_is_exclusive(self):

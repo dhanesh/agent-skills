@@ -1,0 +1,4 @@
+{"source": "jira", "source_id": "OPS-1", "url": "", "kind": "issue", "title": "ok", "severity": 3, "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-02T00:00:00Z"}
+{"source": "jira", "source_id": "OPS-2", "url": "", "kind": "issue", "title": "severity out of range", "severity": 9, "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-02T00:00:00Z"}
+this is not json
+{"source": "other", "source_id": "OPS-3", "url": "", "kind": "issue", "title": "wrong source", "severity": 2, "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-02T00:00:00Z"}

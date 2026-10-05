@@ -18,12 +18,14 @@ import re
 import sys
 import time
 
+import adapters
+
 INTAKE_DIR = ".skill-contract/intake"
 CONFIG_PATH = ".intake/config.json"
 QUEUE_FILE = "queue.json"
 LOG_FILE = "intake-log.jsonl"
 
-# The closed list of formats. Adapters arrive in later tasks.
+# The closed list of formats. adapters.ADAPTERS holds the ones that are built.
 FORMATS = ("release-envelope", "release-status", "gh-issues-json", "gh-runs-json",
            "gh-run-jobs-json", "git-rev-list", "intake-signals-jsonl")
 # git-rev-list is auxiliary: it belongs to no source.
@@ -491,6 +493,138 @@ def cmd_status(a):
     return 0
 
 
+# -- import and formats -----------------------------------------------------------
+EVIDENCE_CAP = 20      # evidence kept per item; the oldest is dropped first
+PROBLEM_LINES = 50     # PROBLEM: lines printed; the IMPORT: line counts all of them
+_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}\Z")
+_RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
+
+
+def _bump(item, sig):
+    """Merge a signal into a known item: new evidence keys raise count, last_seen moves
+    forward only, the evidence list keeps the newest EVIDENCE_CAP."""
+    have = {e.get("key") for e in item.get("evidence", []) if isinstance(e, dict)}
+    for ev in sig["evidence"]:
+        if ev["key"] not in have:
+            have.add(ev["key"])
+            item.setdefault("evidence", []).append(ev)
+            item["count"] = item.get("count", 0) + 1
+    del item["evidence"][:-EVIDENCE_CAP]
+    if sig["last_seen"] > item.get("last_seen", ""):
+        item["last_seen"] = sig["last_seen"]
+
+
+def apply_signals(queue, signals, now):
+    """Merge signals into the queue (spec 1.3, 1.5). A dismissed or resolved item recurs
+    when a signal's last_seen is later than its closed_at. Closing an issue upstream and
+    a signal that cannot say when (release-status) never count as recurrence."""
+    for sig in signals:
+        iid = item_id(sig["source"], sig["source_id"])
+        it = queue.items.get(iid)
+        if it is None:
+            it = queue.add(sig["source"], sig["source_id"], sig["title"], now=sig["first_seen"])
+            it.update(url=sig["url"], kind=sig["kind"], severity=sig["severity"],
+                      trust=sig["trust"], last_seen=sig["last_seen"],
+                      count=max(1, len({e["key"] for e in sig["evidence"]})))
+            if sig.get("closed"):
+                it["closed"] = True
+            seen = set()
+            for ev in sig["evidence"]:
+                if ev["key"] not in seen:
+                    seen.add(ev["key"])
+                    it["evidence"].append(ev)
+            del it["evidence"][:-EVIDENCE_CAP]
+            continue
+        recurs = (it["state"] in ("dismissed", "resolved") and sig.get("recurrence", True)
+                  and not sig.get("closed") and it.get("closed_at")
+                  and sig["last_seen"] > it["closed_at"])
+        _bump(it, sig)
+        it["severity"] = max(it.get("severity", 0), sig["severity"])
+        if sig.get("closed"):
+            it["closed"] = True
+        elif "closed" in it:
+            it["closed"] = False
+        if sig["trust"] == "low":
+            it["trust"] = "low"
+        if recurs:
+            transition(it, "new", now=now)
+
+
+def _read_input(path):
+    try:
+        if path == "-":
+            return sys.stdin.read()
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except (OSError, ValueError) as e:
+        print("STOP: cannot read input: %s" % code(e))
+        return None
+
+
+def cmd_import(a):
+    fmt = a.format
+    if fmt not in FORMATS:
+        print("STOP: unknown-format %s" % code(fmt))
+        return 2
+    cfg = _need_config(a.root)
+    if cfg is None:
+        return 2
+    if fmt == "git-rev-list":
+        if a.source:
+            print("STOP: git-rev-list belongs to no source; do not pass --source")
+            return 2
+        if not (a.commit and _COMMIT_RE.match(a.commit)):
+            print("STOP: git-rev-list needs --commit <hex sha>")
+            return 2
+    else:
+        src = cfg["sources"].get(a.source) if a.source else None
+        if src is None:
+            print("STOP: source-not-configured %s" % code(a.source))
+            return 2
+        if not src["enabled"]:
+            print("STOP: source-disabled %s" % code(a.source))
+            return 2
+        if fmt not in src["formats"]:
+            print("STOP: format-not-listed %s for source %s" % (code(fmt), code(a.source)))
+            return 2
+        if a.run is not None and not _RUN_RE.match(a.run):
+            print("STOP: --run must be a run id (digits)")
+            return 2
+    if fmt not in adapters.ADAPTERS:
+        print("STOP: format-not-built %s" % fmt)
+        return 2
+    raw = _read_input(a.file)
+    if raw is None:
+        return 2
+    now = _now()
+    ctx = {"source": a.source, "now": now, "run": a.run}
+    signals, problems = adapters.ADAPTERS[fmt](raw, ctx)
+    try:
+        with run_lock(a.root):
+            q = _load(a.root)
+            if q is None:
+                return 2
+            apply_signals(q, signals, now)
+            q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
+            q.save()
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    print("IMPORT: %s %s ok %d problems %d" % (a.source, fmt, len(signals), len(problems)))
+    for p in problems[:PROBLEM_LINES]:
+        print("PROBLEM: %s" % one_line(p))
+    if len(problems) > PROBLEM_LINES:
+        print("PROBLEM: and %d more" % (len(problems) - PROBLEM_LINES))
+    return 3 if problems else 0
+
+
+def cmd_formats(a):
+    for f in FORMATS:
+        note = "" if f in adapters.ADAPTERS else "(not yet built) "
+        print("FORMAT: %s %s" % (f, code(note + adapters.FORMAT_HELP[f])))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="intake")
     p.add_argument("--root", default=".")
@@ -503,6 +637,10 @@ def main(argv=None):
     s = sub.add_parser("resolve"); s.add_argument("id"); s.add_argument("--by", required=True)
     s = sub.add_parser("link"); s.add_argument("id"); s.add_argument("other")
     sub.add_parser("status")
+    sub.add_parser("formats")
+    s = sub.add_parser("import"); s.add_argument("--format", required=True)
+    s.add_argument("--source"); s.add_argument("--run"); s.add_argument("--commit")
+    s.add_argument("file")
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
@@ -513,7 +651,8 @@ def main(argv=None):
     if a.cmd == "resolve":
         return _change(a, "resolved")
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
-            "status": cmd_status}[a.cmd](a)
+            "status": cmd_status, "formats": cmd_formats,
+            "import": cmd_import}[a.cmd](a)
 
 
 if __name__ == "__main__":
