@@ -223,6 +223,13 @@ class TestIntakeLint(unittest.TestCase):
         text = intake_spec().replace("- %s" % ITEM_ID, "- %s\n- %s" % (ITEM_ID, ITEM_ID), 1)
         self.assertTrue(any("twice" in i for i in spec_lint.lint(text)))
 
+    def test_intake_without_the_evidence_section_fails(self):
+        # deleting the evidence block would switch the copy tripwire off without a sign
+        text = intake_spec()
+        start = text.index("## External evidence (untrusted)")
+        stripped = text[:start] + text[text.index("## Problem"):]
+        self.assertTrue(any("External evidence" in i for i in spec_lint.lint(stripped)))
+
     def test_a_backticked_id_is_accepted(self):
         text = intake_spec().replace("- %s" % ITEM_ID, "- `%s`" % ITEM_ID, 1)
         self.assertEqual(spec_lint.parse_spec(text)["intake_items"], [ITEM_ID])

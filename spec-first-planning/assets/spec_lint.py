@@ -1034,6 +1034,9 @@ def lint(text, mode="light"):
         issues.append("## Intake bullet is not an intake item id (I + 10 hex): %s" % code(token))
     if spec["intake"] and not spec["intake_items"] and not spec["malformed_intake"]:
         issues.append("section '## Intake' names no intake item id ('- I<10 hex>')")
+    if spec["intake"] and not spec["evidence"]:
+        issues.append("a spec with '## Intake' needs its '## External evidence (untrusted)' "
+                      "section, as intake_request.py wrote it")
     seen_i = set()
     for iid in spec["intake_items"]:
         if iid in seen_i:
