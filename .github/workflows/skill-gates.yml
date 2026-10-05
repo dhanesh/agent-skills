@@ -14,14 +14,17 @@ concurrency:
 
 jobs:
   matrix-gate:
-    # The gates are shell scripts whose behaviour is locale- and awk-dependent,
-    # and they are developed on macOS/BSD. Running only ubuntu meant the platform
-    # where they are weakest was the one CI never exercised.
+    # Ubuntu only, by the owner's choice (2026-10-06): a macOS leg ran the full
+    # gate in ~20 min at 10x the billed rate and was the bulk of every PR's CI
+    # cost. macOS is covered by the owner running `make gate` locally on macOS
+    # before a PR; CI does NOT prove macOS. The gate scripts are BSD/GNU awk- and
+    # locale-sensitive and factory-conductor's re-entry has launchd-only code, so
+    # a contributor not on macOS should say so in the PR.
     name: gate (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -82,11 +85,9 @@ jobs:
   # on one version. Measured before this job existed: the python guard missed
   # every pathlib read on 3.10, the node suite parsed a reporter node 26 no
   # longer defaults to, and the go guard could not run on 1.22-1.23 at all.
-  # ubuntu, bar one leg: the full gate above already covers macOS on the pinned
-  # versions. ubuntu-latest is amd64, so the rust legs are also the rust
-  # guard's only amd64 runs: its hook was developed on arm64. The one macOS
-  # leg is the rust floor, 1.82, whose darwin link and hook are otherwise
-  # never run (the gate above pins 1.98).
+  # All legs are ubuntu (amd64), so the rust legs are also the rust guard's
+  # only amd64 runs: its hook was developed on arm64. The darwin link and hook
+  # are proven only by the owner's local macOS `make gate` (pinned versions).
   versions:
     name: tsn ${{ matrix.stack }} ${{ matrix.version }}${{ matrix.os && format(' ({0})', matrix.os) || '' }}
     strategy:
@@ -113,7 +114,6 @@ jobs:
           - {stack: rust, version: "1.90"}
           - {stack: rust, version: "1.94"}
           - {stack: rust, version: "1.98"}
-          - {stack: rust, version: "1.82", os: macos-latest}
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 30
     defaults:
@@ -160,17 +160,17 @@ jobs:
         working-directory: test-safety-net
         run: python eval/run_eval.py
 
-  # skill-contract is an open convention, so its reference checker is the one
-  # piece of this repo proven off POSIX: vectors and the end-to-end handoff on
-  # Windows too, at both ends of the supported Python range (3.10 floor, 3.14).
-  # Each file is its own step because pwsh (the Windows default shell) does not
-  # stop at a failing native command inside a multi-line `run`.
+  # skill-contract's reference checker: vectors and the end-to-end handoff at
+  # both ends of the supported Python range (3.10 floor, 3.14). Ubuntu only
+  # (owner's choice, 2026-10-06), so CI no longer proves it on Windows or macOS.
+  # Each file stays its own step so re-adding a pwsh leg needs no rework (pwsh
+  # does not stop at a failing native command inside a multi-line `run`).
   contract:
     name: skill-contract (${{ matrix.os }}, py${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
         python: ["3.10", "3.14"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
