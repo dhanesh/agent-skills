@@ -41,11 +41,14 @@ def run(root, *argv):
 
 @contextlib.contextmanager
 def no_io():
-    """Make any socket or subprocess use fail loudly."""
+    """Make any socket, DNS lookup, subprocess, fork or exec fail loudly."""
     def boom(*a, **k):
         raise AssertionError("intake opened a socket or ran a command")
-    with mock.patch.object(socket, "socket", boom), \
-            mock.patch.object(socket, "create_connection", boom), \
-            mock.patch.object(subprocess, "Popen", boom), \
-            mock.patch.object(subprocess, "run", boom):
+    targets = [(socket, n) for n in ("socket", "create_connection", "getaddrinfo", "socketpair")]
+    targets += [(subprocess, n) for n in ("Popen", "run", "call", "check_call", "check_output")]
+    targets += [(os, n) for n in dir(os) if n in ("system", "popen", "fork", "forkpty",
+                "posix_spawn", "posix_spawnp") or n.startswith(("exec", "spawn"))]
+    with contextlib.ExitStack() as st:
+        for mod, name in targets:
+            st.enter_context(mock.patch.object(mod, name, boom))
         yield

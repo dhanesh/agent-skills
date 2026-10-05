@@ -12,6 +12,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -111,12 +112,15 @@ def run_lock(root, timeout=None):
 
 
 # -- Config -----------------------------------------------------------------------
-_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+_REPO_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _TOP_KEYS = {"sources", "github", "ci", "jira", "linear", "weights"}
 
 
 def _is_str(v, limit=200):
-    return isinstance(v, str) and 0 < len(v) <= limit
+    """A short string that is safe on a command line: no leading dash (it would read as
+    a flag) and no control characters."""
+    return (isinstance(v, str) and 0 < len(v) <= limit and not v.startswith("-")
+            and not any(ord(c) < 32 or ord(c) == 127 for c in v))
 
 
 def _str_list(v):
@@ -134,7 +138,8 @@ def _check_section(name, sec, problems):
     for k in sec:
         if k not in allowed:
             problems.append("%s: unknown key %s" % (name, code(k)))
-    if "repo" in sec and not (isinstance(sec["repo"], str) and _REPO_RE.match(sec["repo"])):
+    if "repo" in sec and not (isinstance(sec["repo"], str) and _REPO_RE.match(sec["repo"])
+                                   and ".." not in sec["repo"]):
         problems.append("github.repo must look like owner/name")
     for k in ("default_branch", "jql", "team", "filter"):
         if k in sec and not _is_str(sec[k]):
@@ -186,8 +191,11 @@ def config_problems(cfg):
             _check_section(sec, cfg[sec], problems)
     w = cfg.get("weights", {})
     if not isinstance(w, dict) or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) for v in w.values()):
-        problems.append("weights must map names to numbers")
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in w.values()):
+        problems.append("weights must map names to finite numbers")
+    elif any(k not in sources for k in w):
+        problems.append("weights must be keyed by configured source names")
     return problems
 
 
@@ -230,6 +238,13 @@ def transition(item, to, by=None, reason=None, now=None):
         if frm not in ("dismissed", "resolved"):
             raise ValueError("only a dismissed or resolved item can recur, not %s" % frm)
         item["regressed"] = True
+        item["recurred_at"] = now
+        item.pop("closed_at", None)
+        item.pop("state_by", None)
+        item.pop("state_reason", None)
+        item["state"] = "new"
+        item["state_at"] = now
+        return item
     elif to == "resolved":
         if frm == "resolved":
             raise ValueError("already resolved")
@@ -241,6 +256,9 @@ def transition(item, to, by=None, reason=None, now=None):
         raise ValueError("dismissing needs a reason")
     item["state"] = to
     item["state_at"] = now
+    item["regressed"] = False  # regressed marks a new item only
+    if to in ("dismissed", "resolved"):
+        item["closed_at"] = now  # recurrence compares against this
     if by:
         item["state_by"] = by
     if reason:
@@ -249,6 +267,10 @@ def transition(item, to, by=None, reason=None, now=None):
 
 
 # -- The queue --------------------------------------------------------------------
+class QueueError(Exception):
+    """The queue file is unreadable or not an intake queue."""
+
+
 class Queue:
     def __init__(self, root, items=None):
         self.root = root
@@ -262,7 +284,21 @@ class Queue:
                 data = json.load(f)
         except FileNotFoundError:
             return cls(root)
-        return cls(root, dict(data.get("items", {})))
+        except (OSError, ValueError):
+            raise QueueError(path)
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, dict):
+            raise QueueError(path)
+        for iid, it in items.items():
+            if not (isinstance(it, dict) and it.get("state") in STATES
+                    and isinstance(it.get("title"), str) and isinstance(it.get("source"), str)
+                    and isinstance(it.get("source_id"), str)
+                    and isinstance(it.get("first_seen", ""), str)):
+                raise QueueError(path)
+            it.setdefault("id", iid)
+            it.setdefault("first_seen", "")
+            it.setdefault("regressed", False)
+        return cls(root, items)
 
     def add(self, source, source_id, title, evidence=None, now=None):
         """Add a new item, or return the existing one with the same id."""
@@ -308,6 +344,15 @@ def _rank(item):
     return 0  # placeholder until the ranking task
 
 
+def _load(root):
+    """The queue, or None after printing STOP (exit 2 for the caller)."""
+    try:
+        return Queue.load(root)
+    except QueueError as e:
+        print("STOP: queue-unreadable %s" % code(e))
+        return None
+
+
 def _find(q, iid):
     if iid not in q.items:
         print("STOP: no item %s" % code(iid))
@@ -338,9 +383,18 @@ def cmd_init(a):
         return 2
     path = os.path.join(a.root, *CONFIG_PATH.split("/"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, sort_keys=True)
-        f.write("\n")
+    tmp = path + ".tmp.%d" % os.getpid()
+    try:
+        with run_lock(a.root):
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
     print("NEXT: config written to %s" % CONFIG_PATH)
     return 0
 
@@ -348,9 +402,10 @@ def cmd_init(a):
 def cmd_list(a):
     if _need_config(a.root) is None:
         return 2
-    q = Queue.load(a.root)
-    shown = [i for i in q.items.values()
-             if a.all or i["state"] == "new" or i.get("regressed")]
+    q = _load(a.root)
+    if q is None:
+        return 2
+    shown = [i for i in q.items.values() if a.all or i["state"] == "new"]
     shown.sort(key=lambda i: (-_rank(i), i["first_seen"], i["id"]))
     for i in shown:
         print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
@@ -360,7 +415,8 @@ def cmd_list(a):
 def cmd_show(a):
     if _need_config(a.root) is None:
         return 2
-    i = _find(Queue.load(a.root), a.id)
+    q = _load(a.root)
+    i = _find(q, a.id) if q else None
     if i is None:
         return 2
     print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
@@ -375,8 +431,8 @@ def _change(a, to, need_reason=False):
         return 2
     try:
         with run_lock(a.root):
-            q = Queue.load(a.root)
-            i = _find(q, a.id)
+            q = _load(a.root)
+            i = _find(q, a.id) if q else None
             if i is None:
                 return 2
             try:
@@ -384,8 +440,8 @@ def _change(a, to, need_reason=False):
             except ValueError as e:
                 print("STOP: %s" % one_line(e))
                 return 2
-            q.save()
             q.log(a.cmd, id=a.id, by=a.by, reason=getattr(a, "reason", None))
+            q.save()
     except Locked:
         print("STOP: the intake lock is held by another command")
         return 3
@@ -398,16 +454,21 @@ def cmd_link(a):
         return 2
     try:
         with run_lock(a.root):
-            q = Queue.load(a.root)
+            q = _load(a.root)
+            if q is None:
+                return 2
+            if a.id == a.other:
+                print("STOP: link needs two different items")
+                return 2
             keep, drop = _find(q, a.id), _find(q, a.other)
-            if keep is None or drop is None or a.id == a.other:
+            if keep is None or drop is None:
                 return 2
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
             del q.items[a.other]
-            q.save()
             q.log("link", id=a.id, other=a.other)
+            q.save()
     except Locked:
         print("STOP: the intake lock is held by another command")
         return 3
@@ -418,11 +479,13 @@ def cmd_link(a):
 def cmd_status(a):
     if _need_config(a.root) is None:
         return 2
-    q = Queue.load(a.root)
+    q = _load(a.root)
+    if q is None:
+        return 2
     counts = {s: 0 for s in STATES}
     for i in q.items.values():
         counts[i["state"]] += 1
-    reg = sum(1 for i in q.items.values() if i.get("regressed"))
+    reg = sum(1 for i in q.items.values() if i["state"] == "new" and i.get("regressed"))
     print("SYNC: %d items %s regressed=%d" % (
         len(q.items), " ".join("%s=%d" % kv for kv in counts.items()), reg))
     return 0
