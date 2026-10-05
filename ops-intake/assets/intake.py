@@ -883,7 +883,9 @@ def _close_loop(q, envs, now):
         no_history, missing = [], False
         for rel in (v for v in verified if v["at"] >= since):
             h = q.histories.get(rel["commit"])
-            if h is None:
+            if not _SHA40_RE.match(rel["commit"]):
+                missing = True  # a sha256 repo: git-rev-list takes 40-hex only; a human resolves
+            elif h is None:
                 no_history.append(rel["commit"])
             elif merges <= set(h["shas"]):
                 transition(it, "resolved", by="release:%s" % rel["version"], now=now)

@@ -484,6 +484,15 @@ class LoopTests(unittest.TestCase):
         self.assertNotIn("NEXT: git rev-list", out)
         self.assertEqual(self.flag(), "planned")
 
+    def test_sha256_release_commit_needs_resolve_not_an_endless_next(self):
+        self.plan()
+        self.run_result(self.m)
+        release_env(self.root, "2.0.0", "e" * 64, "verified")
+        rc, out = intake(self.root, "sync")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("NEXT: git rev-list", out)
+        self.assertEqual(self.flag(), "planned+needs-resolve")
+
     def test_old_plan_does_not_replan_a_recurred_item(self):
         self.plan()
         self.run_result(self.m)
