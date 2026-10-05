@@ -211,7 +211,7 @@ Tests are offline and stdlib-only.
 - **Jira and Linear:**
   - A local `http.server` covers pagination, 401, timeouts and malformed JSON.
   - A test asserts that the tool refuses a `mutation` document before it sends any request.
-- **Release:** the tests use real `release-result/v1` envelopes that the vendored checker builds.
+- **Release:** the tests use real `release-result/v1` envelopes. The tests build them with the vendored checker.
 - **Hostile text:** fixtures with:
   - a markdown heading;
   - an `@mention`;
