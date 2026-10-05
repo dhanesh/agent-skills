@@ -69,7 +69,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import intake as IN
 from intake_testkit import repo, run, no_io
 
-GOOD = {"sources": {"github": {"enabled": True, "format": "gh-issues-json"}},
+GOOD = {"sources": {"github": {"enabled": True, "formats": ["gh-issues-json"]},
+                    "ci": {"enabled": True, "formats": ["gh-runs-json", "gh-run-jobs-json"]},
+                    "release": {"enabled": True, "formats": ["release-envelope", "release-status"]}},
         "github": {"repo": "o/r", "labels": ["bug", "incident"]},
         "ci": {"default_branch": "main", "workflows": ["ci"]},
         "weights": {"github": 1.0, "ci": 1.0, "release": 1.5}}
@@ -81,8 +83,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(problems, [])
 
     def test_config_refuses_anything_command_or_credential_shaped(self):
-        for bad in ({"sources": {"x": {"enabled": True, "format": "gh-issues-json", "command": ["gh"]}}},
-                    {"sources": {"x": {"enabled": True, "format": "nope"}}},
+        for bad in ({"sources": {"x": {"enabled": True, "formats": ["gh-issues-json"], "command": ["gh"]}}},
+                    {"sources": {"x": {"enabled": True, "formats": ["nope"]}}},
+                    {"sources": {"repo": {"enabled": True, "formats": ["git-rev-list"]}}},
                     {"jira": {"token_env": "AWS_SECRET_ACCESS_KEY"}},
                     {"jira": {"base_url": "https://evil.example"}}):
             with self.subTest(bad=bad):
@@ -151,7 +154,7 @@ if __name__ == "__main__":
   Expected: `ModuleNotFoundError: No module named 'intake'`.
 
 - [ ] **Step 3: Implement** `intake.py`.
-  - **Config validation** checks an allowlist of keys. `sources.<name>` has exactly `enabled` (bool) and `format` (in `FORMATS`). Section keys:
+  - **Config validation** checks an allowlist of keys. `sources.<name>` has exactly `enabled` (bool) and `formats`, a non-empty list of names from `SOURCE_FORMATS`. `git-rev-list` is an auxiliary format: it belongs to no source and is refused in `sources`. The source name `release` is reserved for the two release formats, and those formats may appear only under `release`, because both key on the version and must land on the same item. Section keys:
     - `github`: `repo` matching `^[\w.-]+/[\w.-]+$`, and `labels`, a list of short strings.
     - `ci`: `default_branch` and `workflows`.
     - `jira`: `jql` (a string).
@@ -190,7 +193,7 @@ git commit -m "feat(ops-intake): config, queue, states, lock — no socket, no s
   - Signal dict keys: `source, source_id, url, kind, title, severity, first_seen, last_seen, trust, evidence` (evidence is a list of `{text, source, source_id, fetched_at, key}`, where `key` dedupes evidence).
   - `FORMAT_HELP: dict[str, str]` gives the command or MCP tool that produces each format, for `intake formats`.
 - Produces in `intake.py`:
-  - `import --format FMT --source NAME [--run ID] FILE|-`;
+  - `import --format FMT --source NAME [--run ID] FILE|-`. It refuses (exit 2) a source that is not configured and enabled, or a format that the source does not list, because the source name is part of `item_id` and a stray name would duplicate every item. The auxiliary `git-rev-list` takes `--commit SHA` and no `--source`;
   - `apply_signals(queue, signals, now)`, the merge and recurrence rules below.
 
 **Adapters in this task:**
@@ -204,7 +207,7 @@ git commit -m "feat(ops-intake): config, queue, states, lock — no socket, no s
   - `state == "CLOSED"` is kept as data: `closed: true`.
 - **`intake-signals-jsonl`:** one JSON object per line, in the signal shape. It sets `trust` to `low` and ignores any `trust` field in the input. `severity` must be 1–4.
 - **`release-status`:**
-  - Input: text lines `RELEASE: <version> <status>`.
+  - Input: text lines `RELEASE: <version> <status>`. The line `RELEASE: none` means zero records, not a problem. Names that are not a semver version (archived directories such as `1.2.0.abandoned-20261006T101500Z`) are skipped, not reported.
   - Statuses `prod_failed` and `outcome_unknown` give severity 4. `rolled_back` and `stage_failed` give 3. `abandoned` gives 2.
   - Any other status is ignored. A line that does not match is a problem.
   - `source_id` = the version; `kind` = `release`; `url` = `""`.
@@ -223,6 +226,8 @@ git commit -m "feat(ops-intake): config, queue, states, lock — no socket, no s
 
   Then add:
   - `import --format nope`, which exits 2;
+  - `import` with an unconfigured source, a disabled source, or a format the source does not list, each exits 2;
+  - `release-status` on `RELEASE: none` gives 0 records and exit 0; an archived name is skipped;
   - `parse_time` on `2026-10-05T08:20:45Z`, `2026-10-05T08:20:45+05:30` and `2026-10-05T08:20:45.000+0000`, and a refusal of `05/10/2026`;
   - a recurrence test: import → dismiss → the same file again gives no change → a file with a later `updatedAt` gives `new` + `regressed`;
   - a double-import test: the same file twice leaves `count` unchanged;
@@ -277,7 +282,8 @@ def test_dismissed_open_issue_does_not_come_back_until_updated(self):
   - For each job with a failing conclusion, the signal has:
     - `source_id` = `"<workflowName>/<job name>/<headBranch>"`; `kind` = `ci`; severity 3;
     - `title` = `"<workflowName> / <job name> failing on <branch>"`; `url` = the job url;
-    - evidence text = the failing step names; `key` = `"<run id>:<attempt>:<job databaseId>"`.
+    - evidence text = the failing step names; `key` = `"<run id>:<attempt>:<job databaseId>"`;
+    - `last_seen` = the job's `completedAt`; `first_seen` = the earliest `completedAt` seen for that key. Recurrence compares `last_seen` with the dismissal or resolution time.
   - Then it sets `jobs_imported: True`.
 - **`sync`** (the first part, here): for each run in `queue.runs` with `jobs_imported == False`, it prints `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source ci --run <id>`.
 
@@ -315,13 +321,15 @@ def test_dismissed_open_issue_does_not_come_back_until_updated(self):
   6. It ranks the queue. Rank = `severity * 100 + recency_points + min(count, 20)`, multiplied by `weights[source]` (default 1.0). `recency_points` = `max(0, 30 - days_since(last_seen))`. Ties break on `item_id`. The rank is recomputed on every `sync`, and `list` reads it.
 - **`pick ID --by NAME`**:
   - only from `new`;
-  - writes an envelope with `CC.build_statement(INTAKE_ITEM_KIND, "ops-intake", VERSION, root, [queue rel path], payload)` and `CC.write_envelope`;
+  - first writes a per-item snapshot, `.skill-contract/intake/items/<id>.json`, the envelope's subject (the queue file changes on every `sync`, so it is a poor subject);
+  - then builds the statement with `CC.build_statement(INTAKE_ITEM_KIND, "ops-intake", VERSION, root, [snapshot rel path], payload)` and writes it to the git-ignored `.skill-contract/intake/envelopes/<statement id>.json`, not to `.skill-contract/envelopes/`. The evidence holds raw ticket text, which can carry customer data, and `.skill-contract/envelopes/` is not git-ignored in every repo;
   - the payload is `{item_id, title, kind, severity, source, source_id, url, trust, count, first_seen, last_seen, evidence}`;
   - prints `NEXT: run spec-first-planning with <envelope path>`.
 
 **Format added in this task:** `git-rev-list` (one sha per line; every line must match `^[0-9a-f]{40}$`, and a bad line is a problem). Add it to `FORMATS` and `FORMAT_HELP`, and add it to the spec's format table in the same commit. The test builds a real repo with `git` *in the test* (tests may run git; intake may not), then pipes `git rev-list` output into `import`.
 
 - [ ] **Step 1: Write the failing tests:**
+  - **privacy:** after `pick`, `git status --porcelain` in the test repo shows no new tracked or untracked file outside ignored paths;
   - **ranking:** the order is deterministic and severity dominates;
   - **pick:** it writes a valid envelope (`CC.check_statement` returns no problems, and the kind matches); picking twice is refused (exit 2); a hostile title travels only as data inside the payload;
   - **loop closing:**

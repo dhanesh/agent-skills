@@ -55,7 +55,7 @@ The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its comm
 ### 1.2 Config
 
 The config is at `.intake/config.json`. It is committed and holds no secrets. It holds only data, never a command:
-- **`sources`:** for each source name, its enabled flag and its format. Example: `{"jira": {"enabled": true, "format": "jira-mcp"}}`.
+- **`sources`:** for each source name, its enabled flag and the formats it uses. Example: `{"ci": {"enabled": true, "formats": ["gh-runs-json", "gh-run-jobs-json"]}}`. `import` refuses a source that is not configured and enabled, or a format that source does not list, because the source name is part of the item id. The name `release` is reserved for the two release formats. `git-rev-list` is auxiliary and belongs to no source.
 - **`github`:** the repo and the labels that mark a signal (default `bug`, `incident`). The agent uses these values when it runs `gh`.
 - **`ci`:** the default branch name and the workflows on it to watch.
 - **`jira`:** one JQL query. The agent uses it when it calls the MCP tool or `acli`.
@@ -147,7 +147,7 @@ A repo-wide lock guards `sync` and every state change. The lock and the atomic w
 
 ### 1.6 The handoff
 
-`pick` writes an `intake-item/v1` envelope. The envelope holds the item's fields and its quoted evidence, with the item id as a subject.
+`pick` writes an `intake-item/v1` envelope. The envelope holds the item's fields and its quoted evidence. Its subject is a per-item snapshot file. The envelope and the snapshot go to the git-ignored `.skill-contract/intake/` directory, because the evidence can carry customer data.
 
 spec-first-planning gains one input path: it accepts this envelope as the request. The drafted spec carries the item id. It keeps the evidence in a fenced **"External evidence (untrusted)"** block, apart from the requirements.
 
