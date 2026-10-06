@@ -143,6 +143,23 @@ carries unit tests, eval negatives and an A/B row:
   refuses it. The fixture also asserts the demotion, so broken crash recovery fails the run.
   Step 5A is to be re-judged by Jev after
   merge, run by the controller, against the actual merge commit. No score is claimed here.
+- **Step 5B (ops-intake) built (branch `feat/ops-intake`, before merge):** `ops-intake`
+  brings operational signals back into planning. The agent runs the CLI or MCP tool and
+  pipes its output into `intake import`. Intake opens no socket, runs no command and holds
+  no token. Each format has one strict adapter: GitHub issues, CI runs and their jobs,
+  release status, and a generic JSON Lines format. An unknown format is refused. The config
+  refuses a command key, a credential key and a source name that a shell could read as
+  syntax. `sync` reads rolled-back releases, ranks the queue and closes the loop. `pick`
+  writes an `intake-item/v1` envelope. spec-first-planning turns it into a spec with an
+  untrusted evidence block and a task-plan that names the item. A check command that
+  copies the evidence gets a WARNING line next to its CHECK_COMMAND line, and a hidden
+  character in a check command fails the lint. A proven run and a verified release whose
+  imported git history holds the merge resolve the item. A squash merge or a partial run
+  does not. A dismissed item comes back only when it recurs. The delta row is a signal that
+  reaches a linted plan by its intake id and is resolved by a verified release. Nine guard
+  rows back it, and each is mutation-proven. The Jira and Linear adapters wait for real
+  samples. Step 5B is to be re-judged by Jev after merge, run by the controller, against
+  the actual merge commit. No score is claimed here.
 
 Nothing else in this document has been re-measured since.
 
