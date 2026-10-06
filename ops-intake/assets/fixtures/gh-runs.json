@@ -3,7 +3,8 @@
   "databaseId": 1001,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "failure",
@@ -16,7 +17,8 @@
   "databaseId": 1002,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "success",
@@ -29,7 +31,8 @@
   "databaseId": 1003,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "cancelled",
@@ -42,7 +45,8 @@
   "databaseId": 1004,
   "workflowName": "gate",
   "headBranch": "dev",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "failure",
@@ -55,7 +59,8 @@
   "databaseId": 1005,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "failure",
@@ -68,7 +73,8 @@
   "databaseId": 1006,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "completed",
   "conclusion": "exploded",
@@ -81,7 +87,8 @@
   "databaseId": 1007,
   "workflowName": "gate",
   "headBranch": "main",
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "headSha":
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "event": "push",
   "status": "in_progress",
   "conclusion": "",
