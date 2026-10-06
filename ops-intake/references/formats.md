@@ -17,8 +17,8 @@ only as one-line code spans.
 | `release-envelope` | release-conductor `release-result/v1` envelopes under `.skill-contract/envelopes/` | `release` | an item for a `rolled_back` release |
 | `release-status` | release-conductor's `release status` (`RELEASE: <version> <status>` lines) | `release` | an item for a failed release |
 | `gh-issues-json` | `gh issue list --repo OWNER/REPO --state all --limit 100 --json number,title,body,labels,state,createdAt,updatedAt,url` | any configured name | an item per issue |
-| `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | `ci` | failing runs, held until their jobs come in |
-| `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | `ci` | an item per failing job |
+| `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | any configured name | failing runs, held until their jobs come in |
+| `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | any configured name | an item per failing job |
 | `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
 | `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` |
 
@@ -65,8 +65,9 @@ through `intake-signals-jsonl`.
   `failure`, `timed_out` or `startup_failure`. It gives no item yet, because `gh run list` has
   no job field.
 - Sync then prints, for each failing run whose jobs are not imported:
-  `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source ci --run <id>`.
-  The source name in that line is `ci`. So name the CI source `ci`.
+  `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source <name> --run <id>`.
+  `<name>` is the source that imported the run, when it lists `gh-run-jobs-json`. If it does
+  not, `<name>` is the first source, by name, that lists it. Run the line as printed.
 - `gh-run-jobs-json` needs `--run`, and that run must be imported first (`run-not-imported`
   otherwise). Each failing job gives an item: kind `ci`, severity 3,
   `source_id` = `<workflow>/<job>/<branch>`. Repeated failures of one job are one item; each

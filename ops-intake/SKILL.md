@@ -73,10 +73,9 @@ Read each command's output lines, not only its exit code.
 0. **Init (once per project).** Ask the human which sources to read and write the answers to a
    JSON file outside the repo, then run `intake init --answers <file>`. It checks the config and
    writes `.intake/config.json` (it replaces an earlier one). The config holds only data, never
-   a command, a host or a credential name. Two source names are fixed: the CI formats belong to a
-   source named `ci` (the jobs `NEXT:` line that sync prints says `--source ci`), and the two
-   release formats belong only to the source named `release`. A config that lists a CI format
-   also needs `ci.default_branch`. `references/formats.md` has the keys and an example. The
+   a command, a host or a credential name. One source name is fixed: the two release formats
+   belong only to the source named `release`. A config that lists a CI format also needs
+   `ci.default_branch`. `references/formats.md` has the keys and an example. The
    config is committed through a normal PR, like any other change.
 1. **Collect, one source at a time.** `intake formats` lists every format with the command or
    tool that produces it. For each enabled source, run its command and pipe the output straight
@@ -85,8 +84,8 @@ Read each command's output lines, not only its exit code.
    | Source | Command, piped into import | Format |
    |---|---|---|
    | GitHub issues | `gh issue list --repo OWNER/REPO --state all --limit 100 --json number,title,body,labels,state,createdAt,updatedAt,url` | `gh-issues-json` |
-   | CI runs | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | `gh-runs-json` (source `ci`) |
-   | CI jobs | the `NEXT: gh run view <id> --json jobs …` line sync prints | `gh-run-jobs-json --run <id>` (source `ci`) |
+   | CI runs | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | `gh-runs-json` |
+   | CI jobs | the `NEXT: gh run view <id> --json jobs …` line sync prints | `gh-run-jobs-json --run <id>` |
    | Releases | release-conductor's `release status` | `release-status` (source `release`) |
    | Jira, Linear, anything else | your own transform to one signal per line | `intake-signals-jsonl` |
 
@@ -213,6 +212,9 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
   release's history arrives only through `git-rev-list`. A squash or rebase merge, a partial or
   stopped run, or a release commit missing from the clone never resolves an item: it waits for
   the human's `resolve`. Intake does not guess.
+- **The history is what you pipe in.** Intake checks only that each `git-rev-list` line is a
+  40-hex sha and that the first line is the release commit. It cannot tell a real history from
+  a made-up one, so a fabricated history could resolve an item.
 - **On demand only.** Nothing sweeps the sources on a schedule; a session has to run the flow.
 - **The CI run list grows.** Imported failing runs stay in the queue file; they are not pruned.
 

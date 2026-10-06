@@ -44,7 +44,8 @@ _checks = []
 CALLS = []  # every socket/subprocess/exec attempt made while the recorder is on
 
 CONFIG = {"sources": {"github": {"enabled": True, "formats": ["gh-issues-json"]},
-                      "ci": {"enabled": True, "formats": ["gh-runs-json", "gh-run-jobs-json"]},
+                      "actions": {"enabled": True,
+                                  "formats": ["gh-runs-json", "gh-run-jobs-json"]},
                       "release": {"enabled": True,
                                   "formats": ["release-envelope", "release-status"]},
                       "jira": {"enabled": True, "formats": ["intake-signals-jsonl"]}},
@@ -237,12 +238,15 @@ def positive_arm():
     res = {}
     res["gh-issues-json"] = intake(root, "import", "--format", "gh-issues-json", "--source",
                                    "github", fixture("gh_issues_ok.json"))
-    res["gh-runs-json"] = intake(root, "import", "--format", "gh-runs-json", "--source", "ci",
-                                 fixture("gh-runs.json"))
+    res["gh-runs-json"] = intake(root, "import", "--format", "gh-runs-json", "--source",
+                                 "actions", fixture("gh-runs.json"))
     rc, out = intake(root, "sync")
     jobs_next = [ln for ln in out.splitlines() if ln.startswith("NEXT: gh run view")]
-    res["gh-run-jobs-json"] = intake(root, "import", "--format", "gh-run-jobs-json", "--source",
-                                     "ci", "--run", "1001", fixture("gh-run-jobs.json"))
+    # the jobs import is the printed NEXT line itself (R20): `gh run view …` is the agent's
+    # half; what follows `| intake ` is intake's argv
+    line = next(ln for ln in jobs_next if "--run 1001" in ln)
+    jobs_argv = line.split(" | intake ", 1)[1].split()
+    res["gh-run-jobs-json"] = intake(root, *jobs_argv, fixture("gh-run-jobs.json"))
     res["release-status"] = intake(root, "import", "--format", "release-status", "--source",
                                    "release", fixture("release_status_ok.txt"))
     res["intake-signals-jsonl"] = intake(root, "import", "--format", "intake-signals-jsonl",
@@ -255,8 +259,8 @@ def positive_arm():
     rolled = IN.item_id("release", "2.0.0")
     imported = all(res[f][1].startswith("IMPORT: ") for f in res)
     check("every built-in source format imports through its adapter, and the CI jobs wait "
-          "for their NEXT line",
-          imported and len(jobs_next) == 2 and {("github", "issue"), ("ci", "ci"),
+          "for their NEXT line, which runs as printed for a source not named ci",
+          imported and res["gh-run-jobs-json"][0] == 0 and len(jobs_next) == 2 and {("github", "issue"), ("actions", "ci"),
                                                  ("release", "release"),
                                                  ("jira", "issue")} <= kinds
           and rolled in items(root) and low and all(i["trust"] == "low" for i in low),

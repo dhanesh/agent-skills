@@ -250,5 +250,38 @@ class CiTests(unittest.TestCase):
                          ("2026-10-05T10:00:00Z", "2026-10-05T10:00:00Z"))
 
 
+class JobsSourceTests(unittest.TestCase):
+    """R18: the jobs NEXT line names the configured source, not a fixed `ci`."""
+
+    def setUp(self):
+        self.root = repo(config={
+            "sources": {"actions": {"enabled": True, "formats": ["gh-runs-json", "gh-run-jobs-json"]},
+                        "nightly": {"enabled": True, "formats": ["gh-runs-json", "gh-run-jobs-json"]}},
+            "ci": {"default_branch": "main"}})
+
+    def imp(self, source, fmt, path, *extra):
+        with no_io():
+            return run(self.root, "import", "--format", fmt, "--source", source, *extra, path)
+
+    def test_the_next_line_names_the_source_that_imported_the_run_and_works(self):
+        self.imp("nightly", "gh-runs-json", fx("gh-runs.json"))
+        self.assertEqual(IN.Queue.load(self.root).runs["1001"]["source"], "nightly")
+        out = sync(self.root)[1]
+        line = next(l for l in out.splitlines() if "--run 1001" in l)
+        self.assertIn("--source nightly --run 1001", line)
+        self.assertNotIn("--source ci", out)
+        argv = line.split(" | intake ", 1)[1].split()
+        with no_io():
+            rc, got = run(self.root, *argv, fx("gh-run-jobs.json"))
+        self.assertEqual(rc, 0, got)
+        self.assertNotIn("--run 1001", sync(self.root)[1])
+        self.assertTrue(any(i["source"] == "nightly" for i in items(self.root).values()))
+
+    def test_a_run_from_a_source_without_the_jobs_format_points_at_one_that_has_it(self):
+        self.assertEqual(IN._jobs_source({"sources": {
+            "a": {"enabled": True, "formats": ["gh-runs-json"]},
+            "b": {"enabled": True, "formats": ["gh-run-jobs-json"]}}}, {"source": "a"}), "b")
+
+
 if __name__ == "__main__":
     unittest.main()

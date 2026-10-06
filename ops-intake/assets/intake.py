@@ -313,7 +313,8 @@ _RUN_STRS = ("workflowName", "headBranch", "headSha", "url", "createdAt", "updat
 def _valid_run(r):
     return (isinstance(r, dict) and all(isinstance(r.get(k), str) for k in _RUN_STRS)
             and isinstance(r.get("attempt"), int) and not isinstance(r.get("attempt"), bool)
-            and isinstance(r.get("jobs_imported"), bool))
+            and isinstance(r.get("jobs_imported"), bool)
+            and isinstance(r.get("source", ""), str))
 
 
 class Queue:
@@ -739,6 +740,8 @@ def cmd_import(a):
                 # Only a well-formed, complete payload retires the run's NEXT line.
                 if ctx.get("jobs_ok") and len(signals) == n_signals:
                     q.runs[a.run]["jobs_imported"] = True
+            for run in ctx["runs_out"].values():
+                run["source"] = a.source  # the jobs NEXT line names this source (R18)
             q.runs.update(ctx["runs_out"])
             apply_signals(q, signals, now)
             q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
@@ -1004,6 +1007,17 @@ def _close_loop(q, envs, now):
     return wanted, due
 
 
+def _jobs_source(cfg, run):
+    """The configured source the jobs import of `run` goes to (R18): the source that
+    imported the run when it lists gh-run-jobs-json, else the first source (by name) that
+    lists it. Config validation keeps every source name safe on a command line."""
+    listing = sorted(n for n, s in cfg["sources"].items() if "gh-run-jobs-json" in s["formats"])
+    own = run.get("source")
+    if own in listing or not listing:
+        return own or "ci"
+    return listing[0]
+
+
 def cmd_sync(a):
     """Read the shared envelopes, add rolled-back releases, close the loop, rank the
     queue (spec 1.4-1.6), and print the NEXT lines for missing CI jobs and histories.
@@ -1045,7 +1059,8 @@ def cmd_sync(a):
     for rid in sorted(q.runs, key=int):
         if not q.runs[rid]["jobs_imported"]:
             print("NEXT: gh run view %s --json jobs | intake import --format "
-                  "gh-run-jobs-json --source ci --run %s" % (rid, rid))
+                  "gh-run-jobs-json --source %s --run %s"
+                  % (rid, _jobs_source(cfg, q.runs[rid]), rid))
     for c in sorted(wanted):
         print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
     for c in sorted(fetch):  # printed once per commit: the item is needs-resolve meanwhile

@@ -36,21 +36,21 @@ Every source reaches intake through a CLI, an MCP server or a local file. The ag
 
 `ops-intake/` follows the repo anatomy: `SKILL.md`, `README.md`, `references/`, `assets/`, `eval/`.
 
-The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Its commands:
+The tool is `assets/intake.py`. It is stdlib-only, Python 3.10+, POSIX. Every command takes `--root R` before the command name: `intake.py --root R <command> …`. The commands (ruling R19 corrected this table):
 
 | Command | Effect |
 |---|---|
-| `init --root R` | Writes `.intake/config.json` from an answers file. The agent interviews the human to get the answers. |
-| `import --root R --format FMT --source NAME FILE` | Parses one source output file (or `-` for stdin) with the adapter for `FMT`. It adds the signals to the queue. |
-| `sync --root R` | Reads the local release envelopes, applies recurrence and the loop-closing rules (1.6), and ranks the queue. |
+| `init --answers FILE` | Writes `.intake/config.json` from an answers file. The agent interviews the human to get the answers. |
+| `import --format FMT --source NAME FILE` | Parses one source output file (or `-` for stdin) with the adapter for `FMT`. It adds the signals to the queue. |
+| `sync` | Reads the local release envelopes, applies recurrence and the loop-closing rules (1.6), and ranks the queue. |
 | `formats` | Lists the supported formats and the command or MCP tool that produces each one. |
-| `list --root R [--all]` | Prints the ranked queue. Without `--all`, it shows only `new` and `regressed` items. |
-| `show --root R <id>` | Prints one item and its quoted evidence. |
-| `pick --root R <id> --by NAME` | Writes the `intake-item/v1` envelope and marks the item `picked`. |
-| `dismiss --root R <id> --by NAME --reason TEXT` | Marks the item `dismissed`. |
-| `link --root R <id> <id>` | Merges two items when the human confirms they are the same issue. |
-| `resolve --root R <id> --by NAME` | Marks the item `resolved` by hand. |
-| `status --root R` | Shows a read-only summary. |
+| `list [--all]` | Prints the ranked queue. Without `--all`, it shows only `new` and `regressed` items. |
+| `show <id>` | Prints one item and its quoted evidence. |
+| `pick <id> --by NAME` | Writes the `intake-item/v1` envelope and marks the item `picked`. |
+| `dismiss <id> --by NAME --reason TEXT` | Marks the item `dismissed`. |
+| `link <id> <id>` | Merges two items when the human confirms they are the same issue. |
+| `resolve <id> --by NAME` | Marks the item `resolved` by hand. |
+| `status` | Shows a read-only summary. |
 
 ### 1.2 Config
 
@@ -85,7 +85,7 @@ Rules:
 - **Unknown format:** `import` refuses it (exit 2).
 - **Malformed record:** the adapter reports it as a problem and continues with the next record.
 - **Provenance:** every signal keeps `source`, `source_id` and `url`.
-- **CI jobs:** `gh run list` has no job field. So a failing run becomes an item only after its jobs are imported. `sync` prints, for each failing run without jobs, `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source ci --run <id>`. The jobs output has no workflow or branch, so intake joins it to the imported run by run id. A failure is `status` `completed` with `conclusion` `failure`, `timed_out` or `startup_failure`.
+- **CI jobs:** `gh run list` has no job field. So a failing run becomes an item only after its jobs are imported. `sync` prints, for each failing run without jobs, `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source <name> --run <id>`. `<name>` is the configured source that imported the run (ruling R18). The jobs output has no workflow or branch, so intake joins it to the imported run by run id. A failure is `status` `completed` with `conclusion` `failure`, `timed_out` or `startup_failure`.
 - **Default branch:** the `gh` output does not name it, so the `ci` config holds it.
 - **Timestamps:** adapters accept RFC 3339 and the `+0000` offset form (no colon).
 - **No guessed shapes:** the Jira and Linear adapters are written only from a real, redacted sample. The format research (`2026-10-06-ops-intake-formats.md`) found no documented output for these three. The owner supplies each sample from their own MCP server or `acli`. Until then, Jira and Linear data can come in through `intake-signals-jsonl`. The redacted sample becomes the adapter's test fixture. If a sample is missing, that adapter is not built, and its format stays out of the list.
@@ -115,7 +115,7 @@ The tool normalises the signals from every source to one shape:
   - release `prod_failed`/`outcome_unknown` = 4;
   - `rolled_back` = 3;
   - a failing CI run on the default branch = 3;
-  - issues map from their priority or label (the defaults are documented, and the config can override them);
+  - a GitHub issue maps from fixed label names: `incident` = 4, `bug` = 3, any other = 2. The config cannot change this; `github.labels` only selects which issues the agent asks `gh` for (ruling R19). An `intake-signals-jsonl` record carries its own severity;
   - unknown = 2.
 
 ### 1.4 Ranking
