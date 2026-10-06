@@ -25,6 +25,7 @@ npx skills add dhanesh/agent-skills --skill feynman-walkthrough
 npx skills add dhanesh/agent-skills --skill jev-agent-setup
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
 npx skills add dhanesh/agent-skills --skill okf-site-kit
+npx skills add dhanesh/agent-skills --skill ops-intake
 npx skills add dhanesh/agent-skills --skill release-conductor
 npx skills add dhanesh/agent-skills --skill repo2skill
 npx skills add dhanesh/agent-skills --skill security-posture-audit
@@ -52,12 +53,14 @@ set of skills a human orchestrates, not yet autonomous.** You choose the next sk
 each handoff. The build step can now run unattended from an approved plan to an open PR (see
 [Unattended mode](#unattended-mode-partial)), and a merged change can be carried to verified
 production with your single production yes (see [Release](#release-merged-change-to-production)).
-Operations and everything after stay with you. The evidence behind this section, and the gaps, are
+Operational signals (failed releases, red CI, issues) can be ranked into a local queue and carried
+back into planning when you pick an item (see [Operate → planning](#operate--planning)).
+Incident response, support and growth stay with you. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev). The Release / deploy row is the exception: it describes release-conductor as built and was not produced by the dated assessment, which re-judges it after this work merges.
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Release / deploy and Operate → planning rows are the exceptions: they describe release-conductor and ops-intake as built and were not produced by the dated assessment, which re-judges them after this work merges.
 
 | Stage | Skills | Status |
 |---|---|---|
@@ -68,6 +71,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Test / verify | `verifier-installer`, `test-safety-net`; `verification-skill-forge` generates a verify skill that drives the running app and records SHA-bound evidence, which `factory-conductor`'s evidence gate requires before a merge | partly |
 | Review | `clean-code`, `security-posture-audit`, `base-in-reality`. None reviews a diff against the spec. | partly |
 | Release / deploy | `release-conductor` preps the release PR, stages the merged commit behind an independent verifier's evidence, deploys to production only on your explicit yes, proves production runs it, and rolls back only on your yes. Limits: the yes is claimed, not proven; production checks are only as good as your `prod_smoke` list; with a rebuild, staging verified the same source, not the same bytes; nothing starts `stage` after your merge | covered, with limits |
+| Operate → planning | `ops-intake` reads failed releases, failing CI on the default branch, GitHub issues and (through a JSON-lines transform) Jira or Linear, ranks them into a local queue, and hands the item you pick to `spec-first-planning` as an `intake-item/v1` envelope; a verified release that holds the fix marks it resolved. Limits: on demand only; it cannot enforce that MCP calls are read-only; squash merges and partial runs need your manual `resolve`; built-in Jira and Linear formats wait for real samples | partly |
 | Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
 | Support / feedback | none | missing |
 | Growth / monetise | none | missing |
@@ -204,11 +208,13 @@ by design, so the agent asks you before any PR is opened.
 
 - **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
   time and hand off a validated envelope, after asking you first unless a grant covers it. Today
-  six skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
+  seven skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
   and `spec-first-planning` → `factory-conductor` (a `task-plan/v1` envelope, with its
   `autonomy-grant/v1`), which returns a `run-result/v1` envelope. `release-conductor` consumes
   its own release grant (and a planning grant's release defaults) and provides a
-  `release-result/v1` envelope.
+  `release-result/v1` envelope. `ops-intake` provides an `intake-item/v1` envelope that
+  `spec-first-planning` reads as a request, and consumes the task-plan, run-result and
+  release-result envelopes to follow the item to resolved.
 - **A missing consumer is not an error.** The producer reports `NO_CONSUMER`, gives you the
   envelope path, and finishes normally.
 - **Every other link between skills is prose.** A skill says "use X next". If X is not installed,
@@ -239,6 +245,22 @@ re-run. Your yes is recorded as claimed, because an agent with a shell could for
 
 ```bash
 npx skills add dhanesh/agent-skills --skill verification-skill-forge --skill release-conductor
+```
+
+### Operate → planning
+
+`ops-intake` answers "what broke?". The agent runs your read-only sources (`gh issue list`,
+`gh run list`, release-conductor's `release status`, or a Jira or Linear MCP search through a
+JSON-lines transform) and pipes each output into `intake.py`, which runs no command and opens
+no socket. It dedupes and ranks the signals into a git-ignored local queue. You pick an item;
+the tool writes an `intake-item/v1` envelope, and `spec-first-planning` drafts a spec that keeps
+the evidence in an "External evidence (untrusted)" section and shows you every check command
+word for word before you approve the plan. A later sync marks the item planned, then resolved
+when a verified release contains every merge of the plan's run. Intake never writes to a
+tracker and never picks or dismisses for you.
+
+```bash
+npx skills add dhanesh/agent-skills --skill ops-intake --skill spec-first-planning
 ```
 
 ### Unattended mode: partial
@@ -322,6 +344,7 @@ The design and the gap analysis are in
 | [`security-posture-audit`](security-posture-audit/) | Read-only, offline security *hygiene* audit — dependency pinning, committed env/key files, debug/permissive flags, insecure transports, risky CI patterns — severity-graded with file:line evidence and honest not-covered boundaries. Not a CVE scanner or SAST; completes the trust family alongside `scan-leaks` and `base-in-reality`. |
 | [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
 | [`factory-conductor`](factory-conductor/) | Runs an approved task plan unattended, from its first task to an open PR, inside a user-approved autonomy grant. The session dispatches a fresh executor per task and a fresh reviewer per finished task; a stdlib state tool schedules waves from `depends_on`, re-runs each task's own verify commands as the proof, merges only what passed both into one run branch, enforces wall-clock, dispatch, repair and parallel budgets (tokens and dollars are recorded, not enforced), parks what fails, and ends with a `run-result/v1` envelope, a pushed branch and a PR. Merging the PR stays with the human. |
+| [`ops-intake`](ops-intake/) | Brings operational signals back into planning. The agent pipes read-only CLI output (gh issues, failing CI on the default branch, release-conductor status, a JSON-lines transform for Jira or Linear) into a stdlib importer that runs no command and opens no socket; it dedupes and ranks a local queue, writes an `intake-item/v1` envelope for the item you pick so `spec-first-planning` drafts the spec with the evidence quoted as untrusted, and marks the item resolved when a verified release contains the fix. |
 | [`release-conductor`](release-conductor/) | Carries a merged change to verified production. A stdlib state tool drives a per-project release recipe: prep bumps the version and opens the release PR under a release grant you accept; after your merge, stage builds the merged commit, holds it for an independent verifier's SHA-bound evidence, deploys to staging and checks it; deploy runs the production deploy only with your explicit yes for this release; verify-prod proves production runs the commit with read-only smoke checks; rollback asks too. Ends with a `release-result/v1` envelope. |
 | [`jev-agent-setup`](jev-agent-setup/) | Machine-wide Jev (TypeSafe System One) setup for every coding agent: installs the `jev` CLI (JSON in, typed Noul/Choice/Score out) and a managed BCP 14 instruction block into the global files of Claude Code, Codex, Gemini CLI and `~/.agents/AGENTS.md`, so agents offload rank/classify/yes-no decisions to Jev. Idempotent, marker-bounded, backs up before first touch, `--check` for drift, optional mirror mode that copies CLAUDE.md to the other agents. Complements `typesafe-ai`, which covers building Jev into applications. |
 | [`world-model-ledger`](world-model-ledger/) | Install a persistent, SQLite-backed world model for a coding agent — entities (symbols/files/modules/real-world referents), interactions, and constraints, each with two confidence axes (observed vs normative), a validation status, and PROV-style evidence. Code-observed relationships are never treated as ground truth: only oracle evidence (tests/CI/docs/human) raises normative confidence. Four lifecycle hooks retrieve validated/unverified/contradicted items before edits, update records without inventing facts, and consolidate on Stop; detects contradictions, proposes located fixes, and improves normative correctness over time. Every triple is validated against a predicate ontology (RDFS-style domain/range) before it enters the ledger — hallucinated verbs and semantically impossible pairings are rejected, not stored. Ships a 116-test install gate. |

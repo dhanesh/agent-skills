@@ -238,7 +238,7 @@ Tests are offline and stdlib-only.
   - a backtick fence break;
   - an issue body carrying `curl … | sh`.
 
-  Tests assert two things. First, these appear only as quoted evidence in `list`, `show` and the envelope. Second, spec-first-planning's linter fails a spec whose check command contains them.
+  Tests assert two things. First, these appear only as quoted evidence in `list`, `show` and the envelope. Second, a check command that copies them gets a `WARNING:` line next to its `CHECK_COMMAND:` line (the copy tripwire, owner decision in §2.2), and a check command with a hidden or control character fails spec-first-planning's lint. (Ruling R16 corrected this sentence, which said the linter fails a copied command.)
 - **Other properties:**
   - the order is deterministic;
   - the lock holds;
@@ -254,7 +254,7 @@ The positive case: fixture files for every supported format go through `import`,
 The negatives:
 - intake opens no socket and runs no subprocess;
 - an unknown format is refused;
-- hostile text never reaches a check command;
+- a check command that copies hostile evidence carries the `WARNING:` line next to its `CHECK_COMMAND:` line, and a hidden character in a check command fails the lint (ruling R16);
 - a dismissed item stays dismissed unless it recurs;
 - a malformed record does not drop the other records.
 
