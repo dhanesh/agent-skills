@@ -132,6 +132,9 @@ def run_lock(root, timeout=None):
 # -- Config -----------------------------------------------------------------------
 _REPO_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*/[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 _TOP_KEYS = {"sources", "github", "ci", "jira", "linear", "weights"}
+# A source name is printed into NEXT: lines the agent runs in a shell, so it is a plain
+# word: no space, quote, `;`, `$`, backtick, `&`, `|` or leading dash (R21).
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,49}\Z")
 
 
 def _is_str(v, limit=200):
@@ -179,8 +182,9 @@ def config_problems(cfg):
         problems.append("sources must be a non-empty object")
         sources = {}
     for name, src in sources.items():
-        if not _is_str(name, 50):
-            problems.append("source name %s is not a short string" % code(name))
+        if not (isinstance(name, str) and _SOURCE_RE.match(name)):
+            problems.append("source name %s must be 1-50 letters, digits, '_', '.' or '-', "
+                            "starting with a letter or digit" % code(name))
             continue
         if not isinstance(src, dict):
             problems.append("source %s must be an object" % code(name))
@@ -1010,7 +1014,8 @@ def _close_loop(q, envs, now):
 def _jobs_source(cfg, run):
     """The configured source the jobs import of `run` goes to (R18): the source that
     imported the run when it lists gh-run-jobs-json, else the first source (by name) that
-    lists it. Config validation keeps every source name safe on a command line."""
+    lists it. config_problems allows only source names matching _SOURCE_RE (letters,
+    digits, '_', '.', '-'), so the name is one shell word with nothing to expand."""
     listing = sorted(n for n, s in cfg["sources"].items() if "gh-run-jobs-json" in s["formats"])
     own = run.get("source")
     if own in listing or not listing:
