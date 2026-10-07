@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires tmux 3.2+, bash, python3, and a POSIX-like shell. Optional clipboard support uses pbcopy, xclip, or wl-copy; optional sounds use paplay, pw-play, or afplay; optional persistence uses TPM with tmux-resurrect/tmux-continuum.
 metadata:
   author: dhanesh
-  version: "2.1.2"
+  version: "2.3.0"
   tags: "tmux,zellij,herdr,coding-agents,terminal-multiplexer,automation"
 ---
 
@@ -28,6 +28,8 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
 
 ## On invocation — install, then serve the request
 
+**`help` first.** When the invocation asks for help (`/tmux-agent-herdr-lite help`, "how do I use this", "what are the keys"), run `bash "$SKILL_DIR/scripts/agent-cheatsheet"` and show its output verbatim as the answer, then mention `prefix a h` opens the same guide inside tmux. Skip the steps below for a pure help request.
+
 When this skill fires (slash command or auto-trigger), immediately do this — it is idempotent, so do it every time rather than asking:
 
 1. Run the installer from this skill's directory:
@@ -36,15 +38,21 @@ When this skill fires (slash command or auto-trigger), immediately do this — i
    bash "$SKILL_DIR/scripts/install.sh"
    ```
 
-   It generates `~/.tmux/agent-panes/tmux-agent.conf` pointing at this skill's `scripts/` **in place** (nothing is copied onto PATH), wires a `source-file` line into `~/.tmux.conf` (before any TPM `run` line), wires the optional tmux-resurrect/continuum persistence layer when TPM is present, **generates a zsh shell hook and sources it from `~/.zshrc`**, and reloads a running tmux server. No network needed.
+   It generates `~/.tmux/agent-panes/tmux-agent.conf` pointing at this skill's `scripts/` **in place** (nothing is copied onto PATH), wires a `source-file` line into `~/.tmux.conf` (before any TPM `run` line), wires the optional tmux-resurrect/continuum persistence layer when TPM is present, **generates a zsh shell hook and sources it from `~/.zshrc`**, installs the optional convenience shell functions (`tm`, `tp`, …; opt out with `AGENT_SHELL_FUNCS=off`), **merges Claude Code status hooks into `~/.claude/settings.json`** beside existing hooks (opt out with `AGENT_CLAUDE_HOOKS=off`), and reloads a running tmux server. Both opt-outs persist across later runs. No network needed.
 
-2. Verify the result (see "Verification" below) and report the outcome. Tell the human to open a new shell (or `source ~/.zshrc`) so auto-tracking activates.
+2. Verify the result (see "Verification" below) and report the outcome. Tell the human to open a new shell (or `source ~/.zshrc`) so the shell hook activates, and that Claude sessions started before the install report exact status only after a restart (until then the scan adopts and screen-reads them).
 
 3. Then serve the user's actual request — checking status, coordinating panes — using the commands in this skill's `scripts/` directory, invoked by path.
 
 ## Zero-command auto-tracking (the core model)
 
-**The human never runs a launcher.** The installed zsh hook (`agent-shell-hook.zsh`, sourced from `~/.zshrc`) watches for a known agent binary (`claude`, `codex`, `gemini`, …) being run at the prompt in any tmux pane. On `preexec` it registers that pane (`bash "$SKILL_DIR/scripts/agent-observe" register`); on `precmd` (the agent exited) it deregisters it. The existing scan/summary/jump pipeline then tracks the pane exactly as if it were launched by `agent-pane`. Dead panes are pruned by `agent-status-scan`, so the fleet is always live-agents-only. `agent-pane` still exists but is **optional** — only for worktree isolation or scripted fan-out where you want to spawn an agent programmatically.
+**The human never runs a launcher.** Three layers find agents, each covering the previous one's blind spot:
+
+1. **Shell hook** — the installed zsh hook (`agent-shell-hook.zsh`, sourced from `~/.zshrc`) watches for a known agent binary (`claude`, `codex`, `gemini`, …) being run at the prompt in any tmux pane. On `preexec` it registers that pane (`bash "$SKILL_DIR/scripts/agent-observe" register`); on `precmd` (the agent exited) it deregisters it. It checks the alias-expanded command too, so `alias ccl='claude …'` is tracked.
+2. **Adoption** — every scan lists agent processes, reads their `TMUX_PANE`, and registers panes nothing else saw (tmux-resurrect restores, agents started before install, wrappers the shell gate misses).
+3. **Agent hooks** — Claude Code reports its own lifecycle (`agent-hook`, installed into Claude's settings), so its `working`/`blocked`/`done`/`error` are exact rather than read off the screen.
+
+The scan/summary/jump pipeline then tracks the pane exactly as if it were launched by `agent-pane`. Dead panes are pruned by `agent-status-scan`, so the fleet is always live-agents-only. `agent-pane` still exists but is **optional** — only for worktree isolation or scripted fan-out where you want to spawn an agent programmatically.
 
 ## The two surfaces
 
@@ -64,12 +72,15 @@ prefix a  then:
   m   command menu — new agent pane, jump, worktree, resume
   s   refresh agent statuses (status scan)
   t   session/window/pane tree
-  b   jump: first blocked agent
-  e   jump: first error (crashed) agent
-  w   jump: first working agent
-  i   jump: first idle agent
-  f   jump: first finished/done agent (idle also matches done)
+  h   user guide popup (scripts/agent-cheatsheet)
+  b   jump: next blocked agent
+  e   jump: next error (crashed) agent
+  w   jump: next working agent
+  i   jump: next idle agent (idle also matches done)
+  f   jump: next finished/done agent
 ```
+
+Jumps cycle: pressing the same key again moves to the next agent in that state, wrapping around.
 
 The cockpit does **not** rebind pane navigation, splits, zoom, or copy mode — use your own.
 It only adds additive settings (mouse, vi copy mode, focus events, pane border titles) and
@@ -77,13 +88,30 @@ sets window tabs to show the folder (`#{b:pane_current_path}`) instead of the ru
 The fleet summary is **not** force-injected into your status bar; add it yourself with
 `#(scripts/agent-status-summary)` in your `status-right`.
 
+## Convenience shell functions (optional, human-facing)
+
+Session shortcuts for the human's own shell, separate from the agent cockpit. The installer sources `assets/tmux-shell-functions.zsh` from `~/.zshrc`. Rerunning it with `AGENT_SHELL_FUNCS=off` removes them and the choice persists across later runs until `AGENT_SHELL_FUNCS=on`. A name the human already owns (their own function, an alias, or a command such as the `tv` fuzzy finder) is left alone. Each opener attaches from outside tmux and switches client from inside it, so none of them nest tmux.
+
+| Function | Does |
+|---|---|
+| `tm` | attach/create the session named after the current directory (`.`/`:` → `_`) |
+| `tp [name]` | fzf picker over sessions, attached first; Esc falls back to `tm`; with a name, attach/create it |
+| `tv [file]` | cwd session that starts in `nvim` (optionally on `file`) |
+| `tn <name>` | attach/create a session with an explicit name |
+| `tms [name]` | the same over SSH to `$TMS_HOST` (fzf or numbered picker on the remote) |
+| `tw <branch>` | git worktree at `../<repo>-<branch>` (slashes flattened) plus a session for it; reuses an existing one only if it is this repo on that branch |
+| `twd [-f]` | remove the current *linked* worktree and kill its session; refuses the main checkout, and keeps a dirty worktree unless `-f` |
+
+Mention these when the human asks how to open, pick, or clean up sessions; agents keep using the `agent-*` API below.
+
 ## The agent coordination API (scripts/)
 
 - `agent-workspace` — create or attach the `agents` cockpit session.
 - `agent-pane [--agent <kind>] [--cwd <dir>] <name> <command...>` — launch and register an agent.
 - `agent-list [--json]` — registry with statuses.
 - `agent-status-scan` / `agent-status-summary` / `agent-dashboard` — status pipeline.
-- `agent-jump <state>` — focus the first pane in a state.
+- `agent-jump <state>` — focus the next pane in a state (repeat to cycle).
+- `agent-hook claude` — Claude Code hook entry point (status from the agent itself); `agent-hook install-claude <settings.json> [--remove]` is the installer's merge step.
 - `agent-explain <target>` — why a pane classified the way it did.
 - `agent-read <target> [--lines N] [--source recent]` — read another pane.
 - `agent-send <target> <text>` / `--keys Enter` — type (no Enter) or press keys.
@@ -118,7 +146,7 @@ Statuses are routing hints, not truth:
 - `done` — completion sentinel or finished-agent prompt chrome; focusing the pane demotes it to `idle` (viewed), Herdr-style.
 - `unknown` — the pane is gone or metadata is incomplete.
 
-Detection is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
+For Claude Code the status comes from its own hooks (`reason: hook <Event>` in `agent-explain`/the dashboard) and outranks every screen rule. Everything else falls back to screen detection, which is two-layered, ported from Herdr's manifests: panes with a known agent (`--agent` or inferred from the command) are classified by that agent's screen rules plus the pane title — loose word heuristics are skipped so an agent *discussing* an error is not mislabeled, and unknown prompts fall back to `idle`, never `blocked`. Unrecognized commands use generic tail heuristics where explicit `AGENT_STATUS:` sentinels and real failure signals outrank loose words. Per-agent rules can be replaced by dropping `<agent>.json` into `~/.tmux/agent-panes/detect/` (format in `references/commands.md`). The classifier is pure and unit-tested (`scripts/agent_classify.py`, `assets/test_agent_classify.py`, run by `make gate`).
 
 For best accuracy, instruct coding agents to print explicit markers — they outrank every heuristic:
 
@@ -137,9 +165,11 @@ AGENT_STATUS: done result="tests passed"
 - `scripts/agent-list`, `scripts/agent-read`, `scripts/agent-send`, `scripts/agent-run`, `scripts/agent-wait` — coordination commands.
 - `scripts/agent-notify`, `scripts/agent-resume`, `scripts/agent-worktree`, `scripts/agent-menu`, `scripts/agent-cheatsheet` — notifications, persistence, isolation, menus.
 - `scripts/agent_classify.py`, `scripts/agent_registry.py` — pure classifier (per-agent manifests) and target resolution.
+- `scripts/agent-hook`, `scripts/agent_hooks.py` — Claude Code status hooks, the settings.json merge, and process adoption.
 - `assets/tmux-agent.conf` (template; `@AGENT_BIN@` is substituted at install), `assets/tmux-agent-persistence.conf` — tmux configuration.
 - `assets/agent-shell-hook.zsh` (template; `@AGENT_BIN@`/`@AGENT_ROOT@`/`@AGENT_NAMES@` substituted at install) — the zsh preexec/precmd hook that makes agents auto-track.
-- `assets/test_agent_classify.py` — stdlib unit suite (run by `make gate`).
+- `assets/tmux-shell-functions.zsh` — optional human shortcuts (`tm`, `tp`, `tv`, `tn`, `tms`, `tw`, `twd`), sourced from `~/.zshrc` by the installer.
+- `assets/test_agent_classify.py`, `assets/test_agent_hooks.py`, `assets/test_cockpit_scripts.sh` — stdlib unit suites and offline shell suite (run by `make gate`).
 - `references/commands.md`, `references/coordination-recipes.md`, `references/herdr-parity.md` — full CLI reference, recipes, Herdr parity map.
 
 ## Common pitfalls

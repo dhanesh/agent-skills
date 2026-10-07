@@ -92,12 +92,72 @@ sed -e "s|@AGENT_BIN@|$AGENT_BIN|g" \
 echo "generated $HOOK"
 ZSHRC="${ZDOTDIR:-$HOME}/.zshrc"
 touch "$ZSHRC"
-# Drop any prior source line (path may have changed) and re-append the current one.
-if grep -Fq "agent-shell-hook.zsh" "$ZSHRC"; then
-  grep -Fv "agent-shell-hook.zsh" "$ZSHRC" > "$ZSHRC.tmp" && mv "$ZSHRC.tmp" "$ZSHRC"
-fi
+
+# Drop our prior `source …/<file>` line from ~/.zshrc (its path may have
+# changed). Anchored on `source …/<file>` so a user's own comment or guarded
+# source of the same file survives. Written back through `cat >` rather than
+# mv so a symlinked ~/.zshrc (stow/chezmoi/yadm) stays a symlink and keeps its
+# mode. grep exits 1 when it filters every line (fine) and 2 on a read error,
+# which must not replace ~/.zshrc with a partial file.
+drop_zshrc_line() {
+  local re="^[[:space:]]*source[[:space:]].*/${1//./\\.}([[:space:]]|$)" rc=0
+  grep -Eq "$re" "$ZSHRC" || return 0
+  grep -Ev "$re" "$ZSHRC" > "$ZSHRC.tmp" || rc=$?
+  if (( rc > 1 )); then
+    rm -f "$ZSHRC.tmp"
+    echo "error: could not read $ZSHRC; left it unchanged" >&2
+    return 1
+  fi
+  cat "$ZSHRC.tmp" > "$ZSHRC"
+  rm -f "$ZSHRC.tmp"
+}
+
+drop_zshrc_line "agent-shell-hook.zsh"
 printf '\nsource %s  # Tmux Agent Herdr-Lite: auto-track agents in any pane\n' "$HOOK" >> "$ZSHRC"
 echo "sourced agent-shell-hook.zsh from $ZSHRC (new shells pick it up; or run: source $ZSHRC)"
+
+# --- Optional convenience functions: tm, tp, tv, tn, tms, tw, twd ---
+# The choice persists: the skill reruns this installer on every invocation
+# with no env, so AGENT_SHELL_FUNCS=off writes a marker that later runs honour
+# until AGENT_SHELL_FUNCS=on removes it.
+FUNCS="$TMUX_AGENT_DIR/tmux-shell-functions.zsh"
+FUNCS_OFF="$TMUX_AGENT_DIR/shell-funcs.off"
+case "${AGENT_SHELL_FUNCS:-}" in
+  off) touch "$FUNCS_OFF" ;;
+  on)  rm -f "$FUNCS_OFF" ;;
+esac
+drop_zshrc_line "tmux-shell-functions.zsh"
+if [[ -f "$FUNCS_OFF" ]]; then
+  rm -f "$FUNCS"
+  echo "convenience shell functions off (re-enable: AGENT_SHELL_FUNCS=on bash $0)"
+else
+  cp "$SKILL_DIR/assets/tmux-shell-functions.zsh" "$FUNCS"
+  printf 'source %s  # Tmux Agent Herdr-Lite: tm/tp/tv/tn/tms/tw/twd\n' "$FUNCS" >> "$ZSHRC"
+  echo "sourced tmux-shell-functions.zsh from $ZSHRC (tm, tp, tv, tn, tms, tw, twd; names you already define are left alone)"
+fi
+
+# --- Claude Code status hooks: exact working/blocked/done instead of guessing ---
+# Merged into Claude's settings.json next to any hooks you already have; only
+# entries marked "# tmux-agent-herdr-lite" are ever replaced or removed. Opt
+# out with AGENT_CLAUDE_HOOKS=off (persists until AGENT_CLAUDE_HOOKS=on).
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+HOOKS_OFF="$TMUX_AGENT_DIR/claude-hooks.off"
+case "${AGENT_CLAUDE_HOOKS:-}" in
+  off) touch "$HOOKS_OFF" ;;
+  on)  rm -f "$HOOKS_OFF" ;;
+esac
+chmod +x "$AGENT_BIN/agent-hook" 2>/dev/null || true
+if [[ ! -d "$CLAUDE_DIR" ]]; then
+  echo "Claude Code config dir not found ($CLAUDE_DIR); skipping status hooks"
+elif [[ -f "$HOOKS_OFF" ]]; then
+  python3 "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" --remove \
+    && echo "Claude status hooks off (re-enable: AGENT_CLAUDE_HOOKS=on bash $0)" \
+    || echo "warning: could not update $CLAUDE_DIR/settings.json" >&2
+else
+  python3 "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" \
+    && echo "Claude status hooks installed in $CLAUDE_DIR/settings.json (restart Claude sessions to pick them up)" \
+    || echo "warning: could not update $CLAUDE_DIR/settings.json; status falls back to screen scraping" >&2
+fi
 
 if command -v tmux >/dev/null 2>&1; then
   tmux source-file "$TMUX_CONF" 2>/dev/null || true

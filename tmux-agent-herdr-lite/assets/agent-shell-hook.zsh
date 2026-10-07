@@ -8,14 +8,18 @@ _agent_herdr_root='@AGENT_ROOT@'
 # '|'-joined known agent binary names, kept in sync with agent_classify at install.
 _agent_herdr_agents='@AGENT_NAMES@'
 
-# preexec: fires with the command line about to run ($1). Cheap shell-side gate
-# first (basename of the first word must be a known agent), then hand off to the
-# python helper in the background so the prompt never blocks.
+# preexec: fires with the line as typed ($1) and with aliases expanded ($3).
+# Checking both catches an alias like `ccl` -> `claude --dangerously-…`, whose
+# typed first word is not an agent name. Cheap shell-side gate first, then hand
+# off to the python helper in the background so the prompt never blocks.
 _agent_herdr_preexec() {
-  [[ -n "$TMUX_PANE" ]] || return
-  local first="${${(z)1}[1]:t}"
-  [[ -n "$_agent_herdr_agents" && "$first" == (${~_agent_herdr_agents}) ]] || return
-  command "$_agent_herdr_bin" register "$TMUX_PANE" "$1" >/dev/null 2>&1 &!
+  [[ -n "$TMUX_PANE" && -n "$_agent_herdr_agents" ]] || return
+  local line
+  for line in "$1" "$3"; do
+    [[ "${${(z)line}[1]:t}" == (${~_agent_herdr_agents}) ]] || continue
+    command "$_agent_herdr_bin" register "$TMUX_PANE" "$line" >/dev/null 2>&1 &!
+    return
+  done
 }
 
 # precmd: fires when control returns to the prompt (i.e. an agent just exited).

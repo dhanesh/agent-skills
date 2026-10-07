@@ -38,6 +38,27 @@ persist per-pane records and `state.json`, and fire `agent-notify` on
 transitions into `blocked`/`error`/`done`. A `done` pane that is focused in an
 attached client demotes to `idle` (viewed), Herdr-style.
 
+Before classifying, the scan **adopts** agents nothing registered: it lists
+processes whose command is a known agent, reads each one's `TMUX_PANE`, and
+registers that pane. This covers alias launches (`ccl` → `claude …`), panes
+restored by tmux-resurrect, and agents started before install.
+`AGENT_ADOPT=off` disables it.
+
+A pane with a `panes/<id>.hook` file newer than its record takes its status
+from that file (reason `hook <Event>`); the screen classifier is the fallback.
+
+### `agent-hook claude` / `agent-hook install-claude <settings.json> [--remove]`
+Claude Code status hooks. `install.sh` merges one entry per event
+(`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, `PostToolUseFailure`, `Notification`, `Stop`, `StopFailure`,
+`SessionEnd`) into `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`, each tagged
+`# tmux-agent-herdr-lite` so reinstalls replace only those entries. Mapping:
+prompt/tool use → `working`; permission request, `AskUserQuestion`,
+`ExitPlanMode`, a permission/elicitation notification → `blocked`; `Stop` →
+`done`; `StopFailure` → `error`; `SessionEnd` → deregister (`/clear` keeps it).
+The hook prints nothing and always exits 0. `AGENT_CLAUDE_HOOKS=off` at install
+removes the entries, and the choice persists until `AGENT_CLAUDE_HOOKS=on`.
+
 ### `agent-status-summary`
 One-line per-agent summary for the tmux status bar.
 
@@ -69,7 +90,9 @@ Matcher kinds: `contains` (substring, lowercased region), `regex`, `line`
 `working`, `idle`. Broken files are ignored. Verify with `agent-explain`.
 
 ### `agent-jump blocked|error|working|idle|done`
-Focus the first pane in that state.
+Focus the next pane in that state after the current one, in tmux's pane
+order, wrapping around — so repeating the jump cycles through every match.
+`idle` also matches `done`.
 
 ## Coordination (Herdr socket-API equivalents)
 
@@ -129,4 +152,6 @@ viewing; a manual invocation always notifies. Config:
 ## Help
 
 ### `agent-cheatsheet`
-Print the command/key reference above in terminal form.
+Print the user guide: session switching, the `tm`/`tp`/… shell functions,
+cockpit keys, settings, then this API. Bound to `prefix a h` (popup) and
+printed when the skill is invoked with `help`.
