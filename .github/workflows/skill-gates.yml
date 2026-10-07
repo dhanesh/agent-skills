@@ -139,6 +139,13 @@ jobs:
           cache: false
       - if: matrix.stack == 'rust'
         run: rustup toolchain install ${{ matrix.version }} --profile minimal && rustup default ${{ matrix.version }}
+      # Non-rust legs still run the full eval, whose check 49 builds the rust
+      # guard with whatever cargo is on PATH. Unpinned, that is the runner
+      # image's rust, so an image bump (ubuntu-24.04 20261004) broke every
+      # python/node/go leg with "invalid definition of the runtime `open`
+      # symbol" while the pinned rust legs passed. Pin it like the gate job.
+      - if: matrix.stack != 'rust'
+        run: rustup toolchain install 1.98 --profile minimal && rustup default 1.98
       - if: matrix.stack == 'python'
         run: |
           python test_rank_risk.py
