@@ -102,6 +102,8 @@ its `test_*.py` suite, `eval/run_eval.py` — that exits green from
 each was resolved or why kept) for the PR description. The repo's PR template has a
 checklist item pointing at the review.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Verifying this skill itself
 
 repo2skill eats its own cooking: `assets/test_scaffold_skill.py` unit-tests the

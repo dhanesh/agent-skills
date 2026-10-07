@@ -153,6 +153,8 @@ Manifold `COVERAGE:` line with every `UNCOVERED:` constraint listed, the cold-ru
 and, in maintain mode, the outcome (clean, changed or blocked), each drift fix and each
 product-bug finding path.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Verify
 
 Before reporting, re-run `forge lint <verify dir>` (and `forge check-maintain` in

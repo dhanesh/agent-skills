@@ -12,7 +12,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate gate-selftest validate scan-leaks dry-run playbook test test-integration eval frontmatter readme bcp14 ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook ste test test-integration eval frontmatter readme bcp14 ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -171,6 +171,16 @@ playbook:
 		printf '\n=== %s ===\n' "$$d"; \
 		sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) || rc=1; \
 	done; exit $$rc
+
+# Advisory "80% STE" hints (docs/writing-style.md) on the Markdown files this
+# branch changes vs $(STE_BASE). */SKILL.md is out of scope (prompt bodies are not
+# rewritten into STE). Always exits 0 and is NOT part of `make gate`; the gate
+# runs only its unit tests (through gate-selftest). Commit first: the diff is
+# against HEAD, so it does not see uncommitted edits.
+STE_BASE ?= origin/main
+ste:
+	@files=$$(git diff --name-only --diff-filter=d $(STE_BASE)...HEAD -- '*.md' 2>/dev/null | grep -Ev '(^|/)SKILL\.md$$'); \
+	 python3 $(GATES)/ste-advisory.py $$files
 
 # Behavioural A/B against a baseline ref: does a change make skills BEHAVE better,
 # or merely still pass the gates? Deliberately NOT part of `make gate` — it needs a

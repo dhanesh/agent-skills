@@ -167,6 +167,8 @@ LSC-10 Failure handling:  <oscillation / drift / premature-stop / runaway mitiga
 <one line per relevant failure mode: detector + recovery>
 ```
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Why this matters
 
 Self-prompting loops are easy to start and easy to get subtly wrong in ways that surface only after they've run a while or been fed adversarial input. The discipline here isn't ceremony — each slot maps to a real failure that has bitten real loops. The mandatory three (backstop, two-channel, gate) are mandatory because their absence is silent until it's expensive. Hold the line on them even when the user just wants something quick; a quick loop with a backstop is still quick.

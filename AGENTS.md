@@ -11,6 +11,8 @@ TL;DR for any coding agent working here:
 - Per-skill: `make gate-skill SKILL=<dir>`. Tests only: `make test`.
 - Don't add a root `PARAMETERS.md` (reserved for template bijection — it fails the gate); use
   `references/parameters.md` to document a skill's flags.
+- Write text for people (specs, plans, PR bodies, reports, READMEs) about 80% of the way
+  to ASD-STE100 Simplified Technical English. See `docs/writing-style.md`.
 
 Full conventions, the skill anatomy, and how to add a skill are in `CLAUDE.md`.
 </content>

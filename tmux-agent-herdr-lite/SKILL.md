@@ -105,6 +105,8 @@ Runtime state lives under `~/.tmux/agent-panes/`. Targets accept an agent name, 
 5. Verify real outcomes separately — a `done` state means the pane looks finished, not that the work is correct. Debug a wrong status with `agent-explain <name>`, never by guessing.
 6. After a tmux server restart, recover with `agent-resume` (add `--session-id <id>` to reopen a native CLI session, e.g. `claude --resume`).
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Status model
 
 Statuses are routing hints, not truth:

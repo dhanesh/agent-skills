@@ -397,6 +397,17 @@ else
   bad "PP-5 reason detector self-test"
 fi
 
+# ── ste-advisory: the 80% STE hints find what they claim and skip the rest ───
+# The advisory never fails a gate (it always exits 0), so nothing else would
+# notice if its checks stopped firing. This unit suite is what notices.
+if out="$(python3 "$GATES/test_ste_advisory.py" 2>&1)" && \
+   printf '%s\n' "$out" | grep -q '^OK'; then
+  ok "ste-advisory checks ($(printf '%s\n' "$out" | grep -oE 'Ran [0-9]+ tests'))"
+else
+  printf '%s\n' "$out" | tail -20 | sed 's/^/  /'
+  bad "ste-advisory unit tests"
+fi
+
 # ── bcp14-registry: every keyword sentence has a register row at its level ───
 # PP-7 checks the declaration and the vocabulary; nothing checked that a MUST
 # added to a SKILL.md was classified, so the register fell behind by dozens of
