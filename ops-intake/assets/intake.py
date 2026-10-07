@@ -355,7 +355,7 @@ def _valid_run(r):
 
 
 # Item fields that hold a time or a short text: a string, or null where a field is unset.
-_ITEM_OPTIONAL_STRS = ("last_seen", "closed_at", "state_at", "recurred_at", "url", "kind",
+_ITEM_OPTIONAL_STRS = ("last_seen", "recur_seen", "closed_at", "state_at", "recurred_at", "url", "kind",
                        "trust", "state_by", "state_reason", "envelope", "wait")
 
 
@@ -699,6 +699,15 @@ def _bump(item, sig):
         item["first_seen"] = sig["first_seen"]  # earliest seen wins
 
 
+def _note_recur_seen(item, sig):
+    """recur_seen: the latest last_seen of a signal that can count as recurrence (not a
+    release-status line, which has no real time, and not a closed issue). The release
+    resolve in _close_loop compares it, not last_seen, so it follows the same rule as
+    apply_signals (R25)."""
+    if sig.get("recurrence", True) and not sig.get("closed"):
+        item["recur_seen"] = max(item.get("recur_seen") or "", sig["last_seen"])
+
+
 def apply_signals(queue, signals, now):
     """Merge signals into the queue (spec 1.3, 1.5). A dismissed or resolved item recurs
     when a signal's last_seen is later than its closed_at. Closing an issue upstream and
@@ -724,11 +733,13 @@ def apply_signals(queue, signals, now):
                     seen.add(ev["key"])
                     it["evidence"].append(ev)
             del it["evidence"][:-EVIDENCE_CAP]
+            _note_recur_seen(it, sig)
             continue
         recurs = (it["state"] in ("dismissed", "resolved") and sig.get("recurrence", True)
                   and not sig.get("closed") and it.get("closed_at")
                   and sig["last_seen"] > it["closed_at"])
         _bump(it, sig)
+        _note_recur_seen(it, sig)
         it["severity"] = max(it.get("severity", 0), sig["severity"])  # only rises on merge, by design
         if sig.get("closed"):
             it["closed"] = True
@@ -1077,11 +1088,11 @@ def _close_loop(q, envs, now):
                 if set(merges) <= set(h["shas"]):
                     transition(it, "resolved", by="release:%s" % rel["version"], now=now)
                     # R25: the fix shipped when the release was made, not when sync ran, so
-                    # recurrence compares against the release time. A signal seen after
-                    # it means the fix failed: the item recurs at once.
+                    # recurrence compares against the release time. A signal that can
+                    # recur, seen after it, means the fix failed: the item recurs at once.
                     it["closed_at"] = rel["at"]
                     q.log("resolved", id=iid, by="release:%s" % rel["version"])
-                    if (it.get("last_seen") or "") > rel["at"]:
+                    if (it.get("recur_seen") or "") > rel["at"]:
                         transition(it, "new", now=now)
                         q.log("recurred", id=iid)
                     break

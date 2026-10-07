@@ -135,7 +135,7 @@ The queue is `.skill-contract/intake/queue.json`. It is git-ignored, and the too
 | `new` | `picked` | `pick` |
 | `new`, `picked` or `planned` | `dismissed` | `dismiss` (needs a reason; final review B6) |
 | `picked` | `planned` | a `task-plan/v1` envelope names the item id |
-| `planned` | `resolved` | a verified `release-result/v1` commit contains every proven task's merge commit (1.6); the resolution time is the release's time, and an item seen after it recurs at once (R25) |
+| `planned` | `resolved` | a verified `release-result/v1` commit contains every proven task's merge commit (1.6); the resolution time is the release's time, and an item with a signal that can recur (not release status, not a closed issue) seen after it recurs at once (R25) |
 | any | `resolved` | `resolve` by hand (logged with the name) |
 | `dismissed` or `resolved` | `new` + `regressed` flag | the signal *recurs* after the dismissal or resolution time (defined below) |
 

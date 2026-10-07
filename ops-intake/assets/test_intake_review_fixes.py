@@ -209,6 +209,28 @@ class ReleaseTimeTests(_Loop):
         it = items(self.root)[self.iid]
         self.assertEqual((it["state"], it["regressed"]), ("new", True))
 
+    def test_a_closed_issue_updated_after_the_release_does_not_recur(self):
+        # "Fixes #42" closed it; a bot comment after the release moves updatedAt. A closed
+        # issue never counts as recurrence in apply_signals, so it must not here either.
+        q = IN.Queue.load(self.root)
+        IN.apply_signals(q, [dict(_sig("42"), closed=True, last_seen="2026-10-10T00:00:00Z")],
+                         NOW)
+        q.save()
+        self.resolve("2026-10-20T00:00:00Z")
+        it = items(self.root)[self.iid]
+        self.assertEqual((it["state"], it["regressed"]), ("resolved", False))
+
+    def test_a_release_status_reimport_after_the_release_does_not_recur(self):
+        # release-status has no real time (recurrence False): a re-import stamps last_seen
+        # with the import time, which is not evidence that the fix failed.
+        q = IN.Queue.load(self.root)
+        IN.apply_signals(q, [dict(_sig("42"), recurrence=False,
+                                  last_seen="2026-10-10T00:00:00Z")], NOW)
+        q.save()
+        self.resolve("2026-10-20T00:00:00Z")
+        it = items(self.root)[self.iid]
+        self.assertEqual((it["state"], it["regressed"]), ("resolved", False))
+
 
 def _sig(sid):
     return {"source": "github", "source_id": sid, "url": "https://example.invalid/" + sid,

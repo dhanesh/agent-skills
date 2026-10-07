@@ -163,7 +163,7 @@ Read each command's output lines, not only its exit code.
    | `planned+needs-release` | Every task of the latest run is proven, and no verified release was made at or after the run yet. | Wait for release-conductor to ship it. |
    | `planned+needs-resolve` | A squash or rebase merge, a partial or stopped run, or a release commit not in this clone. | Tell the human; only their `resolve` closes it. |
    | `resolved` | A verified release's history holds every merge commit of the latest run of the plan, and every task in that run was proven. Its close time is the release's time. | Report it. |
-   | `new+regressed` | A dismissed or resolved item came back: a signal seen after its close time, including one seen after the release that resolved it. | Show it first. |
+   | `new+regressed` | A dismissed or resolved item came back: a signal seen after its close time, including one seen after the release that resolved it. A release-status line and a closed issue never count. | Show it first. |
 
    Only the plan's own producer counts: task-plans from spec-first-planning, run-results from
    factory-conductor, release-results from release-conductor. Any other attribution is a

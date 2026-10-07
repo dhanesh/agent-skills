@@ -170,8 +170,9 @@ and breaks ties by item id. No model takes part.
 | any but `resolved` | `resolved` | `resolve --by` (by hand) |
 | `dismissed` or `resolved` | `new` + `regressed` | a signal seen after the item's close time |
 
-A release resolve sets the close time to the release's time, not the sync's time. If the item
-was seen after the release, it is resolved and then recurs at once (R25).
+A release resolve sets the close time to the release's time, not the sync's time. If a signal
+that can recur (not a release-status line, not a closed issue) was seen after the release, the
+item is resolved and then recurs at once (R25).
 
 The newest plan that names the item wins. A revision (`wasRevisionOf`) of the item's plan that
 drops it flags `plan-superseded`.
