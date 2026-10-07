@@ -351,13 +351,22 @@ report it rather than editing state.
   wrapper script hides what it runs. A malformed allowlist or a bypass flag counts as exposing,
   and so does a grant allowing a broad `git push` in tag-deploy mode, or one reaching
   `release.py`'s own `deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does), which
-  blocks the release until it is narrowed. The check reads a rule through wrappers that run
-  another command (`env`, `uv run`, `uvx`, `sudo`, `nice`, `timeout`, `xargs` and others),
-  an absolute or versioned interpreter (`/usr/bin/python3`, `python3.12`), interpreter flags
-  and a `~/` path. So rules such as `Bash(env *)`, `Bash(uv run *)`, `Bash(uvx *)`,
-  `Bash(sh -c *)`, `Bash(/usr/bin/*)` or `Bash(./*)` count as exposing. Known limits: a
-  script path it does not know stays unseen, and a glob `*` can cross path parts, so a
-  rule like `Bash(python3 tests/*)` can reach `tests/../release.py` and is not caught.
+  blocks the release until it is narrowed. The check reads a rule through these wrappers:
+  `env`, `uv run`, `uv tool run`, `uvx`, `sudo`, `doas`, `command`, `builtin`, `exec`,
+  `nice`, `nohup`, `time`, `stdbuf`, `xargs` and `timeout`, with their options. It reads
+  `eval`, `find -exec` (and `-execdir`, `-ok`, `-okdir`), and `-c` on `sh`, `bash`, `zsh`,
+  `dash`, `ksh` or `fish` as "any command". It reads `python`, `python3` and `python3.N`, by
+  name or by absolute path, with their flags. It reads `python -c` and `python -m` with a
+  glob, `pdb`, `runpy`, `cProfile`, `profile`, `trace`, `timeit` or `code` as "any
+  command". It expands a `~/` path. So rules such as `Bash(env *)`, `Bash(uv run *)`,
+  `Bash(uvx *)`, `Bash(sh -c *)`, `Bash(/usr/bin/*)` or `Bash(./*)` count as exposing.
+  Known limits: this list can never be complete. A wrapper or interpreter not on it stays
+  unseen, for example `poetry run`, `pipenv run`, `pdm run`, `npx`, `setsid`, `ionice`,
+  `flock`, `script -c`, `watch`, `strace`, `perl -e` or `node -e`. A quoted
+  `env -S "..."` string is not read. A script path it does not know stays unseen. A glob `*`
+  can cross path parts, so a rule like `Bash(python3 tests/*)` can reach
+  `tests/../release.py` and is not caught. The real backstop is the re-entry rule: with
+  `FACTORY_CONDUCTOR_REENTRY` set, deploy and rollback wait for the human.
 - **CI tag-trigger detection covers listed formats.** GitHub Actions workflows and CircleCI
   are read; every other CI config is treated as tag-triggered unless proven otherwise, so a tag
   push then waits for the production yes. A false positive costs one extra ask, never a silent

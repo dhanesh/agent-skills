@@ -154,13 +154,23 @@ class AllowlistMatchTests(unittest.TestCase):
         "Bash(time python3 *)", "Bash(stdbuf -oL python3 *)", "Bash(timeout 60 python3 *)",
         "Bash(xargs *)", "Bash(find * -exec *)", "Bash(find . -execdir *)",
         "Bash(python3 -u *)", "Bash(python3.12 -I *)", "Bash(python -X dev *)",
-        "Bash(python3 -W ignore -B *)")
+        "Bash(python3 -W ignore -B *)",
+        # fix round 2
+        "Bash(timeout -s KILL 60 python3 *)", "Bash(timeout -k 5 60 python3 *)",
+        "Bash(uv tool run *)", "Bash(uv --directory D run python *)",
+        "Bash(uv --project D run *)", "Bash(uv *)", "Bash(builtin eval *)",
+        "Bash(fish -c *)", "Bash(python3 -m *)", "Bash(python3 -m pdb *)",
+        "Bash(python3 -m runpy *)", "Bash(python3 -m cProfile *)",
+        "Bash(python3 -m trace *)", "Bash(python3 -mpdb *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
                 "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
                 "Bash(python3 -m pytest *)", "Bash(uv run --with x pytest *)",
                 "Bash(bash scripts/build.sh)", "Bash(find . -name *.py)",
-                "Bash(timeout 60 make test)", "Bash(sudo -n true)")
+                "Bash(timeout 60 make test)", "Bash(sudo -n true)",
+                "Bash(bash scripts/test.sh -cover)", "Bash(git log -exec *)",
+                "Bash(uv --directory D run pytest *)", "Bash(uv tool run ruff *)",
+                "Bash(timeout -s KILL 60 make test)")
 
     def test_every_interpreter_and_path_spelling_reaches_release_py(self):
         argvs = RL.release_tool_argvs([os.path.abspath(RL.__file__)])

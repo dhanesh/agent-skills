@@ -2265,25 +2265,29 @@ def _split_rules(allowed_tools_str):
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*\Z")
 # Programs that run the command after them (their own options and, for timeout, a
 # duration first): a rule naming one reaches whatever follows it.
-_RUN_WRAPPERS = ("env", "uvx", "sudo", "doas", "command", "exec", "nice", "nohup", "time",
-                 "stdbuf", "xargs", "timeout")
-_SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+_RUN_WRAPPERS = ("env", "uvx", "sudo", "doas", "command", "builtin", "exec", "nice",
+                 "nohup", "time", "stdbuf", "xargs", "timeout")
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
 _PYTHON = re.compile(r"python(3(\.\S+)?)?\Z")
 _FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+# Modules that run a script or code given to them: `python3 -m <one> *` runs anything.
+_PYTHON_RUN_MODULES = ("pdb", "runpy", "cProfile", "profile", "trace", "timeit", "code")
 
 
 def _rule_readings(pat):
     """Every way an agent may reach a Bash(...) pattern's program (fail closed): the
     pattern as written, and each reading reached by repeatedly dropping a leading
-    NAME=value or a run-anything wrapper (_RUN_WRAPPERS, `uv run`) with its options --
-    each option alone and with the word after it, since it may take an argument --
+    NAME=value or a run-anything wrapper (_RUN_WRAPPERS, `uv run`, `uv tool run`, with
+    uv's global options before them) with its options -- each option alone and with the
+    word after it, since it may take an argument; timeout then drops its duration --
     reducing an absolute or relative program path to its basename (`/usr/bin/python3`
     is python3), reading a versioned `python3.N` as python3, dropping a python flag
-    (and the value of -X or -W; `-m` stays), and expanding a `~/` or `$HOME/` word. A
-    rule that runs any command reads as `*`: `sh|bash|zsh -c` (or a shell glob that
-    could be given -c), `eval`, `python -c`, and a find `-exec`/`-execdir`/`-ok`.
-    `Bash(uv run *)` thus reads as `*`, and `Bash(/usr/bin/env python3 *)` as
-    `python3 *`."""
+    (and the value of -X or -W), and expanding a `~/` or `$HOME/` word. A rule that runs
+    any command reads as `*`: a shell (_SHELLS) given -c in its leading options (or a
+    shell glob that could be), `eval`, `python -c`, `python -m` with a glob or a
+    _PYTHON_RUN_MODULES module, `uv` with a glob that could be `uv run`, and find with
+    -exec/-execdir/-ok/-okdir. `Bash(uv run *)` thus reads as `*`, and
+    `Bash(/usr/bin/env python3 *)` as `python3 *`."""
     home = os.path.expanduser("~")
     out, todo = [], [pat]
     while todo:
@@ -2296,11 +2300,18 @@ def _rule_readings(pat):
                              else home + w[5:] if w.startswith("$HOME/") else w
                              for w in words))
         head, rest = words[0], words[1:]
-        if head == "eval" or any(w in _FIND_EXEC for w in rest) \
-                or (head == "find" and fnmatch.fnmatch("find . -exec x ;", cur)) \
-                or (head in _SHELLS and fnmatch.fnmatch("%s -c x" % head, cur)) \
-                or (head in _SHELLS and any(w.startswith("-") and not w.startswith("--")
-                                            and "c" in w[1:] for w in rest)):
+        opts = []
+        for w in rest:  # a shell's leading options, up to its first operand
+            if not w.startswith("-") or w in ("-", "--"):
+                break
+            opts.append(w)
+        if head == "eval" \
+                or (head == "find" and (any(w in _FIND_EXEC for w in rest)
+                                        or fnmatch.fnmatch("find . -exec x ;", cur))) \
+                or (head in _SHELLS and (fnmatch.fnmatch("%s -c x" % head, cur)
+                                         or any(not w.startswith("--") and "c" in w[1:]
+                                                for w in opts))) \
+                or (head == "uv" and fnmatch.fnmatch("uv run x", cur)):
             todo.append("*")  # runs any command
         elif head.startswith("-") and head != "-":
             todo.append(" ".join(rest))  # a wrapper's option: alone, or with its argument
@@ -2309,8 +2320,18 @@ def _rule_readings(pat):
             todo.append(" ".join(rest))
         elif "/" in head and head.rsplit("/", 1)[1]:
             todo.append(" ".join([head.rsplit("/", 1)[1]] + rest))
-        elif head in _RUN_WRAPPERS or (head == "uv" and rest[:1] == ["run"]):
-            rest = rest[1:] if head == "uv" else rest
+        elif head == "uv":
+            if rest[:1] and rest[0].startswith("-"):  # a global option, maybe with a value
+                todo.append(" ".join([head] + rest[1:]))
+                todo.append(" ".join([head] + rest[2:]))
+            elif rest[:1] == ["run"]:
+                todo.append(" ".join(rest[1:]))
+            elif rest[:2] == ["tool", "run"]:
+                todo.append(" ".join(rest[2:]))
+        elif head in _RUN_WRAPPERS:
+            if rest[:1] and rest[0].startswith("-"):  # its option, maybe with a value
+                todo.append(" ".join([head] + rest[1:]))
+                todo.append(" ".join([head] + rest[2:]))
             todo.append(" ".join(rest))
             if head == "timeout":
                 todo.append(" ".join(rest[1:]))  # its duration
@@ -2318,13 +2339,17 @@ def _rule_readings(pat):
             if re.match(r"python3\.\S+\Z", head):
                 todo.append(" ".join(["python3"] + rest))
             flag = rest[0] if rest else ""
-            if flag.startswith("-c"):
-                todo.append("*")  # python -c runs any code
+            module = (flag[2:] or (rest[1] if len(rest) > 1 else "")) \
+                if flag.startswith("-m") else ""
+            if flag.startswith("-c") or re.search(r"[*?\[]", module) \
+                    or module in _PYTHON_RUN_MODULES:
+                todo.append("*")  # python -c, or a module that runs any script
             elif flag in ("-X", "-W"):
                 todo.append(" ".join([head] + rest[2:]))
-            elif flag.startswith("-") and flag not in ("-", "-m"):
+            elif flag.startswith("-") and flag != "-" and not flag.startswith("-m"):
                 todo.append(" ".join([head] + rest[1:]))
     return out
+
 
 def allowlist_matches(allowed_tools_str, argv):
     """True when a Claude Code --allowedTools value would let a headless agent run argv
