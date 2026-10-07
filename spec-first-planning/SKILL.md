@@ -271,6 +271,8 @@ order. Add the envelope path from step 6, and propose the handoff when a consume
 installed. In unattended mode, add the grant path and the revoke command. For a request from
 ops-intake, add the item id and every `CHECK_COMMAND:` line.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Contract
 
 This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).

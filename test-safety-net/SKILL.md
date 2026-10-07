@@ -18,8 +18,8 @@ compatibility: >-
   Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
   CLI. Writes and proves tests on four stacks — python 3.10–3.14 (pytest, falling back to
   unittest), node/TypeScript on the LTS lines 18, 20, 22, 24 and 26 (`node --test`), go 1.22–1.26
-  (`go test`, on darwin and linux) and rust 1.82–1.98 (`cargo test`, on darwin and linux; 1.82,
-  1.86, 1.90, 1.94 and 1.98 proven by CI's `versions` legs on amd64 linux, and 1.82 on arm64
+  (`go test`, on darwin and linux) and rust 1.82–1.99 (`cargo test`, on darwin and linux; 1.82,
+  1.86, 1.90, 1.94, 1.98 and 1.99 proven by CI's `versions` legs on amd64 linux, and 1.82 on arm64
   macOS too, the minors between expected by bracketing, not proven) (references/stacks.md). No pip, no npm, no network: node's optional
   precise discovery drives a `typescript` the repo already ships and never downloads one — that
   runs the analysed repo's own compiler in-process, and `--no-precise` declines it — go's runs this
@@ -549,6 +549,8 @@ the module still counts even when it means something else (a same-named local, o
 from a different module). Qualified forms are exact: `mod.name` counts, `buf.name` does not. Where
 the user already has a real call-graph tool, it computes that half of the score better. This is an
 **optional** upgrade, never a dependency — nothing here or in the eval requires one.
+
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
 
 ## Contract
 

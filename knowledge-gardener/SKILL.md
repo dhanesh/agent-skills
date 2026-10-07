@@ -101,6 +101,8 @@ including a direct fingerprint-agreement test against the sibling tool.
 - A **regenerated site**, when one existed before the sweep.
 - Optionally, on opt-in only: a scheduled next sweep.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## How to behave
 
 - **You SHOULD NOT silently rely on a stale explainer** — the whole point of the pins

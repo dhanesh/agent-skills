@@ -135,6 +135,8 @@ You SHOULD structure the scorecard like this:
 <rails claimed in docs but not backed by observable evidence>
 ```
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Why this matters
 
 The instinct when agents underperform in a codebase is to reach for a smarter model or a cleverer prompt. The Honk evidence says the durable wins came from the engineering system instead: a verify→repair loop the agent can't stop short of (R1) took success from ~20–30% to ~80% with no model change. This skill exists to find which rail is missing *before* you spend that effort in the wrong place — and to make the fix concrete rather than aspirational. Hold the line on the read-only default: score honestly from evidence, and let the scorecard, not a hunch, drive what gets built.

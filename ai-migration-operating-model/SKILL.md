@@ -130,6 +130,8 @@ the filter's row-by-row verdict, the pack directory passing `assets/control_pack
 and reports `PARITY_RESULT: PASS` on the pilot slice. Present these with the current
 phase-gate status and the open gaps (`G<n>` entries still ending in `?`).
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Boundaries
 
 - **Not the bulk executor.** This skill ends when the machine is built and the pilot

@@ -27,13 +27,44 @@ Nothing is copied onto your PATH and there are no new commands to learn: the ins
 - **Agent-to-agent coordination** — `agent-list --json`, `agent-read`, `agent-send` (no Enter), `agent-run` (with Enter), and `agent-wait --status/--match`: the shell equivalent of Herdr's socket API, so one agent can drive and monitor its siblings.
 - **Notifications** — transitions into `blocked`/`error`/`done` fire a tmux toast (optionally a desktop notification) and a sound cue with terminal-bell fallback; suppressed when you're already looking at the pane.
 - **Persistence and isolation** — `agent-resume` relaunches dead agents after a tmux server restart, using native session resume (`claude --resume`, `codex resume`, …) when you pass a session id; `agent-worktree` gives each agent an isolated git worktree; optional tmux-resurrect/tmux-continuum config restores layouts across reboots (wired automatically when TPM is present).
-- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix a b/e/w/i/f` bind the states to keys (`idle` also matches finished-but-unviewed `done` panes).
+- **Jump-to-status** — `agent-jump blocked|error|working|idle|done`; `prefix a b/e/w/i/f` bind the states to keys and cycle on repeat (`idle` also matches finished-but-unviewed `done` panes).
+
+## Day-to-day use
+
+Inside tmux, `prefix a h` opens the full guide (also: invoke the skill with `help`).
+
+| To… | Press / run |
+|---|---|
+| switch session | `prefix s` (list), `prefix a t` (tree), `prefix (`/`)` prev/next, `prefix L` last, or `tp` |
+| start an agent | just run `claude`, `codex`, `ccl`, … in any pane — it is tracked automatically |
+| go to the next agent waiting on you | `prefix a b` — press again to cycle through every blocked agent |
+| …crashed / working / idle / finished | `prefix a e` / `w` / `i` / `f` (each cycles) |
+| see every agent and why it has its state | `prefix a d` |
+| launch, worktree, resume | `prefix a m` |
+
+**How status stays accurate.** Claude Code reports its own state through hooks the installer merges into `~/.claude/settings.json` (beside your existing hooks; `AGENT_CLAUDE_HOOKS=off` removes them), so working / blocked / done are exact. Other agents are read from the screen. Agents the shell never saw start — an alias, a tmux-resurrect restore, one started before install — are found by process (`TMUX_PANE`) on the next scan.
+
+## Convenience shell functions
+
+The installer also sources a small set of zsh session shortcuts from `~/.zshrc`. Names you already define (your own `tm`, an alias, or a command like `tv`) are left alone. To remove them, rerun the installer with `AGENT_SHELL_FUNCS=off`; that sticks until `AGENT_SHELL_FUNCS=on`.
+
+| Function | Does |
+|---|---|
+| `tm` | attach/create the session named after the current directory |
+| `tp [name]` | fzf session picker (attached first), or attach/create `name` |
+| `tv [file]` | cwd session that opens `nvim` |
+| `tn <name>` | attach/create a named session |
+| `tms [name]` | remote sessions over SSH; set `TMS_HOST` to your host alias |
+| `tw <branch>` | new git worktree at `../<repo>-<branch>` plus its session |
+| `twd [-f]` | remove the current linked worktree and its session (`-f` discards uncommitted changes) |
+
+All of them switch client when run inside tmux instead of nesting a session.
 
 ## Prerequisites
 
 - **tmux 3.2+** (`tmux -V` to confirm)
 - **bash** and a POSIX-like shell
 - **python3** (status scanning and registry, stdlib only)
-- Optional: `pbcopy`/`xclip`/`wl-copy` (clipboard), `paplay`/`pw-play`/`afplay` (sounds), `notify-send`/`osascript` (desktop notifications), TPM + tmux-resurrect/tmux-continuum (session persistence)
+- Optional: `zsh` + `fzf` (shell functions), `pbcopy`/`xclip`/`wl-copy` (clipboard), `paplay`/`pw-play`/`afplay` (sounds), `notify-send`/`osascript` (desktop notifications), TPM + tmux-resurrect/tmux-continuum (session persistence)
 
 See SKILL.md for full usage.

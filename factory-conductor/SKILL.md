@@ -511,6 +511,8 @@ agent. `conductor trail --out <file>` writes the decision trail (per task: dispa
 owner, worktree, verified commit, reviewer, verdict agent, evidence paths, merge outcome);
 offer it to the user to commit when the stakes warrant an audit record.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Verify and repair
 
 Before you report, run `conductor status` and check that every task has a final status and

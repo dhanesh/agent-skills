@@ -93,6 +93,8 @@ To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X
 - **Inspect state:** `python3 context_ledger.py stats` · `cat .context/digest.md`.
 - **Replacing a model-based auto-summariser?** Remove its `Stop`/`SessionEnd` hooks from settings first (back the file up), then install this kit — otherwise both write to `.context/`. The kit's deterministic harvester is the lossless replacement.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Verifying after install
 
 You MUST confirm the gate passed: `python3 test_context_ledger.py` (27 tests — budget invariant, pin spill, rot survival, two-channel fencing, idempotent ingest, harvester capture + injection boundary). If any fail, the guarantees above do not hold — fix before relying on the kit.

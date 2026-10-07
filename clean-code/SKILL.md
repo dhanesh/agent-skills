@@ -221,6 +221,8 @@ When reviewing, use this structure so findings are scannable and actionable:
 Match the depth to the request: a quick "does this look ok?" wants the top one
 or two findings, not an exhaustive audit.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step. This style is for prose to the user, not for the code, prompts or files that this skill makes.
+
 ## Decision trees
 
 **Designing a dependency**

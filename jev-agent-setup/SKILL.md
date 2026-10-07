@@ -64,6 +64,8 @@ A short setup report with one row per target: `claude`, `agents`, `codex`, `gemi
 any command the user still has to run. After the table come the `--check` exit code and the
 smoke-test result.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## Success criteria
 
 - `install_jev_setup.py --check` exits 0 for every selected target, including `cli`.

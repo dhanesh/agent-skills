@@ -121,7 +121,7 @@ carries unit tests, eval negatives and an A/B row:
   a second driver (0.12) and proof only as strong as the spec's checks (0.10). Q1 and the
   complete factory stay where they were until roadmap steps 5 and 6 exist. Jev picks step
   5, release/deploy and operations intake, as the next work (0.96).
-- **Step 5A (release-conductor) built (branch `feat/release-conductor`, before merge):**
+- **Step 5A (release-conductor) merged (PR #70, merge commit `11cd42d`):**
   `release-conductor` carries a merged change to verified production. `init` writes a
   reviewed recipe. `prep` writes a release grant pinned to the version and the recipe, and
   opens the release PR. After the human merges it, `stage` builds the release commit,
@@ -141,8 +141,25 @@ carries unit tests, eval negatives and an A/B row:
   checker's ASK ci-tag both deleted. The re-run after `outcome_unknown` flips only when crash
   recovery hands a crashed deploy back as retryable, since deploy's status floor also
   refuses it. The fixture also asserts the demotion, so broken crash recovery fails the run.
-  Step 5A is to be re-judged by Jev after
-  merge, run by the controller, against the actual merge commit. No score is claimed here.
+  **Jev re-judgement after merge (AC8, 2026-10-06, against merge commit `11cd42d`,
+  `jev-latest`, same questions as before plus a release question):**
+
+  | Question | After re-entry merge | After release-conductor merge |
+  |---|---|---|
+  | Q1 | partly 0.97 | partly 0.91 / yes 0.09 |
+  | Q2 | yes 1.00 | yes 1.00 |
+  | Q3 | yes 0.69 / partly 0.31 | **yes 0.73** / partly 0.27 |
+  | Plan to open PR without the human | 0.83 | 0.84 |
+  | Merged change to verified production with only the human's yes | (not asked) | 0.68 |
+  | Complete factory | 0.04 | 0.04 |
+
+  The release question leans yes but sits in Jev's uncertain band (0.3–0.7). The likely
+  drags are the known gaps: the allowlist check that keeps a headless agent off
+  `release.py` misses some interpreter spellings (`uv run`, `python3.12`), and one
+  `stage --approved-by` answers both declined steps. Q1 stays partly until operations intake
+  (step 5B) and the business stages (step 6) exist. The top Q3 limit is unchanged: re-entry
+  needs the machine on and the user logged in (0.60). Jev picks step 5B, operations intake,
+  as the next work (0.59), ahead of hardening release-conductor first (0.36).
 - **Step 5B (ops-intake) built (branch `feat/ops-intake`, before merge):** `ops-intake`
   brings operational signals back into planning. The agent runs the CLI or MCP tool and
   pipes its output into `intake import`. Intake opens no socket, runs no command and holds

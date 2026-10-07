@@ -135,6 +135,8 @@ subagent's prompt:
    (ordered by severity then layer), sources appendix, dropped-claims log. If `--annotate`,
    insert the comment markers at each finding's location.
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## References
 
 - `references/source-routing.md` — claim-class → source-class table, API usage, etiquette.

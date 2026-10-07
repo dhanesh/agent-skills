@@ -110,6 +110,8 @@ authorization is unclear, you MUST ask before running.
 <re-run summary for each applied fix: finding gone, before/after counts>
 ```
 
+**Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
+
 ## The checks
 
 Thirteen check ids, each documented in `references/checks.md` (what it proves, what it
