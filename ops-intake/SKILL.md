@@ -119,6 +119,10 @@ Read each command's output lines, not only its exit code.
    sync prints no `NEXT:` line that asks for an import, or after three rounds; report what is
    left. When the jobs import of a run fails three times (the run was deleted on GitHub, say),
    that import prints one `PROBLEM:` line and sync stops printing the run's `NEXT:` line.
+   A run older than 30 days whose jobs never came in is kept. Sync prints one `PROBLEM:` line
+   for it on each sync, and its `NEXT:` line stays. Tell the human. If they want the run gone,
+   run `intake drop-run <run id> --by "<name>" --reason "<their words>"`. It refuses an id that
+   is not a queued run (`STOP:`, exit 2).
 4. **Show the queue.** `intake list` prints the `new` items ranked, one
    `ITEM: <id> <flag> <rank> <title>` line each; `--all` adds every other state, so use it to
    find the `picked` and `planned` items and the ones that wait on the human
@@ -231,7 +235,9 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
   a made-up one, so a fabricated history could resolve an item.
 - **On demand only.** Nothing sweeps the sources on a schedule; a session has to run the flow.
 - **Old runs are forgotten; the log is not.** Sync drops a CI run imported more than 30 days
-  ago. A run whose jobs import fails three times is reported once and not asked for again,
+  ago, but only when its jobs came in or its jobs import failed three times. An old run with
+  no jobs stays, with one `PROBLEM:` line per sync, until the jobs come in or the human runs
+  `drop-run`. Each drop logs a `prune` event. A run whose jobs import fails three times is reported once and not asked for again,
   so a run deleted on GitHub is reported, not retried for ever. The intake log
   (`intake-log.jsonl`) is not pruned in this version.
 - **Customer evidence stays local, unless someone commits it.** The queue, the item

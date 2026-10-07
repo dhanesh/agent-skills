@@ -268,11 +268,87 @@ class JobsImportFailureTests(unittest.TestCase):
         r = IN.Queue.load(self.root).runs["7"]
         self.assertEqual((r["jobs_imported"], r["jobs_failures"]), (True, 1))
 
-    def test_runs_imported_more_than_30_days_ago_are_pruned(self):
-        imp(self.root, "gh-runs-json", "ci", json.dumps([a_run(8)]), now="2026-11-01T00:00:00Z")
-        rc, out = cmd(self.root, "sync", now="2026-11-06T00:00:01Z")
-        self.assertEqual(sorted(IN.Queue.load(self.root).runs), ["8"])
+    # The old test here asserted that a 30-day-old run whose jobs never came in was dropped
+    # silently. That encoded the bug (a failing CI run vanished with no PROBLEM and no NEXT).
+    def events(self, name):
+        path = os.path.join(self.root, IN.INTAKE_DIR, "intake-log.jsonl")
+        return [e for e in map(json.loads, open(path)) if e["event"] == name]
+
+    def old_run_sync(self, rid=7):
+        return cmd(self.root, "sync", now="2026-11-20T00:00:00Z")
+
+    def test_old_run_without_jobs_is_kept_with_one_problem_and_its_next(self):
+        rc, out = self.old_run_sync()
+        self.assertIn("7", IN.Queue.load(self.root).runs)
+        self.assertEqual(sum("run 7 is older than 30 days" in l and l.startswith("PROBLEM:")
+                             for l in out.splitlines()), 1, out)
+        self.assertIn("--run 7", out)
+        self.assertEqual(len(self.events("stale-run")), 1)
+        self.assertEqual(self.events("prune"), [])
+        rc, out = self.old_run_sync()   # one PROBLEM per sync, every sync
+        self.assertEqual(out.count("older than 30 days"), 1, out)
+        self.assertIn("--run 7", out)
+
+    def test_old_run_with_jobs_imported_is_pruned_and_logged(self):
+        imp(self.root, "gh-run-jobs-json", "ci", json.dumps({"jobs": []}), "--run", "7")
+        rc, out = self.old_run_sync()
+        self.assertEqual(IN.Queue.load(self.root).runs, {})
+        self.assertNotIn("PROBLEM", out)
         self.assertNotIn("--run 7", out)
+        ev = self.events("prune")
+        self.assertEqual((len(ev), ev[0]["run"], ev[0]["reason"]), (1, "7", "jobs-imported"))
+
+    def test_old_run_with_jobs_tries_failures_is_pruned(self):
+        for _ in range(IN.JOBS_TRIES):
+            self.fail_jobs()
+        rc, out = self.old_run_sync()
+        self.assertEqual(IN.Queue.load(self.root).runs, {})
+        self.assertNotIn("older than 30 days", out)
+        self.assertEqual(self.events("prune")[0]["reason"], "jobs-failed")
+
+    def test_runs_under_30_days_old_are_kept_quietly(self):
+        rc, out = cmd(self.root, "sync", now="2026-10-20T00:00:00Z")
+        self.assertNotIn("older than 30 days", out)
+        self.assertEqual(self.events("stale-run"), [])
+
+    def test_reimport_of_an_imported_run_keeps_the_first_import_time_and_no_next(self):
+        imp(self.root, "gh-run-jobs-json", "ci", json.dumps({"jobs": []}), "--run", "7")
+        imp(self.root, "gh-runs-json", "ci", json.dumps([a_run(7)]), now="2026-10-25T00:00:00Z")
+        r = IN.Queue.load(self.root).runs["7"]
+        self.assertEqual((r["imported_at"], r["jobs_imported"]), (NOW, True))
+        self.assertNotIn("--run 7", cmd(self.root, "sync", now="2026-10-26T00:00:00Z")[1])
+
+
+class DropRunTests(unittest.TestCase):
+    def setUp(self):
+        self.root = repo(config=CI)
+        imp(self.root, "gh-runs-json", "ci", json.dumps([a_run(7)]))
+
+    def test_drop_run_removes_the_run_and_logs_it(self):
+        rc, out = cmd(self.root, "drop-run", "7", "--by", "ann", "--reason", "gone")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(IN.Queue.load(self.root).runs, {})
+        path = os.path.join(self.root, IN.INTAKE_DIR, "intake-log.jsonl")
+        ev = [e for e in map(json.loads, open(path)) if e["event"] == "drop-run"]
+        self.assertEqual((ev[0]["run"], ev[0]["by"], ev[0]["reason"]), ("7", "ann", "gone"))
+        self.assertNotIn("--run 7", cmd(self.root, "sync")[1])
+
+    def test_unknown_run_id_is_refused(self):
+        rc, out = cmd(self.root, "drop-run", "8", "--by", "ann", "--reason", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("STOP:", out)
+        self.assertEqual(list(IN.Queue.load(self.root).runs), ["7"])
+
+    def test_non_digit_run_id_is_refused(self):
+        rc, out = cmd(self.root, "drop-run", "7x", "--by", "ann", "--reason", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("STOP:", out)
+
+    def test_by_and_reason_are_required(self):
+        for argv in (("7", "--reason", "x"), ("7", "--by", "ann")):
+            rc, _ = cmd(self.root, "drop-run", *argv)
+            self.assertEqual(rc, 2)
+        self.assertEqual(list(IN.Queue.load(self.root).runs), ["7"])
 
 
 # -- B5 ---------------------------------------------------------------------------

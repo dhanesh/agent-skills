@@ -80,7 +80,12 @@ through `intake-signals-jsonl`.
 - A jobs import that fails (not JSON, no `jobs` array, or over the per-import cap) counts
   against the run. At the third failure that import prints one `PROBLEM:` line, and sync stops
   printing the run's `NEXT:` line. A re-import of the same run attempt keeps the count.
-- Sync forgets a run imported more than 30 days ago. The intake log is not pruned.
+- Sync forgets a run imported more than 30 days ago only when its jobs came in or its jobs
+  import failed three times. It logs a `prune` event with the reason (`jobs-imported` or
+  `jobs-failed`). An old run with no jobs stays: sync logs a `stale-run` event, prints one
+  `PROBLEM:` line for it on each sync, and keeps its `NEXT:` line. `drop-run` removes it.
+  A re-import of the same run attempt keeps the first `imported_at`. The intake log is not
+  pruned.
 - An unknown `status` or `conclusion` value is a problem for that record only.
 
 ### git-rev-list
@@ -188,6 +193,7 @@ drops it flags `plan-superseded`.
 | `show <id>` | the `ITEM:` line, `source:` and one `evidence:` line per entry |
 | `pick <id> --by NAME` | `ITEM:` and `NEXT: run spec-first-planning with <envelope path>` |
 | `dismiss <id> --by NAME --reason TEXT`, `resolve <id> --by NAME` | `ITEM:` |
+| `drop-run <run id> --by NAME --reason TEXT` | `NEXT: run <id> dropped`; logs a `drop-run` event; `STOP:` (exit 2) for an unknown or non-digit id |
 | `link <keep> <other>` | `NEXT: merged <other> into <keep>`; `STOP:` when `<other>` is `picked` or `planned`. Later signals for `<other>` go to `<keep>` |
 | `status` | `SYNC: <n> items … regressed=<r>` |
 | `formats` | `FORMAT:` lines (needs no config) |
