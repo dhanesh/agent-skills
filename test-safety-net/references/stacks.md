@@ -17,7 +17,11 @@ indistinguishable from the one you're proving.
 
 Teams on legacy code are the ones with the least test coverage and the oldest toolchains, so every
 stack supports **the last five versions of its language**, and CI's `versions` job runs each stack's
-suites on every one of them rather than assuming it:
+suites on every one of them rather than assuming it. Not every run proves every version (owner
+decision 2026-10-08). A PR that touches the guard (`assets/`, `eval/`, `SKILL.md`, this file or the
+workflow) proves the edge versions: the oldest and the newest of each stack, plus the current stable
+rust. A PR that does not touch the guard runs no version leg. Each push to `main`, a weekly run and
+a manual run prove every version. `scripts/ci/tsn-scope.sh` holds these rules:
 
 | stack | versions | what changes across them, and what the skill does about it |
 |---|---|---|
@@ -689,7 +693,7 @@ anything. A dependency the local cargo cache does not hold exits 2 (NOT ARMED) w
    seed and boundary exemptions (`test::__rust_begin_short_backtrace`, `test::assert_test_result`,
    `hashmap_random_keys`, `drop_slow`) and `SYSTEM_INTERNAL_IMAGES` (darwin's
    `libsystem_malloc.dylib`, whose allocator reads the clock). A toolchain that renames one moves
-   the line, which is why CI runs every supported minor.
+   the line, which is why CI runs every supported minor (on each push to `main` and weekly).
 4. **Some reads no hook can see.** `std::env::vars()`/`vars_os()` read `environ` directly; the
    filter marks them Tier 2. Likewise, `std::env::args`/`args_os` read what the runtime saved
    before `main`, `std::thread::sleep` is an unhooked `nanosleep`, `std::fs::hard_link` is an

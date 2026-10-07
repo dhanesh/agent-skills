@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Every tsn version leg, weekly: a runner image or a new stable toolchain can
+  # break a leg while nothing in this repo changes (rust 1.99, 2026-09-28).
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -77,6 +82,27 @@ jobs:
       - name: Run skill quality gates
         run: make gate
 
+  # Which tsn version legs run (owner decision 2026-10-08: "filter + edges,
+  # full weekly"). A PR that touches the guard, its eval, its docs or this file
+  # runs the edges: the oldest and newest version of each stack, plus the
+  # current stable rust. Any other PR runs none. A push to main, the weekly
+  # schedule and a manual run prove every version. The rules and the two
+  # matrices live in scripts/ci/tsn-scope.sh.
+  tsn-scope:
+    name: tsn scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+      matrix: ${{ steps.scope.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git diff BASE...HEAD` needs the merge base in the clone.
+          fetch-depth: 0
+      - id: scope
+        run: sh scripts/ci/tsn-scope.sh "${{ github.event_name }}" "${{ github.event.pull_request.base.sha }}"
+
   # test-safety-net supports the LAST FIVE VERSIONS of python, node and go, and
   # five rust minors across about two years (1.82, 1.86, 1.90, 1.94, 1.98: every
   # 4th, because the last five would span only ~7 months), plus the current
@@ -89,33 +115,15 @@ jobs:
   # All legs are ubuntu (amd64), so the rust legs are also the rust guard's
   # only amd64 runs: its hook was developed on arm64. The darwin link and hook
   # are proven only by the owner's local macOS `make gate` (pinned versions).
+  # tsn-scope picks the legs; on a PR that does not touch the guard this job
+  # is skipped.
   versions:
     name: tsn ${{ matrix.stack }} ${{ matrix.version }}${{ matrix.os && format(' ({0})', matrix.os) || '' }}
+    needs: tsn-scope
+    if: needs.tsn-scope.outputs.mode != 'none'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {stack: python, version: "3.10"}
-          - {stack: python, version: "3.11"}
-          - {stack: python, version: "3.12"}
-          - {stack: python, version: "3.13"}
-          - {stack: python, version: "3.14"}
-          - {stack: node, version: "18"}
-          - {stack: node, version: "20"}
-          - {stack: node, version: "22"}
-          - {stack: node, version: "24"}
-          - {stack: node, version: "26"}
-          - {stack: go, version: "1.22"}
-          - {stack: go, version: "1.23"}
-          - {stack: go, version: "1.24"}
-          - {stack: go, version: "1.25"}
-          - {stack: go, version: "1.26"}
-          - {stack: rust, version: "1.82"}
-          - {stack: rust, version: "1.86"}
-          - {stack: rust, version: "1.90"}
-          - {stack: rust, version: "1.94"}
-          - {stack: rust, version: "1.98"}
-          - {stack: rust, version: "1.99"}
+      matrix: ${{ fromJSON(needs.tsn-scope.outputs.matrix) }}
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 30
     defaults:
@@ -201,17 +209,24 @@ jobs:
   # adding the matrix silently removed the required context and left every PR
   # blocked with green CI. This aggregator restores it: one check called `gate`
   # that passes only when every leg passed. Keep it if you add another OS.
+  # `versions` may be `skipped` ONLY when tsn-scope succeeded and said "none";
+  # a skip for any other reason (tsn-scope failed) fails the gate.
   gate:
     name: gate
-    needs: [matrix-gate, versions, contract]
+    needs: [matrix-gate, tsn-scope, versions, contract]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require every matrix leg, every language version and the contract legs to pass
+      - name: Require every matrix leg, the selected language versions and the contract legs to pass
         run: |
           gate="${{ needs.matrix-gate.result }}"
+          scope="${{ needs.tsn-scope.result }}"
+          mode="${{ needs.tsn-scope.outputs.mode }}"
           versions="${{ needs.versions.result }}"
           contract="${{ needs.contract.result }}"
-          echo "matrix: $gate  versions: $versions  contract: $contract"
-          [ "$gate" = "success" ] && [ "$versions" = "success" ] && [ "$contract" = "success" ] || exit 1
+          echo "matrix: $gate  scope: $scope ($mode)  versions: $versions  contract: $contract"
+          [ "$gate" = "success" ] && [ "$scope" = "success" ] && [ "$contract" = "success" ] || exit 1
+          [ "$versions" = "success" ] && exit 0
+          [ "$versions" = "skipped" ] && [ "$mode" = "none" ] && exit 0
+          exit 1

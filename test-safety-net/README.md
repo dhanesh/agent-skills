@@ -95,7 +95,7 @@ npx skills add dhanesh/agent-skills --skill test-safety-net
 ```
 
 No further setup: the bundled ranker is offline, stdlib-only python3 (git CLI needed only for the
-churn signal). Four stacks are complete, each run by CI on every version it claims —
+churn signal). Four stacks are complete, each run by CI on every version it claims (on each push to `main` and weekly; a PR that touches the guard runs the oldest and newest only) —
 **Python** 3.10–3.14 (pytest, falling back to `unittest`), **node/TypeScript** on the LTS lines 18,
 20, 22, 24 and 26 (`node --test`, no dependency added), **Go** 1.22–1.26 (`go test`, darwin and
 linux, no dependency added) and **Rust** 1.82, 1.86, 1.90, 1.94, 1.98 and 1.99 (`cargo test`, darwin and
