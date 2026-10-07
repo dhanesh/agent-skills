@@ -1891,21 +1891,30 @@ mod plat {
     }
     // SysV x86_64 and AAPCS64-on-Linux pass a variadic int in the same register
     // as a fixed argument in that position, so a fixed definition reads `mode`.
+    // Rust 1.99 checks a definition of a libc symbol that std itself calls
+    // against the C signature. It rejects `open`: the C signature is
+    // variadic, and stable Rust cannot define a variadic function. The other
+    // three have the same shape, so the deny-by-default lint is allowed on
+    // all four. `unknown_lints` keeps rustc before 1.99 quiet.
+    #[allow(unknown_lints, invalid_runtime_symbol_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn open(p: *const c_char, f: c_int, mode: c_uint) -> c_int {
         guard(b"open");
         real!(c"open", unsafe extern "C" fn(*const c_char, c_int, ...) -> c_int)(p, f, mode)
     }
+    #[allow(unknown_lints, invalid_runtime_symbol_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn open64(p: *const c_char, f: c_int, mode: c_uint) -> c_int {
         guard(b"open64");
         real!(c"open64", unsafe extern "C" fn(*const c_char, c_int, ...) -> c_int)(p, f, mode)
     }
+    #[allow(unknown_lints, invalid_runtime_symbol_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn openat(d: c_int, p: *const c_char, f: c_int, mode: c_uint) -> c_int {
         guard(b"openat");
         real!(c"openat", unsafe extern "C" fn(c_int, *const c_char, c_int, ...) -> c_int)(d, p, f, mode)
     }
+    #[allow(unknown_lints, invalid_runtime_symbol_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn openat64(d: c_int, p: *const c_char, f: c_int, mode: c_uint) -> c_int {
         guard(b"openat64");
