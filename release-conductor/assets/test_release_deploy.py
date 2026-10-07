@@ -131,6 +131,39 @@ class AllowlistMatchTests(unittest.TestCase):
             [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *)"], P))
         self.assertFalse(RL.agent_cmd_exposes([CLAUDE, "-p", "{prompt}"], P))
 
+    # Every spelling of a rule that lets an agent reach release.py's production commands
+    # (R43, hardening 5): an absolute or versioned interpreter, an env or uv wrapper, a
+    # ~ skill path. Each one exposes; harmless rules still do not.
+    EXPOSING_SPELLINGS = (
+        "Bash(/usr/bin/python3 *)", "Bash(/usr/local/bin/python3 */release.py *)",
+        "Bash(python3.12 *)", "Bash(python3.9 */release.py deploy:*)",
+        "Bash(/usr/bin/env python3 *)", "Bash(env python3 *)",
+        "Bash(env PYTHONPATH=. python3 *)", "Bash(uv run *)", "Bash(uv run python *)",
+        "Bash(uv run:*)", "Bash(uvx *)", "Bash(./release.py *)",
+        "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)",
+        "Bash(python3 ~/.agents/skills/release-conductor/assets/release.py deploy:*)")
+    HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
+                "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
+                "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput")
+
+    def test_every_interpreter_and_path_spelling_reaches_release_py(self):
+        argvs = RL.release_tool_argvs([os.path.abspath(RL.__file__)])
+        for rules in self.EXPOSING_SPELLINGS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertTrue(any(RL.agent_cmd_exposes(cmd, a) for a in argvs))
+        for rules in self.HARMLESS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertFalse(any(RL.agent_cmd_exposes(cmd, a) for a in argvs))
+
+    def test_a_wrapper_or_absolute_interpreter_rule_reaches_deploy_prod_too(self):
+        for rules in ("Bash(env vercel *)", "Bash(/usr/bin/env vercel deploy *)",
+                      "Bash(uv run vercel *)", "Bash(/opt/homebrew/bin/vercel *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(RL.allowlist_matches(rules, self.PROD))
+        self.assertFalse(RL.allowlist_matches("Bash(env git *)", self.PROD))
+
 
 class DeployBase(TS.StageBase):
     def setUp(self):
@@ -480,7 +513,9 @@ class RefusalTests(DeployBase):
         here = os.path.abspath(RL.__file__)
         for rules in ("Bash(python3 */release.py *)", "Bash(python3 %s deploy:*)" % here,
                       "Bash(python3 release.py *)", "Read,Bash(python3 * abandon *)",
-                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)',
+                      "Bash(python3.12 *)", "Bash(uv run *)",
+                      "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)"):
             with self.subTest(rules=rules):
                 gid = plant_grant(self.root, rules)
                 self.assert_refused(*self.deploy()[:2], "allowlist-exposes-prod")

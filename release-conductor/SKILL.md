@@ -348,7 +348,9 @@ report it rather than editing state.
   wrapper script hides what it runs. A malformed allowlist or a bypass flag counts as exposing,
   and so does a grant allowing a broad `git push` in tag-deploy mode, or one reaching
   `release.py`'s own `deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does), which
-  blocks the release until it is narrowed.
+  blocks the release until it is narrowed. The check reads a rule through `env`, `uv run` and
+  `uvx`, an absolute or versioned interpreter (`/usr/bin/python3`, `python3.12`) and a `~/`
+  path. A script path it does not know stays unseen.
 - **CI tag-trigger detection covers listed formats.** GitHub Actions workflows and CircleCI
   are read; every other CI config is treated as tag-triggered unless proven otherwise, so a tag
   push then waits for the production yes. A false positive costs one extra ask, never a silent

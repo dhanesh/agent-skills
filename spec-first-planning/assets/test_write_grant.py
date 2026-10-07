@@ -611,6 +611,39 @@ class AllowlistMatchTests(unittest.TestCase):
             [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *)"], P))
         self.assertFalse(write_grant.agent_cmd_exposes([CLAUDE, "-p", "{prompt}"], P))
 
+    # Every spelling of a rule that lets an agent reach release.py's production commands
+    # (R43, hardening 5): an absolute or versioned interpreter, an env or uv wrapper, a
+    # ~ skill path. Each one exposes; harmless rules still do not.
+    EXPOSING_SPELLINGS = (
+        "Bash(/usr/bin/python3 *)", "Bash(/usr/local/bin/python3 */release.py *)",
+        "Bash(python3.12 *)", "Bash(python3.9 */release.py deploy:*)",
+        "Bash(/usr/bin/env python3 *)", "Bash(env python3 *)",
+        "Bash(env PYTHONPATH=. python3 *)", "Bash(uv run *)", "Bash(uv run python *)",
+        "Bash(uv run:*)", "Bash(uvx *)", "Bash(./release.py *)",
+        "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)",
+        "Bash(python3 ~/.agents/skills/release-conductor/assets/release.py deploy:*)")
+    HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
+                "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
+                "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput")
+
+    def test_every_interpreter_and_path_spelling_reaches_release_py(self):
+        argvs = write_grant.release_tool_argvs(write_grant._release_py_paths())
+        for rules in self.EXPOSING_SPELLINGS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertTrue(any(write_grant.agent_cmd_exposes(cmd, a) for a in argvs))
+        for rules in self.HARMLESS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertFalse(any(write_grant.agent_cmd_exposes(cmd, a) for a in argvs))
+
+    def test_a_wrapper_or_absolute_interpreter_rule_reaches_deploy_prod_too(self):
+        for rules in ("Bash(env vercel *)", "Bash(/usr/bin/env vercel deploy *)",
+                      "Bash(uv run vercel *)", "Bash(/opt/homebrew/bin/vercel *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(write_grant.allowlist_matches(rules, self.PROD))
+        self.assertFalse(write_grant.allowlist_matches("Bash(env git *)", self.PROD))
+
 
 class TestProductionAllowlistRefusal(WriteGrantBase):
     """Task 7: write_grant refuses a grant whose reentry.agent_cmd allowlist would let an
@@ -669,7 +702,11 @@ class TestProductionAllowlistRefusal(WriteGrantBase):
         for rules in ("Read,Bash(python3 *)", "Bash(python3 */release.py *)",
                       "Bash(python3 */release.py deploy:*)", "Bash(python3 release.py *)",
                       "Bash(python3 * abandon *)",
-                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)',
+                      "Bash(/usr/bin/python3 *)", "Bash(python3.12 *)",
+                      "Bash(/usr/bin/env python3 *)", "Bash(env python3 *)",
+                      "Bash(uv run *)", "Bash(uv run python *)", "Bash(uvx *)",
+                      "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)"):
             with self.subTest(rules=rules):
                 answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
                 with self.assertRaises(write_grant.GrantRefused):
@@ -679,6 +716,14 @@ class TestProductionAllowlistRefusal(WriteGrantBase):
         answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
                                  "Bash(python3 /x/factory-conductor/assets/conductor.py *)"])
         write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+        # harmless rules (hardening 5): no wrapper or interpreter spelling turns them on
+        for rules in ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
+                      "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
+                      "Bash(uvx ruff check *)"):
+            with self.subTest(rules=rules):
+                answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
+                write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers,
+                                        "Dana")
 
     def test_the_installed_release_py_path_is_checked_when_present(self):  # R43
         paths = write_grant._release_py_paths()
@@ -879,7 +924,8 @@ class MatcherIdentityTests(unittest.TestCase):
     release-conductor is not installed beside this skill."""
 
     NAMES = ("_split_rules", "allowlist_matches", "agent_cmd_exposes", "release_tool_argvs",
-             "ALLOWED_TOOLS_FLAGS", "RELEASE_TOOL_PATHS", "RELEASE_PROD_COMMANDS")
+             "ALLOWED_TOOLS_FLAGS", "RELEASE_TOOL_PATHS", "RELEASE_PROD_COMMANDS",
+             "_rule_readings", "_ASSIGNMENT", "RELEASE_TOOL_INTERPRETERS")
 
     @staticmethod
     def _defs(path):

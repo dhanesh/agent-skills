@@ -220,6 +220,43 @@ def _split_rules(allowed_tools_str):
     return [r.strip() for r in rules if r.strip()], well_formed and depth == 0
 
 
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*\Z")
+
+
+def _rule_readings(pat):
+    """Every way an agent may reach a Bash(...) pattern's program (fail closed): the
+    pattern as written, and each reading reached by repeatedly dropping a leading
+    NAME=value, `env` (and its -options), `uv run` or `uvx` wrapper, reducing an
+    absolute or relative program path to its basename (`/usr/bin/python3` is python3),
+    reading a versioned `python3.N` as python3, and expanding a `~/` or `$HOME/` word.
+    `Bash(uv run *)` thus reads as `*`, and `Bash(/usr/bin/env python3 *)` as
+    `python3 *`."""
+    home = os.path.expanduser("~")
+    out, todo = [], [pat]
+    while todo:
+        cur = todo.pop()
+        if cur in out:
+            continue
+        out.append(cur)
+        words = cur.split(" ")
+        todo.append(" ".join(home + w[1:] if w.startswith("~/")
+                             else home + w[5:] if w.startswith("$HOME/") else w
+                             for w in words))
+        head, rest = words[0], words[1:]
+        if _ASSIGNMENT.match(head):
+            todo.append(" ".join(rest))
+        elif "/" in head and head.rsplit("/", 1)[1]:
+            todo.append(" ".join([head.rsplit("/", 1)[1]] + rest))
+        elif head in ("env", "uvx") or (head == "uv" and rest[:1] == ["run"]):
+            rest = rest[1:] if head == "uv" else rest
+            while rest and rest[0].startswith("-"):
+                rest = rest[1:]  # the wrapper's own options
+            todo.append(" ".join(rest))
+        elif re.match(r"python3\.\S+\Z", head):
+            todo.append(" ".join(["python3"] + rest))
+    return out
+
+
 def allowlist_matches(allowed_tools_str, argv):
     """True when a Claude Code --allowedTools value would let a headless agent run argv
     without a prompt. Rules split on commas and whitespace outside parentheses; runs of
@@ -228,7 +265,9 @@ def allowlist_matches(allowed_tools_str, argv):
     -- and, failing closed, against " ".join(argv) and both with argv[0] reduced to its
     basename, since an agent may type the command either way; the legacy
     `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
-    itself be a glob: fnmatch against prefix + "*"). Other tools never
+    itself be a glob: fnmatch against prefix + "*"). Each pattern is tried in every
+    reading _rule_readings gives (wrappers such as env and uv run dropped, an absolute
+    or versioned interpreter reduced to its name, `~/` expanded). Other tools never
     match. A malformed list fails CLOSED (R29) and counts as matching: unbalanced
     parentheses anywhere, a rule that runs on after its parentheses close (R45c), or a rule that starts with the word `Bash` but is not exactly
     `Bash` or `Bash(...)` -- we cannot tell what Claude Code would make of it. (A longer
@@ -254,12 +293,13 @@ def allowlist_matches(allowed_tools_str, argv):
                 return True  # Bash-something we cannot parse: fail closed
             continue
         pat = norm(m.group(1))
-        if pat.endswith(":*"):
-            prefix = pat[:-2]  # itself a glob: Bash(*:*) and Bash(npx *:*) match too
-            if any(f.startswith(prefix) or fnmatch.fnmatch(f, prefix + "*") for f in forms):
+        legacy = pat.endswith(":*")  # `prefix:*`: the prefix is itself a glob
+        for body in _rule_readings(pat[:-2] if legacy else pat):
+            if legacy:  # Bash(*:*) and Bash(npx *:*) match too
+                if any(f.startswith(body) or fnmatch.fnmatch(f, body + "*") for f in forms):
+                    return True
+            elif any(fnmatch.fnmatch(f, body) for f in forms):
                 return True
-        elif any(fnmatch.fnmatch(f, pat) for f in forms):
-            return True
     return False
 
 
@@ -306,22 +346,34 @@ def agent_cmd_exposes(agent_cmd, argv):
 # install path that a `*/release.py` glob or a `python3 *` rule matches).
 RELEASE_TOOL_PATHS = ("release.py", "assets/release.py", "$SKILL_DIR/assets/release.py",
                       '"$SKILL_DIR/assets/release.py"',
-                      "/skills/release-conductor/assets/release.py")
+                      "/skills/release-conductor/assets/release.py", "./release.py",
+                      "~/.claude/skills/release-conductor/assets/release.py",
+                      "~/.agents/skills/release-conductor/assets/release.py")
 RELEASE_PROD_COMMANDS = ("deploy", "rollback", "abandon")
+# Each interpreter spelling an agent may type before release.py (an empty one runs the
+# script by its shebang). _rule_readings covers more (python3.N, env options).
+RELEASE_TOOL_INTERPRETERS = (("python3",), ("python",), ("/usr/bin/python3",),
+                             ("/usr/local/bin/python3",), ("env", "python3"),
+                             ("/usr/bin/env", "python3"), ("uv", "run", "python"),
+                             ("uv", "run"), ("uvx", "python"), ())
 
 
 def release_tool_argvs(release_paths):
-    """[argv, ...]: every interpreter (python3, python, this one) x every spelling of
-    release.py (`release_paths` first, then RELEASE_TOOL_PATHS) x each production command
-    (deploy, rollback, abandon), bare and with the arguments a real call carries."""
+    """[argv, ...]: every interpreter spelling (RELEASE_TOOL_INTERPRETERS, then this one)
+    x every spelling of release.py (`release_paths` first, each also in its `~/` form,
+    then RELEASE_TOOL_PATHS) x each production command (deploy, rollback, abandon), bare
+    and with the arguments a real call carries."""
+    home = os.path.expanduser("~")
     paths = [p for p in release_paths if p]
+    paths += ["~" + p[len(home):] for p in paths if p.startswith(home + "/")]
     paths += [p for p in RELEASE_TOOL_PATHS if p not in paths]
+    pys = list(RELEASE_TOOL_INTERPRETERS) + ([(sys.executable,)] if sys.executable else [])
     out = []
-    for py in [p for p in ("python3", "python", sys.executable) if p]:
+    for py in pys:
         for path in paths:
             for cmd in RELEASE_PROD_COMMANDS:
-                out.append([py, path, cmd])
-                out.append([py, path, cmd, "--root", ".", "--approved-by", "human"])
+                out.append(list(py) + [path, cmd])
+                out.append(list(py) + [path, cmd, "--root", ".", "--approved-by", "human"])
     return out
 
 

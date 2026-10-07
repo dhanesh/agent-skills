@@ -7127,6 +7127,10 @@ _RC_GUARDS = (
      "a factory grant allowing `Bash(python3 */release.py *)`: an agent could run "
      "`release.py deploy --approved-by` and forge the yes (R43); deploy refuses "
      "allowlist-exposes-prod", "allowlist", "Read,Bash(python3 */release.py *)"),
+    ("production deploys while a live grant's allowlist reaches release.py through a wrapper",
+     "a factory grant allowing `Bash(uv run *)`: `uv run` runs any command, so an agent "
+     "could run `release.py deploy --approved-by` and forge the yes (R43, hardening 5); "
+     "deploy refuses allowlist-exposes-prod", "allowlist", "Read,Bash(uv run *)"),
     ("production deploys on a yes to a summary only an unattended run showed",
      "`deploy --unattended`, then `deploy --approved-by Dana` with no attended display "
      "between: the yes binds only to a summary a human saw (R42), so it shows the summary "
