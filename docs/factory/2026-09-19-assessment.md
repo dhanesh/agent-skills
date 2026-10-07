@@ -160,7 +160,7 @@ carries unit tests, eval negatives and an A/B row:
   (step 5B) and the business stages (step 6) exist. The top Q3 limit is unchanged: re-entry
   needs the machine on and the user logged in (0.60). Jev picks step 5B, operations intake,
   as the next work (0.59), ahead of hardening release-conductor first (0.36).
-- **Step 5B (ops-intake) built (branch `feat/ops-intake`, before merge):** `ops-intake`
+- **Step 5B (ops-intake) merged (PR #77, merge commit `8133acb`):** `ops-intake`
   brings operational signals back into planning. The agent runs the CLI or MCP tool and
   pipes its output into `intake import`. Intake opens no socket, runs no command and holds
   no token. Each format has one strict adapter: GitHub issues, CI runs and their jobs,
@@ -176,8 +176,26 @@ carries unit tests, eval negatives and an A/B row:
   signal that reaches a linted plan by its intake id and is resolved by a verified release,
   and the hidden-character lint on every spec's check command. Nine guard rows hold it. Each
   guard is mutation-proven, except the no-I/O guard, which is mutation-proven for its
-  subprocess half only. The Jira and Linear adapters wait for real samples. Step 5B is to be re-judged by Jev after merge, run by the controller, against
-  the actual merge commit. No score is claimed here.
+  subprocess half only. The Jira and Linear adapters wait for real samples. Jev re-judged the repo after the merge (AC7, 2026-10-09, against merge commit `8133acb`,
+  `jev-latest`). It used the same questions as before plus an intake question:
+
+  | Question | After release-conductor merge | After ops-intake merge |
+  |---|---|---|
+  | Q1 | partly 0.91 / yes 0.09 | partly 0.89 / yes 0.11 |
+  | Q2 | yes 1.00 | yes 1.00 |
+  | Q3 | yes 0.73 / partly 0.27 | **yes 0.78** / partly 0.22 |
+  | Plan to open PR without the human | 0.84 | 0.83 |
+  | Merged change to verified production with only the human's yes | 0.68 | 0.74 |
+  | Production signal to approved plan without the human writing the request | (not asked) | 0.75 |
+  | Complete factory | 0.04 | 0.04 |
+
+  Q1 stays partly until the business stages (step 6) exist. The top Q3 limit is unchanged:
+  re-entry needs the machine on and the user logged in (0.57). Jev now picks hardening as
+  the next work (0.67), ahead of step 6 (0.29). The hardening items are:
+  - ops-intake pruning CI runs whose jobs were never imported;
+  - the release-conductor allowlist spellings;
+  - the per-class stage yes;
+  - the Jira and Linear adapters, which wait for samples.
 
 Nothing else in this document has been re-measured since.
 
