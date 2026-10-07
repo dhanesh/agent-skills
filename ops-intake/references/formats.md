@@ -20,7 +20,7 @@ only as one-line code spans.
 | `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | any configured name | failing runs, held until their jobs come in |
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | any configured name | an item per failing job |
 | `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
-| `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` |
+| `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` (flag `+low-trust`) |
 
 `jira-mcp`, `jira-acli` and `linear-mcp` are not built. Their output is not documented. Each
 adapter waits for a redacted real sample from the owner. Until then, send Jira and Linear data
@@ -56,14 +56,16 @@ through `intake-signals-jsonl`.
 - Severity comes from fixed label names: `incident` gives 4, `bug` gives 3, anything else 2.
   `github.labels` in the config only tells you which labels to ask `gh` for. It does not change
   the severity.
-- A `CLOSED` issue is recorded as closed. A close never makes a dismissed item recur.
+- A `CLOSED` issue is recorded as closed. A close never makes a dismissed item recur. An issue
+  that is already `CLOSED` the first time intake sees it makes no item (R27).
 
 ### gh-runs-json and gh-run-jobs-json
 
 - `gh-runs-json` keeps a run only when `headBranch` equals `ci.default_branch`, the workflow is
   in `ci.workflows` (when that list is set), `status` is `completed` and `conclusion` is
   `failure`, `timed_out` or `startup_failure`. It gives no item yet, because `gh run list` has
-  no job field.
+  no job field. `databaseId` must be a positive integer of at most 20 digits; a longer one is
+  a problem for that record.
 - Sync then prints, for each failing run whose jobs are not imported:
   `NEXT: gh run view <id> --json jobs | intake import --format gh-run-jobs-json --source <name> --run <id>`.
   `<name>` is the source that imported the run, when it lists `gh-run-jobs-json`. If it does
@@ -72,7 +74,13 @@ through `intake-signals-jsonl`.
   otherwise). Each failing job gives an item: kind `ci`, severity 3,
   `source_id` = `<workflow>/<job>/<branch>`. Repeated failures of one job are one item; each
   run adds evidence (the failed step names) and raises `count`.
+- A failing run whose jobs payload holds no failing job (a `startup_failure` has no jobs)
+  gives one item for the run: kind `ci`, severity 3, `source_id` = `<workflow>/(run)/<branch>`.
 - A complete, well-formed jobs payload marks the run done, and its `NEXT:` line goes away.
+- A jobs import that fails (not JSON, no `jobs` array, or over the per-import cap) counts
+  against the run. At the third failure that import prints one `PROBLEM:` line, and sync stops
+  printing the run's `NEXT:` line. A re-import of the same run attempt keeps the count.
+- Sync forgets a run imported more than 30 days ago. The intake log is not pruned.
 - An unknown `status` or `conclusion` value is a problem for that record only.
 
 ### git-rev-list
@@ -156,11 +164,14 @@ and breaks ties by item id. No model takes part.
 |---|---|---|
 | (none) | `new` | the first signal for the item |
 | `new` | `picked` | `pick --by` |
-| `new` | `dismissed` | `dismiss --by --reason` |
+| `new`, `picked` or `planned` | `dismissed` | `dismiss --by --reason` |
 | `picked` | `planned` | a task-plan from spec-first-planning, made at or after the pick, lists the item in `intake_items` |
 | `planned` | `resolved` | the latest run-result pinning the plan has every task `proven` with a merge commit, and a verified release made at or after it has every merge commit in its imported history |
 | any but `resolved` | `resolved` | `resolve --by` (by hand) |
-| `dismissed` or `resolved` | `new` + `regressed` | the signal recurs |
+| `dismissed` or `resolved` | `new` + `regressed` | a signal seen after the item's close time |
+
+A release resolve sets the close time to the release's time, not the sync's time. If the item
+was seen after the release, it is resolved and then recurs at once (R25).
 
 The newest plan that names the item wins. A revision (`wasRevisionOf`) of the item's plan that
 drops it flags `plan-superseded`.
@@ -176,12 +187,14 @@ drops it flags `plan-superseded`.
 | `show <id>` | the `ITEM:` line, `source:` and one `evidence:` line per entry |
 | `pick <id> --by NAME` | `ITEM:` and `NEXT: run spec-first-planning with <envelope path>` |
 | `dismiss <id> --by NAME --reason TEXT`, `resolve <id> --by NAME` | `ITEM:` |
-| `link <keep> <other>` | `NEXT: merged <other> into <keep>` |
+| `link <keep> <other>` | `NEXT: merged <other> into <keep>`; `STOP:` when `<other>` is `picked` or `planned`. Later signals for `<other>` go to `<keep>` |
 | `status` | `SYNC: <n> items … regressed=<r>` |
 | `formats` | `FORMAT:` lines (needs no config) |
 
 The flag is `<state>`, plus `+regressed`, plus for `picked` and `planned` items one of
-`+needs-plan`, `+needs-history`, `+needs-resolve` or `+plan-superseded`.
+`+needs-plan`, `+needs-history`, `+needs-resolve`, `+needs-release` or `+plan-superseded`,
+plus `+low-trust` for an item with `trust: low`. Titles and evidence print as code spans, with
+hidden characters (ESC, bidi overrides, zero-width spaces) written as `\uXXXX`.
 
 Exits: 0 OK; 3 problem records, a bad envelope, or the intake lock held for 900 s; 2 invalid
 config, unknown format, refused input or an unreadable queue (`STOP:` line, nothing changed).
@@ -194,15 +207,18 @@ config, unknown format, refused input or an unreadable queue (`STOP:` line, noth
 | `.skill-contract/intake/queue.json` | no (git-ignored) | the queue, written by atomic replace |
 | `.skill-contract/intake/intake-log.jsonl` | no | an append-only log of every change |
 | `.skill-contract/intake/items/<id>.json` | no | the snapshot that `pick` pins |
-| `.skill-contract/intake/envelopes/<id>.json` | no | the `intake-item/v1` envelope |
+| `.skill-contract/intake/envelopes/<envelope id>.json` | no | the `intake-item/v1` envelope, named by its predicate id |
+| `.skill-contract/intake/specs/<id>.md` | no | the intake spec spec-first-planning writes, because it quotes the evidence |
 
-The intake directory writes its own `.gitignore`, because evidence can carry customer data.
+The intake directory writes its own `.gitignore` (`*`), because evidence can carry customer
+data. If a `.gitignore` there does not hold a `*` line, intake writes its own again.
 
 ## The planner side (spec-first-planning)
 
-- `intake_request.py <envelope>` prints the start of a spec: the title, `## Intake` with the
-  item id, and `## External evidence (untrusted)`. That section has a note that it is data, one
-  metadata line, and one fenced block per evidence entry. A fence is always longer than any
+- `intake_request.py <envelope>` prints the start of a spec: `# Spec: intake <id>`, `## Intake`
+  with the item id, and `## External evidence (untrusted)`. That section has a note that it is
+  data, one metadata line (the title and the other fields, each a code span), and one fenced
+  block per evidence entry. A fence is always longer than any
   backtick run in the text, so the text cannot close it.
 - `spec_lint.py` fails a `[cmd: …]` that holds a hidden or control character (for example
   bidi controls, zero-width characters, ANSI escapes or NUL). It also fails `## Intake` without

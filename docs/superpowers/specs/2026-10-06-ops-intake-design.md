@@ -72,7 +72,7 @@ Intake accepts a closed list of formats. Each format has one strict adapter with
 |---|---|---|
 | `release-envelope` | release-conductor `release-result/v1` envelopes under `.skill-contract/envelopes/`, read locally by `sync` | built in |
 | `release-status` | the text output of release-conductor's `status` command (`RELEASE: <version> <status>` lines), piped in by the agent | built in |
-| `gh-issues-json` | `gh issue list --json number,title,body,labels,state,updatedAt,url` | built in |
+| `gh-issues-json` | `gh issue list --repo OWNER/REPO --state all --limit 100 --json number,title,body,labels,state,createdAt,updatedAt,url` (erratum, final review: `createdAt` is required, `--state all --limit 100` as built) | built in |
 | `gh-runs-json` | `gh run list --branch <default> --json databaseId,workflowName,headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt` | built in |
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | built in |
 | `jira-mcp` | the Atlassian MCP server's `searchJiraIssuesUsingJql` tool | built only when the owner supplies a real sample |
@@ -89,7 +89,7 @@ Rules:
 - **Default branch:** the `gh` output does not name it, so the `ci` config holds it.
 - **Timestamps:** adapters accept RFC 3339 and the `+0000` offset form (no colon).
 - **No guessed shapes:** the Jira and Linear adapters are written only from a real, redacted sample. The format research (`2026-10-06-ops-intake-formats.md`) found no documented output for these three. The owner supplies each sample from their own MCP server or `acli`. Until then, Jira and Linear data can come in through `intake-signals-jsonl`. The redacted sample becomes the adapter's test fixture. If a sample is missing, that adapter is not built, and its format stays out of the list.
-- **Lower trust:** a signal from `intake-signals-jsonl` shows `trust: low` in `list` and in the envelope. Its provenance is only what the user's transform claims.
+- **Lower trust:** a signal from `intake-signals-jsonl` shows `trust: low` in the envelope and `+low-trust` in the `ITEM:` flag of `list` and `show` (erratum, final review C1: `list` did not show it before). Its provenance is only what the user's transform claims.
 
 **The pipeline:** source output → format adapter → signal → queue → `pick` → `intake-item/v1`. The `intake-item/v1` envelope is the format that spec-first-planning reads. spec-first-planning reads these fields from it: `item_id`, `title`, `kind`, `severity`, `source`, `source_id`, `url`, `trust`, `count`, `first_seen`, `last_seen` and `evidence`.
 
@@ -99,9 +99,10 @@ The tool normalises the signals from every source to one shape:
 
 ```
 {source, source_id, url, kind: release|ci|issue, title, severity: 1-4,
- first_seen, last_seen, count, evidence: [{text, source, source_id, fetched_at}]}
+ first_seen, last_seen, count, evidence: [{text, source, source_id, fetched_at, key}]}
 ```
 
+- **Evidence key** (erratum, final review): each evidence entry carries a `key`, and a repeat with a key already held adds no evidence and no count.
 - **Dedupe:** the key is `(source, source_id)`. A repeat raises `count` and `last_seen`. It also appends any new evidence, up to a cap per item.
 - **What `source_id` is, per source:**
   - **CI:** `workflow/job/branch`, not the run id. So repeated failures of one job are one item. Each failing run becomes evidence and raises `count`.
@@ -130,11 +131,11 @@ The queue is `.skill-contract/intake/queue.json`. It is git-ignored, and the too
 
 | From | To | When |
 |---|---|---|
-| (none) | `new` | `sync` sees a signal for the first time |
+| (none) | `new` | `import` (or `sync`, for a rolled-back release envelope) sees a signal for the first time; an issue already closed then makes no item (R27) |
 | `new` | `picked` | `pick` |
-| `new` | `dismissed` | `dismiss` (needs a reason) |
+| `new`, `picked` or `planned` | `dismissed` | `dismiss` (needs a reason; final review B6) |
 | `picked` | `planned` | a `task-plan/v1` envelope names the item id |
-| `planned` | `resolved` | a verified `release-result/v1` commit contains every proven task's merge commit (1.6) |
+| `planned` | `resolved` | a verified `release-result/v1` commit contains every proven task's merge commit (1.6); the resolution time is the release's time, and an item seen after it recurs at once (R25) |
 | any | `resolved` | `resolve` by hand (logged with the name) |
 | `dismissed` or `resolved` | `new` + `regressed` flag | the signal *recurs* after the dismissal or resolution time (defined below) |
 
@@ -158,7 +159,7 @@ The loop closes without any change to factory-conductor or release-conductor. Ea
 2. It finds the `run-result/v1` that pins that plan. It records the `merge_commit` of each proven task in that run. These commits come from the envelope, not from the live run branch. That branch is often deleted after merge.
 3. It marks the item `resolved` when a `release-result/v1` with outcome `verified` has a commit whose history contains every one of those commits. Intake runs no command, so the agent pipes `git rev-list <release commit>` into `intake import --format git-rev-list`.
 
-A squash or rebase merge breaks that ancestry. The item then stays `planned`, and `list` says so. The human closes the item with `resolve`. v1 accepts this limit and does not guess.
+A squash or rebase merge breaks that ancestry. The item then stays `planned`, and `list --all` says so (`planned+needs-resolve`; erratum, final review: `list` without `--all` shows only `new` items). A proven run with no verified release after it shows `planned+needs-release`. The human closes the item with `resolve`. v1 accepts this limit and does not guess.
 
 `docs/skill-contract/SPEC.md` registers the `intake-item/v1` kind.
 
@@ -172,11 +173,14 @@ Everything the tool reads from a source is untrusted. This includes issue bodies
      - one line, code-spanned;
      - no markdown headings;
      - no live `@mentions`;
-     - no issue-closing keywords.
+     - no issue-closing keywords;
+     - hidden characters (ESC, bidi overrides, zero-width spaces) written as `\uXXXX` (final review A4).
+   - The title is untrusted too. The spec's H1 is `# Spec: intake <item id>`, and the title is a code span inside the evidence section, where the copy tripwire sees it. So the task-plan title carries no raw untrusted text (final review A2).
+   - **Customer evidence is never committed by default** (ruling R24). spec-first-planning writes an intake spec to the git-ignored `.skill-contract/intake/specs/<item id>.md`. The final review proved that the plan, the grant and a factory-conductor run work from that path. spec-first-planning tells the human before it commits any file that quotes evidence.
 2. **Nothing executable crosses the boundary.**
    - spec-first-planning MUST NOT lift a check command, a path to execute, a URL to fetch, or an install step from evidence. Otherwise an untrusted issue would become code that factory-conductor runs unattended after the human approves the plan.
    - The agent writes every acceptance check from the repo.
-   - spec-first-planning warns when any check command contains text copied from the external-evidence block. The warning prints next to that command's `CHECK_COMMAND:` line and names the copied text. The lint still passes, because bug reports often name the failing test file, and an honest check reuses it (owner decision, Jev 0.95 over a hard failure). The test is an exact substring of at least 12 characters.
+   - spec-first-planning warns when any check command contains text copied from the external-evidence block. The warning prints next to that command's `CHECK_COMMAND:` line and names the copied text. The lint still passes, because bug reports often name the failing test file, and an honest check reuses it (owner decision, Jev 0.95 over a hard failure). The test is a shared substring of at least 12 characters, after NFKC normalisation, case folding and whitespace folding on both sides (erratum, final review: stronger than an exact match).
    - This check is a tripwire, not the boundary. The planning agent reads the evidence. So injected text can make it write an attacker's command in its own words. No substring check catches that.
    - **The real boundary is the human's approval.** For a plan that comes from intake, the approval step lists every check command verbatim. The human approves those commands and knows that the request came from untrusted text.
 3. **The human's approval is informed.**
@@ -213,9 +217,9 @@ When the human asks something like "what broke?":
 - **A missing source:** if the agent cannot run a CLI or reach an MCP server, it reports that source as skipped to the human. The queue keeps that source's last items.
 - **Exit codes:**
   - 0 when the command succeeds;
-  - 3 when an import had problem records;
-  - 2 for an invalid config, an unknown format or refused input.
-- **Machine lines:** `IMPORT:`, `SYNC:`, `ITEM: <id> <state> <rank> <title>`, `NEXT:`, `STOP:`.
+  - 3 when an import had problem records, a sync met a bad envelope, or the intake lock was held (erratum, final review);
+  - 2 for an invalid config, an unknown format, refused input or an unreadable queue.
+- **Machine lines:** `IMPORT:`, `SYNC:`, `ITEM: <id> <flag> <rank> <title>`, `NEXT:`, `STOP:`, `PROBLEM:`. The flag is the state plus `+regressed`, a wait such as `+needs-resolve`, and `+low-trust` (erratum, final review).
 
 ## 4. Testing, gates, acceptance
 
@@ -229,7 +233,7 @@ Tests are offline and stdlib-only.
   - a file with one malformed record (the others still import);
   - an unknown format (refused, exit 2).
   The `gh` fixtures come from documented `gh --json` output. The `jira-mcp`, `jira-acli` and `linear-mcp` fixtures are the owner's redacted real samples.
-- **Lower trust:** an `intake-signals-jsonl` signal shows `trust: low` in `list` and in the envelope.
+- **Lower trust:** an `intake-signals-jsonl` signal shows `+low-trust` in `list` and `trust: low` in the envelope.
 - **Release:** the tests use real `release-result/v1` envelopes. The tests build them with the vendored checker.
 - **Hostile text:** fixtures with:
   - a markdown heading;
@@ -271,7 +275,7 @@ The negatives:
 
 | AC | Done when |
 |---|---|
-| AC1 | Every supported format imports through its adapter from a fixture. The Jira and Linear fixtures are redacted real samples. An unknown format is refused. |
+| AC1 | Every supported format imports through its adapter from a fixture. An unknown format is refused. The Jira and Linear adapters are deferred until the owner supplies redacted real samples (Task 7); until then that data comes in through `intake-signals-jsonl` (erratum, final review). |
 | AC2 | The trust boundary holds in three places: intake keeps external text as quoted evidence; a check command copied from it carries a warning next to its line; the approval step lists every check command verbatim. |
 | AC3 | The loop closes: a picked item becomes a plan that names it, and a verified release containing that plan's run marks it resolved; squash merges are reported as needing a manual `resolve`. |
 | AC4 | Intake opens no socket and runs no subprocess, proven by a test that makes both raise. The config holds no command, host or credential name. |
