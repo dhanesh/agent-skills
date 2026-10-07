@@ -274,7 +274,7 @@ class JobsImportFailureTests(unittest.TestCase):
         path = os.path.join(self.root, IN.INTAKE_DIR, "intake-log.jsonl")
         return [e for e in map(json.loads, open(path)) if e["event"] == name]
 
-    def old_run_sync(self, rid=7):
+    def old_run_sync(self):
         return cmd(self.root, "sync", now="2026-11-20T00:00:00Z")
 
     def test_old_run_without_jobs_is_kept_with_one_problem_and_its_next(self):

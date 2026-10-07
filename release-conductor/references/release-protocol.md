@@ -40,7 +40,7 @@ verifier" (`NEXT: dispatch-verifier`) or "staged" (`STAGE: <v> pass`).
 | `RELEASE: <v> abandoned (was <status>)` and `  left for the human: …` | abandon | Ended with the human's yes; the remote branch, the PR and any pushed tag are left for the human. A `  note:` line says production is the human's to handle (from `deployed`, `prod_failed` or `outcome_unknown`); `  grant: <id> already revoked` when the kill switch revoked it first. |
 | `RELEASE: archived the abandoned release <v> at <dir>` | prep | A new prep of an abandoned version keeps the old record beside the new one. |
 | `GATE: <action> ASK gate-ask answered by the human's yes: <name> (CLAIMED)` | stage --approved-by | The human answered the declined `deploy_staging` or `push_tag` that stage asked about (R41); logged as `gate_yes`. |
-| `GATE: <action> ASK gate-ask: the yes given answers nothing here (…); ask again` | stage --approved-by | The yes was not for this class or commit; stage stops and asks about `<action>`. |
+| `GATE: <action> ASK gate-ask: the yes given was already used or was not for <action>; ask the human again` | stage --approved-by | The yes was not for this class or commit; stage stops and asks about `<action>`. |
 | `RESULT: <path>` | verify-prod, rollback | The `release-result/v1` envelope, repo-relative. |
 | `GATE: <action> COVERED` / `GATE: <action> <status> <reason>` | prep, stage, deploy, rollback | A `check-grant` answer. `deploy` and `rollback` always print `GATE: deploy ASK …`. |
 | `STOP: <reason>[: <detail>]` | any | The step stopped (exit 3). |
@@ -133,7 +133,8 @@ Then, each step saving its progress so a re-run resumes from the first unfinishe
 6. runs each `staging_checks` argv;
 7. the tag: when the CI config at the commit may run on a tag (or git cannot say), holds it
    (`tag_deploys`); otherwise, gated `push_tag`, pushes `<commit>:refs/tags/v<v>` (non-forced). A
-   failed push stops (exit 3) without failing the stage; a re-run retries it.
+   failed push stops (exit 3) without failing the stage. The yes was used before the push,
+   so the re-run needs a fresh yes from the human.
 
 Every gate in stage names the stage worktree, and first checks its HEAD is still the release
 commit (`head-moved`, exit 3).
@@ -148,7 +149,7 @@ the release commit, as `stage.asked`. `stage --approved-by NAME` answers exactly
 other declined class, stage stops, records that class and asks again (exit 3). A yes given
 when stage asked nothing, or asked about another class or commit, answers nothing. The run
 goes on as without it, and the declined class stops and asks. Stage prints `GATE: <class>
-ASK gate-ask: the yes given answers nothing here …`. It does not refuse: the stop records
+ASK gate-ask: the yes given was already used or was not for <action> …`. It does not refuse: the stop records
 the ask, so the human's next yes answers it. Because
 `check-grant` answers `gate-ask` before its later floors, stage then judges those itself, on
 the stage worktree: `ci-tag` for `push_tag`, `ci-config` for both; either still stops. Every
@@ -253,7 +254,7 @@ abandoned directory as `<v>.abandoned-<UTC time>`.
 | `head-moved` | stage | unchanged |
 | `evidence-reject <reason> [<feature>]` | stage --evidence | `staging_verify` |
 | `build-failed`, `artifact-missing`, `build-tree-unreadable`, `evidence-failed`, `build-tree-changed`, `artifact-altered`, `deploy-failed`, `timeout`, `check-failed` | stage | `stage_failed` (grant revoked) |
-| `tag-push-failed` | stage | unchanged; a re-run retries |
+| `tag-push-failed` | stage | unchanged; the yes is used, so a re-run needs a fresh yes |
 | `gate <action> answered ASK (gate-ask)` with `NEXT: ask the human to approve <action>, then re-run stage --approved-by <name>` | stage | unchanged, `stage.asked` set; the human's yes resumes |
 | `waiting-human` | deploy, rollback | `awaiting_deploy` / unchanged |
 | `deploy-failed` | deploy | `prod_failed` |

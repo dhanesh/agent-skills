@@ -633,11 +633,11 @@ class StagingTests(StageBase):
         rc, out, _ = self.stage("--approved-by", "Dana Human")
         self.assertEqual(rc, 3, out)
         self.assertEqual(self.lines(self.probe_file)[-1], "1.2.0")  # staging deployed
+        self.assertIsNone(self.tag())
+        self.assertEqual(self.yeses(), ["deploy_staging"])
         self.assertIn("GATE: push_tag ASK gate-ask", out)
         self.assertIn("NEXT: ask the human to approve push_tag, then re-run stage "
                       "--approved-by <name>", out.splitlines())
-        self.assertIsNone(self.tag())
-        self.assertEqual(self.yeses(), ["deploy_staging"])
         self.assertEqual(self.rel().stage["asked"]["class"], "push_tag")
         rc, out, err = self.stage("--approved-by", "Dana Human")
         self.assertEqual(rc, 0, out + err)
@@ -649,7 +649,8 @@ class StagingTests(StageBase):
         self.go(policy={"deploy_staging": "ask"})
         self.assertEqual(self.evidence()[0], 3)
         rel = self.rel()
-        rel.stage["asked"]["commit"] = "0" * 40
+        rel.stage["asked"] = {"class": "deploy_staging", "commit": "0" * 40,
+                              "at": rel.stage["asked"]["at"]}
         rel.save()
         rc, out, _ = self.stage("--approved-by", "Dana Human")
         self.assertEqual(rc, 3, out)
@@ -663,7 +664,7 @@ class StagingTests(StageBase):
                                 "--approved-by", "Dana Human")
         self.assertEqual(rc, 3, out)
         self.assertIn("GATE: push_tag ASK gate-ask", out)
-        self.assertIn("the yes given answers nothing", out)
+        self.assertIn("the yes given was already used or was not for push_tag", out)
         self.assertIsNone(self.tag())
         self.assertEqual(self.yeses(), [])
         self.assertEqual(self.rel().stage["asked"]["class"], "push_tag")

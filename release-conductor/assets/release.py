@@ -1721,8 +1721,9 @@ def _stage_gate(root, rel, action, wt, commit, yes=None):
             # Hardening 5: one yes, one step. A yes answers only the class stage asked
             # the human about, for this commit; any other declined class stops and asks.
             if yes:
-                print("GATE: %s ASK gate-ask: the yes given answers nothing here (the human "
-                      "was not asked about %s yet); ask again" % (action, action))
+                print("GATE: %s ASK gate-ask: the yes given was already used or was not "
+                      "for %s; ask the human again" % (action, action))
+            # "at" is informational; the grant's expiry is the only time limit.
             rel.stage["asked"] = {"class": action, "commit": commit, "at": _rfc3339(_now())}
             rel.save()
             return _gate_stop(rel, action, rep, NEXT_STAGE_YES % action)

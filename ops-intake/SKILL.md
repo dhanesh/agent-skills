@@ -237,9 +237,9 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
 - **Old runs are forgotten; the log is not.** Sync drops a CI run imported more than 30 days
   ago, but only when its jobs came in or its jobs import failed three times. An old run with
   no jobs stays, with one `PROBLEM:` line per sync, until the jobs come in or the human runs
-  `drop-run`. Each drop logs a `prune` event. A run whose jobs import fails three times is reported once and not asked for again,
-  so a run deleted on GitHub is reported, not retried for ever. The intake log
-  (`intake-log.jsonl`) is not pruned in this version.
+  `drop-run`. Each drop logs a `prune` event. A run whose jobs import fails three times is
+  reported once and not asked for again, so a run deleted on GitHub is not retried for ever.
+  The intake log (`intake-log.jsonl`) is not pruned in this version.
 - **Customer evidence stays local, unless someone commits it.** The queue, the item
   snapshots, the envelopes and the intake specs live under the git-ignored
   `.skill-contract/intake/`. spec-first-planning tells the human before it commits any file
