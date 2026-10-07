@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""agent-hook: record an agent's own lifecycle events as its pane status.
+
+Claude Code runs this from its hooks (installed into ~/.claude/settings.json by
+install.sh) with the event JSON on stdin and $TMUX_PANE in the environment:
+
+  agent-hook claude                         < hook payload JSON
+  agent-hook install-claude <settings.json> [--remove]   (used by install.sh)
+
+The status lands in panes/<id>.hook, which agent-status-scan prefers over
+screen-scraping. It MUST stay silent and always exit 0: hook stdout can be fed
+back to the model, and a failing hook would interrupt the user's session.
+"""
+import json
+import os
+import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+import agent_hooks as ah  # noqa: E402
+
+ROOT = os.environ.get("AGENT_TMUX_ROOT", os.path.expanduser("~/.tmux/agent-panes"))
+PANE_DIR = os.path.join(ROOT, "panes")
+
+
+def on_claude_event(payload):
+    pane = os.environ.get("TMUX_PANE", "")
+    if not pane:
+        return  # not running inside tmux
+    status = ah.claude_event_status(payload)
+    if status is None:
+        return
+    if status == ah.DEREGISTER:
+        ah.deregister_pane(PANE_DIR, pane)
+        return
+    if not os.path.exists(ah.pane_file(PANE_DIR, pane)):
+        # First sight of this pane (alias launch, resumed pane): track it now.
+        if not ah.register_pane(PANE_DIR, pane, "claude", agent="claude", status=status):
+            return
+    path = ah.hook_file(PANE_DIR, pane)
+    prev = None
+    try:
+        prev = json.load(open(path)).get("status")
+    except Exception:
+        pass
+    ah.write_json_atomic(path, {
+        "status": status,
+        "event": payload.get("hook_event_name", ""),
+        "at": ah.now_iso(),
+        "session_id": payload.get("session_id", ""),
+    })
+    if status != prev:
+        # Refresh state.json now so jumps and the status bar see the change
+        # without waiting for the next status-interval tick.
+        scan = os.path.join(SCRIPT_DIR, "agent-status-scan")
+        if os.access(scan, os.X_OK):
+            subprocess.Popen([scan], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def install_claude(path, remove):
+    try:
+        with open(path) as fh:
+            text = fh.read()
+        settings = json.loads(text) if text.strip() else {}
+    except FileNotFoundError:
+        settings = {}
+    except (OSError, ValueError) as exc:
+        print(f"agent-hook: {path} is not readable JSON ({exc}); left unchanged", file=sys.stderr)
+        return 1
+    merged = ah.merge_claude_settings(settings, SCRIPT_DIR, enable=not remove)
+    if merged == settings and os.path.exists(path):
+        return 0
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Serialise fully before opening the file, then write through (not
+    # os.replace) so a symlinked settings.json stays a link.
+    data = json.dumps(merged, indent=2) + "\n"
+    with open(path, "w") as fh:
+        fh.write(data)
+    return 0
+
+
+def main(argv):
+    if len(argv) >= 3 and argv[1] == "install-claude":
+        return install_claude(argv[2], "--remove" in argv[3:])
+    if len(argv) >= 2 and argv[1] == "claude":
+        try:
+            payload = json.load(sys.stdin)
+            if isinstance(payload, dict):
+                on_claude_event(payload)
+        except Exception:
+            pass  # never break the agent's session over status bookkeeping
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,45 +1,59 @@
 #!/usr/bin/env bash
-cat <<'EOF'
-TMUX AGENT COCKPIT CHEATSHEET
+# The user guide: `prefix a h` shows it in a popup; invoking the skill with
+# `help` prints it. Human keys first, the agent-facing API last.
+cat <<'GUIDE'
+TMUX AGENT COCKPIT — USER GUIDE                      (prefix = your tmux prefix, e.g. C-b)
 
-Agent state / Herdr-like routing
-  agent-pane [--agent k] [--cwd d] <name> <cmd>   launch/register an agent pane
-  agent-status-scan                 refresh pane status
-  agent-status-summary              compact status line
-  agent-dashboard                   full status + key help
-  agent-jump blocked|error|working|idle|done
-  agent-explain <name|pane>         why did this pane classify that way?
+SESSIONS — moving around
+  prefix s          pick a session from a list (arrows + Enter)
+  prefix a t        tree of sessions → windows → panes, zoomed
+  prefix ( / )      previous / next session
+  prefix L          back to the last session you were in
+  prefix d          detach (sessions keep running)
+  From a shell (inside or outside tmux — never nests):
+    tm              session for this directory (create or switch)
+    tp [name]       fzf picker, attached sessions first; or go straight to <name>
+    tn <name>       session with an explicit name
+    tv [file]       directory session that opens nvim
+    tw <branch>     new git worktree ../<repo>-<branch> + its session
+    twd [-f]        remove this worktree + its session (-f discards changes)
+    tms [name]      sessions on $TMS_HOST over SSH
 
-Agent-to-agent coordination (Herdr socket-API equivalents)
-  agent-list [--json]               registry + statuses, machine-readable
-  agent-read <name> [--lines N] [--source recent]   read another pane
-  agent-send <name> <text>          type into a pane (no Enter)
-  agent-send <name> --keys Enter    press keys (Enter, C-c, Escape...)
-  agent-run <name> <command>        send command + Enter atomically
-  agent-wait <name> --status done   block until status (or --match <regex>)
+AGENTS — just run them
+  Run claude / codex / gemini / … (or an alias like ccl) in any pane; it is
+  tracked automatically. Claude Code reports its own state through hooks, so
+  working / blocked / done are exact; other agents are read from the screen.
 
-Persistence / isolation
-  agent-resume [--dry-run]          relaunch dead agents after server restart
-  agent-resume <name> --session-id <id>   native resume (claude --resume ...)
-  agent-worktree create <branch> --window  isolated git worktree + window
-  agent-worktree open|remove|list
+  prefix a b        next BLOCKED agent (waiting on you: approval, question)
+  prefix a e        next ERROR agent (crashed / non-zero exit)
+  prefix a w        next WORKING agent
+  prefix a i        next IDLE agent (also finished ones you have not looked at)
+  prefix a f        next FINISHED agent
+                    Press the same key again to cycle to the next one.
+  prefix a d        dashboard: every agent, its state and why
+  prefix a m        menu: new agent pane, worktree, resume, splits
+  prefix a s        rescan statuses now
+  prefix a h        this guide
 
-Cockpit keys — one prefix, then a key (prefix a puts you in the agent table)
-  prefix a d      dashboard popup
-  prefix a m      command menu (jump/worktree/resume/split/kill)
-  prefix a s      refresh scan
-  prefix a t      choose session/window/pane tree
-  prefix a b      jump to a blocked agent
-  prefix a e      jump to an error (crashed) agent
-  prefix a w      jump to a working agent
-  prefix a i      jump to an idle agent
-  prefix a f      jump to a finished (done) agent
+  Status bar: add #(…/scripts/agent-status-summary) to your status-right.
+  Your own keys (panes, splits, zoom, copy mode) are untouched.
 
-Your own tmux keys are untouched — the cockpit does not rebind pane navigation,
-splits, zoom, copy mode, or the status-bar layout. Whatever you already use for
-those still works.
-
-Notifications (set in the environment tmux server sees)
+SETTINGS (export before starting tmux, or rerun the installer)
   AGENT_NOTIFY=tmux|system|off      toast channel (default tmux)
-  AGENT_NOTIFY_SOUND=on|off         audio cue; blocked/error beep twice
-EOF
+  AGENT_NOTIFY_SOUND=on|off         sound; blocked/error beep twice
+  AGENT_SHELL_FUNCS=off|on          installer: drop/restore tm, tp, …
+  AGENT_CLAUDE_HOOKS=off|on         installer: drop/restore Claude status hooks
+  AGENT_ADOPT=off                   stop auto-adopting agents found by process
+
+FOR AGENTS — coordination API (scripts/, invoked by path)
+  agent-list [--json]               registry + statuses
+  agent-read <name> [--lines N]     read another pane
+  agent-send <name> <text> | --keys Enter    type (no Enter) / press keys
+  agent-run <name> <command>        send command + Enter
+  agent-wait <name> --status done | --match <regex>
+  agent-jump <state>                focus the next pane in a state
+  agent-explain <name|pane>         why a pane has its status
+  agent-pane [--agent k] [--cwd d] <name> <cmd>   scripted launch
+  agent-worktree create|open|remove|list <branch>
+  agent-resume [--dry-run] [<name> --session-id <id>]
+GUIDE

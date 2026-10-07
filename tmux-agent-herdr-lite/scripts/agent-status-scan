@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 pane_dir, state_path, idle_s, mod_dir = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 sys.path.insert(0, mod_dir)
 from agent_classify import classify_explain, infer_agent, load_manifests  # noqa: E402  (path set above)
+import agent_hooks  # noqa: E402
 
 MANIFESTS = load_manifests(os.path.join(os.path.dirname(pane_dir), 'detect'))
 
@@ -67,6 +68,37 @@ if not TMUX_OK:
     raise SystemExit(0)
 FOCUSED = focused_panes()
 
+def is_live_record(pane_id):
+    try:
+        meta = json.load(open(agent_hooks.pane_file(pane_dir, pane_id)))
+    except Exception:
+        return False
+    return not meta.get('dead')
+
+# Adopt agents the shell hook never saw: alias launches (`ccl` -> claude),
+# panes restored by tmux-resurrect, agents started before install. Each agent
+# process carries TMUX_PANE, which names its pane exactly.
+if os.environ.get('AGENT_ADOPT', 'on') != 'off':
+    try:
+        for pane_id, (args, agent) in agent_hooks.discover_agent_panes(
+                TITLES, os.path.join(os.path.dirname(pane_dir), 'adopt-cache.json')).items():
+            if not is_live_record(pane_id):
+                agent_hooks.register_pane(pane_dir, pane_id, args, agent=agent, status='idle')
+    except Exception as exc:
+        print(f'agent-status-scan: adoption skipped ({exc})', file=sys.stderr)
+
+def hook_status(meta):
+    # Status the agent itself reported via agent-hook, if it belongs to this
+    # registration (a stale file from an earlier agent in a reused pane id is
+    # older than the record and ignored).
+    try:
+        hook = json.load(open(agent_hooks.hook_file(pane_dir, meta.get('pane_id', ''))))
+    except Exception:
+        return None, None
+    if hook.get('at', '') < meta.get('created_at', ''):
+        return None, None
+    return hook.get('status'), hook.get('event', '')
+
 # A record whose pane is gone is what agent-resume exists to relaunch, so it is
 # marked dead, not deleted — deletion is unrecoverable. The graveyard is bounded
 # by age so it cannot grow without limit.
@@ -90,6 +122,10 @@ def status_for(text, title, meta):
     status, reason = classify_explain(text, changed, idle_elapsed, idle_s,
                                       meta.get('status', 'working'),
                                       agent=agent, title=title, manifests=MANIFESTS)
+    hstatus, hevent = hook_status(meta)
+    if hstatus:
+        # The agent's own report outranks every screen heuristic.
+        status, reason = hstatus, f'hook {hevent}'
     meta['reason'] = reason
     # Herdr semantics: 'done' persists until the human views the pane, then it
     # becomes 'idle'. Viewing is "pane focused in an attached client"; the
@@ -142,8 +178,9 @@ for fn in sorted(os.listdir(pane_dir)):
             except OSError:
                 pass
         elif now_ts - died > GRAVEYARD_TTL:
-            try: os.remove(path)
-            except OSError: pass
+            for stale in (path, agent_hooks.hook_file(pane_dir, pane_id or '')):
+                try: os.remove(stale)
+                except OSError: pass
         continue
     if meta.pop('dead', None):
         # tmux reissued this pane id to a live pane — the record is current again.

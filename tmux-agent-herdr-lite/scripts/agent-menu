@@ -25,6 +25,7 @@ tmux display-menu -T "Agent Cockpit" \
   "Refresh status" r "run-shell '$BIN/agent-status-scan'" \
   "Dashboard" ? "display-popup -E -w 90% -h 80% '$BIN/agent-dashboard; printf \"\\nPress Enter...\"; read'" \
   "Choose tree" s "choose-tree -Zw" \
+  "User guide" h "display-popup -E -w 90% -h 90% '$BIN/agent-cheatsheet | less -R'" \
   "New worktree window" t "command-prompt -p 'worktree branch' \"run-shell 'cd #{pane_current_path} && ($BIN/agent-worktree create %% --window || $BIN/agent-worktree open %%)'\"" \
   "Resume dead agents" u "run-shell '$BIN/agent-resume'" \
   "New window" n "command-prompt -p 'window name' 'new-window -n %%'" \

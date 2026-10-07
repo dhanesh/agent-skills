@@ -27,7 +27,7 @@ except Exception as e:
     sys.exit(1)
 panes=data.get("items", []) if isinstance(data,dict) else data
 if not panes:
-    print("No registered panes. Start panes with: agent-pane <name> <command>")
+    print("No agents tracked yet. Run claude/codex/… in any pane; prefix a h for the guide.")
     sys.exit(0)
 for p in sorted(panes, key=lambda x:(order.get(x.get('status','unknown'),9), x.get('name',''))):
     status=p.get('status','unknown')
@@ -46,6 +46,7 @@ print("  prefix a w  jump working         prefix a i    jump idle")
 print("  prefix a f  jump finished (done)")
 print("  prefix a d  this dashboard       prefix a m    action menu")
 print("  prefix a s  refresh scan         prefix a t    choose session/tree")
+print("  prefix a h  user guide           (repeat a jump key to cycle)")
 print("  (pane navigation, splits, zoom and copy mode stay your own bindings)")
 print("\nCOORDINATION  agent-list --json | agent-read | agent-send | agent-run")
 print("              agent-wait --status/--match | agent-explain | agent-resume")

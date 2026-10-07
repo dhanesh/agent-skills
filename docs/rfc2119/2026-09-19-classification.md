@@ -173,11 +173,11 @@ Skills appear in rewrite order.
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 16 | **Locating this skill's helpers (do this first).** The steps below run bundled s… | MUST (0.76, 0.78) | MUST | the SKILL.md \`$SKILL_DIR\` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked; PP-5 reasons 2026-09-25: the shared preamble's "and MUST NOT receive a relative form" (Jev plain 0.61, kept for the old PP-5) is dropped; the MUST keeps the rule, and the sentence before it already gives the reason (a relative path will not resolve from the target repo), so none is repeated; Jev on the decision: drop_clause 0.54 vs keep_with_reason 0.46, P(dropping loses a rule) = 0.28. Level unchanged |
-| c2 | 47 | **The human never runs a launcher.** The installed zsh hook (\`agent-shell-hook.zs… | plain (0.46, 0.48) | plain |  |
+| c2 | 49 | **The human never runs a launcher.** Three layers find agents, each covering the … | plain (0.46, 0.48) | plain |  |
 | c3 | 51 | **Humans use tmux only.** They just run their agent (\`claude\`, \`codex\`, …) in an… | plain (0.28, 0.38) | SHOULD | harm 0.38 <0.5 caps below MUST; a genuine behavioural default keeping the human surface pure tmux (per the skill's own description promise), with an alternative named in the same sentence |
 | c4 | 56 | The cockpit deliberately claims exactly **one** prefix key (\`prefix a\`) and puts … | MUST (0.32, 0.54) | plain | describes the key-table design's non-collision guarantee, not a directive to the agent |
 | c5 | 105 | 5. Verify real outcomes separately — a \`done\` state means the pane looks finish… | plain (0.21, 0.29) | plain | Recommended agent workflow step 5; out of scope per the spec's "workflow steps stay plain imperatives" |
-| c6 | 119 | Detection is two-layered, ported from Herdr's manifests: panes with a known age… | plain (0.51, 0.55) | plain |  |
+| c6 | 147 | Everything else falls back to screen detection, which is two-layered, ported fro… | plain (0.51, 0.55) | plain |  |
 
 ## security-posture-audit (10 candidates · 3 MUST · 0 SHOULD · 0 MAY · 7 plain · 5 departures)
 
