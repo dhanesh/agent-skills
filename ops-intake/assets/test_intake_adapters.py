@@ -106,7 +106,8 @@ class HardeningTests(unittest.TestCase):
             AD.MAX_SIGNALS = old
         self.assertEqual(rc, 3)
         self.assertIn("ok 2 problems 1", out)
-        self.assertEqual(len(IN.Queue.load(root).items), 2)
+        # The cap kept issues 7 and 8; 8 was closed when first seen, so no item (R27).
+        self.assertEqual(list(IN.Queue.load(root).items), [IN.item_id("github", "7")])
 
 
 class GhIssuesTests(unittest.TestCase):
@@ -250,7 +251,9 @@ class ImportCommandTests(unittest.TestCase):
         self.assertEqual((it["state"], it["count"], it["severity"], it["kind"], it["trust"]),
                          ("new", 1, 3, "issue", "normal"))
         self.assertEqual(it["url"], "https://github.com/o/r/issues/7")
-        self.assertTrue(q.items[IN.item_id("github", "8")]["closed"])
+        # R27: issue 8 was already CLOSED when intake first saw it, so it makes no item.
+        self.assertNotIn(IN.item_id("github", "8"), q.items)
+        self.assertEqual(len(q.items), 2)
 
     def test_problems_exit_3_and_other_records_import(self):
         root = repo(config=CFG)
@@ -291,7 +294,7 @@ class ImportCommandTests(unittest.TestCase):
         finally:
             sys.stdin = old
         self.assertEqual(rc, 0)
-        self.assertEqual(len(IN.Queue.load(root).items), 3)
+        self.assertEqual(len(IN.Queue.load(root).items), 2)  # closed issue 8: no item (R27)
 
     def test_missing_file_exits_2(self):
         root = repo(config=CFG)

@@ -643,7 +643,7 @@ class LoopTests(unittest.TestCase):
         release_env(self.root, "1.9.0", self.r, "verified", now="2026-10-07T12:00:00Z")
         rc, out = intake(self.root, "sync")
         self.assertNotIn("NEXT: git rev-list", out)
-        self.assertEqual(self.flag(), "planned")
+        self.assertEqual(self.flag(), "planned+needs-release")  # B8: said, not silent
 
     def test_sha256_release_commit_needs_resolve_not_an_endless_next(self):
         self.plan()

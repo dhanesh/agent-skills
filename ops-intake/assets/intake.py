@@ -19,6 +19,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 
 import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
@@ -58,13 +59,33 @@ def one_line(text):
     return " ".join(str(text if text is not None else "").split())
 
 
+# Characters that can hide or disguise text on a terminal or a rendered page: controls
+# (Cc: NUL, ESC, BEL), format characters (Cf: bidi overrides, zero-width spaces), line and
+# paragraph separators, private-use and surrogate code points, and every space separator
+# but U+0020. Copied from spec-first-planning's spec_lint.py (skills cannot import each
+# other).
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+
+
+def is_hidden_char(ch):
+    """True when ch can hide or disguise what a line shows."""
+    cat = unicodedata.category(ch)
+    return cat in _HIDDEN_CATEGORIES or (cat == "Zs" and ch != " ")
+
+
+def visible(text):
+    """text with every hidden character written as \\uXXXX."""
+    return "".join("\\u%04x" % ord(ch) if is_hidden_char(ch) else ch for ch in text)
+
+
 def code(text):
     """Untrusted text as one inline code span. Copied from release-conductor's
     assets/release.py `code()`, which copies factory-conductor's conductor.py `code()`:
     newlines collapsed, and a backtick fence longer than any backtick run inside, so it
     cannot open a heading, list or link, and GitHub does not turn @mentions or closing
-    keywords in it into actions."""
-    s = one_line(text)
+    keywords in it into actions. Hidden characters (ESC, bidi overrides, zero-width
+    spaces) are written as \\uXXXX, so they cannot drive a terminal or reorder the text."""
+    s = visible(one_line(text))
     runs = [len(m) for m in re.findall(r"`+", s)]
     fence = "`" * (max(runs) + 1 if runs else 1)
     pad = " " if s.startswith("`") or s.endswith("`") or not s else ""
@@ -95,7 +116,14 @@ def _ensure_dir(root):
     d = _intake_dir(root)
     os.makedirs(d, exist_ok=True)
     gi = os.path.join(d, ".gitignore")
-    if not os.path.exists(gi):
+    try:
+        with open(gi, encoding="utf-8") as f:
+            ok = not os.path.islink(gi) and "*" in [l.strip() for l in f.read().splitlines()]
+    except (OSError, ValueError):
+        ok = False
+    if not ok:  # missing, a symlink, or not ignoring everything: write our own
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(gi)
         with open(gi, "w", encoding="utf-8") as f:
             f.write("# written by ops-intake: queue state is local, never committed\n*\n")
     return d
@@ -250,13 +278,13 @@ def _now():
 
 
 _MOVES = {("new", "picked"), ("new", "dismissed"), ("picked", "planned"),
-          ("planned", "resolved")}
+          ("picked", "dismissed"), ("planned", "dismissed"), ("planned", "resolved")}
 
 
 def transition(item, to, by=None, reason=None, now=None):
     """Move an item to state `to`, or raise ValueError. Rules (spec 1.5): new->picked,
-    new->dismissed (needs a reason), picked->planned, planned->resolved, any->resolved by
-    hand, dismissed/resolved->new with the regressed flag on recurrence."""
+    new/picked/planned->dismissed (needs a reason), picked->planned, planned->resolved,
+    any->resolved by hand, dismissed/resolved->new with the regressed flag on recurrence."""
     if to not in STATES:
         raise ValueError("unknown state %s" % to)
     frm = item.get("state")
@@ -300,6 +328,7 @@ class QueueError(Exception):
 
 
 _RUN_RE = re.compile(r"^[0-9]{1,20}\Z")
+_ITEM_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}\Z")
 MAX_HISTORY_SHAS = 20000  # per release commit: ~0.9 MB of queue; git lists newest first
 MAX_HISTORIES = 5         # unneeded histories kept; the oldest unneeded import goes first
@@ -318,13 +347,44 @@ def _valid_run(r):
     return (isinstance(r, dict) and all(isinstance(r.get(k), str) for k in _RUN_STRS)
             and isinstance(r.get("attempt"), int) and not isinstance(r.get("attempt"), bool)
             and isinstance(r.get("jobs_imported"), bool)
-            and isinstance(r.get("source", ""), str))
+            and isinstance(r.get("source", ""), str)
+            and isinstance(r.get("conclusion", ""), str)
+            and isinstance(r.get("imported_at", ""), str)
+            and isinstance(r.get("jobs_failures", 0), int)
+            and not isinstance(r.get("jobs_failures", 0), bool))
+
+
+# Item fields that hold a time or a short text: a string, or null where a field is unset.
+_ITEM_OPTIONAL_STRS = ("last_seen", "closed_at", "state_at", "recurred_at", "url", "kind",
+                       "trust", "state_by", "state_reason", "envelope", "wait")
+
+
+def _valid_item(it):
+    """True when every field the commands read has the type they expect, so a hand-edited
+    or damaged queue stops with queue-unreadable instead of a traceback."""
+    return (isinstance(it, dict) and it.get("state") in STATES
+            and isinstance(it.get("title"), str) and isinstance(it.get("source"), str)
+            and isinstance(it.get("source_id"), str)
+            and isinstance(it.get("first_seen", ""), str)
+            and isinstance(it.get("evidence", []), list)
+            and all(isinstance(e, dict) for e in it.get("evidence", []))
+            and all(it.get(k) is None or isinstance(it[k], str) for k in _ITEM_OPTIONAL_STRS))
+
+
+def _valid_aliases(aliases, items):
+    """The link alias map: a dropped item id -> the kept item id. A dropped id is no
+    longer an item, and every kept id is one."""
+    return isinstance(aliases, dict) and all(
+        isinstance(k, str) and _ITEM_ID_RE.match(k) and k not in items
+        and isinstance(v, str) and v in items for k, v in aliases.items())
 
 
 class Queue:
-    def __init__(self, root, items=None, runs=None, histories=None):
+    def __init__(self, root, items=None, runs=None, histories=None, aliases=None):
         self.root = root
         self.items = items if items is not None else {}
+        # Each id `link` dropped -> the id it kept, so a re-import lands on the kept item.
+        self.aliases = aliases if aliases is not None else {}
         self.runs = runs if runs is not None else {}  # failing CI runs by run id
         # imported `git rev-list <commit>` output by release commit, for loop closing
         self.histories = histories if histories is not None else {}
@@ -342,17 +402,17 @@ class Queue:
         except (OSError, ValueError):
             raise QueueError(path)
         items = data.get("items") if isinstance(data, dict) else None
-        if not isinstance(items, dict):
+        if not isinstance(items, dict) or data.get("version", 1) != 1:
             raise QueueError(path)
         for iid, it in items.items():
-            if not (isinstance(it, dict) and it.get("state") in STATES
-                    and isinstance(it.get("title"), str) and isinstance(it.get("source"), str)
-                    and isinstance(it.get("source_id"), str)
-                    and isinstance(it.get("first_seen", ""), str)):
+            if not _valid_item(it):
                 raise QueueError(path)
             it.setdefault("id", iid)
             it.setdefault("first_seen", "")
             it.setdefault("regressed", False)
+        aliases = data.get("aliases", {})
+        if not _valid_aliases(aliases, items):
+            raise QueueError(path)
         runs = data.get("runs", {})
         if not isinstance(runs, dict) or not all(
                 _RUN_RE.match(rid) and _valid_run(r) for rid, r in runs.items()):
@@ -370,7 +430,7 @@ class Queue:
                 and isinstance(u.get("at"), str) and isinstance(u.get("told"), bool)
                 for c, u in unavailable.items())):
             raise QueueError(path)
-        q = cls(root, items, runs, histories)
+        q = cls(root, items, runs, histories, aliases)
         q.needed, q.unavailable = needed, unavailable
         return q
 
@@ -389,7 +449,8 @@ class Queue:
         path = os.path.join(d, QUEUE_FILE)
         tmp = path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "items": self.items, "runs": self.runs,
+            json.dump({"version": 1, "items": self.items, "aliases": self.aliases,
+                       "runs": self.runs,
                        "histories": self.histories, "needed": self.needed,
                        "unavailable": self.unavailable}, f, indent=1, sort_keys=True)
             f.flush()
@@ -413,18 +474,22 @@ class Queue:
 
 # -- CLI --------------------------------------------------------------------------
 def _flag(item):
-    """The state, plus `regressed`, plus what a planned item waits on (set by sync)."""
+    """The state, plus `regressed`, plus what a planned item waits on (set by sync), plus
+    `low-trust` when a signal came from the lower-trust intake-signals-jsonl format."""
     flag = item["state"] + ("+regressed" if item.get("regressed") else "")
     if item["state"] in ("picked", "planned") and item.get("wait") in WAITS:
         flag += "+" + item["wait"]
+    if item.get("trust") == "low":
+        flag += "+low-trust"
     return flag
 
 
 # What sync says an item waits on: needs-plan (picked; the plan naming it predates the
 # pick), needs-history (import a git-rev-list), needs-resolve (a human closes it: squash
-# merge, partial run, release not in the clone), plan-superseded (a revision of its plan
-# dropped it).
-WAITS = ("needs-plan", "needs-history", "needs-resolve", "plan-superseded")
+# merge, partial run, release not in the clone), needs-release (its run is proven, and no
+# verified release made at or after the run exists yet), plan-superseded (a revision of
+# its plan dropped it).
+WAITS = ("needs-plan", "needs-history", "needs-resolve", "needs-release", "plan-superseded")
 
 
 def _rank(item):
@@ -574,10 +639,19 @@ def cmd_link(a):
             keep, drop = _find(q, a.id), _find(q, a.other)
             if keep is None or drop is None:
                 return 2
+            if drop["state"] in ("picked", "planned"):
+                print("STOP: %s is %s; link it as the first id, or dismiss it first"
+                      % (code(drop["id"]), drop["state"]))
+                return 2
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
             del q.items[a.other]
+            # A later import of the dropped item's source id lands on the kept item.
+            for k, v in list(q.aliases.items()):
+                if v == a.other:
+                    q.aliases[k] = a.id
+            q.aliases[a.other] = a.id
             q.log("link", id=a.id, other=a.other)
             q.save()
     except Locked:
@@ -605,6 +679,8 @@ def cmd_status(a):
 # -- import and formats -----------------------------------------------------------
 EVIDENCE_CAP = 20      # evidence kept per item; the oldest is dropped first
 PROBLEM_LINES = 50     # PROBLEM: lines printed; the IMPORT: line counts all of them
+JOBS_TRIES = 3         # failed jobs imports of a run before sync stops its NEXT line (R26)
+RUN_KEEP_DAYS = 30     # sync forgets a run imported longer ago than this (R26)
 
 
 def _bump(item, sig):
@@ -617,7 +693,7 @@ def _bump(item, sig):
             item.setdefault("evidence", []).append(ev)
             item["count"] = item.get("count", 0) + 1
     del item["evidence"][:-EVIDENCE_CAP]
-    if sig["last_seen"] > item.get("last_seen", ""):
+    if sig["last_seen"] > (item.get("last_seen") or ""):
         item["last_seen"] = sig["last_seen"]
     if not item.get("first_seen") or sig["first_seen"] < item["first_seen"]:
         item["first_seen"] = sig["first_seen"]  # earliest seen wins
@@ -626,11 +702,16 @@ def _bump(item, sig):
 def apply_signals(queue, signals, now):
     """Merge signals into the queue (spec 1.3, 1.5). A dismissed or resolved item recurs
     when a signal's last_seen is later than its closed_at. Closing an issue upstream and
-    a signal that cannot say when (release-status) never count as recurrence."""
+    a signal that cannot say when (release-status) never count as recurrence. A source id
+    that `link` dropped goes to the kept item (queue.aliases), and an issue already closed
+    when intake first sees it makes no item (R27)."""
     for sig in signals:
         iid = item_id(sig["source"], sig["source_id"])
+        iid = queue.aliases.get(iid, iid)  # a linked item's signals go to the kept item
         it = queue.items.get(iid)
         if it is None:
+            if sig.get("closed"):
+                continue  # R27: an issue closed before intake saw it is history, not a signal
             it = queue.add(sig["source"], sig["source_id"], sig["title"], now=sig["first_seen"])
             it.update(url=sig["url"], kind=sig["kind"], severity=sig["severity"],
                       trust=sig["trust"], last_seen=sig["last_seen"],
@@ -741,9 +822,19 @@ def cmd_import(a):
                 if a.run not in q.runs:
                     print("STOP: run-not-imported %s" % a.run)
                     return 2
+                run = q.runs[a.run]
                 # Only a well-formed, complete payload retires the run's NEXT line.
                 if ctx.get("jobs_ok") and len(signals) == n_signals:
-                    q.runs[a.run]["jobs_imported"] = True
+                    run["jobs_imported"] = True
+                elif not run["jobs_imported"]:
+                    # R26: after JOBS_TRIES failures (a run deleted on GitHub, say), sync
+                    # stops printing the NEXT line, and this one problem says why.
+                    run["jobs_failures"] = run.get("jobs_failures", 0) + 1
+                    if run["jobs_failures"] == JOBS_TRIES:
+                        problems.append(
+                            "the jobs import of run %s failed %d times, so sync no longer "
+                            "prints its NEXT line; import its jobs by hand when gh can show "
+                            "the run" % (a.run, JOBS_TRIES))
             for run in ctx["runs_out"].values():
                 run["source"] = a.source  # the jobs NEXT line names this source (R18)
             q.runs.update(ctx["runs_out"])
@@ -928,9 +1019,11 @@ def _close_loop(q, envs, now):
     - The latest run-result pinning the plan (digest and id) decides. Every task must be
       proven with a merge commit, else needs-resolve (a partial or stopped run).
     - Each verified release made at or after that run is checked once per item: its
-      history holds every merge (resolved, by release:<version>), or it lacks one (kept
-      in `checked`, never asked for again), or its commit is not in the clone or is not
-      40-hex. When every such release is settled and none resolves: needs-resolve."""
+      history holds every merge (resolved, by release:<version>, closed_at = the
+      release's time, R25), or it lacks one (kept in `checked`, never asked for again),
+      or its commit is not in the clone or is not 40-hex. When every such release is
+      settled and none resolves: needs-resolve. When there is no such release yet:
+      needs-release."""
     plans = [e for e in envs if e["kind"] == PLAN_KIND]
     runs = [e for e in envs if e["kind"] == RUN_KIND]
     verified = [e for e in envs if e["kind"] == RELEASE_KIND and e["outcome"] == "verified"]
@@ -942,7 +1035,7 @@ def _close_loop(q, envs, now):
         it.pop("wait", None)
         naming = [p for p in plans if iid in p["intake_items"]]
         if it["state"] == "picked":
-            fresh = [p for p in naming if p["at"] >= it.get("state_at", "")]
+            fresh = [p for p in naming if p["at"] >= (it.get("state_at") or "")]
             if not fresh:
                 if naming:
                     it["wait"] = "needs-plan"
@@ -983,7 +1076,14 @@ def _close_loop(q, envs, now):
             elif h is not None:
                 if set(merges) <= set(h["shas"]):
                     transition(it, "resolved", by="release:%s" % rel["version"], now=now)
+                    # R25: the fix shipped when the release was made, not when sync ran, so
+                    # recurrence compares against the release time. A signal seen after
+                    # it means the fix failed: the item recurs at once.
+                    it["closed_at"] = rel["at"]
                     q.log("resolved", id=iid, by="release:%s" % rel["version"])
+                    if (it.get("last_seen") or "") > rel["at"]:
+                        transition(it, "new", now=now)
+                        q.log("recurred", id=iid)
                     break
                 checked.append(c)  # a squash or rebase merge: never ask for it again
                 settled = True
@@ -998,6 +1098,8 @@ def _close_loop(q, envs, now):
                 wanted.update(no_history)
             elif settled:
                 it["wait"] = "needs-resolve"
+            else:
+                it["wait"] = "needs-release"  # no verified release at or after the run yet
     # Every history in hand was just used: an item resolved on it or recorded it as
     # checked. Keep none that no planned item still needs.
     for c in [c for c in q.histories if c not in wanted]:
@@ -1011,6 +1113,16 @@ def _close_loop(q, envs, now):
     return wanted, due
 
 
+def _prune_runs(q, now):
+    """R26: forget the runs imported more than RUN_KEEP_DAYS days before now. A run with
+    no import time (an older queue) gets now, so it is kept for the full period."""
+    limit = (_parse_utc(now) - datetime.timedelta(days=RUN_KEEP_DAYS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    for rid in list(q.runs):
+        if q.runs[rid].setdefault("imported_at", now) < limit:
+            del q.runs[rid]
+
+
 def _jobs_source(cfg, run):
     """The configured source the jobs import of `run` goes to (R18): the source that
     imported the run when it lists gh-run-jobs-json, else the first source (by name) that
@@ -1018,6 +1130,8 @@ def _jobs_source(cfg, run):
     digits, '_', '.', '-'), so the name is one shell word with nothing to expand."""
     listing = sorted(n for n, s in cfg["sources"].items() if "gh-run-jobs-json" in s["formats"])
     own = run.get("source")
+    if not (isinstance(own, str) and _SOURCE_RE.match(own)):
+        own = None  # a hand-edited queue: only a plain word reaches the NEXT line
     if own in listing or not listing:
         return own or "ci"
     return listing[0]
@@ -1046,6 +1160,7 @@ def cmd_sync(a):
                         apply_signals(q, sigs, now)
                         problems.extend(probs)
             wanted, fetch = _close_loop(q, envs, now)
+            _prune_runs(q, now)
             weights = cfg.get("weights", {})
             for it in q.items.values():
                 it["rank"] = compute_rank(it, weights, now)
@@ -1062,10 +1177,11 @@ def cmd_sync(a):
     if len(problems) > PROBLEM_LINES:
         print("PROBLEM: and %d more" % (len(problems) - PROBLEM_LINES))
     for rid in sorted(q.runs, key=int):
-        if not q.runs[rid]["jobs_imported"]:
+        r = q.runs[rid]
+        if not r["jobs_imported"] and r.get("jobs_failures", 0) < JOBS_TRIES:
             print("NEXT: gh run view %s --json jobs | intake import --format "
                   "gh-run-jobs-json --source %s --run %s"
-                  % (rid, _jobs_source(cfg, q.runs[rid]), rid))
+                  % (rid, _jobs_source(cfg, r), rid))
     for c in sorted(wanted):
         print("NEXT: git rev-list %s | intake import --format git-rev-list --commit %s" % (c, c))
     for c in sorted(fetch):  # printed once per commit: the item is needs-resolve meanwhile
@@ -1075,7 +1191,6 @@ def cmd_sync(a):
 
 
 # -- pick -------------------------------------------------------------------------
-_ITEM_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
 
 
 def _write_atomic(root, rel, text, exclusive=False):

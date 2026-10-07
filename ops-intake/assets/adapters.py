@@ -240,11 +240,14 @@ def _one_run(rec, ctx):
     if concl not in CI_FAILURES:
         return None
     rid = _int(rec, "databaseId")
+    if rid >= 10 ** 20:  # the queue keeps run ids of 1 to 20 digits (intake.py _RUN_RE)
+        raise ValueError("databaseId must be at most 20 digits")
     run = {"workflowName": _text(rec, "workflowName", 100), "headBranch": rec["headBranch"],
            "headSha": _text(rec, "headSha", 64), "url": _text(rec, "url"),
            "createdAt": parse_time(rec.get("createdAt")),
            "updatedAt": parse_time(rec.get("updatedAt")),
-           "attempt": _int(rec, "attempt", 1), "jobs_imported": False}
+           "attempt": _int(rec, "attempt", 1), "jobs_imported": False,
+           "conclusion": concl, "imported_at": ctx["now"], "jobs_failures": 0}
     return str(rid), run
 
 
@@ -270,6 +273,9 @@ def adapt_gh_runs(raw, ctx):
             old = ctx["runs"].get(rid)
             if old and old.get("attempt") == run["attempt"]:
                 run["jobs_imported"] = bool(old.get("jobs_imported"))
+                # The same attempt again: keep its failure count and its import time.
+                run["jobs_failures"] = old.get("jobs_failures", 0)
+                run["imported_at"] = old.get("imported_at", run["imported_at"])
             ctx["runs_out"][rid] = run
     return [], problems
 
@@ -332,7 +338,26 @@ def adapt_gh_run_jobs(raw, ctx):
             continue
         if s:
             sigs.append(s)
+    if not sigs:
+        # The run failed, yet no job did (startup_failure has no jobs): one signal for
+        # the run itself, so the failure is not lost.
+        s = _run_signal(run, ctx)
+        if len(s["source_id"]) > SOURCE_ID_CAP:
+            problems.append("run: source id longer than %d characters" % SOURCE_ID_CAP)
+        else:
+            sigs.append(s)
     return sigs, problems
+
+
+def _run_signal(run, ctx):
+    sid = "%s/(run)/%s" % (run["workflowName"], run["headBranch"])
+    key = "%s:%s:run" % (ctx["run"], run["attempt"])
+    text = "the run concluded %s and no failing job was recorded" % run.get("conclusion",
+                                                                           "failure")
+    title = "%s failing on %s (no failing job recorded)" % (run["workflowName"],
+                                                            run["headBranch"])
+    return _signal(ctx, sid, run["url"], "ci", title, 3, run["updatedAt"], run["updatedAt"],
+                   "normal", [_evidence(ctx, sid, text, key)])
 
 
 # -- release-envelope -------------------------------------------------------------

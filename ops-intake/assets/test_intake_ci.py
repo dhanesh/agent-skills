@@ -179,12 +179,17 @@ class CiTests(unittest.TestCase):
 
     def test_bad_jobs_payload_keeps_the_next_line(self):
         self.runs()
-        for raw in ("not json", "{}", '{"jobs": 5}'):
+        for n, raw in enumerate(("not json", "{}", '{"jobs": 5}'), 1):
             p = os.path.join(self.root, "b.json")
             with open(p, "w") as f:
                 f.write(raw)
-            self.assertEqual(imp(self.root, "gh-run-jobs-json", p, "--run", "1001")[0], 3)
-            self.assertIn("--run 1001", sync(self.root)[1])
+            rc, out = imp(self.root, "gh-run-jobs-json", p, "--run", "1001")
+            self.assertEqual(rc, 3)
+            if n < IN.JOBS_TRIES:
+                self.assertIn("--run 1001", sync(self.root)[1])
+            else:  # R26: the third failure ends the NEXT line, with one problem
+                self.assertIn("failed 3 times", out)
+                self.assertNotIn("--run 1001", sync(self.root)[1])
 
     def test_truncated_jobs_import_keeps_the_next_line(self):
         self.runs()
