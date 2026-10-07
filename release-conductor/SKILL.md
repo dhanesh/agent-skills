@@ -135,10 +135,13 @@ Each step is one command. Read its output lines, not just the exit code.
    step 5). `STAGE: <v> pass <commit>` with `NEXT: run deploy with the human` ends staging.
    When the release grant declined `deploy_staging` or `push_tag` (the human's `--policy-file`,
    or a planning grant's release defaults), that gate answers `ASK gate-ask` with
-   `NEXT: ask the human, then re-run stage --approved-by <name>`. Ask the human whether to
-   deploy to staging (or push the tag) now; on their yes, run
-   `release stage --approved-by "<their name>"`. The yes answers only that declined gate,
-   recorded as CLAIMED: every other `ASK` reason still stops, and it is refused unattended.
+   `NEXT: ask the human to approve <class>, then re-run stage --approved-by <name>`. Ask the
+   human about that class only: deploy to staging, or push the tag. On their yes, run
+   `release stage --approved-by "<their name>"`. The yes answers only that declined gate, once,
+   for this release commit, recorded as CLAIMED. When both classes are declined, stage asks
+   twice: one yes deploys staging, then stage stops at `push_tag` and asks again. A yes given
+   when stage asked nothing answers nothing. Every other `ASK` reason still stops, and the yes
+   is refused unattended.
    `STOP: evidence-reject <reason>` (exit 3) means dispatch a new verifier; a failing feature,
    build, deploy, probe or check is `STAGE: <v> fail <reason>` and the release is
    `stage_failed`: finished, its grant revoked; a fix needs a new change and a new prep.
@@ -215,7 +218,7 @@ deploy.
 |---|---|
 | `commit .release/recipe.json through a reviewed PR, then run prep` | Open a PR with the recipe for the human; prep after it merges. |
 | `merge the release PR, then run stage` | Tell the human the PR is ready; run stage after they merge it. |
-| `ask the human, then re-run stage --approved-by <name>` | The release grant declined this staging step: ask the human; on their yes, step 4's `stage --approved-by`. |
+| `ask the human to approve <class>, then re-run stage --approved-by <name>` | The release grant declined this staging step: ask the human about that class; on their yes, step 4's `stage --approved-by`. |
 | `fix what stopped it, then re-run prep to resume` (or `stage`) | Read the `GATE:`/`STOP:` line, report it, re-run the same command once the cause is fixed. |
 | `merge the release PR and update local <branch> (git pull), then run stage` | The release commit is not on the local default branch yet. |
 | `dispatch-verifier <commit>` | Step 3, then `stage --evidence --verifier <id>`. |

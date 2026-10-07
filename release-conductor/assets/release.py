@@ -108,9 +108,11 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # (accepted_by is the human who accepted the GRANT -- not approved_by, which is the
 # production deploy's yes); prep: {"branch", "commit", "pushed", "pr"}, prep's progress.
 # stage: stage's progress ({"commit", "worktree", "build_dir", "built", "artifact",
-# "deployed", "live", "probe", "checks", "checks_done", "tag", "failure"}), so a re-run
-# resumes from the first unfinished step; tag_deploys: true when the CI config at the
-# release commit may run on a tag (D6), so the tag push is held for `deploy`.
+# "deployed", "live", "probe", "checks", "checks_done", "tag", "failure", "asked"}), so a
+# re-run resumes from the first unfinished step (asked: {"class", "commit", "at"}, the one
+# declined class stage last asked the human about; a stage yes answers only it, once);
+# tag_deploys: true when the CI config at the release commit may run on a tag (D6), so the
+# tag push is held for `deploy`.
 # approved_by: the production yes, {"name", "status": "CLAIMED"} (a shell-capable agent
 # can forge an in-session yes, so it is never recorded as verified). rollback_target:
 # what production ran before `deploy`, {"source": "probe"|"release-result"|"none",
@@ -1664,7 +1666,17 @@ def _head(wt):
 # R41: the classes whose declined gate (gate_policy "ask") the human may answer in the
 # session with `stage --approved-by`. Only these, and only the checker's "gate-ask".
 STAGE_YES_CLASSES = ("deploy_staging", "push_tag")
-NEXT_STAGE_YES = "ask the human, then re-run stage --approved-by <name>"
+NEXT_STAGE_YES = "ask the human to approve %s, then re-run stage --approved-by <name>"
+
+
+def _asked(rel, commit):
+    """The class stage last asked the human about for this release commit (stage.asked,
+    hardening 5), or None. A yes answers only that one class, once."""
+    asked = (rel.stage or {}).get("asked")
+    if isinstance(asked, dict) and asked.get("commit") == commit \
+            and asked.get("class") in STAGE_YES_CLASSES:
+        return asked["class"]
+    return None
 
 
 def _floor_after_gate(action, wt):
@@ -1705,12 +1717,21 @@ def _stage_gate(root, rel, action, wt, commit, yes=None):
         return 3
     rep = _gate(root, action, wt, rel.grant["id"])
     if rep["status"] == "ASK" and rep["reason"] == "gate-ask" and action in STAGE_YES_CLASSES:
-        if not yes:
-            return _gate_stop(rel, action, rep, NEXT_STAGE_YES)
+        if not yes or _asked(rel, commit) != action:
+            # Hardening 5: one yes, one step. A yes answers only the class stage asked
+            # the human about, for this commit; any other declined class stops and asks.
+            if yes:
+                print("GATE: %s ASK gate-ask: the yes given answers nothing here (the human "
+                      "was not asked about %s yet); ask again" % (action, action))
+            rel.stage["asked"] = {"class": action, "commit": commit, "at": _rfc3339(_now())}
+            rel.save()
+            return _gate_stop(rel, action, rep, NEXT_STAGE_YES % action)
         floor = _floor_after_gate(action, wt)
         if floor:
             return _gate_stop(rel, action, dict(rep, reason=floor), RESUME_STAGE)
         approval = {"name": yes, "status": "CLAIMED"}
+        rel.stage.pop("asked", None)  # consumed before the step runs: it answers once
+        rel.save()
         print("GATE: %s ASK gate-ask answered by the human's yes: %s (CLAIMED)" % (action, yes))
         rel.log("gate_yes", action=action, approved_by=approval)
         return None

@@ -7067,6 +7067,27 @@ elif case == "stage-yes":
     ok(a.cmd("stage", "--approved-by", "Dana"), 0, "stage yes (gate-ask)")
     E.need(a.tag() == ca, "the stage yes did not push the declined tag")
     v = int(pushed_a or pushed_b)
+elif case == "stage-yes-scope":
+    # Hardening 5: one yes, one step. Both deploy_staging and push_tag declined; stage
+    # asks about staging only. 1 when that ONE yes also pushed the tag. Sanity: a second
+    # yes (now the human was asked about push_tag) pushes it, on either tree.
+    p = E.Project()
+    p.init()
+    pol = os.path.join(p.d, "policy.json")
+    with open(pol, "w") as f:
+        json.dump({"deploy_staging": "ask", "push_tag": "ask"}, f)
+    rc, out = p.cmd("prep", "--approved-by", "Dana", "--driver", E.DRIVER,
+                    "--pr-cmd", '["true"]', "--policy-file", pol)
+    E.need(rc == 0, "prep: " + out)
+    commit = p.merge()
+    ok(p.cmd("stage"), 0, "stage")
+    p.record(commit)
+    rc, out = p.cmd("stage", "--evidence", "--verifier", E.VERIFIER)
+    E.need(rc == 3 and "GATE: deploy_staging ASK gate-ask" in out, "no gate-ask: " + out)
+    p.cmd("stage", "--approved-by", "Dana")
+    v = int(p.tag() is not None)
+    p.cmd("stage", "--approved-by", "Dana")
+    E.need(p.tag() == commit, "a second yes did not push the declined tag")
 elif case == "unattended-summary":
     # R42: a summary shown only to an unattended run binds no yes. 1 when the yes that
     # follows it deploys.
@@ -7192,6 +7213,23 @@ def check_release_conductor(old, new):
     else:
         wb = _rc_case(new, "allowlist", "Read,Bash(uv run *)")
         row(s, dim, wa, wb, wa == 1 and wb == 0, note, kind="delta",
+            since=SINCE_HARDENING_5)
+    # Hardening 5: one stage yes answers one declined class. A delta: the baseline pushes
+    # the tag on the yes given for staging (1), the fixed tree stops and asks (0).
+    ya = _rc_case(old, "stage-yes-scope")
+    note = ("deploy_staging and push_tag both declined (gate-ask); stage asks about staging "
+            "only, so `stage --approved-by Dana` deploys staging and then stops at push_tag "
+            "and asks again; sanity-checked in the same fixture (a second yes pushes the "
+            "tag) and against the delta fixture above, which DOES reach production")
+    dim = "tag pushes by a stage yes given for staging only (lower=better)"
+    if b != 1:
+        PROBE_ERRORS.append((new, "release-conductor/assets/release.py",
+                             "release guard sanity check failed for %r: the healthy "
+                             "fixture did not reach verified production" % dim))
+        row(s, dim, ya, None, False, note, kind="delta", since=SINCE_HARDENING_5)
+    else:
+        yb = _rc_case(new, "stage-yes-scope")
+        row(s, dim, ya, yb, ya == 1 and yb == 0, note, kind="delta",
             since=SINCE_HARDENING_5)
 
 
