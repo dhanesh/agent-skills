@@ -79,7 +79,8 @@ jobs:
 
   # test-safety-net supports the LAST FIVE VERSIONS of python, node and go, and
   # five rust minors across about two years (1.82, 1.86, 1.90, 1.94, 1.98: every
-  # 4th, because the last five would span only ~7 months) -- teams on legacy
+  # 4th, because the last five would span only ~7 months), plus the current
+  # stable 1.99 -- teams on legacy
   # code have the oldest toolchains and the fewest tests -- and a support claim
   # nobody runs is a claim nobody has checked. Each leg runs that stack's suites
   # on one version. Measured before this job existed: the python guard missed
@@ -114,6 +115,7 @@ jobs:
           - {stack: rust, version: "1.90"}
           - {stack: rust, version: "1.94"}
           - {stack: rust, version: "1.98"}
+          - {stack: rust, version: "1.99"}
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 30
     defaults:
