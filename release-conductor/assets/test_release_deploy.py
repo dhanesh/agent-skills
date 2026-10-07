@@ -141,10 +141,26 @@ class AllowlistMatchTests(unittest.TestCase):
         "Bash(env PYTHONPATH=. python3 *)", "Bash(uv run *)", "Bash(uv run python *)",
         "Bash(uv run:*)", "Bash(uvx *)", "Bash(./release.py *)",
         "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)",
-        "Bash(python3 ~/.agents/skills/release-conductor/assets/release.py deploy:*)")
+        "Bash(python3 ~/.agents/skills/release-conductor/assets/release.py deploy:*)",
+        # fix round 1: a wrapper option that takes an argument
+        "Bash(env -u FOO python3 *)", "Bash(uv run --with x python *)",
+        "Bash(uv run -p 3.12 python *)", "Bash(uv run --project D python *)",
+        "Bash(uvx --from x python *)", "Bash(uvx -p 3.12 python *)",
+        # fix round 1: other run-anything wrappers and interpreter flags
+        "Bash(python3 -c *)", "Bash(bash -c *)", "Bash(sh -c *)", "Bash(zsh -c *)",
+        "Bash(bash *)", "Bash(eval *)", "Bash(sudo *)", "Bash(sudo -u bob python3 *)",
+        "Bash(doas *)", "Bash(command python3 *)", "Bash(exec python3 *)",
+        "Bash(nice python3 *)", "Bash(nice -n 10 python3 *)", "Bash(nohup python3 *)",
+        "Bash(time python3 *)", "Bash(stdbuf -oL python3 *)", "Bash(timeout 60 python3 *)",
+        "Bash(xargs *)", "Bash(find * -exec *)", "Bash(find . -execdir *)",
+        "Bash(python3 -u *)", "Bash(python3.12 -I *)", "Bash(python -X dev *)",
+        "Bash(python3 -W ignore -B *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
-                "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput")
+                "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
+                "Bash(python3 -m pytest *)", "Bash(uv run --with x pytest *)",
+                "Bash(bash scripts/build.sh)", "Bash(find . -name *.py)",
+                "Bash(timeout 60 make test)", "Bash(sudo -n true)")
 
     def test_every_interpreter_and_path_spelling_reaches_release_py(self):
         argvs = RL.release_tool_argvs([os.path.abspath(RL.__file__)])

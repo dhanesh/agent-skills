@@ -2242,14 +2242,25 @@ def _split_rules(allowed_tools_str):
 
 
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*\Z")
+# Programs that run the command after them (their own options and, for timeout, a
+# duration first): a rule naming one reaches whatever follows it.
+_RUN_WRAPPERS = ("env", "uvx", "sudo", "doas", "command", "exec", "nice", "nohup", "time",
+                 "stdbuf", "xargs", "timeout")
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh")
+_PYTHON = re.compile(r"python(3(\.\S+)?)?\Z")
+_FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 
 
 def _rule_readings(pat):
     """Every way an agent may reach a Bash(...) pattern's program (fail closed): the
     pattern as written, and each reading reached by repeatedly dropping a leading
-    NAME=value, `env` (and its -options), `uv run` or `uvx` wrapper, reducing an
-    absolute or relative program path to its basename (`/usr/bin/python3` is python3),
-    reading a versioned `python3.N` as python3, and expanding a `~/` or `$HOME/` word.
+    NAME=value or a run-anything wrapper (_RUN_WRAPPERS, `uv run`) with its options --
+    each option alone and with the word after it, since it may take an argument --
+    reducing an absolute or relative program path to its basename (`/usr/bin/python3`
+    is python3), reading a versioned `python3.N` as python3, dropping a python flag
+    (and the value of -X or -W; `-m` stays), and expanding a `~/` or `$HOME/` word. A
+    rule that runs any command reads as `*`: `sh|bash|zsh -c` (or a shell glob that
+    could be given -c), `eval`, `python -c`, and a find `-exec`/`-execdir`/`-ok`.
     `Bash(uv run *)` thus reads as `*`, and `Bash(/usr/bin/env python3 *)` as
     `python3 *`."""
     home = os.path.expanduser("~")
@@ -2264,19 +2275,35 @@ def _rule_readings(pat):
                              else home + w[5:] if w.startswith("$HOME/") else w
                              for w in words))
         head, rest = words[0], words[1:]
-        if _ASSIGNMENT.match(head):
+        if head == "eval" or any(w in _FIND_EXEC for w in rest) \
+                or (head == "find" and fnmatch.fnmatch("find . -exec x ;", cur)) \
+                or (head in _SHELLS and fnmatch.fnmatch("%s -c x" % head, cur)) \
+                or (head in _SHELLS and any(w.startswith("-") and not w.startswith("--")
+                                            and "c" in w[1:] for w in rest)):
+            todo.append("*")  # runs any command
+        elif head.startswith("-") and head != "-":
+            todo.append(" ".join(rest))  # a wrapper's option: alone, or with its argument
+            todo.append(" ".join(rest[1:]))
+        elif _ASSIGNMENT.match(head):
             todo.append(" ".join(rest))
         elif "/" in head and head.rsplit("/", 1)[1]:
             todo.append(" ".join([head.rsplit("/", 1)[1]] + rest))
-        elif head in ("env", "uvx") or (head == "uv" and rest[:1] == ["run"]):
+        elif head in _RUN_WRAPPERS or (head == "uv" and rest[:1] == ["run"]):
             rest = rest[1:] if head == "uv" else rest
-            while rest and rest[0].startswith("-"):
-                rest = rest[1:]  # the wrapper's own options
             todo.append(" ".join(rest))
-        elif re.match(r"python3\.\S+\Z", head):
-            todo.append(" ".join(["python3"] + rest))
+            if head == "timeout":
+                todo.append(" ".join(rest[1:]))  # its duration
+        elif _PYTHON.match(head):
+            if re.match(r"python3\.\S+\Z", head):
+                todo.append(" ".join(["python3"] + rest))
+            flag = rest[0] if rest else ""
+            if flag.startswith("-c"):
+                todo.append("*")  # python -c runs any code
+            elif flag in ("-X", "-W"):
+                todo.append(" ".join([head] + rest[2:]))
+            elif flag.startswith("-") and flag not in ("-", "-m"):
+                todo.append(" ".join([head] + rest[1:]))
     return out
-
 
 def allowlist_matches(allowed_tools_str, argv):
     """True when a Claude Code --allowedTools value would let a headless agent run argv

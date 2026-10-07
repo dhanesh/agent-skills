@@ -254,6 +254,9 @@ SINCE_RELEASE = "8616448"  # release-conductor (roadmap step 5A): the campaign's
 # too). One constant for the campaign: it lands at one merge.
 SINCE_INTAKE = "75e0c9d"  # ops-intake (roadmap step 5B): the campaign's FIRST code commit
 # (config, queue, states, lock). One constant for the campaign: it lands at one merge.
+SINCE_HARDENING_5 = "c6961e4"  # fix/hardening-5: the campaign's FIRST commit. The
+# allowlist check reads rules through wrappers (env, uv run, uvx, sudo, sh -c, ...) and
+# absolute or versioned interpreters. One constant for the campaign: it lands at one merge.
 
 
 def _git_out(*args):
@@ -7127,10 +7130,6 @@ _RC_GUARDS = (
      "a factory grant allowing `Bash(python3 */release.py *)`: an agent could run "
      "`release.py deploy --approved-by` and forge the yes (R43); deploy refuses "
      "allowlist-exposes-prod", "allowlist", "Read,Bash(python3 */release.py *)"),
-    ("production deploys while a live grant's allowlist reaches release.py through a wrapper",
-     "a factory grant allowing `Bash(uv run *)`: `uv run` runs any command, so an agent "
-     "could run `release.py deploy --approved-by` and forge the yes (R43, hardening 5); "
-     "deploy refuses allowlist-exposes-prod", "allowlist", "Read,Bash(uv run *)"),
     ("production deploys on a yes to a summary only an unattended run showed",
      "`deploy --unattended`, then `deploy --approved-by Dana` with no attended display "
      "between: the yes binds only to a summary a human saw (R42), so it shows the summary "
@@ -7176,6 +7175,24 @@ def check_release_conductor(old, new):
             continue
         g = _rc_case(new, case, arg)
         row(s, dimension + " (lower=better)", ga, g, g == 0, note, kind="guard")
+    # Hardening 5: a wrapper rule reaching release.py. A delta: the baseline before the
+    # campaign deploys (1), the fixed tree refuses (0). Sanity-checked like the guards.
+    wa = _rc_case(old, "allowlist", "Read,Bash(uv run *)")
+    note = ("a factory grant allowing `Bash(uv run *)`: `uv run` runs any command, so an "
+            "agent could run `release.py deploy --approved-by` and forge the yes (R43); "
+            "deploy refuses allowlist-exposes-prod; sanity-checked against the delta "
+            "fixture above, which DOES reach production")
+    dim = ("production deploys while a live grant's allowlist reaches release.py through "
+           "a wrapper (lower=better)")
+    if b != 1:
+        PROBE_ERRORS.append((new, "release-conductor/assets/release.py",
+                             "release guard sanity check failed for %r: the healthy "
+                             "fixture did not reach verified production" % dim))
+        row(s, dim, wa, None, False, note, kind="delta", since=SINCE_HARDENING_5)
+    else:
+        wb = _rc_case(new, "allowlist", "Read,Bash(uv run *)")
+        row(s, dim, wa, wb, wa == 1 and wb == 0, note, kind="delta",
+            since=SINCE_HARDENING_5)
 
 
 # The checker half (docs/skill-contract/reference/contract_check.py). A repo on
