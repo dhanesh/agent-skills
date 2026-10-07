@@ -155,10 +155,11 @@ carries unit tests, eval negatives and an A/B row:
   copies the evidence gets a WARNING line next to its CHECK_COMMAND line, and a hidden
   character in a check command fails the lint. A proven run and a verified release whose
   imported git history holds the merge resolve the item. A squash merge or a partial run
-  does not. A dismissed item comes back only when it recurs. The delta row is a signal that
-  reaches a linted plan by its intake id and is resolved by a verified release. Nine guard
-  rows back it, and each is mutation-proven. The Jira and Linear adapters wait for real
-  samples. Step 5B is to be re-judged by Jev after merge, run by the controller, against
+  does not. A dismissed item comes back only when it recurs. Two delta rows measure it: a
+  signal that reaches a linted plan by its intake id and is resolved by a verified release,
+  and the hidden-character lint on every spec's check command. Nine guard rows hold it. Each
+  guard is mutation-proven, except the no-I/O guard, which is mutation-proven for its
+  subprocess half only. The Jira and Linear adapters wait for real samples. Step 5B is to be re-judged by Jev after merge, run by the controller, against
   the actual merge commit. No score is claimed here.
 
 Nothing else in this document has been re-measured since.

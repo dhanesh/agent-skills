@@ -7585,7 +7585,8 @@ def check_ops_intake(old, new):
     for dimension, note, case in _OI_GUARDS:
         ga = _oi_case(old, case)
         note += ("; the baseline has no ops-intake, an honest 0, so this is a guard, never a "
-                 "win; mutation-proven")
+                 "win; " + ("mutation-proven for the subprocess half only (the socket half "
+                            "was not mutated)" if case == "no-io" else "mutation-proven"))
         if b != 1:
             PROBE_ERRORS.append((new, "ops-intake/assets/intake.py",
                                  "intake guard sanity check failed for %r: the healthy "
