@@ -45,6 +45,14 @@ numerically; with no dependencies at all it is a single task), then
 or cyclic dependency) prints "ERROR: ..." to stderr and exits non-zero — see
 waves() below, a copy of factory-conductor/assets/conductor.py's waves().
 
+An intake spec (one with a "## Intake" section of ops-intake item ids, or an
+"## External evidence (untrusted)" section) also prints "INTAKE: <ids>" and one
+"CHECK_COMMAND: <task> <argv>" line per verify command, each followed by
+"WARNING: <task> copies untrusted evidence: <text>" when the command shares 12 or
+more characters with the evidence block (the copy tripwire; a warning, never a
+failure). With --json these lines go to stderr. The task-plan payload gains
+"intake_items". A spec without either section prints and derives what it did before.
+
 Deterministic: same spec in, byte-identical plan out. Exit 0 iff every
 requirement is covered; exit 2 on unreadable/requirement-free input.
 """
@@ -64,7 +72,7 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
-SKILL_VERSION = "2.5.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
+SKILL_VERSION = "2.6.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
 USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
@@ -146,7 +154,8 @@ def derive_plan(text):
     """Derive the task plan structure from spec markdown."""
     spec = spec_lint.parse_spec(text)
     crit_by_req = {}
-    for (ctext, refs, owner), raw in zip(spec["criteria"], spec["commands"]):
+    for (ctext, refs, owner), raw, trip in zip(spec["criteria"], spec["commands"],
+                                               spec["tripwires"]):
         # A [cmd: ...] hint is the step's command; one that does not parse is left
         # null here (spec_lint reports it, and the envelope's spec-lint claim fails).
         cmd = spec_lint.command_argv(raw)[0] if raw is not None else None
@@ -159,7 +168,7 @@ def derive_plan(text):
         targets = [owner] if owner is not None else refs
         for ref in dict.fromkeys(targets):
             cleaned = re.sub(r"^(?:\*\*)?R%d(?:\*\*)?\s*[:.]\s*" % ref, "", ctext)
-            crit_by_req.setdefault(ref, []).append((cleaned, cmd))
+            crit_by_req.setdefault(ref, []).append((cleaned, cmd, trip))
 
     tasks = []
     coverage = {}
@@ -168,7 +177,7 @@ def derive_plan(text):
     for num, rtext in spec["requirements"]:
         rid = "R%d" % num
         pairs = crit_by_req.get(num, [])
-        steps = [text for text, _ in pairs]
+        steps = [text for text, _, _ in pairs]
         if not steps:
             coverage[rid] = []
             uncovered.append(rid)
@@ -188,7 +197,8 @@ def derive_plan(text):
                 "title": title,
                 "verify": "; ".join(steps),
                 "_verify_steps": steps,
-                "_verify_cmds": [cmd for _, cmd in pairs],
+                "_verify_cmds": [cmd for _, cmd, _ in pairs],
+                "_verify_trips": [trip for _, _, trip in pairs],
                 "_where": where_m.group(1).strip() if where_m else "",
                 "_after": spec["after"].get(num, []),
                 "_features": spec["features"].get(num, []),
@@ -219,6 +229,8 @@ def derive_plan(text):
         "required_truths": spec["truths"],
         "decisions": spec["decisions"],
         "verify_skill": spec["verify_skill"],
+        "intake_items": list(dict.fromkeys(spec["intake_items"])),
+        "intake": spec["intake"] or spec["evidence"],
     }
 
 
@@ -321,6 +333,9 @@ def to_task_plan_payload(plan, spec_rel):
     if plan.get("verify_skill"):
         # factory-conductor runs a plan with this block under its evidence gate.
         payload["verification"] = {"skill": plan["verify_skill"]}
+    if plan.get("intake_items"):
+        # ops-intake's sync finds the plan that names a picked item through this field.
+        payload["intake_items"] = list(plan["intake_items"])
     if plan.get("decisions"):
         payload["decisions"] = [{"id": d["id"], "question": d["question"], "answer": d["answer"],
                                  "source": d["source"]} for d in plan["decisions"]]
@@ -383,6 +398,12 @@ def payload_errors(payload):
                         and isinstance(t.get("check"), str)):
                     errs.append("required_truths[%d] must be {id, status, text, parent, maps_to, "
                                 "reqs, confidence: a finite number in [0, 1], check}" % i)
+    if "intake_items" in payload:
+        items = payload["intake_items"]
+        if not (isinstance(items, list) and items and all(
+                isinstance(i, str) and spec_lint.INTAKE_ID_RE.match(i) for i in items)):
+            errs.append("payload.intake_items must be a non-empty list of intake item ids "
+                        "(I + 10 hex)")
     if "decisions" in payload:
         decisions = payload["decisions"]
         if not isinstance(decisions, list):
@@ -426,8 +447,33 @@ def write_task_plan_envelope(plan, spec_path, root):
 def show_command(argv):
     """argv as one shell-style line: an argument is quoted only when it needs it, so
     {python} and {skill_dir:...} placeholders read as the spec wrote them."""
+    # Defence in depth (spec_lint already fails such a command): a hidden or control
+    # character is written as \uXXXX, so the line the human approves cannot be
+    # redrawn, reordered or padded by what it contains.
+    argv = [spec_lint._visible(a) for a in argv]
     return " ".join(a if re.fullmatch(r"[\w@%+=:,./{}-]+", a) else shlex.quote(a)
                     for a in argv)
+
+
+def intake_lines(plan):
+    """The machine lines for an intake spec: "INTAKE: <ids>", then one "CHECK_COMMAND:
+    <task> <argv>" per verify command, each followed by the copy tripwire's "WARNING:"
+    when it copies text from the untrusted evidence. [] for any other spec. The agent
+    shows the human every CHECK_COMMAND: line verbatim before asking for approval."""
+    if not plan.get("intake"):
+        return []
+    out = []
+    if plan["intake_items"]:
+        out.append("INTAKE: %s" % " ".join(plan["intake_items"]))
+    for t in plan["tasks"]:
+        for cmd, trip in zip(t["_verify_cmds"], t["_verify_trips"]):
+            if cmd is None:
+                continue
+            out.append("CHECK_COMMAND: %s %s" % (t["id"], show_command(cmd)))
+            if trip:
+                out.append("WARNING: %s copies untrusted evidence: %s"
+                           % (t["id"], spec_lint.code(trip)))
+    return out
 
 
 def render_markdown(plan, spec_name):
@@ -525,12 +571,16 @@ def main(argv):
 
     if as_json:
         print(json.dumps(to_json(plan), indent=2))
+        for line in intake_lines(plan):  # stderr: stdout stays pure JSON
+            print(line, file=sys.stderr)
     else:
         sys.stdout.write(render_markdown(plan, os.path.basename(args[0])))
         for rid, tids in plan["coverage"].items():
             print("COVERAGE: %s -> %s" % (rid, ", ".join(tids) or "(none)"))
         for rid in plan["uncovered"]:
             print("UNCOVERED: %s" % rid)
+        for line in intake_lines(plan):
+            print(line)
         total = len(plan["coverage"])
         covered = total - len(plan["uncovered"])
         print(

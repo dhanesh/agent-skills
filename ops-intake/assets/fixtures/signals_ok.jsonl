@@ -1,0 +1,3 @@
+{"source": "jira", "source_id": "OPS-1", "url": "https://j.example/OPS-1", "kind": "issue", "title": "db slow", "severity": 3, "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-02T00:00:00Z", "trust": "normal", "evidence": [{"text": "p99 up", "key": "a"}]}
+
+{"source": "jira", "source_id": "OPS-2", "url": "", "kind": "ci", "title": "flaky", "severity": 1, "first_seen": "2026-10-01T00:00:00+0000", "last_seen": "2026-10-02T00:00:00Z"}

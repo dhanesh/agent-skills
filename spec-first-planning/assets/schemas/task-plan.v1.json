@@ -89,6 +89,12 @@
         }
       }
     },
+    "intake_items": {
+      "type": "array",
+      "description": "Optional: the ops-intake item ids (intake-item/v1) the spec answers, from its ## Intake section. ops-intake's sync finds the plan that names a picked item through it.",
+      "minItems": 1,
+      "items": {"type": "string", "pattern": "^I[0-9a-f]{10}$"}
+    },
     "decisions": {
       "type": "array",
       "description": "Optional: the spec's unattended-mode Decisions sweep, when it has any.",

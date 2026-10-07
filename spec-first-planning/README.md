@@ -93,6 +93,18 @@ resumed agent run the repo's `.release/recipe.json` `deploy_prod` or `rollback` 
 checking both the recipe's raw argv template and its `{version}`/`{commit}`/`{env}` tokens
 expanded to a fixed placeholder. Details: `references/unattended.md`.
 
+**Requests from ops-intake (2.6.0).** `assets/intake_request.py <envelope>` turns an
+ops-intake `intake-item/v1` envelope into the start of a spec: the title, a `## Intake`
+section with the item id, and a `## External evidence (untrusted)` section with each piece
+of evidence in its own fence. The fence is longer than any backtick run in the text, and the
+linter reads a `##` line inside it as evidence, so hostile text cannot add a requirement or
+a check. The plan payload names the item in `intake_items`, which ops-intake uses to close
+it. `spec_to_tasks.py` prints every check command as a `CHECK_COMMAND:` line, and a
+`WARNING:` after any command that copies 12 or more characters from the evidence. The
+warning does not fail the lint, because a bug report often names the failing test. The real
+boundary is the human: the agent shows every `CHECK_COMMAND:` line before asking for
+approval.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 

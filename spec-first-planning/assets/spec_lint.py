@@ -33,6 +33,16 @@ references/spec-template.md. This linter enforces the mechanical half of
      mapping, requirements and a runnable check, and traces back to OUTCOME;
      every constraint is mapped by some required truth.
 
+  5d. (intake requests, 2.6.0) An optional `## Intake` section lists the
+      intake-item ids the spec answers, one `- I<10 hex>` bullet each (a
+      section with no id, a malformed id or a repeated id fails). An optional
+      `## External evidence (untrusted)` section holds the quoted evidence in
+      fenced blocks; a `##` line inside a fence there is evidence, not a
+      heading. The copy tripwire is advisory, never a failure: a `[cmd: ...]`
+      that shares 12 or more characters with the evidence block (whitespace
+      normalised) prints a `NOTE:` line, and spec_to_tasks.py prints a
+      `WARNING:` line after that task's `CHECK_COMMAND:` line.
+
 --converged adds the Tension + Choose full-loop rules (10-16): Tensions,
 Solution options and Iterations sections; tension grammar, known ids, and a
 decision for an accepted tension; every required truth SATISFIED or
@@ -47,7 +57,8 @@ Usage:
     python3 spec_lint.py [--converged|--unattended] <spec.md>
     python3 spec_lint.py -h | --help      (prints usage, exits 0)
 
-Output: one "FAIL: ..." line per issue, then a final
+Output: one "FAIL: ..." line per issue, one "NOTE: ..." line per copy-tripwire
+hit (advisory; it never fails the lint), then a final
 "LINT_RESULT: PASS" or "LINT_RESULT: FAIL (n issue(s))" line.
 Exit 0 iff the spec is clean; 1 on lint failures; 2 on a usage error or an
 unreadable file. Stdlib-only, offline, deterministic.
@@ -57,6 +68,7 @@ import os
 import re
 import shlex
 import sys
+import unicodedata
 from collections import OrderedDict
 
 REQUIRED_SECTIONS = (
@@ -186,6 +198,88 @@ def strip_proof_hints(text):
 # brackets; "[cmd:" anywhere else in the criterion is a misplaced hint.
 CMD_RE = re.compile(r"\s*\[cmd:\s*(.*)\]\s*$", re.IGNORECASE)
 _CMD_ANY_RE = re.compile(r"\[cmd:", re.IGNORECASE)
+
+# Intake requests (2.6.0): the ids of the ops-intake items a spec answers, and the
+# section that holds their quoted, untrusted evidence.
+INTAKE_SECTION = "Intake"
+EVIDENCE_SECTION = "External evidence (untrusted)"
+INTAKE_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
+# A fence opener and closer (CommonMark: up to 3 spaces of indent; a closer uses the
+# opener's character, is at least as long, and has nothing after it but whitespace).
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# The copy tripwire's minimum: a shared run this long is a copy, not a coincidence.
+TRIPWIRE_MIN = 12
+
+
+def one_line(text):
+    """text with every run of whitespace collapsed to one space. Copied from
+    release-conductor/assets/release.py one_line() (skills cannot import each other)."""
+    return " ".join(str(text if text is not None else "").split())
+
+
+def code(text):
+    """Untrusted text as one inline code span. Copied from release-conductor/assets/
+    release.py code() (skills cannot import each other): newlines collapsed, and a
+    backtick fence longer than any backtick run inside, so it cannot open a heading,
+    list or link, and GitHub does not turn @mentions or closing keywords in it into
+    actions."""
+    s = one_line(text)
+    runs = [len(m) for m in re.findall(r"`+", s)]
+    fence = "`" * (max(runs) + 1 if runs else 1)
+    pad = " " if s.startswith("`") or s.endswith("`") or not s else ""
+    return "%s%s%s%s%s" % (fence, pad, s, pad, fence)
+
+
+# Characters that can make a command look different from what runs: controls (Cc, which
+# includes NUL and ESC), format characters (Cf: bidi overrides, zero-width spaces), line
+# and paragraph separators, private-use and surrogate code points, and every space
+# separator but U+0020. A [cmd: ...] holding one fails the lint (rule 5b).
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+
+
+def is_hidden_char(ch):
+    """True when ch can hide or disguise what a command line shows."""
+    cat = unicodedata.category(ch)
+    return cat in _HIDDEN_CATEGORIES or (cat == "Zs" and ch != " ")
+
+
+def hidden_chars(text):
+    """The distinct hidden characters in text as U+XXXX names, in order of appearance."""
+    return list(dict.fromkeys("U+%04X" % ord(ch) for ch in text if is_hidden_char(ch)))
+
+
+def _fold(text):
+    """text for the copy tripwire: NFKC, case folded and whitespace normalised, so case
+    and compatibility forms (fullwidth letters, ligatures) do not hide a copy."""
+    return one_line(unicodedata.normalize("NFKC", str(text)).casefold())
+
+
+def _visible(text):
+    """text with every hidden character written as \\uXXXX, so a message can quote it."""
+    return "".join("\\u%04x" % ord(ch) if is_hidden_char(ch) else ch for ch in text)
+
+
+def copied_evidence(raw, argv, evidence):
+    """The longest run of TRIPWIRE_MIN or more characters that a [cmd: ...] hint shares
+    with the evidence block, or None. Both sides are NFKC normalised, case folded and
+    whitespace normalised (_fold), and the run is returned in that folded form. The
+    command is checked as written (raw) and as its argv joined with spaces, so shell
+    quoting does not hide a copy; the longest run wins, and a tie goes to the raw form,
+    then to the earliest position."""
+    ev = _fold(evidence)
+    if not ev:
+        return None
+    best = None
+    for cand in (_fold(raw), _fold(" ".join(argv or []))):
+        for i in range(len(cand) - TRIPWIRE_MIN + 1):
+            j = i + TRIPWIRE_MIN
+            if cand[i:j] not in ev:
+                continue
+            while j < len(cand) and cand[i:j + 1] in ev:
+                j += 1
+            if best is None or j - i > len(best):
+                best = cand[i:j]
+    return best
 
 
 def command_argv(raw):
@@ -616,11 +710,34 @@ def parse_spec(text):
       decisions                -- list of {id, question, answer, source} from
                                   ## Decisions (unattended mode)
       malformed_decisions      -- bullets in Decisions not matching the grammar
+      intake                   -- True when the spec has a ## Intake section
+      intake_items             -- the well-formed I<10 hex> ids in ## Intake, in order
+      malformed_intake         -- the ## Intake bullets that are not such an id
+      evidence                 -- True when the spec has ## External evidence (untrusted)
+      tripwires                -- list aligned with criteria: the text a [cmd: ...]
+                                  hint copies from the evidence block, or None
     """
     title = ""
     sections = OrderedDict()
     current = None
+    fence = None  # (char, length) of the open fence inside the evidence section
     for line in text.splitlines():
+        # Inside the untrusted evidence section a fenced block is data: a "##" line in
+        # it is evidence, not a heading, so hostile text cannot open a section of its
+        # own. An unclosed fence runs to the end of the file (CommonMark), which drops
+        # every later section and fails the lint: closed, not open.
+        if fence is not None:
+            close = re.match(r"^ {0,3}(%s{%d,})\s*$" % (re.escape(fence[0]), fence[1]), line)
+            if close:
+                fence = None
+            sections[current].append(line)
+            continue
+        if current is not None and current.strip().lower() == EVIDENCE_SECTION.lower():
+            fm = _FENCE_OPEN_RE.match(line)
+            if fm:
+                fence = (fm.group(1)[0], len(fm.group(1)))
+                sections[current].append(line)
+                continue
         h2 = _H2_RE.match(line)
         if h2:
             current = h2.group(1)
@@ -711,6 +828,15 @@ def parse_spec(text):
         owner = int(pm.group(1)) if pm else None
         criteria.append((text, refs, owner))
 
+    intake_items, malformed_intake = [], []
+    for b in _section_bullets(sections, INTAKE_SECTION):
+        token = b.strip().strip("`").strip()
+        (intake_items if INTAKE_ID_RE.match(token) else malformed_intake).append(token)
+    evidence_body = find_section(sections, EVIDENCE_SECTION)
+    evidence = one_line(" ".join(evidence_body)) if evidence_body is not None else ""
+    tripwires = [copied_evidence(raw, command_argv(raw)[0], evidence) if raw is not None else None
+                 for raw in commands]
+
     constraints, bad_c = _parse_constraints(sections)
     truths, bad_t = _parse_truths(sections)
     tensions, bad_tn = _parse_tensions(sections)
@@ -734,6 +860,11 @@ def parse_spec(text):
         "criteria": criteria,
         "commands": commands,
         "misplaced_cmds": misplaced_cmds,
+        "intake": find_section(sections, INTAKE_SECTION) is not None,
+        "intake_items": intake_items,
+        "malformed_intake": malformed_intake,
+        "evidence": evidence_body is not None,
+        "tripwires": tripwires,
         "constraints": constraints,
         "malformed_constraints": bad_c,
         "truths": truths,
@@ -920,6 +1051,13 @@ def lint(text, mode="light"):
     for (ctext, _refs, _owner), raw in zip(spec["criteria"], spec["commands"]):
         if raw is None:
             continue
+        hidden = hidden_chars(raw)
+        if hidden:
+            # The human approves the command as it is shown; a control, format or odd
+            # space character can make the shown line differ from the argv that runs.
+            issues.append("acceptance criterion [cmd: ...] contains a hidden or control "
+                          "character %s: '%s'" % (", ".join(hidden), _visible(ctext[:60])))
+            continue
         argv, why = command_argv(raw)
         if why:
             issues.append("acceptance criterion [cmd: ...] %s: '%s'" % (why, ctext[:60]))
@@ -927,6 +1065,24 @@ def lint(text, mode="light"):
         for detail in command_rule_violations(argv):
             issues.append("acceptance criterion [cmd: ...] breaks the command rule (C6): "
                           "%s: '%s'" % (detail, ctext[:60]))
+
+    # 5d. ## Intake: one well-formed I<10 hex> id per bullet, at least one, no repeat.
+    # The copy tripwire is not here: it is advisory (see tripwire_notes).
+    for token in spec["malformed_intake"]:
+        issues.append("## Intake bullet is not an intake item id (I + 10 hex): %s" % code(token))
+    if spec["intake"] and not spec["intake_items"] and not spec["malformed_intake"]:
+        issues.append("section '## Intake' names no intake item id ('- I<10 hex>')")
+    if spec["evidence"] and not spec["intake"]:
+        issues.append("a spec with '## External evidence (untrusted)' needs its '## Intake' "
+                      "section, as intake_request.py wrote it")
+    if spec["intake"] and not spec["evidence"]:
+        issues.append("a spec with '## Intake' needs its '## External evidence (untrusted)' "
+                      "section, as intake_request.py wrote it")
+    seen_i = set()
+    for iid in spec["intake_items"]:
+        if iid in seen_i:
+            issues.append("intake item %s is listed twice in '## Intake'" % iid)
+        seen_i.add(iid)
 
     # 6-9. Constrain + Anchor light pass: typed constraints, required truths,
     # and traceability from constraint to RT to requirement (always on).
@@ -939,6 +1095,17 @@ def lint(text, mode="light"):
         issues += lint_unattended(spec)
 
     return issues
+
+
+def tripwire_notes(text):
+    """The copy tripwire's advisory notes, one per [cmd: ...] hint that copies 12 or more
+    characters from the external-evidence block. Never a lint failure (owner decision:
+    a bug report often names the failing test, and an honest check reuses it); the real
+    boundary is the human approving every CHECK_COMMAND: line spec_to_tasks.py prints."""
+    spec = parse_spec(text)
+    return ["acceptance criterion [cmd: ...] copies untrusted evidence: %s: '%s'"
+            % (code(hit), ctext[:60])
+            for (ctext, _refs, _owner), hit in zip(spec["criteria"], spec["tripwires"]) if hit]
 
 
 USAGE = "usage: spec_lint.py [--converged|--unattended] <spec.md>"
@@ -966,6 +1133,8 @@ def main(argv):
     issues = lint(text, mode=mode)
     for issue in issues:
         print("FAIL: %s" % issue)
+    for note in tripwire_notes(text):
+        print("NOTE: %s" % note)
     if issues:
         print("LINT_RESULT: FAIL (%d issue(s), mode=%s)" % (len(issues), mode))
         return 1
