@@ -1892,9 +1892,10 @@ mod plat {
     // SysV x86_64 and AAPCS64-on-Linux pass a variadic int in the same register
     // as a fixed argument in that position, so a fixed definition reads `mode`.
     // Rust 1.99 checks a definition of a libc symbol that std itself calls
-    // against the C signature. That signature is variadic, and stable Rust
-    // cannot define a variadic function. So the deny-by-default lint is
-    // allowed on these four. `unknown_lints` keeps rustc before 1.99 quiet.
+    // against the C signature. It rejects `open`: the C signature is
+    // variadic, and stable Rust cannot define a variadic function. The other
+    // three have the same shape, so the deny-by-default lint is allowed on
+    // all four. `unknown_lints` keeps rustc before 1.99 quiet.
     #[allow(unknown_lints, invalid_runtime_symbol_definitions)]
     #[no_mangle]
     pub unsafe extern "C" fn open(p: *const c_char, f: c_int, mode: c_uint) -> c_int {
