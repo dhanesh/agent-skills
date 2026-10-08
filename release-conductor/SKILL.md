@@ -358,15 +358,20 @@ report it rather than editing state.
   `dash`, `ksh` or `fish` as "any command". It reads `python`, `python3` and `python3.N`, by
   name or by absolute path, with their flags. It reads `python -c` and `python -m` with a
   glob, `pdb`, `runpy`, `cProfile`, `profile`, `trace`, `timeit` or `code` as "any
-  command". It expands a `~/` path. So rules such as `Bash(env *)`, `Bash(uv run *)`,
-  `Bash(uvx *)`, `Bash(sh -c *)`, `Bash(/usr/bin/*)` or `Bash(./*)` count as exposing.
+  command". It expands a `~/` path, and reads a legacy `Bash(x:*)` rule as `Bash(x *)` too.
+  So rules such as `Bash(env *)`, `Bash(uv *)`, `Bash(uv run *)`, `Bash(uvx *)`,
+  `Bash(sh -c *)`, `Bash(bash:*)`, `Bash(/usr/bin/*)` or `Bash(./*)` count as exposing. A
+  rule whose program is a path glob, such as `Bash(./scripts/*)`, `Bash(bin/*)`,
+  `Bash(~/bin/*)` or `Bash(.venv/bin/*)`, counts as exposing too: the glob can name any
+  program. The refusal names each grant and the rule that let it in.
   Known limits: this list can never be complete. A wrapper or interpreter not on it stays
   unseen, for example `poetry run`, `pipenv run`, `pdm run`, `npx`, `setsid`, `ionice`,
   `flock`, `script -c`, `watch`, `strace`, `perl -e` or `node -e`. A quoted
-  `env -S "..."` string is not read. A script path it does not know stays unseen. A glob `*`
-  can cross path parts, so a rule like `Bash(python3 tests/*)` can reach
-  `tests/../release.py` and is not caught. The real backstop is the re-entry rule: with
-  `FACTORY_CONDUCTOR_REENTRY` set, deploy and rollback wait for the human.
+  `env -S "..."` string is not read. A script path it does not know stays unseen. A glob in
+  an argument (not the program) can cross path parts, so a rule like
+  `Bash(python3 tests/*)` can reach `tests/../release.py` and is not caught. The real
+  backstop is the re-entry rule: with `FACTORY_CONDUCTOR_REENTRY` set, deploy and rollback
+  wait for the human.
 - **CI tag-trigger detection covers listed formats.** GitHub Actions workflows and CircleCI
   are read; every other CI config is treated as tag-triggered unless proven otherwise, so a tag
   push then waits for the production yes. A false positive costs one extra ask, never a silent

@@ -641,7 +641,13 @@ class AllowlistMatchTests(unittest.TestCase):
         "Bash(uv --project D run *)", "Bash(uv *)", "Bash(builtin eval *)",
         "Bash(fish -c *)", "Bash(python3 -m *)", "Bash(python3 -m pdb *)",
         "Bash(python3 -m runpy *)", "Bash(python3 -m cProfile *)",
-        "Bash(python3 -m trace *)", "Bash(python3 -mpdb *)")
+        "Bash(python3 -m trace *)", "Bash(python3 -mpdb *)",
+        # final review: legacy prefix forms, options before -c, combined flags, literals
+        "Bash(bash:*)", "Bash(sh:*)", "Bash(find:*)", "Bash(python3 -m:*)",
+        "Bash(bash -o pipefail -c *)", "Bash(python3 -Im pdb *)",
+        'Bash(bash -c "python3 release.py deploy")',
+        'Bash(sh -c "npm test && python3 release.py rollback")',
+        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
                 "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
@@ -650,7 +656,15 @@ class AllowlistMatchTests(unittest.TestCase):
                 "Bash(timeout 60 make test)", "Bash(sudo -n true)",
                 "Bash(bash scripts/test.sh -cover)", "Bash(git log -exec *)",
                 "Bash(uv --directory D run pytest *)", "Bash(uv tool run ruff *)",
-                "Bash(timeout -s KILL 60 make test)")
+                "Bash(timeout -s KILL 60 make test)",
+                # final review: an option must not eat the program word
+                "Bash(env -i pytest *)", "Bash(stdbuf -oL pytest *)",
+                "Bash(time -p pytest -q *)", "Bash(nice -10 make -j 4 *)",
+                "Bash(env -i make -j4 *)", "Bash(xargs -0 grep -l *)",
+                "Bash(xargs -n1 grep *)", "Bash(sudo -n true:*)",
+                # final review: printing and literal programs
+                "Bash(command -v *)", "Bash(command -V *)", 'Bash(bash -c "npm test")',
+                'Bash(python3 -c "print(1)")', "Bash(git:*)", "Bash(npm run:*)")
 
     def test_every_interpreter_and_path_spelling_reaches_release_py(self):
         argvs = write_grant.release_tool_argvs(write_grant._release_py_paths())
@@ -662,6 +676,16 @@ class AllowlistMatchTests(unittest.TestCase):
             with self.subTest(rules=rules):
                 cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
                 self.assertFalse(any(write_grant.agent_cmd_exposes(cmd, a) for a in argvs))
+
+    def test_the_exposing_rule_is_named(self):
+        cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *),Bash(vercel *)"]
+        self.assertEqual(write_grant.agent_cmd_exposing_rule(cmd, self.PROD), "Bash(vercel *)")
+        self.assertEqual(write_grant.agent_cmd_exposing_rule(
+            [CLAUDE, "--dangerously-skip-permissions"], self.PROD),
+            "--dangerously-skip-permissions")
+        self.assertIsNone(write_grant.agent_cmd_exposing_rule(
+            [CLAUDE, "--allowedTools", "Read,Bash(git *)"], self.PROD))
+        self.assertEqual(write_grant.allowlist_match("Read( Bash", self.PROD), "Read( Bash")
 
     def test_a_wrapper_or_absolute_interpreter_rule_reaches_deploy_prod_too(self):
         for rules in ("Bash(env vercel *)", "Bash(/usr/bin/env vercel deploy *)",
@@ -737,9 +761,10 @@ class TestProductionAllowlistRefusal(WriteGrantBase):
                       "Bash(bash -c *)", "Bash(sudo *)", "Bash(python3 -u *)"):
             with self.subTest(rules=rules):
                 answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
-                with self.assertRaises(write_grant.GrantRefused):
+                with self.assertRaises(write_grant.GrantRefused) as cm:
                     write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel,
                                             answers, "Dana")
+                self.assertIn("rule `%s`" % rules.split(",")[-1], str(cm.exception))
         # a conductor-only python rule (the documented example) is not release.py
         answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools",
                                  "Bash(python3 /x/factory-conductor/assets/conductor.py *)"])
@@ -954,7 +979,10 @@ class MatcherIdentityTests(unittest.TestCase):
     NAMES = ("_split_rules", "allowlist_matches", "agent_cmd_exposes", "release_tool_argvs",
              "ALLOWED_TOOLS_FLAGS", "RELEASE_TOOL_PATHS", "RELEASE_PROD_COMMANDS",
              "_rule_readings", "_ASSIGNMENT", "RELEASE_TOOL_INTERPRETERS", "_RUN_WRAPPERS",
-             "_SHELLS", "_PYTHON", "_FIND_EXEC", "_PYTHON_RUN_MODULES")
+             "_SHELLS", "_PYTHON", "_FIND_EXEC", "_PYTHON_RUN_MODULES", "_GLOB",
+             "_UV_VALUE_OPTS", "_WRAPPER_VALUE_OPTS", "_SHELL_VALUE_OPTS", "_PYTHON_RUN_WORDS",
+             "_skip_options", "_literal_commands", "allowlist_match",
+             "agent_cmd_exposing_rule")
 
     @staticmethod
     def _defs(path):

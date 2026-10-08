@@ -203,7 +203,8 @@ The flag is `<state>`, plus `+regressed`, plus for `picked` and `planned` items 
 plus `+low-trust` for an item with `trust: low`. Titles and evidence print as code spans, with
 hidden characters (ESC, bidi overrides, zero-width spaces) written as `\uXXXX`.
 
-Exits: 0 OK; 3 problem records, a bad envelope, or the intake lock held for 900 s; 2 invalid
+Exits: 0 OK; 3 problem records, a bad envelope, the intake lock held for 900 s, or (on
+`sync`) an old run whose jobs never came in, until its jobs come in or `drop-run` drops it; 2 invalid
 config, unknown format, refused input or an unreadable queue (`STOP:` line, nothing changed).
 
 ## Files
