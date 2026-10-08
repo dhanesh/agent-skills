@@ -135,10 +135,13 @@ Each step is one command. Read its output lines, not just the exit code.
    step 5). `STAGE: <v> pass <commit>` with `NEXT: run deploy with the human` ends staging.
    When the release grant declined `deploy_staging` or `push_tag` (the human's `--policy-file`,
    or a planning grant's release defaults), that gate answers `ASK gate-ask` with
-   `NEXT: ask the human, then re-run stage --approved-by <name>`. Ask the human whether to
-   deploy to staging (or push the tag) now; on their yes, run
-   `release stage --approved-by "<their name>"`. The yes answers only that declined gate,
-   recorded as CLAIMED: every other `ASK` reason still stops, and it is refused unattended.
+   `NEXT: ask the human to approve <class>, then re-run stage --approved-by <name>`. Ask the
+   human about that class only: deploy to staging, or push the tag. On their yes, run
+   `release stage --approved-by "<their name>"`. The yes answers only that declined gate, once,
+   for this release commit, recorded as CLAIMED. When both classes are declined, stage asks
+   twice: one yes deploys staging, then stage stops at `push_tag` and asks again. A yes given
+   when stage asked nothing answers nothing. Every other `ASK` reason still stops, and the yes
+   is refused unattended.
    `STOP: evidence-reject <reason>` (exit 3) means dispatch a new verifier; a failing feature,
    build, deploy, probe or check is `STAGE: <v> fail <reason>` and the release is
    `stage_failed`: finished, its grant revoked; a fix needs a new change and a new prep.
@@ -215,7 +218,7 @@ deploy.
 |---|---|
 | `commit .release/recipe.json through a reviewed PR, then run prep` | Open a PR with the recipe for the human; prep after it merges. |
 | `merge the release PR, then run stage` | Tell the human the PR is ready; run stage after they merge it. |
-| `ask the human, then re-run stage --approved-by <name>` | The release grant declined this staging step: ask the human; on their yes, step 4's `stage --approved-by`. |
+| `ask the human to approve <class>, then re-run stage --approved-by <name>` | The release grant declined this staging step: ask the human about that class; on their yes, step 4's `stage --approved-by`. |
 | `fix what stopped it, then re-run prep to resume` (or `stage`) | Read the `GATE:`/`STOP:` line, report it, re-run the same command once the cause is fixed. |
 | `merge the release PR and update local <branch> (git pull), then run stage` | The release commit is not on the local default branch yet. |
 | `dispatch-verifier <commit>` | Step 3, then `stage --evidence --verifier <id>`. |
@@ -348,7 +351,27 @@ report it rather than editing state.
   wrapper script hides what it runs. A malformed allowlist or a bypass flag counts as exposing,
   and so does a grant allowing a broad `git push` in tag-deploy mode, or one reaching
   `release.py`'s own `deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does), which
-  blocks the release until it is narrowed.
+  blocks the release until it is narrowed. The check reads a rule through these wrappers:
+  `env`, `uv run`, `uv tool run`, `uvx`, `sudo`, `doas`, `command`, `builtin`, `exec`,
+  `nice`, `nohup`, `time`, `stdbuf`, `xargs` and `timeout`, with their options. It reads
+  `eval`, `find -exec` (and `-execdir`, `-ok`, `-okdir`), and `-c` on `sh`, `bash`, `zsh`,
+  `dash`, `ksh` or `fish` as "any command". It reads `python`, `python3` and `python3.N`, by
+  name or by absolute path, with their flags. It reads `python -c` and `python -m` with a
+  glob, `pdb`, `runpy`, `cProfile`, `profile`, `trace`, `timeit` or `code` as "any
+  command". It expands a `~/` path, and reads a legacy `Bash(x:*)` rule as `Bash(x *)` too.
+  So rules such as `Bash(env *)`, `Bash(uv *)`, `Bash(uv run *)`, `Bash(uvx *)`,
+  `Bash(sh -c *)`, `Bash(bash:*)`, `Bash(/usr/bin/*)` or `Bash(./*)` count as exposing. A
+  rule whose program is a path glob, such as `Bash(./scripts/*)`, `Bash(bin/*)`,
+  `Bash(~/bin/*)` or `Bash(.venv/bin/*)`, counts as exposing too: the glob can name any
+  program. The refusal names each grant and the rule that let it in.
+  Known limits: this list can never be complete. A wrapper or interpreter not on it stays
+  unseen, for example `poetry run`, `pipenv run`, `pdm run`, `npx`, `setsid`, `ionice`,
+  `flock`, `script -c`, `watch`, `strace`, `perl -e` or `node -e`. A quoted
+  `env -S "..."` string is not read. A script path it does not know stays unseen. A glob in
+  an argument (not the program) can cross path parts, so a rule like
+  `Bash(python3 tests/*)` can reach `tests/../release.py` and is not caught. The real
+  backstop is the re-entry rule: with `FACTORY_CONDUCTOR_REENTRY` set, deploy and rollback
+  wait for the human.
 - **CI tag-trigger detection covers listed formats.** GitHub Actions workflows and CircleCI
   are read; every other CI config is treated as tag-triggered unless proven otherwise, so a tag
   push then waits for the production yes. A false positive costs one extra ask, never a silent

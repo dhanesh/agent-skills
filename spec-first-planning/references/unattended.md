@@ -143,10 +143,12 @@ and skip what the conversation has already answered:
    re-enters. When the project has a `.release/recipe.json` (release-conductor),
    `write_grant.py` also refuses an `agent_cmd` allowlist that would let the resumed
    agent run the recipe's `deploy_prod` or `rollback`, or release-conductor's own
-   `release.py deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule reaches those),
-   unprompted — never put those commands, or a glob wide enough to reach them, in this
-   allowlist; a release always
-   goes through `release prep`'s own grant, with the human present (design spec D10).
+   `release.py deploy`, `rollback` or `abandon` unprompted. It reads rules as
+   release-conductor does (see the wrapper and interpreter list in its SKILL.md, honest
+   limits): `Bash(python3 *)`, `Bash(uv run *)`, `Bash(sh -c *)` and a rule whose program is
+   a path glob, such as `Bash(./scripts/*)` or `Bash(.venv/bin/*)`, all reach those. The
+   refusal names the rule. Never put those commands, or a glob wide enough to reach them,
+   in this allowlist, because a release always goes through `release prep`'s own grant, with the human present (design spec D10).
 9. **System One use.** May the run consult a System One model such as Jev for
    low-stakes decisions? If so, for which kinds of decision, and what data may be sent
    to it?

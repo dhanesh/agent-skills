@@ -582,7 +582,8 @@ class StagingTests(StageBase):
         self.assertEqual(rc, 3)
         self.assertIn("GATE: deploy_staging ASK gate-ask", out)
         self.assertIn("STOP:", out)
-        self.assertIn("NEXT: ask the human, then re-run stage --approved-by <name>",
+        self.assertIn("NEXT: ask the human to approve deploy_staging, then re-run stage "
+                      "--approved-by <name>",
                       out.splitlines())
         rel = self.rel()
         self.assertEqual(rel.status, "staging_verify")
@@ -602,13 +603,74 @@ class StagingTests(StageBase):
         rc, out, _ = self.evidence()
         self.assertEqual(rc, 3, out)
         self.assertIn("GATE: push_tag ASK gate-ask", out)
-        self.assertIn("NEXT: ask the human, then re-run stage --approved-by <name>",
+        self.assertIn("NEXT: ask the human to approve push_tag, then re-run stage "
+                      "--approved-by <name>",
                       out.splitlines())
         self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
                                 "refs/tags/v1.2.0").returncode, 0)
         rc, out, err = self.stage("--approved-by", "Dana Human")
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(git(self.bare, "rev-parse", "refs/tags/v1.2.0").stdout.strip(), commit)
+
+    def tag(self):
+        r = git(self.bare, "rev-parse", "-q", "--verify", "refs/tags/v1.2.0")
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    def yeses(self):
+        return [e["action"] for e in self.rel().events() if e["event"] == "gate_yes"]
+
+    def test_one_yes_answers_one_declined_class(self):  # R41, hardening 5
+        # both classes declined: the human was asked about staging only, so the yes
+        # deploys staging and the tag push stops and asks again
+        _, commit = self.go(policy={"deploy_staging": "ask", "push_tag": "ask"})
+        rc, out, _ = self.evidence()
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: deploy_staging ASK gate-ask", out)
+        self.assertIn("NEXT: ask the human to approve deploy_staging, then re-run stage "
+                      "--approved-by <name>", out.splitlines())
+        self.assertEqual(self.rel().stage["asked"]["class"], "deploy_staging")
+        self.assertEqual(self.rel().stage["asked"]["commit"], commit)
+        rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertEqual(self.lines(self.probe_file)[-1], "1.2.0")  # staging deployed
+        self.assertIsNone(self.tag())
+        self.assertEqual(self.yeses(), ["deploy_staging"])
+        self.assertIn("GATE: push_tag ASK gate-ask", out)
+        self.assertIn("NEXT: ask the human to approve push_tag, then re-run stage "
+                      "--approved-by <name>", out.splitlines())
+        self.assertEqual(self.rel().stage["asked"]["class"], "push_tag")
+        rc, out, err = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.tag(), commit)
+        self.assertEqual(self.yeses(), ["deploy_staging", "push_tag"])
+        self.assertIsNone(self.rel().stage.get("asked"))
+
+    def test_an_ask_for_another_commit_answers_nothing(self):  # hardening 5
+        self.go(policy={"deploy_staging": "ask"})
+        self.assertEqual(self.evidence()[0], 3)
+        rel = self.rel()
+        rel.stage["asked"] = {"class": "deploy_staging", "commit": "0" * 40,
+                              "at": rel.stage["asked"]["at"]}
+        rel.save()
+        rc, out, _ = self.stage("--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: deploy_staging ASK gate-ask", out)
+        self.assertEqual(self.lines(self.probe_file), ["1.1.0"])  # staging never deployed
+        self.assertEqual(self.yeses(), [])
+
+    def test_a_yes_with_nothing_asked_preapproves_nothing(self):  # hardening 5
+        _, commit = self.go(policy={"push_tag": "ask"})
+        rc, out, _ = self.stage("--evidence", "--verifier", VERIFIER,
+                                "--approved-by", "Dana Human")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("GATE: push_tag ASK gate-ask", out)
+        self.assertIn("the yes given was already used or was not for push_tag", out)
+        self.assertIsNone(self.tag())
+        self.assertEqual(self.yeses(), [])
+        self.assertEqual(self.rel().stage["asked"]["class"], "push_tag")
+        rc, out, err = self.stage("--approved-by", "Dana Human")  # now it was asked
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.tag(), commit)
 
     def test_the_yes_never_answers_ci_tag(self):  # R41
         self.go(policy={"push_tag": "ask"})
@@ -624,7 +686,7 @@ class StagingTests(StageBase):
             rc, out, _ = self.stage("--approved-by", "Dana Human")
         self.assertEqual(rc, 3, out)
         self.assertIn("GATE: push_tag ASK ci-tag", out)
-        self.assertNotIn("ask the human, then re-run stage --approved-by", out)
+        self.assertNotIn("re-run stage --approved-by", out)
         self.assertNotEqual(git(self.bare, "rev-parse", "-q", "--verify",
                                 "refs/tags/v1.2.0").returncode, 0)
         self.assertNotIn("gate_yes", [e["event"] for e in self.rel().events()])

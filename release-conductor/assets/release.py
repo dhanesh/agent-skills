@@ -108,9 +108,11 @@ STATES = ("prepped", "staging_verify", "staged", "stage_failed", "awaiting_deplo
 # (accepted_by is the human who accepted the GRANT -- not approved_by, which is the
 # production deploy's yes); prep: {"branch", "commit", "pushed", "pr"}, prep's progress.
 # stage: stage's progress ({"commit", "worktree", "build_dir", "built", "artifact",
-# "deployed", "live", "probe", "checks", "checks_done", "tag", "failure"}), so a re-run
-# resumes from the first unfinished step; tag_deploys: true when the CI config at the
-# release commit may run on a tag (D6), so the tag push is held for `deploy`.
+# "deployed", "live", "probe", "checks", "checks_done", "tag", "failure", "asked"}), so a
+# re-run resumes from the first unfinished step (asked: {"class", "commit", "at"}, the one
+# declined class stage last asked the human about; a stage yes answers only it, once);
+# tag_deploys: true when the CI config at the release commit may run on a tag (D6), so the
+# tag push is held for `deploy`.
 # approved_by: the production yes, {"name", "status": "CLAIMED"} (a shell-capable agent
 # can forge an in-session yes, so it is never recorded as verified). rollback_target:
 # what production ran before `deploy`, {"source": "probe"|"release-result"|"none",
@@ -1664,7 +1666,17 @@ def _head(wt):
 # R41: the classes whose declined gate (gate_policy "ask") the human may answer in the
 # session with `stage --approved-by`. Only these, and only the checker's "gate-ask".
 STAGE_YES_CLASSES = ("deploy_staging", "push_tag")
-NEXT_STAGE_YES = "ask the human, then re-run stage --approved-by <name>"
+NEXT_STAGE_YES = "ask the human to approve %s, then re-run stage --approved-by <name>"
+
+
+def _asked(rel, commit):
+    """The class stage last asked the human about for this release commit (stage.asked,
+    hardening 5), or None. A yes answers only that one class, once."""
+    asked = (rel.stage or {}).get("asked")
+    if isinstance(asked, dict) and asked.get("commit") == commit \
+            and asked.get("class") in STAGE_YES_CLASSES:
+        return asked["class"]
+    return None
 
 
 def _floor_after_gate(action, wt):
@@ -1705,12 +1717,22 @@ def _stage_gate(root, rel, action, wt, commit, yes=None):
         return 3
     rep = _gate(root, action, wt, rel.grant["id"])
     if rep["status"] == "ASK" and rep["reason"] == "gate-ask" and action in STAGE_YES_CLASSES:
-        if not yes:
-            return _gate_stop(rel, action, rep, NEXT_STAGE_YES)
+        if not yes or _asked(rel, commit) != action:
+            # Hardening 5: one yes, one step. A yes answers only the class stage asked
+            # the human about, for this commit; any other declined class stops and asks.
+            if yes:
+                print("GATE: %s ASK gate-ask: the yes given was already used or was not "
+                      "for %s; ask the human again" % (action, action))
+            # "at" is informational; the grant's expiry is the only time limit.
+            rel.stage["asked"] = {"class": action, "commit": commit, "at": _rfc3339(_now())}
+            rel.save()
+            return _gate_stop(rel, action, rep, NEXT_STAGE_YES % action)
         floor = _floor_after_gate(action, wt)
         if floor:
             return _gate_stop(rel, action, dict(rep, reason=floor), RESUME_STAGE)
         approval = {"name": yes, "status": "CLAIMED"}
+        rel.stage.pop("asked", None)  # consumed before the step runs: it answers once
+        rel.save()
         print("GATE: %s ASK gate-ask answered by the human's yes: %s (CLAIMED)" % (action, yes))
         rel.log("gate_yes", action=action, approved_by=approval)
         return None
@@ -2108,11 +2130,12 @@ def _stage_steps(root, rel, recipe, commit, args):
         exposed = exposing_grants(root, recipe, v, commit, _tag_push_spellings(
             args.remote, commit, v) if tagged is None or tagged else None)
         if exposed:
-            rel.log("refused", reason="allowlist-exposes-prod", grants=exposed)
+            rel.log("refused", reason="allowlist-exposes-prod", grants=sorted(exposed),
+                    rules=[exposed[g] for g in sorted(exposed)])
             raise Refused("allowlist-exposes-prod: live grant(s) %s let a headless agent "
                           "run deploy_prod or rollback; revoke them (check-grant "
                           "revoke-grant --id) or narrow their --allowedTools"
-                          % ", ".join(exposed))
+                          % _named(exposed))
         rc = _stage_gate(root, rel, "deploy_staging", wt, commit, yes=args.approved_by)
         if rc is not None:
             return rc
@@ -2241,21 +2264,190 @@ def _split_rules(allowed_tools_str):
     return [r.strip() for r in rules if r.strip()], well_formed and depth == 0
 
 
-def allowlist_matches(allowed_tools_str, argv):
-    """True when a Claude Code --allowedTools value would let a headless agent run argv
-    without a prompt. Rules split on commas and whitespace outside parentheses; runs of
-    whitespace in a pattern or a command compare as one space; `Bash` and `Bash(*)`
-    match every command; `Bash(<glob>)` is matched with fnmatch against shlex.join(argv)
-    -- and, failing closed, against " ".join(argv) and both with argv[0] reduced to its
-    basename, since an agent may type the command either way; the legacy
-    `Bash(<prefix>:*)` form is a prefix match on those same strings (the prefix may
-    itself be a glob: fnmatch against prefix + "*"). Other tools never
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*\Z")
+_GLOB = re.compile(r"[*?\[]")
+# Programs that run the command after them (their own options and, for timeout, a
+# duration first): a rule naming one reaches whatever follows it.
+_RUN_WRAPPERS = ("env", "uvx", "sudo", "doas", "command", "builtin", "exec", "nice",
+                 "nohup", "time", "stdbuf", "xargs", "timeout")
+# uv's options that take a value (global ones before `run`, and run's or uvx's own).
+_UV_VALUE_OPTS = ("--directory", "--project", "--config-file", "--cache-dir", "--color",
+                  "--python", "-p", "--with", "-w", "--with-editable",
+                  "--with-requirements", "--from", "--env-file", "--index", "--index-url",
+                  "--extra-index-url", "--extra", "--group", "--package",
+                  "--allow-insecure-host", "--python-preference")
+# Each wrapper's options that take a value: the word after one is never the program.
+_WRAPPER_VALUE_OPTS = {
+    "env": ("-u", "-C", "-S", "--unset", "--chdir", "--split-string"),
+    "timeout": ("-s", "-k", "--signal", "--kill-after"),
+    "nice": ("-n", "--adjustment"),
+    "sudo": ("-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "--user", "--group",
+             "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
+             "--other-user"),
+    "doas": ("-u", "-C"),
+    "stdbuf": ("-i", "-o", "-e", "--input", "--output", "--error"),
+    "xargs": ("-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E", "--max-args", "--max-procs",
+              "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace",
+              "--eof"),
+    "time": ("-f", "-o", "--format", "--output"),
+    "uvx": _UV_VALUE_OPTS,
+}
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
+_SHELL_VALUE_OPTS = ("-o", "-O", "+o", "+O")
+_PYTHON = re.compile(r"python(3(\.\S+)?)?\Z")
+_FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+# Modules that run a script or code given to them: `python3 -m <one> *` runs anything.
+_PYTHON_RUN_MODULES = ("pdb", "runpy", "cProfile", "profile", "trace", "timeit", "code")
+# Words in a literal `python -c` program that let it run another command.
+_PYTHON_RUN_WORDS = ("release", "subprocess", "system", "exec", "spawn", "popen", "runpy",
+                     "__import__", "pty")
+
+
+def _skip_options(rest, value_opts):
+    """[remainder, ...]: `rest` (a wrapper's words) after its leading options. A known
+    value option (`value_opts`) takes the word after it, unless its value is attached
+    (`-oL`, `--user=bob`); an unknown option is read alone and also with the word after
+    it -- but never when that would leave no plain word (no option, no glob) after it,
+    since then the word it took was the program (`env -i pytest *`)."""
+    out, todo = [], [list(rest)]
+    while todo:
+        r = todo.pop()
+        if not r or not r[0].startswith("-") or r[0] == "-":
+            out.append(r)
+            continue
+        o = r[0]
+        if o == "--":
+            out.append(r[1:])
+        elif o in value_opts:
+            todo.append(r[2:])
+        else:
+            todo.append(r[1:])
+            attached = "=" in o or any(len(v) == 2 and o.startswith(v) for v in value_opts)
+            if not attached and any(not w.startswith("-") and not _GLOB.search(w)
+                                    for w in r[2:]):
+                todo.append(r[2:])
+    return out
+
+
+def _literal_commands(text):
+    """The commands a literal shell -c string runs: split on ; & | ` ( ) and $(, each
+    piece stripped of quotes and whitespace."""
+    return [p.strip().strip("'\"").strip() for p in re.split(r"\$\(|[;&|`()]+", text)
+            if p.strip().strip("'\"").strip()]
+
+
+def _rule_readings(pat):
+    """Every way an agent may reach a Bash(...) pattern's program (fail closed): the
+    pattern as written, and each reading reached by repeatedly dropping a leading
+    NAME=value or a run-anything wrapper (_RUN_WRAPPERS, `uv run`, `uv tool run`, with
+    uv's global options before them) with its options (_skip_options: a known value
+    option takes its value; timeout then drops its duration), reducing an absolute or
+    relative program path to its basename (`/usr/bin/python3` is python3), reading a
+    versioned `python3.N` as python3, dropping python's flags (and the value of -X, -W
+    or -Q), and expanding a `~/` or `$HOME/` word. A rule that runs any command reads as
+    `*`: a shell (_SHELLS) given -c with a glob (or a shell glob that could be given
+    -c), `eval`, `python -c` with a glob or a _PYTHON_RUN_WORDS word, `python -m` with a
+    glob or a _PYTHON_RUN_MODULES module, `uv` with a glob that could be `uv run`, and
+    find with -exec/-execdir/-ok/-okdir. A shell -c literal reads as the commands in it;
+    `command -v`/`-V` only prints. `Bash(uv run *)` thus reads as `*`, and
+    `Bash(/usr/bin/env python3 *)` as `python3 *`."""
+    home = os.path.expanduser("~")
+    out, todo = [], [pat]
+    while todo:
+        cur = todo.pop()
+        if cur in out:
+            continue
+        out.append(cur)
+        words = cur.split(" ")
+        todo.append(" ".join(home + w[1:] if w.startswith("~/")
+                             else home + w[5:] if w.startswith("$HOME/") else w
+                             for w in words))
+        head, rest = words[0], words[1:]
+        if head == "eval" \
+                or (head == "find" and (any(w in _FIND_EXEC for w in rest)
+                                        or fnmatch.fnmatch("find . -exec x ;", cur))) \
+                or (head in _SHELLS and fnmatch.fnmatch("%s -c x" % head, cur)) \
+                or (head == "uv" and fnmatch.fnmatch("uv run x", cur)):
+            todo.append("*")  # runs any command
+        elif head in _SHELLS:
+            i = 0
+            while i < len(rest) and rest[i][:1] in ("-", "+") and rest[i] not in ("-", "--"):
+                w = rest[i]
+                if w in _SHELL_VALUE_OPTS:
+                    i += 2
+                    continue
+                if not w.startswith("--") and "c" in w[1:]:
+                    code = " ".join(rest[i + 1:])
+                    todo.extend(["*"] if _GLOB.search(code) else _literal_commands(code))
+                    break
+                i += 1
+        elif _ASSIGNMENT.match(head):
+            todo.append(" ".join(rest))
+        elif "/" in head and head.rsplit("/", 1)[1]:
+            todo.append(" ".join([head.rsplit("/", 1)[1]] + rest))
+        elif head == "uv":
+            for r in _skip_options(rest, _UV_VALUE_OPTS):
+                sub = r[1:] if r[:1] == ["run"] else r[2:] if r[:2] == ["tool", "run"] \
+                    else None
+                if sub is not None:
+                    todo.extend(" ".join(s) for s in _skip_options(sub, _UV_VALUE_OPTS))
+        elif head in _RUN_WRAPPERS:
+            if head == "command" and any(w in ("-v", "-V") for w in rest
+                                         if w.startswith("-")):
+                continue  # command -v/-V only prints what a name is
+            for r in _skip_options(rest, _WRAPPER_VALUE_OPTS.get(head, ())):
+                todo.append(" ".join(r))
+                if head == "timeout":
+                    todo.append(" ".join(r[1:]))  # its duration
+        elif _PYTHON.match(head):
+            if re.match(r"python3\.\S+\Z", head):
+                todo.append(" ".join(["python3"] + rest))
+            i, stop = 0, None
+            while stop is None and i < len(rest) and rest[i].startswith("-") \
+                    and rest[i] not in ("-", "--"):
+                w, j = rest[i], 1
+                while not w.startswith("--") and j < len(w):
+                    if w[j] == "c":
+                        stop = ("c", w[j + 1:] or " ".join(rest[i + 1:]))
+                        break
+                    if w[j] == "m":
+                        stop = ("m", w[j + 1:] or (rest[i + 1] if i + 1 < len(rest) else ""))
+                        break
+                    if w[j] in "XWQ":
+                        i += 0 if w[j + 1:] else 1  # its value is the next word
+                        break
+                    j += 1
+                i += 1
+            if stop and stop[0] == "c":
+                if _GLOB.search(stop[1]) or any(k in stop[1] for k in _PYTHON_RUN_WORDS):
+                    todo.append("*")  # python -c runs any code
+            elif stop:
+                if _GLOB.search(stop[1]) or stop[1] in _PYTHON_RUN_MODULES:
+                    todo.append("*")  # a module that runs any script
+            elif i:
+                todo.append(" ".join([head] + rest[i:]))
+    return out
+
+
+def allowlist_match(allowed_tools_str, argv):
+    """The rule of a Claude Code --allowedTools value that would let a headless agent run
+    argv without a prompt (the whole value when it is malformed), or None. Rules split on
+    commas and whitespace outside parentheses; runs of whitespace in a pattern or a
+    command compare as one space; `Bash` and `Bash(*)` match every command;
+    `Bash(<glob>)` is matched with fnmatch against shlex.join(argv) -- and, failing
+    closed, against " ".join(argv) and both with argv[0] reduced to its basename, since
+    an agent may type the command either way; the legacy `Bash(<prefix>:*)` form is a
+    prefix match on those same strings (the prefix may itself be a glob: fnmatch against
+    prefix + "*"), and is also read as `Bash(<prefix> *)`. Each pattern is tried in every
+    reading _rule_readings gives (wrappers such as env and uv run dropped, an absolute
+    or versioned interpreter reduced to its name, `~/` expanded). Other tools never
     match. A malformed list fails CLOSED (R29) and counts as matching: unbalanced
-    parentheses anywhere, a rule that runs on after its parentheses close (R45c), or a rule that starts with the word `Bash` but is not exactly
-    `Bash` or `Bash(...)` -- we cannot tell what Claude Code would make of it. (A longer
-    tool name such as BashOutput is another tool, not a malformed Bash rule.) Shared
-    with spec-first-planning's write_grant.py (Task 7), which copies it: keep the two
-    in step."""
+    parentheses anywhere, a rule that runs on after its parentheses close (R45c), or a
+    rule that starts with the word `Bash` but is not exactly `Bash` or `Bash(...)` -- we
+    cannot tell what Claude Code would make of it. (A longer tool name such as
+    BashOutput is another tool, not a malformed Bash rule.) Shared with
+    spec-first-planning's write_grant.py (Task 7), which copies it: keep the two in
+    step."""
     def norm(text):
         return " ".join(text.split())  # runs of whitespace compare as one space
     argv = list(argv)
@@ -2266,45 +2458,53 @@ def allowlist_matches(allowed_tools_str, argv):
     forms |= {norm(f) for f in forms}
     rules, well_formed = _split_rules(allowed_tools_str)
     if not well_formed:
-        return True
+        return allowed_tools_str
     for rule in rules:
         if rule in ("Bash", "Bash(*)"):
-            return True
+            return rule
         m = re.match(r"^Bash\((.*)\)\Z", rule, re.S)
         if not m:
             if re.match(r"^Bash(?![A-Za-z0-9_])", rule):
-                return True  # Bash-something we cannot parse: fail closed
+                return rule  # Bash-something we cannot parse: fail closed
             continue
         pat = norm(m.group(1))
-        if pat.endswith(":*"):
-            prefix = pat[:-2]  # itself a glob: Bash(*:*) and Bash(npx *:*) match too
-            if any(f.startswith(prefix) or fnmatch.fnmatch(f, prefix + "*") for f in forms):
-                return True
-        elif any(fnmatch.fnmatch(f, pat) for f in forms):
-            return True
-    return False
+        if pat.endswith(":*"):  # `prefix:*`: the prefix is itself a glob
+            prefix = pat[:-2]
+            for body in _rule_readings(prefix):  # Bash(*:*) and Bash(npx *:*) match too
+                if any(f.startswith(body) or fnmatch.fnmatch(f, body + "*") for f in forms):
+                    return rule
+            pat = norm(prefix + " *")  # and read as `prefix *` (Bash(bash:*) is bash *)
+        if any(fnmatch.fnmatch(f, body) for body in _rule_readings(pat) for f in forms):
+            return rule
+    return None
+
+
+def allowlist_matches(allowed_tools_str, argv):
+    """True when allowlist_match finds a rule that lets a headless agent run argv."""
+    return allowlist_match(allowed_tools_str, argv) is not None
 
 
 ALLOWED_TOOLS_FLAGS = ("--allowedTools", "--allowed-tools")
 
 
-def agent_cmd_exposes(agent_cmd, argv):
-    """True when a re-entry agent_cmd would let its headless agent run argv unprompted:
-    its --allowedTools (or --allowed-tools) value -- `--flag=value`, or every argument
-    after the flag up to the next option, since Claude Code takes the list as several
-    arguments too -- matches argv (allowlist_matches), or it bypasses permission prompts
-    altogether (--dangerously-skip-permissions, --permission-mode bypassPermissions)."""
+def agent_cmd_exposing_rule(agent_cmd, argv):
+    """What in a re-entry agent_cmd would let its headless agent run argv unprompted, or
+    None: the --allowedTools (or --allowed-tools) rule that matches argv
+    (allowlist_match) -- the value is `--flag=value`, or every argument after the flag up
+    to the next option, since Claude Code takes the list as several arguments too -- or
+    the flag that bypasses permission prompts altogether (--dangerously-skip-permissions,
+    --permission-mode bypassPermissions)."""
     if not isinstance(agent_cmd, list):
-        return False
+        return None
     values = []
     i = 0
     while i < len(agent_cmd):
         a = agent_cmd[i] if isinstance(agent_cmd[i], str) else ""
         if a == "--dangerously-skip-permissions" or a == "--permission-mode=bypassPermissions":
-            return True
+            return a
         if a == "--permission-mode" and i + 1 < len(agent_cmd) \
                 and agent_cmd[i + 1] == "bypassPermissions":
-            return True
+            return "--permission-mode bypassPermissions"
         flag, eq, val = a.partition("=")
         if flag in ALLOWED_TOOLS_FLAGS:
             if eq:
@@ -2318,7 +2518,16 @@ def agent_cmd_exposes(agent_cmd, argv):
                 i = j
                 continue
         i += 1
-    return any(allowlist_matches(v, argv) for v in values)
+    for v in values:
+        rule = allowlist_match(v, argv)
+        if rule is not None:
+            return rule
+    return None
+
+
+def agent_cmd_exposes(agent_cmd, argv):
+    """True when agent_cmd_exposing_rule finds what lets the agent run argv."""
+    return agent_cmd_exposing_rule(agent_cmd, argv) is not None
 
 
 # R43: release.py's own production commands. An allowlist that lets a headless agent run
@@ -2330,22 +2539,34 @@ def agent_cmd_exposes(agent_cmd, argv):
 # install path that a `*/release.py` glob or a `python3 *` rule matches).
 RELEASE_TOOL_PATHS = ("release.py", "assets/release.py", "$SKILL_DIR/assets/release.py",
                       '"$SKILL_DIR/assets/release.py"',
-                      "/skills/release-conductor/assets/release.py")
+                      "/skills/release-conductor/assets/release.py", "./release.py",
+                      "~/.claude/skills/release-conductor/assets/release.py",
+                      "~/.agents/skills/release-conductor/assets/release.py")
 RELEASE_PROD_COMMANDS = ("deploy", "rollback", "abandon")
+# Each interpreter spelling an agent may type before release.py (an empty one runs the
+# script by its shebang). _rule_readings covers more (python3.N, env options).
+RELEASE_TOOL_INTERPRETERS = (("python3",), ("python",), ("/usr/bin/python3",),
+                             ("/usr/local/bin/python3",), ("env", "python3"),
+                             ("/usr/bin/env", "python3"), ("uv", "run", "python"),
+                             ("uv", "run"), ("uvx", "python"), ())
 
 
 def release_tool_argvs(release_paths):
-    """[argv, ...]: every interpreter (python3, python, this one) x every spelling of
-    release.py (`release_paths` first, then RELEASE_TOOL_PATHS) x each production command
-    (deploy, rollback, abandon), bare and with the arguments a real call carries."""
+    """[argv, ...]: every interpreter spelling (RELEASE_TOOL_INTERPRETERS, then this one)
+    x every spelling of release.py (`release_paths` first, each also in its `~/` form,
+    then RELEASE_TOOL_PATHS) x each production command (deploy, rollback, abandon), bare
+    and with the arguments a real call carries."""
+    home = os.path.expanduser("~")
     paths = [p for p in release_paths if p]
+    paths += ["~" + p[len(home):] for p in paths if p.startswith(home + "/")]
     paths += [p for p in RELEASE_TOOL_PATHS if p not in paths]
+    pys = list(RELEASE_TOOL_INTERPRETERS) + ([(sys.executable,)] if sys.executable else [])
     out = []
-    for py in [p for p in ("python3", "python", sys.executable) if p]:
+    for py in pys:
         for path in paths:
             for cmd in RELEASE_PROD_COMMANDS:
-                out.append([py, path, cmd])
-                out.append([py, path, cmd, "--root", ".", "--approved-by", "human"])
+                out.append(list(py) + [path, cmd])
+                out.append(list(py) + [path, cmd, "--root", ".", "--approved-by", "human"])
     return out
 
 
@@ -2365,29 +2586,37 @@ def _tag_push_spellings(remote, commit, version):
 
 
 def exposing_grants(root, recipe, version, commit, tag_push=None):
-    """Ids of every live grant under root whose reentry.agent_cmd could run the recipe's
+    """{id: rule} for every live grant under root whose reentry.agent_cmd could run the recipe's
     deploy_prod or rollback (expanded with this release's values, and as written), or
     -- when CI deploys on tags -- `tag_push`, the list of tag-push argvs that are the
     deploy (R27, R29: _tag_push_spellings) -- or this tool's own production commands
     (`release.py deploy|rollback|abandon` in every spelling, R43: release_tool_argvs).
     Live = a head no revision supersedes (CC._live_heads) that is not revoked; an
     EXPIRED grant still counts (fail closed: a scheduler may still launch its agent,
-    and revoking it is one command)."""
+    and revoking it is one command). The rule is what lets it in (agent_cmd_exposing_rule):
+    a refusal names it so the human can narrow it."""
     values = {"version": version, "commit": commit, "env": PROD_ENV}
     argvs = [recipe["deploy_prod"], recipe["rollback"]]
     argvs += [expand(a, values) for a in argvs]
     argvs.extend(tag_push or [])
     argvs.extend(release_tool_argvs([os.path.abspath(__file__)]))
-    out = []
+    out = {}
     for _, _, st in CC._live_heads(root):
         payload = st["predicate"].get("payload") or {}
         if payload.get("revoked"):
             continue
         cmd = (payload.get("reentry") or {}).get("agent_cmd") \
             if isinstance(payload.get("reentry"), dict) else None
-        if any(agent_cmd_exposes(cmd, a) for a in argvs):
-            out.append(st["predicate"]["id"])
-    return sorted(out)
+        rule = next((r for r in (agent_cmd_exposing_rule(cmd, a) for a in argvs)
+                     if r is not None), None)
+        if rule is not None:
+            out[st["predicate"]["id"]] = rule
+    return out
+
+
+def _named(exposed):
+    """`id (rule `...`)` for each exposing grant: the rule to narrow, beside its grant."""
+    return ", ".join("%s (rule `%s`)" % (gid, exposed[gid]) for gid in sorted(exposed))
 
 
 def recover_crash(rel):
@@ -2573,7 +2802,7 @@ def _deploy_locked(root, args, name):
                               "headless agent run the production deploy (deploy_prod, "
                               "rollback, or the deploying tag push); revoke them "
                               "(check-grant revoke-grant --id) or narrow their "
-                              "--allowedTools" % ", ".join(exposed))
+                              "--allowedTools" % _named(exposed))
     values = {"version": v, "commit": commit, "env": PROD_ENV}
     tag = "v%s" % v
     if rel.tag_deploys:
@@ -3188,7 +3417,7 @@ def _rollback_locked(root, args, name):
         return _deploy_refuse(rel, "allowlist-exposes-prod", "live grant(s) %s let a "
                               "headless agent run the rollback or the production deploy; "
                               "revoke them (check-grant revoke-grant --id) or narrow their "
-                              "--allowedTools" % ", ".join(exposed))
+                              "--allowedTools" % _named(exposed))
     try:
         cwd = _prod_checkout(root, rel)
     except Refused as e:

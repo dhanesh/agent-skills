@@ -235,7 +235,10 @@ grant as covering nothing. Then give the user the revoke commands: this grant al
 command with no `--id`, which revokes every live grant in the repo, an in-flight release's
 grant included.
 `write_grant.py` also refuses a re-entry allowlist that reaches release-conductor's own
-`release.py deploy`, `rollback` or `abandon` (a `Bash(python3 *)` rule does).
+`release.py deploy`, `rollback` or `abandon`. It reads rules the same way release-conductor
+does: see the wrapper and interpreter list in release-conductor's SKILL.md (honest limits).
+For example, `Bash(python3 *)`, `Bash(uv run *)` and `Bash(./scripts/*)` all reach them.
+The refusal names the rule.
 The grant can also carry consent to scheduled re-entry (`answers.reentry`), so a timer resumes
 the run if the session dies; see `references/unattended.md`. `write_grant.py` refuses a
 re-entry allowlist that would let the resumed agent run the repo's `.release/recipe.json`

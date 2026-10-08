@@ -602,6 +602,31 @@ def cmd_show(a):
     return 0
 
 
+def cmd_drop_run(a):
+    """Forget one queued CI run on purpose (a stale run whose jobs cannot be imported)."""
+    if _need_config(a.root) is None:
+        return 2
+    if not _RUN_RE.match(a.id):
+        print("STOP: a run id is digits")
+        return 2
+    try:
+        with run_lock(a.root):
+            q = _load(a.root)
+            if q is None:
+                return 2
+            if a.id not in q.runs:
+                print("STOP: run-not-imported %s" % a.id)
+                return 2
+            del q.runs[a.id]
+            q.log("drop-run", run=a.id, by=a.by, reason=a.reason)
+            q.save()
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
+    print("NEXT: run %s dropped" % a.id)
+    return 0
+
+
 def _change(a, to, need_reason=False):
     if _need_config(a.root) is None:
         return 2
@@ -1125,13 +1150,29 @@ def _close_loop(q, envs, now):
 
 
 def _prune_runs(q, now):
-    """R26: forget the runs imported more than RUN_KEEP_DAYS days before now. A run with
-    no import time (an older queue) gets now, so it is kept for the full period."""
+    """R26: forget the runs imported more than RUN_KEEP_DAYS days before now, but only a run
+    whose jobs came in or whose jobs import failed JOBS_TRIES times. An old run whose jobs
+    never came in is kept, and one PROBLEM line says so each sync. A run with no import time
+    (an older queue) gets now, so it is kept for the full period. Returns the problems."""
     limit = (_parse_utc(now) - datetime.timedelta(days=RUN_KEEP_DAYS)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    for rid in list(q.runs):
-        if q.runs[rid].setdefault("imported_at", now) < limit:
+    problems = []
+    for rid in sorted(q.runs, key=int):
+        r = q.runs[rid]
+        if r.setdefault("imported_at", now) >= limit:
+            continue
+        if r["jobs_imported"]:
             del q.runs[rid]
+            q.log("prune", run=rid, reason="jobs-imported")
+        elif r.get("jobs_failures", 0) >= JOBS_TRIES:
+            del q.runs[rid]
+            q.log("prune", run=rid, reason="jobs-failed")
+        else:
+            q.log("stale-run", run=rid, imported_at=r["imported_at"])
+            problems.append("run %s is older than %d days and its jobs were never imported; "
+                            "import them or drop it: intake drop-run %s --by NAME --reason TEXT"
+                            % (rid, RUN_KEEP_DAYS, rid))
+    return problems
 
 
 def _jobs_source(cfg, run):
@@ -1171,7 +1212,7 @@ def cmd_sync(a):
                         apply_signals(q, sigs, now)
                         problems.extend(probs)
             wanted, fetch = _close_loop(q, envs, now)
-            _prune_runs(q, now)
+            problems.extend(_prune_runs(q, now))
             weights = cfg.get("weights", {})
             for it in q.items.values():
                 it["rank"] = compute_rank(it, weights, now)
@@ -1316,6 +1357,8 @@ def main(argv=None):
     s.add_argument("--by", required=True); s.add_argument("--reason", required=True)
     s = sub.add_parser("resolve"); s.add_argument("id"); s.add_argument("--by", required=True)
     s = sub.add_parser("link"); s.add_argument("id"); s.add_argument("other")
+    s = sub.add_parser("drop-run"); s.add_argument("id")
+    s.add_argument("--by", required=True); s.add_argument("--reason", required=True)
     s = sub.add_parser("pick"); s.add_argument("id"); s.add_argument("--by", required=True)
     sub.add_parser("status")
     sub.add_parser("sync")
@@ -1334,7 +1377,8 @@ def main(argv=None):
         return _change(a, "resolved")
     return {"init": cmd_init, "list": cmd_list, "show": cmd_show, "link": cmd_link,
             "status": cmd_status, "sync": cmd_sync, "formats": cmd_formats,
-            "import": cmd_import, "pick": cmd_pick}[a.cmd](a)
+            "import": cmd_import, "pick": cmd_pick,
+            "drop-run": cmd_drop_run}[a.cmd](a)
 
 
 if __name__ == "__main__":

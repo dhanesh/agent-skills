@@ -131,6 +131,93 @@ class AllowlistMatchTests(unittest.TestCase):
             [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *)"], P))
         self.assertFalse(RL.agent_cmd_exposes([CLAUDE, "-p", "{prompt}"], P))
 
+    # Every spelling of a rule that lets an agent reach release.py's production commands
+    # (R43, hardening 5): an absolute or versioned interpreter, an env or uv wrapper, a
+    # ~ skill path. Each one exposes; harmless rules still do not.
+    EXPOSING_SPELLINGS = (
+        "Bash(/usr/bin/python3 *)", "Bash(/usr/local/bin/python3 */release.py *)",
+        "Bash(python3.12 *)", "Bash(python3.9 */release.py deploy:*)",
+        "Bash(/usr/bin/env python3 *)", "Bash(env python3 *)",
+        "Bash(env PYTHONPATH=. python3 *)", "Bash(uv run *)", "Bash(uv run python *)",
+        "Bash(uv run:*)", "Bash(uvx *)", "Bash(./release.py *)",
+        "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)",
+        "Bash(python3 ~/.agents/skills/release-conductor/assets/release.py deploy:*)",
+        # fix round 1: a wrapper option that takes an argument
+        "Bash(env -u FOO python3 *)", "Bash(uv run --with x python *)",
+        "Bash(uv run -p 3.12 python *)", "Bash(uv run --project D python *)",
+        "Bash(uvx --from x python *)", "Bash(uvx -p 3.12 python *)",
+        # fix round 1: other run-anything wrappers and interpreter flags
+        "Bash(python3 -c *)", "Bash(bash -c *)", "Bash(sh -c *)", "Bash(zsh -c *)",
+        "Bash(bash *)", "Bash(eval *)", "Bash(sudo *)", "Bash(sudo -u bob python3 *)",
+        "Bash(doas *)", "Bash(command python3 *)", "Bash(exec python3 *)",
+        "Bash(nice python3 *)", "Bash(nice -n 10 python3 *)", "Bash(nohup python3 *)",
+        "Bash(time python3 *)", "Bash(stdbuf -oL python3 *)", "Bash(timeout 60 python3 *)",
+        "Bash(xargs *)", "Bash(find * -exec *)", "Bash(find . -execdir *)",
+        "Bash(python3 -u *)", "Bash(python3.12 -I *)", "Bash(python -X dev *)",
+        "Bash(python3 -W ignore -B *)",
+        # fix round 2
+        "Bash(timeout -s KILL 60 python3 *)", "Bash(timeout -k 5 60 python3 *)",
+        "Bash(uv tool run *)", "Bash(uv --directory D run python *)",
+        "Bash(uv --project D run *)", "Bash(uv *)", "Bash(builtin eval *)",
+        "Bash(fish -c *)", "Bash(python3 -m *)", "Bash(python3 -m pdb *)",
+        "Bash(python3 -m runpy *)", "Bash(python3 -m cProfile *)",
+        "Bash(python3 -m trace *)", "Bash(python3 -mpdb *)",
+        # final review: legacy prefix forms, options before -c, combined flags, literals
+        "Bash(bash:*)", "Bash(sh:*)", "Bash(find:*)", "Bash(python3 -m:*)",
+        "Bash(bash -o pipefail -c *)", "Bash(python3 -Im pdb *)",
+        'Bash(bash -c "python3 release.py deploy")',
+        'Bash(sh -c "npm test && python3 release.py rollback")',
+        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)",
+        # long-form value options (hardening 5, regression): each can still run any command
+        "Bash(xargs --max-args 1 *)", "Bash(xargs --max-procs 4 *)",
+        "Bash(stdbuf --output L *)", "Bash(env --unset FOO python3 *)",
+        "Bash(timeout --signal KILL 60 python3 *)")
+    HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
+                "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
+                "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
+                "Bash(python3 -m pytest *)", "Bash(uv run --with x pytest *)",
+                "Bash(bash scripts/build.sh)", "Bash(find . -name *.py)",
+                "Bash(timeout 60 make test)", "Bash(sudo -n true)",
+                "Bash(bash scripts/test.sh -cover)", "Bash(git log -exec *)",
+                "Bash(uv --directory D run pytest *)", "Bash(uv tool run ruff *)",
+                "Bash(timeout -s KILL 60 make test)",
+                # final review: an option must not eat the program word
+                "Bash(env -i pytest *)", "Bash(stdbuf -oL pytest *)",
+                "Bash(time -p pytest -q *)", "Bash(nice -10 make -j 4 *)",
+                "Bash(env -i make -j4 *)", "Bash(xargs -0 grep -l *)",
+                "Bash(xargs -n1 grep *)", "Bash(sudo -n true:*)",
+                # final review: printing and literal programs
+                "Bash(command -v *)", "Bash(command -V *)", 'Bash(bash -c "npm test")',
+                'Bash(python3 -c "print(1)")', "Bash(git:*)", "Bash(npm run:*)")
+
+    def test_every_interpreter_and_path_spelling_reaches_release_py(self):
+        argvs = RL.release_tool_argvs([os.path.abspath(RL.__file__)])
+        for rules in self.EXPOSING_SPELLINGS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertTrue(any(RL.agent_cmd_exposes(cmd, a) for a in argvs))
+        for rules in self.HARMLESS:
+            with self.subTest(rules=rules):
+                cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read," + rules]
+                self.assertFalse(any(RL.agent_cmd_exposes(cmd, a) for a in argvs))
+
+    def test_the_exposing_rule_is_named(self):
+        cmd = [CLAUDE, "-p", "{prompt}", "--allowedTools", "Read,Bash(git *),Bash(vercel *)"]
+        self.assertEqual(RL.agent_cmd_exposing_rule(cmd, self.PROD), "Bash(vercel *)")
+        self.assertEqual(RL.agent_cmd_exposing_rule(
+            [CLAUDE, "--dangerously-skip-permissions"], self.PROD),
+            "--dangerously-skip-permissions")
+        self.assertIsNone(RL.agent_cmd_exposing_rule(
+            [CLAUDE, "--allowedTools", "Read,Bash(git *)"], self.PROD))
+        self.assertEqual(RL.allowlist_match("Read( Bash", self.PROD), "Read( Bash")
+
+    def test_a_wrapper_or_absolute_interpreter_rule_reaches_deploy_prod_too(self):
+        for rules in ("Bash(env vercel *)", "Bash(/usr/bin/env vercel deploy *)",
+                      "Bash(uv run vercel *)", "Bash(/opt/homebrew/bin/vercel *)"):
+            with self.subTest(rules=rules):
+                self.assertTrue(RL.allowlist_matches(rules, self.PROD))
+        self.assertFalse(RL.allowlist_matches("Bash(env git *)", self.PROD))
+
 
 class DeployBase(TS.StageBase):
     def setUp(self):
@@ -480,10 +567,14 @@ class RefusalTests(DeployBase):
         here = os.path.abspath(RL.__file__)
         for rules in ("Bash(python3 */release.py *)", "Bash(python3 %s deploy:*)" % here,
                       "Bash(python3 release.py *)", "Read,Bash(python3 * abandon *)",
-                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)'):
+                      'Bash(python3 "$SKILL_DIR/assets/release.py" rollback *)',
+                      "Bash(python3.12 *)", "Bash(uv run *)",
+                      "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)"):
             with self.subTest(rules=rules):
                 gid = plant_grant(self.root, rules)
-                self.assert_refused(*self.deploy()[:2], "allowlist-exposes-prod")
+                rc, out = self.deploy()[:2]
+                self.assert_refused(rc, out, "allowlist-exposes-prod")
+                self.assertIn("%s (rule `%s`)" % (gid, rules.split(",")[-1]), out)
                 CC.revoke_grant(self.root, gid)
         # a python rule for another tool (factory-conductor's conductor.py) is not release.py
         plant_grant(self.root, "Bash(python3 /x/factory-conductor/assets/conductor.py *)")
@@ -649,6 +740,7 @@ class StageAllowlistTests(DeployBase):
         rc, out, _ = self.evidence()
         self.assertEqual(rc, 2, out)
         self.assertIn("allowlist-exposes-prod", out)
+        self.assertIn("Bash(%s *)" % sys.executable, out)  # the rule is named
         self.assertEqual(self.lines(self.probe_file), ["1.1.0"])  # deploy_staging never ran
         self.assertEqual(self.rel().status, "staging_verify")
         CC.revoke_grant(self.root, gid)
