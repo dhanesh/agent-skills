@@ -241,8 +241,10 @@ _WRAPPER_VALUE_OPTS = {
              "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
              "--other-user"),
     "doas": ("-u", "-C"),
-    "stdbuf": ("-i", "-o", "-e"),
-    "xargs": ("-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E"),
+    "stdbuf": ("-i", "-o", "-e", "--input", "--output", "--error"),
+    "xargs": ("-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E", "--max-args", "--max-procs",
+              "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace",
+              "--eof"),
     "time": ("-f", "-o", "--format", "--output"),
     "uvx": _UV_VALUE_OPTS,
 }

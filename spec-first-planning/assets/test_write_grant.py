@@ -647,7 +647,11 @@ class AllowlistMatchTests(unittest.TestCase):
         "Bash(bash -o pipefail -c *)", "Bash(python3 -Im pdb *)",
         'Bash(bash -c "python3 release.py deploy")',
         'Bash(sh -c "npm test && python3 release.py rollback")',
-        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)")
+        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)",
+        # long-form value options (hardening 5, regression): each can still run any command
+        "Bash(xargs --max-args 1 *)", "Bash(xargs --max-procs 4 *)",
+        "Bash(stdbuf --output L *)", "Bash(env --unset FOO python3 *)",
+        "Bash(timeout --signal KILL 60 python3 *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
                 "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",

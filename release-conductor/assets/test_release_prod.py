@@ -518,6 +518,7 @@ class RollbackTests(ProdBase):
         rc, out, _ = self.rollback()
         self.assertEqual(rc, 2, out)
         self.assertIn("allowlist-exposes-prod", out)
+        self.assertIn(self.prod_probe, out)  # the rule is named
         self.assertEqual(self.lines(self.rollback_marker), [])
         CC.revoke_grant(self.root, gid)
         self.assertEqual(self.rollback()[0], 0)

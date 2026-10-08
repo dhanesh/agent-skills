@@ -167,7 +167,11 @@ class AllowlistMatchTests(unittest.TestCase):
         "Bash(bash -o pipefail -c *)", "Bash(python3 -Im pdb *)",
         'Bash(bash -c "python3 release.py deploy")',
         'Bash(sh -c "npm test && python3 release.py rollback")',
-        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)")
+        "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)",
+        # long-form value options (hardening 5, regression): each can still run any command
+        "Bash(xargs --max-args 1 *)", "Bash(xargs --max-procs 4 *)",
+        "Bash(stdbuf --output L *)", "Bash(env --unset FOO python3 *)",
+        "Bash(timeout --signal KILL 60 python3 *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
                 "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
@@ -736,6 +740,7 @@ class StageAllowlistTests(DeployBase):
         rc, out, _ = self.evidence()
         self.assertEqual(rc, 2, out)
         self.assertIn("allowlist-exposes-prod", out)
+        self.assertIn("Bash(%s *)" % sys.executable, out)  # the rule is named
         self.assertEqual(self.lines(self.probe_file), ["1.1.0"])  # deploy_staging never ran
         self.assertEqual(self.rel().status, "staging_verify")
         CC.revoke_grant(self.root, gid)

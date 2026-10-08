@@ -2130,7 +2130,8 @@ def _stage_steps(root, rel, recipe, commit, args):
         exposed = exposing_grants(root, recipe, v, commit, _tag_push_spellings(
             args.remote, commit, v) if tagged is None or tagged else None)
         if exposed:
-            rel.log("refused", reason="allowlist-exposes-prod", grants=sorted(exposed))
+            rel.log("refused", reason="allowlist-exposes-prod", grants=sorted(exposed),
+                    rules=[exposed[g] for g in sorted(exposed)])
             raise Refused("allowlist-exposes-prod: live grant(s) %s let a headless agent "
                           "run deploy_prod or rollback; revoke them (check-grant "
                           "revoke-grant --id) or narrow their --allowedTools"
@@ -2284,8 +2285,10 @@ _WRAPPER_VALUE_OPTS = {
              "--host", "--prompt", "--close-from", "--chdir", "--role", "--type",
              "--other-user"),
     "doas": ("-u", "-C"),
-    "stdbuf": ("-i", "-o", "-e"),
-    "xargs": ("-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E"),
+    "stdbuf": ("-i", "-o", "-e", "--input", "--output", "--error"),
+    "xargs": ("-I", "-L", "-n", "-P", "-s", "-d", "-a", "-E", "--max-args", "--max-procs",
+              "--max-lines", "--max-chars", "--delimiter", "--arg-file", "--replace",
+              "--eof"),
     "time": ("-f", "-o", "--format", "--output"),
     "uvx": _UV_VALUE_OPTS,
 }
