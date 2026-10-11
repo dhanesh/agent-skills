@@ -168,10 +168,12 @@ def skeleton(p):
                    show(a.get("by")))]
         for n, r in enumerate(a.get("results", []), start=1):
             out += ["", "Result %d for %s: value %s, kind %s, source %s, observed %s, "
-                    "by %s, claim %s." % (n, code(a["id"]), show(r.get("value")),
-                                          show(r.get("kind")), show(r.get("source")),
-                                          show(r.get("observed")), show(r.get("by")),
-                                          show(r.get("claim")))]
+                    "by %s, claim %s%s." % (n, code(a["id"]), show(r.get("value")),
+                                            show(r.get("kind")), show(r.get("source")),
+                                            show(r.get("observed")), show(r.get("by")),
+                                            show(r.get("claim")),
+                                            ", evidence truncated" if r.get("truncated") is True
+                                            else "")]
             if r.get("evidence"):
                 text = normalise_lines(r["evidence"])
                 fence = fence_for(text)
