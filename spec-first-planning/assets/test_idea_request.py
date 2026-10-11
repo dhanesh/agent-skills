@@ -466,6 +466,19 @@ class TestHostileText(unittest.TestCase):
         plan = spec_to_tasks.derive_plan(idea_spec(cmd="scripts/fix-everything.sh --force", p=p))
         self.assertEqual(plan["tasks"][0]["_verify_trips"], ["scripts/fix-everything.sh --force"])
 
+    def test_hidden_characters_in_evidence_are_escaped(self):
+        # 2.7.1: the fence shows a bidi override, a zero-width space or ESC as \\uXXXX
+        out = skeleton_for(payload(evidence="a\u202eb\nc\u200bd \x1b[2Ke\n```"))
+        for ch in ("\u202e", "\u200b", "\x1b"):
+            self.assertNotIn(ch, out)
+        lines = out.splitlines()
+        opener = next(ln for ln in lines if re.match(r"^`{3,}text$", ln))
+        fence = opener[:-len("text")]
+        self.assertGreater(len(fence), 3)
+        body = lines[lines.index(opener) + 1:]
+        close = next(i for i, ln in enumerate(body) if ln == fence)
+        self.assertEqual(body[:close], ["a\\u202eb", "c\\u200bd \\u001b[2Ke", "```"])
+
     def test_an_unclosed_fence_fails_closed(self):
         lines = idea_spec().splitlines()
         fence = next(re.match(r"^(`{3,})", ln).group(1) for ln in lines if re.match(r"^`{3,}", ln))

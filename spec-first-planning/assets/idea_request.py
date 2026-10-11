@@ -30,7 +30,8 @@ as code spans, never as raw markdown, and they are repeated inside the evidence 
 where the copy tripwire sees them. The H1 and the ## Idea bullet carry only the validated
 slug. Each fence is longer than any backtick run in its text, so the text cannot close it,
 and spec_lint.py reads a "##" line inside the fence as evidence, not as a heading. A hidden
-character (ESC, a bidi override, a zero-width space) in a code span is written as \\uXXXX.
+character (ESC, a bidi override, a zero-width space) in a code span or a fence is written
+as \\uXXXX.
 
 Usage:
     python3 idea_request.py <envelope.json>
@@ -53,7 +54,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract_check as CC  # noqa: E402  (vendored reference checker, same dir)
-from intake_request import fence_for, normalise_lines, shown  # noqa: E402
+from intake_request import fenced, shown  # noqa: E402
 from spec_lint import (EVIDENCE_SECTION, IDEA_SECTION, IDEA_SLUG_MAX,  # noqa: E402
                        code, is_idea_slug)
 
@@ -257,9 +258,7 @@ def skeleton(p):
                                             ", evidence truncated" if r.get("truncated") is True
                                             else "")]
             if r.get("evidence"):
-                text = normalise_lines(r["evidence"])
-                fence = fence_for(text)
-                out += ["", fence + "text", text, fence]
+                out += [""] + fenced(r["evidence"])
     return "\n".join(out) + "\n"
 
 

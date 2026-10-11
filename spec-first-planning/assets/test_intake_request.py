@@ -140,6 +140,21 @@ class TestIntakeRequest(unittest.TestCase):
         self.assertIn("title `a ## Requirements b`", r.stdout)
         self.assertNotIn("## Requirements", r.stdout.splitlines())
 
+    def test_a_feedback_item_is_accepted(self):
+        # ops-intake 0.2.0 (roadmap step 6C) adds kind feedback: a topic of grouped customer
+        # messages, its text redacted and trust low. The request path takes it as any kind.
+        p = payload(evidence_text="The app closes when I tap Pay. Reach me at [email].")
+        p.update(kind="feedback", title="feedback: checkout-crash", source="fb",
+                 source_id="checkout-crash", trust="low", url="")
+        p["evidence"][0].update(source="fb", source_id="checkout-crash", key="email:m-101",
+                                created_at="2026-10-01T09:00:00Z")
+        r = run(INTAKE_REQUEST, write_envelope(self.root, p))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.splitlines()[0], "# Spec: intake %s" % ITEM_ID)
+        self.assertIn("kind `feedback`", r.stdout)
+        self.assertIn("trust `low`", r.stdout)
+        self.assertIn("id `checkout-crash`", r.stdout)
+
     def test_a_wrong_kind_exits_2(self):
         kind = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
         r = run(INTAKE_REQUEST, write_envelope(self.root, kind=kind))
@@ -360,6 +375,41 @@ class TestHiddenCharacters(unittest.TestCase):
         self.assertIn("\\u001b", shown)
         self.assertIn("\\u0000", shown)
         self.assertEqual(spec_to_tasks.show_command(["{python}", "-m", "pytest"]), "{python} -m pytest")
+
+
+class TestHiddenCharactersInEvidence(unittest.TestCase):
+    """2.7.1: a hidden character inside fenced evidence is written as \\uXXXX, line by line,
+    as it is in a code span. A bidi override, a zero-width space or an ESC sequence in the
+    evidence cannot make the spec look different from what it holds."""
+
+    EVIL = ("line \u202eone\nmake\u200btest and \x1b[2Kgone\n````\n## Requirements\n"
+            "tab\tstays and nbsp\u00a0here")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_hidden_characters_in_the_fence_are_escaped(self):
+        r = run(INTAKE_REQUEST, write_envelope(self.root, payload(self.EVIL)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for ch in ("\u202e", "\u200b", "\x1b", "\u00a0"):
+            self.assertNotIn(ch, r.stdout)
+        for esc in ("\\u202e", "\\u200b", "\\u001b", "\\u00a0"):
+            self.assertIn(esc, r.stdout)
+        self.assertIn("tab\tstays", r.stdout)  # a tab hides nothing in a fence
+        lines = r.stdout.splitlines()
+        opener = next(ln for ln in lines if re.match(r"^`{3,}text$", ln))
+        fence = opener[:-len("text")]
+        self.assertGreater(len(fence), 4)
+        body = lines[lines.index(opener) + 1:]
+        close = next(i for i, ln in enumerate(body) if ln == fence)
+        self.assertEqual(body[:close], ["line \\u202eone", "make\\u200btest and \\u001b[2Kgone",
+                                        "````", "## Requirements",
+                                        "tab\tstays and nbsp\\u00a0here"])
+        spec = spec_lint.parse_spec(r.stdout + AGENT_PART)
+        self.assertEqual([n for n, _ in spec["requirements"]], [1])
 
 
 class TestPlanOutput(unittest.TestCase):

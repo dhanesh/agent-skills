@@ -116,6 +116,11 @@ the reason. The script refuses an envelope whose override flag, open risks or co
 do not agree with its assumption statuses. The plan payload names the idea in `ideas`,
 and `spec_to_tasks.py` prints `IDEA:` and every `CHECK_COMMAND:` line for the human to see.
 
+**Hidden characters in evidence (2.7.1).** Both scripts write a hidden character inside a
+fenced evidence block as `\uXXXX`, line by line, the same as in a code span. A bidi override,
+a zero-width space or an ESC sequence in the evidence cannot change how the spec looks. A
+tab stays as it is.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 

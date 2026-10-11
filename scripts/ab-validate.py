@@ -264,6 +264,10 @@ SINCE_HARDENING_5 = "c6961e4"  # fix/hardening-5: the campaign's FIRST commit. T
 SINCE_SPEND_METERING = "2bd9f4c"  # spend metering (roadmap step 6B): the campaign's FIRST
 # code commit -- budget.enforce, `usage` and the budget_unmetered/tokens/usd stops in
 # conductor.py. One constant for the campaign: it lands at one merge.
+SINCE_INTAKE_FEEDBACK = "e72a5fa"  # ops-intake feedback (roadmap step 6C): the campaign's
+# FIRST code commit -- feedback-jsonl, the uncapped seen keys (every source), feedback
+# recurrence by message time and redaction. One constant for the campaign: it lands at one
+# merge.
 
 
 def _git_out(*args):
@@ -7663,6 +7667,211 @@ def check_ops_intake(old, new):
         row(s, dimension + " (lower=better)", ga, g, g == 0, note, kind="guard")
 
 
+# ── ops-intake feedback (roadmap step 6C) ──────────────────────────────────
+# Self-contained: the probe drives the tree's own intake.main in-process, with stdin and
+# the clock patched, and uses no eval helper, so a baseline that lacks the new helpers still
+# measures. Every message is synthetic (example.com, 555-01xx). A baseline without
+# feedback-jsonl refuses the `fb` source's config, an honest 0.
+_OF_PROBE = r"""
+sys.dont_write_bytecode = True
+import contextlib, io
+from unittest import mock
+import intake as IN
+case = @CASE@
+CFG = {"sources": {"github": {"enabled": True, "formats": ["gh-issues-json"]},
+                   "jira": {"enabled": True, "formats": ["intake-signals-jsonl"]},
+                   "fb": {"enabled": True, "formats": ["feedback-jsonl"]}}}
+def need(cond, what):
+    if not cond:
+        raise RuntimeError(what)
+def repo(cfg):
+    root = tempfile.mkdtemp(prefix="ab-fb-")
+    os.makedirs(os.path.join(root, ".intake"))
+    with open(os.path.join(root, ".intake", "config.json"), "w") as f:
+        json.dump(cfg, f)
+    return root
+def run(root, *argv, stdin="", now="2026-10-10T00:00:00Z"):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), mock.patch.object(IN, "_now", return_value=now), \
+            mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+        rc = IN.main(["--root", root, *argv])
+    return rc, buf.getvalue()
+def items(root):
+    return IN.Queue.load(root).items
+def msg(i, topic="checkout-crash", created="2026-10-01T00:00:00Z", text=None, **extra):
+    rec = {"id": "m-%d" % i, "topic": topic, "channel": "email", "created_at": created,
+           "text": "message %d" % i if text is None else text}
+    rec.update(extra)
+    return json.dumps(rec) + "\n"
+def fb(root, *recs, now="2026-10-10T00:00:00Z"):
+    return run(root, "import", "--format", "feedback-jsonl", "--source", "fb",
+               stdin="".join(recs), now=now)
+def issue(root, updated):
+    rec = [{"number": 7, "title": "t", "url": "https://github.example/7", "body": "b",
+            "labels": [], "state": "OPEN", "createdAt": "2026-10-01T00:00:00Z",
+            "updatedAt": updated}]
+    return run(root, "import", "--format", "gh-issues-json", "--source", "github",
+               stdin=json.dumps(rec))
+v = 0
+if case == "past-cap":
+    root = repo({"sources": {"github": CFG["sources"]["github"]}})
+    days = ["2026-10-%02dT00:00:00Z" % d for d in range(1, 26)]
+    for d in days:
+        issue(root, d)
+    it = items(root)[IN.item_id("github", "7")]
+    need((it["count"], len(it["evidence"])) == (25, 20), "the first 25 updates did not count 25")
+    for d in days[:5]:
+        issue(root, d)
+    v = int(items(root)[IN.item_id("github", "7")]["count"] == 25)
+elif case == "signals-feedback":
+    root = repo({"sources": {"jira": CFG["sources"]["jira"]}})
+    rec = {"source": "jira", "source_id": "X-1", "kind": "feedback", "title": "t",
+           "severity": 2, "first_seen": "2026-10-01T00:00:00Z",
+           "last_seen": "2026-10-01T00:00:00Z",
+           "evidence": [{"text": "pat@example.com 555-010-0199", "key": "k"}]}
+    rc, _ = run(root, "import", "--format", "intake-signals-jsonl", "--source", "jira",
+                stdin=json.dumps(rec))
+    ok = dict(rec, kind="issue")
+    rc2, _ = run(root, "import", "--format", "intake-signals-jsonl", "--source", "jira",
+                 stdin=json.dumps(dict(ok, source_id="X-2")))
+    need(rc2 == 0, "an honest issue line did not import")
+    v = int(IN.item_id("jira", "X-1") in items(root))
+elif IN.config_problems(CFG):
+    v = 0  # the baseline has no feedback-jsonl: an honest 0
+elif case == "grouped":
+    root = repo(CFG)
+    rc, _ = fb(root, msg(1, text="mail pat@example.com or call +1 (555) 010-0199."),
+               msg(2, rating=1), msg(3, severity=2), msg(4, topic="dark-mode", rating=5))
+    its = items(root)
+    it = its.get(IN.item_id("fb", "checkout-crash"), {})
+    rc2, _ = fb(root, msg(1, text="mail pat@example.com or call +1 (555) 010-0199."))
+    again = items(root).get(IN.item_id("fb", "checkout-crash"), {})
+    v = int(rc == 0 and len(its) == 2 and it.get("count") == 3 and it.get("kind") == "feedback"
+            and it.get("trust") == "low" and it.get("severity") == 3
+            and its[IN.item_id("fb", "dark-mode")]["severity"] == 1
+            and it["evidence"][0]["text"] == "mail [email] or call [phone]."
+            and rc2 == 0 and again == it)
+elif case == "recur":
+    root = repo(CFG)
+    iid = IN.item_id("fb", "checkout-crash")
+    old = [msg(1), msg(2, created="2026-10-02T00:00:00Z")]
+    fb(root, *old)
+    run(root, "dismiss", iid, "--by", "Dana", "--reason", "known", now="2026-10-05T00:00:00Z")
+    fb(root, *old, now="2026-10-06T00:00:00Z")
+    fb(root, msg(3, created="2026-10-04T00:00:00Z"), now="2026-10-06T00:00:00Z")
+    stayed = items(root)[iid]["state"] == "dismissed"
+    # dated 12 hours past the import clock (inside the one-day skew) and past the second
+    # dismissal, so only the seen key keeps it from regressing twice
+    fb(root, msg(9, created="2026-10-06T12:00:00Z"), now="2026-10-06T00:00:00Z")
+    back = items(root)[iid]["state"] == "new" and items(root)[iid]["regressed"]
+    run(root, "dismiss", iid, "--by", "Dana", "--reason", "again", now="2026-10-06T06:00:00Z")
+    fb(root, msg(9, created="2026-10-06T12:00:00Z"), now="2026-10-08T00:00:00Z")
+    v = int(stayed and back and items(root)[iid]["state"] == "dismissed")
+elif case == "redact":
+    keep = ["version 1.2.3 and v10.4.12", "at 2026-10-11 08:20:45", "at 12:30 2026-10-11",
+            "commit 3f9a2c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39", "see #1234",
+            "order ORD-2026-000123",
+            "https://shop.example.com/orders/202600001234567?id=12345678901"]
+    root = repo(CFG)
+    fb(root, *[msg(i, topic="keep", text=t) for i, t in enumerate(keep)])
+    fb(root, msg(99, topic="hide", text="pat@example.com, 555.010.0199"))
+    kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
+    hid = items(root)[IN.item_id("fb", "hide")]["evidence"][0]["text"]
+    v = int(kept == sorted(keep) and hid == "[email], [phone]")
+elif case == "id-url":
+    leak, phone = "pat.leak@example.com", "5550100177"
+    root = repo(CFG)
+    recs = [msg(1, id=leak, url="mailto:%s?subject=re" % leak),
+            msg(2, url="https://help.example.com/t?phone=%s&email=%s"
+                % (phone, leak.replace("@", "%40"))),
+            msg(3, id=int(phone))]
+    rc, _ = fb(root, *recs)
+    fb(root, *recs)
+    iid = IN.item_id("fb", "checkout-crash")
+    need(rc == 0 and items(root)[iid]["count"] == 3, "the three messages did not import once")
+    rc, out = run(root, "pick", iid, "--by", "Dana")
+    need(rc == 0, "pick failed")
+    blob = ""
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                blob += f.read()
+    v = int(not any(x in blob for x in (leak, "%40example", phone)))
+elif case == "review-fp":
+    keep = ["date 2026-10-11 2026-10-12", "11.10.2026 14.30", "ip 192.168.100.200",
+            "build 2026.10.11.1234", "order 2026-000123-45", "epoch 1728640000",
+            "ts 1728640000123", "ids 12345 67890", "latency 1 234 567 890 ns",
+            "git@github.com:owner/repo.git"]
+    root = repo(CFG)
+    fb(root, *[msg(i, topic="keep", text=t) for i, t in enumerate(keep)])
+    fb(root, msg(99, topic="hide", text="pat@example.com, 555.010.0199"))
+    kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
+    hid = items(root)[IN.item_id("fb", "hide")]["evidence"][0]["text"]
+    need(hid == "[email], [phone]", "the email and phone were not redacted")
+    v = int(kept == sorted(keep))
+print(json.dumps({"v": v}))
+"""
+
+
+def _of_case(tree, case):
+    """The feedback probe's 0/1 for `case` in `tree`; 0 (honest) for a tree without
+    ops-intake; None (PROBE_ERRORS) when the fixture itself broke."""
+    if not os.path.isfile(os.path.join(tree, "ops-intake", "assets", "intake.py")):
+        return 0
+    out = probe(tree, "ops-intake/assets", _OF_PROBE.replace("@CASE@", repr(case)))
+    return None if _errored(out) else out.get("v")
+
+
+def check_intake_feedback(old, new):
+    s = "ops-intake"
+    for case, dimension, note in (
+            ("past-cap", "re-imports past the evidence cap counted once, every source "
+             "(higher=better)",
+             "an issue imported with 25 different updatedAt values (count 25, 20 evidence "
+             "kept), then the first 5 again: the count stays 25. The baseline finds seen keys "
+             "only in the capped evidence list, so it counts the 5 dropped ones again (30), "
+             "an honest 0. Sanity-checked in both arms: the first 25 count 25"),
+            ("grouped", "feedback messages grouped by topic, counted and redacted "
+             "(higher=better)",
+             "feedback-jsonl: three messages on one topic give one item, count 3, kind "
+             "feedback, trust low, severity 3 from a 1-star rating (5 stars gives 1), the "
+             "email and phone redacted; the same message again changes nothing. The baseline "
+             "refuses the feedback-jsonl source in its config, an honest 0"),
+            ("recur", "dismissed feedback brought back only by a new message (higher=better)",
+             "dismiss, then the old messages again and an unseen message written before the "
+             "dismissal: still dismissed; a message dated after it: new+regressed; dismissed "
+             "again, the same (future-dated, already seen) message once more: still "
+             "dismissed. The baseline has no feedback-jsonl, an honest 0"),
+            ("redact", "redaction that keeps versions, dates, shas, ids and URLs "
+             "(higher=better)",
+             "versions (1.2.3, v10.4.12), a date with a time either side, a git sha, #1234, "
+             "ORD-2026-000123 and a URL with long numbers stay as written, and an email and "
+             "a dotted phone are redacted. The baseline has no feedback-jsonl, an honest 0"),
+            ("id-url", "feedback ids and urls that store no raw email or phone (higher=better)",
+             "review H1: an email address as a message id, a mailto: url, a url with phone= "
+             "and a %40 address, and a phone number as a numeric id. After import, re-import "
+             "and pick, no file under the repo holds the raw address or number; the hashed "
+             "id still dedupes (count 3). The baseline has no feedback-jsonl, an honest 0. "
+             "Mutation-proven: on the pre-review tree (e931b22) it reads 0"),
+            ("review-fp", "redaction that keeps dates, IPs, epochs, id groups and git remotes "
+             "(higher=better)",
+             "review M2: two ISO dates, a dotted date and time, an IPv4 address, a dotted "
+             "build, a year-first order id, epochs in seconds and milliseconds, two id "
+             "groups, a spaced latency and a git ssh remote stay as written, while an email "
+             "and a dotted phone in the same repo are redacted. The baseline has no "
+             "feedback-jsonl, an honest 0. Mutation-proven: on the pre-review tree "
+             "(e931b22) it reads 0")):
+        a, b = _of_case(old, case), _of_case(new, case)
+        row(s, dimension, a, b, a == 0 and b == 1, note, kind="delta",
+            since=SINCE_INTAKE_FEEDBACK)
+    a, b = _of_case(old, "signals-feedback"), _of_case(new, "signals-feedback")
+    row(s, "intake-signals-jsonl lines that bring kind feedback in unredacted (lower=better)",
+        a, b, a == 0 and b == 0,
+        "an intake-signals-jsonl line with kind feedback is refused (only feedback-jsonl "
+        "redacts), while the same line as kind issue imports. The baseline never had the "
+        "kind, so this is a guard, never a win", kind="guard")
+
+
 # ── idea-validation (roadmap step 6A) ───────────────────────────────────────
 # The baseline has no idea-validation and no idea path in spec-first-planning, so a count
 # of bad outcomes would read 0 -> 0 there: a guard, never a win. Each row here measures a
@@ -8179,6 +8388,7 @@ def main():
         check_release_conductor(old, REPO)
         check_release_checker(old, REPO)
         check_ops_intake(old, REPO)
+        check_intake_feedback(old, REPO)
         check_idea_validation(old, REPO)
         check_spend_metering(old, REPO)
         check_spend_review(old, REPO)

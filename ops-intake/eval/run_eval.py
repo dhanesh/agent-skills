@@ -443,6 +443,203 @@ def partial_arm():
           f == "planned+needs-resolve" and "NEXT: git rev-list" not in out, str(f))
 
 
+# -- feedback (roadmap step 6C) -------------------------------------------------------
+# Synthetic messages only: example.com addresses and 555-01xx numbers.
+FB_CONFIG = json.loads(json.dumps(CONFIG))
+FB_CONFIG["sources"]["fb"] = {"enabled": True, "formats": ["feedback-jsonl"]}
+
+
+def fb_msg(i, topic="checkout-crash", created="2026-10-01T00:00:00Z", text=None, **extra):
+    rec = {"id": "m-%d" % i, "topic": topic, "channel": "email", "created_at": created,
+           "text": "message %d" % i if text is None else text}
+    rec.update(extra)
+    return rec
+
+
+def import_feedback(root, *recs):
+    return intake(root, "import", "--format", "feedback-jsonl", "--source", "fb",
+                  stdin="".join(json.dumps(r) + "\n" for r in recs))
+
+
+@arm("feedback reaches a linted plan as one counted, redacted item")
+def feedback_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    rc, out = intake(root, "import", "--format", "feedback-jsonl", "--source", "fb",
+                     fixture("feedback_ok.jsonl"))
+    iid = IN.item_id("fb", "checkout-crash")
+    it = items(root).get(iid, {})
+    text = json.dumps(it)
+    grouped = (rc == 0 and it.get("count") == 3 and it.get("kind") == "feedback"
+               and it.get("trust") == "low" and it.get("severity") == 3
+               and "[email]" in text and "[phone]" in text and "pat.example@" not in text)
+    spec, env = picked_spec(root, iid, HONEST_CMD)
+    with open(os.path.join(root, env), encoding="utf-8") as f:
+        payload = json.load(f)["predicate"]["payload"]
+    lint = py(os.path.join(SFP, "spec_lint.py"), spec)
+    plan = py(os.path.join(SFP, "spec_to_tasks.py"), spec, "--envelope", root)
+    plans = plan_envelopes(root)
+    named = plans and iid in plans[-1][1]["predicate"]["payload"].get("intake_items", [])
+    check("three messages on one topic become one feedback item (count 3, trust low, "
+          "severity 3 from a 1-star review, email and phone redacted); its pick gives a "
+          "kind-feedback envelope that spec-first-planning lints and plans",
+          grouped and payload.get("kind") == "feedback" and lint.returncode == 0
+          and plan.returncode == 0 and named,
+          "grouped=%s kind=%s lint=%s plan=%s named=%s" % (
+              grouped, payload.get("kind"), lint.returncode, plan.returncode, bool(named)))
+
+
+@arm("NEGATIVE: a feedback record without a topic is a problem")
+def feedback_topic_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    rc, out = intake(root, "import", "--format", "feedback-jsonl", "--source", "fb",
+                     fixture("feedback_one_bad.jsonl"))
+    q = items(root)
+    probs = [ln for ln in out.splitlines() if ln.startswith("PROBLEM:")]
+    check("NEGATIVE: records with no topic, a bad topic, a bad time or an unknown channel are "
+          "PROBLEM: lines (exit 3) that quote no message text; the good record is the only item",
+          rc == 3 and "IMPORT: fb feedback-jsonl ok 1 problems 4" in out
+          and list(q) == [IN.item_id("fb", "login-loop")] and len(probs) == 4
+          and not any(t in out for t in ("no topic here", "Login Loop", "sms")),
+          out.splitlines()[0] if out else "")
+
+
+@arm("NEGATIVE: messages past the evidence cap are not counted twice")
+def feedback_cap_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    recs = [fb_msg(i, created="2026-10-01T00:%02d:00Z" % i) for i in range(25)]
+    import_feedback(root, *recs)
+    import_feedback(root, *recs[:5])
+    fb = items(root)[IN.item_id("fb", "checkout-crash")]
+    for d in range(1, 26):
+        import_issue(root, 7, "x", updated="2026-10-%02dT00:00:00Z" % d)
+    for d in range(1, 6):
+        import_issue(root, 7, "x", updated="2026-10-%02dT00:00:00Z" % d)
+    gh = items(root)[IN.item_id("github", "7")]
+    check("NEGATIVE: 25 messages, then the first 5 again, count 25, not 30; the same holds for "
+          "an issue updated 25 times (the seen keys are uncapped for every source)",
+          (fb["count"], len(fb["evidence"]), gh["count"], len(gh["evidence"])) == (25, 20, 25, 20),
+          "feedback=%d issue=%d" % (fb["count"], gh["count"]))
+
+
+@arm("NEGATIVE: old messages do not regress a dismissed feedback item")
+def feedback_recur_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    old = [fb_msg(1, created="2026-10-01T00:00:00Z"), fb_msg(2, created="2026-10-02T00:00:00Z")]
+    import_feedback(root, *old)
+    iid = IN.item_id("fb", "checkout-crash")
+    intake(root, "dismiss", iid, "--by", "Dana", "--reason", "known")
+    import_feedback(root, *old)
+    import_feedback(root, fb_msg(3, created="2026-10-03T00:00:00Z"))  # unseen, but before
+    stayed = flag(root, iid)
+    import_feedback(root, fb_msg(4, created=later(0.5)))  # inside the one-day skew
+    back = flag(root, iid)
+    check("NEGATIVE: re-importing old messages, or a new message written before the dismissal, "
+          "leaves the item dismissed; a message written after it brings it back as "
+          "new+regressed+low-trust",
+          stayed == "dismissed+low-trust" and back == "new+regressed+low-trust",
+          "stayed=%s back=%s" % (stayed, back))
+
+
+REDACT_KEEP = ["version 1.2.3 and v10.4.12", "at 2026-10-11 08:20:45", "at 12:30 2026-10-11",
+               "commit 3f9a2c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39", "see #1234",
+               "order ORD-2026-000123",
+               "https://shop.example.com/orders/202600001234567?id=12345678901"]
+
+
+@arm("NEGATIVE: redaction keeps versions, dates, shas, issue and order ids and URLs")
+def feedback_redact_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    recs = [fb_msg(i, topic="keep", text=t) for i, t in enumerate(REDACT_KEEP)]
+    recs.append(fb_msg(99, topic="hide", text="mail pat@example.com or call 555-010-0199."))
+    import_feedback(root, *recs)
+    kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
+    hidden = items(root)[IN.item_id("fb", "hide")]["evidence"][0]["text"]
+    check("NEGATIVE: version strings, dates and times, a git sha, #1234, ORD-2026-000123 and a "
+          "URL with long numbers stay as written; an email and a phone in the same import are "
+          "redacted",
+          kept == sorted(REDACT_KEEP) and hidden == "mail [email] or call [phone].",
+          "changed=%s hidden=%s" % ([t for t in kept if t not in REDACT_KEEP], hidden))
+
+
+# Review round: forms the first build missed (M1) and false positives it made (M2).
+REVIEW_HIDE = ["Phone:07700900123", "mob:07700900123", "number=07700900123",
+               "[call me](tel:+15550100199)", "call 555 - 010 - 0199", "call 555\u2013010\u20130199",
+               "call 555  010  0199"]
+REVIEW_KEEP = ["date 2026-10-11 2026-10-12", "11.10.2026 14.30", "ip 192.168.100.200",
+               "build 2026.10.11.1234", "order 2026-000123-45", "epoch 1728640000",
+               "ts 1728640000123", "ids 12345 67890", "latency 1 234 567 890 ns",
+               "git@github.com:owner/repo.git"]
+
+
+@arm("NEGATIVE: review phone forms are redacted; review false positives stay as written")
+def feedback_review_redact_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    recs = [fb_msg(i, topic="keep", text=t) for i, t in enumerate(REVIEW_KEEP)]
+    recs += [fb_msg(100 + i, topic="hide", text=t) for i, t in enumerate(REVIEW_HIDE)]
+    rc, _ = import_feedback(root, *recs)
+    kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
+    hid = [e["text"] for e in items(root)[IN.item_id("fb", "hide")]["evidence"]]
+    leaked = [t for t in hid if any(d in t for d in ("07700900123", "5550100199", "0199"))]
+    check("NEGATIVE: a phone after a phone key (Phone:, mob:, number=, tel:), with spaced or "
+          "Unicode dashes or runs of spaces is redacted; two dates, a date and time, an IPv4 "
+          "address, a dotted build, a year-first order id, epochs, two id groups, a spaced "
+          "latency and a git remote stay as written",
+          rc == 0 and kept == sorted(REVIEW_KEEP) and len(hid) == len(REVIEW_HIDE)
+          and not leaked,
+          "changed=%s leaked=%s" % ([t for t in kept if t not in REVIEW_KEEP], leaked))
+
+
+LEAK_EMAIL, LEAK_PHONE = "pat.leak@example.com", "5550100177"
+
+
+@arm("NEGATIVE: an email or phone in a message id or url is stored nowhere")
+def feedback_id_url_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    recs = [fb_msg(1, text="from %s" % LEAK_EMAIL, url="mailto:%s?subject=re" % LEAK_EMAIL,
+                   id=LEAK_EMAIL),
+            fb_msg(2, url="https://help.example.com/t?phone=%s&email=%s"
+                   % (LEAK_PHONE, LEAK_EMAIL.replace("@", "%40"))),
+            fb_msg(3, id=int(LEAK_PHONE))]
+    rc, _ = import_feedback(root, *recs)
+    rc2, _ = import_feedback(root, *recs)  # the hashed id still dedupes
+    iid = IN.item_id("fb", "checkout-crash")
+    count = items(root)[iid]["count"]
+    spec, env = picked_spec(root, iid, HONEST_CMD)
+    texts = []
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                texts.append((os.path.relpath(os.path.join(dp, fn), root), f.read()))
+    leaks = sorted({p for p, t in texts for leak in (LEAK_EMAIL, "%40example", LEAK_PHONE)
+                    if leak in t})
+    check("NEGATIVE: an email address as a message id, a mailto: url and a url with phone= "
+          "and a %40 address leave no raw address or number in any file under the repo "
+          "(queue, item snapshot, envelope, log, spec); the hashed id dedupes on re-import",
+          rc == 0 and rc2 == 0 and count == 3 and not leaks
+          and any(p.endswith(os.path.basename(spec)) for p, _ in texts),
+          "count=%s leaks=%s" % (count, leaks))
+
+
+@arm("NEGATIVE: a message dated more than a day ahead is a problem")
+def feedback_future_arm():
+    root = tmp()
+    write_config(root, FB_CONFIG)
+    rc, out = import_feedback(root, fb_msg(1), fb_msg(2, created=later(3)))
+    it = items(root).get(IN.item_id("fb", "checkout-crash"), {})
+    check("NEGATIVE: a created_at more than a day after the import clock is a PROBLEM: line "
+          "(exit 3), not a clamped time; the other message imports",
+          rc == 3 and "PROBLEM: line 2: created_at is more than a day after the import time"
+          in out and it.get("count") == 1 and it.get("last_seen") == "2026-10-01T00:00:00Z",
+          out.splitlines()[0] if out else "")
+
+
 @arm("NEGATIVE: intake opened no socket and ran no subprocess")
 def no_io_arm():
     check("NEGATIVE: across every intake call in this eval, intake opened no socket and ran no "
@@ -455,7 +652,9 @@ def main():
     else:
         for fn in (recorder_arm, positive_arm, release_gate_arm, unknown_format_arm,
                    malformed_arm, dismissed_arm, tripwire_arm, hidden_arm, squash_arm,
-                   partial_arm, no_io_arm):
+                   partial_arm, feedback_arm, feedback_topic_arm, feedback_cap_arm,
+                   feedback_recur_arm, feedback_redact_arm, feedback_review_redact_arm,
+                   feedback_id_url_arm, feedback_future_arm, no_io_arm):
             fn()
     n, k = len(_checks), sum(_checks)
     print("EVAL_RESULT: %s (%d/%d checks)" % ("PASS" if k == n else "FAIL", k, n))

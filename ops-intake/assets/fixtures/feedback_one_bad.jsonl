@@ -1,0 +1,5 @@
+{"id": "m-201", "topic": "login-loop", "channel": "email", "created_at": "2026-10-01T09:00:00Z", "text": "Login sends me back to the start."}
+{"id": "m-202", "channel": "email", "created_at": "2026-10-01T09:00:00Z", "text": "no topic here"}
+{"id": "m-203", "topic": "Login Loop", "channel": "email", "created_at": "2026-10-01T09:00:00Z", "text": "bad topic"}
+{"id": "m-204", "topic": "login-loop", "channel": "email", "created_at": "01/10/2026", "text": "bad time"}
+{"id": "m-205", "topic": "login-loop", "channel": "sms", "created_at": "2026-10-01T09:00:00Z", "text": "unknown channel"}

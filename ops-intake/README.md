@@ -16,6 +16,10 @@ npx skills add dhanesh/agent-skills --skill ops-intake
 - GitHub issues (`gh issue list --json …`).
 - Jira, Linear or any other source, through one simple JSON-lines format that you or the agent
   write (`intake-signals-jsonl`). These items are marked lower trust.
+- Support messages, app reviews and feedback-form answers, through `feedback-jsonl`. You
+  export them, and you or the agent transform the export to one line per message, with a
+  topic for each. Messages with the same topic become one item with a count. These items are
+  marked lower trust too.
 
 The agent runs each command or MCP search tool. It pipes CLI output straight into
 `intake.py import`, so it does not read that text first. The tool runs no command, opens no
@@ -43,6 +47,8 @@ only when its source sees it again after the dismissal.
 ## What it does not do
 
 - It never writes to GitHub, Jira or Linear. "Resolved" is local state.
+- It never replies to a customer. The agent can draft a reply for you to send.
+- It never sends customer text to Jev or to another model.
 - It never picks, dismisses or resolves for you.
 - It never starts the factory. Your plan approval does.
 - It runs only when you ask. There is no scheduled sweep.
@@ -55,6 +61,14 @@ only when its source sees it again after the dismissal.
 - Built-in Jira and Linear formats wait for real output samples. Until then, use
   `intake-signals-jsonl`.
 - Which skill made an envelope is what the envelope says. It is not signed.
+- For feedback, the agent reads every message to choose its topic. So the pipe does not keep
+  that text away from the agent. Your review of the check commands is the backstop.
+- The agent chooses the topics. The tool does not cluster messages.
+- The tool writes email addresses and phone numbers as `[email]` and `[phone]`. Names,
+  street addresses and account numbers still get through. The evidence stays in the
+  git-ignored intake directory.
+- App Store Connect, Play Console, Zendesk and Intercom have no built-in format. You export
+  from them and transform the export.
 
 ## Files
 

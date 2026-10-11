@@ -407,7 +407,7 @@ New skill (release-conductor 0.1.0, roadmap step 5A, plan Task 8, 2026-10-04), w
 | c14 | 262 | - You MUST NOT edit a grant to lift a declined class, because… | not judged (final fix wave) | MUST | R41: lifting a decline widens the human's grant without them; the sanctioned route is the human's in-session yes (`stage --approved-by`, CLAIMED, gate-ask on `deploy_staging`/`push_tag` only); the tool cannot see who edited a grant file, so the rule carries it |
 | c11 | 339 | - **Not a merger.** You MUST leave merging the release PR to the human, because… | not judged (new skill) | MUST | the human's merge is the checkpoint before staging (spec §2 step 1); stage refuses a commit that is not on the default branch (`not-merged`), and A8 keeps `merge` ungrantable; same rule as factory-conductor c16 |
 
-## ops-intake (9 candidates · 8 MUST · 0 SHOULD · 1 MAY · 0 plain · 0 departures)
+## ops-intake (12 candidates · 10 MUST · 0 SHOULD · 2 MAY · 0 plain · 0 departures)
 
 New skill (ops-intake 0.1.0, roadmap step 5B, plan Task 6, 2026-10-06), written with BCP 14 from the start. Jev did not judge these rows; as with release-conductor's, each level follows the rule it carries and names what enforces it. The tool runs no command and opens no socket, so most rows carry rules about what the agent does around it (what it reads, calls, picks and writes), which the tool cannot see. Descriptive "never" sentences (the tool never asks a model) are plain prose, not candidates.
 
@@ -422,6 +422,9 @@ New skill (ops-intake 0.1.0, roadmap step 5B, plan Task 6, 2026-10-06), written 
 | c7 | 182 | - You MUST NOT edit or delete files under `.skill-contract/intake/` or `.intake/` by hand, because… | not judged (new skill) | MUST | design spec §1.5 (atomic queue, append-only log, envelopes pinned by digest); same rule as release-conductor c7 |
 | c8 | 185 | - You MUST NOT start factory-conductor or release-conductor from intake, because… | not judged (new skill) | MUST | design spec §2.3 and §5 (intake never starts the factory; the human's plan approval is the checkpoint) |
 | c9 | 268 | You MAY suggest another order to the human in conversation; the tool never asks a model. | not judged (new skill) | MAY | design spec §1.4 (the agent MAY propose a reordering; ranking stays deterministic code) |
+| c10 | 201 | You MUST NOT send customer text to Jev or to any other model or service, including to choose topics, because… | not judged (new in 0.2.0, feedback intake) | MUST | feedback design spec §4 (no customer text goes to Jev or any model; the global data guardrails forbid sending personal data out); intake calls no model and cannot see what the agent sends, so the rule carries it |
+| c11 | 204 | You MUST NOT reply to, email or otherwise contact a customer, because… | not judged (new in 0.2.0, feedback intake) | MUST | feedback design spec §4 (a reply is `external_message` class, which no autonomy grant covers); intake has no send path, so the rule closes the agent's own route; same level as c5 |
+| c12 | 206 | You MAY draft a reply for the human to send. | not judged (new in 0.2.0, feedback intake) | MAY | feedback design spec §4 (the agent MAY draft a reply; the human sends it) |
 
 ## idea-validation (12 candidates · 10 MUST · 0 SHOULD · 2 MAY · 0 plain · 0 departures)
 

@@ -25,7 +25,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -44,7 +44,7 @@ LOG_FILE = "intake-log.jsonl"
 
 # The closed list of formats. adapters.ADAPTERS holds the ones that are built.
 FORMATS = ("release-envelope", "release-status", "gh-issues-json", "gh-runs-json",
-           "gh-run-jobs-json", "git-rev-list", "intake-signals-jsonl")
+           "gh-run-jobs-json", "git-rev-list", "intake-signals-jsonl", "feedback-jsonl")
 # git-rev-list is auxiliary: it belongs to no source.
 SOURCE_FORMATS = tuple(f for f in FORMATS if f != "git-rev-list")
 RELEASE_SOURCE = "release"
@@ -368,6 +368,8 @@ def _valid_item(it):
             and isinstance(it.get("first_seen", ""), str)
             and isinstance(it.get("evidence", []), list)
             and all(isinstance(e, dict) for e in it.get("evidence", []))
+            and isinstance(it.get("seen_keys", []), list)
+            and all(isinstance(k, str) for k in it.get("seen_keys", []))
             and all(it.get(k) is None or isinstance(it[k], str) for k in _ITEM_OPTIONAL_STRS))
 
 
@@ -596,7 +598,8 @@ def cmd_show(a):
     if i is None:
         return 2
     print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
-    print("source: %s %s" % (code(i["source"]), code(i["source_id"])))
+    print("source: %s %s kind %s" % (code(i["source"]), code(i["source_id"]),
+                                      code(i.get("kind", "issue"))))
     for ev in i.get("evidence", []):
         print("evidence: %s" % code(ev if isinstance(ev, str) else json.dumps(ev, sort_keys=True)))
     return 0
@@ -668,6 +671,9 @@ def cmd_link(a):
                 print("STOP: %s is %s; link it as the first id, or dismiss it first"
                       % (code(drop["id"]), drop["state"]))
                 return 2
+            # The kept item has seen every key either item saw, so a later import of the
+            # dropped item's messages is not counted again (spec 2.1).
+            keep["seen_keys"] = sorted(_seen(keep) | _seen(drop))
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
@@ -708,15 +714,27 @@ JOBS_TRIES = 3         # failed jobs imports of a run before sync stops its NEXT
 RUN_KEEP_DAYS = 30     # sync forgets a run imported longer ago than this (R26)
 
 
+def _seen(item):
+    """Every evidence key the item has seen: its uncapped `seen_keys`, or, for an item
+    from a queue written before them, the keys of the evidence it still holds."""
+    if "seen_keys" in item:
+        return set(item["seen_keys"])
+    return {e.get("key") for e in item.get("evidence", [])
+            if isinstance(e, dict) and isinstance(e.get("key"), str)}
+
+
 def _bump(item, sig):
-    """Merge a signal into a known item: new evidence keys raise count, last_seen moves
-    forward only, the evidence list keeps the newest EVIDENCE_CAP."""
-    have = {e.get("key") for e in item.get("evidence", []) if isinstance(e, dict)}
+    """Merge a signal into a known item: an evidence key the item has never seen raises
+    count, last_seen moves forward only, the evidence list keeps the newest EVIDENCE_CAP.
+    The seen keys are kept uncapped, so a key the cap dropped is not counted again
+    (spec 2.1)."""
+    have = _seen(item)
     for ev in sig["evidence"]:
         if ev["key"] not in have:
             have.add(ev["key"])
             item.setdefault("evidence", []).append(ev)
             item["count"] = item.get("count", 0) + 1
+    item["seen_keys"] = sorted(have)
     del item["evidence"][:-EVIDENCE_CAP]
     if sig["last_seen"] > (item.get("last_seen") or ""):
         item["last_seen"] = sig["last_seen"]
@@ -757,12 +775,18 @@ def apply_signals(queue, signals, now):
                 if ev["key"] not in seen:
                     seen.add(ev["key"])
                     it["evidence"].append(ev)
+            it["seen_keys"] = sorted(seen)
             del it["evidence"][:-EVIDENCE_CAP]
             _note_recur_seen(it, sig)
             continue
         recurs = (it["state"] in ("dismissed", "resolved") and sig.get("recurrence", True)
                   and not sig.get("closed") and it.get("closed_at")
                   and sig["last_seen"] > it["closed_at"])
+        if recurs and sig["kind"] == "feedback":
+            # Spec 2.2: only a message never seen before brings feedback back, so a
+            # re-import of old (or future-dated, already seen) messages never regresses it.
+            have = _seen(it)
+            recurs = any(e["key"] not in have for e in sig["evidence"])
         _bump(it, sig)
         _note_recur_seen(it, sig)
         it["severity"] = max(it.get("severity", 0), sig["severity"])  # only rises on merge, by design
@@ -1276,8 +1300,8 @@ def item_payload(i):
     evidence = []
     for e in i.get("evidence", []):
         if isinstance(e, dict):
-            evidence.append({k: e[k] for k in ("text", "source", "source_id", "fetched_at", "key")
-                             if k in e})
+            evidence.append({k: e[k] for k in ("text", "source", "source_id", "fetched_at", "key",
+                                               "created_at") if k in e})
         else:
             evidence.append({"text": str(e)})
     return {"item_id": i["id"], "title": i["title"], "kind": i.get("kind", "issue"),
