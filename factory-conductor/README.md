@@ -131,11 +131,14 @@ every command are in `references/ledger.md`. A project without the budget file s
 - **The money ledger only refuses.** `ledger.py check` refuses a proposal over a category or
   total cap (recorded spend plus open reservations plus the proposal, in each month it
   covers), in another currency, for an unknown category, for a past month, or while the
-  budget differs from the registered copy (fail closed). It never prints an approval word and
-  writes no envelope, and `conductor.py` does not read it, so no grant or run can take a check
-  as permission: `spend` stays an action class no grant covers. Its limits: recorded spend is
-  a claim, `--by` names are self-declared, the committed budget shows your caps to anyone who
-  can read the repository, and spend that nobody records is invisible to it. The test-only
+  budget differs from the registered copy (fail closed). A re-run of the same proposal is
+  checked against the caps again, so a cap cut or a new record can refuse it. It never prints
+  an approval word and writes no envelope, and `conductor.py` does not read it, so no grant or
+  run can take a check as permission: `spend` stays an action class no grant covers. Its
+  limits: recorded spend is a claim, `--by` names are self-declared (an agent name or an
+  approval word in one is refused), the committed budget shows your caps to anyone who can
+  read the repository, spend that nobody records is invisible to it, and its state digest has
+  no key, so a consistent hand edit of both state files is not detected. The test-only
   `--today` switch needs `LEDGER_TEST_CLOCK=1`, which only the tests and the eval set.
 - **Same-user residuals.** A hostile executor running as your OS user could forge the run's
   state or log, tamper with the git object store, read files outside the verify checkout by

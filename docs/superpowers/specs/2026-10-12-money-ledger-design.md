@@ -133,10 +133,12 @@ The build follows this design. These points were changed or made exact while bui
   the sha256 of the state it wrote. When `ledger.json` was deleted, emptied or edited (a
   dropped reservation, a swapped cap), every `check` refuses, `record` and `withdraw` stop,
   and `register` needs `--reason`. Deleting both files still starts a fresh ledger (a known
-  limit).
+  limit). Corrected in the review (below): the digest has no key, so it finds a hand edit of
+  one file, not a consistent edit of both.
 - **Approval words are refused in ids and categories.** An id or a category holding `ok`,
   `approved`, `pass` or `allowed` as a kebab part is refused, and argparse errors do not echo
-  the argument, so no check output can carry one of those words.
+  the argument, so no check output can carry one of those words. The review (below) made the
+  list longer and added `--by`.
 - **The `--today` guard names no switch.** idea-validation 0.1.2's STOP line names its
   environment switch. The ledger follows growth-review: the STOP line, SKILL.md, the
   reference and the usage text do not name it. The README does.
@@ -146,7 +148,8 @@ The build follows this design. These points were changed or made exact while bui
 - **The replay comes after the refusal gates.** A re-run with the same id and fields prints
   `NOT_REFUSED` again only when the budget is registered, not stale, the state matches its
   log, and the currency, category, amount and months still pass. So a stale budget refuses a
-  replay too. A withdrawn id is refused: a new proposal needs a new id.
+  replay too. A withdrawn id is refused: a new proposal needs a new id. Since the review
+  (below, H1), the replay also goes through the cap check.
 - **A recurring proposal covers at most 120 months** and ends by 9999-12. Month arithmetic
   uses plain integers.
 - **`status` is read-only:** it takes no lock and creates no file.
@@ -154,4 +157,68 @@ The build follows this design. These points were changed or made exact while bui
   the agent runs `check` before any spend proposal, in any session. But an agent reads that
   rule only when factory-conductor loads, and the frontmatter description is about running a
   plan. The description is at 1015 of its 1024 characters, so it was not changed. A later
-  change can shorten it and add the ledger.
+  change can shorten it and add the ledger. **Fixed in the review (below, M5).**
+
+## Errata (independent review, 2026-10-12)
+
+An independent review of `ledger.py` found these defects. Each one is fixed, with a unit
+test and, where it fits, an eval arm and an A/B row.
+
+- **H1: a replay is checked against the caps again.** Before, a replay with the same id and
+  fields printed `NOT_REFUSED` before the cap loop. After a cap cut, or after a record that
+  pushed a month up, a replay of an over-cap proposal still passed. Now the replay computes
+  each month's category and total sums with `charge()` over all proposals. Its own
+  reservation or record is already in the sums, so the amount is not added twice. When a
+  month is over either cap, the replay is `REFUSED` (exit 3) with
+  `<id> stays reserved until the human withdraws it`. The reservation stays and nothing is
+  written. The new proposal and the replay share one function, `over_cap()`.
+- **M1: one agent-name check for three tools.** Lookalikes passed: a bare `agent`,
+  `agent x`, `agent.claude`, `agent;x`, `agent|x`, `@agent:x`, `[agent]:x`, `a gent:x`, the
+  lookalike colons U+2236, U+A789, U+02D0 and U+0589, the dashes U+2010 and U+2014, a middle
+  dot, and `ᴀ` (U+1D00) or `ɑ` (U+0251) for `a`. The new fold is NFKD without combining
+  marks, the lookalike map (with the IPA alpha and the small capitals of a, g, e, n and t),
+  casefold, and every character that is not a letter (Lu, Ll, Lt, Lo) or a digit becomes a
+  space. Modifier letters (Lm, such as U+02D0) are separators, because Python counts them as
+  word characters. Then `^ *a *g *e *n *t(?![^\W\d_])` refuses `agent` at the start, its
+  letters apart or not, with no letter after it. The block is byte-identical in
+  `growth-review/assets/growth.py` (0.1.1) and `idea-validation/assets/ideas.py` (0.1.3), and
+  a test pins the three copies together. A human name that starts with the word, such as
+  `Agent Smith`, is now refused: the check fails closed. Three tests asserted that
+  `Agent Smith` passes; each moved it to its refused list. `agentur GmbH`, `Reagent Labs`,
+  `Agentha Ray` and `Magenta` still pass.
+- **M2: more approval words, and `--by`.** The refused set is now `ok`, `okay`, `yes`,
+  `approve`, `approved`, `accept`, `accepted`, `allow`, `allowed`, `grant`, `granted`, `pass`
+  and `passed`, in ids and categories (kebab parts) and in the test token pattern. A `--by`
+  that holds one as a word, after the agent-name fold, is a `STOP:` (exit 2) in `register`,
+  `record` and `withdraw`, because those commands echo the name. `Grant` is a real first name
+  and is refused too (fail closed). `lint` prints `LINT: clean` (it printed `LINT: ok`), and
+  `status` prints `stale=true` or `stale=false` (it printed `stale=yes` or `stale=no`). The
+  lint problem for a bad category no longer lists the words. A test runs every command on
+  legal fixture inputs and finds no approval word in any output.
+- **M3: the state digest has no key.** SKILL.md and the reference said a hand edit makes
+  every check refuse. That is true for an edit of one file. Someone who edits `ledger.json`
+  and appends a log line with the matching digest is not detected. The c29 reason, the
+  reference and the known limits now say so. No code change.
+- **M4: test and eval gaps.** A unit test and an eval arm show that a withdrawn proposal's
+  recorded spend still counts. New eval negative arms: the total cap refuses when no category
+  cap does; another currency and a past month are refused with exit 3 (the old token arm
+  ignored the exit code); a record in another currency is refused and a record for a month
+  that has not started is a `STOP:`; an agent and a lookalike cannot withdraw; a raise
+  registered without `--reason` is refused; a state that its log does not match refuses the
+  check; one minor unit over a cap is refused and exactly at it is not; an approval word in
+  an id or `--by` is a `STOP:`; `--today` without the test switch exits 2; no output of any
+  command carries an approval word; and the two H1 replay arms. The reviewer's mutant list
+  now dies in the eval, the test-clock mutant included.
+- **M5: the description names the ledger.** The frontmatter description was shortened and
+  now says to use the skill before proposing any spend, in any session, and that the ledger
+  only refuses. It is 1015 characters. growth-review and idea-validation SKILL.md tell the
+  agent to run the ledger check before it puts any spend to the human, when factory-conductor
+  is installed, and say that a pass is not approval (a SHOULD, with register rows).
+- **L1: an open-ended recurring proposal names its horizon.** The check and a replay print
+  `NOTE: open-ended; reserved only to YYYY-MM`.
+- **L2: a record outside the proposal's months is noted.** It still records, and prints
+  `NOTE: <month> is not a month that proposal <id> reserved; recorded all the same`.
+- **L3: `status` refuses symlinks as the writers do.** A symlinked `.skill-contract`, ledger
+  directory, state file, log or lock is a `STOP:` (exit 2).
+- **L4: residual risk, documented.** The test-only clock switch lets a back-dated clock pass.
+  The reference's known limits say so, without naming the switch. No code change.

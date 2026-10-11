@@ -41,10 +41,16 @@ agent_cmd is a shell is invalid. Every timer call goes to a temp home, dry-run, 
 
 The money ledger arms drive assets/ledger.py in-process on synthetic amounts (no payment
 tool, no model): a positive flow (register, check, record, status) and, as negatives, a
-stale budget never gives NOT_REFUSED, an agent cannot record spend, a re-run reserves once
-and a second proposal that only fits alone is refused, a recurring proposal that goes over
-in month 7 only is refused, and no check output carries an approval word or writes an
-envelope.
+stale budget never gives NOT_REFUSED, an agent (and a lookalike name) cannot record spend or
+withdraw, a withdrawn proposal's recorded spend still counts, a re-run reserves once and a second proposal that only fits alone is refused, a
+replay after a cap cut or after a record that pushes the total over is refused, a recurring
+proposal that goes over in month 7 only is refused, the total cap refuses when no category
+cap does, one minor unit over a cap is refused while exactly at the cap is not, another
+currency and a past month are refused with exit 3 (a record in another currency too, and a
+record for a month that has not started is a STOP), a raise registered without --reason is
+refused, a state that its log does not match refuses the check, an approval word in an id
+or a --by name is a STOP, --today without the test switch exits 2, and no output of any
+command carries an approval word or a pass writes an envelope.
 """
 import contextlib
 import hashlib
@@ -57,6 +63,7 @@ import subprocess
 import sys
 import time
 from datetime import timedelta
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL = os.path.dirname(HERE)
@@ -739,16 +746,152 @@ def money_ledger_arms():
           and "ppc" not in LK.state(root)["proposals"], "one-off=%r recurring=%r"
           % (one, rec[0]))
 
+    # A replay is checked again: after a cap cut, and after a record that pushes the total
+    # over, the same id and fields are REFUSED and the reservation stays.
+    root = LK.registered()
+    first = LK.check(root, "vps", "hosting", "20")[0]
+    LK.write_budget(root, LK.BUDGET.replace("| hosting | 25 |", "| hosting | 10 |"))
+    cut = LK.run(root, "register", "--by", "Dana", "--reason", "cut")[0]
+    replay = LK.check(root, "vps", "hosting", "20")
+    check("NEGATIVE: money ledger: a replay after a cap cut is REFUSED and stays reserved",
+          first == 0 and cut == 0 and replay[0] == 3 and "NOT_REFUSED" not in replay[1]
+          and LK.state(root)["proposals"]["vps"]["status"] == "open",
+          "first=%r cut=%r replay=%r" % (first, cut, replay[0]))
+    root = LK.registered()
+    a = LK.check(root, "a", "ads", "100")[0]
+    b = [LK.check(root, "b", "hosting", "20")[0] for _ in range(2)]
+    rec = LK.run(root, "record", "--id", "a", "--amount", "100.50", "--currency", "USD",
+                 "--month", "2026-10", "--by", "Dana")[0]
+    replay = LK.check(root, "b", "hosting", "20")
+    check("NEGATIVE: money ledger: a replay after a record pushes the total over is REFUSED",
+          a == 0 and b == [0, 0] and rec == 0 and replay[0] == 3
+          and "the total would reach 120.50" in replay[1],
+          "before=%r record=%r replay=%r" % (b, rec, replay[0]))
+
+    # The total cap refuses when no category cap does; one minor unit over a cap is refused
+    # and exactly at the cap is not.
+    root = LK.registered()
+    ads = LK.check(root, "a", "ads", "100")[0]
+    over = LK.check(root, "b", "hosting", "20.01")
+    at = LK.check(root, "c", "hosting", "20")[0]
+    check("NEGATIVE: money ledger: the total cap refuses when no category cap does",
+          ads == 0 and over[0] == 3 and "the total would reach 120.01" in over[1] and at == 0,
+          "ads=%r over=%r at=%r" % (ads, over[0], at))
+    at = LK.check(LK.registered(), "a", "hosting", "25")
+    unit = LK.check(LK.registered(), "a", "hosting", "25.01")
+    check("NEGATIVE: money ledger: one minor unit over a cap is REFUSED, exactly at it is not",
+          at[0] == 0 and "NOT_REFUSED: a" in at[1] and unit[0] == 3
+          and "would reach 25.01, over its monthly cap 25.00" in unit[1],
+          "at=%r over=%r" % (at[0], unit[0]))
+
+    # Another currency and a past month are REFUSED (exit 3); records too.
+    root = LK.registered()
+    eur = LK.check(root, "e", "ads", "1", currency="EUR")
+    past = LK.check(root, "z", "ads", "1", "--month", "2026-09")
+    LK.check(root, "p", "hosting", "5")
+    rec_eur = LK.run(root, "record", "--id", "p", "--amount", "5", "--currency", "EUR",
+                     "--month", "2026-10", "--by", "Dana")
+    rec_future = LK.run(root, "record", "--id", "p", "--amount", "5", "--currency", "USD",
+                        "--month", "2026-11", "--by", "Dana")
+    check("NEGATIVE: money ledger: another currency and a past month are REFUSED with exit 3",
+          eur[0] == 3 and "not the project currency USD" in eur[1] and past[0] == 3
+          and "before the current month" in past[1] and set(LK.state(root)["proposals"])
+          == {"p"}, "eur=%r past=%r" % (eur[0], past[0]))
+    check("NEGATIVE: money ledger: a record in another currency is REFUSED and a record for "
+          "a month that has not started is a STOP", rec_eur[0] == 3 and rec_future[0] == 2
+          and LK.state(root)["proposals"]["p"]["records"] == {},
+          "currency=%r future=%r" % (rec_eur[0], rec_future[0]))
+
+    # Only the human withdraws, and a raise needs --reason.
+    root = LK.registered()
+    LK.check(root, "vps", "hosting", "5")
+    got = [LK.run(root, "withdraw", "--id", "vps", "--by", by, "--reason", "x")[0]
+           for by in ("agent:claude", "agent.claude", "agent")]
+    human = LK.run(root, "withdraw", "--id", "vps", "--by", "Dana", "--reason", "x")[0]
+    check("NEGATIVE: money ledger: an agent (and a lookalike name) cannot withdraw",
+          got == [2, 2, 2] and human == 0, "agent=%r human=%r" % (got, human))
+    LK.run(root, "record", "--id", "vps", "--amount", "24", "--currency", "USD", "--month",
+           "2026-10", "--by", "Dana")
+    spent = LK.check(root, "q", "hosting", "1.01")
+    fits = LK.check(root, "r", "hosting", "1")[0]
+    check("NEGATIVE: money ledger: a withdrawn proposal's recorded spend still counts against "
+          "the cap", spent[0] == 3 and "would reach 25.01" in spent[1] and fits == 0,
+          "over=%r fits=%r" % (spent[0], fits))
+    root = LK.registered()
+    LK.write_budget(root, LK.BUDGET.replace("| hosting | 25 |", "| hosting | 90 |")
+                    .replace("| total | 120 |", "| total | 200 |"))
+    bare = LK.run(root, "register", "--by", "Dana")
+    regs = len(LK.state(root)["registrations"])
+    big = LK.check(root, "big", "hosting", "80")[0]
+    check("NEGATIVE: money ledger: a raised budget registered without --reason is refused, "
+          "and checks keep refusing", bare[0] == 2 and "needs --reason" in bare[1]
+          and regs == 1 and big == 3, "register=%r regs=%r check=%r" % (bare[0], regs, big))
+
+    # A state that its log does not match refuses the check.
+    root = LK.registered()
+    LK.check(root, "a", "hosting", "20")
+    st = LK.state(root)
+    st["proposals"] = {}
+    LK.write_state(root, st)              # the reservation is gone, the seq is unchanged
+    hand = LK.check(root, "b", "hosting", "20")
+    check("NEGATIVE: money ledger: a hand-edited state that its log does not match refuses "
+          "the check", hand[0] == 3 and "the ledger state and its log disagree" in hand[1],
+          "check=%r" % hand[0])
+
+    # Approval words: an id or a --by name holding one is a STOP.
+    root = LK.registered()
+    ids = [LK.check(root, pid, "hosting", "1")[0] for pid in ("ok", "granted", "yes-go")]
+    LK.check(root, "vps", "hosting", "1")
+    bys = [LK.run(root, "record", "--id", "vps", "--amount", "1", "--currency", "USD",
+                  "--month", "2026-10", "--by", by)[0] for by in ("OK", "Granted", "Dana yes")]
+    check("NEGATIVE: money ledger: an approval word in an id or a --by name is a STOP",
+          ids == [2, 2, 2] and bys == [2, 2, 2]
+          and LK.state(root)["proposals"]["vps"]["records"] == {},
+          "ids=%r bys=%r" % (ids, bys))
+
+    # --today without the test switch is a STOP: exit 2, not 0.
+    root = LK.repo()
+    env = {k: v for k, v in os.environ.items() if k != LK.L.TEST_CLOCK_ENV}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()), \
+            mock.patch.dict(os.environ, env, clear=True):
+        rc = LK.L.main(["--root", root, "--today", LK.TODAY, "register", "--by", "Dana"])
+    check("NEGATIVE: money ledger: --today without the test switch exits 2 and writes nothing",
+          rc == 2 and buf.getvalue().startswith("STOP:")
+          and not os.path.exists(os.path.join(root, ".skill-contract")), "rc=%r" % rc)
+
+    # No approval-like token from any command, no envelope.
+    every = []
+    root = LK.repo()
+    for argv in (("lint",), ("register", "--by", "Dana"), ("register", "--by", "Dana"),
+                 ("record", "--id", "vps", "--amount", "1", "--currency", "USD", "--month",
+                  "2026-10", "--by", "Dana")):
+        every.append(LK.run(root, *argv))
+    LK.check(root, "vps", "hosting", "5")
+    for argv in (("record", "--id", "vps", "--amount", "30", "--currency", "USD", "--month",
+                  "2026-10", "--by", "Dana"),
+                 ("withdraw", "--id", "vps", "--by", "Dana", "--reason", "done"),
+                 ("status",)):
+        every.append(LK.run(root, *argv))
+    LK.write_budget(root, LK.BUDGET.replace("| hosting | 25 |", "| hosting | 30 |"))
+    every += [LK.run(root, "status"),
+              LK.run(root, "register", "--by", "Dana", "--reason", "more")]
+    every_text = "".join(o[1] + o[2] for o in every)
+
     # No approval-like token, no envelope.
     root = LK.registered()
     outs = [LK.check(root, *argv) for argv in (
         ("vps", "hosting", "1"), ("vps", "hosting", "1"), ("big", "hosting", "99"),
         ("x", "gold", "1"), ("y", "ads", "0"), ("z", "ads", "1", "--month", "2026-01"))]
     outs.append(LK.check(root, "e", "ads", "1", currency="EUR"))
-    text = "".join(o[1] + o[2] for o in outs)
+    outs.append(LK.check(root, "o", "hosting", "1", "--recurring", "monthly", "--start",
+                         "2026-11"))
+    text = "".join(o[1] + o[2] for o in outs) + every_text
     hits = re.findall(LK.APPROVAL_TOKEN_RE, text)
-    check("NEGATIVE: money ledger: no check output carries OK, APPROVED, PASS or ALLOWED, and "
-          "a pass writes no envelope", not hits and outs[0][0] == 0
+    check("NEGATIVE: money ledger: no output of any command carries an approval word (OK, "
+          "YES, GRANTED, APPROVED, PASS, ALLOWED and the rest), and a pass writes no envelope",
+          not hits and outs[0][0] == 0 and "NOT_REFUSED" in text and "RECORDED:" in text
+          and "WITHDRAWN:" in text and "STATUS:" in text and "LINT: clean" in text
           and os.listdir(os.path.join(root, ".skill-contract")) == ["ledger"],
           "hits=%r" % hits)
 

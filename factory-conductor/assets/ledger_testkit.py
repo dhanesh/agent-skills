@@ -33,7 +33,8 @@ currency: USD
 """
 
 # Words that read as approval; no check output may carry one (case-insensitive, as words).
-APPROVAL_TOKEN_RE = r"(?i)\b(ok|approved|pass|allowed)\b"
+APPROVAL_TOKEN_RE = (r"(?i)\b(ok|okay|yes|approve|approved|accept|accepted|allow|allowed|"
+                     r"grant|granted|pass|passed)\b")
 
 
 def repo(budget=BUDGET):

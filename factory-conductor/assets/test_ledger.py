@@ -14,7 +14,16 @@ from ledger_testkit import (APPROVAL_TOKEN_RE, BUDGET, L, TODAY, check, ldir, lo
 SKILL = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT_LOOKALIKES = ("agent:claude", "agent：claude", "ａｇｅｎｔ:claude",
                     "аgent:claude", "agеnt:claude", "agent :claude", "agent-claude",
-                    "agent/claude", "agent_claude", "AGENT-Claude", " АGENT:x")
+                    "agent/claude", "agent_claude", "AGENT-Claude", " АGENT:x",
+                    # the review's lookalikes (one shared check with growth-review and
+                    # idea-validation): a bare agent, any separator, letters apart, and
+                    # small-capital or IPA letters; and a human name starting with the word
+                    "agent", "agent x", "agent.claude", "agent;x", "agent|x", "@agent:x",
+                    "[agent]:x", "a gent:x", "agent\u2236x", "agent\ua789x", "agent\u02d0x",
+                    "agent\u0589x", "agent\u2010x", "agent\u2014x", "agent\u00b7x",
+                    "\u1d00gent:x", "\u0251gent:x", "Agent Smith")
+APPROVAL_NAMES = ("OK", "Okay", "yes", "Dana_ok", "Dana (approved)", "Granted", "Grant",
+                  "ｏｋ", "PASS", "Allowed Dana", "accept")
 
 
 def snapshot(d):
@@ -41,7 +50,7 @@ class Lint(unittest.TestCase):
     def test_good_file(self):
         rc, out = self.lint(BUDGET)
         self.assertEqual(rc, 0, out)
-        self.assertIn("LINT: ok 3 categories, currency USD, total 120.00", out)
+        self.assertIn("LINT: clean 3 categories, currency USD, total 120.00", out)
 
     def test_bad_currency(self):
         for cur in ("usd", "US", "USDX", "ＵＳＤ", "U$D", ""):
@@ -115,8 +124,21 @@ class Register(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(ldir(root), L.STATE_FILE)), by)
 
     def test_human_names_pass(self):
-        for by in ("Dana", "Agent Smith", "Reagent:x", "Agentha Ray"):
+        # "Agent Smith" moved to AGENT_LOOKALIKES: a name that starts with the word "agent"
+        # is refused (the check fails closed).
+        for by in ("Dana", "Reagent:x", "Agentha Ray", "agentur GmbH", "Reagent Labs",
+                   "Magenta", "Yesenia Okafor"):
             self.assertEqual(run(repo(), "register", "--by", by)[0], 0, by)
+
+    def test_approval_word_names_refused(self):
+        """A --by that holds an approval word as a word is a STOP, because register prints
+        the name. "Grant" is a real first name: refused too (fail closed)."""
+        for by in APPROVAL_NAMES:
+            root = repo()
+            rc, out, _ = run(root, "register", "--by", by)
+            self.assertEqual(rc, 2, by)
+            self.assertIn("STOP: --by holds a word that reads as approval", out)
+            self.assertFalse(os.path.exists(os.path.join(ldir(root), L.STATE_FILE)), by)
 
     def test_empty_or_hidden_name_refused(self):
         for by in ("", "  ", "Da​na"):
@@ -255,7 +277,7 @@ class Stale(unittest.TestCase):
                 self.assertIn("REFUSED: budget edited since register", out)
                 self.assertNotIn("NOT_REFUSED", out)
         rc, out, _ = run(root, "status")
-        self.assertIn("stale=yes", out)
+        self.assertIn("stale=true", out)
 
     def test_missing_or_broken_budget_refuses(self):
         root = registered()
@@ -408,9 +430,50 @@ class Check(unittest.TestCase):
             rc, out, err = check(self.root, "p", "hosting", "1", *extra)
             self.assertEqual(rc, 2, extra)
             self.assertIn("STOP:", out + err, extra)
-        for pid in ("P1", "a b", "x" * 65, "ok", "pass-1", "allowed"):
+        for pid in ("P1", "a b", "x" * 65, "ok", "pass-1", "allowed", "granted", "yes-go",
+                    "okay", "vps-approve", "accepted"):
             self.assertEqual(check(self.root, pid, "hosting", "1")[0], 2, pid)
         self.assertEqual(check(self.root, "p", "hosting", "1", what=" ")[0], 2)
+
+    def test_replay_after_a_cap_cut_is_refused(self):
+        self.assertEqual(check(self.root, "vps", "hosting", "20")[0], 0)
+        write_budget(self.root, budget_with(hosting="10"))
+        self.assertEqual(run(self.root, "register", "--by", "Dana", "--reason", "cut")[0], 0)
+        events = len(log_lines(self.root))
+        rc, out, _ = check(self.root, "vps", "hosting", "20")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("REFUSED: 2026-10 hosting would reach 20.00, over its monthly cap 10.00; "
+                      "vps stays reserved until the human withdraws it", out)
+        self.assertNotIn("NOT_REFUSED", out)
+        self.assertEqual(state(self.root)["proposals"]["vps"]["status"], "open")
+        self.assertEqual(len(log_lines(self.root)), events)   # a refused replay writes nothing
+        self.assertIn("reserved=20.00 ", self.status())
+
+    def test_replay_after_a_record_pushes_the_total_over_is_refused(self):
+        self.assertEqual(check(self.root, "a", "ads", "100")[0], 0)
+        self.assertEqual(check(self.root, "b", "hosting", "20")[0], 0)   # total 120, at cap
+        self.assertEqual(check(self.root, "b", "hosting", "20")[0], 0)   # replay at the cap
+        self.assertEqual(run(self.root, "record", "--id", "a", "--amount", "100.50",
+                             "--currency", "USD", "--month", "2026-10", "--by", "Dana")[0], 0)
+        rc, out, _ = check(self.root, "b", "hosting", "20")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("REFUSED: 2026-10 the total would reach 120.50, over the monthly total "
+                      "cap 120.00", out)
+        self.assertEqual(state(self.root)["proposals"]["b"]["status"], "open")
+
+    def test_open_ended_prints_its_horizon(self):
+        rc, out, _ = check(self.root, "sub", "domains", "10", "--recurring", "monthly",
+                           "--start", "2026-11")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NOTE: open-ended; reserved only to 2027-10", out)
+        rc, out, _ = check(self.root, "sub", "domains", "10", "--recurring", "monthly",
+                           "--start", "2026-11")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NOTE: open-ended; reserved only to 2027-10", out)
+        rc, out, _ = check(self.root, "fixed", "domains", "1", "--recurring", "monthly",
+                           "--start", "2026-11", "--end", "2027-01")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("open-ended", out)
 
     def test_withdrawn_id_cannot_be_checked_again(self):
         check(self.root, "p", "hosting", "15")
@@ -498,6 +561,39 @@ class RecordWithdraw(unittest.TestCase):
         st = run(self.root, "status", "--month", "2026-11")[1]
         self.assertIn("CATEGORY: ads cap=100.50 recorded=0.00 reserved=0.00", st)
 
+    def test_withdrawn_proposals_recorded_spend_still_counts(self):
+        check(self.root, "p", "hosting", "5")
+        self.record("p", "24")
+        rc, out, _ = run(self.root, "withdraw", "--id", "p", "--by", "Dana", "--reason", "x")
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = check(self.root, "q", "hosting", "1.01")
+        self.assertEqual(rc, 3, out)
+        self.assertIn("hosting would reach 25.01, over its monthly cap 25.00", out)
+        self.assertEqual(check(self.root, "r", "hosting", "1")[0], 0)
+
+    def test_record_for_a_month_the_proposal_never_covered_is_noted(self):
+        check(self.root, "p", "hosting", "5", "--month", "2026-11")
+        rc, out, _ = self.record("p", "3", month="2026-10")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NOTE: 2026-10 is not a month that proposal p reserved; recorded all "
+                      "the same", out)
+        self.assertEqual(state(self.root)["proposals"]["p"]["records"]["2026-10"]["amount"],
+                         300)
+        rc, out, _ = check(self.root, "q", "hosting", "5")
+        self.assertNotIn("is not a month", self.record("q", "5")[1])
+
+    def test_approval_word_names_cannot_record_or_withdraw(self):
+        check(self.root, "p", "hosting", "15")
+        for by in APPROVAL_NAMES:
+            rc, out, _ = self.record("p", "1", by=by)
+            self.assertEqual(rc, 2, by)
+            self.assertIn("STOP: --by holds a word that reads as approval", out)
+            rc, out, _ = run(self.root, "withdraw", "--id", "p", "--by", by, "--reason", "x")
+            self.assertEqual(rc, 2, by)
+            self.assertIn("STOP: --by holds a word that reads as approval", out)
+        p = state(self.root)["proposals"]["p"]
+        self.assertEqual((p["records"], p["status"]), ({}, "open"))
+
     def test_withdraw_needs_a_reason_and_a_known_id(self):
         check(self.root, "a", "hosting", "15")
         self.assertEqual(run(self.root, "withdraw", "--id", "a", "--by", "Dana")[0], 2)
@@ -520,11 +616,28 @@ class Status(unittest.TestCase):
         self.assertEqual(rc, 0)
         after = snapshot(ldir(root))
         self.assertEqual(before, after)
-        self.assertIn("STATUS: 2026-10 currency=USD stale=no", out)
+        self.assertIn("STATUS: 2026-10 currency=USD stale=false", out)
         self.assertIn("TOTAL: cap=120.00 recorded=0.00 reserved=5.00 headroom=115.00", out)
 
     def test_bad_month(self):
         self.assertEqual(run(registered(), "status", "--month", "2026-1")[0], 2)
+
+    def test_status_refuses_symlinks_like_the_writers(self):
+        root = registered()
+        os.rename(os.path.join(root, ".skill-contract"), os.path.join(root, "real"))
+        os.symlink(os.path.join(root, "real"), os.path.join(root, ".skill-contract"))
+        rc, out, _ = run(root, "status")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("is a symlink", out)
+        for name in (L.STATE_FILE, L.LOG_FILE, L.LOCK_FILE):
+            root = registered()
+            path = os.path.join(ldir(root), name)
+            target = os.path.join(root, "outside")
+            os.rename(path, target)
+            os.symlink(target, path)
+            rc, out, _ = run(root, "status")
+            self.assertEqual(rc, 2, name)
+            self.assertIn("is a symlink", out, name)
 
 
 class Output(unittest.TestCase):
@@ -562,6 +675,46 @@ class Output(unittest.TestCase):
     def test_no_approval_token_in_any_check_output(self):
         outs = self.outputs()
         self.assertGreater(len(outs), 15)
+        for text in outs:
+            self.assertIsNone(re.search(APPROVAL_TOKEN_RE, text), text)
+
+    def test_no_approval_token_in_any_command_output(self):
+        """Every command, on the legal inputs of these fixtures, prints no approval word."""
+        root = repo()
+        outs = []
+
+        def r(*argv, **kw):
+            rc, out, err = run(root, *argv, **kw)
+            outs.append(out + err)
+            return rc
+        self.assertEqual(r("lint"), 0)
+        self.assertEqual(r("status"), 2)
+        self.assertEqual(r("register", "--by", "Dana"), 0)
+        self.assertEqual(r("register", "--by", "Dana"), 0)
+        self.assertEqual(r("check", "--id", "vps", "--category", "hosting", "--amount", "5",
+                           "--currency", "USD", "--what", "a vps"), 0)
+        r("check", "--id", "vps", "--category", "hosting", "--amount", "5", "--currency",
+          "USD", "--what", "a vps")
+        r("check", "--id", "sub", "--category", "ads", "--amount", "5", "--currency", "USD",
+          "--what", "ads", "--recurring", "monthly", "--start", "2026-10")
+        r("check", "--id", "big", "--category", "ads", "--amount", "99", "--currency", "USD",
+          "--what", "ads")
+        self.assertEqual(r("record", "--id", "vps", "--amount", "30", "--currency", "USD",
+                           "--month", "2026-10", "--by", "Dana"), 0)
+        r("record", "--id", "vps", "--amount", "6", "--currency", "USD", "--month", "2026-09",
+          "--by", "Dana")
+        r("record", "--id", "vps", "--amount", "4", "--currency", "USD", "--month", "2026-10",
+          "--by", "Dana")
+        self.assertEqual(r("withdraw", "--id", "sub", "--by", "Dana", "--reason", "no"), 0)
+        r("withdraw", "--id", "sub", "--by", "Dana", "--reason", "no")
+        r("status")
+        r("status", "--month", "2026-11")
+        write_budget(root, budget_with(hosting="40", total="150"))
+        r("status")
+        r("register", "--by", "Dana")
+        self.assertEqual(r("register", "--by", "Dana", "--reason", "more hosting"), 0)
+        r("lint")
+        self.assertGreater(len(outs), 18)
         for text in outs:
             self.assertIsNone(re.search(APPROVAL_TOKEN_RE, text), text)
 
@@ -728,6 +881,29 @@ class NoIO(unittest.TestCase):
             self.assertEqual(run(root, "withdraw", "--id", "p", "--by", "Dana", "--reason",
                                  "done")[0], 0)
             self.assertEqual(run(root, "status")[0], 0)
+
+
+class SharedAgentCheck(unittest.TestCase):
+    def test_the_three_copies_are_byte_identical(self):
+        """_fold(), _is_agent() and their tables are the same text in growth-review and
+        idea-validation, so the three checks cannot drift (skipped when this skill is
+        installed alone)."""
+        def block(path):
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            start = text.index("_CONFUSABLES = ")
+            tail = "    return bool(_AGENT_RE.match(folded))\n"
+            end = text.index(tail) + len(tail)
+            return text[start:end]
+        top = os.path.dirname(SKILL)
+        others = [os.path.join(top, "growth-review", "assets", "growth.py"),
+                  os.path.join(top, "idea-validation", "assets", "ideas.py")]
+        if not all(os.path.isfile(p) for p in others):
+            self.skipTest("growth-review or idea-validation is not next to this skill")
+        mine = block(os.path.join(SKILL, "assets", "ledger.py"))
+        self.assertTrue(mine.endswith("_AGENT_RE.match(folded))\n"), mine[-60:])
+        for p in others:
+            self.assertEqual(block(p), mine, p)
 
 
 class Version(unittest.TestCase):

@@ -71,8 +71,10 @@ MONTH_RE = re.compile(r"^([0-9]{4})-(0[1-9]|1[0-2])\Z")
 DAY_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 CURRENCY_LINE_RE = re.compile(r"^\s*(?:[-*]\s+)?currency:\s*(.*?)\s*\Z")
 # Words that read as approval. An id or a category holding one as a kebab part is refused,
-# so no check output can carry one (the pass line is NOT_REFUSED, never one of these).
-APPROVAL_WORDS = frozenset({"ok", "approved", "pass", "allowed"})
+# and so is a --by name holding one as a word, so no output can carry one (the pass line is
+# NOT_REFUSED, never one of these).
+APPROVAL_WORDS = frozenset({"ok", "okay", "yes", "approve", "approved", "accept", "accepted",
+                            "allow", "allowed", "grant", "granted", "pass", "passed"})
 
 
 # -- Untrusted text ---------------------------------------------------------------
@@ -121,25 +123,51 @@ def _name_ok(name):
             and not any(is_hidden_char(c) for c in name))
 
 
-# _CONFUSABLES, _AGENT_RE and _is_agent() are copied exactly from growth-review's
-# assets/growth.py (the same fold as idea-validation 0.1.2), because skills cannot import
-# each other. Latin lookalikes of the letters in "agent" (Cyrillic and Greek) that NFKC does
-# not fold.
+# -- Agent names ------------------------------------------------------------------
+# The block from here to the end of _is_agent() is byte-identical in growth-review's
+# assets/growth.py and idea-validation's assets/ideas.py, because skills cannot import each
+# other; test_ledger.py pins the three copies together.
+# Latin lookalikes of the letters in "agent" that NFKD does not fold: Cyrillic, Greek, the
+# IPA script g and alpha, and the small capitals.
 _CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p",
                               "с": "c", "х": "x", "і": "i", "А": "a",
                               "Е": "e", "О": "o", "Р": "p", "С": "c",
                               "Х": "x", "І": "i", "α": "a", "ε": "e",
                               "ο": "o", "Α": "a", "Ε": "e", "Ο": "o",
                               "Ν": "n", "Τ": "t", "т": "t", "н": "n",
-                              "Т": "t", "Н": "n", "ɡ": "g"})
-_AGENT_RE = re.compile(r"^\s*agent\s*[:/\-_]")
+                              "Т": "t", "Н": "n", "ɡ": "g", "ɑ": "a",
+                              "ᴀ": "a", "ɢ": "g", "ᴇ": "e", "ɴ": "n",
+                              "ᴛ": "t"})
+# Letters and digits stay; every other character (punctuation, a symbol, a modifier letter
+# such as U+02D0, whitespace) becomes one space, so it counts as a separator.
+_WORD_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lo", "Nd"})
+# "agent" at the start, its letters apart or not, and no letter after it (a digit or a
+# space may follow: "agent2" and "agent x" are refused).
+_AGENT_RE = re.compile(r"^ *a *g *e *n *t(?![^\W\d_])")
+
+
+def _fold(name):
+    """name as lowercase Latin letters, digits and spaces: NFKD, combining marks dropped,
+    the lookalikes above folded, casefolded, and every other character a space."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", name)
+                if unicodedata.category(c) != "Mn")
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLES).casefold())
+    return "".join(c if unicodedata.category(c) in _WORD_CATEGORIES else " " for c in s)
 
 
 def _is_agent(name):
-    """True for `agent:` and its lookalikes: fullwidth or Cyrillic letters, a fullwidth
-    colon, a space before the separator, or `/`, `-` or `_` as the separator."""
-    folded = unicodedata.normalize("NFKC", name).translate(_CONFUSABLES).casefold()
+    """True for a name that starts with the word "agent" in any form: `agent:x`, a bare
+    `agent`, any separator (a space, `.`, `;`, `|`, a ratio or modifier-letter colon, a dash
+    or a middle dot), letters apart (`a gent:x`), fullwidth, Cyrillic, Greek or
+    small-capital letters. A human name that starts with that word ("Agent Smith") is
+    refused too: the check fails closed. "Agentha", "agentur" and "Reagent" pass."""
+    folded = _fold(name)
     return bool(_AGENT_RE.match(folded))
+
+
+def _approval_word(name):
+    """True when name holds an approval word as a word, after the agent-name fold."""
+    return bool(set(_fold(name).split()) & APPROVAL_WORDS)
 
 
 def _kebab_ok(name):
@@ -268,8 +296,8 @@ def parse_budget(text):
             continue
         if not _kebab_ok(name):
             problems.append("line %d: category %s must be kebab-case, at most %d characters, "
-                            "and hold no approval word (ok, approved, pass, allowed)"
-                            % (n, code(name), NAME_CAP))
+                            "and hold no word that reads as approval (references/ledger.md "
+                            "lists them)" % (n, code(name), NAME_CAP))
             continue
         if name in caps:
             problems.append("line %d: category %s appears twice" % (n, name))
@@ -673,6 +701,24 @@ def usage(st, m, category=None):
     return recorded, reserved
 
 
+def over_cap(st, reg, category, months, extra):
+    """The refusal reason when, in any of months, the category or the total would go over its
+    cap with extra added to what every proposal already counts there (charge()), else "".
+    A new proposal passes its amount as extra. A replay passes 0, because its own
+    reservation or record is already in the sums."""
+    for m in months:
+        cat = sum(charge(p, m) for p in st["proposals"].values()
+                  if p["category"] == category) + extra
+        if cat > reg["caps"][category]:
+            return ("%s %s would reach %s, over its monthly cap %s"
+                    % (m, category, money(cat), money(reg["caps"][category])))
+        tot = sum(charge(p, m) for p in st["proposals"].values()) + extra
+        if tot > reg["total"]:
+            return ("%s the total would reach %s, over the monthly total cap %s"
+                    % (m, money(tot), money(reg["total"])))
+    return ""
+
+
 def proposal_key(p):
     return {k: p.get(k) for k in ("category", "amount", "currency", "recurring", "start",
                                   "end", "months", "what")}
@@ -706,6 +752,10 @@ def _human(by, what):
         print("STOP: an agent: name cannot %s; only the human does, because it changes what "
               "later checks count" % what)
         return 2
+    if _approval_word(by):
+        print("STOP: --by holds a word that reads as approval; give the human's plain name, "
+              "because the tool echoes it")
+        return 2
     return None
 
 
@@ -723,7 +773,7 @@ def cmd_lint(a):
             print("PROBLEM: %s" % p)
         print("LINT: fail %d problems" % len(parsed["problems"]))
         return 2
-    print("LINT: ok %d categories, currency %s, total %s"
+    print("LINT: clean %d categories, currency %s, total %s"
           % (len(parsed["caps"]), parsed["currency"], money(parsed["total"])))
     return 0
 
@@ -912,20 +962,21 @@ def cmd_check(a):
                 if old["status"] == "withdrawn":
                     return _refuse("proposal %s was withdrawn by the human; a new proposal "
                                    "needs a new id" % a.id)
+                # A replay is checked again against today's caps and spend: a cap cut or a
+                # record since the first check can put it over. Its reservation stays (only
+                # the human withdraws it), and a refused replay writes nothing.
+                why = over_cap(st, reg, a.category, months, 0)
+                if why:
+                    return _refuse("%s; %s stays reserved until the human withdraws it"
+                                   % (why, a.id))
                 print("NOTE: %s was checked before; nothing more is reserved" % a.id)
+                if a.recurring is not None and a.end is None:
+                    print("NOTE: open-ended; reserved only to %s" % months[-1])
                 print("NOT_REFUSED: %s — the human's approval is still required" % a.id)
                 return 0
-            for m in months:
-                cat = sum(charge(p, m) for p in st["proposals"].values()
-                          if p["category"] == a.category) + amount
-                if cat > reg["caps"][a.category]:
-                    return _refuse("%s %s would reach %s, over its monthly cap %s"
-                                   % (m, a.category, money(cat),
-                                      money(reg["caps"][a.category])))
-                tot = sum(charge(p, m) for p in st["proposals"].values()) + amount
-                if tot > reg["total"]:
-                    return _refuse("%s the total would reach %s, over the monthly total cap "
-                                   "%s" % (m, money(tot), money(reg["total"])))
+            why = over_cap(st, reg, a.category, months, amount)
+            if why:
+                return _refuse(why)
             seq = max(st["seq"], log["seq"]) + 1
             prop.update(at=_now(), status="open", records={}, withdrawn=None)
             st["proposals"][a.id] = prop
@@ -942,6 +993,8 @@ def cmd_check(a):
     span = months[0] if len(months) == 1 else "%s..%s" % (months[0], months[-1])
     print("NOTE: reserved %s %s a month in %s (%d month%s)"
           % (money(amount), a.currency, span, len(months), "" if len(months) == 1 else "s"))
+    if a.recurring is not None and a.end is None:
+        print("NOTE: open-ended; reserved only to %s" % months[-1])
     print("NOT_REFUSED: %s — the human's approval is still required" % a.id)
     return 0
 
@@ -998,6 +1051,7 @@ def cmd_record(a):
                 return _refuse("the currency is not the project currency %s; there is no "
                                "conversion" % reg["currency"])
             prev = p["records"].get(a.month)
+            covered = a.month in p["months"]
             seq = max(st["seq"], log["seq"]) + 1
             p["records"][a.month] = {"amount": amount, "by": a.by.strip(), "at": _now()}
             st["seq"] = seq
@@ -1013,6 +1067,9 @@ def cmd_record(a):
     except StateError as e:
         print("STOP: %s" % code(e))
         return 2
+    if not covered:
+        print("NOTE: %s is not a month that proposal %s reserved; recorded all the same"
+              % (a.month, a.id))
     if prev is not None:
         print("NOTE: replaced the earlier record of %s for %s" % (money(prev["amount"]),
                                                                   a.month))
@@ -1077,8 +1134,11 @@ def cmd_status(a):
     else:
         m = a.month
     try:
-        if os.path.islink(_ledger_dir(a.root)):
+        # The same symlink refusals as the writers (_ensure_dir and _check_state_files).
+        if (os.path.islink(os.path.join(a.root, ".skill-contract"))
+                or os.path.islink(_ledger_dir(a.root))):
             raise StateError("%s is a symlink" % LEDGER_DIR)
+        _check_state_files(a.root)
         st = load_state(a.root)
         log = load_log(a.root)
     except StateError as e:
@@ -1095,7 +1155,7 @@ def cmd_status(a):
     if why:
         print("NOTE: stale: %s; every check refuses until the human registers it again" % why)
     print("STATUS: %s currency=%s stale=%s registered=%s by %s"
-          % (m, reg["currency"], "yes" if why else "no", reg["at"], code(reg["by"])))
+          % (m, reg["currency"], "true" if why else "false", reg["at"], code(reg["by"])))
     for name in sorted(reg["caps"]):
         rec, res = usage(st, m, name)
         cap = reg["caps"][name]

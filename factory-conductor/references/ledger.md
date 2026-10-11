@@ -32,8 +32,10 @@ currency: USD
 
 - One `currency:` line with an ISO 4217 code: three capital letters A to Z.
 - One table with exactly the columns `category` and `monthly_cap`.
-- Category names are kebab-case and at most 64 characters. A name cannot hold `ok`,
-  `approved`, `pass` or `allowed` as a part, so that no check output carries one.
+- Category names are kebab-case and at most 64 characters. A name cannot hold a word that
+  reads as approval as a part, so that no output carries one. The words are `ok`, `okay`,
+  `yes`, `approve`, `approved`, `accept`, `accepted`, `allow`, `allowed`, `grant`,
+  `granted`, `pass` and `passed`.
 - One row named `total` holds the monthly total cap. It is required.
 - An amount is a decimal string in major units: ASCII digits only, at most 12 digits before
   the point and at most 2 after it. `25`, `19.99` and `0.5` are good. `1e3`, `12.345`,
@@ -54,10 +56,28 @@ currency: USD
 | `withdraw --id ID --by NAME --reason TEXT` | the human | Withdraws a proposal and frees its open reservations. |
 | `status [--month YYYY-MM]` | anyone | Prints caps, recorded spend, reservations and headroom. Read-only. |
 
-`register`, `record` and `withdraw` refuse an `agent:` name and its lookalikes (fullwidth or
-Cyrillic letters, a space before the separator, or `/`, `-` or `_` as the separator), with
-the same fold as growth-review. Names are self-declared: the rule against an agent typing a
-human's name is in SKILL.md.
+`register`, `record` and `withdraw` refuse an agent name with a `STOP:` (exit 2). The check
+is the same one that growth-review and idea-validation use. It folds the name first: Unicode
+NFKD without combining marks, Cyrillic, Greek, IPA and small-capital lookalike letters to
+Latin, and any case. Every character that is not a letter or a digit counts as a separator.
+Then a name that starts with the word `agent` in any form is refused:
+
+- `agent:x`, a bare `agent`, `agent x`, `agent.claude`, `agent;x`, `agent|x`, `@agent:x` and
+  `[agent]:x`;
+- a lookalike colon or dash (`agent∶x`, `agent꞉x`, `agentːx`, `agent‐x`, `agent—x`) and a
+  middle dot (`agent·x`);
+- the letters apart (`a gent:x`), and fullwidth, Cyrillic, Greek or small-capital letters
+  (`ａｇｅｎｔ:x`, `аgent:x`, `ᴀgent:x`, `ɑgent:x`).
+
+A human name that starts with the word `agent`, such as `Agent Smith`, is refused too. The
+check fails closed. `Agentha Ray`, `agentur GmbH`, `Reagent Labs` and `Magenta` pass.
+
+The three commands also refuse a `--by` that holds an approval word (the list above) as a
+word, after the same fold: `OK`, `Dana yes`, `Dana_ok` and `ｏｋ` are a `STOP:`, because the
+tool echoes the name. `Grant` is a real first name and is refused too (fail closed).
+`Yesenia` passes, because the check matches whole words.
+
+Names are self-declared: the rule against an agent typing a human's name is in SKILL.md.
 
 ### register
 
@@ -86,9 +106,18 @@ human's name is in SKILL.md.
   to the cap is not refused. One cent over is refused.
 - A recorded spend for a month replaces that proposal's reservation for that month.
 - Running `check` again with the same id and the same fields (category, amount, currency,
-  months and `--what`) reserves nothing more and prints `NOT_REFUSED` again. `25` and
-  `25.00` are the same amount. A different month, amount or text with the same id is refused.
-  A withdrawn id is refused: a new proposal needs a new id.
+  months and `--what`) reserves nothing more. It checks the proposal again against today's
+  caps and spend, because a cap cut or a record since the first check can put it over. Its
+  own reservation (or record) is already in the sums, so the check does not add the amount
+  twice. When a month is now over the category cap or the total cap, the replay prints
+  `REFUSED: <reason>; <id> stays reserved until the human withdraws it` (exit 3). The reservation
+  stays and nothing is written. Otherwise it prints `NOT_REFUSED` again. `25` and `25.00` are
+  the same amount. A different month, amount or text with the same id is refused. A
+  withdrawn id is refused: a new proposal needs a new id.
+- An open-ended recurring proposal (no `--end`) reserves only its first 12 months. The check
+  and a replay print `NOTE: open-ended; reserved only to YYYY-MM`. After that month the
+  ledger counts nothing for it. Tell the human, and check the proposal again with a new id
+  before the reservation runs out.
 - It refuses, in this order, when:
   1. the budget is not registered, or the ledger state was deleted by hand;
   2. `budget/budget.md` differs from the registered copy, is missing or does not lint
@@ -100,7 +129,8 @@ human's name is in SKILL.md.
   6. the amount is not a valid positive amount;
   7. a month is before the current month;
   8. the same id was used with different fields, or was withdrawn;
-  9. any month would go over the category cap or the total cap.
+  9. any month would go over the category cap or the total cap. This also applies to a
+     replay with the same id and fields: the replay counts its own reservation once.
 
 ### record and withdraw
 
@@ -109,14 +139,17 @@ human's name is in SKILL.md.
   record for the same id and month replaces the first and prints a `NOTE:`. A recorded spend
   over a cap is still recorded, with a `NOTE:`. A record in another currency is refused.
 - `withdraw` frees the proposal's open reservations. Recorded spend stays, because it was
-  real. Reservations never expire on their own.
+  real, and it still counts against the caps in later checks. Reservations never expire on
+  their own.
+- A `record` for a month that the proposal never covered still records the spend. It prints
+  `NOTE: <month> is not a month that proposal <id> reserved; recorded all the same`.
 
 ## Output and exit codes
 
 | Exit | Meaning |
 |---|---|
 | 0 | `NOT_REFUSED`, or a command that succeeded |
-| 2 | bad input, or a STOP: an agent name, a corrupt or symlinked state file, a lock held for 900 s |
+| 2 | bad input, or a STOP: an agent name, an approval word in `--by`, a corrupt or symlinked state file, a lock held for 900 s |
 | 3 | `REFUSED` |
 
 A check prints one of:
@@ -131,19 +164,22 @@ REFUSED: 2026-10 hosting would reach 25.01, over its monthly cap 25.00
 NEXT: tell the human this reason; only the human changes the budget
 ```
 
-The check never prints `OK`, `APPROVED`, `PASS` or `ALLOWED`, and it writes no envelope for
-a pass, so no skill can take a pass as a grant. A bad argument prints the usage and
+No command prints an approval word (the list above) for legal input, and the check writes no
+envelope for a pass, so no skill can take a pass as a grant. `lint` prints
+`LINT: clean <n> categories, …` for a good file. A bad argument prints the usage and
 `STOP: bad arguments; see the usage above` without echoing the argument.
 
 `status` prints:
 
 ```text
-STATUS: 2026-10 currency=USD stale=no registered=<time> by `Dana`
+STATUS: 2026-10 currency=USD stale=false registered=<time> by `Dana`
 CATEGORY: hosting cap=25.00 recorded=0.00 reserved=19.99 headroom=5.01
 TOTAL: cap=120.00 recorded=0.00 reserved=19.99 headroom=100.01
 ```
 
-Headroom can be negative when recorded spend went over a cap.
+Headroom can be negative when recorded spend went over a cap. `stale=true` means the budget
+file differs from the registered copy. `status` refuses a symlinked `.skill-contract`,
+ledger directory, state file, log or lock with a `STOP:` (exit 2), as the writers do.
 
 `--today YYYY-MM-DD` is for tests only. Outside the test suite the tool refuses it (exit 2).
 
@@ -160,7 +196,9 @@ because spend records are business data:
 - `log.jsonl` is append-only. Every event carries a sequence number and the sha256 of the
   state it wrote. When `ledger.json` was deleted, emptied or edited by hand, the log
   disagrees with it, and every check refuses until the human registers again with
-  `--reason`.
+  `--reason`. The digest has no key, so it finds a hand edit of one file only. Someone who
+  edits `ledger.json` and appends a matching line to `log.jsonl` is not detected (see
+  "Known limits").
 - `.lock` serialises every command that writes, so two checks cannot both pass on the same
   headroom.
 
@@ -173,3 +211,9 @@ The tool refuses a symlinked directory, state file, log or lock. A corrupt file 
 - The committed budget file shows the budget to anyone who can read the repository.
 - The tool cannot see spend that nobody records.
 - Deleting both `ledger.json` and `log.jsonl` starts a fresh ledger.
+- The state digest has no key. It finds a hand edit of one file, not a consistent edit of
+  both. Someone who drops a reservation or raises a frozen cap in `ledger.json`, and appends
+  a log line with the new digest, passes every check.
+- The test-only clock switch lets a back-dated clock pass. Anyone who sets it can move the
+  current month back, so a past month counts as current. The tool cannot tell a test from a
+  real run when the switch is set.

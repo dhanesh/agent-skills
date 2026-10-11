@@ -3,15 +3,16 @@ name: factory-conductor
 description: >-
   Run an approved task plan unattended, from its first task to an open pull request, inside a
   user-approved autonomy grant. Use when the user says "run the plan", "build this plan
-  unattended", "take the plan to a PR", or hands over a skill-contract task-plan envelope with an
-  autonomy-grant that covers it. A stdlib state tool (conductor.py) schedules tasks into waves
-  from depends_on, gives each task its own git worktree, re-runs every task's verify commands
-  itself as the proof, records an independent reviewer's verdict, merges proven tasks into one
-  run branch, enforces its budgets (token and dollar caps when the grant opts in), parks what fails,
-  and ends with a run-result envelope, a pushed branch and an open PR. When the plan declares a
-  verify skill, an evidence gate holds each merge until a verifier other than the writer
-  records SHA-bound runtime evidence for every touched feature. Merging the PR stays human. Not the planner (spec-first-planning), not the loop designer
-  (crafting-self-prompting-loops).
+  unattended", "take the plan to a PR", or hands over a task-plan envelope with an
+  autonomy-grant that covers it. conductor.py schedules tasks into waves, gives each its own git
+  worktree, re-runs its verify commands as the proof, records an independent review, merges
+  proven tasks into one run branch, enforces the budgets, parks what fails, and ends with a
+  run-result envelope, a pushed branch and an open PR; an optional evidence gate holds each
+  merge for SHA-bound evidence from a verifier other than the writer. Merging the PR stays
+  human. Also use before proposing any spend (hosting, domains, APIs, ads, subscriptions), in
+  any session: its money ledger (ledger.py check) can only refuse a spend against
+  budget/budget.md, never approve one. Not the planner (spec-first-planning), not the loop
+  designer (crafting-self-prompting-loops).
 license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
@@ -653,7 +654,9 @@ python3 "$SKILL_DIR/assets/ledger.py" --root <repo> check --id <kebab-id> --cate
 and refuses an `agent:` name. You MUST NOT run them yourself, even when the human tells you
 the figures, because each one changes what later checks count; give the human the exact
 command line to run. You MUST NOT edit or delete files under `.skill-contract/ledger/` by
-hand, because the log would no longer match the state and every check would refuse.
+hand, because each file is what later checks count: an edit can drop a reservation or raise
+a frozen cap. The log's state digest finds a hand edit of one file, but it has no key, so it
+cannot find a consistent edit of both.
 
 **No spend.** You MUST NOT spend money, buy, subscribe, or start a paid trial, because
 spend is irreversible and no grant covers it. You MAY draft a proposal for the human.
@@ -676,9 +679,16 @@ check only finds reasons to say no. Ask the human for each spend.
 `--today` is for the tool's tests. You MUST NOT pass it, because it moves the month that the
 check counts.
 
+A re-run of `check` with the same id and fields checks the proposal again against today's
+caps and spend. It can now print `REFUSED` (a cap was cut, or a record pushed a month over).
+The reservation stays; show the human the reason. An open-ended recurring proposal prints
+`NOTE: open-ended; reserved only to YYYY-MM`: tell the human that the ledger counts nothing
+for it after that month.
+
 The ledger's limits: recorded spend is a claim, and `--by` names are self-declared. The
 committed budget file shows the budget to anyone who can read the repository. The tool cannot
-see spend that nobody records.
+see spend that nobody records. The state digest has no key: deleting both state files, or
+editing both consistently, is not detected.
 
 ## Contract
 
