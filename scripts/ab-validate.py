@@ -8558,6 +8558,53 @@ elif CASE == "agent":
     rc2, _ = g(root, T, "register", "--by", "Dana")   # sanity: a human name registers
     v = int(rc == 2 and not stored and rc2 == 0
             and os.path.exists(os.path.join(root, ".skill-contract", "growth", "plan.json")))
+elif CASE == "reset":
+    root = repo()
+    state = os.path.join(root, ".skill-contract", "growth", "plan.json")
+    first = g(root, T, "register", "--by", "Dana")[0]
+    os.unlink(state)
+    rc, out = g(root, T, "register", "--by", "Dana")
+    gone = not os.path.exists(state)
+    rc2, _ = g(root, T, "register", "--by", "Dana", "--reason", "lost")  # sanity
+    v = int(first == 0 and rc == 2 and gone and rc2 == 0 and os.path.exists(state))
+elif CASE == "ncorrect":
+    root = repo("| metric | direction | period | warn | breach | min_n |\n"
+                "|---|---|---|---|---|---|\n| churn-rate | down | month | 0.05 | 0.08 | 50 |\n")
+    g(root, T, "register", "--by", "Dana")
+    def put(n):
+        path = os.path.join(root, "d.jsonl")
+        with open(path, "w") as f:
+            f.write(json.dumps({"metric": "churn-rate", "period": "2026-09", "value": 0.1,
+                                "n": n, "source": "x"}) + "\n")
+        return g(root, T, "import", path)[0]
+    put(60)
+    before = g(root, T, "review")   # sanity: the breach alarms
+    put(40)
+    rc, out = g(root, T, "review")
+    v = int(before[0] == 3 and "METRIC: churn-rate BREACH" in before[1] and rc == 3
+            and "n was=60 now=40" in out)
+elif CASE == "unicode":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    rc = load(root, T, ("signups", "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff11\uff11", 70))
+    data = os.path.join(root, ".skill-contract", "growth", "data.jsonl")
+    stored = os.path.exists(data)
+    rc2 = load(root, T, ("signups", "2026-10-11", 70))   # sanity: ASCII digits import
+    lint = g(repo(PLAN.replace("| 100 |", "| \uff11\uff10\uff10 |")), T, "lint")[0]
+    lint_ok = g(repo(), T, "lint")[0]                     # sanity: the ASCII plan lints
+    v = int(rc == 3 and not stored and rc2 == 0 and lint == 2 and lint_ok == 0)
+elif CASE == "loud":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    load(root, T, ("signups", "2026-10-11", 70))
+    src, sig = g(root, T, "signals", "--source", "growth")   # sanity: one line
+    with open(os.path.join(root, ".skill-contract", "growth", "plan.json"), "w") as f:
+        f.write('{"registrations": [{}]}')
+    try:
+        rc, out = g(root, T, "signals", "--source", "growth")
+    except Exception:
+        rc, out = None, "traceback"
+    v = int(src == 0 and len(sig.splitlines()) == 1 and rc not in (None, 0) and out == "")
 print(json.dumps({"v": v}))
 """
 
@@ -8578,7 +8625,10 @@ def _gr_case(tree, case):
 # fixture. Mutation-checked on 2026-10-12: with signals emitting every streak period as
 # evidence the count row reads 0 (the count overshoots 25 once the 20-entry cap
 # drops old keys); with review
-# reading the edited plan instead of the frozen copy the stale row reads 0.
+# reading the edited plan instead of the frozen copy the stale row reads 0. The review-round
+# rows were mutation-checked the same day: without register's reset check the reset row
+# reads 0; with no ` n was= now=` part the ncorrect row reads 0; with `\d` back in DAY_RE the
+# unicode row reads 0; without the registration-entry check the loud row reads 0.
 _GR_ROWS = (
     ("metric breaches accepted by ops-intake as one item",
      "register, a breaching day, signals: ops-intake's own intake-signals-jsonl adapter "
@@ -8596,6 +8646,20 @@ _GR_ROWS = (
     ("agent-registered plans refused",
      "register --by agent:claude exits 2 and stores no plan. Sanity-checked: a human name "
      "registers", "agent"),
+    # Review round (M1, M2, M3, M5/L1). Each row is a 0 -> 1 only because the baseline has
+    # no growth-review at all; the probe still checks the guard and its healthy path.
+    ("hand-deleted registrations that cannot silently reset thresholds",
+     "plan.json deleted after a registration: register without --reason exits 2 and writes "
+     "nothing (log.jsonl remembers). Sanity-checked: with --reason it registers", "reset"),
+    ("n-only corrections that fail closed",
+     "a BREACH whose n is corrected below min_n: review prints CORRECTED: with n was=60 "
+     "now=40 and still exits 3. Sanity-checked: before the correction it is BREACH", "ncorrect"),
+    ("non-ASCII digits refused in data and plan",
+     "a fullwidth day label is a problem record and nothing is stored; a fullwidth threshold "
+     "fails lint. Sanity-checked: ASCII digits import and lint", "unicode"),
+    ("signals that fail loud on corrupt registration state",
+     "a registration entry {} makes signals exit non-zero with empty stdout, no traceback. "
+     "Sanity-checked: before the corruption it prints one line", "loud"),
 )
 
 
