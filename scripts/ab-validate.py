@@ -271,6 +271,8 @@ SINCE_INTAKE_FEEDBACK = "e72a5fa"  # ops-intake feedback (roadmap step 6C): the 
 SINCE_FACTORY_HARDENING = "06018f7"  # fix/factory-hardening: the campaign's FIRST commit,
 # ops-intake's link count (L3) and source-namespaced seen keys (L4); idea-validation's
 # --today test clock (L5) came next. One constant for the campaign: it lands at one merge.
+SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the campaign's
+# FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
 
 
 def _git_out(*args):
@@ -8453,6 +8455,230 @@ def check_factory_hardening(old, new):
             since=SINCE_FACTORY_HARDENING)
 
 
+# ── growth-review (roadmap step 6D, part 1) ─────────────────────────────────
+# One fixture per case, run with the tree's own growth.py and the tree's own ops-intake
+# (adapter and CLI, ops-intake's clock pinned). A baseline without growth-review measures
+# an honest 0: nothing runs.
+_GR_PROBE = r"""
+import contextlib, datetime, io
+from unittest import mock
+TREE = @TREE@
+sys.path.insert(0, os.path.join(TREE, "ops-intake", "assets"))
+import growth as G
+import adapters as AD
+import intake as IN
+os.environ[G.TEST_CLOCK_ENV] = "1"
+CASE = @CASE@
+PLAN = ("| metric | direction | period | warn | breach | severity |\n"
+        "|---|---|---|---|---|---|\n| signups | up | day | 100 | 80 | 3 |\n")
+def g(root, today, *argv):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        rc = G.main(["--root", root, "--today", today, *argv])
+    return rc, out.getvalue()
+def repo(plan=PLAN):
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, "growth"))
+    with open(os.path.join(root, "growth", "metrics.md"), "w") as f:
+        f.write(plan)
+    return root
+def load(root, today, *recs):
+    path = os.path.join(root, "d.jsonl")
+    with open(path, "w") as f:
+        for m, p, v in recs:
+            f.write(json.dumps({"metric": m, "period": p, "value": v, "source": "x"}) + "\n")
+    return g(root, today, "import", path)[0]
+def intake_root():
+    r = tempfile.mkdtemp()
+    os.makedirs(os.path.join(r, ".intake"))
+    with open(os.path.join(r, ".intake", "config.json"), "w") as f:
+        json.dump({"sources": {"growth": {"enabled": True,
+                                          "formats": ["intake-signals-jsonl"]}}}, f)
+    return r
+def intake(iroot, text, now):
+    path = os.path.join(iroot, "s.jsonl")
+    with open(path, "w") as f:
+        f.write(text)
+    with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(IN, "_now", lambda: now):
+        return IN.main(["--root", iroot, "import", "--format", "intake-signals-jsonl",
+                        "--source", "growth", path])
+T = "2026-10-12"
+v = 0
+if CASE == "signal":
+    root = repo()
+    ok = g(root, T, "register", "--by", "Dana")[0] == 0 and load(root, T, ("signups", "2026-10-11", 70)) == 0
+    rc, out = g(root, T, "signals", "--source", "growth")
+    sigs, problems = AD.ADAPTERS["intake-signals-jsonl"](out, {"source": "growth", "now": T + "T06:00:00Z"})
+    iroot = intake_root()
+    irc = intake(iroot, out, T + "T06:00:00Z")
+    items = IN.Queue.load(iroot).items
+    v = int(ok and rc == 0 and problems == [] and len(sigs) == 1 and irc == 0 and len(items) == 1)
+elif CASE == "stale":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    load(root, T, ("signups", "2026-10-11", 70))
+    before = g(root, T, "review")
+    with open(os.path.join(root, "growth", "metrics.md"), "w") as f:
+        f.write(PLAN.replace("| 100 | 80 |", "| 100 | 50 |"))
+    rc, out = g(root, T, "review")
+    src, sig = g(root, T, "signals", "--source", "growth")
+    v = int(before[0] == 3 and "stale=no" in before[1] and rc == 3
+            and "METRIC: signups BREACH +stale" in out and "stale=yes" in out
+            and src == 0 and len(sig.splitlines()) == 1)
+elif CASE == "warn":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    load(root, T, ("signups", "2026-10-11", 90))
+    rc, out = g(root, T, "review")
+    src, sig = g(root, T, "signals", "--source", "growth")
+    load(root, T, ("signups", "2026-10-11", 70))   # sanity: the same metric in BREACH signals
+    src2, sig2 = g(root, T, "signals", "--source", "growth")
+    v = int(rc == 0 and "METRIC: signups WARN" in out and src == 0 and sig == ""
+            and src2 == 0 and len(sig2.splitlines()) == 1)
+elif CASE == "count":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    iroot = intake_root()
+    start = datetime.date(2026, 9, 1)
+    rcs = set()
+    for i in range(25):
+        period = (start + datetime.timedelta(days=i)).isoformat()
+        today = (start + datetime.timedelta(days=i + 1)).isoformat()
+        rcs.add(load(root, today, ("signups", period, 60)))
+        for k in range(2 if i in (0, 24) else 1):
+            rc, out = g(root, today, "signals", "--source", "growth")
+            rcs.add(rc)
+            rcs.add(intake(iroot, out, "%sT0%d:00:00Z" % (today, k + 1)))
+    items = list(IN.Queue.load(iroot).items.values())
+    v = int(rcs == {0} and len(items) == 1 and items[0].get("count") == 25)
+elif CASE == "agent":
+    root = repo()
+    rc, out = g(root, T, "register", "--by", "agent:claude")
+    stored = os.path.exists(os.path.join(root, ".skill-contract", "growth", "plan.json"))
+    rc2, _ = g(root, T, "register", "--by", "Dana")   # sanity: a human name registers
+    v = int(rc == 2 and not stored and rc2 == 0
+            and os.path.exists(os.path.join(root, ".skill-contract", "growth", "plan.json")))
+elif CASE == "reset":
+    root = repo()
+    state = os.path.join(root, ".skill-contract", "growth", "plan.json")
+    first = g(root, T, "register", "--by", "Dana")[0]
+    os.unlink(state)
+    rc, out = g(root, T, "register", "--by", "Dana")
+    gone = not os.path.exists(state)
+    rc2, _ = g(root, T, "register", "--by", "Dana", "--reason", "lost")  # sanity
+    v = int(first == 0 and rc == 2 and gone and rc2 == 0 and os.path.exists(state))
+elif CASE == "ncorrect":
+    root = repo("| metric | direction | period | warn | breach | min_n |\n"
+                "|---|---|---|---|---|---|\n| churn-rate | down | month | 0.05 | 0.08 | 50 |\n")
+    g(root, T, "register", "--by", "Dana")
+    def put(n):
+        path = os.path.join(root, "d.jsonl")
+        with open(path, "w") as f:
+            f.write(json.dumps({"metric": "churn-rate", "period": "2026-09", "value": 0.1,
+                                "n": n, "source": "x"}) + "\n")
+        return g(root, T, "import", path)[0]
+    put(60)
+    before = g(root, T, "review")   # sanity: the breach alarms
+    put(40)
+    rc, out = g(root, T, "review")
+    v = int(before[0] == 3 and "METRIC: churn-rate BREACH" in before[1] and rc == 3
+            and "n was=60 now=40" in out)
+elif CASE == "unicode":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    rc = load(root, T, ("signups", "\uff12\uff10\uff12\uff16-\uff11\uff10-\uff11\uff11", 70))
+    data = os.path.join(root, ".skill-contract", "growth", "data.jsonl")
+    stored = os.path.exists(data)
+    rc2 = load(root, T, ("signups", "2026-10-11", 70))   # sanity: ASCII digits import
+    lint = g(repo(PLAN.replace("| 100 |", "| \uff11\uff10\uff10 |")), T, "lint")[0]
+    lint_ok = g(repo(), T, "lint")[0]                     # sanity: the ASCII plan lints
+    v = int(rc == 3 and not stored and rc2 == 0 and lint == 2 and lint_ok == 0)
+elif CASE == "loud":
+    root = repo()
+    g(root, T, "register", "--by", "Dana")
+    load(root, T, ("signups", "2026-10-11", 70))
+    src, sig = g(root, T, "signals", "--source", "growth")   # sanity: one line
+    with open(os.path.join(root, ".skill-contract", "growth", "plan.json"), "w") as f:
+        f.write('{"registrations": [{}]}')
+    try:
+        rc, out = g(root, T, "signals", "--source", "growth")
+    except Exception:
+        rc, out = None, "traceback"
+    v = int(src == 0 and len(sig.splitlines()) == 1 and rc not in (None, 0) and out == "")
+print(json.dumps({"v": v}))
+"""
+
+
+def _gr_case(tree, case):
+    """The growth-review probe's 0/1 for `case` in `tree`; 0 (honest, nothing run) when the
+    tree has no growth-review or no ops-intake; None (PROBE_ERRORS) when the fixture broke."""
+    for rel in (("growth-review", "assets", "growth.py"),
+                ("ops-intake", "assets", "adapters.py")):
+        if not os.path.isfile(os.path.join(tree, *rel)):
+            return 0
+    out = probe(tree, "growth-review/assets",
+                _GR_PROBE.replace("@CASE@", repr(case)).replace("@TREE@", repr(tree)))
+    return None if _errored(out) else out.get("v")
+
+
+# (dimension, note, case). Each row: 1 = the healthy case and the guard both hold in one
+# fixture. Mutation-checked on 2026-10-12: with signals emitting every streak period as
+# evidence the count row reads 0 (the count overshoots 25 once the 20-entry cap
+# drops old keys); with review
+# reading the edited plan instead of the frozen copy the stale row reads 0. The review-round
+# rows were mutation-checked the same day: without register's reset check the reset row
+# reads 0; with no ` n was= now=` part the ncorrect row reads 0; with `\d` back in DAY_RE the
+# unicode row reads 0; without the registration-entry check the loud row reads 0.
+_GR_ROWS = (
+    ("metric breaches accepted by ops-intake as one item",
+     "register, a breaching day, signals: ops-intake's own intake-signals-jsonl adapter "
+     "reports no problem and its CLI import makes one item", "signal"),
+    ("threshold edits after registration that still alarm",
+     "a breach, then the plan edited so the edit would hide it: review stays BREACH +stale, "
+     "stale=yes, exit 3, and signals still prints the line. Sanity-checked in the same probe: "
+     "before the edit stale=no", "stale"),
+    ("WARN metrics kept out of the queue",
+     "a WARN value gives review exit 0 and no signal line. Sanity-checked: a correction into "
+     "BREACH gives one line", "warn"),
+    ("daily breach counts that stay exact in ops-intake",
+     "25 breached days, one signals | intake import a day plus two same-day re-runs: one "
+     "item, count 25, past ops-intake's 20-entry evidence cap", "count"),
+    ("agent-registered plans refused",
+     "register --by agent:claude exits 2 and stores no plan. Sanity-checked: a human name "
+     "registers", "agent"),
+    # Review round (M1, M2, M3, M5/L1). Each row is a 0 -> 1 only because the baseline has
+    # no growth-review at all; the probe still checks the guard and its healthy path.
+    ("hand-deleted registrations that cannot silently reset thresholds",
+     "plan.json deleted after a registration: register without --reason exits 2 and writes "
+     "nothing (log.jsonl remembers). Sanity-checked: with --reason it registers", "reset"),
+    ("n-only corrections that fail closed",
+     "a BREACH whose n is corrected below min_n: review prints CORRECTED: with n was=60 "
+     "now=40 and still exits 3. Sanity-checked: before the correction it is BREACH", "ncorrect"),
+    ("non-ASCII digits refused in data and plan",
+     "a fullwidth day label is a problem record and nothing is stored; a fullwidth threshold "
+     "fails lint. Sanity-checked: ASCII digits import and lint", "unicode"),
+    ("signals that fail loud on corrupt registration state",
+     "a registration entry {} makes signals exit non-zero with empty stdout, no traceback. "
+     "Sanity-checked: before the corruption it prints one line", "loud"),
+)
+
+
+def check_growth_review(old, new):
+    s = "growth-review"
+    if not os.path.isfile(os.path.join(new, "growth-review", "assets", "growth.py")):
+        PROBE_ERRORS.append((new, "growth-review/assets/growth.py",
+                             "the tree under review has no growth-review to measure"))
+    for dimension, note, case in _GR_ROWS:
+        a, b = _gr_case(old, case), _gr_case(new, case)
+        note += "; the baseline has no growth-review, an honest 0 -> 1"
+        if b is None:
+            row(s, dimension + " (higher=better)", a, None, False, note, kind="delta",
+                since=SINCE_GROWTH_REVIEW)
+            continue
+        row(s, dimension + " (higher=better)", a, b, a == 0 and b == 1, note, kind="delta",
+            since=SINCE_GROWTH_REVIEW)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -8540,6 +8766,7 @@ def main():
         check_spend_metering(old, REPO)
         check_spend_review(old, REPO)
         check_factory_hardening(old, REPO)
+        check_growth_review(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

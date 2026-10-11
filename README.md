@@ -22,6 +22,7 @@ npx skills add dhanesh/agent-skills --skill context-hygiene-kit
 npx skills add dhanesh/agent-skills --skill crafting-self-prompting-loops
 npx skills add dhanesh/agent-skills --skill factory-conductor
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough
+npx skills add dhanesh/agent-skills --skill growth-review
 npx skills add dhanesh/agent-skills --skill idea-validation
 npx skills add dhanesh/agent-skills --skill jev-agent-setup
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
@@ -58,12 +59,14 @@ Operational signals (failed releases, red CI, issues) can be ranked into a local
 back into planning when you pick an item (see [Operate → planning](#operate--planning)). An idea
 can be tested against pre-registered pass and kill thresholds before it is planned, and a `go`
 hands it to planning (see [Idea → plan](#idea--plan)); you run the experiments yourself.
-Incident response, support and growth stay with you. The evidence behind this section, and the gaps, are
+Product metrics can be checked against thresholds you register first, and a breach goes into
+the same queue (see [Growth → queue](#growth--queue)).
+Incident response, support, launch and pricing stay with you. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning and Support / feedback rows are the exceptions: they describe idea-validation, release-conductor and ops-intake as built and were not produced by the dated assessment. Jev re-judged the repo after them (#82 before merge; AC8, 2026-10-11): Q1 is still partly, but yes rose from 0.11 to 0.24.
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning, Support / feedback and Growth / monetise rows are the exceptions: they describe idea-validation, release-conductor, ops-intake and growth-review as built and were not produced by the dated assessment. Jev re-judged the repo after the first four (#82 before merge; AC8, 2026-10-11): Q1 is still partly, but yes rose from 0.11 to 0.24. growth-review is re-judged after it merges.
 
 | Stage | Skills | Status |
 |---|---|---|
@@ -77,7 +80,7 @@ Status is the more conservative of the assessment's two judges (Claude and Jev).
 | Operate → planning | `ops-intake` reads failed releases, failing CI on the default branch, GitHub issues and (through a JSON-lines transform) Jira or Linear, ranks them into a local queue, and hands the item you pick to `spec-first-planning` as an `intake-item/v1` envelope; a verified release that holds the fix marks it resolved. Limits: on demand only; it cannot enforce that MCP calls are read-only; squash merges and partial runs need your manual `resolve`; built-in Jira and Linear formats wait for real samples | partly |
 | Operate / incident | `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit) | partly |
 | Support / feedback | `ops-intake` reads support messages, app reviews and feedback-form answers through `feedback-jsonl`, groups them by topic into one counted item each, redacts email addresses and phone numbers, and hands the item you pick to `spec-first-planning` like any other. Limits: you export the messages and the agent transforms the export; the agent chooses the topics; redaction is a safety net, not a guarantee; nobody replies to a customer through the factory (the agent can draft a reply for you) | partly |
-| Growth / monetise | none | missing |
+| Growth / monetise | `growth-review` checks the metrics you export against warn and breach thresholds you register before the data comes in, reports OK, WARN, BREACH or NO_DATA per metric for the last complete UTC period, keeps judging on the registered thresholds when the plan is edited afterwards (`+stale`), and sends each breach to `ops-intake` through `intake-signals-jsonl`. Limits: you export the data and set the thresholds; launch and pricing stay manual (the agent never publishes, emails, changes a price or spends); no money ledger yet; no forecasts or statistics | partly |
 | Knowledge / docs | `feynman-walkthrough`, `okf-site-kit`, `knowledge-gardener`, `starlight-handbook-kit`, `bug-autopsy`; agent memory: `world-model-ledger`, `context-hygiene-kit` | covered |
 | Governance | `security-posture-audit`, `base-in-reality`, `agent-ready-rails` (audit), `crafting-self-prompting-loops` (per-loop budget), `factory-conductor` (run token and dollar caps, enforced when the grant opts in, metered from the usage the agent claims from its harness). No project spend ledger yet, and no gate policy. | partly |
 
@@ -97,6 +100,13 @@ after your `go`. You run the experiments; the agent records what you report.
 
 ```bash
 npx skills add dhanesh/agent-skills --skill idea-validation --skill spec-first-planning
+```
+
+**Growth → queue.** Check your exported metrics against thresholds you registered first, and
+send each breach into the ops-intake queue. You export the data and set the thresholds.
+
+```bash
+npx skills add dhanesh/agent-skills --skill growth-review --skill ops-intake
 ```
 
 **Make a repo agent-ready.** Audit the repo's rails, install the format/build/test loop and CI,
@@ -294,6 +304,21 @@ see your experiment.
 npx skills add dhanesh/agent-skills --skill idea-validation --skill spec-first-planning
 ```
 
+### Growth → queue
+
+`growth-review` answers "are our numbers where we said they would be?". You and the agent
+write a metrics plan: for each metric a direction, a period, a warn line and a breach line.
+You register it before the data comes in; the agent cannot. You export the numbers, and the
+tool reviews the last complete period of each metric. A threshold edit after registration
+does not hide a breach: the review keeps the registered thresholds, marks every line
+`+stale` and still sends the breach on. Each breach becomes one `ops-intake` item, ranked
+with failed releases and red CI. The data stays in a git-ignored directory and goes to no
+model. Launch and pricing stay manual.
+
+```bash
+npx skills add dhanesh/agent-skills --skill growth-review --skill ops-intake
+```
+
 ### Unattended mode: partial
 
 `spec-first-planning` 2.x can plan unattended, and — after you say yes — write a
@@ -378,6 +403,7 @@ The design and the gap analysis are in
 | [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
 | [`factory-conductor`](factory-conductor/) | Runs an approved task plan unattended, from its first task to an open PR, inside a user-approved autonomy grant. The session dispatches a fresh executor per task and a fresh reviewer per finished task; a stdlib state tool schedules waves from `depends_on`, re-runs each task's own verify commands as the proof, merges only what passed both into one run branch, enforces wall-clock, dispatch, repair and parallel budgets (token and dollar caps only when the grant opts in, from the usage the agent reports), parks what fails, and ends with a `run-result/v1` envelope, a pushed branch and a PR. Merging the PR stays with the human. |
 | [`idea-validation`](idea-validation/) | Tests a product idea before it is planned. You and the agent write a validation brief whose riskiest assumptions each carry a test, a metric, pass and kill thresholds and a deadline; a stdlib tool that runs no command and opens no socket lints it, registers it before any result, records the results you report, computes GO/KILL/STALLED/PENDING (desk research alone never passes a critical assumption), flags a critical assumption dropped after registration, and after your `go` writes an `idea-brief/v1` envelope that `spec-first-planning` turns into a spec. You run every experiment. |
+| [`growth-review`](growth-review/) | Checks product metrics against thresholds you register before the data comes in. You write a metrics plan (metric, direction, period, warn, breach); a stdlib tool that runs no command, opens no socket and calls no model imports the data you export, reports OK/WARN/BREACH/NO_DATA for each metric's last complete UTC period, keeps judging on the registered thresholds when the plan is edited later (`+stale`, exit 3), prints `CORRECTED:` when a fix moves a period out of breach, and turns each breach into an `intake-signals-jsonl` line for `ops-intake`. It never publishes, emails, changes a price or spends. |
 | [`ops-intake`](ops-intake/) | Brings operational signals back into planning. The agent pipes read-only CLI output (gh issues, failing CI on the default branch, release-conductor status, a JSON-lines transform for Jira or Linear, a transform of support and review exports grouped by topic) into a stdlib importer that runs no command and opens no socket; it dedupes and ranks a local queue, writes an `intake-item/v1` envelope for the item you pick so `spec-first-planning` drafts the spec with the evidence quoted as untrusted, and marks the item resolved when a verified release contains the fix. |
 | [`release-conductor`](release-conductor/) | Carries a merged change to verified production. A stdlib state tool drives a per-project release recipe: prep bumps the version and opens the release PR under a release grant you accept; after your merge, stage builds the merged commit, holds it for an independent verifier's SHA-bound evidence, deploys to staging and checks it; deploy runs the production deploy only with your explicit yes for this release; verify-prod proves production runs the commit with read-only smoke checks; rollback asks too. Ends with a `release-result/v1` envelope. |
 | [`jev-agent-setup`](jev-agent-setup/) | Machine-wide Jev (TypeSafe System One) setup for every coding agent: installs the `jev` CLI (JSON in, typed Noul/Choice/Score out) and a managed BCP 14 instruction block into the global files of Claude Code, Codex, Gemini CLI and `~/.agents/AGENTS.md`, so agents offload rank/classify/yes-no decisions to Jev. Idempotent, marker-bounded, backs up before first touch, `--check` for drift, optional mirror mode that copies CLAUDE.md to the other agents. Complements `typesafe-ai`, which covers building Jev into applications. |
