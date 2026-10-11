@@ -185,9 +185,8 @@ assumptions that have not passed go into the handoff as open risks.
   `decide` and the
   handoff and lists it in the envelope's `dropped_critical`, but does not refuse it.
 - You MUST NOT pass `--today` outside a test, because it moves the clock that deadlines,
-  expiry and the future-date check on `--observed` all read. The tool refuses `--today`
-  (`STOP:`, exit 2) unless the environment sets `IDEAS_TEST_CLOCK=1`, which only the tests
-  and the eval set; setting it in a real run turns that guard off.
+  expiry and the future-date check on `--observed` all read. Outside the test suite the tool
+  refuses `--today` (`STOP:`, exit 2).
 - You MUST NOT edit or delete files under `.skill-contract/ideas/` by hand, because the
   registrations, the results ledger, the log and the envelopes are the record that every later
   command reads back. Use the commands; report a problem instead.
