@@ -23,7 +23,10 @@ _SEMVER_RE = re.compile(
 _RELEASE_RE = re.compile(r"^RELEASE: (\S+) (\S+)\Z")
 _RELEASE_SEVERITY = {"prod_failed": 4, "outcome_unknown": 4, "rolled_back": 3,
                      "stage_failed": 3, "abandoned": 2}
-KINDS = ("release", "ci", "issue")
+KINDS = ("release", "ci", "issue", "feedback")
+# intake-signals-jsonl keeps the first three: feedback text is redacted only by
+# feedback-jsonl, so the generic format cannot carry unredacted customer text in.
+SIGNAL_KINDS = ("release", "ci", "issue")
 
 
 def parse_time(s):
@@ -131,7 +134,7 @@ def _one_jsonl(rec, ctx):
         raise ValueError("url must be a string of at most %d characters" % URL_CAP)
     if len(rec["source_id"]) > SOURCE_ID_CAP:
         raise ValueError("source_id longer than %d characters" % SOURCE_ID_CAP)
-    if rec.get("kind") not in KINDS:
+    if rec.get("kind") not in SIGNAL_KINDS:
         raise ValueError("kind must be release, ci or issue")
     sev = rec.get("severity")
     if not isinstance(sev, int) or isinstance(sev, bool) or not 1 <= sev <= 4:
@@ -162,6 +165,114 @@ def adapt_jsonl(raw, ctx):
             continue
         try:
             sigs.append(_one_jsonl(json.loads(line), ctx))
+        except (ValueError, RecursionError) as e:
+            problems.append("line %d: %s" % (n, e if isinstance(e, ValueError) else "nested too deeply"))
+        except Exception:  # backstop: one odd line never aborts the import
+            problems.append("line %d: unreadable record" % n)
+    return sigs, problems
+
+
+# -- feedback-jsonl ---------------------------------------------------------------
+# One support message, app review or form answer per line, from the user's (or the
+# agent's) transform of an export. The record's topic groups messages into one item.
+CHANNELS = ("email", "review", "form", "chat", "other")
+_TOPIC_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
+TOPIC_CAP = 64
+FEEDBACK_ID_CAP = KEY_CAP - len("review:")  # the evidence key <channel>:<id> fits KEY_CAP
+
+# Redaction (spec 2.3) is a safety net, not a guarantee: names, addresses and account
+# numbers still get through. URLs are masked first and kept as they are, so a long number
+# in a link is not taken for a phone; an email address is redacted everywhere else.
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
+    r"(?![A-Za-z0-9-])")
+# A phone: digits, single groups in parentheses and one space, '.' or '-' between them,
+# with an optional leading '+'. Not part of a longer token: no letter, digit, '-', '/',
+# ':', '=', '#', '+', '.', '@' or '&' right before it, and no letter, digit, ':', '/', '@'
+# or '%' right after it, nor a '.' or '-' that runs on into a letter or digit.
+_PHONE_RE = re.compile(
+    r"(?<![A-Za-z0-9_/#@+.:=?&%-])\+?(?:\([0-9]+\)|[0-9])(?:[ .-]?(?:\([0-9]+\)|[0-9]))*"
+    r"(?![A-Za-z0-9_:/@%]|[.-][A-Za-z0-9])")
+PHONE_MIN_DIGITS = 10
+
+
+def _redact_plain(text):
+    text = _EMAIL_RE.sub("[email]", text)
+
+    def phone(m):
+        digits = sum(c.isdigit() for c in m.group(0))
+        return "[phone]" if digits >= PHONE_MIN_DIGITS else m.group(0)
+    return _PHONE_RE.sub(phone, text)
+
+
+def redact(text):
+    """text with email addresses as [email] and phone numbers (10 or more digits) as
+    [phone]. URLs are left as they are."""
+    out, pos = [], 0
+    for m in _URL_RE.finditer(text):
+        out.append(_redact_plain(text[pos:m.start()]))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(_redact_plain(text[pos:]))
+    return "".join(out)
+
+
+def _feedback_severity(rec):
+    """F4: a star rating decides when there is one (1-2 = 3, 3 = 2, 4-5 = 1); else the
+    record's own severity, capped at 3; else 2. Feedback never reaches 4 on its own."""
+    rating, sev = rec.get("rating"), rec.get("severity")
+    if rating is not None:
+        if not isinstance(rating, int) or isinstance(rating, bool) or not 1 <= rating <= 5:
+            raise ValueError("rating must be 1 to 5")
+    if sev is not None:
+        if not isinstance(sev, int) or isinstance(sev, bool) or not 1 <= sev <= 4:
+            raise ValueError("severity must be 1 to 4")
+    if rating is not None:
+        return 3 if rating <= 2 else 2 if rating == 3 else 1
+    return min(sev, 3) if sev is not None else 2
+
+
+def _one_feedback(rec, ctx):
+    if not isinstance(rec, dict):
+        raise ValueError("not an object")
+    mid = rec.get("id")
+    if isinstance(mid, int) and not isinstance(mid, bool) and mid >= 0:
+        mid = str(mid)
+    if not (isinstance(mid, str) and mid and len(mid) <= FEEDBACK_ID_CAP):
+        raise ValueError("id must be a non-empty string of at most %d characters"
+                         % FEEDBACK_ID_CAP)
+    topic = rec.get("topic")
+    if not (isinstance(topic, str) and len(topic) <= TOPIC_CAP and _TOPIC_RE.match(topic)):
+        raise ValueError("topic must be kebab-case (a-z, 0-9, single dashes), at most %d "
+                         "characters" % TOPIC_CAP)
+    channel = rec.get("channel")
+    if channel not in CHANNELS:
+        raise ValueError("channel must be one of %s" % ", ".join(CHANNELS))
+    created = parse_time(rec.get("created_at"))
+    text = rec.get("text")
+    if not isinstance(text, str):
+        raise ValueError("text must be a string")
+    url = rec.get("url")
+    url = "" if url is None else url
+    if not isinstance(url, str) or len(url) > URL_CAP:
+        raise ValueError("url must be a string of at most %d characters" % URL_CAP)
+    sev = _feedback_severity(rec)
+    # Redact the whole text before _evidence caps it, so a cut cannot split an address.
+    ev = _evidence(ctx, topic, redact(text), "%s:%s" % (channel, mid))
+    ev["created_at"] = created
+    # Whatever the record says about trust, kind or title is ignored.
+    return _signal(ctx, topic, url, "feedback", "feedback: %s" % topic, sev, created, created,
+                   "low", [ev])
+
+
+def adapt_feedback(raw, ctx):
+    sigs, problems = [], []
+    for n, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            sigs.append(_one_feedback(json.loads(line), ctx))
         except (ValueError, RecursionError) as e:
             problems.append("line %d: %s" % (n, e if isinstance(e, ValueError) else "nested too deeply"))
         except Exception:  # backstop: one odd line never aborts the import
@@ -431,6 +542,7 @@ ADAPTERS = {
     "gh-runs-json": adapt_gh_runs,
     "gh-run-jobs-json": adapt_gh_run_jobs,
     "intake-signals-jsonl": adapt_jsonl,
+    "feedback-jsonl": adapt_feedback,
     "release-status": adapt_release_status,
 }
 
@@ -445,4 +557,6 @@ FORMAT_HELP = {
     "gh-run-jobs-json": "gh run view <run id> --json jobs, imported with --run <run id>",
     "git-rev-list": "git rev-list <release commit>, imported with --commit <release commit>",
     "intake-signals-jsonl": "your own transform: one signal per line (lower trust)",
+    "feedback-jsonl": "your transform of an inbox, review or form export, one message per "
+                      "line (lower trust)",
 }

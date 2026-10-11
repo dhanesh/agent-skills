@@ -1,0 +1,5 @@
+{"id": "m-101", "topic": "checkout-crash", "channel": "email", "created_at": "2026-10-01T09:00:00Z", "text": "The app closes when I tap Pay. Reach me at pat.example@example.com or +1 (555) 010-0199.", "url": "https://support.example.com/tickets/101"}
+{"id": "r-7", "topic": "checkout-crash", "channel": "review", "created_at": "2026-10-02T10:30:00+00:00", "text": "Crashes at checkout every time.", "rating": 1}
+{"id": "f-33", "topic": "checkout-crash", "channel": "form", "created_at": "2026-10-03T12:00:00Z", "text": "Pay button does nothing, then the app quits. Version 2.4.1.", "severity": 2}
+
+{"id": "c-9", "topic": "dark-mode", "channel": "chat", "created_at": "2026-10-03T13:00:00Z", "text": "Please add a dark mode.", "rating": 5}
