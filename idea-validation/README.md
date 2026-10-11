@@ -54,6 +54,14 @@ npx skills add dhanesh/agent-skills --skill idea-validation
 
 ## Changes
 
+- **0.1.3.** One agent-name check for idea-validation, growth-review and factory-conductor's
+  ledger. An experiment result is now refused for a name that starts with the word `agent`
+  in any form: a bare `agent`, any separator after it (`agent x`, `agent.x`, `agent;x`, a
+  lookalike colon), its letters apart (`a gent:x`), and small-capital or IPA lookalike
+  letters. Before, these passed. A human name that starts with that word, such as
+  `Agent Smith`, is refused too: the check fails closed. SKILL.md also tells the agent to run
+  factory-conductor's ledger check before it puts any spend to the human, and says that a
+  pass is not approval.
 - **0.1.2.** The `--today` refusal no longer names the test switch, so the tool's own
   output does not tell an agent how to turn the guard off. An experiment result by a
   lookalike of `agent:` is now refused too: fullwidth or Cyrillic letters, a fullwidth colon,

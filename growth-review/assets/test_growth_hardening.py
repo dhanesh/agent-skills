@@ -350,8 +350,30 @@ class AgentLookalikes(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(gdir(root), "plan.json")), by)
 
     def test_human_names_pass(self):
-        for by in ("Dana", "Agent Smith", "Reagent:x", "Agentha Ray"):
+        # "Agent Smith" moved to test_word_agent_in_any_form_refused (growth-review 0.1.1):
+        # a name that starts with the word "agent" is refused, the check fails closed.
+        for by in ("Dana", "Reagent:x", "Agentha Ray", "agentur GmbH", "Reagent Labs",
+                   "Magenta"):
             self.assertEqual(run(repo(), "register", "--by", by)[0], 0, by)
+
+    def test_word_agent_in_any_form_refused(self):
+        """0.1.1: a bare agent, any separator, letters apart, and small-capital or IPA
+        lookalikes are refused; so is a human name that starts with the word."""
+        for by in ("agent", "agent x", "agent.claude", "agent;x", "agent|x", "@agent:x",
+                   "[agent]:x", "a gent:x", "agent\u2236x", "agent\ua789x", "agent\u02d0x",
+                   "agent\u0589x", "agent\u2010x", "agent\u2014x", "agent\u00b7x",
+                   "\u1d00gent:x", "\u0251gent:x", "Agent Smith"):
+            root = repo()
+            rc, out = run(root, "register", "--by", by)
+            self.assertEqual(rc, 2, by)
+            self.assertIn("STOP: an agent: name cannot register", out)
+            self.assertFalse(os.path.exists(os.path.join(gdir(root), "plan.json")), by)
+
+    def test_version_matches_skill_md(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "SKILL.md"), encoding="utf-8") as f:
+            self.assertIn('  version: "%s"\n' % G.VERSION, f.read())
+        self.assertEqual(G.VERSION, "0.1.1")
 
 
 class WhoRegistered(unittest.TestCase):
