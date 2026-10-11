@@ -275,7 +275,7 @@ SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the 
 # FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
 SINCE_IDEA_NAMES = "3531d6a"  # idea-validation 0.1.2: the --today refusal no longer names
 # the test switch, and lookalike agent: names are refused. One constant: it lands at one merge.
-SINCE_MONEY_LEDGER = "f705344"  # money ledger (roadmap step 6D, part 2): the campaign's
+SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the campaign's
 # FIRST commit, factory-conductor's ledger.py and its tests. One constant for the campaign:
 # it lands at one merge.
 
