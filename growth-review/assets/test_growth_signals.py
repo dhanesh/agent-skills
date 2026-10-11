@@ -70,8 +70,10 @@ class Signals(unittest.TestCase):
         fresh = registered()
         os.unlink(os.path.join(fresh, ".skill-contract", "growth", "plan.json"))
         rc, out, err = run_err(fresh, "signals", "--source", "growth")
-        self.assertEqual((rc, out), (2, ""))
+        # M1: log.jsonl still records the registration, so the deletion fails closed (3).
+        self.assertEqual((rc, out), (3, ""))
         self.assertIn("STOP: no registered plan", err)
+        self.assertIn("NOTE: log.jsonl records 1 registration, but plan.json holds none", err)
 
 
 class OpsIntakeOnMain(unittest.TestCase):

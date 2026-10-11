@@ -57,31 +57,31 @@ class Import(unittest.TestCase):
             '{"metric": "signups", "period": "2026-10-01", "value": Infinity, "source": "x"}',
             rec("signups", "2026-10-02", True),                    # a bool is not a number
             rec("signups", "2026-10-03", "12"),                    # a string is not a number
-            rec("signups", "2026-10-14", 1),                       # ends 2 days after today
+            rec("signups", "2026-10-14", 1),                       # 2 days after today
             rec("signups", "2026-10-04", 1, n=-1),
             {"metric": "signups", "period": "2026-10-05", "value": 1},   # no source
             "not json",
-            rec("signups", "2026-10-13", 120),                     # tomorrow: the 1-day grace
+            rec("signups", "2026-10-13", 120),                     # tomorrow: not ended (M6)
             rec("churn-rate", "2026-10", 0.01, n=60),              # this month ends 10-31
             rec("signups", YDAY, 120),
         ])
         rc, out = run(root, "import", path)
         self.assertEqual(rc, 3, out)
-        self.assertIn("IMPORT: added 2 corrected 0 unchanged 0 problems 11", out)
+        self.assertIn("IMPORT: added 1 corrected 0 unchanged 0 problems 12", out)
         for want in ("line 1: metric is not in the registered plan",
                      "line 2: period does not fit the metric's period day",
                      "line 3: NaN is not a finite number",
                      "line 4: Infinity is not a finite number",
                      "line 5: value must be a finite number",
                      "line 6: value must be a finite number",
-                     "line 7: period ends more than 1 day after today",
+                     "line 7: period has not ended: its last day is after today (UTC)",
                      "line 8: n must be a whole number",
                      "line 9: source must be a non-empty string",
-                     "line 12: period ends more than 1 day after today"):
+                     "line 11: period has not ended: its last day is after today (UTC)",
+                     "line 12: period has not ended: its last day is after today (UTC)"):
             self.assertIn("PROBLEM: " + want, out)
         self.assertNotIn("nope", out)  # problem lines never quote the record's text
-        self.assertEqual(sorted(r["period"] for r in data_lines(root)), ["2026-10-11",
-                                                                         "2026-10-13"])
+        self.assertEqual(sorted(r["period"] for r in data_lines(root)), ["2026-10-11"])
 
     def test_reimport_is_a_no_op_and_a_correction_keeps_both(self):
         root = registered()
@@ -167,7 +167,9 @@ class Review(unittest.TestCase):
         self.assertIn("REVIEW: ok=0 warn=0 breach=0 no_data=3 stale=no", out)
         rc, out = self.review(rec("churn-rate", LAST_MONTH, 0.5, n=49))
         self.assertIn("METRIC: churn-rate NO_DATA value=0.5", out)
-        self.assertEqual(rc, 0)
+        # M2: a record for the judged period that cannot be judged fails closed.
+        self.assertIn("NOTE: churn-rate 2026-09 has a value, but n=49 is below min_n 50", out)
+        self.assertEqual(rc, 3)
         rc, out = self.review(rec("churn-rate", LAST_MONTH, 0.5))  # min_n set, no n
         self.assertIn("METRIC: churn-rate NO_DATA", out)
 
@@ -269,7 +271,8 @@ class Corrections(unittest.TestCase):
         rc, out = run(root, "review")
         self.assertIn("CORRECTED: signups 2026-10-11 was=70 now=120 OK", out)
         self.assertIn("METRIC: signups OK value=120", out)
-        self.assertEqual(rc, 0)
+        # M2: the correction concerns the judged period, so the review fails closed.
+        self.assertEqual(rc, 3)
 
     def test_correction_into_breach_or_within_breach_is_not(self):
         root = registered()

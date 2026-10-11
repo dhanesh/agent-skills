@@ -23,7 +23,8 @@ npx skills add dhanesh/agent-skills --skill growth-review
 4. **Review.** The tool looks at the last complete period of each metric, by the UTC clock,
    and prints its status. If the newest period has no data, the status is NO_DATA. The tool
    does not fall back to older data.
-5. **Queue.** The agent pipes `growth.py signals` into ops-intake's `import`. Each metric in
+5. **Queue.** The agent pipes `growth.py signals` into ops-intake's `import`, with
+   `set -o pipefail`, and checks that the counts agree. Each metric in
    BREACH becomes one ops-intake item. Each new breached period raises the item's count by
    one.
 
@@ -34,7 +35,14 @@ npx skills add dhanesh/agent-skills --skill growth-review
   breach under the frozen thresholds is still a breach and still goes to the queue. Only you
   can register the new thresholds, with a reason.
 - **Vanishing breaches.** If a corrected number moves a period out of BREACH, the review
-  prints a `CORRECTED:` line, so you can see the change.
+  prints a `CORRECTED:` line, so you can see the change. A corrected `n` shows too. If the
+  correction is for the newest period, or that period has a value with too small an `n`, the
+  review exits 3.
+- **Reset by hand.** If someone deletes or empties the registration file, `register` needs a
+  reason again, because the log still remembers the old registration. The review compares the
+  file with the log and exits 3 when they disagree.
+- **Unfinished periods.** The tool takes only periods that have ended by today (UTC). A day
+  label for tomorrow is refused.
 - **Business data.** The tool sends nothing anywhere. The agent sends no metric value to Jev or
   to any other model. It changes nothing in your analytics, payment or store accounts. It
   does not publish, post, email, change a price or spend money.

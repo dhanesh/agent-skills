@@ -73,7 +73,7 @@ A period is "complete" when it has ended, by the clock (or `--today` in tests on
 - `first_seen` is the end of the first period in the current breach streak, and `last_seen` is the end of the latest breached period. Both are RFC 3339 timestamps in UTC with `Z`;
 - the line carries evidence for **the latest breached period only**. Its key is `<metric>:<period>`, and its text is `value <v> vs breach <b> (<direction>)`.
 
-One evidence entry per run keeps ops-intake's count right on main, where dedupe looks only at the capped evidence list (PR #82 fixes the cap for every source). A metric that breaches every day for 25 days and is reviewed every day adds one key a day, never a repeat.
+One evidence entry per run keeps the evidence small and gives one key per breached period. Dedupe on main uses ops-intake's uncapped, source-namespaced `seen_keys`, so a key it already holds adds nothing. A metric that breaches every day for 25 days and is reviewed every day adds one key a day, never a repeat. (Corrected in the review round: see erratum 15.)
 
 The agent pipes it into `intake import --format intake-signals-jsonl --source <name>` without reading it first. Whether a later breach regresses a dismissed item follows ops-intake's own recurrence rule for `intake-signals-jsonl`. The build checks this against main and states the result in the SKILL.
 
@@ -121,7 +121,8 @@ No new envelope kind. The output is the existing `intake-signals-jsonl`, and ops
 
 The build follows this design. These points changed or were made exact while building it.
 
-1. **The 1-day grace is not ops-intake's rule on main.** Section 2 says the grace "matches
+1. **The 1-day grace is not ops-intake's rule on main.** (Replaced in the review round:
+   see erratum 21. There is no grace now.) Section 2 says the grace "matches
    ops-intake's future-date rule". `ops-intake/assets/intake.py` on main has no future-date
    rule. The grace stays as designed: a period whose last day is more than 1 day after today
    (UTC) is a problem record. A side effect: a month or ISO week that is still running is
@@ -144,6 +145,8 @@ The build follows this design. These points changed or were made exact while bui
    to `growth/metrics.md` but not registered is a problem record until the human registers.
 8. **`min_n` with no `n`.** A record without `n` for a metric with `min_n` imports, and the
    review counts it as NO_DATA. This keeps import independent of a later `min_n` change.
+   (Changed in the review round: when that record is for the judged period, the review
+   prints a `NOTE:` and exits 3. See erratum 17.)
 9. **A correction is a different `value` or `n`.** A different `source` alone is a no-op.
 10. **STALE covers a broken plan.** A missing `growth/metrics.md`, or one that does not lint,
     is STALE too, and the frozen thresholds stay in force. A metric removed from the file is
@@ -161,3 +164,68 @@ The build follows this design. These points changed or were made exact while bui
 14. **The `--today` guard's STOP line does not name the switch.** idea-validation 0.1.1 names
     its variable in the STOP line; growth-review prints only `STOP: --today is for tests
     only`. The README names the variable for humans.
+
+## Errata (review round, 2026-10-12)
+
+An independent review of the build found the points below. Each one changes behaviour or
+corrects this document. `assets/test_growth_hardening.py` pins them.
+
+15. **The reason for one evidence entry (section 4).** Section 4 said dedupe on main looks
+    only at the capped evidence list, and that PR #82 fixes the cap. That is out of date.
+    Main now has ops-intake's uncapped, source-namespaced `seen_keys`, and dedupe uses them.
+    The reason for one evidence entry per run is that it keeps the evidence small and gives
+    one key per period. Section 4 is corrected.
+16. **A reset by hand needs a reason (M1).** If `plan.json` is deleted, or its
+    `registrations` list is empty, `register` with no `--reason` is refused (`STOP:`, exit
+    2) when `log.jsonl` records an earlier registration or `data.jsonl` exists. Before, it
+    reset the thresholds without a trace in the state. `review` cross-checks `plan.json`
+    against `log.jsonl`. When the latest registration differs, or one file records a
+    registration that the other does not, it prints a `NOTE:` and exits 3. With no
+    registration in `plan.json` but one in the log, `review` and `signals` exit 3 (before:
+    2).
+17. **Corrections and `n` fail closed (M2).** `CORRECTED:` adds ` n was=<a> now=<b>` when
+    `n` changed, so an n-only correction is visible. `review` exits 3 when a `CORRECTED:`
+    line concerns a metric's judged (latest complete) period. It also exits 3, with a
+    `NOTE:`, when the judged period has a record but `min_n` is set and `n` is missing or
+    below it. Before, both turned a BREACH into NO_DATA with exit 0. A correction of an
+    older period still prints `CORRECTED:` and does not change the exit code.
+18. **ASCII digits only (M3).** The number, whole-number and period patterns use `[0-9]`.
+    `\d` matched fullwidth and other Unicode digits, and `int()` and `float()` accept them,
+    so a fullwidth period imported and was never judged. Such a period is now a problem
+    record, and such a threshold or `min_n` fails lint.
+19. **Huge numbers (M4).** An integer `value` too large for a float raised `OverflowError`
+    and stopped the whole import. It is now `PROBLEM: line N: value must be a finite
+    number`, and the other records import. `n` and `min_n` are capped at 18 digits. A
+    threshold that overflows a float was already refused.
+20. **`signals` is countable (M5).** `signals` prints a last stderr line `SIGNALS: <k>`.
+    The SKILL runs the pipe under `set -o pipefail`, checks its exit status, and checks
+    that ops-intake's `ok <k>` equals `SIGNALS: <k>` and the `REVIEW:` breach count. A
+    failed `signals` prints nothing on stdout and no `SIGNALS:` line.
+21. **No future periods at all (M6, L7).** A period whose last day is after today (UTC) is
+    refused: `period has not ended: its last day is after today (UTC); export finished
+    periods only`. The 1-day grace of erratum 1 is gone. A day label for today itself still
+    imports, for an export made east of UTC. Tomorrow's label is refused, because it hid a
+    breach once the clock made it the judged day. Weeks and months are tighter than before
+    too: they import from their last day on, not one day before it. The old text ("ends more
+    than 1 day after today") did not match `period_end`, which is why it changed.
+22. **Corrupt registrations (L1).** Each registration entry is checked on load: `sha256`,
+    `by`, `at` and `metrics` present, each metric well formed, and the thresholds match their
+    sha256. A bad entry is `STOP:` and exit 2 in every command. Before, `{}` gave a
+    `KeyError` traceback (exit 1). Stored data records are checked the same way.
+23. **Lookalike agent names (L2).** The `agent:` check folds the name with NFKC, a small
+    map of Cyrillic and Greek lookalike letters and `casefold()`, then refuses
+    `^\s*agent\s*[:/\-_]`. So `agent：claude`, `ａｇｅｎｔ:claude`, `аgent:claude`
+    (Cyrillic `а`), `agent :claude`, `agent-claude` and `agent/claude` are refused;
+    `Agent Smith` passes. Follow-up: idea-validation's `_is_agent()` has the same gap and is
+    not changed here.
+24. **Who registered (L3).** `REGISTERED:` includes the time. `review` prints
+    `NOTE: registered <sha12> by <name> at <time>[ reason <reason>]`.
+25. **Symlinked state files (L4).** `plan.json`, `data.jsonl`, `log.jsonl` and `.lock` are
+    refused when they are symlinks (`STOP:`, exit 2). `register` and `import` check before
+    the first write, so a refusal never leaves `plan.json` and the log out of step. Files are
+    opened with `O_NOFOLLOW` where the platform has it, after an `lstat` check.
+26. **Not done: a note for data imported before its period ended.** The review suggested an
+    optional `NOTE:` when the judged record was imported before its period ended. It is not
+    built: `imported_at` comes from the real clock, not the test clock, so the check cannot be
+    tested without mocking time, and erratum 21 already limits such records to today's own
+    day label.

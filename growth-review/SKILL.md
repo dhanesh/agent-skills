@@ -50,12 +50,14 @@ Every command below is `python3 "$SKILL_DIR/assets/growth.py" --root <repo> <com
 written `growth <command>` for short. `--root` comes before the command. The `NEXT:` lines the
 tool prints name a command without that prefix: expand them the same way before you run them.
 Each command prints machine lines (`LINT:`, `PROBLEM:`, `NOTE:`, `REGISTERED:`, `IMPORT:`,
-`METRIC:`, `CORRECTED:`, `REVIEW:`, `STOP:`, `NEXT:`) and exits **0** for OK, **2** for refused
-input, a bad plan or a state directory that cannot be shown to be git-ignored (nothing
-changed), and **3** for attention: a BREACH or a STALE plan (`review`), problem records
-(`import`; the other records still imported), or the growth lock held. `signals` is the
-exception: its stdout holds only JSON lines, its notes go to stderr, and it exits 0 when it
-printed its lines, breaches included.
+`METRIC:`, `CORRECTED:`, `REVIEW:`, `SIGNALS:`, `STOP:`, `NEXT:`) and exits **0** for OK, **2**
+for refused input, a bad plan, an unreadable or symlinked state file, or a state directory
+that cannot be shown to be git-ignored (nothing changed), and **3** for attention: a BREACH, a
+STALE plan, a correction or an unjudged record for the latest period, or a registration record
+changed by hand (`review`), problem records (`import`; the other records still imported), or
+the growth lock held. `signals` is the exception: its stdout holds only JSON lines, its notes
+and a final `SIGNALS: <k>` line go to stderr, and it exits 0 when it printed its lines,
+breaches included.
 
 ## When to use
 
@@ -86,21 +88,31 @@ Read each command's output lines, not only its exit code.
    human's own login (see Trust and safety). You MAY transform an export into the data format:
    one JSON object per line with `metric`, `period`, `value`, optional `n` and `source`. Run
    `growth import <file>`. Each `PROBLEM:` line names a record the tool refused (an unknown
-   metric, a wrong period shape, a value that is not a finite number, a period that ends more
-   than 1 day after today); the other records import. Tell the human about each one.
+   metric, a wrong period shape or a digit that is not ASCII, a value that is not a finite
+   number, a period that has not ended by today in UTC); the other records import. Export
+   finished periods only: today's own day is the latest day the tool takes. Tell the human
+   about each `PROBLEM:` line.
 4. **Review.** Run `growth review`. It prints one `METRIC: <name> <status>[ +stale] value=<v>
    period=<p>` line per registered metric, a `CORRECTED:` line for each period that a later
-   record moved out of BREACH, `NOTE: stale` lines, and the `REVIEW:` summary. You MUST show
+   record moved out of BREACH (with `n was=<a> now=<b>` when the sample count changed),
+   `NOTE: stale` lines, a `NOTE: registered <sha> by <name> at <time>` line, and the `REVIEW:`
+   summary. You MUST show
    the human every `NOTE: stale` and `CORRECTED:` line, because each one means a goalpost or
-   a breach changed after the fact.
+   a breach changed after the fact. A `CORRECTED:` line for the latest period, a record for
+   it that `min_n` cannot judge, or a `NOTE:` that the registration record changed by hand
+   makes `review` exit 3 even with no BREACH: show the human each of those `NOTE:` lines too.
 5. **Send breaches to the queue.** When the review shows a BREACH, pipe the signals straight
    into ops-intake, with an `intake-signals-jsonl` source the human configured there (for
-   example `growth`):
-   `growth signals --source growth | intake import --format intake-signals-jsonl --source growth`,
-   where `intake` is ops-intake's tool expanded as that skill says. Do not read the lines
-   first and do not edit them. From there ops-intake ranks the item, and the human picks it.
+   example `growth`). Run the pipe under `set -o pipefail`, because without it a failed
+   `signals` gives an empty stdin that ops-intake imports as success:
+   `set -o pipefail; growth signals --source growth | intake import --format intake-signals-jsonl --source growth`,
+   where `intake` is ops-intake's tool expanded as that skill says. Check the pipe's exit
+   status: anything other than 0 is a failure to report. Do not read the lines first and do
+   not edit them. From there ops-intake ranks the item, and the human picks it.
 6. **A plan edit.** If the human changes a threshold, the plan is STALE until they register it
-   again: `growth register --by "<their name>" --reason "<their words>"`. You MUST NOT edit a
+   again: `growth register --by "<their name>" --reason "<their words>"`. `register` also
+   needs `--reason` when the registration state was deleted or emptied while the log or the
+   data still remembers it. You MUST NOT edit a
    registered `growth/metrics.md` without the human, because the edit makes the plan STALE and
    moves the goalposts after the data is in.
 
@@ -202,8 +214,10 @@ A **growth report** for the user:
 ## Verify and repair
 
 Before you report, run `growth review` again and check that every status you report matches a
-`METRIC:` line. After a pipe into ops-intake, check its `IMPORT:` line shows `problems 0`; a
-problem there is a tool bug, so report it and do not edit the lines by hand. If `lint` fails,
+`METRIC:` line. After a pipe into ops-intake, check that the pipe exited 0, that its `IMPORT:`
+line shows `problems 0`, and that its `ok <k>` count equals both the `SIGNALS: <k>` line on
+`signals`' stderr and the `breach=` count on the `REVIEW:` line. A mismatch or a problem there
+is a tool bug, so report it and do not edit the lines by hand. If `lint` fails,
 fix the plan with the human and lint again. If `register` refuses, read its `STOP:` and `NOTE:`
 lines with the human.
 

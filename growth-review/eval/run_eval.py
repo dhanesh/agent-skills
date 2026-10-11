@@ -10,8 +10,10 @@ review, and the breach lines from `signals` are accepted by ops-intake's own
 intake-signals-jsonl adapter and CLI (the sibling skill in this repository) as one item.
 Negatives: a goalpost moved after registration does not hide the breach (+stale, exit 3, the
 signal still comes out); an agent-registered plan is refused; a future period is a problem
-record; a WARN does not leak as a signal; --today outside the test switch is refused; and
-growth.py opens no socket and runs no subprocess. growth.py runs in-process under a recorder
+record; a WARN does not leak as a signal; a STALE plan with no breach still exits 3; a
+correction that removes a breach prints CORRECTED: and exits 3 when it is the judged period;
+--today outside the test switch is refused; and growth.py opens no socket and runs no
+subprocess. growth.py runs in-process under a recorder
 that logs (then refuses) every socket, subprocess, fork and exec; ops-intake runs outside it.
 
 Every NEGATIVE check asserts a side effect, not only an exit code: the stored files, the
@@ -245,6 +247,7 @@ def count_arm():
         for k in range(2 if i == 24 else 1):
             out = io.StringIO()
             with recorder(), contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(io.StringIO()), \
                     mock.patch.dict(os.environ, {G.TEST_CLOCK_ENV: "1"}):
                 rcs.append(G.main(["--root", root, "--today", today, "signals", "--source",
                                    "growth"]))
@@ -296,12 +299,12 @@ def agent_arm():
 def future_arm():
     root = registered(rec("signups", YDAY, 120))
     before = state_files(root)
-    rc, out, _ = growth(root, "import", data(root, rec("signups", "2026-10-14", 10),
+    rc, out, _ = growth(root, "import", data(root, rec("signups", "2026-10-13", 10),
                                              rec("churn-rate", "2026-10", 0.5, n=90)))
     rev = growth(root, "review")
-    check("NEGATIVE: periods ending more than 1 day after today are PROBLEM lines, nothing is "
+    check("NEGATIVE: periods that have not ended by today (UTC) are PROBLEM lines, nothing is "
           "stored, and the review is unchanged",
-          rc == 3 and out.count("period ends more than 1 day after today") == 2
+          rc == 3 and out.count("period has not ended: its last day is after today") == 2
           and "problems 2" in out and state_files(root) == before
           and "METRIC: signups OK value=120" in rev[1], out[:300])
 
@@ -313,8 +316,46 @@ def warn_arm():
     sig = growth(root, "signals", "--source", "growth")
     rc, _, items = intake_import(sig[1])
     check("NEGATIVE: two WARN metrics give no signal line and no ops-intake item; review exits 0",
-          rev[0] == 0 and "REVIEW: ok=0 warn=2 breach=0" in rev[1] and sig == (0, "", "")
+          rev[0] == 0 and "REVIEW: ok=0 warn=2 breach=0" in rev[1]
+          and sig == (0, "", "SIGNALS: 0\n")
           and items == {}, "%r %r" % (rev[1][:200], sig))
+
+
+@arm("NEGATIVE: a STALE plan with no breach still exits 3")
+def stale_ok_arm():
+    root = registered(rec("signups", YDAY, 120), rec("churn-rate", "2026-09", 0.01, n=80))
+    before = growth(root, "review")
+    write(root, "growth/metrics.md", PLAN.replace("| 100 | 80 |", "| 130 | 80 |"))
+    rev = growth(root, "review")
+    sig = growth(root, "signals", "--source", "growth")
+    check("NEGATIVE: an edited plan with every metric OK under the frozen thresholds gives "
+          "OK +stale, stale=yes and exit 3, and no signal line",
+          before[0] == 0 and "stale=no" in before[1]
+          and rev[0] == 3 and "METRIC: signups OK +stale value=120" in rev[1]
+          and "REVIEW: ok=2 warn=0 breach=0 no_data=0 stale=yes" in rev[1]
+          and "NOTE: stale signups edited" in rev[1]
+          and sig[0] == 0 and sig[1] == "", "%r | %r" % (before[1][:150], rev[1][:300]))
+
+
+@arm("NEGATIVE: a correction that removes a breach is shown and fails closed")
+def corrected_arm():
+    root = registered(rec("signups", YDAY, 70))
+    first = growth(root, "review")
+    rc, out, _ = growth(root, "import", data(root, rec("signups", YDAY, 120)))
+    rev = growth(root, "review")
+    sig = growth(root, "signals", "--source", "growth")
+    root2 = registered(rec("churn-rate", "2026-09", 0.1, n=60))
+    rc2, _, _ = growth(root2, "import", data(root2, rec("churn-rate", "2026-09", 0.1, n=40)))
+    rev2 = growth(root2, "review")
+    check("NEGATIVE: a later record that moves the judged period out of BREACH (by value, or "
+          "by n under min_n) prints CORRECTED: and review still exits 3",
+          first[0] == 3 and "METRIC: signups BREACH value=70" in first[1]
+          and rc == 0 and "corrected 1" in out
+          and rev[0] == 3 and "CORRECTED: signups 2026-10-11 was=70 now=120 OK" in rev[1]
+          and "METRIC: signups OK value=120" in rev[1] and sig[1] == ""
+          and rc2 == 0 and rev2[0] == 3
+          and "CORRECTED: churn-rate 2026-09 was=0.1 now=0.1 NO_DATA n was=60 now=40"
+          in rev2[1], "%r | %r" % (rev[1][:250], rev2[1][:250]))
 
 
 @arm("NEGATIVE: --today outside the test switch is refused")
@@ -338,7 +379,7 @@ def main():
         check("ops-intake is beside growth-review", False, OPS)
     else:
         for fn in (recorder_arm, positive_arm, count_arm, stale_arm, agent_arm, future_arm,
-                   warn_arm, today_arm, no_io_arm):
+                   warn_arm, stale_ok_arm, corrected_arm, today_arm, no_io_arm):
             fn()
     n, k = len(_checks), sum(_checks)
     print("EVAL_RESULT: %s (%d/%d checks)" % ("PASS" if k == n else "FAIL", k, n))
