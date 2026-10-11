@@ -263,7 +263,13 @@ carries unit tests, eval negatives and an A/B row:
 
   For the first time, Q1 leans to yes, but the answer is uncertain: 0.54 against 0.46. So the README keeps the conservative reading, partly. Every stage now has a skill, but the human still runs several of them by hand: launch and pricing, experiments, exports, merges and production deploys.
 
-  The feedback answer rose from 0.52 to 0.89. Its only state change was "#82 merged", so the rise comes from that wording, not from any new code.
+  The feedback answer rose from 0.52 to 0.89. The state text changed in several places that touch the feedback path:
+  - #82 is marked as merged;
+  - #84 changed ops-intake's link counts and keys;
+  - growth-review, which feeds ops-intake, was added;
+  - a new known limit was added.
+
+  The rise is not attributed to any one of these changes, or to new feedback code. It was not tested further.
 
   The top Q3 limit is unchanged: re-entry needs the machine on and the user logged in (0.65). Spend scored 0.01 as a blocker. The next-step choice is uncertain: launch and pricing drafting 0.44, adapters 0.23 (confidence 0.30). The adapters wait for the owner's samples.
 
