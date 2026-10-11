@@ -21,6 +21,7 @@ only as one-line code spans.
 | `gh-run-jobs-json` | `gh run view <run id> --json jobs`, imported with `--run <run id>` | any configured name | an item per failing job |
 | `git-rev-list` | `git rev-list <release commit>`, imported with `--commit <release commit>` | none (no `--source`) | the release history, for loop closing |
 | `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` (flag `+low-trust`) |
+| `feedback-jsonl` | your transform of an inbox, review or form export, one message per line | any configured name | an item per topic, kind `feedback`, `trust: low` (flag `+low-trust`) |
 
 `jira-mcp`, `jira-acli` and `linear-mcp` are not built. Their output is not documented. Each
 adapter waits for a redacted real sample from the owner. Until then, send Jira and Linear data
@@ -113,6 +114,48 @@ One JSON object per line:
 - `evidence` is optional. A missing `key` becomes a hash of the text.
 - `trust` is always `low`. A `trust` field in the record is ignored.
 - Times: RFC 3339 with `Z`, `+HH:MM` or `+HHMM` (Jira's form), with or without fractions.
+- `kind` cannot be `feedback`. Only `feedback-jsonl` redacts customer text, so feedback comes
+  in only through that format.
+
+### feedback-jsonl
+
+One support message, app review or form answer per line:
+
+```json
+{"id": "m-101", "topic": "checkout-crash", "channel": "email",
+ "created_at": "2026-10-01T09:00:00Z", "text": "The app closes when I tap Pay.",
+ "rating": 1, "severity": 2, "url": "https://support.example.com/tickets/101"}
+```
+
+- Required: `id` (a string, or a whole number, at most 193 characters), `topic`, `channel`,
+  `created_at` and `text` (a string, which can be empty). A missing or bad field makes that
+  line a problem. The other lines still import.
+- `topic` matches `^[a-z0-9]+(-[a-z0-9]+)*$` and has at most 64 characters. You (or the
+  human) choose it when you transform the export. Intake never guesses a topic.
+- `channel` is `email`, `review`, `form`, `chat` or `other`.
+- Optional: `rating` (1 to 5), `severity` (1 to 4; see below) and `url`. `null` counts as
+  missing.
+- The item key is `(source, topic)`. So messages with the same topic are one item, titled
+  `feedback: <topic>`, with `source_id` = the topic and kind `feedback`. Each message is one
+  piece of evidence with the key `<channel>:<id>` and the time `created_at`. A message with a
+  new key raises `count`.
+- Severity: a rating decides when there is one (1 or 2 stars give 3, 3 stars give 2, 4 or 5
+  stars give 1). Otherwise the record's `severity`, capped at 3. Otherwise 2. Feedback never
+  reaches 4 on its own. As for every format, an item's severity only rises.
+- `trust` is always `low`. A `trust`, `kind`, `title` or `source` field in the record is
+  ignored.
+- Redaction: before intake stores a message, it writes email addresses as `[email]` and
+  phone numbers (10 or more digits, with spaces, dots, dashes, parentheses and a leading `+`
+  allowed between them) as `[phone]`. Version strings, dates and times, git shas, `#1234`,
+  order ids such as `ORD-2026-000123` and URLs stay as written. A URL is kept whole, so a phone
+  number inside a link is not redacted, but an email address is redacted everywhere. This is a
+  safety net, not a guarantee: names, street addresses and account numbers get through. Only
+  `feedback-jsonl` is redacted.
+- Recurrence: a dismissed or resolved feedback item comes back as `new` + `regressed` only
+  for a message with a key the item has not seen and a `created_at` later than the close
+  time. Re-importing an export never brings it back.
+- App Store Connect, Play Console, Zendesk and Intercom have no built-in format. Each waits for
+  a real sample and a CLI or MCP tool that owns its login.
 
 ### Rules for every format
 
@@ -121,9 +164,14 @@ One JSON object per line:
 - Problem lines never quote the source's text.
 - Caps: 5000 signals per import, 500 characters per title, 4000 per evidence text, 20 evidence
   entries per item (the oldest goes first).
+- Seen keys: each item keeps every evidence key it has seen (`seen_keys`, sorted, not capped),
+  and `count` grows only for a key that is not in it. So a record that the evidence cap
+  dropped is not counted again when it is imported again. An item from an older queue starts
+  from the keys of the evidence it still holds. `link` merges the seen keys of both items.
 - Dedupe key: `(source, source_id)`. The item id is `I` + 10 hex of its sha256.
 - Recurrence: a dismissed or resolved item becomes `new` with `regressed` when a signal for it
-  has a `last_seen` later than the time it was closed.
+  has a `last_seen` later than the time it was closed. For feedback the message must also be
+  one the item has not seen.
 
 ## Config: `.intake/config.json`
 
@@ -135,7 +183,8 @@ Write it with `intake init --answers <file>`. It is committed. It holds only dat
     "github":  {"enabled": true, "formats": ["gh-issues-json"]},
     "ci":      {"enabled": true, "formats": ["gh-runs-json", "gh-run-jobs-json"]},
     "release": {"enabled": true, "formats": ["release-envelope", "release-status"]},
-    "jira":    {"enabled": true, "formats": ["intake-signals-jsonl"]}
+    "jira":    {"enabled": true, "formats": ["intake-signals-jsonl"]},
+    "support": {"enabled": true, "formats": ["feedback-jsonl"]}
   },
   "github": {"repo": "owner/name", "labels": ["bug", "incident"]},
   "ci": {"default_branch": "main", "workflows": ["gate"]},
@@ -190,7 +239,7 @@ drops it flags `plan-superseded`.
 | `import --format F [--source S] [--run ID] [--commit SHA] [FILE]` | `IMPORT: <source> <format> ok <n> problems <m>`, `PROBLEM:` lines (at most 50, then `PROBLEM: and <k> more`) |
 | `sync` | `SYNC: <n> items new=… picked=… planned=… resolved=… dismissed=… envelopes <e> problems <p>`, `PROBLEM:` and `NEXT:` lines |
 | `list [--all]` | `ITEM: <id> <flag> <rank> <title>` per item (`new` only, without `--all`) |
-| `show <id>` | the `ITEM:` line, `source:` and one `evidence:` line per entry |
+| `show <id>` | the `ITEM:` line, `source: <source> <source id> kind <kind>` and one `evidence:` line per entry |
 | `pick <id> --by NAME` | `ITEM:` and `NEXT: run spec-first-planning with <envelope path>` |
 | `dismiss <id> --by NAME --reason TEXT`, `resolve <id> --by NAME` | `ITEM:` |
 | `drop-run <run id> --by NAME --reason TEXT` | `NEXT: run <id> dropped`; logs a `drop-run` event; `STOP:` (exit 2) for an unknown or non-digit id |
