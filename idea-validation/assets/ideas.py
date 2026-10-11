@@ -7,7 +7,7 @@ and verdicts are code, and every experiment is run by a human. Stdlib only, Pyth
 POSIX.
 
 Usage: ideas.py [--root R] [--today YYYY-MM-DD] <command> ...
-  (--today is for tests: it is refused, exit 2, unless IDEAS_TEST_CLOCK=1 is set)
+  (--today is for tests: outside the test suite it is refused, exit 2)
   new <slug> --title TEXT
   lint <brief>
   register <brief> --by NAME
@@ -38,7 +38,7 @@ import unicodedata
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "idea-validation"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 # --today moves the clock that deadlines, expiry and the --observed future-date check
 # read, so it is honoured only when this variable is "1". Only the tests and the eval set it.
 TEST_CLOCK_ENV = "IDEAS_TEST_CLOCK"
@@ -152,8 +152,23 @@ def _name_ok(name):
             and not any(is_hidden_char(c) for c in name))
 
 
+# Latin lookalikes of the letters in "agent" (Cyrillic and Greek) that NFKC does not fold;
+# the same map as growth-review's growth.py.
+_CONFUSABLES = str.maketrans({"\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+                              "\u0441": "c", "\u0445": "x", "\u0456": "i", "\u0410": "a",
+                              "\u0415": "e", "\u041e": "o", "\u0420": "p", "\u0421": "c",
+                              "\u0425": "x", "\u0406": "i", "\u03b1": "a", "\u03b5": "e",
+                              "\u03bf": "o", "\u0391": "a", "\u0395": "e", "\u039f": "o",
+                              "\u039d": "n", "\u03a4": "t", "\u0442": "t", "\u043d": "n",
+                              "\u0422": "t", "\u041d": "n", "\u0261": "g"})
+_AGENT_RE = re.compile(r"^\s*agent\s*[:/\-_]")
+
+
 def _is_agent(name):
-    return name.strip().casefold().startswith("agent:")
+    """True for `agent:` and its lookalikes: fullwidth or Cyrillic letters, a fullwidth
+    colon, a space before the separator, or `/`, `-` or `_` as the separator."""
+    folded = unicodedata.normalize("NFKC", name).translate(_CONFUSABLES).casefold()
+    return bool(_AGENT_RE.match(folded))
 
 
 # -- Brief grammar (spec 1.2) -----------------------------------------------------
@@ -1249,8 +1264,7 @@ def main(argv=None):
         return 2 if e.code else 0
     a.root = os.path.abspath(a.root)
     if a.today is not None and os.environ.get(TEST_CLOCK_ENV) != "1":
-        print("STOP: --today is for tests only; it needs %s=1 in the environment"
-              % TEST_CLOCK_ENV)
+        print("STOP: --today is for tests only; outside the test suite it is refused")
         return 2
     if a.today is None:
         a.today = datetime.date.today()

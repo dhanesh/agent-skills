@@ -54,6 +54,11 @@ npx skills add dhanesh/agent-skills --skill idea-validation
 
 ## Changes
 
+- **0.1.2.** The `--today` refusal no longer names the test switch, so the tool's own
+  output does not tell an agent how to turn the guard off. An experiment result by a
+  lookalike of `agent:` is now refused too: fullwidth or Cyrillic letters, a fullwidth colon,
+  a space before the colon, or `/`, `-` or `_` as the separator. This is the same check as
+  growth-review.
 - **0.1.1.** `--today` works only in tests. Before, `record --today 2099-01-01` let
   `--observed` take any date up to 2099. That date got past the future-date check and decided
   which result was the latest. Now the tool refuses `--today` with exit 2, unless the

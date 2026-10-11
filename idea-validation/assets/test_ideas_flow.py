@@ -90,7 +90,7 @@ class New(unittest.TestCase):
     def test_version_matches_skill_md(self):
         with open(os.path.join(os.path.dirname(HERE), "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('  version: "%s"\n' % ID.VERSION, f.read())
-        self.assertEqual(ID.VERSION, "0.1.1")
+        self.assertEqual(ID.VERSION, "0.1.2")
 
     def test_today_without_the_test_clock_is_refused(self):
         """L5: --today outside a test would let --observed reach any date up to it."""
@@ -105,8 +105,9 @@ class New(unittest.TestCase):
                         contextlib.redirect_stdout(buf):
                     rc = ID.main(["--root", root, "--today", "2099-01-01", *argv])
                 self.assertEqual(rc, 2)
-                self.assertIn("STOP: --today is for tests only; it needs IDEAS_TEST_CLOCK=1",
-                              buf.getvalue())
+                self.assertIn("STOP: --today is for tests only", buf.getvalue())
+                # The refusal never names the switch: that would tell an agent how to undo it.
+                self.assertNotIn(ID.TEST_CLOCK_ENV, buf.getvalue())
                 self.assertFalse(os.path.exists(ledger))
         for val in ("0", "", "yes"):
             with self.subTest(val=val), mock.patch.dict(os.environ, {ID.TEST_CLOCK_ENV: val}), \
@@ -158,6 +159,20 @@ class Record(unittest.TestCase):
                 self.assertEqual(rc, 2, out)
         self.assertFalse(os.path.exists(
             os.path.join(root, ".skill-contract", "ideas", "flat", "results.jsonl")))
+
+    def test_self_certification_lookalikes_refused(self):
+        root = registered()
+        for by in ("agent\uff1aclaude", "\uff41\uff47\uff45\uff4e\uff54:claude",
+                   "\u0430gent:claude", "agent :claude", "agent-claude", "agent/claude",
+                   "agent_claude", "\u0391GENT:x"):
+            with self.subTest(by=by):
+                rc, out = record(root, "A1", 7, by=by)
+                self.assertEqual(rc, 2, out)
+        self.assertFalse(os.path.exists(
+            os.path.join(root, ".skill-contract", "ideas", "flat", "results.jsonl")))
+        for by in ("Dana", "Agent Smith", "agentur GmbH"):
+            with self.subTest(human=by):
+                self.assertFalse(ID._is_agent(by))
 
     def test_desk_allowed_for_agent_and_human(self):
         root = registered()
