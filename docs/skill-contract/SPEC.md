@@ -204,9 +204,11 @@ sha256), `run_branch`, `stopped` (the stop rule and when), `log_sha256` with `lo
 sha256 of the local, append-only autonomy log's first `log_bytes` bytes, which end with the
 `finish` event), the `budget` with a `budget_note` saying which of `max_tokens` and `max_usd`
 are enforced and which are only recorded, an optional `usage` (`{tokens, usd, entries,
-unmetered, trust}`: the totals of the usage the agent reported, present when the budget sets
-`enforce` or an entry was recorded; trust is `claimed`, or `low` when an entry came from a
-user's file), the worktrees left for a human, and `tasks`: each task's status, its
+unmetered, unknown, trust}`: the totals of the usage the agent reported, present when the
+budget sets `enforce` or an entry was recorded; each entry names the dispatch it meters, and
+the totals stay finite (at most 10^12 tokens and 10^9 USD); trust is `claimed`, or `low` when
+an entry came from a user's file; `unknown` counts the dispatches that a human attested have
+no known figures, which the totals leave out), the worktrees left for a human, and `tasks`: each task's status, its
 verify commands with outcomes, the review verdict, the merge commit and the park reason. Its
 assertions are one passed `verify:<task>` per proven task, carrying that task's first verify
 command as the plan wrote it and pinning the plan envelope; parked and blocked tasks get none.

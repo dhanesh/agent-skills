@@ -27,8 +27,10 @@ Usage:
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
     python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
-    python3 conductor.py usage <task> --tokens N [--usd X] [--source T] [--root <repo>]
+    python3 conductor.py usage <task> [--dispatch N] --tokens N [--usd X] [--source T] [--root <repo>]
                                                                        # USAGE: <task> dispatch=<n> ...
+    python3 conductor.py usage <task> --unknown [--dispatch N] --by NAME [--root <repo>]
+                                                                       # USAGE: <task> dispatch=<n> unknown by=<name>
     python3 conductor.py usage --file F [--root <repo>]                # USAGE: | PROBLEM: line <n>: ...
     python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]
                                                                        # FINISH: <envelope path>
@@ -70,12 +72,17 @@ max_tokens and max_usd are recorded and reported, and enforced only when the bud
 `enforce` list names their metric ("tokens", "usd"; opt-in, init refuses a metric whose
 cap is unset, and --budget may add a metric but never drop one the grant enforces). The
 runtime does not expose usage to this tool, so the agent reports it: `usage <task>
---tokens N [--usd X] [--source T]` meters the latest finished dispatch of the task that
-has no entry yet (trust claimed; exit 2 when there is none, so nothing is metered twice,
-and for a negative or non-finite figure, or no usd while usd is enforced), and `usage
---file F` applies JSON-lines records {task, tokens, usd, source} the same way (trust low;
-a bad record prints PROBLEM: line <n>: <why> and is skipped, the others apply; exit 3
-when any record was a problem). A dispatch (one `dispatch` log event: an executor start,
+[--dispatch N] --tokens N [--usd X] [--source T]` meters dispatch N, or else the latest
+finished dispatch of the task that has no entry yet (trust claimed; exit 2 when there is
+none, so nothing is metered twice, and for a negative, non-finite or past-the-ceiling
+figure or total (10^12 tokens, 10^9 usd), or no usd while usd is enforced), and `usage
+--file F` applies JSON-lines records {task, dispatch, tokens, usd, source} to exactly the
+dispatch each names (trust low; a bad record, including one for a dispatch already
+metered, prints PROBLEM: line <n>: <why> and is skipped, the others apply; exit 3 when
+any record was a problem). `usage <task> --unknown --by NAME` is a human's attestation
+that a dispatch's figures cannot be known (trust unknown, no figures): it meters the
+dispatch, and the totals leave it out. On a run stopped for good (not grant_ask or
+budget_unmetered), `usage` may meter a dispatch still in flight. A dispatch (one `dispatch` log event: an executor start,
 a repair, a reviewer, a verifier, or a resume NEXT: line) is finished once a later
 verify, review, evidence or park event names its task. Entries go to state.json
 (`usage`, written only once there is one) and the log. Nothing here opens a socket.
@@ -83,8 +90,10 @@ With `enforce`, when a task is ready and nothing is in flight, `next`, `start` a
 `resume` stop the run, before the other rules and in order, with budget_unmetered (a
 finished dispatch has no entry, or no figure for an enforced metric), budget_tokens (the
 claimed tokens reach max_tokens) or budget_usd (the claimed usd reach max_usd). While
-work is in flight it goes on, as under budget_dispatches: next prints no READY: and start
-refuses (exit 2). `resume` lifts a budget_unmetered stop once every finished dispatch is
+work is in flight, next prints no READY: and start refuses (exit 2); no repair, verifier
+redo or resume executor goes out (the task parks with the spend reason), and only the
+current attempt's reviewer and verifier do: at most two dispatches past the stop per
+in-flight task. `resume` lifts a budget_unmetered stop once every finished dispatch is
 metered (until then it prints NEXT: run ask, and `watch` treats it as waiting on the
 human); budget_tokens and budget_usd are never lifted. `next` stops the run (STOP:
 <reason>, exit 3) on, in order, the spend stops above, budget_wall_clock,
@@ -1100,59 +1109,79 @@ def _enforced(st):
     return list(st.budget.get("enforce") or [])
 
 
-def dispatch_ledger(st):
-    """[{n, task, kind, finished}] for every dispatch the log records, oldest first.
+def dispatch_ledger(st, events=None):
+    """[{n, task, kind, finished, finished_by}] for every dispatch the log records, oldest
+    first.
 
     n is the run's dispatch ordinal (the `dispatches` count the dispatch event carries).
     A dispatch is finished once a later verify, review, evidence or park event names its
-    task: the conductor recorded the outcome of that work."""
+    task: the conductor recorded the outcome of that work. finished_by is that event's
+    index in the log (None while in flight)."""
     out = []
-    for e in st.events():
+    for i, e in enumerate(st.events() if events is None else events):
         ev = e.get("event")
         if ev == "dispatch" and isinstance(e.get("dispatches"), int) \
                 and not isinstance(e.get("dispatches"), bool):
             out.append({"n": e["dispatches"], "task": e.get("task"), "kind": e.get("kind"),
-                        "finished": False})
+                        "finished": False, "finished_by": None})
         elif ev in OUTCOME_EVENTS:
             for d in out:
-                if d["task"] == e.get("task"):
+                if d["task"] == e.get("task") and not d["finished"]:
                     d["finished"] = True
+                    d["finished_by"] = i
     return out
 
 
-def unmetered(st, ledger=None):
+def unmetered(st, ledger=None, settling=None):
     """The finished dispatches with no usage entry, or with an entry that lacks a figure
-    for an enforced metric (tokens always has one)."""
+    for an enforced metric (tokens always has one; an `unknown` entry a human attested
+    meters its dispatch with no figure).
+
+    settling: a task whose outcome is the log's newest event. The dispatches that outcome
+    just finished are left out: the agent can record their usage only now, so they do not
+    stop the next step of that same task (review fix M1's grace rule)."""
     entries = {e.get("dispatch"): e for e in st.usage}
     need_usd = "usd" in _enforced(st)
+    last = None
+    if settling is not None and ledger is None:
+        events = st.events()
+        last = len(events) - 1
+        ledger = dispatch_ledger(st, events)
     out = []
     for d in dispatch_ledger(st) if ledger is None else ledger:
         if not d["finished"]:
             continue
+        if last is not None and d["task"] == settling and d["finished_by"] == last:
+            continue
         e = entries.get(d["n"])
-        if e is None or (need_usd and e.get("usd") is None):
+        if e is None or (need_usd and e.get("usd") is None
+                         and e.get("trust") != "unknown"):
             out.append(d)
     return out
 
 
 def usage_summary(st):
-    """{tokens, usd, entries, unmetered, trust}: the claimed totals. usd is None while no
-    entry carries one; trust is the weakest entry's (low < claimed), None with none."""
-    usds = [e["usd"] for e in st.usage if e.get("usd") is not None]
-    trusts = {e.get("trust") for e in st.usage}
-    return {"tokens": sum(int(e.get("tokens") or 0) for e in st.usage),
-            "usd": sum(usds) if usds else None, "entries": len(st.usage),
-            "unmetered": len(unmetered(st)),
-            "trust": None if not st.usage else ("low" if "low" in trusts else "claimed")}
+    """{tokens, usd, entries, unmetered, unknown, trust}: the claimed totals. entries
+    counts the entries with figures; unknown counts the dispatches a human attested as
+    unknown (no figures, so the totals leave them out). usd is None while no entry carries
+    one; trust is the weakest figure entry's (low < claimed), None with none."""
+    figured = [e for e in st.usage if e.get("trust") != "unknown"]
+    usds = [e["usd"] for e in figured if e.get("usd") is not None]
+    trusts = {e.get("trust") for e in figured}
+    return {"tokens": sum(int(e.get("tokens") or 0) for e in figured),
+            "usd": sum(usds) if usds else None, "entries": len(figured),
+            "unmetered": len(unmetered(st)), "unknown": len(st.usage) - len(figured),
+            "trust": None if not figured else ("low" if "low" in trusts else "claimed")}
 
 
-def spend_stop(st):
+def spend_stop(st, settling=None):
     """budget_unmetered, budget_tokens or budget_usd (in that order) when the run's
-    `enforce` makes one fire now, else None. Always None without `enforce`."""
+    `enforce` makes one fire now, else None. Always None without `enforce`. settling:
+    see unmetered()."""
     enforce = _enforced(st)
     if not enforce:
         return None
-    if unmetered(st):
+    if unmetered(st, settling=settling):
         return "budget_unmetered"
     total = usage_summary(st)
     if "tokens" in enforce and total["tokens"] >= st.budget["max_tokens"]:
@@ -1498,8 +1527,9 @@ def _usage_line(st):
         tok += "/" + _num(st.budget["max_tokens"])
     if st.budget.get("max_usd") is not None:
         usd += "/" + _num(st.budget["max_usd"])
-    return ("STATUS: usage tokens=%s usd=%s entries=%d unmetered=%d trust=%s"
-            % (tok, usd, u["entries"], u["unmetered"], u["trust"] or "-"))
+    return ("STATUS: usage tokens=%s usd=%s entries=%d unmetered=%d trust=%s%s"
+            % (tok, usd, u["entries"], u["unmetered"], u["trust"] or "-",
+               " unknown=%d" % u["unknown"] if u.get("unknown") else ""))
 
 
 RUN_NEXT = "NEXT: run next"
@@ -2140,10 +2170,22 @@ def _count_failure(st, task):
     t["repairs"] = max(0, failures - 1)
 
 
-def _dispatch(st, task, kind, resume=False):
-    """Spend one dispatch (kind: executor, repair or reviewer) and log it (resume: true
-    when a resume NEXT: line asked for it). When max_dispatches is spent the task parks
-    with budget_dispatches instead: False."""
+def _dispatch(st, task, kind, resume=False, redo=False):
+    """Spend one dispatch (kind: executor, repair, reviewer or verifier) and log it
+    (resume: true when a resume NEXT: line asked for it; redo: a verifier sent again after
+    a verifier-side reject). When max_dispatches is spent the task parks with
+    budget_dispatches instead: False.
+
+    Under a spend stop (budget.enforce) a repair, a redo and a resume's executor park the
+    task with the stop's reason instead: False. Only the current attempt's reviewer and
+    verifier still go out, so a stop overshoots by at most two dispatches per in-flight
+    task (review fix M1)."""
+    if kind in ("executor", "repair") or redo:
+        spend = spend_stop(st, settling=None if resume else task)
+        if spend:
+            sys.stderr.write("spend stop %s: %s needs a %s dispatch\n" % (spend, task, kind))
+            _park(st, task, spend)
+            return False
     if _dispatches_left(st) == 0:
         sys.stderr.write("dispatch budget spent (max_dispatches %d): %s needs a %s dispatch\n"
                          % (st.budget["max_dispatches"], task, kind))
@@ -2531,7 +2573,7 @@ def cmd_evidence(args):
     if redos > st.max_repairs():
         _park(st, args.task, "evidence_redo_exhausted")
         return 3
-    _dispatch(st, args.task, "verifier")
+    _dispatch(st, args.task, "verifier", redo=True)
     return 3
 
 
@@ -2821,39 +2863,97 @@ def _reject_constant(name):
     raise ValueError("%s is not a number usage accepts" % name)
 
 
+# A sane ceiling for one figure and for the run's total (review fix L1): far above any
+# real run, low enough that a sum stays finite, so the envelope never holds Infinity.
+MAX_TOKENS_FIGURE = 10 ** 12
+MAX_USD_FIGURE = 1e9
+
+
 def _usage_figures(tokens, usd):
-    """None when tokens is an integer >= 0 and usd is None or a finite number >= 0;
-    else why not. A bool is not a number here."""
+    """None when tokens is an integer in [0, 1e12] and usd is None or a finite number in
+    [0, 1e9]; else why not. A bool is not a number here."""
     if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
         return "tokens must be an integer >= 0, got %r" % (tokens,)
+    if tokens > MAX_TOKENS_FIGURE:
+        return "tokens above the ceiling %d, got %r" % (MAX_TOKENS_FIGURE, tokens)
     if usd is not None and (isinstance(usd, bool) or not isinstance(usd, (int, float))
                             or not math.isfinite(usd) or usd < 0):
         return "usd must be a finite number >= 0, got %r" % (usd,)
+    if usd is not None and usd > MAX_USD_FIGURE:
+        return "usd above the ceiling %g, got %r" % (MAX_USD_FIGURE, usd)
     return None
 
 
-def record_usage(st, task, tokens, usd, source, trust):
-    """Meter the latest finished dispatch of `task` that has no usage entry yet. Returns
-    (entry, None), or (None, why) with nothing written."""
-    if not isinstance(task, str) or task not in st.tasks:
-        return None, "unknown task %r" % (task,)
-    why = _usage_figures(tokens, usd)
-    if why:
-        return None, why
-    if usd is None and "usd" in _enforced(st):
-        return None, "usd is enforced: give the dispatch's usd figure too"
-    if source is not None and not isinstance(source, str):
-        return None, "source must be text"
+def _pick_dispatch(st, task, dispatch):
+    """(ledger entry, None) for the dispatch a usage entry of `task` meters, or (None,
+    why). With `dispatch`, exactly that one: it is the task's, unmetered, and finished
+    (or the run is stopped). Without, the latest finished unmetered dispatch of the task;
+    on a run stopped for good (any stop but grant_ask or budget_unmetered), then the
+    latest unfinished one (in-flight work that will never report an outcome still spent
+    tokens)."""
     metered = {e.get("dispatch") for e in st.usage}
-    open_ = [d for d in dispatch_ledger(st)
-             if d["task"] == task and d["finished"] and d["n"] not in metered]
+    ledger = dispatch_ledger(st)
+    reason = (st.stopped.get("reason") if isinstance(st.stopped, dict)
+              else st.stopped) if st.stopped else None
+    # Only a stop no human lifts: under grant_ask the in-flight work goes on once the grant
+    # is renewed, and its own report must still be recordable then.
+    stopped = reason is not None and reason not in ("grant_ask", "budget_unmetered")
+    if dispatch is not None:
+        if isinstance(dispatch, bool) or not isinstance(dispatch, int):
+            return None, "dispatch must be a dispatch id (an integer), got %r" % (dispatch,)
+        d = next((x for x in ledger if x["n"] == dispatch), None)
+        if d is None:
+            return None, "no dispatch %d in this run" % dispatch
+        if d["task"] != task:
+            return None, "dispatch %d is task %s's, not %s's" % (dispatch, d["task"], task)
+        if dispatch in metered:
+            return None, "dispatch %d already has a usage entry" % dispatch
+        if not d["finished"] and not stopped:
+            return None, ("dispatch %d is in flight (a dispatch is finished once its "
+                          "verify, review, evidence or park is recorded)" % dispatch)
+        return d, None
+    mine = [x for x in ledger if x["task"] == task and x["n"] not in metered]
+    open_ = [x for x in mine if x["finished"]] or (mine if stopped else [])
     if not open_:
         return None, ("task %s has no finished dispatch without usage (a dispatch is "
                       "finished once its verify, review, evidence or park is recorded)"
                       % task)
-    d = max(open_, key=lambda x: x["n"])
+    return max(open_, key=lambda x: x["n"]), None
+
+
+def record_usage(st, task, tokens, usd, source, trust, dispatch=None, by=None):
+    """Meter one dispatch of `task` (see _pick_dispatch). trust `unknown` is a human's
+    attestation that the figures cannot be known: no tokens or usd, and `by` names the
+    human. Returns (entry, None), or (None, why) with nothing written."""
+    if not isinstance(task, str) or task not in st.tasks:
+        return None, "unknown task %r" % (task,)
+    if trust == "unknown":
+        if tokens is not None or usd is not None:
+            return None, "an unknown entry carries no tokens or usd"
+        if not isinstance(by, str) or not by.strip():
+            return None, "an unknown entry names the human who attests it (--by)"
+    else:
+        why = _usage_figures(tokens, usd)
+        if why:
+            return None, why
+        if usd is None and "usd" in _enforced(st):
+            return None, "usd is enforced: give the dispatch's usd figure too"
+    if source is not None and not isinstance(source, str):
+        return None, "source must be text"
+    d, why = _pick_dispatch(st, task, dispatch)
+    if why:
+        return None, why
+    if trust != "unknown":
+        total = usage_summary(st)
+        if total["tokens"] + tokens > MAX_TOKENS_FIGURE:
+            return None, "the run's token total would pass the ceiling %d" % MAX_TOKENS_FIGURE
+        new_usd = (total["usd"] or 0) + (usd or 0)
+        if not math.isfinite(new_usd) or new_usd > MAX_USD_FIGURE:
+            return None, "the run's usd total would pass the ceiling %g" % MAX_USD_FIGURE
     entry = {"task": task, "dispatch": d["n"], "kind": d["kind"], "tokens": tokens,
              "usd": usd, "source": one_line(source) if source else None, "trust": trust}
+    if trust == "unknown":
+        entry["by"] = one_line(by.strip())
     st.usage.append(dict(entry, at=_rfc3339(_now())))
     st.save()
     st.log("usage", **entry)
@@ -2861,6 +2961,9 @@ def record_usage(st, task, tokens, usd, source, trust):
 
 
 def _usage_out(entry):
+    if entry["trust"] == "unknown":
+        return "USAGE: %s dispatch=%d unknown by=%s" % (entry["task"], entry["dispatch"],
+                                                       entry["by"])
     return ("USAGE: %s dispatch=%d tokens=%d usd=%s trust=%s"
             % (entry["task"], entry["dispatch"], entry["tokens"], _num(entry["usd"]),
                entry["trust"]))
@@ -2871,8 +2974,9 @@ def _usd_arg(text):
         value = float(text)
     except ValueError:
         raise argparse.ArgumentTypeError("not a number: %r" % text) from None
-    if not math.isfinite(value) or value < 0:
-        raise argparse.ArgumentTypeError("usd must be a finite number >= 0, got %r" % text)
+    if not math.isfinite(value) or value < 0 or value > MAX_USD_FIGURE:
+        raise argparse.ArgumentTypeError("usd must be a finite number in [0, %g], got %r"
+                                         % (MAX_USD_FIGURE, text))
     return value
 
 
@@ -2881,26 +2985,43 @@ def _tokens_arg(text):
         value = int(text)
     except ValueError:
         raise argparse.ArgumentTypeError("not an integer: %r" % text) from None
-    if value < 0:
-        raise argparse.ArgumentTypeError("tokens must be >= 0, got %r" % text)
+    if value < 0 or value > MAX_TOKENS_FIGURE:
+        raise argparse.ArgumentTypeError("tokens must be in [0, %d], got %r"
+                                         % (MAX_TOKENS_FIGURE, text))
+    return value
+
+
+def _dispatch_arg(text):
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a dispatch id: %r" % text) from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("a dispatch id is >= 1, got %r" % text)
     return value
 
 
 def cmd_usage(args):
-    """Record the usage of a finished dispatch: `usage <task> --tokens N [--usd X]
-    [--source TEXT]` (trust claimed), or `usage --file F`, one JSON object per line
-    ({task, tokens, usd, source}, trust low). Prints USAGE: per entry and PROBLEM: line
-    <n>: <why> per bad record (the others still apply). Works on a stopped run (that is
-    how a budget_unmetered stop is cleared), not on a finished one. Exit 0; 2 on a
-    refused single entry or bad arguments; 3 when the file had a problem record."""
+    """Record the usage of a finished dispatch: `usage <task> [--dispatch N] --tokens N
+    [--usd X] [--source TEXT]` (trust claimed; without --dispatch, the task's latest
+    finished unmetered dispatch), `usage <task> --unknown [--dispatch N] --by NAME` (a
+    human attests the figures cannot be known: trust unknown, no figures), or `usage
+    --file F`, one JSON object per line ({task, dispatch, tokens, usd, source}, trust low;
+    dispatch is required, so a re-applied file never meters the wrong dispatch). Prints
+    USAGE: per entry and PROBLEM: line <n>: <why> per bad record (the others still
+    apply). Works on a stopped run (that is how a budget_unmetered stop is cleared), not
+    on a finished one. Exit 0; 2 on a refused single entry or bad arguments; 3 when the
+    file had a problem record."""
     st = _load_current(args.root)
     if st is None:
         return 2
     if _finished(st):
         return 2
     if args.file is not None:
-        if args.task or args.tokens is not None or args.usd is not None:
-            sys.stderr.write("usage --file takes no task, --tokens or --usd\n")
+        if args.task or args.tokens is not None or args.usd is not None \
+                or args.dispatch is not None or args.unknown or args.by is not None:
+            sys.stderr.write("usage --file takes no task, --dispatch, --tokens, --usd, "
+                             "--unknown or --by\n")
             return 2
         try:
             with open(args.file, encoding="utf-8") as f:
@@ -2918,19 +3039,33 @@ def cmd_usage(args):
                 rec, why = None, "not JSON: %s" % e
             else:
                 why = None if isinstance(rec, dict) else "not a JSON object"
+            if why is None and "dispatch" not in rec:
+                why = "dispatch is required: the dispatch id `status` prints"
             if why is None:
                 _, why = record_usage(st, rec.get("task"), rec.get("tokens"),
-                                      rec.get("usd"), rec.get("source"), "low")
+                                      rec.get("usd"), rec.get("source"), "low",
+                                      dispatch=rec.get("dispatch"))
             if why:
                 problems += 1
                 print("PROBLEM: line %d: %s" % (n, one_line(why)))
                 continue
             print(_usage_out(st.usage[-1]))
         return 3 if problems else 0
-    if not args.task or args.tokens is None:
-        sys.stderr.write("give usage <task> --tokens N [--usd X], or usage --file F\n")
+    if args.unknown:
+        if not args.task or args.tokens is not None or args.usd is not None \
+                or not (args.by or "").strip():
+            sys.stderr.write("give usage <task> --unknown [--dispatch N] --by NAME (no "
+                             "--tokens or --usd)\n")
+            return 2
+        entry, why = record_usage(st, args.task, None, None, args.source, "unknown",
+                                  dispatch=args.dispatch, by=args.by)
+    elif not args.task or args.tokens is None or args.by is not None:
+        sys.stderr.write("give usage <task> [--dispatch N] --tokens N [--usd X], usage "
+                         "<task> --unknown --by NAME, or usage --file F\n")
         return 2
-    entry, why = record_usage(st, args.task, args.tokens, args.usd, args.source, "claimed")
+    else:
+        entry, why = record_usage(st, args.task, args.tokens, args.usd, args.source,
+                                  "claimed", dispatch=args.dispatch)
     if why:
         sys.stderr.write("usage refused: %s\n" % why)
         return 2
@@ -3281,6 +3416,9 @@ def pr_body(payload, envelope_rel):
         lines.append("Usage: %d tokens, %s USD, from %d entries (trust %s); %d dispatches "
                      "unmetered." % (use["tokens"], _num(use["usd"]), use["entries"],
                                      code(use["trust"] or "-"), use["unmetered"]))
+        if use.get("unknown"):
+            lines.append("%d dispatches attested unknown by a human (no figures; the "
+                         "totals leave them out)." % use["unknown"])
     lines += ["",
               "Evidence: %s (run-result/v1). Every proven task was re-run by the conductor "
               "and reviewed before it merged; a human merges this pull request."
@@ -3984,6 +4122,9 @@ def main(argv=None):
     s.add_argument("--usd", type=_usd_arg, default=None)
     s.add_argument("--source", default=None)
     s.add_argument("--file", default=None)
+    s.add_argument("--dispatch", type=_dispatch_arg, default=None)
+    s.add_argument("--unknown", action="store_true")
+    s.add_argument("--by", default=None)
     s.set_defaults(fn=cmd_usage)
     s = sub.add_parser("owner")
     s.add_argument("task")

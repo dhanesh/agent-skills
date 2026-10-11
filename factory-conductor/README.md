@@ -70,7 +70,11 @@ You can stop a run at any time by revoking the grant
   runtime does not expose usage to the tool, so the agent reports each finished dispatch's
   usage with `conductor usage`, as its harness shows it. The run stops at the cap
   (`budget_tokens`, `budget_usd`), and it stops when a finished dispatch has no report
-  (`budget_unmetered`). The totals are claimed, so a cap is only as good as the reports.
+  (`budget_unmetered`). After a stop, a task in flight gets no more repairs: it parks, and
+  the run goes past the stop by at most two dispatches per task in flight (the current
+  reviewer and verifier). Claude Code shows tokens, not dollars, so an enforced dollar cap
+  needs a user's transform (`conductor usage --file`) or a harness that reports cost. The
+  totals are claimed, so a cap is only as good as the reports.
   Without `enforce`, dispatch count is the real cost limit. The grant's `stop_on` list is
   recorded too, but not enforced: the conductor's own stop rules apply.
 - **The proof is only as good as the checks.** The conductor proves that a task's verify

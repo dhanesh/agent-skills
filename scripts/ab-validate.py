@@ -7991,6 +7991,112 @@ def check_spend_metering(old, new):
         kind="guard")
 
 
+# ── factory-conductor spend review fixes (M1, M2) ──────────────────────────
+# "repairs" (M1): budget {enforce: [tokens], max_tokens: 10, max_repairs_per_task: 20,
+# max_dispatches: 100}; T1 goes start -> commit -> verify, then review fail -> commit ->
+# verify again, up to 25 times, and nobody reports usage. v is 1 when T1 parks with a spend
+# reason after its executor and reviewer only (2 dispatches). "stale" (M2): budget
+# {enforce: [tokens], max_tokens: 10^9}; a usage file with one record for dispatch 1 is
+# applied after T1's verify, a record for dispatch 2 is appended after its review, and the
+# whole file is applied again. v is 1 when the second apply exits 3 with a PROBLEM: for
+# line 1 and the entries are exactly dispatch 1 = 1000 tokens and dispatch 2 = 7 tokens.
+_SMR_PROBE = r"""
+import contextlib, io, subprocess
+import conductor as C
+import conductor_testkit as TK
+CASE = @CASE@
+root = TK.repo()
+OK = [{"text": "ok", "command": ["true"]}]
+plan = TK.write_plan_envelope(root, {"T1": ([], OK), "T2": ([], OK)})
+budget = ({"enforce": ["tokens"], "max_tokens": 10, "max_repairs_per_task": 20,
+           "max_dispatches": 100} if CASE == "repairs"
+          else {"enforce": ["tokens"], "max_tokens": 10 ** 9})
+TK.write_grant(root, plan, budget=budget)
+def step(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = C.main(list(argv) + ["--root", root])
+    return rc, out.getvalue()
+def commit(n):
+    wt = C.State.load(C.state_path(root)).tasks["T1"]["worktree"]
+    with open(os.path.join(wt, "t1-%d.txt" % n), "w") as f:
+        f.write("x\n")
+    subprocess.run(["git", "-C", wt, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "c"], check=True,
+                   env=dict(os.environ, **TK.GIT))
+step("init", "--plan", plan)
+step("start", "T1")
+commit(0)
+if CASE == "repairs":
+    step("verify", "T1")
+    for i in range(25):
+        rc, out = step("review", "T1", "--verdict", "fail", "--detail", "no")
+        if "PARK:" in out:
+            break
+        commit(i + 1)
+        rc, out = step("verify", "T1")
+        if "VERIFY: T1 pass" not in out:
+            break
+    st = C.State.load(C.state_path(root))
+    t = st.tasks["T1"]
+    spend = ("budget_unmetered", "budget_tokens", "budget_usd")
+    v = int(t["status"] == "parked" and t.get("park_reason") in spend
+            and st.dispatches == 2)
+    print(json.dumps({"v": v, "dispatches": st.dispatches,
+                      "park": t.get("park_reason")}))
+else:
+    path = os.path.join(tempfile.mkdtemp(), "u.jsonl")
+    step("verify", "T1")
+    with open(path, "w") as f:
+        f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": 1000}) + "\n")
+    step("usage", "--file", path)
+    step("review", "T1", "--verdict", "pass")
+    with open(path, "a") as f:
+        f.write(json.dumps({"task": "T1", "dispatch": 2, "tokens": 7}) + "\n")
+    rc, out = step("usage", "--file", path)
+    st = C.State.load(C.state_path(root))
+    got = [[e.get("dispatch"), e.get("tokens")] for e in getattr(st, "usage", [])]
+    v = int(rc == 3 and "PROBLEM: line 1:" in out and got == [[1, 1000], [2, 7]])
+    print(json.dumps({"v": v, "rc": rc, "entries": got}))
+"""
+
+
+def _smr_case(tree, case):
+    """The spend-review probe's result for `case` in `tree`; None (PROBE_ERRORS) when the
+    fixture itself broke."""
+    assets = os.path.join(tree, "factory-conductor", "assets")
+    if not os.path.isfile(os.path.join(assets, "conductor_testkit.py")):
+        return {"v": 0}
+    out = probe(tree, "factory-conductor/assets", _SMR_PROBE.replace("@CASE@", repr(case)))
+    return None if _errored(out) else out
+
+
+def check_spend_review(old, new):
+    s = "factory-conductor"
+    for case, dimension, note in (
+            ("repairs", "enforced runs whose spend stop parks an in-flight repair "
+             "(higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 10, max_repairs_per_task: 20, "
+             "max_dispatches: 100}; nobody reports usage and T1's reviewer keeps failing. "
+             "The fixed conductor parks T1 with budget_unmetered at the first failing "
+             "review, after 2 dispatches (executor, reviewer). The baseline has no spend "
+             "stop and repairs on until verify_red_after_repairs, an honest 0. "
+             "Mutation-proven: with the spend check removed from _dispatch it reads 0"),
+            ("stale", "usage files whose re-applied old record meters no wrong dispatch "
+             "(higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 10^9}; a usage file with a "
+             "record for dispatch 1 (1000 tokens) is applied, a record for dispatch 2 "
+             "(7 tokens) is appended after the review, and the file is applied again: exit "
+             "3, PROBLEM: line 1, and the entries are exactly 1->1000 and 2->7. The "
+             "baseline has no usage command, an honest 0. Mutation-proven: with the "
+             "dispatch field ignored (latest unmetered instead) it reads 0")):
+        a, b = _smr_case(old, case), _smr_case(new, case)
+        av = None if a is None else a.get("v")
+        bv = None if b is None else b.get("v")
+        row(s, dimension, av, bv, av == 0 and bv == 1, note, kind="delta",
+            since=SINCE_SPEND_METERING)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -8075,6 +8181,7 @@ def main():
         check_ops_intake(old, REPO)
         check_idea_validation(old, REPO)
         check_spend_metering(old, REPO)
+        check_spend_review(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

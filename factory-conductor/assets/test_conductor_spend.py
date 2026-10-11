@@ -14,6 +14,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 import reentry as R  # noqa: E402
+import test_conductor_evidence as EV  # noqa: E402
 from conductor_testkit import (GIT, repo_with_plan, write_plan_envelope,  # noqa: E402
                                write_grant, tmpdir)
 
@@ -150,12 +151,13 @@ class SpendTests(unittest.TestCase):
         self.cmd("verify", "T1")
         path = os.path.join(tmpdir(), "usage.jsonl")
         with open(path, "w") as f:
-            f.write(json.dumps({"task": "T1", "tokens": 70, "usd": 0.5,
+            f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": 70, "usd": 0.5,
                                 "source": "billing export"}) + "\n")
             f.write("not json\n")
-            f.write(json.dumps({"task": "T2", "tokens": 5}) + "\n")  # nothing finished
-            f.write('{"task": "T1", "tokens": NaN}\n')
-            f.write(json.dumps({"task": "T1", "tokens": True}) + "\n")
+            f.write(json.dumps({"task": "T2", "dispatch": 1, "tokens": 5})
+                    + "\n")  # T1's dispatch, and T2 has nothing finished
+            f.write('{"task": "T1", "dispatch": 1, "tokens": NaN}\n')
+            f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": True}) + "\n")
             f.write("\n")
         rc, out, _ = self.cmd("usage", "--file", path)
         self.assertEqual(rc, 3)
@@ -329,21 +331,254 @@ class SpendTests(unittest.TestCase):
         self.cmd("usage", "T1", "--tokens", "30", "--usd", "0.1")
         path = os.path.join(tmpdir(), "u.jsonl")
         with open(path, "w") as f:
-            f.write(json.dumps({"task": "T1", "tokens": 12}) + "\n")
+            f.write(json.dumps({"task": "T1", "dispatch": 2, "tokens": 12}) + "\n")
         self.cmd("review", "T1", "--verdict", "pass")
         self.assertEqual(self.cmd("usage", "--file", path)[0], 0)
         self.cmd("merge", "T1")
         pay = C.run_result_payload(self.state())
         self.assertEqual(pay["usage"], {"tokens": 42, "usd": 0.1, "entries": 2,
-                                        "unmetered": 0, "trust": "low"})
+                                        "unmetered": 0, "unknown": 0, "trust": "low"})
         self.assertIn("enforced", pay["budget_note"])
         body = C.pr_body(pay, "e.json")
         self.assertIn("Usage: 42 tokens, 0.1 USD, from 2 entries (trust `low`); "
                       "0 dispatches unmetered.", body)
 
+    # ── review fixes: a spend stop parks in-flight repairs (M1) ───────────────
+    def park_reason(self, task):
+        t = self.state().tasks[task]
+        return t["status"], t.get("park_reason")
+
+    def kinds(self):
+        return [e["kind"] for e in self.state().events() if e["event"] == "dispatch"]
+
+    def test_a_spend_stop_parks_an_in_flight_repair(self):
+        # Nobody reports usage and the reviewer keeps failing: before the fix every
+        # failing review handed out one more unmetered repair, up to max_repairs.
+        self.assertEqual(self.init(tasks={"T1": ([], OK), "T2": ([], OK)},
+                                   budget={"enforce": ["tokens"], "max_tokens": 10,
+                                           "max_repairs_per_task": 20,
+                                           "max_dispatches": 100}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.assertEqual(self.cmd("verify", "T1")[0], 0)  # the reviewer goes out
+        rc, out, _ = self.cmd("review", "T1", "--verdict", "fail", "--detail", "no")
+        self.assertEqual(rc, 3)
+        self.assertIn("PARK: T1 budget_unmetered", out)
+        self.assertEqual(self.park_reason("T1"), ("parked", "budget_unmetered"))
+        self.assertEqual(self.kinds(), ["executor", "reviewer"])  # no repair
+
+    def test_a_metered_run_still_repairs_after_a_failing_review(self):
+        # The review that fails has just finished the reviewer's dispatch, whose usage
+        # the agent can only record now: that one dispatch does not park the repair.
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 1000}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.cmd("verify", "T1")
+        self.assertEqual(self.cmd("usage", "T1", "--tokens", "5")[0], 0)
+        rc, out, _ = self.cmd("review", "T1", "--verdict", "fail", "--detail", "no")
+        self.assertEqual(rc, 3)
+        self.assertNotIn("PARK:", out)
+        self.assertEqual(self.state().tasks["T1"]["status"], "verifying")
+        self.assertEqual(self.kinds(), ["executor", "reviewer", "repair"])
+
+    def test_a_metered_run_still_repairs_after_a_failing_verify(self):
+        self.assertEqual(self.init(tasks={"T1": ([], [{"text": "f", "command": ["false"]}])},
+                                   budget={"enforce": ["tokens"], "max_tokens": 1000}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        rc, out, _ = self.cmd("verify", "T1")
+        self.assertEqual(rc, 3)
+        self.assertNotIn("PARK:", out)
+        self.assertEqual(self.kinds(), ["executor", "repair"])
+
+    def test_the_token_cap_reached_mid_task_parks_the_repair(self):
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 10}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.cmd("verify", "T1")
+        self.cmd("usage", "T1", "--tokens", "50")
+        rc, out, _ = self.cmd("review", "T1", "--verdict", "fail", "--detail", "no")
+        self.assertIn("PARK: T1 budget_tokens", out)
+        self.assertEqual(self.kinds(), ["executor", "reviewer"])
+
+    def test_resume_parks_repairs_and_executors_under_a_spend_stop(self):
+        self.assertEqual(self.init(tasks=THREE, budget={"enforce": ["tokens"],
+                                                        "max_tokens": 100}), 0)
+        self.cmd("start", "T1")
+        self.cmd("start", "T2")
+        self.commit("T2")
+        self.cmd("verify", "T2")
+        self.cmd("usage", "T2", "--tokens", "5")
+        self.cmd("review", "T2", "--verdict", "fail", "--detail", "no")  # a repair goes out
+        self.assertEqual(self.kinds(), ["executor", "executor", "reviewer", "repair"])
+        self.cmd("usage", "T2", "--tokens", "500")  # the reviewer: over the cap
+        rc, out, _ = self.cmd("resume")
+        self.assertIn("PARK: T1 budget_tokens", out)
+        # parking T1 finished its executor unmetered, so T2 parks on that first
+        self.assertIn("PARK: T2 budget_unmetered", out)
+        self.assertNotIn("NEXT: T", out)
+        self.assertEqual(self.kinds(), ["executor", "executor", "reviewer", "repair"])
+
+    # ── review fixes: dispatch-bound usage records (M2) ────────────────────
+    def test_a_file_record_meters_exactly_the_dispatch_it_names(self):
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 10 ** 6}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.cmd("verify", "T1")
+        self.cmd("review", "T1", "--verdict", "pass")  # dispatches 1 and 2 are finished
+        path = os.path.join(tmpdir(), "u.jsonl")
+        with open(path, "w") as f:
+            f.write(json.dumps({"task": "T1", "tokens": 3}) + "\n")  # no dispatch
+            f.write(json.dumps({"task": "T1", "dispatch": True, "tokens": 3}) + "\n")
+            f.write(json.dumps({"task": "T1", "dispatch": 9, "tokens": 3}) + "\n")
+            f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": 1000}) + "\n")
+        rc, out, _ = self.cmd("usage", "--file", path)
+        self.assertEqual(rc, 3)
+        self.assertEqual([l.split()[2].rstrip(":") for l in out.splitlines()
+                          if l.startswith("PROBLEM: ")], ["1", "2", "3"])
+        self.assertIn("USAGE: T1 dispatch=1 tokens=1000 usd=- trust=low", out)
+        self.assertEqual([d["n"] for d in C.unmetered(self.state())], [2])
+
+    def test_reapplying_an_appended_file_never_meters_the_wrong_dispatch(self):
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 10 ** 9}), 0)
+        path = os.path.join(tmpdir(), "u.jsonl")
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.cmd("verify", "T1")
+        with open(path, "w") as f:
+            f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": 1000,
+                                "source": "executor"}) + "\n")
+        self.assertEqual(self.cmd("usage", "--file", path)[0], 0)
+        self.cmd("review", "T1", "--verdict", "pass")
+        with open(path, "a") as f:
+            f.write(json.dumps({"task": "T1", "dispatch": 2, "tokens": 7,
+                                "source": "reviewer"}) + "\n")
+        rc, out, _ = self.cmd("usage", "--file", path)
+        self.assertEqual(rc, 3)
+        self.assertIn("PROBLEM: line 1:", out)
+        self.assertIn("USAGE: T1 dispatch=2 tokens=7 usd=- trust=low", out)
+        self.assertEqual([(e["dispatch"], e["tokens"]) for e in self.state().usage],
+                         [(1, 1000), (2, 7)])
+
+    def test_cli_usage_takes_a_dispatch(self):
+        self.assertEqual(self.init(tasks=THREE, budget={"enforce": ["tokens"],
+                                                        "max_tokens": 10 ** 6}), 0)
+        self.cmd("start", "T1")
+        self.cmd("start", "T2")
+        self.commit("T1")
+        self.cmd("verify", "T1")  # T1: 1 finished; T2: 2 in flight; T1's reviewer 3
+        self.cmd("review", "T1", "--verdict", "pass")
+        self.assertEqual(self.cmd("usage", "T1", "--dispatch", "2", "--tokens", "1")[0], 2)
+        self.assertEqual(self.cmd("usage", "T1", "--dispatch", "9", "--tokens", "1")[0], 2)
+        self.assertEqual(self.cmd("usage", "T2", "--dispatch", "2", "--tokens", "1")[0], 2)
+        rc, out, _ = self.cmd("usage", "T1", "--dispatch", "1", "--tokens", "4")
+        self.assertEqual((rc, out.strip()),
+                         (0, "USAGE: T1 dispatch=1 tokens=4 usd=- trust=claimed"))
+        self.assertEqual(self.cmd("usage", "T1", "--dispatch", "1", "--tokens", "4")[0], 2)
+
+    # ── review fixes: finite totals (L1) ───────────────────────────────────
+    def test_usage_refuses_figures_and_totals_beyond_the_ceiling(self):
+        self.assertEqual(self.init(budget={"enforce": ["usd"], "max_usd": 1e308}), 0)
+        self.cmd("start", "T1")
+        self.commit("T1")
+        self.cmd("verify", "T1")
+        for argv in (["--tokens", "1", "--usd", "1.7e308"],
+                     ["--tokens", str(10 ** 13), "--usd", "1"]):
+            self.assertEqual(self.cmd("usage", "T1", *argv)[0], 2, argv)
+        self.assertEqual(self.cmd("usage", "T1", "--tokens", "1", "--usd", "6e8")[0], 0)
+        self.cmd("review", "T1", "--verdict", "pass")
+        # the figure is under the ceiling, the total would not be
+        self.assertEqual(self.cmd("usage", "T1", "--tokens", "1", "--usd", "6e8")[0], 2)
+        path = os.path.join(tmpdir(), "u.jsonl")
+        with open(path, "w") as f:
+            f.write(json.dumps({"task": "T1", "dispatch": 2, "tokens": 1,
+                                "usd": 1.7e308}) + "\n")
+        self.assertEqual(self.cmd("usage", "--file", path)[0], 3)
+        self.assertEqual(len(self.state().usage), 1)
+        u = C.usage_summary(self.state())
+        self.assertEqual(u["usd"], 6e8)
+
+    # ── review fixes: a human-attested unknown entry (L2) ──────────────────
+    def test_a_human_unknown_entry_clears_an_unmetered_dispatch(self):
+        self.assertEqual(self.init(tasks=THREE, budget={"enforce": ["tokens", "usd"],
+                                                        "max_tokens": 1000,
+                                                        "max_usd": 5}), 0)
+        self.prove("T1")  # nobody reported usage
+        self.assertEqual(self.cmd("next")[1].strip(), "STOP: budget_unmetered")
+        self.assertEqual(self.cmd("usage", "T1", "--unknown")[0], 2)  # --by is required
+        self.assertEqual(self.cmd("usage", "T1", "--unknown", "--by", "ann",
+                                  "--tokens", "1")[0], 2)
+        self.assertEqual(self.cmd("usage", "T1", "--by", "ann", "--tokens", "1",
+                                  "--usd", "1")[0], 2)
+        rc, out, _ = self.cmd("usage", "T1", "--unknown", "--by", "ann")
+        self.assertEqual((rc, out.strip()), (0, "USAGE: T1 dispatch=2 unknown by=ann"))
+        rc, out, _ = self.cmd("usage", "T1", "--unknown", "--dispatch", "1", "--by", "ann")
+        self.assertEqual((rc, out.strip()), (0, "USAGE: T1 dispatch=1 unknown by=ann"))
+        e = self.state().usage[-1]
+        self.assertEqual((e["trust"], e["by"], e["tokens"], e["usd"]),
+                         ("unknown", "ann", None, None))
+        self.assertEqual(C.unmetered(self.state()), [])
+        rc, out, _ = self.cmd("resume")
+        self.assertEqual(rc, 0, out)
+        rc, out, _ = self.cmd("status")
+        self.assertIn("STATUS: usage tokens=0/1000 usd=-/5 entries=0 unmetered=0 trust=- "
+                      "unknown=2", out.splitlines())
+        pay = C.run_result_payload(self.state())
+        self.assertEqual(pay["usage"], {"tokens": 0, "usd": None, "entries": 0,
+                                        "unmetered": 0, "unknown": 2, "trust": None})
+        self.assertIn("2 dispatches attested unknown by a human", C.pr_body(pay, "e.json"))
+
+    def test_a_grant_ask_stop_does_not_meter_an_in_flight_dispatch(self):
+        # grant_ask is lifted once the grant is renewed; the running subagent's own report
+        # must still be recordable then.
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 1000}), 0)
+        self.cmd("start", "T1")
+        st = self.state()
+        st.stopped = {"reason": "grant_ask"}
+        st.save()
+        self.assertEqual(self.cmd("usage", "T1", "--tokens", "5")[0], 2)
+        self.assertEqual(self.cmd("usage", "T1", "--dispatch", "1", "--tokens", "5")[0], 2)
+        self.assertEqual(self.state().usage, [])
+
+    def test_a_stopped_run_may_meter_an_in_flight_dispatch(self):
+        self.assertEqual(self.init(budget={"enforce": ["tokens"], "max_tokens": 1000}), 0)
+        self.cmd("start", "T1")
+        st = self.state()
+        st.stopped = {"reason": "budget_wall_clock"}
+        st.save()
+        rc, out, _ = self.cmd("usage", "T1", "--tokens", "500")
+        self.assertEqual((rc, out.strip()),
+                         (0, "USAGE: T1 dispatch=1 tokens=500 usd=- trust=claimed"))
+
     def test_the_stop_reasons_are_known(self):
         for reason in ("budget_unmetered", "budget_tokens", "budget_usd"):
             self.assertIn(reason, C.STOP_REASONS)
+
+
+class SpendEvidenceTests(EV.Gate):
+    """The verifier redo path (evidence gate) under a spend stop (review fix M1)."""
+
+    def kinds(self):
+        return [e["kind"] for e in self.state().events() if e["event"] == "dispatch"]
+
+    def test_a_spend_stop_parks_a_verifier_redo(self):
+        self.init([EV.task("T1", ["notes-create"])],
+                  budget={"enforce": ["tokens"], "max_tokens": 1000})
+        self.build()  # executor, reviewer, verifier; nobody reported usage
+        rc, out, _ = self.evidence()  # nothing recorded: a verifier-side reject
+        self.assertEqual(rc, 3)
+        self.assertIn("PARK: T1 budget_unmetered", out)
+        self.assertEqual(self.kinds(), ["executor", "reviewer", "verifier"])
+
+    def test_a_metered_run_still_redoes_the_verifier(self):
+        self.init([EV.task("T1", ["notes-create"])],
+                  budget={"enforce": ["tokens"], "max_tokens": 1000})
+        self.build()
+        for _ in range(2):  # the executor and the reviewer
+            self.assertEqual(self.run_cmd("usage", "T1", "--tokens", "5")[0], 0)
+        rc, out, _ = self.evidence()
+        self.assertNotIn("PARK:", out)
+        self.assertEqual(self.kinds(), ["executor", "reviewer", "verifier", "verifier"])
 
 
 if __name__ == "__main__":

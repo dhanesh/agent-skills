@@ -192,18 +192,37 @@ an executor or repair at its `verify`, a reviewer at its `review`, a verifier at
 record the usage that your harness reports for that subagent before you ask for the next
 action, because the run otherwise stops at `budget_unmetered`. Run
 `conductor usage <task> --tokens <n> [--usd <x>] --source "<where you read it>"`; Claude Code
-shows a subagent's token count when it finishes. It meters the task's latest finished
-dispatch that has no entry yet and prints `USAGE: <task> dispatch=<n> …`. An exit 2 means
-nothing is left to meter for that task, or a figure is missing or invalid (when `usd` is
-enforced, give `--usd` too). You MUST NOT invent or estimate a usage figure, because the cap
-would then be fiction. A user may have a transform that writes JSON-lines records
-(`{"task", "tokens", "usd", "source"}`): `conductor usage --file <f>` applies each one with
-trust `low`, prints a `PROBLEM: line <n>: …` per bad record and exits 3 when there was one.
+shows a subagent's token count when it finishes, not a dollar figure, so an enforced `usd`
+cap needs a user's transform (`usage --file`) or a harness that reports cost. It meters the
+task's latest finished dispatch that has no entry yet and prints `USAGE: <task> dispatch=<n> …`;
+`--dispatch <n>` meters exactly the dispatch that `conductor status` lists as
+`STATUS: unmetered <task> dispatch=<n> kind=<kind>`. An exit 2 means nothing is left to meter
+for that task, the dispatch is not that task's, is metered already or is still in flight, or a
+figure is missing, invalid or past its ceiling (10^12 tokens or 10^9 USD, for one entry and for
+the run's total; when `usd` is enforced, give `--usd` too). You MUST NOT invent or estimate a
+usage figure, because the cap would then be fiction. A user may have a transform that writes JSON-lines records
+(`{"task", "dispatch", "tokens", "usd", "source"}`, `dispatch` required): `conductor usage
+--file <f>` applies each one with trust `low` to exactly the dispatch it names, prints a
+`PROBLEM: line <n>: …` per bad record (a record for a dispatch that has an entry already is
+one, so a re-applied file meters nothing twice) and exits 3 when there was one. When nobody
+can know a dispatch's figures, the user can attest that with `conductor usage <task> --unknown
+[--dispatch <n>] --by <name>`: the entry has trust `unknown` and no figures, it clears that
+dispatch, and the run result counts it apart (`usage.unknown`). You MUST NOT run
+`usage --unknown` yourself, because it removes the meter from a dispatch; report the
+unmetered dispatch to the user instead. On a run stopped for good (not `grant_ask`), `usage`
+also meters a dispatch that is still in flight, so the totals include the work that the stop
+cut short.
 The caps are only as good as the reports. The fail-closed rule makes sure that an agent that
 stops reporting cannot go on without limit: while a finished dispatch is unmetered, or the
-claimed total is at a cap, the work in flight goes on to its outcome, `next` prints no
-`READY:`, and `start` refuses (exit 2). Once nothing is in flight, the run stops with
-`budget_unmetered`, `budget_tokens` or `budget_usd`.
+claimed total is at a cap, `next` prints no `READY:`, `start` refuses (exit 2), and no repair
+goes out. A failing verify, review or evidence check then parks its task with the stop's
+reason (`PARK: <task> budget_unmetered`, for example), and so does a verifier redo, or a
+`dispatch-executor` or `dispatch-repair` line that `resume` would print. Only the reviewer and
+the verifier of each in-flight task's current attempt still go out, so the run overshoots a
+stop by at most two dispatches per in-flight task. The dispatch whose outcome was just
+recorded does not park its own task's next step, because you can record its usage only after
+that outcome. Once nothing is in flight, the run stops with `budget_unmetered`,
+`budget_tokens` or `budget_usd`.
 
 **When nothing moves.** If `next` prints nothing and you are waiting on no subagent, run
 `conductor status` and park every in-flight task (`running`, `verifying`, `reviewing`) you are
@@ -252,8 +271,10 @@ re-checks the grant; it lifts a `grant_ask` stop once a grant covers the run aga
 `budget_unmetered` stop once every finished dispatch has its usage. It lifts no other stop.
 A `budget_unmetered` stop that it cannot lift prints `NEXT: run ask`. After a crash, the
 dispatches of the dead session are usually unmetered, because a new session cannot see
-them: the run stays stopped until the user records them with `conductor usage` and
-resumes it. Then it prints one `NEXT:` line per in-flight task and a last line for the run.
+them: the run stays stopped until the user records them with `conductor usage` (or attests
+them with `usage --unknown`) and resumes it. A task whose executor or repair is still in
+flight at that `resume` parks with `budget_unmetered` and stays parked, so the user records
+the missing usage before the resume when that task is to go on. Then it prints one `NEXT:` line per in-flight task and a last line for the run.
 A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `running` or
 `verifying` task whose worktree is gone prints `PARK: <task> worktree-missing` instead.
 

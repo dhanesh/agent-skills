@@ -180,18 +180,39 @@ two-parent merge of the expected commits, parks `merge-inconsistent` and stops t
 
 ### usage
 
-`usage <task> --tokens N [--usd X] [--source TEXT]` records the usage of the task's latest
-finished dispatch that has no entry yet, with trust `claimed`, and prints
-`USAGE: <task> dispatch=<n> tokens=<N> usd=<X|-> trust=claimed`. `usage --file F` reads
-JSON-lines records `{"task", "tokens", "usd", "source"}` and applies each one the same way,
-with trust `low`. A bad record (not JSON, not an object, NaN or Infinity, a bad figure, an
-unknown task, nothing left to meter) prints `PROBLEM: line <n>: <why>` and is skipped; the
-other records still apply. Exit 0; exit 2 for a refused single entry, bad arguments or a file
-that cannot be read; exit 3 when the file had a problem record. `tokens` is an integer ≥ 0 and
-`usd` a finite number ≥ 0; when `usd` is enforced, every entry needs a `usd` figure. `usage`
-works on a stopped run (that is how a `budget_unmetered` stop is cleared), and refuses a
-finished run (exit 2). Entries go to `state.json` (`usage`, written only once there is one)
-and to the log as `usage` events. Nothing is sent anywhere.
+`usage <task> [--dispatch N] --tokens N [--usd X] [--source TEXT]` records the usage of one
+dispatch of the task, with trust `claimed`, and prints
+`USAGE: <task> dispatch=<n> tokens=<N> usd=<X|-> trust=claimed`. With `--dispatch`, it meters
+exactly that dispatch. The dispatch must be the task's, have no entry yet, and be finished.
+Without `--dispatch`, it meters the task's latest finished dispatch that has no entry yet.
+`status` prints the id of each unmetered dispatch (`STATUS: unmetered <task> dispatch=<n>`).
+
+`usage --file F` reads JSON-lines records `{"task", "dispatch", "tokens", "usd", "source"}`
+and applies each one with trust `low` to exactly the dispatch it names. `dispatch` is
+required. A bad record prints `PROBLEM: line <n>: <why>` and is skipped; the other records
+still apply. These records are bad: not JSON, not an object, NaN or Infinity, a bad figure,
+an unknown task, no `dispatch`, a dispatch of another task, a dispatch still in flight, and a
+dispatch that has an entry already. So a file that a transform appends to and that is applied
+again gives a `PROBLEM:` for each old line. It never meters the wrong dispatch.
+
+`usage <task> --unknown [--dispatch N] --by NAME` records a human's statement that the
+dispatch's figures cannot be known. The entry has trust `unknown`, no `tokens` and no `usd`,
+and `by` names the human. It prints `USAGE: <task> dispatch=<n> unknown by=<name>`. The
+entry clears that dispatch from `budget_unmetered`, also when `usd` is enforced. The totals
+leave it out, and `status`, the run result and the PR body count it separately. Only a human
+runs it, because it removes the meter from a dispatch.
+
+Exit 0; exit 2 for a refused single entry, bad arguments or a file that cannot be read; exit 3
+when the file had a problem record. `tokens` is an integer from 0 to 10^12, and `usd` a
+finite number from 0 to 10^9. The run's totals have the same ceilings: an entry that would
+take a total past its ceiling is refused, so the envelope never holds Infinity. When `usd` is
+enforced, every entry with figures needs a `usd` figure. `usage` works on a stopped run (that
+is how a `budget_unmetered` stop is cleared), and refuses a finished run (exit 2). On a
+run stopped for good (any stop but `grant_ask` or `budget_unmetered`) it also meters a
+dispatch that is still in flight, so that the totals include
+work that ended with the stop. Without `--dispatch` it takes the latest finished dispatch
+first. Entries go to `state.json` (`usage`, written only once there is one) and to the log as
+`usage` events. Nothing is sent anywhere.
 
 ### park and decision
 
@@ -491,24 +512,40 @@ the run result and the PR body are as before.
   older one stays unmetered and the run stops at `budget_unmetered` until a human records it
   (fail closed; the spec's errata say why).
 - **Unmetered.** A finished dispatch with no usage entry, or with an entry that has no figure
-  for an enforced metric.
+  for an enforced metric. An `unknown` entry from a human meters its dispatch.
 - **The stops.** When a task is ready and nothing is in flight, `next`, `start` and `resume`
   check, before their other stop rules and in this order: `budget_unmetered` (a dispatch is
   unmetered), `budget_tokens` (the claimed tokens are at or above `max_tokens`, when tokens
   are enforced) and `budget_usd` (the claimed usd are at or above `max_usd`, when usd is
-  enforced). While work is in flight it goes on to its outcome, as under
-  `budget_dispatches`: `next` prints no `READY:`, `start` refuses (exit 2, logged as
-  `dispatch_refused` with the reason), and the reviewer, repair and verifier dispatches of
-  in-flight tasks are still handed out.
+  enforced). While work is in flight, `next` prints no `READY:` and `start` refuses (exit 2,
+  logged as `dispatch_refused` with the reason).
+- **In-flight tasks under a stop.** While a spend stop fires, no repair goes out. A failing
+  `verify`, `review` or `evidence` check parks its task with the stop's reason, and so does a
+  verifier redo. `resume` parks a task whose `dispatch-executor` or `dispatch-repair` line it
+  would print. Only the reviewer and the verifier of each in-flight task's current attempt
+  still go out. So the run overshoots a stop by at most two dispatches per in-flight task.
+  A crash re-dispatch of a reviewer or verifier by `resume` can add one more each time. A task
+  parked this way stays parked, as with `budget_dispatches`. So after a crash that left a
+  finished dispatch unmetered, record its usage before `resume`: otherwise `resume` parks
+  every task whose executor or repair is still in flight. The check leaves out the
+  dispatches that the outcome just recorded finished for that same task. The agent can record
+  their usage only after that outcome, so they do not park the task's next step. An older
+  unmetered dispatch, of any task, does park it.
 - **Lifting.** `resume` lifts `budget_unmetered` once every finished dispatch is metered.
   `budget_tokens` and `budget_usd` stay: claimed spend does not go down. `watch` treats a
   `budget_unmetered` stop as waiting on the human (`REENTRY: waiting-human`), because a
   started agent cannot see the usage of the session that died.
 - **Reporting.** `status` prints `STATUS: unmetered <task> dispatch=<n> kind=<kind>` per
   unmetered dispatch, `STATUS: usage tokens=<sum>[/<cap>] usd=<sum|->[/<cap>] entries=<n>
-  unmetered=<n> trust=<claimed|low|->`, and a budget note that names the enforced and the
-  recorded caps. The run result carries `usage: {tokens, usd, entries, unmetered, trust}`
-  (trust is the weakest entry's), and the PR body a `Usage:` line.
+  unmetered=<n> trust=<claimed|low|->[ unknown=<n>]`, and a budget note that names the
+  enforced and the recorded caps. `unknown=<n>` appears only when a human attested an entry.
+  The run result carries `usage: {tokens, usd, entries, unmetered, unknown, trust}`. Here
+  `entries` and `trust` (the weakest one) cover the entries with figures, and `unknown` counts
+  the attested entries. The PR body has a `Usage:` line, and a line for the attested entries
+  when there are any.
+- **Where the figures come from.** Claude Code shows a token count for each subagent, not a
+  dollar figure. So an enforced `usd` cap needs a user's transform (`usage --file`) or a
+  harness that reports cost.
 
 ## Task statuses and stop reasons
 
@@ -584,6 +621,7 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `FINISH: …`, `NEXT: run done` | the run is finished: every step done, or the integration was red | report it; nothing is left to run |
 | `PARK: <task> worktree-missing` | `running` or `verifying`, its worktree is gone | nothing: the task is done for this run |
 | `PARK: <task> budget_dispatches` | the dispatch this line would spend is past `max_dispatches` | nothing: the task is done for this run |
+| `PARK: <task> budget_unmetered`, `budget_tokens` or `budget_usd` | a spend stop fires, and this is a `dispatch-executor` or `dispatch-repair` line (see "Spend metering") | nothing: the task is done for this run |
 
 Every line starts `NEXT: `, then a task id or `run`, then the action; that grammar is stable
 for tools that read it. Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer`

@@ -123,7 +123,11 @@ and skip what the conversation has already answered:
    (`max_tokens`, `max_usd`) are recorded, and enforced only when the user opts in. The
    runtime does not expose usage, so ask: "Enforce the token cap? (Your agent must report
    each dispatch's usage. Claude Code shows it when a subagent finishes.)" Ask the same for
-   the dollar cap when the user gives `max_usd`. A yes adds `"enforce": ["tokens"]` (or
+   the dollar cap when the user gives `max_usd`. Tell the user that Claude Code shows a token
+   count for each subagent, not a dollar figure. So a dollar cap that is enforced needs the
+   user's own transform, which writes usage records for `conductor usage --file`, or a
+   harness that reports cost. Without one, the run stops at the first unmetered dispatch.
+   A yes adds `"enforce": ["tokens"]` (or
    `["usd"]`, or both) to `budget`, next to the cap it names: factory-conductor then stops
    the run at the cap, and also when a finished dispatch has no usage report. Without
    `enforce` the caps are only recorded. Also ask which events should stop the run (`stop_on`): it is recorded but not
