@@ -78,7 +78,18 @@ A spec is one markdown file:
   this section, a `##` line is evidence, not a heading. A fence closes only on
   a line of the same character, at least as long, with nothing after it but
   whitespace. An unclosed fence runs to the end of the file, so the later
-  sections go missing and the lint fails.
+  sections go missing and the lint fails. `assets/idea_request.py` writes the
+  same section for an idea spec. It holds the brief's fields, each assumption
+  and each result as code spans, and each result's evidence in its own fence.
+- **Idea** (optional `## Idea` section, 2.7.0): one bullet that names the
+  idea-validation brief the spec builds, `- <slug>`. The slug is lowercase
+  kebab-case (`[a-z0-9]` words joined by single hyphens), 64 characters at
+  most. A backticked slug is fine. `assets/idea_request.py <envelope>` writes
+  it from an `idea-brief/v1` envelope, together with `## Problem`, `## Users`
+  and `## Open risks` (seeded as code spans from the brief) and the evidence
+  section. When the human's `go` differs from the computed verdict, the
+  skeleton has a `> **Override:**` line directly under the H1. The plan
+  payload carries the slug as `ideas`.
 
 **Full-loop sections** (Tension + Choose; required only under `--converged` /
 `--unattended`, design spec §4). How to run the loop that fills them, the
@@ -115,7 +126,8 @@ pre-mortem and the decision sweep are in `references/unattended.md`:
 | 5a | Every id in a requirement's `[after: ...]` hint names a known requirement; the after-hints as a whole contain no cycle (message: "after: hints have a cycle") | a task ordered after a requirement that doesn't exist, or a dependency loop no schedule can satisfy |
 | 5c | Every `[feature: ...]` id is lowercase kebab-case; a spec that names a feature has a `## Verification` section whose `Verify skill:` is a repo-relative `verify-<app>` path; no requirement is both `[parallel-safe]` and `[after: ...]` | a plan the evidence gate cannot run, or contradictory independence markers |
 | 5b | A criterion's `[cmd: ...]` hint ends the criterion, holds no hidden or control character (Unicode `Cc`, `Cf`, `Zl`, `Zp`, `Co`, `Cs`, or a space other than U+0020; the message names each as `U+XXXX`; a TAB or a no-break space between words fails too, so separate words with plain spaces), parses with `shlex`, is non-empty, and passes the C6 command rule (the vendored `contract_check`) | a command no machine can run, or one that names an interpreter or an absolute path; a bidi override, zero-width space, ESC sequence or NUL that makes the line a human approves differ from what runs |
-| 5d | Every `## Intake` bullet is an intake item id (`I` + 10 hex), the section names at least one, no id repeats, and the spec keeps its `## External evidence (untrusted)` section; an evidence section needs `## Intake` too | a plan that names an item ops-intake cannot find, so the item never closes; a deleted evidence block that silently switches the copy tripwire off |
+| 5d | Every `## Intake` bullet is an intake item id (`I` + 10 hex), the section names at least one, no id repeats, and the spec keeps its `## External evidence (untrusted)` section; an evidence section needs `## Intake` or `## Idea` | a plan that names an item ops-intake cannot find, so the item never closes; a deleted evidence block that silently switches the copy tripwire off |
+| 5e | `## Idea` has exactly one bullet, a lowercase kebab-case slug of 64 characters or fewer, and the spec keeps its `## External evidence (untrusted)` section | a plan that names no idea, or two; a deleted evidence block that silently switches the copy tripwire off |
 | 6 | Constraint grammar (`- <ID> [<type>]: ...`) and `<type>` is `invariant`/`goal`/`boundary`; no duplicate ID | a constraint the parser can't type or trace |
 | 7 | Required-truth grammar, `<status>` one of the four values, `confidence` a number in `[0, 1]`, and a non-empty `check:` field | a truth with no falsifiable status, confidence, or way to verify it |
 | 8 | Traceability: every constraint is named in some RT's `maps_to`; every RT names ≥1 known constraint and ≥1 known requirement (`reqs:`); every RT's `parent` is `OUTCOME` or another RT in this spec, and not itself | a constraint nobody anchors; a truth that traces to nothing |
@@ -237,6 +249,11 @@ argument). `WARNING:` follows the line of a command that trips the copy
 tripwire. The agent shows the human every `CHECK_COMMAND:` line verbatim before
 asking for approval. A spec with neither section prints none of these lines.
 
+**Idea specs (2.7.0).** A spec with `## Idea` prints `IDEA: <slug>` in the
+same place, then the same `CHECK_COMMAND:` and `WARNING:` lines, because its
+evidence is untrusted too. A spec without `## Idea` prints and derives exactly
+what it did before.
+
 Exit codes: `0` total coverage; `1` any requirement uncovered (a plan with
 a hole is not a plan); `2` unreadable input or no `R<n>:` bullets at all.
 
@@ -280,7 +297,8 @@ fields lifted from the spec when present: `constraints` (`{id, type, text}`),
 `required_truths` (only when every truth is well formed) and `decisions`
 (`{id, question, answer, source}`). It also gains `intake_items` (the
 `## Intake` ids) when the spec has them; ops-intake's `sync` finds the plan
-for a picked item through this field. Each task's `verify` is a list of
+for a picked item through this field. It gains `ideas` (a list of one
+`## Idea` slug) when the spec has one. Each task's `verify` is a list of
 `{text, command}`: `command` is the criterion's `[cmd: ...]` argv, or `null`
 when it has none. `task-plan/v1` stays v1 because the
 fields are additive. The schema is `assets/schemas/task-plan.v1.json`.

@@ -43,6 +43,12 @@ references/spec-template.md. This linter enforces the mechanical half of
       normalised) prints a `NOTE:` line, and spec_to_tasks.py prints a
       `WARNING:` line after that task's `CHECK_COMMAND:` line.
 
+  5e. (idea requests, 2.7.0) An optional `## Idea` section names the
+      idea-validation brief the spec builds: exactly one bullet, a lowercase
+      kebab-case slug of at most 64 characters (backticked is fine). A spec
+      with `## Idea` keeps its `## External evidence (untrusted)` section, and
+      an evidence section needs `## Intake` or `## Idea`.
+
 --converged adds the Tension + Choose full-loop rules (10-16): Tensions,
 Solution options and Iterations sections; tension grammar, known ids, and a
 decision for an accepted tension; every required truth SATISFIED or
@@ -204,6 +210,10 @@ _CMD_ANY_RE = re.compile(r"\[cmd:", re.IGNORECASE)
 INTAKE_SECTION = "Intake"
 EVIDENCE_SECTION = "External evidence (untrusted)"
 INTAKE_ID_RE = re.compile(r"^I[0-9a-f]{10}\Z")
+# Idea requests (2.7.0): the slug of the idea-validation brief a spec builds.
+IDEA_SECTION = "Idea"
+IDEA_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+IDEA_SLUG_MAX = 64
 # A fence opener and closer (CommonMark: up to 3 spaces of indent; a closer uses the
 # opener's character, is at least as long, and has nothing after it but whitespace).
 _FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -257,6 +267,13 @@ def _fold(text):
 def _visible(text):
     """text with every hidden character written as \\uXXXX, so a message can quote it."""
     return "".join("\\u%04x" % ord(ch) if is_hidden_char(ch) else ch for ch in text)
+
+
+def is_idea_slug(token):
+    """True when token is an idea-validation slug: lowercase kebab-case, at most
+    IDEA_SLUG_MAX characters."""
+    return (isinstance(token, str) and len(token) <= IDEA_SLUG_MAX
+            and IDEA_SLUG_RE.match(token) is not None)
 
 
 def copied_evidence(raw, argv, evidence):
@@ -713,6 +730,9 @@ def parse_spec(text):
       intake                   -- True when the spec has a ## Intake section
       intake_items             -- the well-formed I<10 hex> ids in ## Intake, in order
       malformed_intake         -- the ## Intake bullets that are not such an id
+      idea                     -- True when the spec has a ## Idea section
+      ideas                    -- the well-formed kebab-case slugs in ## Idea, in order
+      malformed_ideas          -- the ## Idea bullets that are not such a slug
       evidence                 -- True when the spec has ## External evidence (untrusted)
       tripwires                -- list aligned with criteria: the text a [cmd: ...]
                                   hint copies from the evidence block, or None
@@ -832,6 +852,10 @@ def parse_spec(text):
     for b in _section_bullets(sections, INTAKE_SECTION):
         token = b.strip().strip("`").strip()
         (intake_items if INTAKE_ID_RE.match(token) else malformed_intake).append(token)
+    ideas, malformed_ideas = [], []
+    for b in _section_bullets(sections, IDEA_SECTION):
+        token = b.strip().strip("`").strip()
+        (ideas if is_idea_slug(token) else malformed_ideas).append(token)
     evidence_body = find_section(sections, EVIDENCE_SECTION)
     evidence = one_line(" ".join(evidence_body)) if evidence_body is not None else ""
     tripwires = [copied_evidence(raw, command_argv(raw)[0], evidence) if raw is not None else None
@@ -863,6 +887,9 @@ def parse_spec(text):
         "intake": find_section(sections, INTAKE_SECTION) is not None,
         "intake_items": intake_items,
         "malformed_intake": malformed_intake,
+        "idea": find_section(sections, IDEA_SECTION) is not None,
+        "ideas": ideas,
+        "malformed_ideas": malformed_ideas,
         "evidence": evidence_body is not None,
         "tripwires": tripwires,
         "constraints": constraints,
@@ -1072,9 +1099,10 @@ def lint(text, mode="light"):
         issues.append("## Intake bullet is not an intake item id (I + 10 hex): %s" % code(token))
     if spec["intake"] and not spec["intake_items"] and not spec["malformed_intake"]:
         issues.append("section '## Intake' names no intake item id ('- I<10 hex>')")
-    if spec["evidence"] and not spec["intake"]:
+    if spec["evidence"] and not spec["intake"] and not spec["idea"]:
         issues.append("a spec with '## External evidence (untrusted)' needs its '## Intake' "
-                      "section, as intake_request.py wrote it")
+                      "section (or its '## Idea' section), as intake_request.py or "
+                      "idea_request.py wrote it")
     if spec["intake"] and not spec["evidence"]:
         issues.append("a spec with '## Intake' needs its '## External evidence (untrusted)' "
                       "section, as intake_request.py wrote it")
@@ -1083,6 +1111,19 @@ def lint(text, mode="light"):
         if iid in seen_i:
             issues.append("intake item %s is listed twice in '## Intake'" % iid)
         seen_i.add(iid)
+
+    # 5e. ## Idea: exactly one bullet, a lowercase kebab-case slug.
+    for token in spec["malformed_ideas"]:
+        issues.append("## Idea bullet is not an idea slug (lowercase kebab-case, at most %d "
+                      "characters): %s" % (IDEA_SLUG_MAX, code(_visible(token))))
+    n_idea = len(spec["ideas"]) + len(spec["malformed_ideas"])
+    if spec["idea"] and n_idea == 0:
+        issues.append("section '## Idea' names no idea slug ('- <slug>')")
+    if n_idea > 1:
+        issues.append("section '## Idea' must name exactly one idea slug, not %d" % n_idea)
+    if spec["idea"] and not spec["evidence"]:
+        issues.append("a spec with '## Idea' needs its '## External evidence (untrusted)' "
+                      "section, as idea_request.py wrote it")
 
     # 6-9. Constrain + Anchor light pass: typed constraints, required truths,
     # and traceability from constraint to RT to requirement (always on).

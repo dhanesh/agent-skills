@@ -105,6 +105,14 @@ warning does not fail the lint, because a bug report often names the failing tes
 boundary is the human: the agent shows every `CHECK_COMMAND:` line before asking for
 approval.
 
+**Requests from idea-validation (2.7.0).** `assets/idea_request.py <envelope>` turns an
+idea-validation `idea-brief/v1` envelope into the start of a spec. It accepts only an idea
+that the human decided `go`. The skeleton has a `## Idea` section with the slug, `## Problem`
+and `## Users` from the brief, `## Open risks` with the assumptions that have not passed, and
+the same untrusted evidence block as an intake spec. When the human's `go` overrides the
+computed verdict, a line under the title says so. The plan payload names the idea in `ideas`,
+and `spec_to_tasks.py` prints `IDEA:` and every `CHECK_COMMAND:` line for the human to see.
+
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.
 Run `spec_lint.py` and add the sections it names.
 
