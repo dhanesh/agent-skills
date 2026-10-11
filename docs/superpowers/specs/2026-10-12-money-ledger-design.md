@@ -111,3 +111,42 @@ The tool writes no envelope for `NOT_REFUSED`, so no skill can take a pass as a 
 - lifetime caps, FX conversion, invoices and payment-tool adapters;
 - a conductor dispatch link (L6);
 - forecasting and anomaly detection.
+
+## Errata (implementation, 2026-10-12)
+
+The build follows this design. These points were changed or made exact while building it:
+
+- **`conductor.py` changed by one line.** `CONDUCTOR_VERSION` is now `1.5.0`, because
+  `test_conductor_state.py` requires it to equal the SKILL.md version. Run-result envelopes
+  now name 1.5.0. No other line of `conductor.py` changed, and it does not import the ledger
+  or read its state (`test_ledger_isolation.py`).
+- **"Differs" means the parsed budget.** The registration hashes the currency and the caps,
+  as growth-review hashes its thresholds. A prose edit in `budget.md` does not make the budget
+  stale. A cap or currency edit does, and a missing or unlintable file does too.
+- **`record` needs a checked proposal.** §2 gives `record` no `--category`, so the tool takes
+  the category from the proposal with that id. An unknown id is a STOP (exit 2). A record of
+  `0` is allowed (a spend that did not happen), a second record for the same id and month
+  replaces the first with a `NOTE:`, and a month that has not started is refused.
+- **A currency change is refused while the ledger holds proposals or records,** because there
+  is no conversion (L4). Without them, the human can re-register in another currency.
+- **Hand edits are found by a state digest.** Every log event carries a sequence number and
+  the sha256 of the state it wrote. When `ledger.json` was deleted, emptied or edited (a
+  dropped reservation, a swapped cap), every `check` refuses, `record` and `withdraw` stop,
+  and `register` needs `--reason`. Deleting both files still starts a fresh ledger (a known
+  limit).
+- **Approval words are refused in ids and categories.** An id or a category holding `ok`,
+  `approved`, `pass` or `allowed` as a kebab part is refused, and argparse errors do not echo
+  the argument, so no check output can carry one of those words.
+- **The `--today` guard names no switch.** idea-validation 0.1.2's STOP line names its
+  environment switch. The ledger follows growth-review: the STOP line, SKILL.md, the
+  reference and the usage text do not name it. The README does.
+- **Exit codes, made exact.** An invalid or non-positive amount and a past month are
+  `REFUSED` (exit 3), as §2 lists them. A malformed id, month, `--what` or recurring shape
+  is bad input (exit 2). A lock held for 900 s is a STOP (exit 2).
+- **The replay comes after the refusal gates.** A re-run with the same id and fields prints
+  `NOT_REFUSED` again only when the budget is registered, not stale, the state matches its
+  log, and the currency, category, amount and months still pass. So a stale budget refuses a
+  replay too. A withdrawn id is refused: a new proposal needs a new id.
+- **A recurring proposal covers at most 120 months** and ends by 9999-12. Month arithmetic
+  uses plain integers.
+- **`status` is read-only:** it takes no lock and creates no file.
