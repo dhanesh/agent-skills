@@ -591,6 +591,50 @@ def compute(st, results, today):
     return rows, v
 
 
+def dropped_critical(st, results):
+    """Every assumption id that was critical in an earlier registration and is normal or
+    deleted in the latest one: [{id, statement, last_critical_registration, had_results}].
+
+    This is the goalpost flag (owner-proxy decision, Jev 0.97: flag it, not refuse or
+    stale it). Demoting a critical assumption after its result came in moves the
+    goalposts as surely as a threshold edit, but the human may have a good reason, so the
+    tool surfaces it in status, decide and the handoff instead of blocking. Tracking is by
+    assumption id: the statement is the one from the latest registration where the id was
+    critical, and had_results is true when a result was recorded for the id under a
+    registration in which it was critical. A limit: deleting A2 and renumbering the old A3
+    to A2 reads as an edit of A2, not a deletion."""
+    current = st["registrations"][-1]["assumptions"]
+    found, crit_regs = {}, {}
+    for reg in st["registrations"][:-1]:
+        for aid, x in reg["assumptions"].items():
+            if not x.get("critical"):
+                continue
+            now = current.get(aid)
+            if now is not None and now.get("critical"):
+                continue
+            found[aid] = {"id": aid, "statement": x.get("statement", ""),
+                          "last_critical_registration": reg["sha256"]}
+            crit_regs.setdefault(aid, set()).add(reg["sha256"])
+    out = []
+    for aid in sorted(found, key=lambda x: int(x[1:])):
+        d = found[aid]
+        d["had_results"] = any(r.get("assumption") == aid
+                               and r.get("registration") in crit_regs[aid] for r in results)
+        out.append(d)
+    return out
+
+
+def _print_dropped(dropped, current):
+    if not dropped:
+        return
+    print("NOTE: dropped-critical %s: critical in an earlier registration, not critical "
+          "now; the handoff lists them" % ", ".join(d["id"] for d in dropped))
+    for d in dropped:
+        print("NOTE: dropped-critical %s now %s, results under a critical registration: %s, "
+              "statement %s" % (d["id"], "normal" if d["id"] in current else "deleted",
+                                "yes" if d["had_results"] else "no", code(d["statement"])))
+
+
 def _fmt(v):
     return "%g" % v if isinstance(v, float) else str(v)
 
@@ -874,6 +918,7 @@ def cmd_status(a):
         print("EXPERIMENT: %d %s %s" % (e["n"], "outward" if e["outward"] else "inward",
                                         ",".join(e["ids"])))
     print("VERDICT: %s" % verdict)
+    _print_dropped(dropped_critical(st, results), reg["assumptions"])
     if _brief_changed(a.root, a.slug, st):
         print("NOTE: %s changed since its last registration; register it again"
               % _brief_rel(a.slug))
@@ -907,7 +952,9 @@ def cmd_decide(a):
             if st.get("closed"):
                 print("STOP: %s was closed by a pivot decision" % a.slug)
                 return 2
-            _, computed = compute(st, load_results(a.root, a.slug), a.today)
+            results = load_results(a.root, a.slug)
+            _, computed = compute(st, results, a.today)
+            dropped = dropped_critical(st, results)
             override = ((a.verdict == "go" and computed != "GO")
                         or (a.verdict == "kill" and computed == "GO"))
             d = {"verdict": a.verdict, "by": a.by.strip(), "reason": reason,
@@ -930,6 +977,7 @@ def cmd_decide(a):
     if override:
         print("NOTE: this decision overrides the computed verdict %s; the handoff says so"
               % computed)
+    _print_dropped(dropped, st["registrations"][-1]["assumptions"])
     if a.verdict == "go":
         print("NEXT: the human runs handoff %s --by NAME" % a.slug)
     elif a.verdict == "pivot":
@@ -946,7 +994,7 @@ def _read_snapshot(root, reg):
         return None
 
 
-def build_payload(slug, snap, rows, verdict, decision):
+def build_payload(slug, snap, rows, verdict, decision, dropped):
     """The idea-brief/v1 payload (schemas/idea-brief.v1.json)."""
     sec = snap["sections"]
     assumptions = []
@@ -970,6 +1018,7 @@ def build_payload(slug, snap, rows, verdict, decision):
         "decision": {k: decision[k] for k in ("verdict", "by", "reason", "override", "at")},
         "assumptions": assumptions,
         "open_risks": [x["id"] for x in assumptions if x["status"] != "pass"],
+        "dropped_critical": [dict(d) for d in dropped],
     }
 
 
@@ -1013,7 +1062,8 @@ def cmd_handoff(a):
                 print("STOP: the registered snapshot %s is missing or changed" % snap_rel)
                 print("NEXT: register %s --by NAME again" % _brief_rel(a.slug))
                 return 2
-            rows, verdict = compute(st, load_results(a.root, a.slug), a.today)
+            results = load_results(a.root, a.slug)
+            rows, verdict = compute(st, results, a.today)
             if verdict != last["computed"]:
                 # The override flag describes the verdict the human saw. A verdict that
                 # moved since then (new results, a passed deadline) needs a new decision.
@@ -1022,7 +1072,8 @@ def cmd_handoff(a):
                 print("NEXT: the human decides again: decide %s --verdict go|kill|pivot "
                       "--by NAME --reason TEXT" % a.slug)
                 return 2
-            payload = build_payload(a.slug, snap, rows, verdict, last)
+            dropped = dropped_critical(st, results)
+            payload = build_payload(a.slug, snap, rows, verdict, last, dropped)
             stmt = CC.build_statement(IDEA_KIND, SKILL_NAME, VERSION, a.root, [snap_rel],
                                       payload)
             viol = CC.check_statement(stmt)
@@ -1054,6 +1105,7 @@ def cmd_handoff(a):
         print("NOTE: this go overrides the computed verdict %s; the envelope says so" % verdict)
     if payload["open_risks"]:
         print("NOTE: open risks: %s" % ", ".join(payload["open_risks"]))
+    _print_dropped(dropped, reg["assumptions"])
     print("ENVELOPE: %s" % env_rel)
     print("NEXT: run spec-first-planning with %s" % env_rel)
     return 0

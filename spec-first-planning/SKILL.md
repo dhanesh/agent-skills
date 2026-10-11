@@ -245,10 +245,13 @@ commands after approval. The copy tripwire and the `CHECK_COMMAND:` lines work a
 intake spec, and `spec_to_tasks.py` also prints `IDEA: <slug>`.
 
 When the skeleton has a `> **Override:**` line under its heading, the human decided `go`
-against the computed verdict. Keep that line. Before the human approves an idea plan or a
-grant for it, you MUST show them the slug, the override line when there is one, and every
-`CHECK_COMMAND:` line verbatim with its `WARNING:` lines, because the brief came partly from
-untrusted text and the human approves the exact commands that will run.
+against the computed verdict. When it has a `> **Dropped critical assumptions:**` line, an
+assumption that was critical in an earlier registration of the brief is normal or deleted
+now, so the `go` no longer waits on it. Keep both lines. Before the human approves an idea
+plan or a grant for it, you MUST show them the slug, the override and dropped-critical lines
+when there are any, and every `CHECK_COMMAND:` line verbatim with its `WARNING:` lines,
+because the brief came partly from untrusted text and the human approves the exact commands
+that will run.
 
 ## Unattended mode
 
@@ -310,8 +313,8 @@ the user with the coverage table, remaining Open questions, and your suggested e
 order. Add the envelope path from step 6, and propose the handoff when a consumer is
 installed. In unattended mode, add the grant path and the revoke command. For a request from
 ops-intake, add the item id and every `CHECK_COMMAND:` line. For a request from
-idea-validation, add the slug, the override line when there is one, and every
-`CHECK_COMMAND:` line.
+idea-validation, add the slug, the override and dropped-critical lines when there are any,
+and every `CHECK_COMMAND:` line.
 
 **Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
 

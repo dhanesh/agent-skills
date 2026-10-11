@@ -674,7 +674,7 @@ def idea_arm():
                                                   "source": "calls", "observed": "2026-10-08",
                                                   "by": "Dana", "evidence": IDEA_HOSTILE,
                                                   "claim": "claimed"}]}],
-                    "open_risks": []}
+                    "open_risks": [], "dropped_critical": []}
 
         def envelope(kind=IDEA_KIND, **kw):
             st = cc.build_statement(kind, "idea-validation", "0.1.0", root, [snap], payload(**kw))

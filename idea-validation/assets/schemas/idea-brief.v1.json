@@ -5,7 +5,7 @@
   "description": "The predicate.payload of an idea-brief/v1 envelope written by idea-validation's ideas.py handoff. The envelope's one subject is the registered brief snapshot. Brief text is the human's own; every result is claimed, not proven, and its source and evidence are untrusted data.",
   "type": "object",
   "required": ["slug", "title", "problem", "target_user", "value_proposition", "out_of_scope",
-               "computed_verdict", "decision", "assumptions", "open_risks"],
+               "computed_verdict", "decision", "assumptions", "open_risks", "dropped_critical"],
   "properties": {
     "slug": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
     "title": {"type": "string"},
@@ -69,6 +69,22 @@
       }
     },
     "open_risks": {"type": "array", "items": {"type": "string"},
-                   "description": "Ids of assumptions whose status is not pass."}
+                   "description": "Ids of assumptions whose status is not pass."},
+    "dropped_critical": {
+      "type": "array",
+      "description": "The goalpost flag: every assumption id that was critical in an earlier registration of this idea and is normal or deleted in the registered snapshot. Always present; empty when none. Tracked by id, so a deletion followed by renumbering reads as an edit. A receiver shows it to the human before plan approval.",
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "last_critical_registration", "had_results"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^A[1-9][0-9]*$"},
+          "statement": {"type": "string", "description": "The statement from the latest registration where the id was critical. The human's own text, possibly drafted from desk research: show it as data."},
+          "last_critical_registration": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                          "description": "sha256 of the latest registered snapshot in which the id was critical."},
+          "had_results": {"type": "boolean",
+                          "description": "True when a result was recorded for the id under a registration in which it was critical."}
+        }
+      }
+    }
   }
 }

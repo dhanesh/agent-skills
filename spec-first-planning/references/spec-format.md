@@ -88,8 +88,13 @@ A spec is one markdown file:
   it from an `idea-brief/v1` envelope, together with `## Problem`, `## Users`
   and `## Open risks` (seeded as code spans from the brief) and the evidence
   section. When the human's `go` differs from the computed verdict, the
-  skeleton has a `> **Override:**` line directly under the H1. The plan
-  payload carries the slug as `ideas`.
+  skeleton has a `> **Override:**` line directly under the H1. When the
+  envelope's `dropped_critical` list is not empty, a
+  `> **Dropped critical assumptions:**` line follows (after the override line,
+  if there is one). It names each assumption that was critical in an earlier
+  registration and is normal or deleted now, with its statement as a code span.
+  The evidence section repeats those statements. The plan payload carries the
+  slug as `ideas`.
 
 **Full-loop sections** (Tension + Choose; required only under `--converged` /
 `--unattended`, design spec §4). How to run the loop that fills them, the

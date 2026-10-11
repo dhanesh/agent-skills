@@ -9,6 +9,9 @@ prints the start of a spec:
 
     > **Override:** ... (only when the human's go differs from the computed verdict)
 
+    > **Dropped critical assumptions:** ... (only when an assumption that was critical in
+    an earlier registration is normal or deleted now)
+
     ## Idea
     - <slug>
 
@@ -54,6 +57,7 @@ from spec_lint import (EVIDENCE_SECTION, IDEA_SECTION, IDEA_SLUG_MAX,  # noqa: E
 IDEA_BRIEF_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/idea-brief/v1"
 USAGE = "usage: idea_request.py <envelope.json>"
 ASSUMPTION_ID_RE = re.compile(r"^A[1-9][0-9]{0,3}\Z")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 class Refused(Exception):
@@ -125,6 +129,27 @@ def payload_of(statement):
     for r in risks:
         if r not in ids:
             raise Refused("payload.open_risks names an unknown assumption")
+    # Required, not defaulted: idea-brief/v1 always carries it, and a missing goalpost
+    # flag would let a demoted critical assumption reach plan approval unseen.
+    dropped = p.get("dropped_critical")
+    if not (isinstance(dropped, list) and all(isinstance(d, dict) for d in dropped)):
+        raise Refused("payload.dropped_critical must be a list of objects")
+    seen = []
+    for d in dropped:
+        did = d.get("id")
+        if not (isinstance(did, str) and ASSUMPTION_ID_RE.match(did)):
+            raise Refused("every payload.dropped_critical id must be A<n>")
+        if did in seen:
+            raise Refused("payload.dropped_critical lists %s twice" % did)
+        seen.append(did)
+        if not isinstance(d.get("statement"), str):
+            raise Refused("payload.dropped_critical %s: statement must be a string" % did)
+        if not isinstance(d.get("had_results"), bool):
+            raise Refused("payload.dropped_critical %s: had_results must be true or false" % did)
+        reg = d.get("last_critical_registration")
+        if not (isinstance(reg, str) and SHA256_RE.match(reg)):
+            raise Refused("payload.dropped_critical %s: last_critical_registration must be a "
+                          "sha256" % did)
     return p
 
 
@@ -138,6 +163,13 @@ def skeleton(p):
                 "approve the plan."
                 % (show(p.get("computed_verdict")), show(d.get("by")), show(d.get("at")),
                    show(d.get("reason"))), ""]
+    if p["dropped_critical"]:
+        out += ["> **Dropped critical assumptions:** %s. Each was critical in an earlier "
+                "registration of the brief and is normal or deleted now, so the go no longer "
+                "waits on it. Show this line to the human before they approve the plan."
+                % "; ".join("%s %s (%s)" % (x["id"], show(x["statement"]),
+                                            "had results" if x["had_results"] else "no results")
+                            for x in p["dropped_critical"]), ""]
     by_id = {a["id"]: a for a in p["assumptions"]}
     out += ["## %s" % IDEA_SECTION, "", "- %s" % slug, "",
             "## Problem", "",
@@ -159,6 +191,11 @@ def skeleton(p):
                show(p.get("value_proposition")), show(p.get("out_of_scope")),
                show(p.get("computed_verdict")), show(d["verdict"]), show(d.get("by")),
                show(d.get("at")), show(d["override"]), show(d.get("reason")))]
+    for x in p["dropped_critical"]:
+        out += ["", "Dropped critical assumption %s: statement %s, last critical registration "
+                "%s, had results %s." % (code(x["id"]), show(x["statement"]),
+                                          code(x["last_critical_registration"]),
+                                          show(x["had_results"]))]
     for a in p["assumptions"]:
         out += ["", "Assumption %s: critical %s, category %s, status %s, statement %s, "
                 "test %s, metric %s, pass %s, kill %s, by %s."
