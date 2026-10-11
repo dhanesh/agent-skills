@@ -99,7 +99,10 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    the problem (who hurts, how), the users, what success observably looks like, explicit
    non-goals, and hard constraints. Prefer a single batched round of questions over an
    interview; note unresolved answers as candidates for Open questions rather than stalling.
-   In unattended mode, the same round also carries the decision sweep. When the request is
+   In unattended mode, the same round also carries the decision sweep. Its budget question
+   includes one on spend: whether to enforce the token cap (and the dollar cap). Tell the
+   user that the agent then reports each dispatch's usage, which Claude Code shows when a
+   subagent finishes; a yes adds `enforce` to `answers.budget`. When the request is
    an ops-intake envelope, start from it as `## Requests from ops-intake` says. When it is
    an idea-validation envelope, start from it as `## Requests from idea-validation` says.
 2. **Draft the spec** from `references/spec-template.md`, running the planning loop at the

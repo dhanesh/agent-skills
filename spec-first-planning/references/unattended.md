@@ -120,8 +120,13 @@ and skip what the conversation has already answered:
    still bounds the run), `max_repairs_per_task`
    (default 2) and
    `max_parallel` (tasks in flight at once, default 2). Tokens and dollars
-   (`max_tokens`, `max_usd`) are recorded but not enforced: the runtime does not expose
-   usage. Also ask which events should stop the run (`stop_on`): it is recorded but not
+   (`max_tokens`, `max_usd`) are recorded, and enforced only when the user opts in. The
+   runtime does not expose usage, so ask: "Enforce the token cap? (Your agent must report
+   each dispatch's usage. Claude Code shows it when a subagent finishes.)" Ask the same for
+   the dollar cap when the user gives `max_usd`. A yes adds `"enforce": ["tokens"]` (or
+   `["usd"]`, or both) to `budget`, next to the cap it names: factory-conductor then stops
+   the run at the cap, and also when a finished dispatch has no usage report. Without
+   `enforce` the caps are only recorded. Also ask which events should stop the run (`stop_on`): it is recorded but not
    enforced by factory-conductor 1.0.0, whose own stop rules apply.
 8. **Re-entry (optional).** Ask: "If this session dies, should a timer on this machine
    resume the run? If so, give the exact agent command, as an argv list with `{prompt}`
@@ -230,7 +235,8 @@ After `TASKS_RESULT: PASS` and the plan envelope, show the user one screen:
 - the decisions (D1..Dn), one line each;
 - the gate table, with each class and its gate;
 - the branch pattern and the expiry, as a date and time;
-- the budget (and which parts are only recorded: tokens, dollars and `stop_on`);
+- the budget: which caps are enforced, and which parts are only recorded (`stop_on`, and
+  tokens and dollars that `enforce` does not name);
 - the System One setting;
 - the line: "`merge`, `deploy`, `spend`, `external_message` and `delete` are never
   covered by a grant; I will always ask you before any of them";
@@ -266,7 +272,8 @@ filled example:
     "max_dispatches": 40,
     "max_tokens": 2000000,
     "max_usd": 25,
-    "max_repairs_per_task": 3
+    "max_repairs_per_task": 3,
+    "enforce": ["tokens"]
   },
   "stop_on": ["a verify step fails after max_repairs_per_task", "a new dependency is needed"],
   "defaults": [
