@@ -211,3 +211,16 @@ Offline, stdlib-only `unittest` suites in `assets/test_*.py`:
 - market-size calculators or survey tooling;
 - pulling results from analytics or a form tool (that belongs to the growth step);
 - the spend governor (step 6, later; making `spend` grantable stays an owner decision).
+
+## Errata (build)
+
+The build changed the design in these places. The code, the tests and `idea-validation/references/brief-format.md` follow the build.
+
+- **Mixed evidence.** §1.3 did not say how desk and experiment results combine. The rule: desk research can kill an assumption at any time. A desk pass or an in-between desk value does not rescue an experiment kill and does not undo an experiment pass. When the latest result is a desk result that does not meet `kill`, and an experiment result exists, the latest experiment result decides.
+- **Two more handoff refusals.** §1.5 refused a handoff without a `go` and after a brief change. `handoff` also refuses when the `go` decision was made before the latest registration, and when the computed verdict changed after the `go` decision (new results, or a deadline that passed). The override flag describes the verdict the human saw, so a moved verdict needs a new decision. `handoff` also refuses a registered snapshot that is missing or does not match its sha256.
+- **Pivot closes the brief.** After `pivot`, `record`, `register` and `decide` refuse. §1.4 said "closes"; the build makes it a hard stop.
+- **No future `--observed`.** `record` refuses an `--observed` date later than today.
+- **Truncated flag.** Evidence is cut at 4096 bytes on a UTF-8 boundary. The result and the payload carry `truncated: true`, the `RESULT:` line says so, and spec-first-planning prints "evidence truncated".
+- **`ideas` has one item.** The task-plan schema's optional `ideas` list has `maxItems: 1`, because a spec has one `## Idea` slug.
+- **Evidence-section pairing.** spec_lint accepts `## External evidence (untrusted)` only in a spec that has `## Intake` or `## Idea`. An idea spec without the evidence section fails.
+- **Dropped critical assumptions (the goalpost flag).** The design fixed thresholds by pre-registration, but a human could still demote a failed critical assumption to `normal`, or delete it, and register again. The owner-proxy decision went to Jev: **flag it** (0.97), not refuse the handoff (0.01) and not mark its results stale (0.02). The tool tracks each id that was critical in an earlier registration and is normal or deleted now. `status`, `decide` and `handoff` print `NOTE: dropped-critical` lines, and the payload always carries `dropped_critical: [{id, statement, last_critical_registration, had_results}]`. spec-first-planning requires the field and prints a `> **Dropped critical assumptions:**` line under the H1. The flag does not change the verdict. Tracking is by id, so a deletion followed by renumbering reads as an edit. `had_results` is true only for a result recorded under a registration where the id was critical (Jev 0.76 at confidence 0.52, below the 0.6 bar, so this was decided by reasoning: a looser rule gives false positives after renumbering).
