@@ -37,7 +37,7 @@ import time
 import unicodedata
 
 SKILL_NAME = "growth-review"
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 # --today moves the clock that decides which period is complete and which record is from
 # the future, so it is honoured only when this variable is "1". Only the tests and the
 # eval set it.
@@ -117,21 +117,44 @@ def _name_ok(name):
             and not any(is_hidden_char(c) for c in name))
 
 
-# Latin lookalikes of the letters in "agent" (Cyrillic and Greek) that NFKC does not fold.
-_CONFUSABLES = str.maketrans({"\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
-                              "\u0441": "c", "\u0445": "x", "\u0456": "i", "\u0410": "a",
-                              "\u0415": "e", "\u041e": "o", "\u0420": "p", "\u0421": "c",
-                              "\u0425": "x", "\u0406": "i", "\u03b1": "a", "\u03b5": "e",
-                              "\u03bf": "o", "\u0391": "a", "\u0395": "e", "\u039f": "o",
-                              "\u039d": "n", "\u03a4": "t", "\u0442": "t", "\u043d": "n",
-                              "\u0422": "t", "\u041d": "n", "\u0261": "g"})
-_AGENT_RE = re.compile(r"^\s*agent\s*[:/\-_]")
+# The block from here to the end of _is_agent() is byte-identical in idea-validation's
+# assets/ideas.py and factory-conductor's assets/ledger.py, because skills cannot import
+# each other.
+# Latin lookalikes of the letters in "agent" that NFKD does not fold: Cyrillic, Greek, the
+# IPA script g and alpha, and the small capitals.
+_CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p",
+                              "с": "c", "х": "x", "і": "i", "А": "a",
+                              "Е": "e", "О": "o", "Р": "p", "С": "c",
+                              "Х": "x", "І": "i", "α": "a", "ε": "e",
+                              "ο": "o", "Α": "a", "Ε": "e", "Ο": "o",
+                              "Ν": "n", "Τ": "t", "т": "t", "н": "n",
+                              "Т": "t", "Н": "n", "ɡ": "g", "ɑ": "a",
+                              "ᴀ": "a", "ɢ": "g", "ᴇ": "e", "ɴ": "n",
+                              "ᴛ": "t"})
+# Letters and digits stay; every other character (punctuation, a symbol, a modifier letter
+# such as U+02D0, whitespace) becomes one space, so it counts as a separator.
+_WORD_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lo", "Nd"})
+# "agent" at the start, its letters apart or not, and no letter after it (a digit or a
+# space may follow: "agent2" and "agent x" are refused).
+_AGENT_RE = re.compile(r"^ *a *g *e *n *t(?![^\W\d_])")
+
+
+def _fold(name):
+    """name as lowercase Latin letters, digits and spaces: NFKD, combining marks dropped,
+    the lookalikes above folded, casefolded, and every other character a space."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", name)
+                if unicodedata.category(c) != "Mn")
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLES).casefold())
+    return "".join(c if unicodedata.category(c) in _WORD_CATEGORIES else " " for c in s)
 
 
 def _is_agent(name):
-    """True for `agent:` and its lookalikes: fullwidth or Cyrillic letters, a fullwidth
-    colon, a space before the separator, or `/`, `-` or `_` as the separator."""
-    folded = unicodedata.normalize("NFKC", name).translate(_CONFUSABLES).casefold()
+    """True for a name that starts with the word "agent" in any form: `agent:x`, a bare
+    `agent`, any separator (a space, `.`, `;`, `|`, a ratio or modifier-letter colon, a dash
+    or a middle dot), letters apart (`a gent:x`), fullwidth, Cyrillic, Greek or
+    small-capital letters. A human name that starts with that word ("Agent Smith") is
+    refused too: the check fails closed. "Agentha", "agentur" and "Reagent" pass."""
+    folded = _fold(name)
     return bool(_AGENT_RE.match(folded))
 
 

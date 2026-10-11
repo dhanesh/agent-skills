@@ -275,6 +275,12 @@ SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the 
 # FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
 SINCE_IDEA_NAMES = "3531d6a"  # idea-validation 0.1.2: the --today refusal no longer names
 # the test switch, and lookalike agent: names are refused. One constant: it lands at one merge.
+SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the campaign's
+# FIRST commit, factory-conductor's ledger.py and its tests. One constant for the campaign:
+# it lands at one merge.
+SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
+# check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
+# refused). The commit that changes those two skills; it lands with the money ledger.
 
 
 def _git_out(*args):
@@ -8738,6 +8744,276 @@ def check_idea_names(old, new):
             since=SINCE_IDEA_NAMES)
 
 
+# ── growth-review 0.1.1 and idea-validation 0.1.3: one agent-name check ───────
+_AN_PROBE = r"""
+sys.dont_write_bytecode = True
+TREE = @TREE@
+SKILL = @SKILL@
+BAD = ("agent.claude", "agent", "agent x", "a gent:x", "agent\u02d0x", "\u1d00gent:x")
+GOOD = ("Dana", "agentur GmbH")
+if SKILL == "growth-review":
+    import growth_testkit as K
+    def refused(by):
+        root = K.repo()
+        rc, _ = K.run(root, "register", "--by", by)
+        return rc == 2 and not os.path.exists(
+            os.path.join(root, ".skill-contract", "growth", "plan.json"))
+    def accepted(by):
+        return K.run(K.repo(), "register", "--by", by)[0] == 0
+else:
+    sys.path.insert(0, os.path.join(TREE, "idea-validation", "eval"))
+    import run_eval as EV
+    def refused(by):
+        root = EV.registered()
+        return EV.record(root, "A1", 7, by=by)[0] == 2 and EV.ledger(root) == b""
+    def accepted(by):
+        return EV.record(EV.registered(), "A1", 7, by=by)[0] == 0
+v = int(all(refused(b) for b in BAD) and all(accepted(g) for g in GOOD))
+print(json.dumps({"v": v}))
+"""
+
+
+def _an_case(tree, skill):
+    sub = os.path.join(skill, "assets")
+    if not os.path.isdir(os.path.join(tree, sub)):
+        return 0
+    out = probe(tree, sub, _AN_PROBE.replace("@TREE@", repr(tree))
+                .replace("@SKILL@", repr(skill)))
+    return None if _errored(out) else out.get("v")
+
+
+def check_agent_names(old, new):
+    for skill, what in (("growth-review", "register thresholds"),
+                        ("idea-validation", "record an experiment")):
+        a, b = _an_case(old, skill), _an_case(new, skill)
+        row(skill, "lookalike agent names that cannot %s (higher=better)" % what, a, b,
+            a == 0 and b == 1,
+            "agent.claude, a bare agent, agent x, a gent:x, a modifier-letter colon (U+02D0) "
+            "and a small-capital a (U+1D00) each exit 2 and store nothing; sanity-checked in "
+            "the same probe: Dana and agentur GmbH pass. The baseline accepts agent.claude "
+            "and a bare agent, an honest 0", kind="delta", since=SINCE_AGENT_NAMES)
+
+
+# ── factory-conductor: the money ledger (roadmap step 6D, part 2) ─────────────
+_ML_PROBE = r"""
+import ast, contextlib, io, re
+TREE = @TREE@
+CASE = @CASE@
+ASSETS = os.path.join(TREE, "factory-conductor", "assets")
+import ledger as L
+os.environ[L.TEST_CLOCK_ENV] = "1"
+T = "2026-10-12"
+BUDGET = ("currency: USD\n\n| category | monthly_cap |\n|---|---|\n| hosting | 25 |\n"
+          "| ads | 100.50 |\n| total | 120 |\n")
+def run(root, *argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = L.main(["--root", root, "--today", T, *argv])
+    return rc, out.getvalue() + err.getvalue()
+def repo(text=BUDGET):
+    root = tempfile.mkdtemp()
+    os.makedirs(os.path.join(root, "budget"))
+    with open(os.path.join(root, "budget", "budget.md"), "w") as f:
+        f.write(text)
+    return root
+def reg(text=BUDGET):
+    root = repo(text)
+    assert run(root, "register", "--by", "Dana")[0] == 0
+    return root
+def chk(root, pid, cat, amount, *extra, cur="USD"):
+    return run(root, "check", "--id", pid, "--category", cat, "--amount", amount,
+               "--currency", cur, "--what", "w", *extra)
+def stored(root):
+    with open(os.path.join(root, ".skill-contract", "ledger", "ledger.json")) as f:
+        return json.load(f)["proposals"]
+v = 0
+if CASE == "cap":
+    root = reg()
+    at = chk(root, "a", "hosting", "25")
+    over = chk(reg(), "b", "hosting", "25.01")
+    total = chk(root, "c", "ads", "95.01")          # 25 + 95.01 > 120, ads cap is 100.50
+    v = int(at[0] == 0 and "NOT_REFUSED: a" in at[1] and over[0] == 3
+            and total[0] == 3 and "total" in total[1])
+elif CASE == "stale":
+    root = reg()
+    first = chk(root, "a", "hosting", "5")           # sanity: a fresh budget passes
+    with open(os.path.join(root, "budget", "budget.md"), "w") as f:
+        f.write(BUDGET.replace("| hosting | 25 |", "| hosting | 900 |"))
+    new, replay = chk(root, "b", "hosting", "800"), chk(root, "a", "hosting", "5")
+    v = int(first[0] == 0 and all(r[0] == 3 and "NOT_REFUSED" not in r[1]
+                                  for r in (new, replay)))
+elif CASE == "reserve":
+    root = reg()
+    runs = [chk(root, "a", "hosting", "15")[0] for _ in range(3)]
+    second = chk(root, "b", "hosting", "15")
+    alone = chk(reg(), "b", "hosting", "15")[0]       # sanity: it fits alone
+    _, st = run(root, "status")
+    v = int(runs == [0, 0, 0] and second[0] == 3 and alone == 0
+            and "reserved=15.00 headroom=10.00" in st)
+elif CASE == "agent":
+    root = reg()
+    chk(root, "a", "hosting", "5")
+    bad = [run(root, "record", "--id", "a", "--amount", "1", "--currency", "USD",
+               "--month", "2026-10", "--by", by)[0]
+           for by in ("agent:claude", "аgent:x", "agent-x")]
+    clean = stored(root)["a"]["records"] == {}
+    good = run(root, "record", "--id", "a", "--amount", "1", "--currency", "USD",
+               "--month", "2026-10", "--by", "Dana")[0]   # sanity: a human records
+    v = int(bad == [2, 2, 2] and clean and good == 0)
+elif CASE == "token":
+    root = reg()
+    outs = [chk(root, *a) for a in (("a", "hosting", "1"), ("a", "hosting", "1"),
+                                     ("b", "hosting", "99"), ("c", "gold", "1"),
+                                     ("d", "ads", "0"), ("e", "ads", "1", "--month", "2026-01"))]
+    outs.append(chk(root, "f", "ads", "1", cur="EUR"))
+    outs.append(run(root, "check", "--id", "ok"))
+    text = "".join(o[1] for o in outs)
+    hits = re.findall(r"(?i)\b(ok|approved|pass|allowed)\b", text)
+    v = int(outs[0][0] == 0 and "NOT_REFUSED: a" in text and not hits
+            and os.listdir(os.path.join(root, ".skill-contract")) == ["ledger"])
+elif CASE == "replay":
+    root = reg()
+    first = chk(root, "a", "hosting", "20")[0]
+    again = chk(root, "a", "hosting", "20")[0]          # sanity: a replay under the cap passes
+    with open(os.path.join(root, "budget", "budget.md"), "w") as f:
+        f.write(BUDGET.replace("| hosting | 25 |", "| hosting | 10 |"))
+    cut = run(root, "register", "--by", "Dana", "--reason", "cut")[0]
+    after = chk(root, "a", "hosting", "20")
+    v = int(first == 0 and again == 0 and cut == 0 and after[0] == 3
+            and "NOT_REFUSED" not in after[1] and stored(root)["a"]["status"] == "open")
+elif CASE == "names":
+    root = reg()
+    chk(root, "a", "hosting", "5")
+    bad = [run(root, "record", "--id", "a", "--amount", "1", "--currency", "USD",
+               "--month", "2026-10", "--by", by)[0]
+           for by in ("agent.claude", "agent", "agent x", "a gent:x", "agent\u02d0x",
+                      "\u1d00gent:x")]
+    clean = stored(root)["a"]["records"] == {}
+    good = [run(root, "record", "--id", "a", "--amount", "1", "--currency", "USD",
+                "--month", "2026-10", "--by", by)[0] for by in ("Dana", "agentur GmbH")]
+    v = int(bad == [2] * 6 and clean and good == [0, 0])
+elif CASE == "approval":
+    words = (r"(?i)\b(ok|okay|yes|approve|approved|accept|accepted|allow|allowed|grant|"
+             r"granted|pass|passed)\b")
+    root = repo()
+    outs = [run(root, "lint"), run(root, "register", "--by", "Dana")]
+    outs += [chk(root, "a", "hosting", "5"), chk(root, "a", "hosting", "5"),
+             chk(root, "b", "hosting", "99")]
+    outs += [run(root, "record", "--id", "a", "--amount", "5", "--currency", "USD",
+                 "--month", "2026-10", "--by", "Dana"),
+             run(root, "withdraw", "--id", "a", "--by", "Dana", "--reason", "x")]
+    with open(os.path.join(root, "budget", "budget.md"), "w") as f:
+        f.write(BUDGET.replace("| hosting | 25 |", "| hosting | 30 |"))
+    outs.append(run(root, "status"))
+    hits = re.findall(words, "".join(o[1] for o in outs))
+    by_refused = [run(root, "register", "--by", by, "--reason", "r")[0]
+                  for by in ("OK", "Granted", "Dana yes")]
+    id_refused = chk(root, "yes-go", "hosting", "1")[0]
+    v = int(not hits and outs[2][0] == 0 and by_refused == [2, 2, 2] and id_refused == 2)
+elif CASE == "isolation":
+    src = open(os.path.join(ASSETS, "conductor.py")).read()
+    tree = ast.parse(src)
+    mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module.split(".")[0])
+    names_state = any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                      and ("ledger/" in n.value or "ledger.py" in n.value)
+                      for n in ast.walk(tree))
+    v = int("ledger" not in mods and not names_state
+            and ".skill-contract/ledger" not in src)
+print(json.dumps({"v": v}))
+"""
+
+# A guard on what the ledger must never change: the vendored checker still refuses a grant
+# that names `spend` at grant or auto, and accepts it at ask. Same in both trees.
+_ML_GUARD = r"""
+import conductor_testkit as TK
+import contract_check as CC
+root = TK.repo()
+plan = TK.write_plan_envelope(root, {"T1": ([], [{"text": "t", "command": ["true"]}])})
+msg = "gate_policy['spend'] must be ask: a grant never covers it (A8)"
+refused = all(msg in CC.grant_violations(CC.load_envelope(
+    TK.write_grant(root, plan, policy=dict(TK.DEFAULT_POLICY, spend=g)))[0])
+    for g in ("grant", "auto"))
+ask_ok = CC.grant_violations(CC.load_envelope(
+    TK.write_grant(root, plan, policy=dict(TK.DEFAULT_POLICY, spend="ask")))[0]) == []
+print(json.dumps({"v": int(refused and ask_ok and "spend" in CC.IRREVERSIBLE_CLASSES)}))
+"""
+
+
+def _ml_case(tree, case):
+    """The money-ledger probe's 0/1 for `case` in `tree`; 0 (honest, nothing run) when the
+    tree has no ledger.py; None (PROBE_ERRORS) when the fixture broke."""
+    if not os.path.isfile(os.path.join(tree, "factory-conductor", "assets", "ledger.py")):
+        return 0
+    out = probe(tree, "factory-conductor/assets",
+                _ML_PROBE.replace("@CASE@", repr(case)).replace("@TREE@", repr(tree)))
+    return None if _errored(out) else out.get("v")
+
+
+# (dimension, note, case). Each row: 1 = the guard and its healthy path both hold in one
+# fixture. Mutation-checked on 2026-10-12: with stale_why() returning "" the stale row
+# reads 0; with charge() counting nothing for an open reservation the reserve row reads 0.
+_ML_ROWS = (
+    ("over-cap proposals refused, at-cap ones not",
+     "a check exactly at the hosting cap is NOT_REFUSED; one cent over is REFUSED; a total "
+     "over its cap is REFUSED when no category cap is", "cap"),
+    ("stale budgets that refuse every check",
+     "budget.md edited after register: a new proposal and a replay of a passed one are both "
+     "REFUSED. Sanity-checked: before the edit the proposal passes", "stale"),
+    ("reservations that count, and re-runs that reserve once",
+     "the same id checked three times reserves 15.00 once; a second 15.00 proposal is "
+     "REFUSED. Sanity-checked: alone it passes", "reserve"),
+    ("agent-recorded spend refused",
+     "record --by agent:claude and two lookalikes exit 2 and store nothing. Sanity-checked: "
+     "a human name records", "agent"),
+    ("check output with no approval word",
+     "passes, refusals and a bad argument print no OK, APPROVED, PASS or ALLOWED, and a pass "
+     "writes no envelope", "token"),
+    ("replays re-checked against the caps",
+     "a passed proposal replays NOT_REFUSED under the cap; after the human cuts the cap, the "
+     "same replay is REFUSED and stays reserved (review H1)", "replay"),
+    ("lookalike agent names that cannot record spend",
+     "record --by agent.claude, a bare agent, agent x, a gent:x, a modifier-letter colon and "
+     "a small-capital a each exit 2 and store nothing. Sanity-checked: Dana and agentur GmbH "
+     "record (review M1)", "names"),
+    ("approval words kept out of every command's output",
+     "lint, register, check, a replay, a refusal, record, withdraw and a stale status print "
+     "none of ok, okay, yes, approve(d), accept(ed), allow(ed), grant(ed), pass(ed); a --by "
+     "of OK, Granted or Dana yes and an id yes-go are STOPs (review M2)", "approval"),
+    ("a conductor.py that never reads the ledger",
+     "conductor.py imports no ledger and names no .skill-contract/ledger path; the probe "
+     "reads 0 for a tree with no ledger.py, so the baseline is 0", "isolation"),
+)
+
+
+def check_money_ledger(old, new):
+    s = "factory-conductor"
+    if not os.path.isfile(os.path.join(new, "factory-conductor", "assets", "ledger.py")):
+        PROBE_ERRORS.append((new, "factory-conductor/assets/ledger.py",
+                             "the tree under review has no money ledger to measure"))
+    for dimension, note, case in _ML_ROWS:
+        a, b = _ml_case(old, case), _ml_case(new, case)
+        note += "; the baseline has no money ledger, an honest 0 -> 1"
+        if b is None:
+            row(s, dimension + " (higher=better)", a, None, False, note, kind="delta",
+                since=SINCE_MONEY_LEDGER)
+            continue
+        row(s, dimension + " (higher=better)", a, b, a == 0 and b == 1, note, kind="delta",
+            since=SINCE_MONEY_LEDGER)
+    ga = probe(old, "factory-conductor/assets", _ML_GUARD)
+    gb = probe(new, "factory-conductor/assets", _ML_GUARD)
+    if _errored(ga, gb):
+        return
+    row(s, "grants that name spend, still refused (guard)", ga.get("v"), gb.get("v"),
+        ga.get("v") == gb.get("v") == 1,
+        "the vendored checker refuses spend at grant or auto and accepts it at ask, in both "
+        "trees: the ledger changes nothing about who may spend", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -8827,6 +9103,8 @@ def main():
         check_factory_hardening(old, REPO)
         check_growth_review(old, REPO)
         check_idea_names(old, REPO)
+        check_money_ledger(old, REPO)
+        check_agent_names(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

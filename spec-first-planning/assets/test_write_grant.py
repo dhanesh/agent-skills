@@ -111,6 +111,18 @@ class TestBuildGrant(WriteGrantBase):
         self.assertIn("must be ask", str(cm.exception))
         self.assertIn("merge", str(cm.exception))
 
+    def test_refused_when_spend_is_named(self):
+        # factory-conductor's money ledger (1.5.0) only refuses spend; it never approves one.
+        # This pins that a grant still cannot cover `spend` at all (A8).
+        for gate in ("grant", "auto"):
+            answers = dict(self.answers, gate_policy={"read_only": "auto", "spend": gate})
+            with self.assertRaises(write_grant.GrantRefused) as cm:
+                write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers,
+                                        "Dana")
+            self.assertIn("gate_policy['spend'] must be ask", str(cm.exception), gate)
+        answers = dict(self.answers, gate_policy={"read_only": "auto", "spend": "ask"})
+        write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, answers, "Dana")
+
     def test_refused_when_accepted_by_is_empty(self):
         with self.assertRaises(write_grant.GrantRefused):
             write_grant.build_grant(self.root, "docs/spec.md", self.plan_rel, self.answers, "")

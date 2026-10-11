@@ -46,10 +46,14 @@ would otherwise read it as one value and print it as another.
 the time and the reason in `.skill-contract/growth/plan.json`. The hash covers only the
 parsed table, so an edit to the prose around it changes nothing.
 
-- An `agent:` name is refused. The check folds the name first (Unicode NFKC, Cyrillic and
-  Greek lookalike letters to Latin, any case), so `ａｇｅｎｔ:x`, `аgent:x` (Cyrillic `а`) and
-  `agent：x` are refused too. A space before the separator, and `/`, `-` or `_` as the
-  separator, are refused the same way (`agent :x`, `agent-x`). `Agent Smith` is a human name.
+- An agent name is refused. The check folds the name first (Unicode NFKD without combining
+  marks, Cyrillic, Greek, IPA and small-capital lookalike letters to Latin, any case), and
+  every character that is not a letter or a digit counts as a separator. So a name that
+  starts with the word `agent` in any form is refused: `agent:x`, a bare `agent`,
+  `ａｇｅｎｔ:x`, `аgent:x` (Cyrillic `а`), `agent：x`, `agent :x`, `agent-x`, `agent.x`,
+  `agent x`, `a gent:x` and `ᴀgent:x`. A human name that starts with that word, such as
+  `Agent Smith`, is refused too: the check fails closed. `Agentha Ray`, `agentur GmbH` and
+  `Reagent:x` pass. idea-validation and factory-conductor's ledger use the same check.
 - A new registration prints `REGISTERED: <sha12> by <name> at <time>, <n> metrics`.
 - The same thresholds registered again print `REGISTERED: <sha> (no change …)` and exit 0.
 - Different thresholds after an earlier registration need `--reason`. Without it the tool

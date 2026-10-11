@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool needs no network and no credentials; the human exports the data with their own login. Breaches go to ops-intake through its intake-signals-jsonl format.
 metadata:
   author: dhanesh
-  version: "0.1.0"
+  version: "0.1.1"
   tags: "factory,growth,metrics,ops-intake"
 ---
 
@@ -178,6 +178,9 @@ What ops-intake does with it (checked against ops-intake on main):
 - You MUST NOT publish, post, email, change a price or spend money, because those actions are
   `external_message` or `spend` class, which no autonomy grant covers. You MAY draft launch or
   pricing text for the human, who decides and acts.
+- You SHOULD run factory-conductor's money-ledger check (`ledger.py check`) before you put any
+  spend to the human, when that skill is installed, because it counts the budget's caps and
+  the open reservations. Its pass is not approval: the human still decides each spend.
 - You MUST NOT copy metric values into a tracked file, because revenue and user counts are
   business data. The data and the frozen plan live under the git-ignored
   `.skill-contract/growth/`, which the tool proves before its first write. The plan in

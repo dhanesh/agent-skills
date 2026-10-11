@@ -67,8 +67,13 @@ because 35 meets both.
 A result is `{assumption, value, kind, source, observed, by, evidence, truncated,
 registration, recorded_at}`, one JSON line in `.skill-contract/ideas/<slug>/results.jsonl`.
 
-- `kind: experiment` needs a `--by` that does not start with `agent:`. The tool refuses
-  `agent:…` for an experiment.
+- `kind: experiment` needs a `--by` that is not an agent name. The tool refuses a name that
+  starts with the word `agent` in any form: `agent:x`, a bare `agent`, any separator after it
+  (`agent x`, `agent.x`, `agent;x`, a dash, a middle dot or a lookalike colon), its letters
+  apart (`a gent:x`), and fullwidth, Cyrillic, Greek or small-capital letters. A human name
+  that starts with that word, such as `Agent Smith`, is refused too: the check fails closed.
+  `Agentha`, `agentur GmbH` and `Reagent` pass. growth-review and factory-conductor's ledger
+  use the same check.
 - `kind: desk` is research. Its `--by` is `agent:<name>`, or a human's name when the human did
   the research.
 - `--observed` has to be a real date, no later than today.

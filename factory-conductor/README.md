@@ -53,6 +53,17 @@ drivers from writing at once. `conductor reentry status` shows the timer and the
 You can stop a run at any time by revoking the grant
 (`contract_check.py revoke-grant --root <repo>`): the next gate asks and the run stops.
 
+**Money ledger (new in 1.5.0, optional).** Commit a monthly budget at `budget/budget.md`: a
+`currency:` line and a table of `category | monthly_cap` rows plus a `total` row. Register it
+yourself with `python3 <skill dir>/assets/ledger.py register --by <your name>`. Before the agent proposes
+any spend to you (hosting, domains, APIs, ads, subscriptions), it runs `ledger.py check`. The
+check can refuse a proposal that would break a cap, and a proposal it does not refuse
+reserves its amount. It never approves: the pass line is `NOT_REFUSED: <id> — the human's
+approval is still required`, and you still decide every spend. You record real spend with
+`ledger.py record --by <your name>` and withdraw a proposal with `ledger.py withdraw`.
+`ledger.py status` shows caps, spend, reservations and headroom for a month. The format and
+every command are in `references/ledger.md`. A project without the budget file sees no change.
+
 ## What it enforces, and what it does not
 
 - **Cost is always bounded, by dispatches and by wall clock.** Dispatches (executor, repair and
@@ -117,6 +128,18 @@ You can stop a run at any time by revoking the grant
   merge outcome).
 - **Claims, not proof, to a receiver.** The run result's assertions read as CLAIMED to anyone
   else until they re-run them (`check-envelope --rerun`) or CI on the pushed branch reports them.
+- **The money ledger only refuses.** `ledger.py check` refuses a proposal over a category or
+  total cap (recorded spend plus open reservations plus the proposal, in each month it
+  covers), in another currency, for an unknown category, for a past month, or while the
+  budget differs from the registered copy (fail closed). A re-run of the same proposal is
+  checked against the caps again, so a cap cut or a new record can refuse it. It never prints
+  an approval word and writes no envelope, and `conductor.py` does not read it, so no grant or
+  run can take a check as permission: `spend` stays an action class no grant covers. Its
+  limits: recorded spend is a claim, `--by` names are self-declared (an agent name or an
+  approval word in one is refused), the committed budget shows your caps to anyone who can
+  read the repository, spend that nobody records is invisible to it, and its state digest has
+  no key, so a consistent hand edit of both state files is not detected. The test-only
+  `--today` switch needs `LEDGER_TEST_CLOCK=1`, which only the tests and the eval set.
 - **Same-user residuals.** A hostile executor running as your OS user could forge the run's
   state or log, tamper with the git object store, read files outside the verify checkout by
   absolute path, leave a process running past a verify, or redirect where a push goes through
@@ -128,9 +151,12 @@ You can stop a run at any time by revoking the grant
   reviewer briefs, stop and park rules, and the skill-contract block.
 - `references/run-protocol.md` — every `conductor.py` command with its output and exit codes,
   the state and log formats, resume, and a worked three-task example.
+- `references/ledger.md` — the budget format and every `ledger.py` command, with its output
+  and exit codes.
 - `assets/conductor.py` — the state tool; `assets/reentry.py` — the run lock, the lease and
   the `watch` decision; `assets/reentry_timer.py` — the launchd, systemd and cron timers;
   `assets/contract_check.py` — the vendored
   skill-contract checker; `assets/schemas/run-result.v1.json` — the payload schema;
-  `assets/test_conductor_*.py` — the stdlib test suites.
+  `assets/test_conductor_*.py` — the stdlib test suites; `assets/ledger.py` — the money
+  ledger, with `assets/ledger_testkit.py` and `assets/test_ledger*.py`.
 - `eval/run_eval.py` — the outcome eval (see the repo's docs/eval-standard.md).

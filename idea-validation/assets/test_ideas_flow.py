@@ -90,7 +90,7 @@ class New(unittest.TestCase):
     def test_version_matches_skill_md(self):
         with open(os.path.join(os.path.dirname(HERE), "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('  version: "%s"\n' % ID.VERSION, f.read())
-        self.assertEqual(ID.VERSION, "0.1.2")
+        self.assertEqual(ID.VERSION, "0.1.3")
 
     def test_today_without_the_test_clock_is_refused(self):
         """L5: --today outside a test would let --observed reach any date up to it."""
@@ -170,9 +170,21 @@ class Record(unittest.TestCase):
                 self.assertEqual(rc, 2, out)
         self.assertFalse(os.path.exists(
             os.path.join(root, ".skill-contract", "ideas", "flat", "results.jsonl")))
-        for by in ("Dana", "Agent Smith", "agentur GmbH"):
+        # "Agent Smith" moved to the refused list below (idea-validation 0.1.3): a name that
+        # starts with the word "agent" is refused, the check fails closed.
+        for by in ("Dana", "agentur GmbH", "Agentha Ray", "Reagent Labs", "Magenta"):
             with self.subTest(human=by):
                 self.assertFalse(ID._is_agent(by))
+        for by in ("agent", "agent x", "agent.claude", "agent;x", "agent|x", "@agent:x",
+                   "[agent]:x", "a gent:x", "agent\u2236x", "agent\ua789x", "agent\u02d0x",
+                   "agent\u0589x", "agent\u2010x", "agent\u2014x", "agent\u00b7x",
+                   "\u1d00gent:x", "\u0251gent:x", "Agent Smith"):
+            with self.subTest(agent=by):
+                self.assertTrue(ID._is_agent(by))
+                rc, out = record(root, "A1", 7, by=by)
+                self.assertEqual(rc, 2, out)
+        self.assertFalse(os.path.exists(
+            os.path.join(root, ".skill-contract", "ideas", "flat", "results.jsonl")))
 
     def test_desk_allowed_for_agent_and_human(self):
         root = registered()
