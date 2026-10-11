@@ -53,6 +53,11 @@ more characters with the evidence block (the copy tripwire; a warning, never a
 failure). With --json these lines go to stderr. The task-plan payload gains
 "intake_items". A spec without either section prints and derives what it did before.
 
+An idea spec (one with a "## Idea" section naming an idea-validation brief, 2.7.0)
+prints "IDEA: <slug>" and the same CHECK_COMMAND: and WARNING: lines, because its
+evidence is untrusted too. The task-plan payload gains "ideas". A spec without
+"## Idea" prints and derives what it did before.
+
 Deterministic: same spec in, byte-identical plan out. Exit 0 iff every
 requirement is covered; exit 2 on unreadable/requirement-free input.
 """
@@ -72,7 +77,7 @@ import spec_lint  # noqa: E402  (shared parser lives beside this script)
 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 SKILL_NAME = "spec-first-planning"
-SKILL_VERSION = "2.6.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
+SKILL_VERSION = "2.7.0"  # keep in step with SKILL.md metadata.version (a unit test checks)
 USAGE = "usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>]"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*([^\]]+)\]", re.IGNORECASE)
@@ -230,7 +235,8 @@ def derive_plan(text):
         "decisions": spec["decisions"],
         "verify_skill": spec["verify_skill"],
         "intake_items": list(dict.fromkeys(spec["intake_items"])),
-        "intake": spec["intake"] or spec["evidence"],
+        "intake": spec["intake"] or spec["evidence"] or spec["idea"],
+        "ideas": list(dict.fromkeys(spec["ideas"])),
     }
 
 
@@ -336,6 +342,9 @@ def to_task_plan_payload(plan, spec_rel):
     if plan.get("intake_items"):
         # ops-intake's sync finds the plan that names a picked item through this field.
         payload["intake_items"] = list(plan["intake_items"])
+    if plan.get("ideas"):
+        # the idea-validation brief (idea-brief/v1) the plan builds, by slug.
+        payload["ideas"] = list(plan["ideas"])
     if plan.get("decisions"):
         payload["decisions"] = [{"id": d["id"], "question": d["question"], "answer": d["answer"],
                                  "source": d["source"]} for d in plan["decisions"]]
@@ -404,6 +413,12 @@ def payload_errors(payload):
                 isinstance(i, str) and spec_lint.INTAKE_ID_RE.match(i) for i in items)):
             errs.append("payload.intake_items must be a non-empty list of intake item ids "
                         "(I + 10 hex)")
+    if "ideas" in payload:
+        ideas = payload["ideas"]
+        if not (isinstance(ideas, list) and len(ideas) == 1
+                and all(spec_lint.is_idea_slug(i) for i in ideas)):
+            errs.append("payload.ideas must be a list of one idea slug "
+                        "(lowercase kebab-case, at most %d characters)" % spec_lint.IDEA_SLUG_MAX)
     if "decisions" in payload:
         decisions = payload["decisions"]
         if not isinstance(decisions, list):
@@ -456,15 +471,17 @@ def show_command(argv):
 
 
 def intake_lines(plan):
-    """The machine lines for an intake spec: "INTAKE: <ids>", then one "CHECK_COMMAND:
-    <task> <argv>" per verify command, each followed by the copy tripwire's "WARNING:"
-    when it copies text from the untrusted evidence. [] for any other spec. The agent
+    """The machine lines for an intake or idea spec: "INTAKE: <ids>" and "IDEA: <slug>",
+    then one "CHECK_COMMAND: <task> <argv>" per verify command, each followed by the
+    copy tripwire's "WARNING:" when it copies text from the untrusted evidence. [] for any other spec. The agent
     shows the human every CHECK_COMMAND: line verbatim before asking for approval."""
     if not plan.get("intake"):
         return []
     out = []
     if plan["intake_items"]:
         out.append("INTAKE: %s" % " ".join(plan["intake_items"]))
+    for slug in plan.get("ideas", []):
+        out.append("IDEA: %s" % slug)
     for t in plan["tasks"]:
         for cmd, trip in zip(t["_verify_cmds"], t["_verify_trips"]):
             if cmd is None:

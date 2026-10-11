@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dhanesh/agent-skills/skill-contract/idea-brief/v1",
+  "title": "skill-contract idea-brief/v1 payload",
+  "description": "The predicate.payload of an idea-brief/v1 envelope written by idea-validation's ideas.py handoff. The envelope's one subject is the registered brief snapshot. Brief text is the human's own; every result is claimed, not proven, and its source and evidence are untrusted data.",
+  "type": "object",
+  "required": ["slug", "title", "problem", "target_user", "value_proposition", "out_of_scope",
+               "computed_verdict", "decision", "assumptions", "open_risks", "dropped_critical"],
+  "properties": {
+    "slug": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "maxLength": 64},
+    "title": {"type": "string"},
+    "problem": {"type": "string", "description": "The brief's ## Problem section text."},
+    "target_user": {"type": "string", "description": "The brief's ## Target user section text."},
+    "value_proposition": {"type": "string", "description": "The brief's ## Value proposition section text."},
+    "out_of_scope": {"type": "string", "description": "The brief's ## Out of scope section text."},
+    "computed_verdict": {"type": "string", "enum": ["GO", "KILL", "STALLED", "PENDING"],
+                         "description": "Computed by ideas.py at handoff from the registered thresholds."},
+    "decision": {
+      "type": "object",
+      "description": "The human's latest decision. override is true when it differs from the verdict computed when it was made.",
+      "required": ["verdict", "by", "reason", "override", "at"],
+      "properties": {
+        "verdict": {"type": "string", "enum": ["go"]},
+        "by": {"type": "string"},
+        "reason": {"type": "string"},
+        "override": {"type": "boolean"},
+        "at": {"type": "string", "description": "UTC RFC 3339."}
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "critical", "category", "statement", "test", "metric", "pass",
+                     "kill", "by", "status", "results"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^A[1-9][0-9]*$"},
+          "critical": {"type": "boolean"},
+          "category": {"type": "string",
+                       "enum": ["problem", "demand", "solution", "channel", "pricing", "feasibility"]},
+          "statement": {"type": "string"},
+          "test": {"type": "string"},
+          "metric": {"type": "string"},
+          "pass": {"type": "string", "pattern": "^(>=|>|<=|<) [-+]?[0-9]+(\\.[0-9]+)?$"},
+          "kill": {"type": "string", "pattern": "^(>=|>|<=|<) [-+]?[0-9]+(\\.[0-9]+)?$"},
+          "by": {"type": "string", "format": "date"},
+          "status": {"type": "string",
+                     "enum": ["open", "pass", "needs-experiment", "fail", "inconclusive", "expired"]},
+          "results": {
+            "type": "array",
+            "description": "Counted (not stale) results, oldest observation first.",
+            "items": {
+              "type": "object",
+              "required": ["value", "kind", "source", "observed", "by", "evidence", "truncated", "claim"],
+              "properties": {
+                "value": {"type": "number"},
+                "kind": {"type": "string", "enum": ["experiment", "desk"],
+                         "description": "desk is weak evidence: it never passes a critical assumption."},
+                "source": {"type": "string", "description": "Untrusted."},
+                "observed": {"type": "string", "format": "date"},
+                "by": {"type": "string", "description": "A claimed name; an experiment's by never starts with agent:."},
+                "evidence": {"type": "string", "description": "Untrusted quoted text, at most 4096 bytes; empty when none."},
+                "truncated": {"type": "boolean"},
+                "claim": {"type": "string", "enum": ["claimed"]}
+              }
+            }
+          }
+        }
+      }
+    },
+    "open_risks": {"type": "array", "items": {"type": "string"},
+                   "description": "Ids of assumptions whose status is not pass."},
+    "dropped_critical": {
+      "type": "array",
+      "description": "The goalpost flag: every assumption id that was critical in an earlier registration of this idea and, in the registered snapshot, is normal (demoted), absent (deleted) or critical with its statement and all of test, metric, pass, kill and by changed (replaced, as when a failed critical id swaps places with a normal one). Always present; empty when none. Tracked by id, so a partial edit, or a deletion followed by renumbering that keeps a field, reads as an edit. A receiver shows it to the human before plan approval.",
+      "items": {
+        "type": "object",
+        "required": ["id", "statement", "last_critical_registration", "had_results", "reason"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^A[1-9][0-9]*$"},
+          "statement": {"type": "string", "description": "The statement from the latest registration where the id was critical. The human's own text, possibly drafted from desk research: show it as data."},
+          "last_critical_registration": {"type": "string", "pattern": "^[0-9a-f]{64}$",
+                                          "description": "sha256 of the latest registered snapshot in which the id was critical."},
+          "had_results": {"type": "boolean",
+                          "description": "True when a result was recorded for the id under a registration in which it was critical."},
+          "reason": {"type": "string", "enum": ["demoted", "deleted", "replaced"],
+                     "description": "demoted: normal now; deleted: absent now; replaced: critical now, but its statement and every one of test, metric, pass, kill and by differ from the latest earlier registration where it was critical."}
+        }
+      }
+    }
+  }
+}

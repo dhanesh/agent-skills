@@ -95,6 +95,13 @@
       "minItems": 1,
       "items": {"type": "string", "pattern": "^I[0-9a-f]{10}$"}
     },
+    "ideas": {
+      "type": "array",
+      "description": "Optional: the slug of the idea-validation brief (idea-brief/v1) the spec builds, from its ## Idea section.",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"}
+    },
     "decisions": {
       "type": "array",
       "description": "Optional: the spec's unattended-mode Decisions sweep, when it has any.",
