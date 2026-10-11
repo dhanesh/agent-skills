@@ -524,6 +524,36 @@ def feedback_cap_arm():
           "feedback=%d issue=%d" % (fb["count"], gh["count"]))
 
 
+@arm("NEGATIVE: link counts by source, and a raw h: id is not a hash")
+def feedback_keys_arm():
+    """Factory hardening L3 and L4: after link, two sources' messages with the same id count
+    twice, a re-import adds nothing, and a raw id h:<16 hex> never equals a hashed id."""
+    import hashlib
+    root = tmp()
+    cfg = json.loads(json.dumps(FB_CONFIG))
+    cfg["sources"]["fb2"] = {"enabled": True, "formats": ["feedback-jsonl"]}
+    write_config(root, cfg)
+    a, b = [fb_msg(1), fb_msg(2)], [fb_msg(2), fb_msg(3)]
+    import_feedback(root, *a)
+    feed2 = lambda recs: intake(root, "import", "--format", "feedback-jsonl", "--source", "fb2",
+                                stdin="".join(json.dumps(r) + "\n" for r in recs))
+    feed2(b)
+    keep = IN.item_id("fb", "checkout-crash")
+    intake(root, "link", keep, IN.item_id("fb2", "checkout-crash"))
+    linked = items(root)[keep]["count"]
+    import_feedback(root, *a)
+    feed2(b)
+    again = items(root)[keep]["count"]
+    email = "pat.form@example.com"
+    hashed = "h:" + hashlib.sha256(email.encode("utf-8")).hexdigest()[:16]
+    import_feedback(root, fb_msg(8, topic="form-bug", id=email), fb_msg(9, topic="form-bug",
+                                                                         id=hashed))
+    raw = items(root)[IN.item_id("fb", "form-bug")]["count"]
+    check("NEGATIVE: fb m-1, m-2 and fb2 m-2, m-3 linked count 4, not 3, and a re-import keeps "
+          "4; an email id (hashed) and a raw id equal to that hash count 2, not 1",
+          (linked, again, raw) == (4, 4, 2), "linked=%s again=%s raw=%s" % (linked, again, raw))
+
+
 @arm("NEGATIVE: old messages do not regress a dismissed feedback item")
 def feedback_recur_arm():
     root = tmp()
@@ -654,7 +684,7 @@ def main():
                    malformed_arm, dismissed_arm, tripwire_arm, hidden_arm, squash_arm,
                    partial_arm, feedback_arm, feedback_topic_arm, feedback_cap_arm,
                    feedback_recur_arm, feedback_redact_arm, feedback_review_redact_arm,
-                   feedback_id_url_arm, feedback_future_arm, no_io_arm):
+                   feedback_id_url_arm, feedback_future_arm, feedback_keys_arm, no_io_arm):
             fn()
     n, k = len(_checks), sum(_checks)
     print("EVAL_RESULT: %s (%d/%d checks)" % ("PASS" if k == n else "FAIL", k, n))

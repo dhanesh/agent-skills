@@ -52,6 +52,13 @@ npx skills add dhanesh/agent-skills --skill idea-validation
 - One idea per brief. A pivot closes the brief. You start a new brief for the new idea.
 - The tool does not pull results from a form or an analytics service.
 
+## Changes
+
+- **0.1.1.** `--today` works only in tests. Before, `record --today 2099-01-01` let
+  `--observed` take any date up to 2099. That date got past the future-date check and decided
+  which result was the latest. Now the tool refuses `--today` with exit 2, unless the
+  environment sets `IDEAS_TEST_CLOCK=1`. Only the tests and the eval set it.
+
 ## Files
 
 - `SKILL.md`: the agent's instructions.

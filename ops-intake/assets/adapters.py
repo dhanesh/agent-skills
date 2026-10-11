@@ -178,7 +178,9 @@ def adapt_jsonl(raw, ctx):
 CHANNELS = ("email", "review", "form", "chat", "other")
 _TOPIC_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
 TOPIC_CAP = 64
-FEEDBACK_ID_CAP = KEY_CAP - len("review:")  # the evidence key <channel>:<id> fits KEY_CAP
+# The raw id cap. The evidence key is <channel>:<id>; an escaped raw id ("r:" + id, see
+# _one_feedback) can make it 2 characters longer than KEY_CAP, which only bounds input keys.
+FEEDBACK_ID_CAP = KEY_CAP - len("review:")
 
 # Redaction (spec 2.3, widened in the review round) is a safety net, not a guarantee:
 # names, addresses and account numbers still get through, and so do fullwidth or
@@ -332,8 +334,12 @@ def _one_feedback(rec, ctx):
     sev = _feedback_severity(rec)
     # An id that holds an email address or a phone number (form exports key on the
     # respondent's address) is stored only as a stable hash, so dedupe still works.
+    # A raw id that starts with "h:" or "r:" gets one more "r:" in front, so a raw id can
+    # never equal a hashed one ("h:" + 16 hex) and the escape stays one-to-one (L4).
     if redact(mid) != mid:
         mid = "h:" + hashlib.sha256(mid.encode("utf-8")).hexdigest()[:16]
+    elif mid.startswith(("h:", "r:")):
+        mid = "r:" + mid
     # Redact the whole text before _evidence caps it, so a cut cannot split an address.
     ev = _evidence(ctx, topic, redact(text), "%s:%s" % (channel, mid))
     ev["created_at"] = created

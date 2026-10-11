@@ -370,6 +370,8 @@ def _valid_item(it):
             and all(isinstance(e, dict) for e in it.get("evidence", []))
             and isinstance(it.get("seen_keys", []), list)
             and all(isinstance(k, str) for k in it.get("seen_keys", []))
+            and isinstance(it.get("legacy_keys", []), list)
+            and all(isinstance(k, str) for k in it.get("legacy_keys", []))
             and all(it.get(k) is None or isinstance(it[k], str) for k in _ITEM_OPTIONAL_STRS))
 
 
@@ -415,6 +417,11 @@ class Queue:
         aliases = data.get("aliases", {})
         if not _valid_aliases(aliases, items):
             raise QueueError(path)
+        key_format = data.get("key_format", 1)
+        if key_format not in (1, KEY_FORMAT):
+            raise QueueError(path)
+        if key_format == 1:
+            _migrate_keys(items, aliases)
         runs = data.get("runs", {})
         if not isinstance(runs, dict) or not all(
                 _RUN_RE.match(rid) and _valid_run(r) for rid, r in runs.items()):
@@ -451,7 +458,8 @@ class Queue:
         path = os.path.join(d, QUEUE_FILE)
         tmp = path + ".tmp.%d" % os.getpid()
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "items": self.items, "aliases": self.aliases,
+            json.dump({"version": 1, "key_format": KEY_FORMAT, "items": self.items,
+                       "aliases": self.aliases,
                        "runs": self.runs,
                        "histories": self.histories, "needed": self.needed,
                        "unavailable": self.unavailable}, f, indent=1, sort_keys=True)
@@ -672,11 +680,16 @@ def cmd_link(a):
                       % (code(drop["id"]), drop["state"]))
                 return 2
             # The kept item has seen every key either item saw, so a later import of the
-            # dropped item's messages is not counted again (spec 2.1).
-            keep["seen_keys"] = sorted(_seen(keep) | _seen(drop))
+            # dropped item's messages is not counted again (spec 2.1). count grows by the
+            # dropped item's keys the kept item has not seen, plus any count the dropped
+            # item has with no key behind it (an item from before seen keys) (L3).
+            _merge_keys(keep, drop)
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
+            # The dropped item's own links come along, so every source merged into the
+            # kept item stays on record.
+            keep["linked"].extend(drop.get("linked", []))
             del q.items[a.other]
             # A later import of the dropped item's source id lands on the kept item.
             for k, v in list(q.aliases.items()):
@@ -714,13 +727,127 @@ JOBS_TRIES = 3         # failed jobs imports of a run before sync stops its NEXT
 RUN_KEEP_DAYS = 30     # sync forgets a run imported longer ago than this (R26)
 
 
+# Seen keys are namespaced: <source>|<evidence key>, so two sources that use the same
+# evidence key (after `link`) still count twice (L4). "|" cannot appear in a source name
+# (_SOURCE_RE). A queue from before L4 (no key_format) is migrated on load.
+KEY_SEP = "|"
+KEY_FORMAT = 2
+_FEEDBACK_KEY_RE = re.compile(r"^(?:email|review|form|chat|other):")
+_HASH_ID_RE = re.compile(r"^h:[0-9a-f]{16}\Z")
+
+
+def ns_key(source, key):
+    return source + KEY_SEP + key
+
+
+def _legacy_form(key, feedback):
+    """The key a queue from before L4 stored for the namespaced key: no source, and a
+    feedback id without the raw-id escape ("r:")."""
+    key = key.partition(KEY_SEP)[2] or key  # a key without a source is its own old form
+    if feedback:
+        ch, _, mid = key.partition(":")
+        if mid.startswith("r:"):
+            key = ch + ":" + mid[2:]
+    return key
+
+
+def _migrate_key(source, key, feedback):
+    """A pre-L4 key, namespaced with source. A feedback id was stored as it came unless it
+    was a hash, so an id that starts with "r:", or with "h:" and is not "h:" + 16 hex,
+    was raw and gets the escape. A raw id that looks exactly like a hash stays a hash."""
+    if feedback and _FEEDBACK_KEY_RE.match(key):
+        ch, _, mid = key.partition(":")
+        if mid.startswith("r:") or (mid.startswith("h:") and not _HASH_ID_RE.match(mid)):
+            key = ch + ":r:" + mid
+    return ns_key(source, key)
+
+
+def _keys_from_evidence(item):
+    """For an item from a queue written before seen keys: the keys of the evidence it still
+    holds. Each evidence entry names its own source, and only feedback evidence has a
+    created_at."""
+    return {_migrate_key(e["source"] if isinstance(e.get("source"), str) and e["source"]
+                         else item["source"], e["key"], "created_at" in e)
+            for e in item.get("evidence", [])
+            if isinstance(e, dict) and isinstance(e.get("key"), str)}
+
+
+def _migrate_keys(items, aliases):
+    """Namespace the seen keys of a queue from before L4. An item whose every merged item
+    came from its own source gets its own source on every key. An item linked from another
+    source, or one whose links cannot all be read back (a chain of links before the link
+    record carried the dropped item's own links), keeps its keys unattributed in
+    legacy_keys: intake does not guess their source. Each legacy key then matches the first
+    namespaced key whose old form it is, so a re-import does not count it again."""
+    merged = {}
+    for v in aliases.values():
+        merged[v] = merged.get(v, 0) + 1
+    for iid, it in items.items():
+        if "seen_keys" not in it:
+            continue  # _seen reads these from the evidence, with each entry's source
+        links = it.get("linked") if isinstance(it.get("linked"), list) else []
+        sources = {it["source"]} | {ln.get("source") if isinstance(ln, dict) else None
+                                    for ln in links}
+        if len(sources) == 1 and merged.get(iid, 0) == len(links):
+            fb = it.get("kind") == "feedback"
+            it["seen_keys"] = sorted({_migrate_key(it["source"], k, fb) for k in it["seen_keys"]})
+        elif it["seen_keys"]:
+            it["legacy_keys"] = sorted(set(it["seen_keys"]))
+            it["seen_keys"] = []
+
+
 def _seen(item):
-    """Every evidence key the item has seen: its uncapped `seen_keys`, or, for an item
+    """Every namespaced key the item has seen: its uncapped `seen_keys`, or, for an item
     from a queue written before them, the keys of the evidence it still holds."""
     if "seen_keys" in item:
         return set(item["seen_keys"])
-    return {e.get("key") for e in item.get("evidence", [])
-            if isinstance(e, dict) and isinstance(e.get("key"), str)}
+    return _keys_from_evidence(item)
+
+
+def _take(item, have, key, feedback):
+    """Add the namespaced key to `have`. True when the item has never seen it, which
+    raises count. A legacy key with the same old form is used up instead (L4)."""
+    if key in have:
+        return False
+    have.add(key)
+    legacy = item.get("legacy_keys")
+    old = _legacy_form(key, feedback)
+    if legacy and old in legacy:
+        legacy.remove(old)
+        if not legacy:
+            del item["legacy_keys"]
+        return False
+    return True
+
+
+def _is_new(item, have, key, feedback):
+    return key not in have and _legacy_form(key, feedback) not in item.get("legacy_keys", ())
+
+
+def _count(item):
+    c = item.get("count")
+    return c if isinstance(c, int) and not isinstance(c, bool) and c > 0 else 1
+
+
+def _merge_keys(keep, drop):
+    """`link`: keep has seen every key either item saw. count = keep.count + the dropped
+    item's keys keep has not seen + max(0, drop.count - the dropped item's keys) (L3)."""
+    fb = drop.get("kind") == "feedback"
+    have = _seen(keep)
+    drop_keys = _seen(drop)
+    new = sum(1 for k in sorted(drop_keys) if _take(keep, have, k, fb))
+    drop_legacy = drop.get("legacy_keys", [])
+    if drop_legacy:
+        legacy = set(keep.get("legacy_keys", []))
+        olds = {_legacy_form(k, fb) for k in have}
+        for k in drop_legacy:
+            if k not in legacy and k not in olds:
+                legacy.add(k)
+                new += 1
+        keep["legacy_keys"] = sorted(legacy)
+    keep["count"] = (_count(keep) + new
+                     + max(0, _count(drop) - len(drop_keys) - len(drop_legacy)))
+    keep["seen_keys"] = sorted(have)
 
 
 def _bump(item, sig):
@@ -729,9 +856,9 @@ def _bump(item, sig):
     The seen keys are kept uncapped, so a key the cap dropped is not counted again
     (spec 2.1)."""
     have = _seen(item)
+    fb = sig["kind"] == "feedback"
     for ev in sig["evidence"]:
-        if ev["key"] not in have:
-            have.add(ev["key"])
+        if _take(item, have, ns_key(sig["source"], ev["key"]), fb):
             item.setdefault("evidence", []).append(ev)
             item["count"] = item.get("count", 0) + 1
     item["seen_keys"] = sorted(have)
@@ -775,7 +902,7 @@ def apply_signals(queue, signals, now):
                 if ev["key"] not in seen:
                     seen.add(ev["key"])
                     it["evidence"].append(ev)
-            it["seen_keys"] = sorted(seen)
+            it["seen_keys"] = sorted(ns_key(sig["source"], k) for k in seen)
             del it["evidence"][:-EVIDENCE_CAP]
             _note_recur_seen(it, sig)
             continue
@@ -786,7 +913,8 @@ def apply_signals(queue, signals, now):
             # Spec 2.2: only a message never seen before brings feedback back, so a
             # re-import of old (or future-dated, already seen) messages never regresses it.
             have = _seen(it)
-            recurs = any(e["key"] not in have for e in sig["evidence"])
+            recurs = any(_is_new(it, have, ns_key(sig["source"], e["key"]), True)
+                         for e in sig["evidence"])
         _bump(it, sig)
         _note_recur_seen(it, sig)
         it["severity"] = max(it.get("severity", 0), sig["severity"])  # only rises on merge, by design

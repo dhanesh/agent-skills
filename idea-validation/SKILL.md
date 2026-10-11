@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool needs no network and no credentials.
 metadata:
   author: dhanesh
-  version: "0.1.0"
+  version: "0.1.1"
   skill-contract: "1"
   tags: "factory,ideas,validation,skill-contract"
 ---
@@ -185,7 +185,8 @@ assumptions that have not passed go into the handoff as open risks.
   `decide` and the
   handoff and lists it in the envelope's `dropped_critical`, but does not refuse it.
 - You MUST NOT pass `--today` outside a test, because it moves the clock that deadlines,
-  expiry and the future-date check on `--observed` all read.
+  expiry and the future-date check on `--observed` all read. Outside the test suite the tool
+  refuses `--today` (`STOP:`, exit 2).
 - You MUST NOT edit or delete files under `.skill-contract/ideas/` by hand, because the
   registrations, the results ledger, the log and the envelopes are the record that every later
   command reads back. Use the commands; report a problem instead.

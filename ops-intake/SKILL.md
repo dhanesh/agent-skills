@@ -144,7 +144,8 @@ Read each command's output lines, not only its exit code.
    words>"`, `intake link <keep> <other>` or `intake resolve <id> --by "<name>"`. A `new`,
    `picked` or `planned` item can be dismissed. `link` keeps the first item and drops the
    other; it refuses (`STOP:`) to drop a `picked` or `planned` item. A later import of the
-   dropped item's source goes to the kept item.
+   dropped item's source goes to the kept item, and the kept item's count grows by the
+   dropped item's messages it had not seen.
 6. **Hand off to spec-first-planning.** pick writes the item snapshot and an `intake-item/v1`
    envelope under the git-ignored `.skill-contract/intake/`, because evidence can carry customer
    data, and prints `NEXT: run spec-first-planning with <envelope path>`. spec-first-planning

@@ -1,7 +1,9 @@
 """new, register, record, decide, handoff, storage and the trust boundary (spec 1.1-2)."""
+import contextlib
 import fcntl
 import glob
 import hashlib
+import io
 import json
 import os
 import sys
@@ -84,6 +86,35 @@ class New(unittest.TestCase):
 
     def test_bad_today_refused(self):
         self.assertEqual(run(repo(), "list", today="2026-13-01")[0], 2)
+
+    def test_version_matches_skill_md(self):
+        with open(os.path.join(os.path.dirname(HERE), "SKILL.md"), encoding="utf-8") as f:
+            self.assertIn('  version: "%s"\n' % ID.VERSION, f.read())
+        self.assertEqual(ID.VERSION, "0.1.1")
+
+    def test_today_without_the_test_clock_is_refused(self):
+        """L5: --today outside a test would let --observed reach any date up to it."""
+        root = registered()
+        ledger = os.path.join(root, ".skill-contract", "ideas", "flat", "results.jsonl")
+        env = {k: v for k, v in os.environ.items() if k != ID.TEST_CLOCK_ENV}
+        for argv in (["list"], ["record", "flat", "A1", "--value", "7", "--kind", "experiment",
+                                "--source", "s", "--observed", "2098-12-31", "--by", "Dana"]):
+            with self.subTest(cmd=argv[0]):
+                buf = io.StringIO()
+                with mock.patch.dict(os.environ, env, clear=True), \
+                        contextlib.redirect_stdout(buf):
+                    rc = ID.main(["--root", root, "--today", "2099-01-01", *argv])
+                self.assertEqual(rc, 2)
+                self.assertIn("STOP: --today is for tests only; it needs IDEAS_TEST_CLOCK=1",
+                              buf.getvalue())
+                self.assertFalse(os.path.exists(ledger))
+        for val in ("0", "", "yes"):
+            with self.subTest(val=val), mock.patch.dict(os.environ, {ID.TEST_CLOCK_ENV: val}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ID.main(["--root", root, "--today", "2026-10-20", "list"]), 2)
+        with mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ID.main(["--root", root, "list"]), 0)  # no --today: the real clock
 
 
 class Register(unittest.TestCase):

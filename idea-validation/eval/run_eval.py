@@ -125,7 +125,9 @@ def recorder():
 def ideas(root, *argv):
     """ideas.py in-process, under the recorder, with today pinned. Returns (rc, stdout)."""
     buf = io.StringIO()
-    with recorder(), contextlib.redirect_stdout(buf):
+    # --today is honoured only under the test clock switch (ideas.TEST_CLOCK_ENV).
+    with recorder(), contextlib.redirect_stdout(buf), \
+            mock.patch.dict(os.environ, {ID.TEST_CLOCK_ENV: "1"}):
         rc = ID.main(["--root", root, "--today", TODAY, *argv])
     return rc, buf.getvalue()
 
@@ -367,6 +369,25 @@ def dropped_arm():
                                                          dropped, sk[2:3]))
 
 
+@arm("NEGATIVE: --today outside a test is refused")
+def today_arm():
+    root = registered()
+    before = ledger(root)
+    env = {k: v for k, v in os.environ.items() if k != ID.TEST_CLOCK_ENV}
+    buf = io.StringIO()
+    with recorder(), contextlib.redirect_stdout(buf), mock.patch.dict(os.environ, env, clear=True):
+        rc = ID.main(["--root", root, "--today", "2099-01-01", "record", "flat", "A1", "--value",
+                      "7", "--kind", "experiment", "--source", "s", "--observed", "2098-12-31",
+                      "--by", "Dana"])
+    after = ledger(root)
+    rc2, _ = record(root, "A1", 7)  # the same result, under the test clock, is accepted
+    check("NEGATIVE: without %s=1, record --today 2099-01-01 --observed 2098-12-31 exits 2, "
+          "prints STOP: and records nothing; the test clock still works" % ID.TEST_CLOCK_ENV,
+          rc == 2 and "STOP: --today is for tests only" in buf.getvalue()
+          and after == before and rc2 == 0 and ledger(root) != before,
+          "rc=%s rc2=%s out=%r" % (rc, rc2, buf.getvalue()[:120]))
+
+
 @arm("NEGATIVE: ideas.py opened no socket and ran no subprocess")
 def no_io_arm():
     check("NEGATIVE: across every ideas.py call in this eval, the tool opened no socket and "
@@ -378,7 +399,7 @@ def main():
         check("spec-first-planning is beside idea-validation", False, SFP)
     else:
         for fn in (recorder_arm, positive_arm, desk_arm, stale_arm, self_cert_arm, no_go_arm,
-                   dropped_arm, no_io_arm):
+                   dropped_arm, today_arm, no_io_arm):
             fn()
     n, k = len(_checks), sum(_checks)
     print("EVAL_RESULT: %s (%d/%d checks)" % ("PASS" if k == n else "FAIL", k, n))

@@ -6,7 +6,7 @@ This file is the reference for `ideas.py`. The design is in the repository at
 ## Commands
 
 Every command takes `--root R` before the command name. `--today YYYY-MM-DD` sets "today" for
-tests only.
+tests only. Outside the test suite, a command with `--today` prints `STOP:` and exits 2.
 
 | Command | Effect |
 |---|---|
