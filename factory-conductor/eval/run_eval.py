@@ -38,6 +38,13 @@ stub agent (it sleeps at most 2 s), and a second tick sees it live; and, as nega
 nothing starts while a reentry lease's pid lives, on a grant_ask stop, under a revoked
 grant, or past max_reentries (which records reentry_exhausted), and a grant whose
 agent_cmd is a shell is invalid. Every timer call goes to a temp home, dry-run, as cron.
+
+The money ledger arms drive assets/ledger.py in-process on synthetic amounts (no payment
+tool, no model): a positive flow (register, check, record, status) and, as negatives, a
+stale budget never gives NOT_REFUSED, an agent cannot record spend, a re-run reserves once
+and a second proposal that only fits alone is refused, a recurring proposal that goes over
+in month 7 only is refused, and no check output carries an approval word or writes an
+envelope.
 """
 import contextlib
 import hashlib
@@ -59,6 +66,7 @@ import conductor as C  # noqa: E402
 import contract_check as CC  # noqa: E402
 import reentry as R  # noqa: E402
 import conductor_testkit as TK  # noqa: E402
+import ledger_testkit as LK  # noqa: E402
 
 _checks = []
 
@@ -680,6 +688,71 @@ def evidence_gate_arm():
               "evidence=%r merge=%r" % (rc, mrc))
 
 
+def money_ledger_arms():
+    import re
+    # Positive flow: register, check, record, status.
+    root = LK.registered()
+    c = LK.check(root, "vps", "hosting", "19.99")
+    r = LK.run(root, "record", "--id", "vps", "--amount", "21", "--currency", "USD",
+               "--month", "2026-10", "--by", "Dana")
+    s = LK.run(root, "status")
+    check("money ledger: register, a check under the cap, a human record and status agree",
+          c[0] == 0 and "NOT_REFUSED: vps — the human's approval is still required" in c[1]
+          and r[0] == 0 and "CATEGORY: hosting cap=25.00 recorded=21.00 reserved=0.00 "
+          "headroom=4.00" in s[1], "check=%r record=%r" % (c[0], r[0]))
+
+    # Stale budget: every check refuses, a new id and a replay alike.
+    root = LK.registered()
+    before = LK.check(root, "vps", "hosting", "5")
+    LK.write_budget(root, LK.BUDGET.replace("| hosting | 25 |", "| hosting | 500 |"))
+    after = [LK.check(root, "vps", "hosting", "5"), LK.check(root, "big", "hosting", "400")]
+    check("NEGATIVE: money ledger: a budget edited since register never gives NOT_REFUSED",
+          before[0] == 0 and all(rc == 3 and "budget edited since register" in out
+                                 and "NOT_REFUSED" not in out for rc, out, _ in after),
+          "before=%r after=%r" % (before[0], [a[0] for a in after]))
+
+    # An agent cannot record spend.
+    root = LK.registered()
+    LK.check(root, "vps", "hosting", "5")
+    got = [LK.run(root, "record", "--id", "vps", "--amount", "1", "--currency", "USD",
+                  "--month", "2026-10", "--by", by)[0]
+           for by in ("agent:claude", "\u0430gent:claude", "AGENT-x")]
+    check("NEGATIVE: money ledger: an agent-recorded spend is refused and nothing is stored",
+          got == [2, 2, 2] and LK.state(root)["proposals"]["vps"]["records"] == {},
+          "exits=%r" % got)
+
+    # No double reservation.
+    root = LK.registered()
+    a = [LK.check(root, "a", "hosting", "15")[0] for _ in range(3)]
+    b = LK.check(root, "b", "hosting", "15")
+    s = LK.run(root, "status")[1]
+    check("NEGATIVE: money ledger: a re-run reserves once, and a second proposal that fits "
+          "only alone is refused", a == [0, 0, 0] and b[0] == 3
+          and "reserved=15.00 headroom=10.00" in s, "reruns=%r second=%r" % (a, b[0]))
+
+    # Over-cap recurring month (month 7 of an open-ended monthly spend).
+    root = LK.registered()
+    one = LK.check(root, "launch", "ads", "95", "--month", "2027-04")[0]
+    rec = LK.check(root, "ppc", "ads", "10", "--recurring", "monthly", "--start", "2026-10")
+    check("NEGATIVE: money ledger: a recurring proposal over the cap in month 7 only is refused",
+          one == 0 and rec[0] == 3 and "2027-04" in rec[1]
+          and "ppc" not in LK.state(root)["proposals"], "one-off=%r recurring=%r"
+          % (one, rec[0]))
+
+    # No approval-like token, no envelope.
+    root = LK.registered()
+    outs = [LK.check(root, *argv) for argv in (
+        ("vps", "hosting", "1"), ("vps", "hosting", "1"), ("big", "hosting", "99"),
+        ("x", "gold", "1"), ("y", "ads", "0"), ("z", "ads", "1", "--month", "2026-01"))]
+    outs.append(LK.check(root, "e", "ads", "1", currency="EUR"))
+    text = "".join(o[1] + o[2] for o in outs)
+    hits = re.findall(LK.APPROVAL_TOKEN_RE, text)
+    check("NEGATIVE: money ledger: no check output carries OK, APPROVED, PASS or ALLOWED, and "
+          "a pass writes no envelope", not hits and outs[0][0] == 0
+          and os.listdir(os.path.join(root, ".skill-contract")) == ["ledger"],
+          "hits=%r" % hits)
+
+
 def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
@@ -694,6 +767,7 @@ def main():
     integration_red_is_never_pushed_arm()
     reentry_arms()
     evidence_gate_arm()
+    money_ledger_arms()
 
     n, k = len(_checks), sum(_checks)
     ok = k == n
