@@ -273,6 +273,8 @@ SINCE_FACTORY_HARDENING = "06018f7"  # fix/factory-hardening: the campaign's FIR
 # --today test clock (L5) came next. One constant for the campaign: it lands at one merge.
 SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the campaign's
 # FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
+SINCE_IDEA_NAMES = "3531d6a"  # idea-validation 0.1.2: the --today refusal no longer names
+# the test switch, and lookalike agent: names are refused. One constant: it lands at one merge.
 
 
 def _git_out(*args):
@@ -8679,6 +8681,63 @@ def check_growth_review(old, new):
             since=SINCE_GROWTH_REVIEW)
 
 
+# ── idea-validation 0.1.2: the unnamed test switch and lookalike agent names ─
+_IN_PROBE = r"""
+sys.dont_write_bytecode = True
+import contextlib, io
+from unittest import mock
+sys.path.insert(0, os.path.join(@TREE@, "idea-validation", "eval"))
+import run_eval as EV
+import ideas as ID
+case = @CASE@
+def need(cond, what):
+    if not cond:
+        raise RuntimeError(what)
+root = EV.registered()
+if case == "noname":
+    switch = getattr(ID, "TEST_CLOCK_ENV", "IDEAS_TEST_CLOCK")
+    env = {k: x for k, x in os.environ.items() if k != switch}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), mock.patch.dict(os.environ, env, clear=True):
+        rc = ID.main(["--root", root, "--today", "2099-01-01", "list"])
+    need(rc == 2, "--today outside a test was not refused")
+    v = int(switch not in buf.getvalue())
+else:
+    refused = all(EV.record(root, "A1", 7, by=by)[0] == 2
+                  for by in ("\u0430gent:claude", "agent\uff1aclaude", "agent-claude"))
+    refused = refused and EV.ledger(root) == b""
+    need(EV.record(root, "A1", 7, by="Dana")[0] == 0, "a human result was refused")
+    v = int(refused)
+print(json.dumps({"v": v}))
+"""
+
+
+def _in_case(tree, case):
+    for rel in (("idea-validation", "assets", "ideas.py"),
+                ("idea-validation", "eval", "run_eval.py")):
+        if not os.path.isfile(os.path.join(tree, *rel)):
+            return 0
+    out = probe(tree, "idea-validation/assets",
+                _IN_PROBE.replace("@TREE@", repr(tree)).replace("@CASE@", repr(case)))
+    return None if _errored(out) else out.get("v")
+
+
+def check_idea_names(old, new):
+    for case, dimension, note in (
+            ("noname", "the --today refusal does not name the test switch (higher=better)",
+             "Without the switch, --today 2099-01-01 list exits 2 and its output does not "
+             "contain the switch's name, so the tool does not tell an agent how to undo the "
+             "guard. The baseline (0.1.1) prints the name, an honest 0"),
+            ("lookalike", "lookalike agent: names cannot record an experiment (higher=better)",
+             "record --kind experiment by a Cyrillic-a agent:claude, a fullwidth-colon "
+             "agent:claude and agent-claude each exit 2, and the ledger stays empty. "
+             "Sanity-checked in the same probe: Dana records. The baseline accepts the "
+             "lookalikes, an honest 0")):
+        a, b = _in_case(old, case), _in_case(new, case)
+        row("idea-validation", dimension, a, b, a == 0 and b == 1, note, kind="delta",
+            since=SINCE_IDEA_NAMES)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -8767,6 +8826,7 @@ def main():
         check_spend_review(old, REPO)
         check_factory_hardening(old, REPO)
         check_growth_review(old, REPO)
+        check_idea_names(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
