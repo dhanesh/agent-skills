@@ -75,3 +75,17 @@
 - automatic topic clustering;
 - sending replies;
 - sentiment scoring.
+
+## Errata (build)
+
+The build followed §1–§5, with these differences. Each one is in the code, the tests and `references/formats.md`.
+
+1. **spec-first-planning did not change.** §3 says `intake_request.py` has a kind check. It does not: it checks only `item_id`, `title` and `evidence`, so it already accepts `kind: feedback`. The build added a test that proves this (`test_a_feedback_item_is_accepted`) and changed no code. So spec-first-planning keeps version 2.7.0.
+2. **`intake-signals-jsonl` cannot claim `kind: feedback`.** `KINDS` now holds `feedback`, but the generic format keeps its own list of three kinds. Only `feedback-jsonl` redacts. Without this, a generic line could bring customer text in unredacted.
+3. **Severity 4 in a record is accepted and capped at 3.** §1 shows `severity` as 1–3, and F4 says "capped at 3". The adapter accepts 1–4, caps the value at 3, and refuses anything else.
+4. **`id` can be a string or a whole number.** Many exports use numbers for ids. The evidence key `<channel>:<id>` must fit the 200-character key cap, so an id has at most 193 characters. `text` can be empty.
+5. **An email in a URL is redacted.** §2.3 says URLs stay unredacted. The build keeps a URL whole for phone numbers, so a long number in a link is not changed, but it still redacts an email address inside a URL. Privacy wins over an exact link here.
+6. **Feedback evidence carries `created_at`.** The evidence time is stored as `created_at` on each entry, next to `fetched_at`. The intake-item payload and its schema allow it as an optional field.
+7. **`list` shows the kind through the title.** The `ITEM:` line grammar is documented and parsed, so it did not change. A feedback item's title is `feedback: <topic>`, and its flag carries `+low-trust`. `show` prints the kind on the `source:` line for every item: `source: <source> <source id> kind <kind>`.
+8. **Recurrence needs an unseen message.** §2.2 compares the message time with the close time. The build also requires that the item has not seen the message. Without this, a future-dated message that was already imported would bring the item back each time it is imported again.
+9. **`link` merges the seen keys.** `link` merges both items' seen keys, so a later import of the dropped topic does not count its messages again.
