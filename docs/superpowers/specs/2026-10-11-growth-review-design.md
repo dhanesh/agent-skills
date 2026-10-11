@@ -116,3 +116,48 @@ No new envelope kind. The output is the existing `intake-signals-jsonl`, and ops
 - vendor adapters (Mixpanel, Stripe, App Store, PayPal), which wait for a real sample and a tool that owns auth;
 - anomaly detection, forecasting and statistical tests (the thresholds are the human's judgment);
 - making `spend` grantable (S7, the owner's decision).
+
+## Errata (build, 2026-10-12)
+
+The build follows this design. These points changed or were made exact while building it.
+
+1. **The 1-day grace is not ops-intake's rule on main.** Section 2 says the grace "matches
+   ops-intake's future-date rule". `ops-intake/assets/intake.py` on main has no future-date
+   rule. The grace stays as designed: a period whose last day is more than 1 day after today
+   (UTC) is a problem record. A side effect: a month or ISO week that is still running is
+   refused until its last day is at most 1 day away. The format reference says so, so the
+   agent exports finished periods only.
+2. **"The end of a period" is the start of the next day.** Day `2026-10-11` ends at
+   `2026-10-12T00:00:00Z`; week `2026-W41` at `2026-10-12T00:00:00Z`; month `2026-09` at
+   `2026-10-01T00:00:00Z`. `first_seen` and `last_seen` use this.
+3. **The latest complete period comes from the clock.** Yesterday, the last ISO week or last
+   month. With no record for it, the status is NO_DATA; the review never falls back to an
+   older period. A breach streak runs back from that period and stops at a gap.
+4. **No `url` in the signal line.** Main's adapter reads `url` as optional and stores `""`.
+   There is no natural URL for a metric. A test pins that main accepts the line.
+5. **`signals` keeps stdout pure.** Only JSON lines go to stdout; `NOTE:` and `STOP:` go to
+   stderr. It exits 0 when it printed its lines, breaches included, so a `pipefail` pipe does
+   not break. `review` is the alarm (exit 3).
+6. **`import` exits 3 on problem records**, as ops-intake's import does. The other records
+   still import. Exit 2 stays for refused input (no registration, an unreadable file).
+7. **Import checks records against the frozen copy.** A record for a metric that was added
+   to `growth/metrics.md` but not registered is a problem record until the human registers.
+8. **`min_n` with no `n`.** A record without `n` for a metric with `min_n` imports, and the
+   review counts it as NO_DATA. This keeps import independent of a later `min_n` change.
+9. **A correction is a different `value` or `n`.** A different `source` alone is a no-op.
+10. **STALE covers a broken plan.** A missing `growth/metrics.md`, or one that does not lint,
+    is STALE too, and the frozen thresholds stay in force. A metric removed from the file is
+    still reviewed; a metric added to it is not, until it is registered. The hash covers only
+    the parsed thresholds, so a prose edit is not STALE.
+11. **`CORRECTED:` covers every stored period**, not only the latest one, so an older breach
+    cannot vanish without a record either.
+12. **Recurrence on main, as built and tested.** A dismissed item becomes `new +regressed`
+    when a signal's `last_seen` is later than the dismiss time. A re-run for the same period
+    has an earlier `last_seen`, so the item stays dismissed; the next breached period brings
+    it back. A later OK or WARN period does not close the item. The SKILL states this, and
+    `assets/test_growth_signals.py` pins it.
+13. **No skill-contract opt-in.** The skill emits no envelope (section 6), so it carries no
+    `skill-contract` metadata and no `## Contract` block.
+14. **The `--today` guard's STOP line does not name the switch.** idea-validation 0.1.1 names
+    its variable in the STOP line; growth-review prints only `STOP: --today is for tests
+    only`. The README names the variable for humans.
