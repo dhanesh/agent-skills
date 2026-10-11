@@ -54,7 +54,8 @@ def run(root, *argv, today=TODAY):
     """Call ID.main with --root and --today, capture stdout. Returns (rc, stdout)."""
     buf = io.StringIO()
     pre = ["--root", root] + (["--today", today] if today else [])
-    with contextlib.redirect_stdout(buf):
+    # --today is honoured only under the test clock switch (ideas.TEST_CLOCK_ENV).
+    with contextlib.redirect_stdout(buf), mock.patch.dict(os.environ, {ID.TEST_CLOCK_ENV: "1"}):
         rc = ID.main(pre + list(argv))
     return rc, buf.getvalue()
 
