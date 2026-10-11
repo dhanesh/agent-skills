@@ -186,6 +186,190 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(its[TOPIC]["evidence"][0]["text"], "[email] [phone]")
 
 
+class RedactFormsTests(unittest.TestCase):
+    """Review round: phone forms the first build missed (M1) and false positives (M2)."""
+
+    HYPHENS = ("\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212")
+    M1 = [
+        ("Phone:07700900123", "Phone:[phone]"),
+        ("mob:07700900123", "mob:[phone]"),
+        ("Mobile : 07700 900123", "Mobile : [phone]"),
+        ("number=07700900123", "number=[phone]"),
+        ("tel:+15550100199", "tel:[phone]"),
+        ("[call me](tel:+15550100199)", "[call me](tel:[phone])"),
+        ("call 555 - 010 - 0199", "call [phone]"),
+        ("call 555  010  0199 now", "call [phone] now"),
+        ("call 555\t010 \u00a00199", "call [phone]"),
+        ("call (555)  010 - 0199", "call [phone]"),
+    ]
+    # Guards: what an exclusion must not re-open.
+    GUARDS = [
+        ("5550100199", "[phone]"),                       # bare, does not start with 1
+        ("call 1728640000", "call [phone]"),             # epoch-like, but phone context
+        ("my number is 12345 67890", "my number is [phone]"),
+        ("07700 900123", "[phone]"),                     # two groups, leading 0
+        ("98765 43210", "[phone]"),                      # Indian mobile, starts 6-9
+        ("ping me on 98765 43210", "ping me on [phone]"),
+        ("contact 12345 67890", "contact [phone]"),
+        ("reach me at 1728640000", "reach me at [phone]"),
+        ("call 020 7946 0958 ext 12", "call [phone] ext 12"),
+        ("cc 4111 1111 1111 1111", "cc [phone]"),
+        ("2026-10-11 555-010-0199", "2026-10-11 [phone]"),
+        ("on 11.10.2026 call 555.010.0199", "on 11.10.2026 call [phone]"),
+        ("pat@example.com: hi", "[email]: hi"),          # only git@host:path is a remote
+        ("git@example.com and pat@example.com", "[email] and [email]"),
+        ("mailto:pat@example.com", "mailto:[email]"),
+        ("write to pat%40example.com", "write to [email]"),
+        ("https://x.example/u?phone=5550100199&id=5550100199",
+         "https://x.example/u?phone=[phone]&id=5550100199"),
+        ("https://x.example/u?email=pat%40example.com&n=1", "https://x.example/u?email=[email]&n=1"),
+        ("https://x.example/u?Tel=%2B15550100199", "https://x.example/u?Tel=[phone]"),
+    ]
+    M2 = [
+        "date 2026-10-11 2026-10-12", "11.10.2026 14.30", "ip 192.168.100.200 and 10.0.0.1",
+        "build 2026.10.11.1234", "order 2026-000123-45", "epoch 1728640000",
+        "ts 1728640000123", "ids 12345 67890", "latency 1 234 567 890 ns",
+        "git@github.com:owner/repo.git", "remote git@gitlab.example.com:group/app.git ok",
+        "ref:12345678901", "from 2026-10-11 10:20 to 2026-10-12 11:30",
+    ]
+
+    def test_m1_phone_forms_are_redacted(self):
+        for text, want in self.M1:
+            with self.subTest(text=text):
+                self.assertEqual(AD.redact(text), want)
+
+    def test_unicode_hyphens_are_separators(self):
+        for h in self.HYPHENS:
+            with self.subTest(hyphen="U+%04X" % ord(h)):
+                self.assertEqual(AD.redact("call 555%s010%s0199" % (h, h)), "call [phone]")
+
+    def test_guards_stay_redacted(self):
+        for text, want in self.GUARDS:
+            with self.subTest(text=text):
+                self.assertEqual(AD.redact(text), want)
+
+    def test_m2_false_positives_stay_unredacted(self):
+        for text in self.M2:
+            with self.subTest(text=text):
+                self.assertEqual(AD.redact(text), text)
+
+    def test_a_newline_never_joins_a_phone(self):
+        self.assertEqual(AD.redact("555 010\n0199"), "555 010\n0199")
+        self.assertEqual(AD.redact("555 010\u20280199"), "555 010\u20280199")
+
+
+LEAK_EMAIL, LEAK_PHONE = "pat.leak@example.com", "5550100177"
+
+
+class IdAndUrlTests(unittest.TestCase):
+    """Review H1: the id and the url are redacted too. An id that holds an email address or
+    a phone number becomes h:<16 hex of its sha256>, so dedupe still works and the raw id is
+    stored nowhere."""
+
+    def one(self, rec):
+        sigs, problems = AD.ADAPTERS["feedback-jsonl"](json.dumps(rec), CTX)
+        self.assertEqual(problems, [])
+        return sigs[0]
+
+    def test_an_id_with_an_email_is_hashed(self):
+        import hashlib
+        s = self.one(dict(msg(1, channel="form"), id=LEAK_EMAIL))
+        want = "form:h:" + hashlib.sha256(LEAK_EMAIL.encode("utf-8")).hexdigest()[:16]
+        self.assertEqual(s["evidence"][0]["key"], want)
+        self.assertNotIn(LEAK_EMAIL, json.dumps(s))
+
+    def test_an_id_with_a_phone_is_hashed(self):
+        for mid in (LEAK_PHONE, int(LEAK_PHONE), "tel:+1" + LEAK_PHONE):
+            with self.subTest(mid=mid):
+                key = self.one(dict(msg(1), id=mid))["evidence"][0]["key"]
+                self.assertTrue(key.startswith("email:h:"), key)
+                self.assertNotIn(LEAK_PHONE, key)
+
+    def test_a_plain_id_is_kept(self):
+        for mid, want in (("m-1", "email:m-1"), (42, "email:42"),
+                          ("ORD-2026-000123", "email:ORD-2026-000123"),
+                          ("1728640000", "email:1728640000")):
+            with self.subTest(mid=mid):
+                self.assertEqual(self.one(dict(msg(1), id=mid))["evidence"][0]["key"], want)
+
+    def test_a_hashed_id_still_dedupes(self):
+        root = repo(config=CFG)
+        rec = dict(msg(1), id=LEAK_EMAIL)
+        imp(root, lines(rec, msg(2)))
+        imp(root, lines(rec))
+        self.assertEqual(items(root)[TOPIC]["count"], 2)
+
+    def test_the_url_is_redacted(self):
+        cases = [("mailto:%s?subject=re" % LEAK_EMAIL, "mailto:[email]?subject=re"),
+                 ("https://help.example.com/t?phone=%s&email=bob%%40example.com" % LEAK_PHONE,
+                  "https://help.example.com/t?phone=[phone]&email=[email]"),
+                 ("https://support.example.com/tickets/5550100199",
+                  "https://support.example.com/tickets/5550100199")]
+        for url, want in cases:
+            with self.subTest(url=url):
+                self.assertEqual(self.one(msg(1, url=url))["url"], want)
+
+    def test_no_raw_email_or_phone_reaches_any_file_or_the_skeleton(self):
+        import subprocess
+        root = repo(config=CFG)
+        recs = [dict(msg(1, channel="form", text="from %s, call %s" % (LEAK_EMAIL, LEAK_PHONE),
+                         url="mailto:%s?subject=re" % LEAK_EMAIL), id=LEAK_EMAIL),
+                msg(2, url="https://help.example.com/t?phone=%s&email=%s"
+                    % (LEAK_PHONE, LEAK_EMAIL.replace("@", "%40"))),
+                dict(msg(3), id=int(LEAK_PHONE))]
+        rc, out = imp(root, lines(*recs))
+        self.assertEqual(rc, 0, out)
+        outs = [out, cmd(root, "sync")[1], cmd(root, "list")[1], cmd(root, "show", TOPIC)[1]]
+        rc, out = cmd(root, "pick", TOPIC, "--by", "Dana")
+        self.assertEqual(rc, 0, out)
+        outs.append(out)
+        env = out.split("NEXT: run spec-first-planning with ", 1)[1].strip()
+        r = subprocess.run([sys.executable, "-B", os.path.join(SFP, "intake_request.py"),
+                            os.path.join(root, env)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        outs.append(r.stdout)
+        seen = 0
+        for dp, _, fns in os.walk(root):
+            for fn in fns:
+                with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                    outs.append(f.read())
+                seen += 1
+        self.assertGreaterEqual(seen, 3)  # config, queue, item snapshot, envelope, log
+        for leak in (LEAK_EMAIL, "pat.leak", "%40example", LEAK_PHONE):
+            for i, text in enumerate(outs):
+                self.assertNotIn(leak, text, "%s leaked in output %d" % (leak, i))
+        self.assertIn("[email]", r.stdout)
+
+
+class FutureDateTests(unittest.TestCase):
+    """Review L1: a created_at more than a day after the import clock is a problem record,
+    not a clamped or silently kept time."""
+
+    def test_more_than_a_day_ahead_is_a_problem(self):
+        for created in ("2026-10-11T00:00:01Z", "2099-01-01T00:00:00Z"):
+            with self.subTest(created=created):
+                sigs, problems = AD.ADAPTERS["feedback-jsonl"](
+                    json.dumps(msg(1, created=created)), CTX)
+                self.assertEqual(sigs, [])
+                self.assertEqual(problems, ["line 1: created_at is more than a day after the "
+                                            "import time"])
+
+    def test_up_to_a_day_ahead_is_kept(self):
+        for created in ("2026-10-11T00:00:00Z", "2026-10-10T23:00:00+01:00"):
+            with self.subTest(created=created):
+                sigs, problems = AD.ADAPTERS["feedback-jsonl"](
+                    json.dumps(msg(1, created=created)), CTX)
+                self.assertEqual((len(sigs), problems), (1, []))
+
+    def test_import_exits_3_and_keeps_the_rest(self):
+        root = repo(config=CFG)
+        rc, out = imp(root, lines(msg(1), msg(2, created="2027-01-01T00:00:00Z")))
+        self.assertEqual(rc, 3)
+        self.assertIn("IMPORT: fb feedback-jsonl ok 1 problems 1", out)
+        self.assertNotIn("2027", out)
+        self.assertEqual(items(root)[TOPIC]["count"], 1)
+
+
 class GroupingTests(unittest.TestCase):
     def test_three_messages_one_topic_one_item_count_3(self):
         root = repo(config=CFG)
@@ -363,12 +547,17 @@ class RecurrenceTests(unittest.TestCase):
         self.assertEqual(self.state(), ("new", True))
 
     def test_a_seen_future_dated_message_does_not_regress_twice(self):
-        imp(self.root, lines(msg(9, created="2099-01-01T00:00:00Z")), now="2026-10-06T00:00:00Z")
+        # The message is dated 12 hours after the import clock (inside the one-day skew
+        # intake allows) and after the second dismissal, so only the seen key stops a
+        # second regression: the time check alone would let it through.
+        future = "2026-10-06T12:00:00Z"
+        imp(self.root, lines(msg(9, created=future)), now="2026-10-06T00:00:00Z")
         self.assertEqual(self.state(), ("new", True))
         cmd(self.root, "dismiss", TOPIC, "--by", "Dana", "--reason", "again",
-            now="2026-10-07T00:00:00Z")
-        imp(self.root, lines(msg(9, created="2099-01-01T00:00:00Z")), now="2026-10-08T00:00:00Z")
+            now="2026-10-06T06:00:00Z")
+        imp(self.root, lines(msg(9, created=future)), now="2026-10-08T00:00:00Z")
         self.assertEqual(self.state()[0], "dismissed")
+        self.assertEqual(items(self.root)[TOPIC]["count"], 3)
 
 
 class HandoffTests(unittest.TestCase):

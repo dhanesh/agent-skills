@@ -130,6 +130,11 @@ One support message, app review or form answer per line:
 - Required: `id` (a string, or a whole number, at most 193 characters), `topic`, `channel`,
   `created_at` and `text` (a string, which can be empty). A missing or bad field makes that
   line a problem. The other lines still import.
+- `created_at` can be at most one day after the import clock. A later time makes the line a
+  problem. Intake does not clamp or change a time.
+- An `id` that holds an email address or a phone number (form exports often key on the
+  respondent's address) is stored as `h:` and the first 16 hex characters of its sha256. The
+  same id always gives the same hash, so dedupe still works. The raw id is stored nowhere.
 - `topic` matches `^[a-z0-9]+(-[a-z0-9]+)*$` and has at most 64 characters. You (or the
   human) choose it when you transform the export. Intake never guesses a topic.
 - `channel` is `email`, `review`, `form`, `chat` or `other`.
@@ -144,13 +149,34 @@ One support message, app review or form answer per line:
   reaches 4 on its own. As for every format, an item's severity only rises.
 - `trust` is always `low`. A `trust`, `kind`, `title` or `source` field in the record is
   ignored.
-- Redaction: before intake stores a message, it writes email addresses as `[email]` and
-  phone numbers (10 or more digits, with spaces, dots, dashes, parentheses and a leading `+`
-  allowed between them) as `[phone]`. Version strings, dates and times, git shas, `#1234`,
-  order ids such as `ORD-2026-000123` and URLs stay as written. A URL is kept whole, so a phone
-  number inside a link is not redacted, but an email address is redacted everywhere. This is a
-  safety net, not a guarantee: names, street addresses and account numbers get through. Only
-  `feedback-jsonl` is redacted.
+- Redaction: before intake stores a message, it redacts the `text` and the `url`.
+  - Email addresses become `[email]` everywhere, in URLs too, also in the `%40` form. A git
+    remote such as `git@github.com:owner/repo.git` stays.
+  - Phone numbers become `[phone]`: 10 or more digits, with parentheses, a leading `+` and
+    separators between them. A separator is a run of spaces or tabs, or one `.`, `-` or
+    Unicode dash (`‐ ‑ ‒ – — ― −`) with optional spaces around it. A line break never
+    joins a number. A phone right after `:` or `=` counts only after a phone key
+    (`phone`, `ph`, `tel`, `mob`, `mobile`, `cell`, `number`, `num`, `fax`, `whatsapp`,
+    `msisdn`, `sms`), as in `Phone:07700900123` or `tel:+15550100199`.
+  - These stay as written: version strings, git shas, `#1234`, order ids such as
+    `ORD-2026-000123`, IPv4 addresses, dates (year first or year last, with `-`, `.` or
+    `/`) with an optional time after them, and `ref=12345678901`.
+  - These number shapes stay as written unless a phone word (a phone key, `call`, `dial`,
+    `ring`, `contact` or `reach`) comes a few characters before them: a 10- or 13-digit
+    number that starts with `1` (an epoch), two space-joined groups of 4 or more digits
+    that start with `1` to `5` (`12345 67890`), digits grouped in threes with spaces
+    (`1 234 567 890`) and a year-first id (`2026-000123-45`). A 10-digit North American
+    number never starts with `1`, and an Indian mobile written `98765 43210` starts with
+    `6` to `9`, so these stay redacted.
+  - Inside a URL, a phone is redacted only after a phone key in the query (`phone=`,
+    `tel=`), so `/tickets/5550100199` and `?id=12345678901` stay.
+  - Where a rule could miss a real phone, intake redacts: `build 20261011.123456` and
+    `1000-2000-3000` become `[phone]`.
+  - This is a safety net, not a guarantee. Names, street addresses and account numbers get
+    through. So do fullwidth or Arabic-Indic digits, a fullwidth `＠`, spelled-out addresses
+    (`pat [at] example [dot] com`) and numbers split by `/` or `_`. A bare national number
+    that has one of the shapes above and no phone word before it also gets through, for
+    example a Brazilian `1198765432` (area code 11). Only `feedback-jsonl` is redacted.
 - Recurrence: a dismissed or resolved feedback item comes back as `new` + `regressed` only
   for a message with a key the item has not seen and a `created_at` later than the close
   time. Re-importing an export never brings it back.

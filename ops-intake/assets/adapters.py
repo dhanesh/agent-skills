@@ -180,42 +180,111 @@ _TOPIC_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
 TOPIC_CAP = 64
 FEEDBACK_ID_CAP = KEY_CAP - len("review:")  # the evidence key <channel>:<id> fits KEY_CAP
 
-# Redaction (spec 2.3) is a safety net, not a guarantee: names, addresses and account
-# numbers still get through. URLs are found first and get no phone pass, so a long number
-# in a link is not taken for a phone; an email address is redacted everywhere, URLs too.
+# Redaction (spec 2.3, widened in the review round) is a safety net, not a guarantee:
+# names, addresses and account numbers still get through, and so do fullwidth or
+# Arabic-Indic digits, a fullwidth at sign and spelled-out addresses ("pat [at] example
+# [dot] com"). An email address is redacted everywhere, URLs too, in plain or %40 form,
+# except the git remote form git@host:path. Phone numbers are looked for outside URLs,
+# IPv4 addresses and dates; inside a URL only after a phone key (phone=, tel=, ...).
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _EMAIL_RE = re.compile(
-    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
-    r"(?![A-Za-z0-9-])")
-# A phone: digits, single groups in parentheses and one space, '.' or '-' between them,
-# with an optional leading '+'. Not part of a longer token: no letter, digit, '-', '/',
-# ':', '=', '#', '+', '.', '@' or '&' right before it, and no letter, digit, ':', '/', '@'
-# or '%' right after it, nor a '.' or '-' that runs on into a letter or digit.
+    r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+?)(?:@|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+    r"\.[A-Za-z]{2,}(?![A-Za-z0-9-])", re.I)
+_GIT_PATH_RE = re.compile(r":[A-Za-z0-9_~./-]")
+# Horizontal space only: a line break never joins a phone number.
+_WS = "[ \t\u00a0\u2007\u202f]"
+_HYPHENS = "\\-\u2010-\u2015\u2212"
+_SEP = "(?:%s*[.%s]%s*|%s+)" % (_WS, _HYPHENS, _WS, _WS)
+# A phone: digits and single groups in parentheses, with a separator (a run of spaces, or
+# one '.', '-' or Unicode dash with spaces around it) or none between them, and an
+# optional leading '+'. Not part of a longer token: no letter, digit, '-', '/', '#', '+',
+# '.', '@', '?', '&' or '%' right before it (':' and '=' only after a phone key), and no
+# letter, digit, ':', '/', '@' or '%' right after it, nor a '.' or dash that runs on into
+# a letter or digit.
 _PHONE_RE = re.compile(
-    r"(?<![A-Za-z0-9_/#@+.:=?&%-])\+?(?:\([0-9]+\)|[0-9])(?:[ .-]?(?:\([0-9]+\)|[0-9]))*"
-    r"(?![A-Za-z0-9_:/@%]|[.-][A-Za-z0-9])")
+    r"(?<![A-Za-z0-9_/#@+.?&%%-])\+?(?:\([0-9]+\)|[0-9])(?:%s?(?:\([0-9]+\)|[0-9]))*"
+    r"(?![A-Za-z0-9_:/@%%]|[.%s][A-Za-z0-9])" % (_SEP, _HYPHENS))
 PHONE_MIN_DIGITS = 10
+_KEYS = ("phone|ph|tel|telephone|mob|mobile|cell|cellphone|number|num|fax|whatsapp|"
+         "msisdn|sms")
+# A phone key right before ':' or '=' ("Phone:0770...", "tel:+1...", "number=...").
+_KEY_BEFORE_RE = re.compile(r"(?i)(?:^|[^A-Za-z])(?:%s)%s*[:=]\Z" % (_KEYS, _WS))
+# Phone context: a phone word a few characters before the number.
+_CONTEXT_RE = re.compile(r"(?i)(?<![A-Za-z])(?:%s|call|dial|ring|contact|reach)(?![A-Za-z])"
+                         r"[^\n]{0,12}\Z"
+                         % _KEYS)
+_URL_PHONE_RE = re.compile(r"(?i)((?:^|[^A-Za-z])(?:%s)[=:])((?:\+|%%2B)?[0-9][0-9.()-]*[0-9])"
+                           % _KEYS)
+# Tokens the phone pass leaves alone: URLs, IPv4 addresses, and dates (year first or
+# year last) with an optional time after them.
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+_TIME = (r"(?:(?:T|%s+)[0-9]{1,2}[:.][0-9]{2}(?:[:.][0-9]{2}(?:\.[0-9]+)?)?"
+         r"(?:Z|[+-][0-9]{2}:?[0-9]{2})?(?![0-9]))?" % _WS)
+_DAY, _MONTH = r"(?:0?[1-9]|[12][0-9]|3[01])", r"(?:0?[1-9]|1[0-2])"
+_KEEP_RE = re.compile(
+    r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*://\S+)"
+    r"|(?<![0-9.])(?:%s\.){3}%s(?![0-9]|\.[0-9])"
+    r"|(?<![0-9])(?:19|20)[0-9]{2}[-./]%s[-./]%s(?![0-9])%s"
+    r"|(?<![0-9.])%s[-./]%s[-./](?:19|20)[0-9]{2}(?![0-9])%s"
+    % (_OCTET, _OCTET, _MONTH, _DAY, _TIME, _DAY, _DAY, _TIME))
+# Number shapes that are not phones unless a phone word is near (spec review M2): an
+# epoch in seconds or milliseconds, two space-joined groups of 4+ digits that start with
+# 1-5 (Indian mobiles, 98765 43210, start with 6-9), digits grouped in threes with spaces
+# (1 234 567), and a year-first id (2026-000123-45). North American numbers never start
+# with 1 in their 10-digit form, so the epoch shape skips none of them.
+_NOT_PHONE_RE = re.compile(
+    r"1(?:[0-9]{9}|[0-9]{12})\Z|[1-5][0-9]{3,}%s+[0-9]{4,}\Z|[1-9][0-9]{0,2}(?:%s+[0-9]{3})+\Z"
+    r"|(?:19|20)[0-9]{2}-[0-9]{5,}" % (_WS, _WS))
 
 
-def _redact_plain(text):
-    text = _EMAIL_RE.sub("[email]", text)
+def _email(m):
+    s = m.string
+    if m.group(1).lower() == "git" and _GIT_PATH_RE.match(s, m.end()):
+        return m.group(0)  # a git remote, git@host:owner/repo.git
+    return "[email]"
 
+
+def _phones(seg):
     def phone(m):
-        digits = sum(c.isdigit() for c in m.group(0))
-        return "[phone]" if digits >= PHONE_MIN_DIGITS else m.group(0)
-    return _PHONE_RE.sub(phone, text)
+        s = m.group(0)
+        if sum(c.isdigit() for c in s) < PHONE_MIN_DIGITS:
+            return s
+        before = seg[max(0, m.start() - 40):m.start()]  # a window: no O(n^2) on long text
+        if before.endswith((":", "=")) and not _KEY_BEFORE_RE.search(before):
+            return s  # ref=12345678901, ts:1728640000123
+        if _NOT_PHONE_RE.match(s) and not _CONTEXT_RE.search(before):
+            return s
+        return "[phone]"
+    return _PHONE_RE.sub(phone, seg)
+
+
+def _url_phones(url):
+    def phone(m):
+        if sum(c.isdigit() for c in m.group(2)) < PHONE_MIN_DIGITS:
+            return m.group(0)
+        return m.group(1) + "[phone]"
+    return _URL_PHONE_RE.sub(phone, url)
 
 
 def redact(text):
     """text with email addresses as [email] and phone numbers (10 or more digits) as
-    [phone]. Inside a URL only email addresses are redacted: its numbers stay."""
+    [phone]. Inside a URL a phone is redacted only after a phone key (phone=, tel=)."""
+    text = _EMAIL_RE.sub(_email, text)
     out, pos = [], 0
-    for m in _URL_RE.finditer(text):
-        out.append(_redact_plain(text[pos:m.start()]))
-        out.append(_EMAIL_RE.sub("[email]", m.group(0)))  # no phone pass inside a URL
+    for m in _KEEP_RE.finditer(text):
+        out.append(_phones(text[pos:m.start()]))
+        out.append(_url_phones(m.group(0)) if m.group("url") else m.group(0))
         pos = m.end()
-    out.append(_redact_plain(text[pos:]))
+    out.append(_phones(text[pos:]))
     return "".join(out)
+
+
+FUTURE_SKEW_DAYS = 1  # a created_at later than the import clock plus this is a problem
+
+
+def _plus_days(stamp, days):
+    t = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ") + datetime.timedelta(days=days)
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _feedback_severity(rec):
@@ -250,6 +319,9 @@ def _one_feedback(rec, ctx):
     if channel not in CHANNELS:
         raise ValueError("channel must be one of %s" % ", ".join(CHANNELS))
     created = parse_time(rec.get("created_at"))
+    if created > _plus_days(ctx["now"], FUTURE_SKEW_DAYS):
+        # A problem, not a clamp: intake never rewrites a time it was given.
+        raise ValueError("created_at is more than a day after the import time")
     text = rec.get("text")
     if not isinstance(text, str):
         raise ValueError("text must be a string")
@@ -258,12 +330,16 @@ def _one_feedback(rec, ctx):
     if not isinstance(url, str) or len(url) > URL_CAP:
         raise ValueError("url must be a string of at most %d characters" % URL_CAP)
     sev = _feedback_severity(rec)
+    # An id that holds an email address or a phone number (form exports key on the
+    # respondent's address) is stored only as a stable hash, so dedupe still works.
+    if redact(mid) != mid:
+        mid = "h:" + hashlib.sha256(mid.encode("utf-8")).hexdigest()[:16]
     # Redact the whole text before _evidence caps it, so a cut cannot split an address.
     ev = _evidence(ctx, topic, redact(text), "%s:%s" % (channel, mid))
     ev["created_at"] = created
     # Whatever the record says about trust, kind or title is ignored.
-    return _signal(ctx, topic, url, "feedback", "feedback: %s" % topic, sev, created, created,
-                   "low", [ev])
+    return _signal(ctx, topic, redact(url), "feedback", "feedback: %s" % topic, sev, created,
+                   created, "low", [ev])
 
 
 def adapt_feedback(raw, ctx):

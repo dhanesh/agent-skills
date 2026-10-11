@@ -7760,10 +7760,12 @@ elif case == "recur":
     fb(root, *old, now="2026-10-06T00:00:00Z")
     fb(root, msg(3, created="2026-10-04T00:00:00Z"), now="2026-10-06T00:00:00Z")
     stayed = items(root)[iid]["state"] == "dismissed"
-    fb(root, msg(9, created="2099-01-01T00:00:00Z"), now="2026-10-06T00:00:00Z")
+    # dated 12 hours past the import clock (inside the one-day skew) and past the second
+    # dismissal, so only the seen key keeps it from regressing twice
+    fb(root, msg(9, created="2026-10-06T12:00:00Z"), now="2026-10-06T00:00:00Z")
     back = items(root)[iid]["state"] == "new" and items(root)[iid]["regressed"]
-    run(root, "dismiss", iid, "--by", "Dana", "--reason", "again", now="2026-10-07T00:00:00Z")
-    fb(root, msg(9, created="2099-01-01T00:00:00Z"), now="2026-10-08T00:00:00Z")
+    run(root, "dismiss", iid, "--by", "Dana", "--reason", "again", now="2026-10-06T06:00:00Z")
+    fb(root, msg(9, created="2026-10-06T12:00:00Z"), now="2026-10-08T00:00:00Z")
     v = int(stayed and back and items(root)[iid]["state"] == "dismissed")
 elif case == "redact":
     keep = ["version 1.2.3 and v10.4.12", "at 2026-10-11 08:20:45", "at 12:30 2026-10-11",
@@ -7776,6 +7778,37 @@ elif case == "redact":
     kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
     hid = items(root)[IN.item_id("fb", "hide")]["evidence"][0]["text"]
     v = int(kept == sorted(keep) and hid == "[email], [phone]")
+elif case == "id-url":
+    leak, phone = "pat.leak@example.com", "5550100177"
+    root = repo(CFG)
+    recs = [msg(1, id=leak, url="mailto:%s?subject=re" % leak),
+            msg(2, url="https://help.example.com/t?phone=%s&email=%s"
+                % (phone, leak.replace("@", "%40"))),
+            msg(3, id=int(phone))]
+    rc, _ = fb(root, *recs)
+    fb(root, *recs)
+    iid = IN.item_id("fb", "checkout-crash")
+    need(rc == 0 and items(root)[iid]["count"] == 3, "the three messages did not import once")
+    rc, out = run(root, "pick", iid, "--by", "Dana")
+    need(rc == 0, "pick failed")
+    blob = ""
+    for dp, _, fns in os.walk(root):
+        for fn in fns:
+            with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
+                blob += f.read()
+    v = int(not any(x in blob for x in (leak, "%40example", phone)))
+elif case == "review-fp":
+    keep = ["date 2026-10-11 2026-10-12", "11.10.2026 14.30", "ip 192.168.100.200",
+            "build 2026.10.11.1234", "order 2026-000123-45", "epoch 1728640000",
+            "ts 1728640000123", "ids 12345 67890", "latency 1 234 567 890 ns",
+            "git@github.com:owner/repo.git"]
+    root = repo(CFG)
+    fb(root, *[msg(i, topic="keep", text=t) for i, t in enumerate(keep)])
+    fb(root, msg(99, topic="hide", text="pat@example.com, 555.010.0199"))
+    kept = sorted(e["text"] for e in items(root)[IN.item_id("fb", "keep")]["evidence"])
+    hid = items(root)[IN.item_id("fb", "hide")]["evidence"][0]["text"]
+    need(hid == "[email], [phone]", "the email and phone were not redacted")
+    v = int(kept == sorted(keep))
 print(json.dumps({"v": v}))
 """
 
@@ -7813,7 +7846,21 @@ def check_intake_feedback(old, new):
              "(higher=better)",
              "versions (1.2.3, v10.4.12), a date with a time either side, a git sha, #1234, "
              "ORD-2026-000123 and a URL with long numbers stay as written, and an email and "
-             "a dotted phone are redacted. The baseline has no feedback-jsonl, an honest 0")):
+             "a dotted phone are redacted. The baseline has no feedback-jsonl, an honest 0"),
+            ("id-url", "feedback ids and urls that store no raw email or phone (higher=better)",
+             "review H1: an email address as a message id, a mailto: url, a url with phone= "
+             "and a %40 address, and a phone number as a numeric id. After import, re-import "
+             "and pick, no file under the repo holds the raw address or number; the hashed "
+             "id still dedupes (count 3). The baseline has no feedback-jsonl, an honest 0. "
+             "Mutation-proven: on the pre-review tree (e931b22) it reads 0"),
+            ("review-fp", "redaction that keeps dates, IPs, epochs, id groups and git remotes "
+             "(higher=better)",
+             "review M2: two ISO dates, a dotted date and time, an IPv4 address, a dotted "
+             "build, a year-first order id, epochs in seconds and milliseconds, two id "
+             "groups, a spaced latency and a git ssh remote stay as written, while an email "
+             "and a dotted phone in the same repo are redacted. The baseline has no "
+             "feedback-jsonl, an honest 0. Mutation-proven: on the pre-review tree "
+             "(e931b22) it reads 0")):
         a, b = _of_case(old, case), _of_case(new, case)
         row(s, dimension, a, b, a == 0 and b == 1, note, kind="delta",
             since=SINCE_INTAKE_FEEDBACK)

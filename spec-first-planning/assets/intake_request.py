@@ -19,7 +19,7 @@ it, and spec_lint.py reads a "##" line inside the fence as evidence, not as a he
 The title is untrusted too: the H1 names only the item id, and the title is a code span
 inside the evidence section, where the copy tripwire sees it, so the task plan's title
 carries no raw untrusted text. A hidden character (ESC, a bidi override, a zero-width
-space) in a code span is written as \\uXXXX.
+space) in a code span or a fenced block is written as \\uXXXX (2.7.1 for the fence).
 
 Usage:
     python3 intake_request.py <envelope.json>
@@ -34,6 +34,7 @@ vendored contract_check). Stdlib only, offline, deterministic.
 import os
 import re
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import contract_check as CC  # noqa: E402  (vendored reference checker, same dir)
@@ -81,6 +82,25 @@ def normalise_lines(text):
     return "\n".join(str(text).splitlines())
 
 
+def visible_lines(text):
+    """Evidence text for a fence: line breaks normalised, then every hidden character on
+    each line (a bidi override, a zero-width space, ESC) written as \\uXXXX, as in a code
+    span. A tab stays: it hides nothing in a fence. A lone surrogate stays too, so the
+    UTF-8 encode in main() still refuses the envelope."""
+    def keep(ch):
+        return ch == "\t" or unicodedata.category(ch) == "Cs"
+    return "\n".join("".join(ch if keep(ch) else _visible(ch) for ch in line)
+                     for line in normalise_lines(text).split("\n"))
+
+
+def fenced(text):
+    """The opener, the visible text and the closer of one fenced evidence block. The fence
+    is sized on the escaped text, so it is longer than any backtick run the file holds."""
+    text = visible_lines(text)
+    fence = fence_for(text)
+    return [fence + "text", text, fence]
+
+
 def shown(value):
     """Untrusted text as one code span, its hidden characters written as \\uXXXX."""
     return code(_visible(one_line("" if value is None else value)))
@@ -104,12 +124,10 @@ def skeleton(p):
                   field("count"), field("source"), field("source_id"), field("first_seen"),
                   field("last_seen"), field("url")))
     for n, e in enumerate(p["evidence"], start=1):
-        text = normalise_lines(e["text"])
-        fence = fence_for(text)
         out += ["", "Evidence %d: source %s, id %s, fetched %s."
                 % (n, shown(e.get("source", "")), shown(e.get("source_id", "")),
                    shown(e.get("fetched_at", ""))),
-                "", fence + "text", text, fence]
+                ""] + fenced(e["text"])
     return "\n".join(out) + "\n"
 
 

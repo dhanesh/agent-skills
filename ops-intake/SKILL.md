@@ -205,9 +205,11 @@ raises its count, so twelve people with one problem show as one item with a coun
    reply is an `external_message` action that no autonomy grant covers and the human did not
    approve. You MAY draft a reply for the human to send.
 5. **Redaction is a safety net.** Intake writes email addresses as `[email]` and phone numbers
-   as `[phone]` before it stores a message. Names, street addresses and account numbers still
-   get through, so the evidence stays in the git-ignored `.skill-contract/intake/`. Say so
-   when you report feedback items.
+   as `[phone]` before it stores a message, in its text and its `url`. A message `id` that
+   holds an address or a number is stored only as `h:<16 hex>` of its hash. Names, street
+   addresses, account numbers and spelled-out or fullwidth addresses still get through, so
+   the evidence stays in the git-ignored `.skill-contract/intake/`. Say so when you report
+   feedback items.
 
 A dismissed or resolved feedback item comes back only for a message the queue has not seen,
 written after the item was closed. Re-importing an export never brings it back.
