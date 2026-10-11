@@ -353,7 +353,7 @@ prints `REENTRY: superseded` (exit 0 both; a malformed id prints `failed`). With
 | `REENTRY: no-run` | no run under the root |
 | `REENTRY: done` | the run is finished (or `--run` names a missing run); `watch` also removes the run's timer (every kind, by run id) |
 | `REENTRY: superseded` | `--run` names an unfinished run that a newer run under the root replaced; its timer is removed |
-| `REENTRY: waiting-human` | the run is stopped with `grant_ask` |
+| `REENTRY: waiting-human` | the run is stopped with `grant_ask`, or with `budget_unmetered` (only a human can record the usage a dead session never reported) |
 | `REENTRY: exhausted` | the run is stopped with `reentry_exhausted` (every later tick, until `finish`) |
 | `REENTRY: ask` | the newest grant does not cover `local_reversible` for this plan (expired, revoked, stale, or invalid: a shell `agent_cmd` makes the whole grant invalid) |
 | `REENTRY: disabled` | the covering grant has no valid `reentry` block |
