@@ -235,6 +235,38 @@ carries unit tests, eval negatives and an A/B row:
   whether the owner's "continue with the remaining skills / steps" puts growth first. The
   unblocked hardening goes first, then step 6D, growth and monetise.
 
+- **Step 6D, growth and the money ledger (AC9, 2026-10-12).** Two more pieces were built unattended and merged:
+  - growth-review (PR #85, merge `f58d7f2`);
+  - the money ledger with its refuse-only pre-spend check in factory-conductor 1.5.0 (PR #87, merge `dcb53a5`).
+
+  The small fixes #84 and #86 also merged. Jev re-judged the repo against main at `dcb53a5` (`jev-latest`). The AC8 state and questions were reused. Only these changes were made:
+  - PR #82 is now marked as merged;
+  - #84, #85 and #87 were added to the shipped list;
+  - "not started" now holds only the launch and pricing stage, which is manual by design;
+  - one known limit was added: growth and the ledger rely on human exports and human records;
+  - the next-step options changed, because growth and hardening are done;
+  - two new questions were added, for growth and for a spend governor.
+
+  | Question | After step 6A–6C | After step 6D |
+  |---|---|---|
+  | Q1 | partly 0.76 / yes 0.24 | **yes 0.54** / partly 0.46 (uncertain, conf. 0.31) |
+  | Q2 | yes 1.00 | yes 1.00 |
+  | Q3 | yes 0.78 / partly 0.22 | yes 0.77 / partly 0.23 |
+  | Plan to open PR without the human | 0.85 | 0.82 |
+  | Merged change to verified production with only the human's yes | 0.70 | 0.73 |
+  | Production signal to approved plan without the human writing the request | 0.68 | 0.64 |
+  | Idea to approved spec through a checked brief | 0.92 | 0.92 |
+  | Repeated feedback to approved plan without the human writing the request | 0.52 | 0.89 |
+  | Falling metric to approved plan without the human writing the request | (not asked) | 0.80 |
+  | A spend governor that keeps proposals inside the budget, with every spend still the human's | (not asked) | 0.83 |
+  | Complete factory | 0.04 | 0.17 |
+
+  For the first time, Q1 leans to yes, but the answer is uncertain: 0.54 against 0.46. So the README keeps the conservative reading, partly. Every stage now has a skill, but the human still runs several of them by hand: launch and pricing, experiments, exports, merges and production deploys.
+
+  The feedback answer rose from 0.52 to 0.89. Its only state change was "#82 merged", so the rise comes from that wording, not from any new code.
+
+  The top Q3 limit is unchanged: re-entry needs the machine on and the user logged in (0.65). Spend scored 0.01 as a blocker. The next-step choice is uncertain: launch and pricing drafting 0.44, adapters 0.23 (confidence 0.30). The adapters wait for the owner's samples.
+
 Nothing else in this document has been re-measured since.
 
 ## 1. Verdicts: Claude vs Jev

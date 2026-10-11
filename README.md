@@ -66,7 +66,7 @@ in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning, Support / feedback and Growth / monetise rows are the exceptions: they describe idea-validation, release-conductor, ops-intake and growth-review as built and were not produced by the dated assessment. Jev re-judged the repo after the first four (#82 before merge; AC8, 2026-10-11): Q1 is still partly, but yes rose from 0.11 to 0.24. growth-review is re-judged after it merges.
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning, Support / feedback and Growth / monetise rows are the exceptions: they describe idea-validation, release-conductor, ops-intake and growth-review as built and were not produced by the dated assessment. Jev re-judged the repo after all five (AC9, 2026-10-12, at `dcb53a5`): Q1 leans yes (0.54 against partly 0.46, uncertain), so the table keeps the conservative reading.
 
 | Stage | Skills | Status |
 |---|---|---|
