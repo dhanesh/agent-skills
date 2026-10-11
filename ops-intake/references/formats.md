@@ -135,6 +135,9 @@ One support message, app review or form answer per line:
 - An `id` that holds an email address or a phone number (form exports often key on the
   respondent's address) is stored as `h:` and the first 16 hex characters of its sha256. The
   same id always gives the same hash, so dedupe still works. The raw id is stored nowhere.
+- A raw `id` that starts with `h:` or `r:` is stored with one more `r:` in front (`h:x`
+  becomes `r:h:x`, `r:x` becomes `r:r:x`). So a raw id can never equal a hashed id, and two
+  different raw ids never get the same key.
 - `topic` matches `^[a-z0-9]+(-[a-z0-9]+)*$` and has at most 64 characters. You (or the
   human) choose it when you transform the export. Intake never guesses a topic.
 - `channel` is `email`, `review`, `form`, `chat` or `other`.
@@ -143,7 +146,8 @@ One support message, app review or form answer per line:
 - The item key is `(source, topic)`. So messages with the same topic are one item, titled
   `feedback: <topic>`, with `source_id` = the topic and kind `feedback`. Each message is one
   piece of evidence with the key `<channel>:<id>` and the time `created_at`. A message with a
-  new key raises `count`.
+  new key raises `count`. The queue stores this key as the seen key `<source>|<channel>:<id>`
+  (see "Seen keys" below).
 - Severity: a rating decides when there is one (1 or 2 stars give 3, 3 stars give 2, 4 or 5
   stars give 1). Otherwise the record's `severity`, capped at 3. Otherwise 2. Feedback never
   reaches 4 on its own. As for every format, an item's severity only rises.
@@ -193,7 +197,24 @@ One support message, app review or form answer per line:
 - Seen keys: each item keeps every evidence key it has seen (`seen_keys`, sorted, not capped),
   and `count` grows only for a key that is not in it. So a record that the evidence cap
   dropped is not counted again when it is imported again. An item from an older queue starts
-  from the keys of the evidence it still holds. `link` merges the seen keys of both items.
+  from the keys of the evidence it still holds.
+- A seen key is `<source>|<evidence key>`. A source name cannot hold `|`. So two sources that
+  use the same evidence key count as two messages after `link`. The queue file records
+  `"key_format": 2`.
+- Migration: a queue without `key_format` is from before this rule. On load, intake adds the
+  item's own source to each of its seen keys. A feedback id that starts with `r:`, or with
+  `h:` and is not `h:` and 16 hex characters, was a raw id, so it gets the `r:` escape. A raw
+  id that looks exactly like a hash stays a hash. An item that was linked from another source
+  keeps its old keys as they are, in `legacy_keys`, because intake cannot tell which source
+  each key came from. So does an item whose link records do not name every merged item (a
+  chain of links, before `link` carried the dropped item's own links). Each legacy key
+  matches the first new key with the same old form. So a re-import does not count a message
+  again. A message that two sources shared, which the old queue counted once, can count one
+  more time, once.
+- `link <keep> <other>` merges the seen keys of both items and the link records of both. The
+  kept item's `count` becomes `keep.count + (other's keys that keep has not seen) +
+  max(0, other.count - other's keys)`. When both items track every key, that is the number of
+  distinct keys. An item from before seen keys keeps the part of its count that has no key.
 - Dedupe key: `(source, source_id)`. The item id is `I` + 10 hex of its sha256.
 - Recurrence: a dismissed or resolved item becomes `new` with `regressed` when a signal for it
   has a `last_seen` later than the time it was closed. For feedback the message must also be

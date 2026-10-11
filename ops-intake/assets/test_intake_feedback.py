@@ -383,7 +383,7 @@ class GroupingTests(unittest.TestCase):
                          (3, "feedback", "low", 3, "feedback: checkout-crash"))
         self.assertEqual((it["first_seen"], it["last_seen"]),
                          ("2026-10-01T09:00:00Z", "2026-10-03T12:00:00Z"))
-        self.assertEqual(it["seen_keys"], ["email:m-101", "form:f-33", "review:r-7"])
+        self.assertEqual(it["seen_keys"], ["fb|email:m-101", "fb|form:f-33", "fb|review:r-7"])
         self.assertNotIn("pat.example@", json.dumps(it))
         self.assertEqual(its[IN.item_id("fb", "dark-mode")]["severity"], 1)
 
@@ -478,7 +478,7 @@ class PastCapTests(unittest.TestCase):
         imp(root, lines(msg(3)))
         it = items(root)[TOPIC]
         self.assertEqual((it["count"], it["seen_keys"]),
-                         (3, ["email:m-1", "email:m-2", "email:m-3"]))
+                         (3, ["fb|email:m-1", "fb|email:m-2", "fb|email:m-3"]))
 
     def test_bad_seen_keys_is_queue_unreadable(self):
         root = repo(config=CFG)
@@ -505,7 +505,7 @@ class PastCapTests(unittest.TestCase):
         keep, drop = TOPIC, IN.item_id("fb", "pay-crash")
         cmd(root, "link", keep, drop)
         it = items(root)[keep]
-        self.assertEqual(it["seen_keys"], ["email:m-1", "email:m-2", "email:m-3"])
+        self.assertEqual(it["seen_keys"], ["fb|email:m-1", "fb|email:m-2", "fb|email:m-3"])
         before = it["count"]
         imp(root, lines(msg(1, topic="pay-crash"), msg(2, topic="pay-crash")))
         self.assertEqual(items(root)[keep]["count"], before)
