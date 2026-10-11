@@ -197,6 +197,44 @@ carries unit tests, eval negatives and an A/B row:
   - the per-class stage yes;
   - the Jira and Linear adapters, which wait for samples.
 
+- **Step 6, business loop (AC8, 2026-10-11).** Three pieces were built unattended:
+  - idea-validation (PR #80, merge `2d94bdc`);
+  - opt-in spend metering in factory-conductor 1.4.0 (PR #81, merge `3025754`);
+  - support and customer feedback through ops-intake 0.2.0 (PR #82). PR #82 was not merged when Jev judged it.
+
+  Jev re-judged the repo against main at `3025754` and the PR #82 head `96f4c48` (`jev-latest`).
+  It used the AC7 questions, with these changes:
+  - two new questions, one for ideas and one for feedback;
+  - new next-step options: growth, hardening, plugin, hosted and sweep;
+  - the `blocker` spend option now reads "spend caps are opt-in and rely on claimed usage".
+
+  | Question | After ops-intake merge | After step 6A–6C |
+  |---|---|---|
+  | Q1 | partly 0.89 / yes 0.11 | partly 0.76 / **yes 0.24** |
+  | Q2 | yes 1.00 | yes 1.00 |
+  | Q3 | yes 0.78 / partly 0.22 | yes 0.78 / partly 0.22 |
+  | Plan to open PR without the human | 0.83 | 0.85 |
+  | Merged change to verified production with only the human's yes | 0.74 | 0.70 |
+  | Production signal to approved plan without the human writing the request | 0.75 | 0.68 |
+  | Idea to approved spec through a checked brief | (not asked) | 0.92 |
+  | Repeated feedback to approved plan without the human writing the request | (not asked) | 0.52 (uncertain) |
+  | Complete factory | 0.04 | 0.04 |
+
+  Q1 stays partly, but yes rose from 0.11 to 0.24. Growth and monetise is the only stage that
+  is still missing. The feedback answer is uncertain: the human still exports the messages,
+  and the agent chooses the topics. The release and intake answers fell by 0.04 and 0.07.
+  Nothing changed in those skills, but the state text did change (the known limits were
+  rewritten). So the drop is not a measured regression. It was not tested further. The top Q3 limit is unchanged: re-entry needs the machine on and the
+  user logged in (0.73). The reworded spend option scored 0.00 as a blocker.
+
+  The first next-step answer was uncertain (hardening 0.50, growth 0.39, confidence 0.37). Its
+  hardening option included adapters that wait for the owner's samples. A second call limited
+  hardening to the unblocked follow-ups. These are the `link` count, source-namespaced
+  evidence keys, the spec_to_tasks lint record and the idea-validation `--today` guard. Jev
+  then chose hardening (0.72, confidence 0.63) over growth (0.26). It was uncertain (0.50)
+  whether the owner's "continue with the remaining skills / steps" puts growth first. The
+  unblocked hardening goes first, then step 6D, growth and monetise.
+
 Nothing else in this document has been re-measured since.
 
 ## 1. Verdicts: Claude vs Jev
