@@ -142,7 +142,7 @@ line in ops-intake's `intake-signals-jsonl` format (keys sorted):
 - `NAME` follows ops-intake's source-name rule (1 to 50 letters, digits, `_`, `.` or `-`,
   starting with a letter or digit) and is not `release`. It has to match a source in
   `.intake/config.json` whose formats list `intake-signals-jsonl`.
-- stdout holds only these lines. `STOP:` and `NOTE:` lines go to stderr.
+- stdout holds only these lines. Its own `STOP:` and `NOTE:` lines go to stderr.
 
 ## ops-intake's handling (main, 2026-10-12)
 

@@ -445,7 +445,7 @@ New skill (idea-validation 0.1.0, roadmap step 6A, 2026-10-11), written with BCP
 | c11 | 186 | You MUST NOT edit or delete files under `.skill-contract/ideas/` by hand, because… | not judged (new skill) | MUST | design spec §1.1 (atomic state, append-only ledger and log, snapshots pinned by sha256); same rule as ops-intake c7 and release-conductor c7 |
 | c12 | 189 | You MAY offer to rank the assumptions by risk with Jev, and run it only after the user agrees; the tool never calls it. | not judged (new skill) | MAY | design spec §2.4 (the agent MAY offer Jev only after the user agrees; thresholds and verdicts stay code) |
 
-## growth-review (14 candidates · 9 MUST · 0 SHOULD · 5 MAY · 0 plain · 0 departures)
+## growth-review (14 candidates · 10 MUST · 0 SHOULD · 4 MAY · 0 plain · 0 departures)
 
 New skill (growth-review 0.1.0, roadmap step 6D part 1, 2026-10-12), written with BCP 14 from the start. Jev did not judge these rows; as with idea-validation's, each level follows the rule it carries and names what enforces it. No metric value or other business figure went to Jev. The tool runs no command, opens no socket and calls no model, so most rows carry rules about what the agent does around it (what it registers, edits, exports, sends and commits), which the tool cannot see. Descriptive "never" sentences (the tool never falls back to an older period) are plain prose, not candidates.
 

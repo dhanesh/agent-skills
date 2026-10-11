@@ -134,6 +134,7 @@ class OpsIntakeOnMain(unittest.TestCase):
         rc, out = intake_run(iroot, "dismiss", iid, "--by", "Dana", "--reason", "promo ended",
                              now="2026-10-11T09:00:00Z")
         self.assertEqual(rc, 0, out)
+        self.assertEqual(intake_items(iroot)[iid]["closed_at"], "2026-10-11T09:00:00Z")
         # The same period again, later the same day: last_seen 2026-10-11T00:00Z is before
         # the dismiss, so the item stays dismissed.
         pipe(root, iroot, "2026-10-11", "2026-10-11T18:00:00Z")
