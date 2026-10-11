@@ -743,7 +743,7 @@ def ns_key(source, key):
 def _legacy_form(key, feedback):
     """The key a queue from before L4 stored for the namespaced key: no source, and a
     feedback id without the raw-id escape ("r:")."""
-    key = key.split(KEY_SEP, 1)[1]
+    key = key.partition(KEY_SEP)[2] or key  # a key without a source is its own old form
     if feedback:
         ch, _, mid = key.partition(":")
         if mid.startswith("r:"):
