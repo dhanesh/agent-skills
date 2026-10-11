@@ -149,6 +149,8 @@ class RedactTests(unittest.TestCase):
         ("phone: 5550100199", "phone: [phone]"),
         ("(555) 010 0199 or +44 20 7946 0958", "[phone] or [phone]"),
         ("both pat@example.com and 555-010-0199", "both [email] and [phone]"),
+        ("https://x.example/u?mail=pat@example.com&id=5550100199",
+         "https://x.example/u?mail=[email]&id=5550100199"),
     ]
     NEGATIVE = [
         "version 1.2.3", "on v10.4.12 and v2.0.0-rc.1", "build 10.4.12",

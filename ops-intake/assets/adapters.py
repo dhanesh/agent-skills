@@ -181,8 +181,8 @@ TOPIC_CAP = 64
 FEEDBACK_ID_CAP = KEY_CAP - len("review:")  # the evidence key <channel>:<id> fits KEY_CAP
 
 # Redaction (spec 2.3) is a safety net, not a guarantee: names, addresses and account
-# numbers still get through. URLs are masked first and kept as they are, so a long number
-# in a link is not taken for a phone; an email address is redacted everywhere else.
+# numbers still get through. URLs are found first and get no phone pass, so a long number
+# in a link is not taken for a phone; an email address is redacted everywhere, URLs too.
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S+")
 _EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
@@ -208,11 +208,11 @@ def _redact_plain(text):
 
 def redact(text):
     """text with email addresses as [email] and phone numbers (10 or more digits) as
-    [phone]. URLs are left as they are."""
+    [phone]. Inside a URL only email addresses are redacted: its numbers stay."""
     out, pos = [], 0
     for m in _URL_RE.finditer(text):
         out.append(_redact_plain(text[pos:m.start()]))
-        out.append(m.group(0))
+        out.append(_EMAIL_RE.sub("[email]", m.group(0)))  # no phone pass inside a URL
         pos = m.end()
     out.append(_redact_plain(text[pos:]))
     return "".join(out)

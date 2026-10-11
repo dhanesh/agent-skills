@@ -186,7 +186,7 @@ Support messages, app reviews and feedback-form answers come in through `feedbac
 CLI owns the inbox, the store console or the form, so the human exports the messages and you
 (or the human) transform the export: one JSON line per message with `id`, `topic`, `channel`
 (`email`, `review`, `form`, `chat` or `other`), `created_at` and `text`, and optionally
-`rating` (1 to 5), `severity` (1 to 3) and `url`. `references/formats.md` has the format.
+`rating` (1 to 5), `severity` (1 to 3; a 4 is capped at 3) and `url`. `references/formats.md` has the format.
 Messages with the same topic become one item titled `feedback: <topic>`, and each new message
 raises its count, so twelve people with one problem show as one item with a count of 12.
 
