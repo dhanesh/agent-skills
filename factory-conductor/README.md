@@ -65,9 +65,14 @@ You can stop a run at any time by revoking the grant
   the plan. Repairs per task (2 by default) and parallelism (2 by default) are enforced too.
   `--budget` can only tighten a limit the grant sets; with no grant cap it can set a higher
   `max_dispatches` than the derived one.
-- **Recorded, not enforced:** `max_tokens` and `max_usd`. The runtime does not expose usage to
-  the tool, so dispatch count is the real cost limit. The grant's `stop_on` list is recorded
-  too, but not enforced: the conductor's own stop rules apply.
+- **Token and dollar caps are opt-in:** `max_tokens` and `max_usd` are recorded. They are
+  enforced only when the grant's budget sets `enforce` (`["tokens"]`, `["usd"]` or both). The
+  runtime does not expose usage to the tool, so the agent reports each finished dispatch's
+  usage with `conductor usage`, as its harness shows it. The run stops at the cap
+  (`budget_tokens`, `budget_usd`), and it stops when a finished dispatch has no report
+  (`budget_unmetered`). The totals are claimed, so a cap is only as good as the reports.
+  Without `enforce`, dispatch count is the real cost limit. The grant's `stop_on` list is
+  recorded too, but not enforced: the conductor's own stop rules apply.
 - **The proof is only as good as the checks.** The conductor proves that a task's verify
   commands passed on that task's own commit, before it was merged. Then, before the push,
   `finish` re-runs every proven task's checks on the merged run branch: two tasks that each
