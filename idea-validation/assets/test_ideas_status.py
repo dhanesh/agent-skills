@@ -88,11 +88,36 @@ class Statuses(unittest.TestCase):
         record(root, "A1", 9, kind="desk", by="agent:claude", observed="2026-10-15")
         self.assertEqual(status(root)[0]["A1"], "pass")
 
-    def test_desk_pass_after_experiment_kill_needs_experiment(self):
+    def test_desk_pass_cannot_rescue_experiment_kill(self):
         root = registered()
         record(root, "A1", 1, observed="2026-10-10")
         record(root, "A1", 9, kind="desk", by="agent:claude", observed="2026-10-15")
-        self.assertEqual(status(root)[0]["A1"], "needs-experiment")
+        st, v, _ = status(root)
+        self.assertEqual(st["A1"], "fail")
+        self.assertEqual(v, "KILL")
+
+    def test_desk_inconclusive_cannot_rescue_experiment_kill(self):
+        root = registered()
+        record(root, "A1", 1, observed="2026-10-10")
+        record(root, "A1", 4, kind="desk", by="agent:claude", observed="2026-10-15")
+        self.assertEqual(status(root)[0]["A1"], "fail")
+
+    def test_desk_inconclusive_does_not_undo_experiment_pass(self):
+        root = registered()
+        record(root, "A1", 7, observed="2026-10-10")
+        record(root, "A1", 4, kind="desk", by="agent:claude", observed="2026-10-15")
+        self.assertEqual(status(root)[0]["A1"], "pass")
+
+    def test_desk_kill_after_experiment_pass_is_fail(self):
+        root = registered()
+        record(root, "A1", 7, observed="2026-10-10")
+        record(root, "A1", 1, kind="desk", by="agent:claude", observed="2026-10-15")
+        self.assertEqual(status(root)[0]["A1"], "fail")
+
+    def test_desk_inconclusive_alone_is_inconclusive(self):
+        root = registered()
+        record(root, "A1", 4, kind="desk", by="agent:claude")
+        self.assertEqual(status(root)[0]["A1"], "inconclusive")
 
 
 class Stale(unittest.TestCase):

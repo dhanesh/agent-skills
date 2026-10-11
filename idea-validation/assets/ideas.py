@@ -538,17 +538,20 @@ def assumption_status(a, counted, today):
         base = "open"
     else:
         latest = counted[-1]
+        if latest["kind"] == "desk" and not meets(a["kill"], latest["value"]):
+            # Desk research is weak evidence (spec D5): it can kill at any time, but it
+            # never outweighs a human's experiment in either direction. A later desk pass
+            # or in-between value neither undoes an experiment pass nor rescues an
+            # experiment kill, so the latest experiment result decides when there is one.
+            exps = [r for r in counted if r["kind"] == "experiment"]
+            if exps:
+                latest = exps[-1]
         v = latest["value"]
         if meets(a["kill"], v):
             base = "fail"
         elif meets(a["pass"], v):
             if a["critical"] and latest["kind"] == "desk":
-                # A desk pass never passes a critical assumption. A later desk pass does
-                # not undo an on-time experiment pass either: use the latest experiment.
-                exps = [r for r in counted if r["kind"] == "experiment"]
-                e = exps[-1] if exps else None
-                base = ("pass" if e and meets(a["pass"], e["value"])
-                        and _date(e["observed"]) <= by else "needs-experiment")
+                base = "needs-experiment"  # a desk pass never passes a critical assumption
             elif _date(latest["observed"]) > by:
                 base = "late"  # a deadline is part of the test
             else:
