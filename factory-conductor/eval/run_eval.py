@@ -26,7 +26,11 @@ merged run branch first), sanity-checked against the same fixture with a check t
 merged result passes, which DOES push to the scratch bare origin. The evidence-gate arm
 drives one gated task per case through the gate suite's fixtures: fresh, independent,
 SHA-bound evidence with a green doctor merges; evidence from another head, a verdict from
-the writer, a red doctor and an artifact removed after the verdict never do.
+the writer, a red doctor and an artifact removed after the verdict never do. The spend
+metering arm drives one task through to its merge under three budgets: an enforced
+run whose reported usage reaches max_tokens stops with budget_tokens; as negatives, an
+enforced run nobody metered stops with budget_unmetered, and the same run without
+`enforce` goes on.
 
 The scheduled re-entry checks (`conductor watch`) share one fixture shape, a one-task
 run aged past stall_min under a grant with a reentry block: one watch starts exactly one
@@ -260,6 +264,48 @@ def max_dispatches_one_stops_the_run_arm():
               and status(root, "T1") == "parked", out.strip())
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _spend_run(budget, meter):
+    """Two tasks under a grant whose budget is `budget`. T1 runs start -> verify -> review
+    pass -> merge; after each finished dispatch (the executor once verify records its
+    outcome, the reviewer once review does) `meter` tokens are reported with `usage`, or
+    nothing when meter is None. Returns next's (exit code, stdout) and T1's status."""
+    root = TK.repo()
+    try:
+        plan_env = TK.write_plan_envelope(root, plan=plan(
+            task("T1", [], ["true"]), task("T2", [], ["true"])))
+        TK.write_grant(root, plan_env, budget=budget)
+        run(["init", "--plan", plan_env, "--root", root])
+        run(["start", "T1", "--root", root])
+        commit_in(wt(root, "T1"), "t1.txt", "one\n")
+        run(["verify", "T1", "--root", root])
+        if meter is not None:
+            run(["usage", "T1", "--tokens", str(meter), "--root", root])
+        run(["review", "T1", "--verdict", "pass", "--root", root])
+        if meter is not None:
+            run(["usage", "T1", "--tokens", str(meter), "--root", root])
+        run(["merge", "T1", "--root", root])
+        rc, out, _ = run(["next", "--root", root])
+        return rc, out.strip(), status(root, "T1")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def spend_metering_arm():
+    """Spend metering (opt-in, budget.enforce). The positive: an enforced run whose
+    claimed usage reaches max_tokens stops with budget_tokens although T2 is ready.
+    Negatives: an enforced run with a finished dispatch nobody metered stops with
+    budget_unmetered; the same unmetered run without `enforce` goes on (READY: T2)."""
+    rc, out, st1 = _spend_run({"enforce": ["tokens"], "max_tokens": 100}, 60)
+    check("an enforced run stops at its token cap (budget_tokens) with a task still ready",
+          rc == 3 and out == "STOP: budget_tokens" and st1 == "proven", out)
+    rc, out, st1 = _spend_run({"enforce": ["tokens"], "max_tokens": 10 ** 6}, None)
+    check("NEGATIVE: an unmetered finished dispatch stops an enforced run "
+          "(budget_unmetered)", rc == 3 and out == "STOP: budget_unmetered", out)
+    rc, out, st1 = _spend_run({"max_tokens": 1}, None)
+    check("NEGATIVE: without enforce the same unmetered run goes on, its cap only recorded",
+          rc == 0 and out == "READY: T2", out)
 
 
 def merge_conflict_parks_and_run_branch_stays_clean_arm():
@@ -640,6 +686,7 @@ def main():
     revoked_grant_stops_at_next_gate_arm()
     expired_grant_stops_at_next_gate_arm()
     max_dispatches_one_stops_the_run_arm()
+    spend_metering_arm()
     merge_conflict_parks_and_run_branch_stays_clean_arm()
     merge_refuses_a_task_not_in_reviewing_status_arm()
     null_verify_is_refused_at_init_arm()

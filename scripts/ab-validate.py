@@ -261,6 +261,9 @@ SINCE_IDEA_VALIDATION = "8831798"  # idea-validation (roadmap step 6A): the camp
 SINCE_HARDENING_5 = "c6961e4"  # fix/hardening-5: the campaign's FIRST commit. The
 # allowlist check reads rules through wrappers (env, uv run, uvx, sudo, sh -c, ...) and
 # absolute or versioned interpreters. One constant for the campaign: it lands at one merge.
+SINCE_SPEND_METERING = "2bd9f4c"  # spend metering (roadmap step 6B): the campaign's FIRST
+# code commit -- budget.enforce, `usage` and the budget_unmetered/tokens/usd stops in
+# conductor.py. One constant for the campaign: it lands at one merge.
 
 
 def _git_out(*args):
@@ -7895,6 +7898,205 @@ def check_idea_validation(old, new):
         since=SINCE_IDEA_VALIDATION)
 
 
+# ── factory-conductor spend metering (roadmap step 6B) ─────────────────────
+# One fixture per case, run with the tree's own conductor and testkit: a two-task plan
+# under a grant whose budget is the case's; T1 goes start -> commit -> verify -> review
+# pass -> merge, with `usage` reported after each finished dispatch where the case says so;
+# then `next`. A baseline without spend metering drops the grant's unknown `enforce` key
+# (warned, logged) and refuses `usage` as an unknown command, so it measures an honest 0.
+_SM_PROBE = r"""
+import contextlib, hashlib, io, re, subprocess
+import conductor as C
+import conductor_testkit as TK
+CASE = @CASE@
+BUDGETS = {"tokens": ({"enforce": ["tokens"], "max_tokens": 100}, 60),
+           "unmetered": ({"enforce": ["tokens"], "max_tokens": 10 ** 6}, None),
+           "off": ({"max_tokens": 1, "max_usd": 0}, None)}
+budget, meter = BUDGETS[CASE]
+root = TK.repo()
+OK = [{"text": "ok", "command": ["true"]}]
+plan = TK.write_plan_envelope(root, {"T1": ([], OK), "T2": ([], OK)})
+TK.write_grant(root, plan, budget=budget)
+trace = []
+def step(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = C.main(list(argv) + ["--root", root])
+    text = re.sub(r"run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}", "<run>",
+                  out.getvalue().replace(root, "<root>"))
+    trace.append([argv[0], rc, re.sub(r"\b[0-9a-f]{40}\b", "<sha>", text)])
+    return rc, out.getvalue()
+step("init", "--plan", plan)
+step("start", "T1")
+wt = C.State.load(C.state_path(root)).tasks["T1"]["worktree"]
+with open(os.path.join(wt, "t1.txt"), "w") as f:
+    f.write("one\n")
+subprocess.run(["git", "-C", wt, "add", "-A"], check=True)
+subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "c"], check=True,
+               env=dict(os.environ, **TK.GIT))
+step("verify", "T1")
+if meter is not None:
+    step("usage", "T1", "--tokens", str(meter))
+step("review", "T1", "--verdict", "pass")
+if meter is not None:
+    step("usage", "T1", "--tokens", str(meter))
+step("merge", "T1")
+rc, out = step("next")
+step("status")
+want = {"tokens": "STOP: budget_tokens", "unmetered": "STOP: budget_unmetered"}.get(CASE)
+v = int(rc == 3 and out.strip() == want) if want else None
+digest = hashlib.sha256(json.dumps(trace).encode()).hexdigest()[:16]
+print(json.dumps({"v": v, "digest": digest, "next": out.strip()}))
+"""
+
+
+def _sm_case(tree, case):
+    """The spend-metering probe's result for `case` in `tree`: {v, digest, next}; None
+    (PROBE_ERRORS) when the fixture itself broke."""
+    assets = os.path.join(tree, "factory-conductor", "assets")
+    if not os.path.isfile(os.path.join(assets, "conductor_testkit.py")):
+        return {"v": 0, "digest": None, "next": None}
+    out = probe(tree, "factory-conductor/assets", _SM_PROBE.replace("@CASE@", repr(case)))
+    return None if _errored(out) else out
+
+
+def check_spend_metering(old, new):
+    s = "factory-conductor"
+    for case, dimension, note in (
+            ("tokens", "enforced runs stopped at their token cap (higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 100}; T1 merged with 60 tokens "
+             "reported after its executor and after its reviewer (120 >= 100); next prints "
+             "STOP: budget_tokens (exit 3) although T2 is ready. The baseline drops the "
+             "unknown enforce key and refuses `usage`, so T2 is READY: an honest 0. "
+             "Mutation-proven: with the tokens check removed from spend_stop it reads 0"),
+            ("unmetered", "enforced runs stopped by an unmetered finished dispatch "
+             "(higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 10^6}; T1 merged and nobody "
+             "reported usage; next prints STOP: budget_unmetered (exit 3). The baseline "
+             "goes on (READY: T2), an honest 0. Mutation-proven: with the unmetered check "
+             "removed from spend_stop it reads 0")):
+        a, b = _sm_case(old, case), _sm_case(new, case)
+        av = None if a is None else a.get("v")
+        bv = None if b is None else b.get("v")
+        row(s, dimension, av, bv, av == 0 and bv == 1, note, kind="delta",
+            since=SINCE_SPEND_METERING)
+    a, b = _sm_case(old, "off"), _sm_case(new, "off")
+    ad = None if a is None else a.get("digest")
+    bd = None if b is None else b.get("digest")
+    row(s, "runs without budget.enforce: transcript unchanged (guard)", ad, bd,
+        ad is not None and ad == bd and (b or {}).get("next") == "READY: T2",
+        "the same fixture with budget {max_tokens: 1, max_usd: 0} and no enforce: every "
+        "command's exit code and stdout (run id, root and shas masked), status included, "
+        "hash the same in both trees, and next still prints READY: T2 with T1 unmetered",
+        kind="guard")
+
+
+# ── factory-conductor spend review fixes (M1, M2) ──────────────────────────
+# "repairs" (M1): budget {enforce: [tokens], max_tokens: 10, max_repairs_per_task: 20,
+# max_dispatches: 100}; T1 goes start -> commit -> verify, then review fail -> commit ->
+# verify again, up to 25 times, and nobody reports usage. v is 1 when T1 parks with a spend
+# reason after its executor and reviewer only (2 dispatches). "stale" (M2): budget
+# {enforce: [tokens], max_tokens: 10^9}; a usage file with one record for dispatch 1 is
+# applied after T1's verify, a record for dispatch 2 is appended after its review, and the
+# whole file is applied again. v is 1 when the second apply exits 3 with a PROBLEM: for
+# line 1 and the entries are exactly dispatch 1 = 1000 tokens and dispatch 2 = 7 tokens.
+_SMR_PROBE = r"""
+import contextlib, io, subprocess
+import conductor as C
+import conductor_testkit as TK
+CASE = @CASE@
+root = TK.repo()
+OK = [{"text": "ok", "command": ["true"]}]
+plan = TK.write_plan_envelope(root, {"T1": ([], OK), "T2": ([], OK)})
+budget = ({"enforce": ["tokens"], "max_tokens": 10, "max_repairs_per_task": 20,
+           "max_dispatches": 100} if CASE == "repairs"
+          else {"enforce": ["tokens"], "max_tokens": 10 ** 9})
+TK.write_grant(root, plan, budget=budget)
+def step(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = C.main(list(argv) + ["--root", root])
+    return rc, out.getvalue()
+def commit(n):
+    wt = C.State.load(C.state_path(root)).tasks["T1"]["worktree"]
+    with open(os.path.join(wt, "t1-%d.txt" % n), "w") as f:
+        f.write("x\n")
+    subprocess.run(["git", "-C", wt, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "c"], check=True,
+                   env=dict(os.environ, **TK.GIT))
+step("init", "--plan", plan)
+step("start", "T1")
+commit(0)
+if CASE == "repairs":
+    step("verify", "T1")
+    for i in range(25):
+        rc, out = step("review", "T1", "--verdict", "fail", "--detail", "no")
+        if "PARK:" in out:
+            break
+        commit(i + 1)
+        rc, out = step("verify", "T1")
+        if "VERIFY: T1 pass" not in out:
+            break
+    st = C.State.load(C.state_path(root))
+    t = st.tasks["T1"]
+    spend = ("budget_unmetered", "budget_tokens", "budget_usd")
+    v = int(t["status"] == "parked" and t.get("park_reason") in spend
+            and st.dispatches == 2)
+    print(json.dumps({"v": v, "dispatches": st.dispatches,
+                      "park": t.get("park_reason")}))
+else:
+    path = os.path.join(tempfile.mkdtemp(), "u.jsonl")
+    step("verify", "T1")
+    with open(path, "w") as f:
+        f.write(json.dumps({"task": "T1", "dispatch": 1, "tokens": 1000}) + "\n")
+    step("usage", "--file", path)
+    step("review", "T1", "--verdict", "pass")
+    with open(path, "a") as f:
+        f.write(json.dumps({"task": "T1", "dispatch": 2, "tokens": 7}) + "\n")
+    rc, out = step("usage", "--file", path)
+    st = C.State.load(C.state_path(root))
+    got = [[e.get("dispatch"), e.get("tokens")] for e in getattr(st, "usage", [])]
+    v = int(rc == 3 and "PROBLEM: line 1:" in out and got == [[1, 1000], [2, 7]])
+    print(json.dumps({"v": v, "rc": rc, "entries": got}))
+"""
+
+
+def _smr_case(tree, case):
+    """The spend-review probe's result for `case` in `tree`; None (PROBE_ERRORS) when the
+    fixture itself broke."""
+    assets = os.path.join(tree, "factory-conductor", "assets")
+    if not os.path.isfile(os.path.join(assets, "conductor_testkit.py")):
+        return {"v": 0}
+    out = probe(tree, "factory-conductor/assets", _SMR_PROBE.replace("@CASE@", repr(case)))
+    return None if _errored(out) else out
+
+
+def check_spend_review(old, new):
+    s = "factory-conductor"
+    for case, dimension, note in (
+            ("repairs", "enforced runs whose spend stop parks an in-flight repair "
+             "(higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 10, max_repairs_per_task: 20, "
+             "max_dispatches: 100}; nobody reports usage and T1's reviewer keeps failing. "
+             "The fixed conductor parks T1 with budget_unmetered at the first failing "
+             "review, after 2 dispatches (executor, reviewer). The baseline has no spend "
+             "stop and repairs on until verify_red_after_repairs, an honest 0. "
+             "Mutation-proven: with the spend check removed from _dispatch it reads 0"),
+            ("stale", "usage files whose re-applied old record meters no wrong dispatch "
+             "(higher=better)",
+             "grant budget {enforce: [tokens], max_tokens: 10^9}; a usage file with a "
+             "record for dispatch 1 (1000 tokens) is applied, a record for dispatch 2 "
+             "(7 tokens) is appended after the review, and the file is applied again: exit "
+             "3, PROBLEM: line 1, and the entries are exactly 1->1000 and 2->7. The "
+             "baseline has no usage command, an honest 0. Mutation-proven: with the "
+             "dispatch field ignored (latest unmetered instead) it reads 0")):
+        a, b = _smr_case(old, case), _smr_case(new, case)
+        av = None if a is None else a.get("v")
+        bv = None if b is None else b.get("v")
+        row(s, dimension, av, bv, av == 0 and bv == 1, note, kind="delta",
+            since=SINCE_SPEND_METERING)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -7978,6 +8180,8 @@ def main():
         check_release_checker(old, REPO)
         check_ops_intake(old, REPO)
         check_idea_validation(old, REPO)
+        check_spend_metering(old, REPO)
+        check_spend_review(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

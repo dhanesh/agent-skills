@@ -37,7 +37,7 @@
           "type": "object",
           "required": ["reason"],
           "properties": {
-            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks", "integration_red", "reentry_exhausted"]},
+            "reason": {"type": "string", "enum": ["budget_wall_clock", "budget_dispatches", "grant_ask", "new_human_decision", "no_ready_tasks", "integration_red", "reentry_exhausted", "budget_unmetered", "budget_tokens", "budget_usd"]},
             "at": {"type": "string"},
             "detail": {"type": "string"},
             "task": {"type": "string"},
@@ -49,10 +49,23 @@
     "log": {"type": "string", "description": "Repo-relative path of autonomy-log.jsonl (local, never committed)."},
     "log_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the log's first log_bytes bytes, which end with the finish event. The log is append-only, so events after it (the push and PR gates and steps) never change that prefix."},
     "log_bytes": {"type": "integer", "minimum": 1},
-    "budget": {"type": "object", "description": "The run's budget as enforced, plus max_tokens/max_usd, which are recorded, not enforced."},
+    "budget": {"type": "object", "description": "The run's budget as enforced, plus max_tokens/max_usd, which are recorded, and enforced only for the metrics its optional enforce list names (tokens, usd)."},
     "budget_derived": {"type": "array", "items": {"type": "string"}, "description": "The budget keys init derived rather than read from the grant or --budget (max_dispatches when neither set it)."},
     "dispatches": {"type": "integer", "minimum": 0},
-    "budget_note": {"type": "string", "description": "Says that max_tokens and max_usd are recorded, not enforced: the runtime does not expose usage."},
+    "budget_note": {"type": "string", "description": "Without budget.enforce: says that max_tokens and max_usd are recorded, not enforced (the runtime does not expose usage). With it: which caps are enforced from claimed usage reports, and which are only recorded."},
+    "usage": {
+      "type": "object",
+      "required": ["tokens", "usd", "entries", "unmetered", "unknown", "trust"],
+      "description": "Optional. Present when the budget sets enforce or a usage entry was recorded. The totals of the usage entries the agent reported (conductor.py usage); they are claimed, so a cap is only as good as the reports.",
+      "properties": {
+        "tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000000, "description": "The sum over the entries with figures; usage refuses an entry that would take it past 10^12."},
+        "usd": {"type": ["number", "null"], "minimum": 0, "maximum": 1000000000, "description": "null when no entry carries a usd figure. Always finite: usage refuses an entry that would take it past 10^9."},
+        "entries": {"type": "integer", "minimum": 0, "description": "The entries with figures (trust claimed or low)."},
+        "unknown": {"type": "integer", "minimum": 0, "description": "The dispatches a human attested as unknown (usage --unknown --by NAME): metered, with no figures, so tokens and usd leave them out."},
+        "unmetered": {"type": "integer", "minimum": 0, "description": "Finished dispatches with no usage entry (or none with a figure for an enforced metric)."},
+        "trust": {"type": ["string", "null"], "enum": ["claimed", "low", null], "description": "The weakest trust among the entries with figures: claimed (the agent's harness report) or low (a JSON-lines import); null with none. Unknown entries are counted in unknown, not here."}
+      }
+    },
     "integration": {
       "type": "object",
       "required": ["head", "passed", "runs"],

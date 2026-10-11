@@ -53,6 +53,14 @@ following optional field:
 | `release` | object, optional | Marks a release grant (release-conductor): exactly `{"version": "<semver>"}`, the version `MAJOR.MINOR.PATCH` with an optional `-pre` or `+build` suffix. A release grant's subjects pin the release recipe and the release intent file instead of a spec and a plan. The checker refuses any other shape (C10). |
 | `release_defaults` | object, optional | Non-normative: spec-first-planning's unattended interview records only release defaults here — exactly `{"bump": "patch"\|"minor"\|"major", "grant_staging": bool, "grant_tag": bool}` — for a later `release prep` to apply; it never writes a release grant itself (`release` above), which `release prep` writes separately, with the human present. `write_grant.py` validates this shape strictly before writing it; the reference checker does not (there is no payload-key allowlist, so an unknown key here is not itself a C10 violation). |
 
+`budget` is an object that the consumer reads. factory-conductor knows `wall_clock_min`,
+`max_dispatches`, `max_repairs_per_task`, `max_parallel`, `max_tokens`, `max_usd` and the
+optional `enforce`. `enforce` is a list of one or both of `"tokens"` and `"usd"`, with no
+repeats. It opts the run in to stopping at `max_tokens` or `max_usd`, from usage that the agent
+reports after each finished dispatch. Each metric it names needs its cap in the same budget.
+Without `enforce`, the two caps are recorded, not enforced. `enforce` does not make `spend`
+grantable: that class stays `ask` only.
+
 The action classes are:
 
 | Class | Examples | Reversibility | Most permissive gate |
@@ -194,8 +202,13 @@ Its subjects pin the task-plan envelope the run carried out and the `autonomy-gr
 under. Its payload carries `run_id`, `plan` (id, path, sha256, title), `grant` (id, path,
 sha256), `run_branch`, `stopped` (the stop rule and when), `log_sha256` with `log_bytes` (the
 sha256 of the local, append-only autonomy log's first `log_bytes` bytes, which end with the
-`finish` event), the `budget` with a `budget_note` saying `max_tokens` and `max_usd` are
-recorded, not enforced, the worktrees left for a human, and `tasks`: each task's status, its
+`finish` event), the `budget` with a `budget_note` saying which of `max_tokens` and `max_usd`
+are enforced and which are only recorded, an optional `usage` (`{tokens, usd, entries,
+unmetered, unknown, trust}`: the totals of the usage the agent reported, present when the
+budget sets `enforce` or an entry was recorded; each entry names the dispatch it meters, and
+the totals stay finite (at most 10^12 tokens and 10^9 USD); trust is `claimed`, or `low` when
+an entry came from a user's file; `unknown` counts the dispatches that a human attested have
+no known figures, which the totals leave out), the worktrees left for a human, and `tasks`: each task's status, its
 verify commands with outcomes, the review verdict, the merge commit and the park reason. Its
 assertions are one passed `verify:<task>` per proven task, carrying that task's first verify
 command as the plan wrote it and pinning the plan envelope; parked and blocked tasks get none.

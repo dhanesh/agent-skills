@@ -70,7 +70,8 @@ key exits 2, and a key the grant does not set can be added. An unknown key in `-
 | `max_dispatches` (always; derived when unset) | one dispatch per executor start, per repair send-back, per reviewer; `start` refuses past it, a task that needs one parks with `budget_dispatches`, and `next` stops the run once nothing is in flight. When neither the grant nor `--budget` sets it, `init` sets it to tasks × 2 × (1 + `max_repairs_per_task`), one executor and one reviewer per attempt, or tasks × 3 × (1 + `max_repairs_per_task`) under the evidence gate, which adds one verifier per attempt. A verifier dispatch is spent at each passing review and each redo-able evidence reject. Each `dispatch-*` line `resume` prints spends one too (see "Resume"). Only dispatches the tool records count: a subagent an executor starts itself does not |
 | `max_repairs_per_task` (2 by default) | every failing verify or review after the first is a repair; at the cap the task parks with `verify_red_after_repairs` |
 | `max_parallel` | `start` refuses past it; `next --max` is clamped to it |
-| `max_tokens`, `max_usd` | recorded, not enforced: the runtime does not expose usage to the tool |
+| `max_tokens`, `max_usd` | recorded; enforced only for the metrics `enforce` names (see "Spend metering"). Without `enforce` they are recorded, not enforced: the runtime does not expose usage to the tool |
+| `enforce` (opt-in) | `["tokens"]`, `["usd"]` or both, no repeats. `init` refuses (exit 2) a metric whose cap the budget does not set. `--budget` may add a metric, and cannot drop one the grant names. `next`, `start` and `resume` stop the run with `budget_unmetered`, `budget_tokens` or `budget_usd` |
 
 The grant's `stop_on` list is not enforced: it is recorded in the grant, but factory-conductor
 1.0.0 applies only its own stop rules (see "Task statuses and stop reasons").
@@ -177,6 +178,42 @@ HEAD anywhere but where it was), or a merge that is not a
 two-parent merge of the expected commits, parks `merge-inconsistent` and stops the run with
 `new_human_decision`.
 
+### usage
+
+`usage <task> [--dispatch N] --tokens N [--usd X] [--source TEXT]` records the usage of one
+dispatch of the task, with trust `claimed`, and prints
+`USAGE: <task> dispatch=<n> tokens=<N> usd=<X|-> trust=claimed`. With `--dispatch`, it meters
+exactly that dispatch. The dispatch must be the task's, have no entry yet, and be finished.
+Without `--dispatch`, it meters the task's latest finished dispatch that has no entry yet.
+`status` prints the id of each unmetered dispatch (`STATUS: unmetered <task> dispatch=<n>`).
+
+`usage --file F` reads JSON-lines records `{"task", "dispatch", "tokens", "usd", "source"}`
+and applies each one with trust `low` to exactly the dispatch it names. `dispatch` is
+required. A bad record prints `PROBLEM: line <n>: <why>` and is skipped; the other records
+still apply. These records are bad: not JSON, not an object, NaN or Infinity, a bad figure,
+an unknown task, no `dispatch`, a dispatch of another task, a dispatch still in flight, and a
+dispatch that has an entry already. So a file that a transform appends to and that is applied
+again gives a `PROBLEM:` for each old line. It never meters the wrong dispatch.
+
+`usage <task> --unknown [--dispatch N] --by NAME` records a human's statement that the
+dispatch's figures cannot be known. The entry has trust `unknown`, no `tokens` and no `usd`,
+and `by` names the human. It prints `USAGE: <task> dispatch=<n> unknown by=<name>`. The
+entry clears that dispatch from `budget_unmetered`, also when `usd` is enforced. The totals
+leave it out, and `status`, the run result and the PR body count it separately. Only a human
+runs it, because it removes the meter from a dispatch.
+
+Exit 0; exit 2 for a refused single entry, bad arguments or a file that cannot be read; exit 3
+when the file had a problem record. `tokens` is an integer from 0 to 10^12, and `usd` a
+finite number from 0 to 10^9. The run's totals have the same ceilings: an entry that would
+take a total past its ceiling is refused, so the envelope never holds Infinity. When `usd` is
+enforced, every entry with figures needs a `usd` figure. `usage` works on a stopped run (that
+is how a `budget_unmetered` stop is cleared), and refuses a finished run (exit 2). On a
+run stopped for good (any stop but `grant_ask` or `budget_unmetered`) it also meters a
+dispatch that is still in flight, so that the totals include
+work that ended with the stop. Without `--dispatch` it takes the latest finished dispatch
+first. Entries go to `state.json` (`usage`, written only once there is one) and to the log as
+`usage` events. Nothing is sent anywhere.
+
 ### park and decision
 
 `park` records any reason. `decision` records the question and parks with
@@ -187,13 +224,16 @@ task cannot be parked.
 
 Prints the last recorded event, re-checks `local_reversible`, and prints `READY:`, then the
 exact next action as `NEXT:` lines (see "Resume" below). It lifts a `grant_ask` stop once a
-grant covers the run again. A stop that a crashed `finish` recorded over an earlier one (it
+grant covers the run again, and a `budget_unmetered` stop once every finished dispatch has
+its usage (while one is still unmetered it prints `STOP: budget_unmetered` and
+`NEXT: run ask`, exit 3). A stop that a crashed `finish` recorded over an earlier one (it
 carries `prior`) is first undone to that earlier stop, so a sticky stop such as
 `new_human_decision` is never lifted by a renewed grant. While the grant still asks it prints `GATE: ASK`,
 `STOP: grant_ask` and `NEXT: run ask` (exit 3): a human renews the grant, then `resume` runs
 again. Any other stop stays, and `resume` exits 3 with its `STOP:` line and
-`NEXT: run finish`. Like `next`, it records a stop rule that fires (`budget_wall_clock`,
-`budget_dispatches`, `no_ready_tasks`), prints `STOP:` and `NEXT: run finish`, and exits 3.
+`NEXT: run finish`. Like `next`, it records a stop rule that fires (the spend stops,
+`budget_wall_clock`, `budget_dispatches`, `no_ready_tasks`), prints `STOP:` and
+`NEXT: run finish` (`NEXT: run ask` for `budget_unmetered`), and exits 3.
 A `running` or `verifying` task whose worktree is gone parks with `worktree-missing`. Each
 `dispatch-*` line spends a dispatch (logged as `dispatch` with `resume: true`); a task past
 `max_dispatches` parks with `budget_dispatches` and gets no line. It logs a `resume` event.
@@ -334,7 +374,7 @@ prints `REENTRY: superseded` (exit 0 both; a malformed id prints `failed`). With
 | `REENTRY: no-run` | no run under the root |
 | `REENTRY: done` | the run is finished (or `--run` names a missing run); `watch` also removes the run's timer (every kind, by run id) |
 | `REENTRY: superseded` | `--run` names an unfinished run that a newer run under the root replaced; its timer is removed |
-| `REENTRY: waiting-human` | the run is stopped with `grant_ask` |
+| `REENTRY: waiting-human` | the run is stopped with `grant_ask`, or with `budget_unmetered` (only a human can record the usage a dead session never reported) |
 | `REENTRY: exhausted` | the run is stopped with `reentry_exhausted` (every later tick, until `finish`) |
 | `REENTRY: ask` | the newest grant does not cover `local_reversible` for this plan (expired, revoked, stale, or invalid: a shell `agent_cmd` makes the whole grant invalid) |
 | `REENTRY: disabled` | the covering grant has no valid `reentry` block |
@@ -456,6 +496,57 @@ overlapping `where` paths or shared features serialize.
 `trail` prints the per-unit record; the run-result payload carries the same list as
 `trail`, plus `evidence_gate`, and each task's `owner` and `evidence`.
 
+## Spend metering
+
+Opt-in per grant: the budget's `enforce` list. Without it nothing here applies, and `status`,
+the run result and the PR body are as before.
+
+- **Dispatch.** One `dispatch` event in the log: an executor `start`, a repair or reviewer
+  send-off from `verify` or `review`, a verifier from `review` or `evidence`, or a
+  `dispatch-*` line from `resume`. Each carries its ordinal `dispatches`, the dispatch id that
+  usage entries name.
+- **Finished.** A dispatch is finished once a later `verify`, `review`, `evidence` or `park`
+  event names its task: the conductor recorded the outcome of that work. One outcome can
+  finish two dispatches: when `resume` hands an in-flight executor out again after a crash,
+  the next `verify` finishes both. The new session can report only its own subagent, so the
+  older one stays unmetered and the run stops at `budget_unmetered` until a human records it
+  (fail closed; the spec's errata say why).
+- **Unmetered.** A finished dispatch with no usage entry, or with an entry that has no figure
+  for an enforced metric. An `unknown` entry from a human meters its dispatch.
+- **The stops.** When a task is ready and nothing is in flight, `next`, `start` and `resume`
+  check, before their other stop rules and in this order: `budget_unmetered` (a dispatch is
+  unmetered), `budget_tokens` (the claimed tokens are at or above `max_tokens`, when tokens
+  are enforced) and `budget_usd` (the claimed usd are at or above `max_usd`, when usd is
+  enforced). While work is in flight, `next` prints no `READY:` and `start` refuses (exit 2,
+  logged as `dispatch_refused` with the reason).
+- **In-flight tasks under a stop.** While a spend stop fires, no repair goes out. A failing
+  `verify`, `review` or `evidence` check parks its task with the stop's reason, and so does a
+  verifier redo. `resume` parks a task whose `dispatch-executor` or `dispatch-repair` line it
+  would print. Only the reviewer and the verifier of each in-flight task's current attempt
+  still go out. So the run overshoots a stop by at most two dispatches per in-flight task.
+  A crash re-dispatch of a reviewer or verifier by `resume` can add one more each time. A task
+  parked this way stays parked, as with `budget_dispatches`. So after a crash that left a
+  finished dispatch unmetered, record its usage before `resume`: otherwise `resume` parks
+  every task whose executor or repair is still in flight. The check leaves out the
+  dispatches that the outcome just recorded finished for that same task. The agent can record
+  their usage only after that outcome, so they do not park the task's next step. An older
+  unmetered dispatch, of any task, does park it.
+- **Lifting.** `resume` lifts `budget_unmetered` once every finished dispatch is metered.
+  `budget_tokens` and `budget_usd` stay: claimed spend does not go down. `watch` treats a
+  `budget_unmetered` stop as waiting on the human (`REENTRY: waiting-human`), because a
+  started agent cannot see the usage of the session that died.
+- **Reporting.** `status` prints `STATUS: unmetered <task> dispatch=<n> kind=<kind>` per
+  unmetered dispatch, `STATUS: usage tokens=<sum>[/<cap>] usd=<sum|->[/<cap>] entries=<n>
+  unmetered=<n> trust=<claimed|low|->[ unknown=<n>]`, and a budget note that names the
+  enforced and the recorded caps. `unknown=<n>` appears only when a human attested an entry.
+  The run result carries `usage: {tokens, usd, entries, unmetered, unknown, trust}`. Here
+  `entries` and `trust` (the weakest one) cover the entries with figures, and `unknown` counts
+  the attested entries. The PR body has a `Usage:` line, and a line for the attested entries
+  when there are any.
+- **Where the figures come from.** Claude Code shows a token count for each subagent, not a
+  dollar figure. So an enforced `usd` cap needs a user's transform (`usage --file`) or a
+  harness that reports cost.
+
 ## Task statuses and stop reasons
 
 Statuses: `pending`, `running` (started), `verifying` (verify failed, awaiting repair),
@@ -467,7 +558,9 @@ Stop reasons the tool records: `budget_wall_clock` (from `next`, `resume`, `star
 `verify`, `merge`, `resume` or `finish`), `new_human_decision` (a `merge-inconsistent` park) and
 `no_ready_tasks` (from `next` or `resume`), `integration_red` (from `finish`, when the merged
 run branch fails a proven task's own checks), and `reentry_exhausted` (from `watch`, once
-`max_reentries` agents have started). The grant's `stop_on` is not enforced.
+`max_reentries` agents have started), and, only when the budget sets `enforce`,
+`budget_unmetered`, `budget_tokens` and `budget_usd` (from `next`, `resume` or `start`; see
+"Spend metering"). The grant's `stop_on` is not enforced.
 
 Park reasons: `verify_red_after_repairs`, `budget_dispatches`, `unrunnable-verify`,
 `no-commits`, `merge-conflict`, `merge-inconsistent`, `new_human_decision`,
@@ -528,6 +621,7 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `FINISH: …`, `NEXT: run done` | the run is finished: every step done, or the integration was red | report it; nothing is left to run |
 | `PARK: <task> worktree-missing` | `running` or `verifying`, its worktree is gone | nothing: the task is done for this run |
 | `PARK: <task> budget_dispatches` | the dispatch this line would spend is past `max_dispatches` | nothing: the task is done for this run |
+| `PARK: <task> budget_unmetered`, `budget_tokens` or `budget_usd` | a spend stop fires, and this is a `dispatch-executor` or `dispatch-repair` line (see "Spend metering") | nothing: the task is done for this run |
 
 Every line starts `NEXT: `, then a task id or `run`, then the action; that grammar is stable
 for tools that read it. Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer`

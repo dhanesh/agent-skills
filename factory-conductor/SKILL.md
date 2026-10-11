@@ -7,7 +7,7 @@ description: >-
   autonomy-grant that covers it. A stdlib state tool (conductor.py) schedules tasks into waves
   from depends_on, gives each task its own git worktree, re-runs every task's verify commands
   itself as the proof, records an independent reviewer's verdict, merges proven tasks into one
-  run branch, enforces the wall-clock, dispatch, repair and parallel budgets, parks what fails,
+  run branch, enforces its budgets (token and dollar caps when the grant opts in), parks what fails,
   and ends with a run-result envelope, a pushed branch and an open PR. When the plan declares a
   verify skill, an evidence gate holds each merge until a verifier other than the writer
   records SHA-bound runtime evidence for every touched feature. Merging the PR stays human. Not the planner (spec-first-planning), not the loop designer
@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.3.0"
+  version: "1.4.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -50,7 +50,7 @@ Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --roo
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
 `EVIDENCE:`, `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`,
-`TRAIL:`, `REENTRY:`, and
+`TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, and
 `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
@@ -101,6 +101,10 @@ above the derived one: the tighten-only rule covers only keys the grant sets.
 `wall_clock_min` is enforced when set, and the grant's expiry caps the wall clock in any case:
 at most 7 days from the newest grant that covers the plan, so a newer grant extends it. The
 grant's `stop_on` is not enforced (the conductor's own stop rules below apply).
+`max_tokens` and `max_usd` are only recorded unless the budget's `enforce` list names their
+metric (`["tokens"]`, `["usd"]` or both); then the run stops at the cap, and you report usage
+after every dispatch (see "Spend metering" below). `init` refuses an `enforce` whose cap is
+unset, and `--budget` can add a metric to `enforce` but cannot drop one the grant names.
 
 ## The loop
 
@@ -120,8 +124,9 @@ Each step is one command. Read its output lines, not just the exit code.
    dispatch the executor, then `conductor owner <task> --owner <its id>` straight away: the
    owner is recorded once and never replaced, because a swapped owner could let the writer
    pass as its own verifier, and `verify` refuses a gated task whose owner is not recorded. It creates the task branch `<run_branch>--<task>` in that
-   worktree and logs a `dispatch`. An exit 2 for the parallel limit or a spent dispatch budget
-   means skip that start and carry on with the tasks in flight.
+   worktree and logs a `dispatch`. An exit 2 for the parallel limit, a spent dispatch budget, or
+   a spend stop waiting on the work in flight (`budget_unmetered`, `budget_tokens` or
+   `budget_usd` on stderr) means skip that start and carry on with the tasks in flight.
 4. **Dispatch the executor.** Send a fresh subagent the executor brief below, filled in, and
    nothing more. Ready tasks run in parallel, up to `max_parallel` (2 by default).
 5. **Verify.** On a `DONE` report, `conductor verify <task>`. It re-reads the task's commands
@@ -170,6 +175,9 @@ Each step is one command. Read its output lines, not just the exit code.
 - `STOP: <reason>` from any command (`next`, but also `start`, `verify`, `review`, `merge` or
   `resume`, for example when the wall clock runs out) ends the loop: go to step 10. From
   `resume`, follow its `NEXT:` line instead: `NEXT: run ask` waits for a renewed grant.
+  `STOP: budget_unmetered` is the exception: record the usage of every dispatch that
+  `conductor status` lists as `STATUS: unmetered`, then run `conductor resume`. If your
+  harness does not show you a figure, report the stop to the user and wait.
 - `PARK: <task> <reason>` means that task is done for this run; carry on with the rest.
 - An exit 2 that the step's own instruction above does not cover, such as the root being off
   the run branch or dirty, a merge in progress, or a plan edited since `init`, means park it:
@@ -177,11 +185,50 @@ Each step is one command. Read its output lines, not just the exit code.
 - A report that does not follow its brief's format: ask that subagent once for the format.
   If it still does not follow it, treat an executor as `BLOCKED` and a reviewer as a `fail`.
 
+**Spend metering.** This applies only when `status` shows a `STATUS: usage` line (the
+budget's `enforce` is set). A dispatch is finished once the conductor records its outcome:
+an executor or repair at its `verify`, a reviewer at its `review`, a verifier at its
+`evidence`, and any dispatch of a task at its `park`. After each finished dispatch, you MUST
+record the usage that your harness reports for that subagent before you ask for the next
+action, because the run otherwise stops at `budget_unmetered`. Run
+`conductor usage <task> --tokens <n> [--usd <x>] --source "<where you read it>"`; Claude Code
+shows a subagent's token count when it finishes, not a dollar figure, so an enforced `usd`
+cap needs a user's transform (`usage --file`) or a harness that reports cost. It meters the
+task's latest finished dispatch that has no entry yet and prints `USAGE: <task> dispatch=<n> …`;
+`--dispatch <n>` meters exactly the dispatch that `conductor status` lists as
+`STATUS: unmetered <task> dispatch=<n> kind=<kind>`. An exit 2 means nothing is left to meter
+for that task, the dispatch is not that task's, is metered already or is still in flight, or a
+figure is missing, invalid or past its ceiling (10^12 tokens or 10^9 USD, for one entry and for
+the run's total; when `usd` is enforced, give `--usd` too). You MUST NOT invent or estimate a
+usage figure, because the cap would then be fiction. A user may have a transform that writes JSON-lines records
+(`{"task", "dispatch", "tokens", "usd", "source"}`, `dispatch` required): `conductor usage
+--file <f>` applies each one with trust `low` to exactly the dispatch it names, prints a
+`PROBLEM: line <n>: …` per bad record (a record for a dispatch that has an entry already is
+one, so a re-applied file meters nothing twice) and exits 3 when there was one. When nobody
+can know a dispatch's figures, the user can attest that with `conductor usage <task> --unknown
+[--dispatch <n>] --by <name>`: the entry has trust `unknown` and no figures, it clears that
+dispatch, and the run result counts it apart (`usage.unknown`). You MUST NOT run
+`usage --unknown` yourself, because it removes the meter from a dispatch; report the
+unmetered dispatch to the user instead. On a run stopped for good (not `grant_ask`), `usage`
+also meters a dispatch that is still in flight, so the totals include the work that the stop
+cut short.
+The caps are only as good as the reports. The fail-closed rule makes sure that an agent that
+stops reporting cannot go on without limit: while a finished dispatch is unmetered, or the
+claimed total is at a cap, `next` prints no `READY:`, `start` refuses (exit 2), and no repair
+goes out. A failing verify, review or evidence check then parks its task with the stop's
+reason (`PARK: <task> budget_unmetered`, for example), and so does a verifier redo, or a
+`dispatch-executor` or `dispatch-repair` line that `resume` would print. Only the reviewer and
+the verifier of each in-flight task's current attempt still go out, so the run overshoots a
+stop by at most two dispatches per in-flight task. The dispatch whose outcome was just
+recorded does not park its own task's next step, because you can record its usage only after
+that outcome. Once nothing is in flight, the run stops with `budget_unmetered`,
+`budget_tokens` or `budget_usd`.
+
 **When nothing moves.** If `next` prints nothing and you are waiting on no subagent, run
 `conductor status` and park every in-flight task (`running`, `verifying`, `reviewing`) you are
 not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
-**Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
+**Ending the run.** When the run stops for any reason but `grant_ask` or `budget_unmetered`, you MUST stop or wait for
 the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
 as `in_flight_at_stop`. A `GATE: ASK`, followed by `REMOTE: pending …` (exit 3) naming the push, the PR or
 both, means the grant does not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
@@ -220,8 +267,14 @@ instead.
 A fresh agent session with no memory of the run can resume it: a new session, a
 `claude --continue`, or a scheduled re-entry. Run `conductor resume` and do what each `NEXT:`
 line says, in order. It first prints the last recorded step (`STATUS: run=<run-id> …`) and
-re-checks the grant; it lifts a `grant_ask` stop once a grant covers the run again, and no
-other stop. Then it prints one `NEXT:` line per in-flight task and a last line for the run.
+re-checks the grant; it lifts a `grant_ask` stop once a grant covers the run again, and a
+`budget_unmetered` stop once every finished dispatch has its usage. It lifts no other stop.
+A `budget_unmetered` stop that it cannot lift prints `NEXT: run ask`. After a crash, the
+dispatches of the dead session are usually unmetered, because a new session cannot see
+them: the run stays stopped until the user records them with `conductor usage` (or attests
+them with `usage --unknown`) and resumes it. A task whose executor or repair is still in
+flight at that `resume` parks with `budget_unmetered` and stays parked, so the user records
+the missing usage before the resume when that task is to go on. Then it prints one `NEXT:` line per in-flight task and a last line for the run.
 A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `running` or
 `verifying` task whose worktree is gone prints `PARK: <task> worktree-missing` instead.
 
@@ -246,8 +299,9 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   the run branch, `merge` finds that merge, records the task as proven and prints `MERGE:`.
 - `NEXT: run next`: carry on with the loop from step 2.
 - `NEXT: run ask`: the grant asks (`GATE: ASK`, `STOP: grant_ask`; on a finished run, the
-  gate of its pending push or PR). Report it to the user and wait; once they renew the
-  grant, run `conductor resume` again.
+  gate of its pending push or PR), or a finished dispatch has no usage (`STOP: budget_unmetered`).
+  Report it to the user and wait; once they renew the grant, or record the missing usage with
+  `conductor usage`, run `conductor resume` again.
 - `NEXT: run finish`: the run is stopped (its `STOP:` line says why, and `resume` records a
   stop rule that fires, as `next` does) or nothing is left to do: go to "Ending the run". On
   a finished run (resume prints its `FINISH:` line) it means a remote step is pending and
@@ -480,7 +534,9 @@ change rather than worked around in silence.
 - **Parking does not stop the run.** The parked task's dependents become `blocked`, and every
   other ready task continues. A parked task's worktree and branch are kept for the human.
 - **What stops the run.** `next` stops it with `budget_wall_clock`, `budget_dispatches` or
-  `no_ready_tasks` (the normal end: nothing left to do); `start`, `verify`, `review` and
+  `no_ready_tasks` (the normal end: nothing left to do), and, when the budget's `enforce` is
+  set, first with `budget_unmetered`, `budget_tokens` or `budget_usd` (`start` and `resume`
+  too); `start`, `verify`, `review` and
   `merge` can stop it with `budget_wall_clock` too, and `start` with `budget_dispatches`. A
   `GATE: ASK` on `start`, `verify`, `merge` or `resume` stops it with `grant_ask`: the grant
   expired or was revoked, its spec or plan went stale, or the root left a branch the grant
@@ -504,8 +560,9 @@ with its reason or question, `blocked` with the task it waits on), the stop reas
 integration result (`INTEGRATION: pass <sha>`, the failing lines, or `skipped`), the
 budget spent, and, when the grant allows re-entry, the attempt count from
 `conductor reentry status`.
-The report MUST state that `max_tokens` and `max_usd` were recorded, not enforced, as
-`conductor status` does. Name the grant id and each action class the run used. Say whether
+The report MUST state which of `max_tokens` and `max_usd` were enforced and which were only
+recorded, as `conductor status` does, and, when one was enforced, the claimed usage totals
+and their trust. Name the grant id and each action class the run used. Say whether
 the evidence gate was on; when it was, give each proven task's evidence paths and verdict
 agent. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
 owner, worktree, verified commit, reviewer, verdict agent, evidence paths, merge outcome);
@@ -542,7 +599,10 @@ grant sets none, and the grant's expiry caps the wall clock at 7 days even witho
 `wall_clock_min`. Repairs per task and parallelism are bounded too. `max_dispatches` counts
 the dispatches the conductor records, including each one `resume` asks for; a subagent an
 executor starts against its brief is not counted. `max_tokens` and `max_usd` are recorded,
-not enforced: the runtime does not expose usage to the tool.
+and enforced only when the grant's `enforce` opts in. The runtime does not expose usage to
+the tool, so an enforced cap counts the usage that the agent claims (`usage`, trust
+`claimed`) or that a user's file adds (trust `low`). The tool reads no billing API and
+converts no tokens to dollars.
 
 The run result's assertions are claims. To a receiver they read as CLAIMED, because the
 conductor wrote the envelope; they become PROVEN when a receiver re-runs them
@@ -591,4 +651,6 @@ them.
 - **Not a merger.** The conductor merges tasks into its own run branch only. You MUST leave
   merging the run branch or the PR into the default branch to the human; a grant cannot cover
   `merge`.
-- **Not a spend governor.** Token and dollar caps are recorded, not enforced.
+- **Not a project spend governor.** A grant that opts in gets run token and dollar caps,
+  enforced from claimed usage reports. There is no project money ledger, and `spend` stays an
+  ask-class action that no grant covers.

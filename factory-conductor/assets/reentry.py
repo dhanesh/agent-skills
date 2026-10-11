@@ -247,7 +247,9 @@ def decide(finished, stopped_reason, covered, block, live, idle_min, count):
     """The watch decision; the first failing check wins, in spec section 3's order."""
     if finished:
         return "done"
-    if stopped_reason == "grant_ask":
+    if stopped_reason in ("grant_ask", "budget_unmetered"):
+        # budget_unmetered: only a human can record the usage a dead session never
+        # reported; a started agent would end the run instead.
         return "waiting-human"
     if stopped_reason == "reentry_exhausted":
         return "exhausted"  # watch's own stop event must not make it look fresh again
