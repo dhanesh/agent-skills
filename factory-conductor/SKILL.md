@@ -209,7 +209,7 @@ claimed total is at a cap, the work in flight goes on to its outcome, `next` pri
 `conductor status` and park every in-flight task (`running`, `verifying`, `reviewing`) you are
 not waiting on, with the reason it is stuck. Otherwise the run cannot end.
 
-**Ending the run.** When the run stops for any reason but `grant_ask`, you MUST stop or wait for
+**Ending the run.** When the run stops for any reason but `grant_ask` or `budget_unmetered`, you MUST stop or wait for
 the subagents still working, then run `conductor finish`: it is how a stopped run ends, and it parks any task still in flight
 as `in_flight_at_stop`. A `GATE: ASK`, followed by `REMOTE: pending …` (exit 3) naming the push, the PR or
 both, means the grant does not cover that remote step: report it. `conductor finish --retry-remote` runs just the pending
@@ -278,8 +278,9 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   the run branch, `merge` finds that merge, records the task as proven and prints `MERGE:`.
 - `NEXT: run next`: carry on with the loop from step 2.
 - `NEXT: run ask`: the grant asks (`GATE: ASK`, `STOP: grant_ask`; on a finished run, the
-  gate of its pending push or PR). Report it to the user and wait; once they renew the
-  grant, run `conductor resume` again.
+  gate of its pending push or PR), or a finished dispatch has no usage (`STOP: budget_unmetered`).
+  Report it to the user and wait; once they renew the grant, or record the missing usage with
+  `conductor usage`, run `conductor resume` again.
 - `NEXT: run finish`: the run is stopped (its `STOP:` line says why, and `resume` records a
   stop rule that fires, as `next` does) or nothing is left to do: go to "Ending the run". On
   a finished run (resume prints its `FINISH:` line) it means a remote step is pending and
