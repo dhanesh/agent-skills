@@ -271,7 +271,7 @@ SINCE_INTAKE_FEEDBACK = "e72a5fa"  # ops-intake feedback (roadmap step 6C): the 
 SINCE_FACTORY_HARDENING = "06018f7"  # fix/factory-hardening: the campaign's FIRST commit,
 # ops-intake's link count (L3) and source-namespaced seen keys (L4); idea-validation's
 # --today test clock (L5) came next. One constant for the campaign: it lands at one merge.
-SINCE_GROWTH_REVIEW = "fbc2a03"  # growth-review (roadmap step 6D, part 1): the campaign's
+SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the campaign's
 # FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
 
 
