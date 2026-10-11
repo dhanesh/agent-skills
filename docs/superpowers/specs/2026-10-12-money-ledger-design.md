@@ -150,3 +150,8 @@ The build follows this design. These points were changed or made exact while bui
 - **A recurring proposal covers at most 120 months** and ends by 9999-12. Month arithmetic
   uses plain integers.
 - **`status` is read-only:** it takes no lock and creates no file.
+- **Known limit: the skill description does not name the ledger.** The SKILL.md rule says
+  the agent runs `check` before any spend proposal, in any session. But an agent reads that
+  rule only when factory-conductor loads, and the frontmatter description is about running a
+  plan. The description is at 1015 of its 1024 characters, so it was not changed. A later
+  change can shorten it and add the ledger.

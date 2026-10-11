@@ -55,8 +55,8 @@ npx skills add dhanesh/agent-skills --skill growth-review
 - The committed plan can show your revenue targets. The data itself is git-ignored.
 - A month or week that is still running is refused as a future period. Export finished
   periods only.
-- No launch or pricing checklist, no money ledger, no forecasts and no statistics. Launch and
-  pricing stay manual.
+- No launch or pricing checklist, no money ledger (factory-conductor 1.5.0 has one), no
+  forecasts and no statistics. Launch and pricing stay manual.
 - When a metric recovers, nothing closes the ops-intake item. You resolve or dismiss it there.
   A dismissed item comes back at the next breached period.
 
