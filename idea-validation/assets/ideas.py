@@ -58,6 +58,9 @@ KINDS = ("experiment", "desk")
 DECISIONS = ("go", "kill", "pivot")
 
 SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+# Directory names under .skill-contract/ideas/ that are not ideas: an idea with one of these
+# slugs would mix its state with the envelopes or the idea specs.
+RESERVED_SLUGS = ("envelopes", "specs")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 AID_RE = re.compile(r"^A[1-9][0-9]{0,3}\Z")
 
@@ -159,7 +162,8 @@ _FIELDS_TAIL = re.compile(r"^(?P<stmt>.*)\((?P<fields>\s*test\s*:.*)\)\s*$")
 _FIELD_SPLIT = re.compile(r";\s*(?=(?:test|metric|pass|kill|by)\s*:)")
 _FIELD_KV = re.compile(r"^\s*(test|metric|pass|kill|by)\s*:\s*(.*?)\s*$", re.S)
 _THRESHOLD_RE = re.compile(r"^(>=|>|<=|<)\s*([-+]?\d+(?:\.\d+)?)\Z")
-_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*)$")
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+_LOOKS_LIKE_ASSUMPTION = re.compile(r"\bA\d+\s*\[")
 _ID_REF = re.compile(r"\bA(\d+)\b")
 
 
@@ -287,6 +291,11 @@ def parse_brief(text):
             a = _parse_assumption(line, problems)
             if a:
                 assumptions.append(a)
+        elif _LOOKS_LIKE_ASSUMPTION.search(line):
+            # Never silently drop a line that looks like an assumption: a bare `A4 [...]`
+            # line would otherwise vanish from the registration and from the verdict.
+            problems.append("line %s looks like an assumption but is not a `- A<n> ...` "
+                            "bullet" % code(line))
     if "riskiest assumptions" in sections:
         if not ns:
             problems.append("no assumption lines under `## Riskiest assumptions`")
@@ -349,12 +358,30 @@ def _ideas_dir(root):
     return os.path.join(root, *IDEAS_DIR.split("/"))
 
 
+def _gitignore_lines(path):
+    with open(path, encoding="utf-8") as f:
+        return [l.strip() for l in f.read().splitlines()]
+
+
 def _gitignore_ok(path):
+    """True when the file holds `*` and no negation: a `!` line re-includes what `*`
+    ignored, so the results could be committed."""
     try:
         if os.path.islink(path) or not os.path.isfile(path):
             return False
-        with open(path, encoding="utf-8") as f:
-            return "*" in [l.strip() for l in f.read().splitlines()]
+        lines = _gitignore_lines(path)
+        return "*" in lines and not any(l.startswith("!") for l in lines)
+    except (OSError, ValueError):
+        return False
+
+
+def _gitignore_negates(path):
+    """True when an existing regular file has a `!` line. The tool refuses it rather than
+    overwrite it, because someone un-ignored part of the directory on purpose."""
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        return any(l.startswith("!") for l in _gitignore_lines(path))
     except (OSError, ValueError):
         return False
 
@@ -377,6 +404,8 @@ def _ensure_dir(root):
     gi = os.path.join(d, ".gitignore")
     if os.path.isdir(d) and _gitignore_ok(gi):
         return d
+    if _gitignore_negates(gi):
+        raise NotIgnored("%s/.gitignore has a `!` line that un-ignores files" % IDEAS_DIR)
     if os.path.lexists(gi) and not os.path.isfile(gi) or os.path.islink(gi):
         raise NotIgnored("%s/.gitignore is not a regular file" % IDEAS_DIR)
     try:
@@ -541,11 +570,12 @@ def assumption_status(a, counted, today):
         if latest["kind"] == "desk" and not meets(a["kill"], latest["value"]):
             # Desk research is weak evidence (spec D5): it can kill at any time, but it
             # never outweighs a human's experiment in either direction. A later desk pass
-            # or in-between value neither undoes an experiment pass nor rescues an
-            # experiment kill, so the latest experiment result decides when there is one.
-            exps = [r for r in counted if r["kind"] == "experiment"]
-            if exps:
-                latest = exps[-1]
+            # or in-between value undoes neither an experiment result nor an earlier desk
+            # kill, so the latest experiment result or desk kill decides when there is one.
+            decisive = [r for r in counted
+                        if r["kind"] == "experiment" or meets(a["kill"], r["value"])]
+            if decisive:
+                latest = decisive[-1]
         v = latest["value"]
         if meets(a["kill"], v):
             base = "fail"
@@ -591,48 +621,63 @@ def compute(st, results, today):
     return rows, v
 
 
+REPLACED_FIELDS = ("statement",) + FIELDS
+
+
 def dropped_critical(st, results):
-    """Every assumption id that was critical in an earlier registration and is normal or
-    deleted in the latest one: [{id, statement, last_critical_registration, had_results}].
+    """Every assumption id that was critical in an earlier registration and is not the same
+    critical assumption in the latest one: [{id, statement, last_critical_registration,
+    had_results, reason}]. reason is `demoted` (normal now), `deleted` (absent now) or
+    `replaced` (critical now, but its statement and every one of test, metric, pass, kill
+    and by differ from the latest earlier registration where the id was critical, as when
+    a failed critical A1 swaps places with a normal A3).
 
     This is the goalpost flag (owner-proxy decision, Jev 0.97: flag it, not refuse or
     stale it). Demoting a critical assumption after its result came in moves the
     goalposts as surely as a threshold edit, but the human may have a good reason, so the
     tool surfaces it in status, decide and the handoff instead of blocking. Tracking is by
-    assumption id: the statement is the one from the latest registration where the id was
-    critical, and had_results is true when a result was recorded for the id under a
-    registration in which it was critical. A limit: deleting A2 and renumbering the old A3
-    to A2 reads as an edit of A2, not a deletion."""
+    assumption id: the statement is the one from the latest earlier registration where the
+    id was critical, and had_results is true when a result was recorded for the id under
+    an earlier registration in which it was critical. Limits: a partial edit (one field
+    kept) reads as an edit, not a replacement, and a replacement is judged against the
+    latest earlier critical version only, so registering the replacement again with a
+    small edit clears the `replaced` flag."""
     current = st["registrations"][-1]["assumptions"]
-    found, crit_regs = {}, {}
+    last, crit_regs = {}, {}
     for reg in st["registrations"][:-1]:
         for aid, x in reg["assumptions"].items():
-            if not x.get("critical"):
-                continue
-            now = current.get(aid)
-            if now is not None and now.get("critical"):
-                continue
-            found[aid] = {"id": aid, "statement": x.get("statement", ""),
-                          "last_critical_registration": reg["sha256"]}
-            crit_regs.setdefault(aid, set()).add(reg["sha256"])
+            if x.get("critical"):
+                last[aid] = (reg["sha256"], x)
+                crit_regs.setdefault(aid, set()).add(reg["sha256"])
     out = []
-    for aid in sorted(found, key=lambda x: int(x[1:])):
-        d = found[aid]
-        d["had_results"] = any(r.get("assumption") == aid
-                               and r.get("registration") in crit_regs[aid] for r in results)
-        out.append(d)
+    for aid in sorted(last, key=lambda x: int(x[1:])):
+        sha, then = last[aid]
+        now = current.get(aid)
+        if now is None:
+            reason = "deleted"
+        elif not now.get("critical"):
+            reason = "demoted"
+        elif all(then.get(f) != now.get(f) for f in REPLACED_FIELDS):
+            reason = "replaced"
+        else:
+            continue
+        out.append({"id": aid, "statement": then.get("statement", ""),
+                    "last_critical_registration": sha, "reason": reason,
+                    "had_results": any(r.get("assumption") == aid
+                                       and r.get("registration") in crit_regs[aid]
+                                       for r in results)})
     return out
 
 
-def _print_dropped(dropped, current):
+def _print_dropped(dropped):
     if not dropped:
         return
-    print("NOTE: dropped-critical %s: critical in an earlier registration, not critical "
-          "now; the handoff lists them" % ", ".join(d["id"] for d in dropped))
+    print("NOTE: dropped-critical %s: critical in an earlier registration, and now demoted, "
+          "deleted or replaced; the handoff lists them" % ", ".join(d["id"] for d in dropped))
     for d in dropped:
-        print("NOTE: dropped-critical %s now %s, results under a critical registration: %s, "
-              "statement %s" % (d["id"], "normal" if d["id"] in current else "deleted",
-                                "yes" if d["had_results"] else "no", code(d["statement"])))
+        print("NOTE: dropped-critical %s %s, results under a critical registration: %s, "
+              "statement %s" % (d["id"], d["reason"], "yes" if d["had_results"] else "no",
+                                code(d["statement"])))
 
 
 def _fmt(v):
@@ -644,9 +689,18 @@ def _brief_rel(slug):
     return "%s/%s.md" % (BRIEFS_DIR, slug)
 
 
+def _slug_valid(slug):
+    return (isinstance(slug, str) and bool(SLUG_RE.match(slug)) and len(slug) <= 64
+            and slug not in RESERVED_SLUGS)
+
+
 def _slug_ok(slug):
-    if isinstance(slug, str) and SLUG_RE.match(slug) and len(slug) <= 64:
+    if _slug_valid(slug):
         return True
+    if slug in RESERVED_SLUGS:
+        print("STOP: slug %s is reserved (%s); pick another slug"
+              % (code(slug), ", ".join(RESERVED_SLUGS)))
+        return False
     print("STOP: slug %s must be kebab-case (a-z, 0-9 and single dashes, at most 64)"
           % code(slug))
     return False
@@ -726,6 +780,9 @@ def cmd_register(a):
     base = os.path.basename(path)
     slug = base[:-3] if base.endswith(".md") else ""
     expect = os.path.join(a.root, BRIEFS_DIR, slug + ".md")
+    if slug in RESERVED_SLUGS:
+        _slug_ok(slug)  # prints the reserved-slug STOP line
+        return 2
     if not (SLUG_RE.match(slug) and os.path.realpath(path) == os.path.realpath(expect)):
         print("STOP: register takes %s/<slug>.md under --root" % BRIEFS_DIR)
         return 2
@@ -918,7 +975,7 @@ def cmd_status(a):
         print("EXPERIMENT: %d %s %s" % (e["n"], "outward" if e["outward"] else "inward",
                                         ",".join(e["ids"])))
     print("VERDICT: %s" % verdict)
-    _print_dropped(dropped_critical(st, results), reg["assumptions"])
+    _print_dropped(dropped_critical(st, results))
     if _brief_changed(a.root, a.slug, st):
         print("NOTE: %s changed since its last registration; register it again"
               % _brief_rel(a.slug))
@@ -977,7 +1034,7 @@ def cmd_decide(a):
     if override:
         print("NOTE: this decision overrides the computed verdict %s; the handoff says so"
               % computed)
-    _print_dropped(dropped, st["registrations"][-1]["assumptions"])
+    _print_dropped(dropped)
     if a.verdict == "go":
         print("NEXT: the human runs handoff %s --by NAME" % a.slug)
     elif a.verdict == "pivot":
@@ -1105,7 +1162,7 @@ def cmd_handoff(a):
         print("NOTE: this go overrides the computed verdict %s; the envelope says so" % verdict)
     if payload["open_risks"]:
         print("NOTE: open risks: %s" % ", ".join(payload["open_risks"]))
-    _print_dropped(dropped, reg["assumptions"])
+    _print_dropped(dropped)
     print("ENVELOPE: %s" % env_rel)
     print("NEXT: run spec-first-planning with %s" % env_rel)
     return 0
@@ -1116,11 +1173,11 @@ def cmd_list(a):
     slugs = set()
     with contextlib.suppress(OSError):
         for n in os.listdir(os.path.join(a.root, BRIEFS_DIR)):
-            if n.endswith(".md") and SLUG_RE.match(n[:-3]):
+            if n.endswith(".md") and _slug_valid(n[:-3]):
                 slugs.add(n[:-3])
     with contextlib.suppress(OSError):
         for n in os.listdir(_ideas_dir(a.root)):
-            if SLUG_RE.match(n) and os.path.isfile(os.path.join(a.root, *_state_rel(n).split("/"))):
+            if _slug_valid(n) and os.path.isfile(os.path.join(a.root, *_state_rel(n).split("/"))):
                 slugs.add(n)
     for slug in sorted(slugs):
         title = ""

@@ -35,7 +35,10 @@ handoff; 3 the lock is held.
   ```
 
   `<op>` is `>=`, `>`, `<=` or `<`. The number is a finite decimal.
-- Each experiment in `## Experiments` is one `- ` bullet. It names the assumption ids it tests
+- A line under `## Riskiest assumptions` that looks like an assumption (`A<n> [`) but is not
+  a valid `- A<n> …` line is a fault. The tool never drops it silently. So `+ A4 [critical] …`,
+  `1. A4 [critical] …` and a bare `A4 [critical] …` each give a `PROBLEM:` line.
+- Each experiment in `## Experiments` is one bullet: `- `, `* `, `+ `, `1. ` or `1) `. It names the assumption ids it tests
   (`A1`, `A2`). Start it with `[outward]` when it publishes, sends, spends or contacts a
   person. A human runs every outward experiment.
 
@@ -48,6 +51,7 @@ handoff; 3 the lock is held.
 | Ids | the ids do not run A1..An in order, with no gaps or repeats |
 | Critical | no assumption is `[critical]` |
 | Fields | a severity or category is not in its list; the statement or a field is empty; a field appears twice |
+| Unparsed lines | a line under `## Riskiest assumptions` has `A<n> [` but is not a valid `- A<n> …` line |
 | Thresholds | `pass` or `kill` is not `<op> <number>`; they point the same way; they overlap (some value meets both) |
 | Deadline | `by` is not a real date |
 | Experiments | no experiment bullet; a bullet names no assumption id; a bullet names an unknown id |
@@ -92,10 +96,11 @@ The status comes from the latest counted result by `observed` date (ties by reco
 | `inconclusive` | the value is between `pass` and `kill` |
 | `expired` | the deadline has passed and the status is not `pass` or `fail`. A passing result observed after the deadline lands here, because a deadline is part of the test |
 
-**Mixed evidence.** When the latest result is `desk` and does not meet `kill`, and an
-`experiment` result exists, the latest `experiment` result decides. So desk research can kill
-at any time, but a desk pass or an in-between desk value never rescues an experiment kill or
-undoes an experiment pass.
+**Mixed evidence.** When the latest result is `desk` and does not meet `kill`, the latest
+result that is an `experiment` result or a `desk` kill decides. When there is no such result,
+the desk result decides. So desk research can kill at any time, and a later desk pass or
+in-between desk value never undoes a desk kill, rescues an experiment kill or undoes an
+experiment pass. A later `experiment` result does decide over an earlier desk kill.
 
 ## Verdict
 
@@ -107,17 +112,27 @@ undoes an experiment pass.
 ## Dropped critical assumptions
 
 An assumption id is **dropped critical** when it was `critical` in some earlier registration
-and, in the latest registration, it is `normal` or absent. The tool does not refuse this. It
-prints:
+and, in the latest registration, one of these is true. Each has a `reason`:
+
+- `demoted`: the id is `normal`.
+- `deleted`: the id is absent.
+- `replaced`: the id is `critical`, but its statement and every one of `test`, `metric`,
+  `pass`, `kill` and `by` differ from the latest earlier registration where it was critical.
+  An example is a failed critical A1 that swaps places with a normal A3.
+
+The tool does not refuse this. It prints:
 
 ```
-NOTE: dropped-critical A2, A3: critical in an earlier registration, not critical now; the handoff lists them
-NOTE: dropped-critical A2 now normal, results under a critical registration: yes, statement `…`
+NOTE: dropped-critical A2, A3: critical in an earlier registration, and now demoted, deleted or replaced; the handoff lists them
+NOTE: dropped-critical A2 demoted, results under a critical registration: yes, statement `…`
 ```
 
 in `status`, `decide` and `handoff`, and lists each one in the payload's `dropped_critical`.
 The flag does not change the verdict. Tracking is by id. If you delete A2 and renumber A3 to
-A2, the tool sees an edit of A2. Promoting the id back to critical clears the flag.
+A2, the tool sees an edit of A2 when one field stays the same, and a replacement when all of
+them change. A replacement is compared only with the latest earlier critical version, so a
+second registration with a small edit clears `replaced`. Promoting the id back to critical
+clears `demoted`.
 
 ## Decisions
 
@@ -148,14 +163,17 @@ The schema is `assets/schemas/idea-brief.v1.json`.
  assumptions: [{id, critical, category, statement, test, metric, pass, kill, by, status,
                 results: [{value, kind, source, observed, by, evidence, truncated, claim}]}],
  open_risks: [ids of assumptions that are not pass],
- dropped_critical: [{id, statement, last_critical_registration, had_results}]}
+ dropped_critical: [{id, statement, last_critical_registration, had_results, reason}]}
 ```
 
 - `results` holds only counted (not stale) results. Each has `claim: "claimed"`.
 - `dropped_critical` is always present. It is empty when none is dropped.
   `last_critical_registration` is the sha256 of the latest registration where the id was
   critical. `had_results` is true when a result was recorded for the id under a registration
-  where it was critical.
+  where it was critical. `reason` is `demoted`, `deleted` or `replaced`.
+- spec-first-planning refuses a payload that contradicts itself: `decision.override` must equal
+  "`computed_verdict` is not `GO`", `open_risks` must be exactly the ids whose status is not
+  `pass`, and `computed_verdict` must follow from the critical statuses by the verdict rules.
 - `source` and `evidence` are untrusted. The brief text can also come from desk research.
 
 ## Machine lines
@@ -181,6 +199,10 @@ The schema is `assets/schemas/idea-brief.v1.json`.
 - The brief is `ideas/<slug>.md`. The human chooses whether to commit it.
 - The snapshots, `state.json`, `results.jsonl`, `log.jsonl` and the envelopes are under
   `.skill-contract/ideas/`. The tool writes `.skill-contract/ideas/.gitignore` with `*` before
-  its first write and stops with exit 2 when it cannot prove the directory is ignored.
+  its first write and stops with exit 2 when it cannot prove the directory is ignored. A
+  `.gitignore` there with a `!` line (a negation that un-ignores files) also stops the tool
+  with exit 2. The tool does not overwrite it.
+- The slugs `envelopes` and `specs` are reserved, because they are directory names under
+  `.skill-contract/ideas/`. Every command that takes a slug refuses them.
 - State files are written by atomic replace. The results and the log are append-only. One lock
   (`.skill-contract/ideas/.lock`) covers every writing command.

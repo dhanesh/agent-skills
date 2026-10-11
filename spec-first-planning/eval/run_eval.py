@@ -27,7 +27,8 @@ evidence passes lint with a NOTE and gets a WARNING after its CHECK_COMMAND line
 the plan payload names the item. The idea arm (2.7.0) turns an idea-brief/v1 envelope
 with hostile evidence into a request skeleton and checks that the evidence adds no
 section, criterion, command or idea slug (NEGATIVE), that a wrong-kind envelope and a
-decision that is not go each exit 2 (NEGATIVE), that an override go is shown under the
+decision that is not go each exit 2 (NEGATIVE), that an envelope that hides its verdict
+behind override false exits 2 (NEGATIVE), that an override go is shown under the
 heading, and that the plan prints IDEA: and names the slug in `ideas`. Stdlib-only,
 offline, no repo writes.
 """
@@ -669,12 +670,17 @@ def idea_arm():
                     "assumptions": [{"id": "A1", "critical": True, "category": "demand",
                                      "statement": "People want it", "test": "interviews",
                                      "metric": "yes answers", "pass": ">= 5", "kill": "< 2",
-                                     "by": "2026-10-09", "status": "pass",
-                                     "results": [{"value": 6, "kind": "experiment",
+                                     "by": "2026-10-09",
+                                     # an override go needs a non-GO verdict, so A1 is
+                                     # inconclusive and an open risk (the payload must
+                                     # agree with itself, or idea_request.py refuses it)
+                                     "status": "inconclusive" if override else "pass",
+                                     "results": [{"value": 3 if override else 6,
+                                                  "kind": "experiment",
                                                   "source": "calls", "observed": "2026-10-08",
                                                   "by": "Dana", "evidence": IDEA_HOSTILE,
                                                   "claim": "claimed"}]}],
-                    "open_risks": [], "dropped_critical": []}
+                    "open_risks": ["A1"] if override else [], "dropped_critical": []}
 
         def envelope(kind=IDEA_KIND, **kw):
             st = cc.build_statement(kind, "idea-validation", "0.1.0", root, [snap], payload(**kw))
@@ -700,6 +706,17 @@ def idea_arm():
         bad = py(script, envelope(verdict="kill"))
         check("negative: an idea whose decision is not go exits 2",
               bad.returncode == 2 and not bad.stdout and "ERROR:" in bad.stderr)
+        forged = payload(override=True)
+        forged["decision"]["override"] = False
+        st_forged = cc.build_statement(IDEA_KIND, "idea-validation", "0.1.0", root, [snap],
+                                       forged)
+        forged_path = os.path.join(root, "forged.json")
+        with open(forged_path, "w", encoding="utf-8") as f:
+            json.dump(st_forged, f)
+        bad = py(script, forged_path)
+        check("negative: an idea envelope that hides a PENDING verdict behind override false "
+              "exits 2", bad.returncode == 2 and not bad.stdout and "override" in bad.stderr,
+              bad.stderr.strip()[-120:])
         over = py(script, envelope(override=True))
         check("idea: an override go is shown under the heading", over.returncode == 0
               and over.stdout.splitlines()[2].startswith("> **Override:**")

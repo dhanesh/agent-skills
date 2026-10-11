@@ -35,8 +35,9 @@ npx skills add dhanesh/agent-skills --skill idea-validation
 
 - **Stale results.** A result counts only while its assumption's test, metric, thresholds and
   deadline stay the same.
-- **Dropped critical assumptions.** If you make a critical assumption normal, or delete it,
-  after a registration, the tool shows it in `status`, `decide` and the handoff. It does not
+- **Dropped critical assumptions.** If you make a critical assumption normal, delete it, or
+  replace it with a different assumption under the same id, after a registration, the tool
+  shows it in `status`, `decide` and the handoff. It does not
   stop you. It makes sure the person who approves the plan sees it.
 - **Overrides.** A `go` against the computed verdict is marked in the envelope and in the spec.
 
@@ -46,7 +47,8 @@ npx skills add dhanesh/agent-skills --skill idea-validation
   what someone typed, and an agent with a shell can type any name.
 - The idea stage cannot run unattended. Experiments are human work.
 - Dropped critical assumptions are tracked by id. If you delete A2 and renumber A3 to A2, the
-  tool sees an edit of A2, not a deletion.
+  tool sees an edit of A2 when one field stays the same, and a replacement when the statement
+  and every field change. A small edit in a later registration clears the replacement flag.
 - One idea per brief. A pivot closes the brief. You start a new brief for the new idea.
 - The tool does not pull results from a form or an analytics service.
 

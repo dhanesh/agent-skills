@@ -114,6 +114,34 @@ class Statuses(unittest.TestCase):
         record(root, "A1", 1, kind="desk", by="agent:claude", observed="2026-10-15")
         self.assertEqual(status(root)[0]["A1"], "fail")
 
+    def test_later_desk_non_kill_does_not_undo_a_desk_kill(self):
+        # Desk research can kill at any time; a later desk inconclusive must not erase the
+        # kill by falling back to an older experiment pass.
+        root = registered()
+        record(root, "A1", 8, observed="2026-10-10")
+        record(root, "A2", 30, observed="2026-10-10")
+        record(root, "A1", 1, kind="desk", by="agent:claude", observed="2026-10-12")
+        st, v, _ = status(root)
+        self.assertEqual((st["A1"], v), ("fail", "KILL"))
+        record(root, "A1", 4, kind="desk", by="agent:claude", observed="2026-10-13")
+        st, v, _ = status(root)
+        self.assertEqual((st["A1"], v), ("fail", "KILL"))
+        record(root, "A1", 9, kind="desk", by="agent:claude", observed="2026-10-14")
+        st, v, _ = status(root)
+        self.assertEqual((st["A1"], v), ("fail", "KILL"))
+
+    def test_desk_only_kill_then_desk_pass_stays_fail(self):
+        root = registered()
+        record(root, "A3", 0, kind="desk", by="agent:claude", observed="2026-10-12")
+        record(root, "A3", 3, kind="desk", by="agent:claude", observed="2026-10-13")
+        self.assertEqual(status(root)[0]["A3"], "fail")
+
+    def test_experiment_after_desk_kill_decides(self):
+        root = registered()
+        record(root, "A1", 1, kind="desk", by="agent:claude", observed="2026-10-12")
+        record(root, "A1", 8, observed="2026-10-14")
+        self.assertEqual(status(root)[0]["A1"], "pass")
+
     def test_desk_inconclusive_alone_is_inconclusive(self):
         root = registered()
         record(root, "A1", 4, kind="desk", by="agent:claude")

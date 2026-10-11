@@ -10,7 +10,7 @@ prints the start of a spec:
     > **Override:** ... (only when the human's go differs from the computed verdict)
 
     > **Dropped critical assumptions:** ... (only when an assumption that was critical in
-    an earlier registration is normal or deleted now)
+    an earlier registration is demoted, deleted or replaced now; each names its reason)
 
     ## Idea
     - <slug>
@@ -38,8 +38,11 @@ Usage:
 
 Exit 0 with the skeleton on stdout; 2 (an ERROR: line on stderr, nothing on stdout) when
 the file cannot be read, the envelope breaks the skill-contract checks, its kind is not
-idea-brief/v1, its payload is not a usable idea brief, or the decision's verdict is not
-`go`. Needs Python >= 3.10 (the vendored contract_check). Stdlib only, offline,
+idea-brief/v1, its payload is not a usable idea brief, the decision's verdict is not
+`go`, or the payload contradicts itself: the override flag must equal "the computed verdict
+is not GO", open_risks must be exactly the ids whose status is not pass, and the computed
+verdict must follow from the critical statuses (KILL if one failed, else GO if all passed,
+else STALLED if one expired, else PENDING). Needs Python >= 3.10 (the vendored contract_check). Stdlib only, offline,
 deterministic.
 """
 
@@ -58,6 +61,21 @@ IDEA_BRIEF_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/idea-b
 USAGE = "usage: idea_request.py <envelope.json>"
 ASSUMPTION_ID_RE = re.compile(r"^A[1-9][0-9]{0,3}\Z")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
+STATUSES = ("open", "pass", "needs-experiment", "fail", "inconclusive", "expired")
+VERDICTS = ("GO", "KILL", "STALLED", "PENDING")
+DROP_REASONS = ("demoted", "deleted", "replaced")
+
+
+def verdict_of(statuses):
+    """idea-validation's verdict rule over the critical assumptions' statuses (a copy of
+    ideas.py compute(), because skills cannot import each other)."""
+    if any(s == "fail" for s in statuses):
+        return "KILL"
+    if statuses and all(s == "pass" for s in statuses):
+        return "GO"
+    if any(s == "expired" for s in statuses):
+        return "STALLED"
+    return "PENDING"
 
 
 class Refused(Exception):
@@ -117,6 +135,10 @@ def payload_of(statement):
         ids.append(aid)
         if not isinstance(a.get("statement"), str):
             raise Refused("assumption %s: statement must be a string" % aid)
+        if not isinstance(a.get("critical"), bool):
+            raise Refused("assumption %s: critical must be true or false" % aid)
+        if a.get("status") not in STATUSES:
+            raise Refused("assumption %s: status must be one of %s" % (aid, ", ".join(STATUSES)))
         results = a.get("results", [])
         if not (isinstance(results, list) and all(isinstance(r, dict) for r in results)):
             raise Refused("assumption %s: results must be a list of objects" % aid)
@@ -129,6 +151,23 @@ def payload_of(statement):
     for r in risks:
         if r not in ids:
             raise Refused("payload.open_risks names an unknown assumption")
+    # Self-consistency: the override flag, the open risks and the computed verdict all
+    # follow from the statuses, so a hand-edited envelope cannot hide a KILL behind
+    # override false or drop an open risk before plan approval.
+    if sorted(risks) != sorted(a["id"] for a in assumptions if a["status"] != "pass"):
+        raise Refused("payload.open_risks must list exactly the assumptions whose status is "
+                      "not pass")
+    verdict = p.get("computed_verdict")
+    if verdict not in VERDICTS:
+        raise Refused("payload.computed_verdict must be one of %s" % ", ".join(VERDICTS))
+    expected = verdict_of([a["status"] for a in assumptions if a["critical"]])
+    if verdict != expected:
+        raise Refused("payload.computed_verdict is %s, but the critical assumptions' statuses "
+                      "give %s" % (verdict, expected))
+    if d["override"] != (verdict != "GO"):
+        raise Refused("payload.decision.override is %s, but a go against the computed verdict "
+                      "%s is %san override" % (json.dumps(d["override"]), verdict,
+                                               "" if verdict != "GO" else "not "))
     # Required, not defaulted: idea-brief/v1 always carries it, and a missing goalpost
     # flag would let a demoted critical assumption reach plan approval unseen.
     dropped = p.get("dropped_critical")
@@ -146,6 +185,9 @@ def payload_of(statement):
             raise Refused("payload.dropped_critical %s: statement must be a string" % did)
         if not isinstance(d.get("had_results"), bool):
             raise Refused("payload.dropped_critical %s: had_results must be true or false" % did)
+        if d.get("reason") not in DROP_REASONS:
+            raise Refused("payload.dropped_critical %s: reason must be one of %s"
+                          % (did, ", ".join(DROP_REASONS)))
         reg = d.get("last_critical_registration")
         if not (isinstance(reg, str) and SHA256_RE.match(reg)):
             raise Refused("payload.dropped_critical %s: last_critical_registration must be a "
@@ -165,10 +207,12 @@ def skeleton(p):
                    show(d.get("reason"))), ""]
     if p["dropped_critical"]:
         out += ["> **Dropped critical assumptions:** %s. Each was critical in an earlier "
-                "registration of the brief and is normal or deleted now, so the go no longer "
-                "waits on it. Show this line to the human before they approve the plan."
-                % "; ".join("%s %s (%s)" % (x["id"], show(x["statement"]),
-                                            "had results" if x["had_results"] else "no results")
+                "registration of the brief and is demoted to normal, deleted or replaced by "
+                "a different assumption now, so the go no longer waits on it. Show this line "
+                "to the human before they approve the plan."
+                % "; ".join("%s %s (%s, %s)" % (x["id"], show(x["statement"]), x["reason"],
+                                                "had results" if x["had_results"]
+                                                else "no results")
                             for x in p["dropped_critical"]), ""]
     by_id = {a["id"]: a for a in p["assumptions"]}
     out += ["## %s" % IDEA_SECTION, "", "- %s" % slug, "",
@@ -192,10 +236,11 @@ def skeleton(p):
                show(p.get("computed_verdict")), show(d["verdict"]), show(d.get("by")),
                show(d.get("at")), show(d["override"]), show(d.get("reason")))]
     for x in p["dropped_critical"]:
-        out += ["", "Dropped critical assumption %s: statement %s, last critical registration "
-                "%s, had results %s." % (code(x["id"]), show(x["statement"]),
-                                          code(x["last_critical_registration"]),
-                                          show(x["had_results"]))]
+        out += ["", "Dropped critical assumption %s: reason %s, statement %s, last critical "
+                "registration %s, had results %s." % (code(x["id"]), code(x["reason"]),
+                                                      show(x["statement"]),
+                                                      code(x["last_critical_registration"]),
+                                                      show(x["had_results"]))]
     for a in p["assumptions"]:
         out += ["", "Assumption %s: critical %s, category %s, status %s, statement %s, "
                 "test %s, metric %s, pass %s, kill %s, by %s."

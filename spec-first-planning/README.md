@@ -111,7 +111,9 @@ that the human decided `go`. The skeleton has a `## Idea` section with the slug,
 and `## Users` from the brief, `## Open risks` with the assumptions that have not passed, and
 the same untrusted evidence block as an intake spec. When the human's `go` overrides the
 computed verdict, a line under the title says so. When the human made a critical assumption
-normal or deleted it after an earlier registration, a second line names it. The plan payload names the idea in `ideas`,
+normal, deleted it or replaced it after an earlier registration, a second line names it and
+the reason. The script refuses an envelope whose override flag, open risks or computed verdict
+do not agree with its assumption statuses. The plan payload names the idea in `ideas`,
 and `spec_to_tasks.py` prints `IDEA:` and every `CHECK_COMMAND:` line for the human to see.
 
 **Upgrading from 1.x:** specs written for 1.x need Constraints and Required truths sections.

@@ -92,7 +92,11 @@ A spec is one markdown file:
   envelope's `dropped_critical` list is not empty, a
   `> **Dropped critical assumptions:**` line follows (after the override line,
   if there is one). It names each assumption that was critical in an earlier
-  registration and is normal or deleted now, with its statement as a code span.
+  registration and is demoted to normal, deleted or replaced now, with its
+  statement as a code span and its reason. `idea_request.py` exits 2 when the
+  payload contradicts itself: `decision.override` must equal "the computed
+  verdict is not GO", `open_risks` must be exactly the ids that have not
+  passed, and the computed verdict must follow from the critical statuses.
   The evidence section repeats those statements. The plan payload carries the
   slug as `ideas`.
 

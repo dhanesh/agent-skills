@@ -73,7 +73,8 @@ running the experiment itself, which is the human's work.
 Read each command's output lines, not only its exit code.
 
 1. **Draft the brief.** Run `ideas new <slug> --title "<title>"`. It writes `ideas/<slug>.md`
-   from the template and refuses a slug that exists. Fill it in with the human: the problem,
+   from the template and refuses a slug that exists, and the reserved slugs `envelopes` and
+   `specs`. Fill it in with the human: the problem,
    the target user, the value proposition, and 3 to 7 riskiest assumptions, critical ones
    first, each with its test, metric, pass and kill thresholds and deadline. Name the
    experiments, and mark each outward one `[outward]`. Run `ideas lint ideas/<slug>.md` until it
@@ -148,8 +149,8 @@ Each assumption's status comes from its latest counted result by `observed` date
 
 Desk and experiment results mix by one rule: desk research can kill at any time, but it never
 outweighs an experiment, because the human's experiment is the stronger evidence. A later desk
-pass or an in-between desk value neither rescues an experiment kill nor undoes an experiment
-pass.
+pass or an in-between desk value never undoes a desk kill, rescues an experiment kill or undoes
+an experiment pass; a later experiment result does decide.
 
 The verdict: **KILL** if a critical assumption failed; else **GO** if every critical
 assumption passed; else **STALLED** if a critical one expired; else **PENDING**. Normal
@@ -179,7 +180,9 @@ assumptions that have not passed go into the handoff as open risks.
 - Before the human decides or hands off, you MUST show them every `NOTE: dropped-critical`
   line and every override note, because each one means the `go` no longer rests on the test
   the human first set. A **dropped critical** assumption was critical in an earlier
-  registration and is normal or deleted now; the tool flags it in `status`, `decide` and the
+  registration and is demoted to normal, deleted or replaced (still critical, but with its
+  statement and every field changed) now; the tool flags it with its reason in `status`,
+  `decide` and the
   handoff and lists it in the envelope's `dropped_critical`, but does not refuse it.
 - You MUST NOT pass `--today` outside a test, because it moves the clock that deadlines,
   expiry and the future-date check on `--observed` all read.

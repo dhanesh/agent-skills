@@ -7697,6 +7697,22 @@ elif case == "desk":
     out = EV.ideas(root, "status", "flat")[1]
     v = int(EV.verdict(out) != "GO"
             and EV.statuses(out).get("A1") == "needs-experiment")
+elif case == "desk-kill":
+    def rec(root, aid, value, observed, kind="experiment", by="Dana"):
+        rc, out = EV.ideas(root, "record", "flat", aid, "--value", str(value), "--kind", kind,
+                           "--source", "s", "--observed", observed, "--by", by)
+        need(rc == 0, "record was refused: %s" % out)
+    root = EV.registered()
+    rec(root, "A1", 8, "2026-10-10")
+    rec(root, "A2", 30, "2026-10-10")
+    need(EV.verdict(EV.ideas(root, "status", "flat")[1]) == "GO",
+         "two experiment passes did not give GO")
+    rec(root, "A1", 1, "2026-10-12", kind="desk", by="agent:claude")
+    killed = EV.verdict(EV.ideas(root, "status", "flat")[1]) == "KILL"
+    need(killed, "a desk kill after an experiment pass did not give KILL")
+    rec(root, "A1", 4, "2026-10-13", kind="desk", by="agent:claude")
+    out = EV.ideas(root, "status", "flat")[1]
+    v = int(EV.verdict(out) == "KILL" and EV.statuses(out).get("A1") == "fail")
 elif case == "stale":
     root = go_ready()
     EV.write_brief(root, GOOD.replace("every week", "most weeks"))
@@ -7822,8 +7838,10 @@ def _iv_fence(tree):
 
 # (dimension, note, case). Each row: 1 = the guard refuses the hostile case and the healthy
 # case in the same fixture works. Mutation-proven on 2026-10-11: with the named refusal
-# deleted the row reads 0 (no-go: deleting the kill half reads 0; deleting the no-decision
-# half crashes the handoff, a probe failure); the fence row reads 0 with a plain ``` fence.
+# deleted the row reads 0 (desk-kill, final review: with the desk-kill half of
+# assumption_status's decisive set removed it reads 0; no-go: deleting the kill half reads
+# 0; deleting the no-decision half crashes the handoff, a probe failure); the fence row
+# reads 0 with a plain ``` fence.
 _IV_ROWS = (
     ("go ideas reaching a spec skeleton through an idea-brief/v1 envelope",
      "the eval's flow: register, two experiment results, decide go, handoff, and "
@@ -7831,6 +7849,11 @@ _IV_ROWS = (
     ("desk-only critical passes kept from GO",
      "desk passes on both critical assumptions give needs-experiment and no GO. "
      "Sanity-checked in the same probe: two experiment passes give GO", "desk"),
+    ("desk kills that a later desk non-kill does not undo",
+     "A1 and A2 pass by experiment (GO), a desk result on A1 meets kill (KILL), then a later "
+     "desk in-between value on A1: the verdict stays KILL and A1 stays fail. Sanity-checked "
+     "in the same probe: GO before the desk kill and KILL right after it. Final review M1: "
+     "the first build fell back to the latest experiment result and read GO", "desk-kill"),
     ("threshold edits after a result that make it stale",
      "A1 passes, then its pass threshold is raised and the brief registered again: A1 is "
      "open, its result is shown stale, no GO. Sanity-checked: a statement-only edit keeps "

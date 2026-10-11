@@ -59,6 +59,29 @@ class New(unittest.TestCase):
                 self.assertEqual(run(root, "new", slug, "--title", "t")[0], 2)
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(root), "x.md")))
 
+    def test_reserved_slugs_refused_everywhere(self):
+        for slug in ("envelopes", "specs"):
+            with self.subTest(slug=slug):
+                root = repo()
+                rc, out = run(root, "new", slug, "--title", "t")
+                self.assertEqual(rc, 2, out)
+                self.assertIn("reserved", out)
+                self.assertFalse(os.path.exists(os.path.join(root, "ideas", slug + ".md")))
+                root = repo({slug: GOOD})
+                before = tree(root)
+                rc, out = run(root, "register", "ideas/%s.md" % slug, "--by", "Dana")
+                self.assertEqual(rc, 2, out)
+                self.assertEqual(tree(root), before)
+                for argv in (("record", slug, "A1", "--value", "7", "--kind", "experiment",
+                              "--source", "s", "--observed", "2026-10-15", "--by", "Dana"),
+                             ("status", slug),
+                             ("decide", slug, "--verdict", "go", "--by", "D", "--reason", "r"),
+                             ("handoff", slug, "--by", "D")):
+                    rc, out = run(root, *argv)
+                    self.assertEqual(rc, 2, (argv, out))
+                    self.assertIn("reserved", out)
+                self.assertNotIn("IDEA: %s " % slug, run(root, "list")[1])
+
     def test_bad_today_refused(self):
         self.assertEqual(run(repo(), "list", today="2026-13-01")[0], 2)
 
@@ -335,6 +358,23 @@ class Storage(unittest.TestCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("ignore", out)
         self.assertEqual(tree(root), before)
+
+    def test_negated_ignore_line_stops_before_any_write(self):
+        for body in ("*\n!results.jsonl\n", "*\n  !flat/\n", "!*\n*\n"):
+            with self.subTest(body=body):
+                root = repo({"flat": GOOD})
+                d = os.path.join(root, ".skill-contract", "ideas")
+                os.makedirs(d)
+                with open(os.path.join(d, ".gitignore"), "w") as f:
+                    f.write(body)
+                before = tree(root)
+                rc, out = run(root, "register", "ideas/flat.md", "--by", "Dana")
+                self.assertEqual(rc, 2, out)
+                self.assertIn("ignore", out)
+                self.assertEqual(tree(root), before)
+                with open(os.path.join(d, ".gitignore")) as f:
+                    self.assertEqual(f.read(), body)
+        self.assertFalse(ID._gitignore_ok("/nonexistent/.gitignore"))
 
     def test_symlinked_state_dir_refused(self):
         root = repo({"flat": GOOD})

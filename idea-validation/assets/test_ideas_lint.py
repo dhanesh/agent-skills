@@ -152,6 +152,25 @@ class LintFail(unittest.TestCase):
     def test_no_experiments(self):
         self.assertProblem(make(experiments=["Prose with no bullets. A1."]), "experiment")
 
+    def test_unparsed_assumption_lines_are_problems(self):
+        tail = ("[critical] [pricing]: People pay (test: x; metric: y; pass: >= 10; "
+                "kill: < 2; by: 2026-12-01)")
+        for prefix in ("+ A3 ", "1. A3 ", "2) A3 ", "A3 ", "* A3 "):
+            with self.subTest(prefix=prefix):
+                rc, out = lint(make(assumptions=(A1, A2, prefix + tail)))
+                self.assertEqual(rc, 2, out)
+                self.assertIn("A3", "\n".join(l for l in out.splitlines()
+                                             if l.startswith("PROBLEM:")))
+                parsed = ID.parse_brief(make(assumptions=(A1, A2, prefix + tail)))
+                self.assertEqual([x["id"] for x in parsed["assumptions"]], ["A1", "A2"])
+
+    def test_numbered_and_plus_experiment_bullets_count(self):
+        for bullet in ("+ ", "1. ", "1) "):
+            with self.subTest(bullet=bullet):
+                parsed = ID.parse_brief(make(experiments=[bullet + "Landing page. Tests A1 and A2."]))
+                self.assertEqual([e["ids"] for e in parsed["experiments"]], [["A1", "A2"]])
+                self.assertEqual(parsed["problems"], [])
+
     def test_bad_fixture_lists_every_fault(self):
         rc, out = lint(fixture("bad-brief.md"))
         self.assertEqual(rc, 2)
