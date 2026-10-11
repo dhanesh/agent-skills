@@ -27,6 +27,9 @@ Usage:
     python3 conductor.py merge <task> [--root <repo>]                  # MERGE: <task> <sha>
     python3 conductor.py park <task> --reason R [--root <repo>]        # PARK: <task> <reason>
     python3 conductor.py decision <task> --question Q [--root <repo>]  # PARK: <task> new_human_decision
+    python3 conductor.py usage <task> --tokens N [--usd X] [--source T] [--root <repo>]
+                                                                       # USAGE: <task> dispatch=<n> ...
+    python3 conductor.py usage --file F [--root <repo>]                # USAGE: | PROBLEM: line <n>: ...
     python3 conductor.py finish [--root <repo>] [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]
                                                                        # FINISH: <envelope path>
 
@@ -63,10 +66,30 @@ the run goes on;
 DEFAULT_REPAIRS = 2 when neither the grant nor --budget sets it, recorded in the state)
 and max_parallel (default 2; start refuses past it, next --max is clamped to it) are
 enforced.
-max_tokens and max_usd are recorded and reported, not enforced: the runtime does not
-expose usage to this tool. `next` stops the run (STOP: <reason>, exit 3) on, in order,
-budget_wall_clock, budget_dispatches, no_ready_tasks. `decision` parks a task with
-new_human_decision and the run goes on.
+max_tokens and max_usd are recorded and reported, and enforced only when the budget's
+`enforce` list names their metric ("tokens", "usd"; opt-in, init refuses a metric whose
+cap is unset, and --budget may add a metric but never drop one the grant enforces). The
+runtime does not expose usage to this tool, so the agent reports it: `usage <task>
+--tokens N [--usd X] [--source T]` meters the latest finished dispatch of the task that
+has no entry yet (trust claimed; exit 2 when there is none, so nothing is metered twice,
+and for a negative or non-finite figure, or no usd while usd is enforced), and `usage
+--file F` applies JSON-lines records {task, tokens, usd, source} the same way (trust low;
+a bad record prints PROBLEM: line <n>: <why> and is skipped, the others apply; exit 3
+when any record was a problem). A dispatch (one `dispatch` log event: an executor start,
+a repair, a reviewer, a verifier, or a resume NEXT: line) is finished once a later
+verify, review, evidence or park event names its task. Entries go to state.json
+(`usage`, written only once there is one) and the log. Nothing here opens a socket.
+With `enforce`, when a task is ready and nothing is in flight, `next`, `start` and
+`resume` stop the run, before the other rules and in order, with budget_unmetered (a
+finished dispatch has no entry, or no figure for an enforced metric), budget_tokens (the
+claimed tokens reach max_tokens) or budget_usd (the claimed usd reach max_usd). While
+work is in flight it goes on, as under budget_dispatches: next prints no READY: and start
+refuses (exit 2). `resume` lifts a budget_unmetered stop once every finished dispatch is
+metered (until then it prints NEXT: run ask, and `watch` treats it as waiting on the
+human); budget_tokens and budget_usd are never lifted. `next` stops the run (STOP:
+<reason>, exit 3) on, in order, the spend stops above, budget_wall_clock,
+budget_dispatches, no_ready_tasks. `decision` parks a task with new_human_decision and
+the run goes on.
 
 Each task runs in its own git worktree, <run>/wt/<task>, on the task branch
 <run_branch>--<task>. (Not <run_branch>/<task>: git cannot keep a ref
@@ -127,7 +150,8 @@ must still let a run end and report what it did.
 The envelope's subjects pin the plan envelope and the grant read at init; its payload
 carries each task's status, verify re-runs (commands in the plan's {python} form),
 review, merge commit and park reason, the stop, the budget (max_tokens and max_usd
-recorded, not enforced), and the worktrees a merge-conflict park kept (never deleted
+recorded, and enforced only as `enforce` says), the usage totals {tokens, usd, entries,
+unmetered, trust} when the budget sets enforce or an entry exists, and the worktrees a merge-conflict park kept (never deleted
 here), and the integration result. Its assertions are one passed `verify:<task>` per
 proven task, carrying the task's first verify command as the plan wrote it, plus one
 `integration:<head, 12 chars>`, passed or failed, when the integration re-run ran anything; `init` refuses a plan whose verify
@@ -212,13 +236,13 @@ STATUSES = ("pending", "running", "verifying", "reviewing", "proven", "parked", 
 # own checks, so it is never pushed.
 STOP_REASONS = ("budget_wall_clock", "budget_dispatches", "grant_ask",
                 "new_human_decision", "no_ready_tasks", "integration_red",
-                "reentry_exhausted")
+                "reentry_exhausted", "budget_unmetered", "budget_tokens", "budget_usd")
 DEFAULT_PARALLEL = 2
 DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget sets it
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.3.0"
+CONDUCTOR_VERSION = "1.4.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -248,13 +272,21 @@ EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
 # Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
 # EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
-# reported, never enforced: the runtime does not expose usage to this tool.
+# reported; they are enforced only for the metrics `enforce` names (opt-in: the runtime
+# does not expose usage to this tool, so the agent reports it with `usage`).
 BUDGET_KEYS = {"wall_clock_min": "number", "max_dispatches": "count",
                "max_repairs_per_task": "count", "max_parallel": "positive",
-               "max_tokens": "count", "max_usd": "number"}
+               "max_tokens": "count", "max_usd": "number", "enforce": "enforce"}
 BUDGET_NOTE_TEXT = ("max_tokens/max_usd recorded, not enforced "
                     "(the runtime does not expose usage)")
 BUDGET_NOTE = "STATUS: budget " + BUDGET_NOTE_TEXT
+# Spend metering (opt-in per grant). `enforce` names the metrics whose cap stops the run;
+# each needs its cap in the budget. A dispatch is finished once a later outcome event
+# (verify, review, evidence or park) for its task is in the log; each finished dispatch
+# needs one usage entry (`usage`), with a figure for every enforced metric.
+SPEND_CAPS = {"tokens": "max_tokens", "usd": "max_usd"}
+SPEND_STOPS = ("budget_unmetered", "budget_tokens", "budget_usd")
+OUTCOME_EVENTS = ("verify", "review", "evidence", "park")
 # finish's remote steps. Each is an argv list (never a shell); a token that is exactly
 # {run_branch}, {base_branch}, {title} or {body_file} is replaced (see expand_cmd).
 DEFAULT_PUSH_CMD = ["git", "push", "-u", "origin", "{run_branch}"]
@@ -369,6 +401,9 @@ class State:
         # Budget keys init derived rather than read from the grant or --budget.
         self.budget_derived = list(data.get("budget_derived") or [])
         self.dispatches = data.get("dispatches", 0)
+        # Usage entries (`usage`); the key is written only once there is one, so a run
+        # that never meters keeps the state it had before spend metering.
+        self.usage = list(data.get("usage") or [])
         self.stopped = data.get("stopped")
         self.finished = data.get("finished")
         self.tasks = data["tasks"]
@@ -394,6 +429,7 @@ class State:
         schedule = waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
         budget = dict(budget or {})
         check_budget(budget)
+        check_enforce_caps(budget)
         part = partition(order, plan_tasks, gated=bool(verification))
         tasks = {}
         for tid in order:
@@ -459,17 +495,24 @@ class State:
         if data.get("budget_derived") is not None and not isinstance(
                 data["budget_derived"], list):
             raise StateError("budget_derived is not a list")
+        if data.get("usage") is not None and not (
+                isinstance(data["usage"], list)
+                and all(isinstance(e, dict) for e in data["usage"])):
+            raise StateError("usage is not a list of objects")
         return cls(data, os.path.dirname(os.path.abspath(path)))
 
     def to_dict(self):
-        return {"root": self.root, "run_id": self.run_id,
-                "plan_envelope": self.plan_envelope, "plan_sha256": self.plan_sha256,
-                "grant_id": self.grant_id, "run_branch": self.run_branch,
-                "base_branch": self.base_branch, "created_at": self.created_at,
-                "budget": self.budget, "budget_derived": self.budget_derived,
-                "dispatches": self.dispatches, "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
-                "order": self.order, "verification": self.verification,
-                "partition": self.partition}
+        out = {"root": self.root, "run_id": self.run_id,
+               "plan_envelope": self.plan_envelope, "plan_sha256": self.plan_sha256,
+               "grant_id": self.grant_id, "run_branch": self.run_branch,
+               "base_branch": self.base_branch, "created_at": self.created_at,
+               "budget": self.budget, "budget_derived": self.budget_derived,
+               "dispatches": self.dispatches, "stopped": self.stopped, "finished": self.finished, "tasks": self.tasks,
+               "order": self.order, "verification": self.verification,
+               "partition": self.partition}
+        if self.usage:
+            out["usage"] = self.usage
+        return out
 
     def save(self):
         """Write state.json atomically: a temp file in the same directory, then os.replace."""
@@ -707,7 +750,12 @@ def check_budget(budget):
     for key, value in budget.items():
         kind = BUDGET_KEYS[key]
         is_int = isinstance(value, int) and not isinstance(value, bool)
-        if kind == "positive":
+        if kind == "enforce":
+            if not isinstance(value, list) or not value or any(
+                    m not in SPEND_CAPS for m in value) or len(set(value)) != len(value):
+                raise PlanError("budget.enforce must be a list of one or both of "
+                                "\"tokens\" and \"usd\", without repeats, got %r" % (value,))
+        elif kind == "positive":
             if not is_int or value < 1:
                 raise PlanError("budget.%s must be an integer >= 1, got %r" % (key, value))
         elif kind == "count":
@@ -716,6 +764,14 @@ def check_budget(budget):
         elif not ((is_int or isinstance(value, float)) and math.isfinite(value)
                   and value >= 0):
             raise PlanError("budget.%s must be a number >= 0, got %r" % (key, value))
+
+
+def check_enforce_caps(budget):
+    """Raise PlanError when `enforce` names a metric whose cap the budget does not set."""
+    for metric in budget.get("enforce") or []:
+        if budget.get(SPEND_CAPS[metric]) is None:
+            raise PlanError("budget.enforce names %s but the budget sets no %s"
+                            % (metric, SPEND_CAPS[metric]))
 
 
 def _plan_tasks(plan):
@@ -1039,13 +1095,101 @@ def _dispatches_left(st):
     return None if cap is None else max(0, cap - st.dispatches)
 
 
+# ── spend metering (opt-in: budget.enforce) ─────────────────────────────────
+def _enforced(st):
+    return list(st.budget.get("enforce") or [])
+
+
+def dispatch_ledger(st):
+    """[{n, task, kind, finished}] for every dispatch the log records, oldest first.
+
+    n is the run's dispatch ordinal (the `dispatches` count the dispatch event carries).
+    A dispatch is finished once a later verify, review, evidence or park event names its
+    task: the conductor recorded the outcome of that work."""
+    out = []
+    for e in st.events():
+        ev = e.get("event")
+        if ev == "dispatch" and isinstance(e.get("dispatches"), int) \
+                and not isinstance(e.get("dispatches"), bool):
+            out.append({"n": e["dispatches"], "task": e.get("task"), "kind": e.get("kind"),
+                        "finished": False})
+        elif ev in OUTCOME_EVENTS:
+            for d in out:
+                if d["task"] == e.get("task"):
+                    d["finished"] = True
+    return out
+
+
+def unmetered(st, ledger=None):
+    """The finished dispatches with no usage entry, or with an entry that lacks a figure
+    for an enforced metric (tokens always has one)."""
+    entries = {e.get("dispatch"): e for e in st.usage}
+    need_usd = "usd" in _enforced(st)
+    out = []
+    for d in dispatch_ledger(st) if ledger is None else ledger:
+        if not d["finished"]:
+            continue
+        e = entries.get(d["n"])
+        if e is None or (need_usd and e.get("usd") is None):
+            out.append(d)
+    return out
+
+
+def usage_summary(st):
+    """{tokens, usd, entries, unmetered, trust}: the claimed totals. usd is None while no
+    entry carries one; trust is the weakest entry's (low < claimed), None with none."""
+    usds = [e["usd"] for e in st.usage if e.get("usd") is not None]
+    trusts = {e.get("trust") for e in st.usage}
+    return {"tokens": sum(int(e.get("tokens") or 0) for e in st.usage),
+            "usd": sum(usds) if usds else None, "entries": len(st.usage),
+            "unmetered": len(unmetered(st)),
+            "trust": None if not st.usage else ("low" if "low" in trusts else "claimed")}
+
+
+def spend_stop(st):
+    """budget_unmetered, budget_tokens or budget_usd (in that order) when the run's
+    `enforce` makes one fire now, else None. Always None without `enforce`."""
+    enforce = _enforced(st)
+    if not enforce:
+        return None
+    if unmetered(st):
+        return "budget_unmetered"
+    total = usage_summary(st)
+    if "tokens" in enforce and total["tokens"] >= st.budget["max_tokens"]:
+        return "budget_tokens"
+    if "usd" in enforce and (total["usd"] or 0) >= st.budget["max_usd"]:
+        return "budget_usd"
+    return None
+
+
+def budget_note_text(budget):
+    """BUDGET_NOTE_TEXT without `enforce`; else which caps are enforced, and which only
+    recorded."""
+    enforce = budget.get("enforce") or []
+    if not enforce:
+        return BUDGET_NOTE_TEXT
+    on = [SPEND_CAPS[m] for m in SPEND_CAPS if m in enforce]
+    off = [SPEND_CAPS[m] for m in SPEND_CAPS if m not in enforce]
+    text = "%s enforced from claimed usage reports" % "/".join(on)
+    if off:
+        text += "; %s recorded, not enforced" % "/".join(off)
+    return text
+
+
 def check_stop(st):
     """The stop reason that ends the run now, or None. In order:
 
+    budget_unmetered,  (only with budget.enforce) a task is ready, nothing is in flight,
+    budget_tokens,     and spend_stop fires: a finished dispatch has no usage, or the
+    budget_usd         claimed total reached an enforced cap (in-flight work may still
+                       verify, review and merge, as under budget_dispatches);
     budget_wall_clock  wall_clock_min has passed since init (in-flight work included);
     budget_dispatches  max_dispatches is spent, a task is ready, and nothing is in
                        flight (in-flight work may still verify, review and merge);
     no_ready_tasks     nothing is ready and nothing is in flight."""
+    spend = spend_stop(st)
+    if spend and not _in_flight(st) and st.ready(len(st.tasks)):
+        return spend
     reason = _wall_clock_stop(st)
     if reason:
         return reason
@@ -1213,15 +1357,25 @@ def cmd_init(args):
                          % ", ".join(unknown))
     try:
         check_budget(granted)  # before comparing: a bad grant value fails, never raises
-        looser = sorted(k for k in extra if k in granted and extra[k] > granted[k])
+        looser = sorted(k for k in extra if k in granted and k != "enforce"
+                        and extra[k] > granted[k])
         if looser:
             raise PlanError("--budget cannot loosen the grant's budget: %s" % ", ".join(
                 "%s %r > %r" % (k, extra[k], granted[k]) for k in looser))
+        if "enforce" in extra and "enforce" in granted and not set(
+                extra["enforce"]) >= set(granted["enforce"]):
+            # enforce only tightens: --budget may add a metric, never drop one
+            raise PlanError("--budget cannot loosen the grant's budget: enforce %r drops "
+                            "a metric of %r" % (extra["enforce"], granted["enforce"]))
     except PlanError as e:
         return _init_fail("invalid budget: %s" % e)
     budget = {"max_parallel": DEFAULT_PARALLEL, "max_repairs_per_task": DEFAULT_REPAIRS}
     budget.update(granted)
     budget.update(extra)  # only ever tighter than the grant, or a key it does not set
+    try:
+        check_enforce_caps(budget)
+    except PlanError as e:
+        return _init_fail("invalid budget: %s" % e)
     derived = []
     if budget.get("max_dispatches") is None:
         # Cost is always bounded: one executor and one reviewer per attempt, for the first
@@ -1282,6 +1436,12 @@ def cmd_next(args):
     left = _dispatches_left(st)
     if left is not None:
         ready = ready[:left]
+    spend = spend_stop(st)
+    if spend and ready:
+        # Work is in flight (else check_stop fired): it goes on, nothing new starts.
+        sys.stderr.write("%s: no new task is handed out; the work in flight goes on\n"
+                         % spend)
+        ready = []
     if ready:
         print("READY: %s" % " ".join(ready))
     return 0
@@ -1318,8 +1478,28 @@ def cmd_status(args):
     gate_on = ("on skill=%s" % st.verification["skill"]) if st.verification else "off"
     print("STATUS: budget %s dispatches=%d evidence_gate=%s%s"
           % (json.dumps(st.budget, sort_keys=True), st.dispatches, gate_on, derived))
-    print(BUDGET_NOTE)
+    if _enforced(st) or st.usage:
+        ledger = dispatch_ledger(st)
+        for d in unmetered(st, ledger):
+            print("STATUS: unmetered %s dispatch=%d kind=%s" % (d["task"], d["n"], d["kind"]))
+        print(_usage_line(st))
+    print("STATUS: budget " + budget_note_text(st.budget))
     return 0
+
+
+def _num(x):
+    return "-" if x is None else ("%g" % x if isinstance(x, float) else str(x))
+
+
+def _usage_line(st):
+    u = usage_summary(st)
+    tok, usd = _num(u["tokens"]), _num(u["usd"])
+    if st.budget.get("max_tokens") is not None:
+        tok += "/" + _num(st.budget["max_tokens"])
+    if st.budget.get("max_usd") is not None:
+        usd += "/" + _num(st.budget["max_usd"])
+    return ("STATUS: usage tokens=%s usd=%s entries=%d unmetered=%d trust=%s"
+            % (tok, usd, u["entries"], u["unmetered"], u["trust"] or "-"))
 
 
 RUN_NEXT = "NEXT: run next"
@@ -1442,12 +1622,19 @@ def cmd_resume(args):
     if st.finished:
         return _resume_finished(st)
     _undo_finish_stop(st)
-    if st.stopped and (st.stopped.get("reason") if isinstance(st.stopped, dict)
-                       else st.stopped) != "grant_ask":
+    stop = (st.stopped.get("reason") if isinstance(st.stopped, dict)
+            else st.stopped) if st.stopped else None
+    if stop and stop not in ("grant_ask", "budget_unmetered"):
         _stopped(st)
         print(RUN_FINISH)
         return 3
     if not _gated(st, "local_reversible"):
+        print(RUN_ASK)
+        return 3
+    if stop == "budget_unmetered" and unmetered(st):
+        # Lifted only once every finished dispatch has its usage: a human records what
+        # the session could not see (`usage`), then resumes.
+        _stopped(st)
         print(RUN_ASK)
         return 3
     lifted = st.stopped
@@ -1459,7 +1646,7 @@ def cmd_resume(args):
     reason = check_stop(st)
     if reason:
         _record_stop(st, reason)
-        print(RUN_FINISH)
+        print(RUN_ASK if reason == "budget_unmetered" else RUN_FINISH)
         return 3
     lines = []
     for tid, action in next_actions(st):
@@ -1476,12 +1663,14 @@ def cmd_resume(args):
     reason = check_stop(st)
     if reason:
         _record_stop(st, reason)
-        print(RUN_FINISH)
+        print(RUN_ASK if reason == "budget_unmetered" else RUN_FINISH)
         return 3
     ready = st.ready(st.max_parallel())
     left = _dispatches_left(st)
     if left is not None:
         ready = ready[:left]
+    if spend_stop(st):
+        ready = []  # work in flight goes on; nothing new is handed out
     print("READY: %s" % " ".join(ready) if ready else "READY:")
     for line in lines:
         print(line)
@@ -1579,6 +1768,18 @@ def cmd_start(args):
     if active >= st.max_parallel():
         sys.stderr.write("parallel limit reached: %d task(s) in flight, max_parallel is %d; "
                          "%s is not started\n" % (active, st.max_parallel(), args.task))
+        return 2
+    spend = spend_stop(st)
+    if spend:
+        if not _in_flight(st):
+            return _record_stop(st, spend)
+        # As under budget_dispatches: the work in flight goes on; this dispatch is refused
+        # and `next` records the stop once nothing is in flight.
+        sys.stderr.write("%s: %s is not started while the run's spend is %s; finish the "
+                         "in-flight tasks (record each finished dispatch's usage)\n"
+                         % (spend, args.task, "unmetered" if spend == "budget_unmetered"
+                            else "at its cap"))
+        st.log("dispatch_refused", task=args.task, reason=spend, dispatches=st.dispatches)
         return 2
     reason = _wall_clock_stop(st)
     if reason:
@@ -2616,6 +2817,127 @@ def cmd_park(args):
     return 0
 
 
+def _reject_constant(name):
+    raise ValueError("%s is not a number usage accepts" % name)
+
+
+def _usage_figures(tokens, usd):
+    """None when tokens is an integer >= 0 and usd is None or a finite number >= 0;
+    else why not. A bool is not a number here."""
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+        return "tokens must be an integer >= 0, got %r" % (tokens,)
+    if usd is not None and (isinstance(usd, bool) or not isinstance(usd, (int, float))
+                            or not math.isfinite(usd) or usd < 0):
+        return "usd must be a finite number >= 0, got %r" % (usd,)
+    return None
+
+
+def record_usage(st, task, tokens, usd, source, trust):
+    """Meter the latest finished dispatch of `task` that has no usage entry yet. Returns
+    (entry, None), or (None, why) with nothing written."""
+    if not isinstance(task, str) or task not in st.tasks:
+        return None, "unknown task %r" % (task,)
+    why = _usage_figures(tokens, usd)
+    if why:
+        return None, why
+    if usd is None and "usd" in _enforced(st):
+        return None, "usd is enforced: give the dispatch's usd figure too"
+    if source is not None and not isinstance(source, str):
+        return None, "source must be text"
+    metered = {e.get("dispatch") for e in st.usage}
+    open_ = [d for d in dispatch_ledger(st)
+             if d["task"] == task and d["finished"] and d["n"] not in metered]
+    if not open_:
+        return None, ("task %s has no finished dispatch without usage (a dispatch is "
+                      "finished once its verify, review, evidence or park is recorded)"
+                      % task)
+    d = max(open_, key=lambda x: x["n"])
+    entry = {"task": task, "dispatch": d["n"], "kind": d["kind"], "tokens": tokens,
+             "usd": usd, "source": one_line(source) if source else None, "trust": trust}
+    st.usage.append(dict(entry, at=_rfc3339(_now())))
+    st.save()
+    st.log("usage", **entry)
+    return entry, None
+
+
+def _usage_out(entry):
+    return ("USAGE: %s dispatch=%d tokens=%d usd=%s trust=%s"
+            % (entry["task"], entry["dispatch"], entry["tokens"], _num(entry["usd"]),
+               entry["trust"]))
+
+
+def _usd_arg(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not a number: %r" % text) from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError("usd must be a finite number >= 0, got %r" % text)
+    return value
+
+
+def _tokens_arg(text):
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("not an integer: %r" % text) from None
+    if value < 0:
+        raise argparse.ArgumentTypeError("tokens must be >= 0, got %r" % text)
+    return value
+
+
+def cmd_usage(args):
+    """Record the usage of a finished dispatch: `usage <task> --tokens N [--usd X]
+    [--source TEXT]` (trust claimed), or `usage --file F`, one JSON object per line
+    ({task, tokens, usd, source}, trust low). Prints USAGE: per entry and PROBLEM: line
+    <n>: <why> per bad record (the others still apply). Works on a stopped run (that is
+    how a budget_unmetered stop is cleared), not on a finished one. Exit 0; 2 on a
+    refused single entry or bad arguments; 3 when the file had a problem record."""
+    st = _load_current(args.root)
+    if st is None:
+        return 2
+    if _finished(st):
+        return 2
+    if args.file is not None:
+        if args.task or args.tokens is not None or args.usd is not None:
+            sys.stderr.write("usage --file takes no task, --tokens or --usd\n")
+            return 2
+        try:
+            with open(args.file, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            sys.stderr.write("cannot read %s: %s\n" % (args.file, e))
+            return 2
+        problems = 0
+        for n, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line, parse_constant=_reject_constant)
+            except ValueError as e:
+                rec, why = None, "not JSON: %s" % e
+            else:
+                why = None if isinstance(rec, dict) else "not a JSON object"
+            if why is None:
+                _, why = record_usage(st, rec.get("task"), rec.get("tokens"),
+                                      rec.get("usd"), rec.get("source"), "low")
+            if why:
+                problems += 1
+                print("PROBLEM: line %d: %s" % (n, one_line(why)))
+                continue
+            print(_usage_out(st.usage[-1]))
+        return 3 if problems else 0
+    if not args.task or args.tokens is None:
+        sys.stderr.write("give usage <task> --tokens N [--usd X], or usage --file F\n")
+        return 2
+    entry, why = record_usage(st, args.task, args.tokens, args.usd, args.source, "claimed")
+    if why:
+        sys.stderr.write("usage refused: %s\n" % why)
+        return 2
+    print(_usage_out(entry))
+    return 0
+
+
 def cmd_decision(args):
     """Park a task that needs a human decision the grant does not cover. The question is
     recorded; the task's dependents become blocked and the run goes on (exit 0)."""
@@ -2775,9 +3097,10 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "log": _rel(st, st.log_path), "log_sha256": None, "log_bytes": None,
         "budget": dict(st.budget), "budget_derived": list(st.budget_derived),
         "dispatches": st.dispatches,
-        "budget_note": BUDGET_NOTE_TEXT, "integration": integration,
+        "budget_note": budget_note_text(st.budget), "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st),
-        "evidence_gate": bool(st.verification), "trail": trail(st)["units"]}
+        "evidence_gate": bool(st.verification), "trail": trail(st)["units"],
+        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {})}
 
 
 def _run_result_assertions(st, plan_doc, integration=None):
@@ -2952,7 +3275,13 @@ def pr_body(payload, envelope_rel):
               "Dispatches: %d; budget: %s." % (payload["dispatches"],
                                                code(json.dumps(payload["budget"],
                                                                sort_keys=True))),
-              "Budget note: %s." % payload["budget_note"], "",
+              "Budget note: %s." % payload["budget_note"]]
+    use = payload.get("usage")
+    if isinstance(use, dict):
+        lines.append("Usage: %d tokens, %s USD, from %d entries (trust %s); %d dispatches "
+                     "unmetered." % (use["tokens"], _num(use["usd"]), use["entries"],
+                                     code(use["trust"] or "-"), use["unmetered"]))
+    lines += ["",
               "Evidence: %s (run-result/v1). Every proven task was re-run by the conductor "
               "and reviewed before it merged; a human merges this pull request."
               % code(envelope_rel), ""]
@@ -3648,6 +3977,14 @@ def main(argv=None):
     s.add_argument("--pr-cmd", default=None)
     s.add_argument("--retry-remote", action="store_true")
     s.set_defaults(fn=cmd_finish)
+    s = sub.add_parser("usage")
+    s.add_argument("task", nargs="?", default=None)
+    s.add_argument("--root", default=".")
+    s.add_argument("--tokens", type=_tokens_arg, default=None)
+    s.add_argument("--usd", type=_usd_arg, default=None)
+    s.add_argument("--source", default=None)
+    s.add_argument("--file", default=None)
+    s.set_defaults(fn=cmd_usage)
     s = sub.add_parser("owner")
     s.add_argument("task")
     s.add_argument("--root", default=".")
