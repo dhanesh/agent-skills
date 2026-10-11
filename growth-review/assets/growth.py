@@ -555,7 +555,12 @@ _METRIC_KEYS = {"direction", "period", "warn", "breach", "min_n", "severity"}
 
 
 def _is_num(v):
-    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(v)  # an int too large for a float raises OverflowError
+    except (ValueError, ArithmeticError):
+        return False
 
 
 def _check_registration(i, reg):
@@ -599,7 +604,7 @@ def load_registrations(root):
         for i, reg in enumerate(regs, 1):
             _check_registration(i, reg)
         return regs
-    except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, ArithmeticError) as e:
         raise StateError("cannot read %s/%s: %s" % (GROWTH_DIR, PLAN_STATE, one_line(e)))
 
 
@@ -644,7 +649,7 @@ def load_data(root):
                                                     and not isinstance(r["n"], bool)))):
                     raise ValueError("line %d is not a metric record" % n)
                 out.append(r)
-    except (OSError, ValueError, RecursionError) as e:
+    except (OSError, ValueError, RecursionError, ArithmeticError) as e:
         raise StateError("cannot read %s/%s: %s" % (GROWTH_DIR, DATA_FILE, one_line(e)))
     return out
 

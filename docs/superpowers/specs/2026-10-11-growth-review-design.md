@@ -211,7 +211,9 @@ corrects this document. `assets/test_growth_hardening.py` pins them.
 22. **Corrupt registrations (L1).** Each registration entry is checked on load: `sha256`,
     `by`, `at` and `metrics` present, each metric well formed, and the thresholds match their
     sha256. A bad entry is `STOP:` and exit 2 in every command. Before, `{}` gave a
-    `KeyError` traceback (exit 1). Stored data records are checked the same way.
+    `KeyError` traceback (exit 1). Stored data records are checked the same way. An integer
+    too large for a float in `plan.json` or `data.jsonl` is a bad entry too (`STOP:`, exit
+    2), not an `OverflowError` traceback.
 23. **Lookalike agent names (L2).** The `agent:` check folds the name with NFKC, a small
     map of Cyrillic and Greek lookalike letters and `casefold()`, then refuses
     `^\s*agent\s*[:/\-_]`. So `agent：claude`, `ａｇｅｎｔ:claude`, `аgent:claude`

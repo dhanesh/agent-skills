@@ -302,6 +302,40 @@ class CorruptRegistration(unittest.TestCase):
             self.assertEqual((rc, out), (2, ""), entry)
 
 
+class HugeNumbersInState(unittest.TestCase):
+    """L1/M4: an integer too large for a float in a state file is STOP, never a traceback."""
+
+    def check_all_stop(self, root, name):
+        for argv in (("review",), ("register", "--by", "Dana"),
+                     ("import", records(root, [rec("signups", YDAY, 1)]))):
+            rc, out = run(root, *argv)
+            self.assertEqual(rc, 2, (argv, out))
+            self.assertIn("STOP: `cannot read .skill-contract/growth/%s" % name, out)
+        rc, out, err = run_err(root, "signals", "--source", "growth")
+        self.assertEqual((rc, out), (2, ""))
+        self.assertIn("STOP:", err)
+
+    def test_huge_threshold_in_plan_json(self):
+        root = registered()
+        path = os.path.join(gdir(root), "plan.json")
+        text = read(path).replace('"warn": 100.0', '"warn": ' + "9" * 400)
+        self.assertIn("9" * 400, text)
+        write(path, text)
+        self.check_all_stop(root, "plan.json")
+
+    def test_huge_value_in_data_jsonl(self):
+        root = registered()
+        load(root, rec("signups", YDAY, 120))
+        with open(os.path.join(gdir(root), "data.jsonl"), "a", encoding="utf-8") as f:
+            f.write('{"metric": "signups", "period": "2026-10-10", "value": %s}\n' % ("9" * 400))
+        for argv in (("review",), ("import", records(root, [rec("signups", YDAY, 1)]))):
+            rc, out = run(root, *argv)
+            self.assertEqual(rc, 2, (argv, out))
+            self.assertIn("STOP: `cannot read .skill-contract/growth/data.jsonl", out)
+        rc, out, err = run_err(root, "signals", "--source", "growth")
+        self.assertEqual((rc, out), (2, ""))
+
+
 class AgentLookalikes(unittest.TestCase):
     """L2: lookalike agent names are refused; human names still register."""
 
