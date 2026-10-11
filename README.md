@@ -22,6 +22,7 @@ npx skills add dhanesh/agent-skills --skill context-hygiene-kit
 npx skills add dhanesh/agent-skills --skill crafting-self-prompting-loops
 npx skills add dhanesh/agent-skills --skill factory-conductor
 npx skills add dhanesh/agent-skills --skill feynman-walkthrough
+npx skills add dhanesh/agent-skills --skill idea-validation
 npx skills add dhanesh/agent-skills --skill jev-agent-setup
 npx skills add dhanesh/agent-skills --skill knowledge-gardener
 npx skills add dhanesh/agent-skills --skill okf-site-kit
@@ -54,17 +55,19 @@ each handoff. The build step can now run unattended from an approved plan to an 
 [Unattended mode](#unattended-mode-partial)), and a merged change can be carried to verified
 production with your single production yes (see [Release](#release-merged-change-to-production)).
 Operational signals (failed releases, red CI, issues) can be ranked into a local queue and carried
-back into planning when you pick an item (see [Operate → planning](#operate--planning)).
+back into planning when you pick an item (see [Operate → planning](#operate--planning)). An idea
+can be tested against pre-registered pass and kill thresholds before it is planned, and a `go`
+hands it to planning (see [Idea → plan](#idea--plan)); you run the experiments yourself.
 Incident response, support and growth stay with you. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev). The Release / deploy and Operate → planning rows are the exceptions: they describe release-conductor and ops-intake as built and were not produced by the dated assessment, which re-judges them after this work merges.
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy and Operate → planning rows are the exceptions: they describe idea-validation, release-conductor and ops-intake as built and were not produced by the dated assessment, which re-judges them after this work merges.
 
 | Stage | Skills | Status |
 |---|---|---|
-| Idea validation | none (ai-migration-operating-model `qualify` covers migrations only) | missing |
+| Idea validation | `idea-validation` turns an idea into a brief whose riskiest assumptions each carry a test, a metric, pass and kill thresholds and a deadline, registers it before any result, computes GO, KILL, STALLED or PENDING from the results you report, flags a critical assumption you drop later, and hands a `go` to `spec-first-planning` as an `idea-brief/v1` envelope. Limits: you run every experiment (the agent never publishes, sends or spends); results are claimed, not proven; the stage cannot run unattended | partly |
 | Requirements / spec | `spec-first-planning` | covered |
 | Design / plan | `spec-first-planning`, `clean-code` (architecture), `ai-migration-operating-model` (migrations) | partly |
 | Build / execute | `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies | partly |
@@ -87,6 +90,13 @@ executes it, handing off a `task-plan/v1` envelope.
 
 ```bash
 npx skills add dhanesh/agent-skills --skill spec-first-planning --skill crafting-self-prompting-loops
+```
+
+**Idea → plan.** Test an idea against pre-registered pass and kill thresholds, then plan it
+after your `go`. You run the experiments; the agent records what you report.
+
+```bash
+npx skills add dhanesh/agent-skills --skill idea-validation --skill spec-first-planning
 ```
 
 **Make a repo agent-ready.** Audit the repo's rails, install the format/build/test loop and CI,
@@ -208,13 +218,14 @@ by design, so the agent asks you before any PR is opened.
 
 - **Skills that adopt [skill-contract](docs/skill-contract/SPEC.md)** find each other at handoff
   time and hand off a validated envelope, after asking you first unless a grant covers it. Today
-  seven skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
+  eight skills adopt it, and the handoffs are `spec-first-planning` → `crafting-self-prompting-loops`
   and `spec-first-planning` → `factory-conductor` (a `task-plan/v1` envelope, with its
   `autonomy-grant/v1`), which returns a `run-result/v1` envelope. `release-conductor` consumes
   its own release grant (and a planning grant's release defaults) and provides a
   `release-result/v1` envelope. `ops-intake` provides an `intake-item/v1` envelope that
   `spec-first-planning` reads as a request, and consumes the task-plan, run-result and
-  release-result envelopes to follow the item to resolved.
+  release-result envelopes to follow the item to resolved. `idea-validation` provides an
+  `idea-brief/v1` envelope that `spec-first-planning` reads as a request.
 - **A missing consumer is not an error.** The producer reports `NO_CONSUMER`, gives you the
   envelope path, and finishes normally.
 - **Every other link between skills is prose.** A skill says "use X next". If X is not installed,
@@ -261,6 +272,23 @@ tracker and never picks or dismisses for you.
 
 ```bash
 npx skills add dhanesh/agent-skills --skill ops-intake --skill spec-first-planning
+```
+
+### Idea → plan
+
+`idea-validation` answers "is this worth building?". You and the agent write
+a brief: the problem, the user, the value, and the riskiest assumptions, each with a test, a
+metric, a pass and a kill threshold and a deadline. You confirm it, and the tool registers it
+before any result comes in, so a later threshold change makes the earlier results stale. You
+run the experiments (interviews, a landing page, a price test) and report each result; the
+agent never publishes, sends or spends. The tool computes the verdict, and desk research alone
+never passes a critical assumption. When you decide `go`, `spec-first-planning` starts a spec
+from the `idea-brief/v1` envelope, with any override or dropped critical assumption shown at
+the top and the evidence quoted as untrusted. Results are claimed, not proven: the tool cannot
+see your experiment.
+
+```bash
+npx skills add dhanesh/agent-skills --skill idea-validation --skill spec-first-planning
 ```
 
 ### Unattended mode: partial
@@ -344,6 +372,7 @@ The design and the gap analysis are in
 | [`security-posture-audit`](security-posture-audit/) | Read-only, offline security *hygiene* audit — dependency pinning, committed env/key files, debug/permissive flags, insecure transports, risky CI patterns — severity-graded with file:line evidence and honest not-covered boundaries. Not a CVE scanner or SAST; completes the trust family alongside `scan-leaks` and `base-in-reality`. |
 | [`spec-first-planning`](spec-first-planning/) | Fills the plan band: turns a fuzzy feature request into a lint-clean spec of numbered, testable requirements, then derives a task plan where every task names the check that proves it done — with a total requirement↔task coverage map before handoff to an implementer or a `crafting-self-prompting-loops` loop. |
 | [`factory-conductor`](factory-conductor/) | Runs an approved task plan unattended, from its first task to an open PR, inside a user-approved autonomy grant. The session dispatches a fresh executor per task and a fresh reviewer per finished task; a stdlib state tool schedules waves from `depends_on`, re-runs each task's own verify commands as the proof, merges only what passed both into one run branch, enforces wall-clock, dispatch, repair and parallel budgets (tokens and dollars are recorded, not enforced), parks what fails, and ends with a `run-result/v1` envelope, a pushed branch and a PR. Merging the PR stays with the human. |
+| [`idea-validation`](idea-validation/) | Tests a product idea before it is planned. You and the agent write a validation brief whose riskiest assumptions each carry a test, a metric, pass and kill thresholds and a deadline; a stdlib tool that runs no command and opens no socket lints it, registers it before any result, records the results you report, computes GO/KILL/STALLED/PENDING (desk research alone never passes a critical assumption), flags a critical assumption dropped after registration, and after your `go` writes an `idea-brief/v1` envelope that `spec-first-planning` turns into a spec. You run every experiment. |
 | [`ops-intake`](ops-intake/) | Brings operational signals back into planning. The agent pipes read-only CLI output (gh issues, failing CI on the default branch, release-conductor status, a JSON-lines transform for Jira or Linear) into a stdlib importer that runs no command and opens no socket; it dedupes and ranks a local queue, writes an `intake-item/v1` envelope for the item you pick so `spec-first-planning` drafts the spec with the evidence quoted as untrusted, and marks the item resolved when a verified release contains the fix. |
 | [`release-conductor`](release-conductor/) | Carries a merged change to verified production. A stdlib state tool drives a per-project release recipe: prep bumps the version and opens the release PR under a release grant you accept; after your merge, stage builds the merged commit, holds it for an independent verifier's SHA-bound evidence, deploys to staging and checks it; deploy runs the production deploy only with your explicit yes for this release; verify-prod proves production runs the commit with read-only smoke checks; rollback asks too. Ends with a `release-result/v1` envelope. |
 | [`jev-agent-setup`](jev-agent-setup/) | Machine-wide Jev (TypeSafe System One) setup for every coding agent: installs the `jev` CLI (JSON in, typed Noul/Choice/Score out) and a managed BCP 14 instruction block into the global files of Claude Code, Codex, Gemini CLI and `~/.agents/AGENTS.md`, so agents offload rank/classify/yes-no decisions to Jev. Idempotent, marker-bounded, backs up before first touch, `--check` for drift, optional mirror mode that copies CLAUDE.md to the other agents. Complements `typesafe-ai`, which covers building Jev into applications. |
