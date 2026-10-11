@@ -268,6 +268,9 @@ SINCE_INTAKE_FEEDBACK = "e72a5fa"  # ops-intake feedback (roadmap step 6C): the 
 # FIRST code commit -- feedback-jsonl, the uncapped seen keys (every source), feedback
 # recurrence by message time and redaction. One constant for the campaign: it lands at one
 # merge.
+SINCE_FACTORY_HARDENING = "06018f7"  # fix/factory-hardening: the campaign's FIRST commit,
+# ops-intake's link count (L3) and source-namespaced seen keys (L4); idea-validation's
+# --today test clock (L5) came next. One constant for the campaign: it lands at one merge.
 
 
 def _git_out(*args):
@@ -8306,6 +8309,150 @@ def check_spend_review(old, new):
             since=SINCE_SPEND_METERING)
 
 
+# ── factory hardening (L3, L4, L5) ──────────────────────────────────────────
+# ops-intake: link counts the dropped item's unseen keys (L3); seen keys carry their source
+# and a raw h: id is escaped (L4). idea-validation: --today needs IDEAS_TEST_CLOCK=1 (L5).
+# Each case is 1 when the fix holds and the healthy half of the same fixture works.
+_FH_PROBE = r"""
+sys.dont_write_bytecode = True
+import contextlib, hashlib, io
+from unittest import mock
+import intake as IN
+case = @CASE@
+CFG = {"sources": {"jira": {"enabled": True, "formats": ["intake-signals-jsonl"]},
+                   "ops": {"enabled": True, "formats": ["intake-signals-jsonl"]},
+                   "fb": {"enabled": True, "formats": ["feedback-jsonl"]}}}
+def need(cond, what):
+    if not cond:
+        raise RuntimeError(what)
+def repo(cfg):
+    root = tempfile.mkdtemp(prefix="ab-fh-")
+    os.makedirs(os.path.join(root, ".intake"))
+    with open(os.path.join(root, ".intake", "config.json"), "w") as f:
+        json.dump(cfg, f)
+    return root
+def run(root, *argv, stdin=""):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), \
+            mock.patch.object(IN, "_now", return_value="2026-10-10T00:00:00Z"), \
+            mock.patch.object(sys, "stdin", io.StringIO(stdin)):
+        rc = IN.main(["--root", root, *argv])
+    return rc, buf.getvalue()
+def sig(source, sid, *keys):
+    rec = {"source": source, "source_id": sid, "kind": "issue", "title": "t", "severity": 2,
+           "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-01T00:00:00Z",
+           "evidence": [{"text": "e " + k, "key": k} for k in keys]}
+    rc, _ = run(root, "import", "--format", "intake-signals-jsonl", "--source", source, "-",
+                stdin=json.dumps(rec) + "\n")
+    need(rc == 0, "an intake-signals-jsonl line did not import")
+def count(iid):
+    return IN.Queue.load(root).items[iid]["count"]
+v = 0
+if case == "link-count":
+    root = repo({"sources": {"jira": CFG["sources"]["jira"]}})
+    keep, drop = IN.item_id("jira", "X-1"), IN.item_id("jira", "X-2")
+    sig("jira", "X-1", "a", "b")
+    sig("jira", "X-2", "b", "c")
+    need(run(root, "link", keep, drop)[0] == 0, "link failed")
+    linked = count(keep)
+    sig("jira", "X-1", "a", "b")
+    sig("jira", "X-2", "b", "c")
+    v = int(linked == 3 and count(keep) == 3)
+elif case == "cross-source":
+    root = repo({"sources": {k: CFG["sources"][k] for k in ("jira", "ops")}})
+    keep, drop = IN.item_id("jira", "X-1"), IN.item_id("ops", "Y-1")
+    sig("jira", "X-1", "a")
+    sig("ops", "Y-1", "a")
+    need(run(root, "link", keep, drop)[0] == 0, "link failed")
+    linked = count(keep)
+    sig("jira", "X-1", "a")
+    sig("ops", "Y-1", "a")
+    v = int(linked == 2 and count(keep) == 2)
+elif IN.config_problems(CFG):
+    v = 0  # the baseline has no feedback-jsonl: an honest 0
+elif case == "raw-h":
+    root = repo({"sources": {"fb": CFG["sources"]["fb"]}})
+    email = "pat.form@example.com"
+    hashed = "h:" + hashlib.sha256(email.encode("utf-8")).hexdigest()[:16]
+    recs = "".join(json.dumps({"id": i, "topic": "form-bug", "channel": "form",
+                               "created_at": "2026-10-01T00:00:00Z", "text": "x"}) + "\n"
+                   for i in (email, hashed))
+    rc, _ = run(root, "import", "--format", "feedback-jsonl", "--source", "fb", "-", stdin=recs)
+    need(rc == 0, "the feedback lines did not import")
+    first = count(IN.item_id("fb", "form-bug"))
+    run(root, "import", "--format", "feedback-jsonl", "--source", "fb", "-", stdin=recs)
+    v = int(first == 2 and count(IN.item_id("fb", "form-bug")) == 2)
+print(json.dumps({"v": v}))
+"""
+
+_FH_TODAY_PROBE = r"""
+sys.dont_write_bytecode = True
+import contextlib, io
+from unittest import mock
+sys.path.insert(0, os.path.join(@TREE@, "idea-validation", "eval"))
+import run_eval as EV
+import ideas as ID
+def need(cond, what):
+    if not cond:
+        raise RuntimeError(what)
+root = EV.registered()
+env = {k: x for k, x in os.environ.items() if k != "IDEAS_TEST_CLOCK"}
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf), mock.patch.dict(os.environ, env, clear=True):
+    rc = ID.main(["--root", root, "--today", "2099-01-01", "record", "flat", "A1", "--value",
+                  "7", "--kind", "experiment", "--source", "s", "--observed", "2098-12-31",
+                  "--by", "Dana"])
+refused = rc == 2 and EV.ledger(root) == b""
+need(EV.record(root, "A1", 7)[0] == 0, "a result under the test clock was refused")
+print(json.dumps({"v": int(refused)}))
+"""
+
+
+def _fh_case(tree, case):
+    """The factory-hardening probe's 0/1 for `case` in `tree`; 0 (honest) for a tree
+    without the skill; None (PROBE_ERRORS) when the fixture itself broke."""
+    if case == "today":
+        for rel in (("idea-validation", "assets", "ideas.py"),
+                    ("idea-validation", "eval", "run_eval.py")):
+            if not os.path.isfile(os.path.join(tree, *rel)):
+                return 0
+        out = probe(tree, "idea-validation/assets",
+                    _FH_TODAY_PROBE.replace("@TREE@", repr(tree)))
+    else:
+        if not os.path.isfile(os.path.join(tree, "ops-intake", "assets", "intake.py")):
+            return 0
+        out = probe(tree, "ops-intake/assets", _FH_PROBE.replace("@CASE@", repr(case)))
+    return None if _errored(out) else out.get("v")
+
+
+def check_factory_hardening(old, new):
+    for skill, case, dimension, note in (
+            ("ops-intake", "link-count", "link counts the dropped item's unseen messages "
+             "(higher=better)",
+             "L3: two intake-signals-jsonl items of one source, keys {a, b} and {b, c}, "
+             "linked: count 3 (the distinct keys), and a re-import of both keeps 3. The "
+             "baseline keeps the kept item's count (2), an honest 0. Mutation-proven: on "
+             "96f4c48, the tree before the fix, it reads 0"),
+            ("ops-intake", "cross-source", "seen keys carry the source (higher=better)",
+             "L4: sources jira and ops each import key a, then are linked: count 2, and a "
+             "re-import from both keeps 2. The baseline keeps count 1, an honest 0. "
+             "Mutation-proven: on 96f4c48 (seen keys without the source, the union {a}) it "
+             "reads 0, and with the L3 count only the formula still gives 1"),
+            ("ops-intake", "raw-h", "a raw h: id never equals a hashed id (higher=better)",
+             "L4: a form message keyed by an email (stored as h: + 16 hex of its sha256) "
+             "and one whose raw id is that same h: string count 2, and a re-import keeps 2. "
+             "The baseline has no feedback-jsonl, an honest 0. Mutation-proven: on 96f4c48 "
+             "the two ids collide and it reads 0"),
+            ("idea-validation", "today", "--today outside a test refused (higher=better)",
+             "L5: without IDEAS_TEST_CLOCK=1, record --today 2099-01-01 --observed "
+             "2098-12-31 exits 2 and the results ledger stays empty. Sanity-checked in the "
+             "same probe: under the test clock the eval's record is accepted. The baseline "
+             "accepts the 2098 result, an honest 0")):
+        a, b = _fh_case(old, case), _fh_case(new, case)
+        row(skill, dimension, a, b, a == 0 and b == 1, note, kind="delta",
+            since=SINCE_FACTORY_HARDENING)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -8392,6 +8539,7 @@ def main():
         check_idea_validation(old, REPO)
         check_spend_metering(old, REPO)
         check_spend_review(old, REPO)
+        check_factory_hardening(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
