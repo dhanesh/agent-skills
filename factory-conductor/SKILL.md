@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.4.0"
+  version: "1.5.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -624,6 +624,62 @@ the push either. The rest is covered by the independent reviewer and by CI re-ru
 on the pushed branch.
 That is why merging the PR stays with the human.
 
+## Money ledger
+
+The project can keep a monthly budget in `budget/budget.md` and a record of what it spends in
+the git-ignored `.skill-contract/ledger/`. `ledger.py` is a separate tool: `conductor.py` does not
+read it, and it is not part of a run. A project without `budget/budget.md` has no ledger.
+The full reference (the budget format, every command, its output and exit codes) is in
+`references/ledger.md`.
+
+Before you propose any spend to the human, in any session and not only during a run, you MUST
+run the check, because it is the only place the budget's caps and the open reservations are
+counted:
+
+```sh
+python3 "$SKILL_DIR/assets/ledger.py" --root <repo> check --id <kebab-id> --category <c> \
+  --amount <decimal> --currency <code> --what "<what it buys>" \
+  [--month YYYY-MM | --recurring monthly --start YYYY-MM [--end YYYY-MM]]
+```
+
+- `REFUSED: <reason>` (exit 3): show the human the reason. You MUST NOT work around a refusal
+  by splitting the spend, changing the id, the month or the category, because each of those
+  hides the same money from the cap.
+- `NOT_REFUSED: <id> — the human's approval is still required` (exit 0): the proposal now
+  reserves its amounts. Put the proposal to the human and wait for their answer.
+- Exit 2: bad input or a `STOP:` line. Fix the input, or report the stop to the human.
+
+`register`, `record` and `withdraw` are the human's commands. Each takes `--by <their name>`
+and refuses an `agent:` name. You MUST NOT run them yourself, even when the human tells you
+the figures, because each one changes what later checks count; give the human the exact
+command line to run. You MUST NOT edit or delete files under `.skill-contract/ledger/` by
+hand, because the log would no longer match the state and every check would refuse.
+
+**No spend.** You MUST NOT spend money, buy, subscribe, or start a paid trial, because
+spend is irreversible and no grant covers it. You MAY draft a proposal for the human.
+
+**No payment tools.** You MUST NOT call a payment, billing or store tool (for example PayPal
+or Stripe) to make a spend or to change one, because those calls move real money outside
+every check. You MAY read a bill or invoice that the human exports.
+
+**The budget is the human's.** You MUST NOT edit `budget/budget.md` without the human, because
+an edit moves the goalposts after you have seen the proposal. The check refuses every
+proposal while the budget differs from the registered copy, and only the human registers an
+edit.
+
+**No figures to a model.** You MUST NOT send budget amounts or spend records to Jev or to any
+other model, because they are financial data.
+
+**The check is not approval.** You MUST NOT treat `NOT_REFUSED` as permission, because the
+check only finds reasons to say no. Ask the human for each spend.
+
+`--today` is for the tool's tests. You MUST NOT pass it, because it moves the month that the
+check counts.
+
+The ledger's limits: recorded spend is a claim, and `--by` names are self-declared. The
+committed budget file shows the budget to anyone who can read the repository. The tool cannot
+see spend that nobody records.
+
 ## Contract
 
 This skill follows [skill-contract v1](https://github.com/dhanesh/agent-skills/blob/main/docs/skill-contract/SPEC.md).
@@ -652,5 +708,5 @@ them.
   merging the run branch or the PR into the default branch to the human; a grant cannot cover
   `merge`.
 - **Not a project spend governor.** A grant that opts in gets run token and dollar caps,
-  enforced from claimed usage reports. There is no project money ledger, and `spend` stays an
-  ask-class action that no grant covers.
+  enforced from claimed usage reports. The money ledger only refuses: it never approves a
+  spend, and `spend` stays an ask-class action that no grant covers.
