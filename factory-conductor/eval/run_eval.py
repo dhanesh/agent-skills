@@ -222,6 +222,43 @@ def decision_parks_and_run_continues_arm():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def spend_request_parks_only_that_task_arm():
+    """A decision whose question is a well-formed spend request line parks only that task.
+    T2 depends on T1 and becomes blocked. T3 is independent and stays ready. The `next` call
+    after the decision must still offer T3: a `decision` that stopped the run would print a
+    STOP line (or nothing) here, and this arm would fail."""
+    root = TK.repo()
+    try:
+        plan_env = TK.write_plan_envelope(root, plan=plan(
+            task("T1", [], ["true"]), task("T2", ["T1"], ["true"]), task("T3", [], ["true"])))
+        TK.write_grant(root, plan_env)
+        rc, out, err = run(["init", "--plan", plan_env, "--root", root])
+        run_id = out.split("RUN:", 1)[1].split()[0] if "RUN:" in out else "run-x"
+        rid = "%s-t1" % run_id
+        line = ("spend request %s: example.dev domain from Namecheap; 12.00 USD once in 2026-10; "
+                "category domains; ledger: NOT_REFUSED %s; why: the task needs a hostname; "
+                "blocks: T2; after buying: ledger.py --root %s record --id %s --amount 12.00 "
+                "--currency USD --month 2026-10 --by Dana; to decline: ledger.py --root %s "
+                "withdraw --id %s --by Dana --reason not-needed"
+                % (rid, rid, root, rid, root, rid))
+        well_formed = (line.count("\n") == 0 and line.startswith("spend request ")
+                       and "; ledger: NOT_REFUSED " in line and "; blocks: " in line
+                       and "http" not in line and len(rid) <= 64)
+        rc, out, err = run(["decision", "T1", "--question", line, "--root", root])
+        parked = (rc == 0 and out.strip() == "PARK: T1 new_human_decision"
+                  and status(root, "T1") == "parked")
+        rc, out, err = run(["next", "--root", root])
+        check("NEGATIVE: a decision whose question is a spend request line parks only that "
+              "task: its dependent T2 is blocked, the independent T3 is still offered, and "
+              "the run does not stop",
+              well_formed and parked and status(root, "T2") == "blocked"
+              and rc == 0 and out.strip() == "READY: T3" and status(root, "T3") != "parked",
+              "well_formed=%r parked=%r T2=%r rc=%r out=%r"
+              % (well_formed, parked, status(root, "T2"), rc, out.strip()))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def revoked_grant_stops_at_next_gate_arm():
     root = TK.repo()
     try:
@@ -899,6 +936,7 @@ def money_ledger_arms():
 def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
+    spend_request_parks_only_that_task_arm()
     revoked_grant_stops_at_next_gate_arm()
     expired_grant_stops_at_next_gate_arm()
     max_dispatches_one_stops_the_run_arm()

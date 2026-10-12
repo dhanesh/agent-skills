@@ -47,6 +47,8 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**1.5.3.** A run that reaches a paid step gives the human a spend request. The controller runs the ledger check from the repository root, then parks only that task with a one-line request. The human buys, then records or withdraws it. No code moves money. The ledger commands are unchanged.
+
 **1.5.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
 
 **1.5.1.** The contract checker honours `SKILL_PYTHON` (after `SKILL_CONTRACT_PYTHON`) and skips the macOS `python3` install stub without running it.

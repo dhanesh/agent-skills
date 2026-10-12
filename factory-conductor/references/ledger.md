@@ -147,6 +147,42 @@ Names are self-declared: the rule against an agent typing a human's name is in S
 - A `record` for a month that the proposal never covered still records the spend. It prints
   `NOTE: <month> is not a month that proposal <id> reserved; recorded all the same`.
 
+## Spend requests
+
+A run can reach a step that costs money, such as a domain, an API tier or a hosting upgrade.
+The executor reports `NEEDS_DECISION` with the item, vendor, amount, currency, recurrence,
+category and reason. The controller then runs `check` from the repository root. It does not
+run it in the task worktree, because a check there reserves budget in the wrong state
+directory. The controller writes one request line and runs `conductor decision <task>
+--question "<line>"`. Only that task parks. Its dependents become blocked, and the rest of the
+run goes on. The human buys the item. No code moves money, and the ledger commands do not
+change.
+
+The request id is `<run-id>-<task>`, cut to fit the 64-character limit in the same way every
+time. Lowercase it. Turn each run of characters outside `a-z0-9` into one `-`. Strip `-` from
+both ends. Keep the first 64 characters. Strip a trailing `-`. A resumed run gets the same id,
+so its second `check` is a replay. The ledger counts a replay once. A new id would reserve the
+money twice.
+
+The request is one line, because `status` prints the question JSON-escaped and the PR body puts
+it in inline code:
+
+```
+spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: ledger.py --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: ledger.py --root <repo> withdraw --id <id> --by <your name> --reason <text>
+```
+
+The line names `record` and `withdraw`, because a reservation holds budget until the human
+records it or withdraws it. When `check` prints `REFUSED:`, the line says
+`ledger: REFUSED <reason>` and has no `after buying` or `to decline` part. Without a
+registered budget, the line says `ledger: no registered budget`. The line holds no payment link,
+only the vendor and the item.
+
+Example:
+
+```
+spend request run-20261012T101530Z-a1b2c3-add-domain: example.dev domain from Namecheap; 12.00 USD once in 2026-10; category domains; ledger: NOT_REFUSED run-20261012T101530Z-a1b2c3-add-domain; why: the landing task needs a real hostname; blocks: deploy-landing; after buying: ledger.py --root /work/shop record --id run-20261012T101530Z-a1b2c3-add-domain --amount 12.00 --currency USD --month 2026-10 --by Dana; to decline: ledger.py --root /work/shop withdraw --id run-20261012T101530Z-a1b2c3-add-domain --by Dana --reason not needed
+```
+
 ## Output and exit codes
 
 | Exit | Meaning |
