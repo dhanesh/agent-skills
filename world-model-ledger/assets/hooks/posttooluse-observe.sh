@@ -12,9 +12,12 @@
 # Wire under hooks.PostToolUse (matcher "*").
 set -uo pipefail
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/find_python.sh"
+find_python
+[ -n "$PY" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-cwd="$(printf '%s' "$input" | python3 -c "import json,sys
+cwd="$(printf '%s' "$input" | "$PY" -c "import json,sys
 try: print((json.load(sys.stdin) or {}).get('cwd',''))
 except Exception: print('')" 2>/dev/null)"
 
@@ -29,13 +32,13 @@ if [[ -d ".git" ]]; then
   mkdir -p .world-model
   grep -qxF '.world-model/' .gitignore 2>/dev/null \
     || printf '\n# world-model-ledger runtime store\n.world-model/\n' >> .gitignore 2>/dev/null || true
-  python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" bootstrap . >/dev/null 2>&1 || true
+  "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" bootstrap . >/dev/null 2>&1 || true
 elif [[ ! -f ".world-model/model.db" ]]; then
   # Not a project and nothing to observe into — stay out of scratch directories.
   echo '{"continue": true}'; exit 0
 fi
 
-printf '%s' "$input" | python3 "$KIT_HOME/world_model.py" \
+printf '%s' "$input" | "$PY" "$KIT_HOME/world_model.py" \
   --db ".world-model/model.db" observe-tool --from-hook --digest ".world-model/digest.md" >&2 || true
 
 echo '{"continue": true}'

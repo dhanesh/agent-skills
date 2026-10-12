@@ -7,9 +7,12 @@
 # Wire in settings.json under hooks.PreToolUse (matcher "Edit|Write|MultiEdit").
 set -uo pipefail
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+. "$(dirname "$0")/find_python.sh"
+find_python
+[ -n "$PY" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-get() { printf '%s' "$input" | python3 -c "import json,sys
+get() { printf '%s' "$input" | "$PY" -c "import json,sys
 try: print(json.load(sys.stdin)$1)
 except Exception: print('')" 2>/dev/null; }
 
@@ -22,7 +25,7 @@ cd "$cwd" || { echo '{"continue": true}'; exit 0; }
 paths="$(get ".get('tool_input',{}).get('file_path','')")"
 [[ -z "$paths" ]] && { echo '{"continue": true}'; exit 0; }
 
-summary="$(WM_DB=".world-model/model.db" python3 "$KIT_HOME/world_model.py" \
+summary="$(WM_DB=".world-model/model.db" "$PY" "$KIT_HOME/world_model.py" \
             --db ".world-model/model.db" precall "$paths" 2>/dev/null || true)"
 
 if [[ -z "$summary" ]]; then
@@ -31,7 +34,7 @@ if [[ -z "$summary" ]]; then
 fi
 
 # Emit as additionalContext (best-effort; ignored gracefully by older clients).
-python3 - "$summary" <<'PY'
+"$PY" - "$summary" <<'PY'
 import json, sys
 ctx = sys.argv[1]
 print(json.dumps({
