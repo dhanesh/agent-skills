@@ -312,5 +312,14 @@ class MigrationTests(unittest.TestCase):
         self.assertNotIn("legacy_keys", IN.item_payload(it))
 
 
+class VersionPin(unittest.TestCase):
+    def test_version_matches_skill_md(self):
+        # every envelope names this constant as its producer version: it must be the
+        # version SKILL.md ships
+        skill_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SKILL.md")
+        with open(skill_md, encoding="utf-8") as f:
+            self.assertIn('  version: "%s"\n' % IN.VERSION, f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -627,7 +627,7 @@ class Release:
 
 # ── init and prep (spec section 2, decisions D7/D9/D10) ──────────────────────────
 SKILL_NAME = "release-conductor"
-SKILL_VERSION = "0.1.0"
+SKILL_VERSION = "0.1.1"
 INTENT_FILE = "intent.json"
 PREP_WT = "wt-prep"
 CHANGELOG = "CHANGELOG.md"  # R11: at the repo root, a new section on top, created if absent

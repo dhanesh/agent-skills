@@ -355,6 +355,9 @@ class RuntimeTests(unittest.TestCase):
                 if xcode_rc is None:
                     raise OSError("no xcode-select")
                 return subprocess.CompletedProcess(argv, xcode_rc, b"", b"")
+            if argv[0] == "/usr/bin/python3":
+                # never run the real macOS stub: answer as a python that fails the probe
+                return subprocess.CompletedProcess(argv, 1, b"", b"")
             return real_run(argv, **kw)
         return ran, [
             mock.patch.object(cc.sys, "platform", "darwin"),

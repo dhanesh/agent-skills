@@ -188,6 +188,10 @@ The first that succeeds wins. If none does, the checker cannot run, and commandm
 applies. In that path the model reads the envelope against SPEC.md itself. The checker also verifies its
 own Python version and exits 2 with a message rather than a traceback.
 
+2026-10-12: the portability retrofit added `SKILL_PYTHON` after `SKILL_CONTRACT_PYTHON`. On macOS the
+lookup also skips `/usr/bin/python3` without running it when `xcode-select -p` fails. See
+`docs/superpowers/specs/2026-10-12-portability-retrofit-design.md`.
+
 ## 3. Discovery (C8)
 
 `discover` gathers `## Contract` blocks from these roots, in precedence order. For a given skill name,
