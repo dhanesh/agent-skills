@@ -31,9 +31,13 @@ The data rules (`--check` fails on any of them):
               handoff   `from` sends its result to `to`; a human starts `to` next;
               optional  `from` uses `to` only when it is installed.
             `short` (root label), `when` and `why` (per-skill label) are plain text.
-  evidence  Each item is {"at": "<skill>/<file>:<line>", "mentions": "<skill>"}. The
-            file belongs to one end of the edge, `mentions` is the other end, and the
-            line still names it. A file under references/ is linked from that skill's
+  evidence  Each item is {"file": "<skill>/<file>", "quote": "<words>", "mentions": "<skill>"}.
+            The file belongs to one end of the edge and `mentions` is the other end.
+            `quote` is a short verbatim run of words from the file (6-15 words is a
+            good size). Runs of whitespace, line breaks too, count as one space, so a
+            line that moves or a paragraph that is rewrapped does not break it. The
+            quote occurs exactly once in the file, and the line(s) it spans name
+            `mentions`. A file under references/ is linked from that skill's
             SKILL.md. Every non-contract edge has at least one item.
   contract  The contract edges are exactly the pairs where `from`'s
             ```json skill-contract block provides a kind that `to`'s block consumes,
@@ -45,6 +49,7 @@ Stdlib only; no network.
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import os
 import re
@@ -193,15 +198,50 @@ def validate(root: str, g: dict) -> list[str]:
     return fails
 
 
+MIN_QUOTE_WORDS = 3
+
+
+def normalise(text: str) -> tuple[str, list[int], list[int]]:
+    """Collapse each run of whitespace to one space.
+
+    Return the joined text, the offset of each word in it, and the 1-based
+    line number of each word in the original text.
+    """
+    norm: list[str] = []
+    offs: list[int] = []
+    lines: list[int] = []
+    pos = 0
+    for n, line in enumerate(text.split("\n"), 1):
+        for w in line.split():
+            offs.append(pos)
+            lines.append(n)
+            norm.append(w)
+            pos += len(w) + 1
+    return " ".join(norm), offs, lines
+
+
+def find_all(hay: str, needle: str) -> list[int]:
+    out, i = [], hay.find(needle)
+    while i != -1:
+        out.append(i)
+        i = hay.find(needle, i + 1)
+    return out
+
+
 def check_evidence(root: str, tag: str, a: str, b: str, item: dict) -> list[str]:
-    at, want = item.get("at", ""), item.get("mentions", "")
-    path, _, line = at.rpartition(":")
+    path, want, quote = item.get("file", ""), item.get("mentions", ""), item.get("quote", "")
+    if "at" in item:
+        return [f"{tag}: evidence {item['at']!r} uses the old `at` field; "
+                f"give `file` and a verbatim `quote` instead"]
     owner = path.split("/", 1)[0]
-    if owner not in (a, b) or not line.isdigit():
-        return [f"{tag}: evidence {at!r} must be <one end>/<file>:<line>"]
+    if owner not in (a, b) or "/" not in path:
+        return [f"{tag}: evidence file {path!r} must be <one end>/<file>"]
     other = b if owner == a else a
     if want != other:
-        return [f"{tag}: evidence {at} must mention {other}, not {want!r}"]
+        return [f"{tag}: evidence in {path} must mention {other}, not {want!r}"]
+    q = " ".join(quote.split())
+    if len(q.split(" ")) < MIN_QUOTE_WORDS:
+        return [f"{tag}: evidence in {path} needs a `quote` of at least {MIN_QUOTE_WORDS} words"]
     full = os.path.join(root, path)
     if not os.path.isfile(full):
         return [f"{tag}: evidence file {path} does not exist"]
@@ -210,14 +250,33 @@ def check_evidence(root: str, tag: str, a: str, b: str, item: dict) -> list[str]
         with open(os.path.join(root, owner, "SKILL.md"), encoding="utf-8") as fh:
             if rel not in fh.read():
                 return [f"{tag}: {path} is not linked from {owner}/SKILL.md"]
-    lines = read_lines(full)
-    i = int(line)
+    with open(full, encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    norm, offs, wline = normalise(text)
     pat = name_re(want)
-    if 1 <= i <= len(lines) and pat.search(lines[i - 1]):
-        return []
+    lines = text.split("\n")
     now = [str(n) for n, l in enumerate(lines, 1) if pat.search(l)]
-    where = f"it is now on line(s) {', '.join(now[:8])}" if now else "the file no longer names it"
-    return [f"{tag}: evidence {at} no longer mentions {want}; {where}"]
+    where = (f"{want} is now on line(s) {', '.join(now[:8])}" if now
+             else f"the file no longer names {want}")
+    hits = find_all(norm, q)
+
+    def span(i: int) -> tuple[int, int]:
+        first = bisect.bisect_right(offs, i) - 1
+        last = bisect.bisect_right(offs, i + len(q) - 1) - 1
+        return wline[first], wline[last]
+
+    if not hits:
+        return [f"{tag}: evidence quote {quote!r} is not in {path}; {where}"]
+    if len(hits) > 1:
+        at = ", ".join(str(span(i)[0]) for i in hits[:8])
+        return [f"{tag}: evidence quote {quote!r} occurs {len(hits)} times in {path} "
+                f"(lines {at}); use a longer quote"]
+    lo, hi = span(hits[0])
+    if pat.search("\n".join(lines[lo - 1:hi])):
+        return []
+    lref = f"line {lo}" if lo == hi else f"lines {lo}-{hi}"
+    return [f"{tag}: evidence quote {quote!r} in {path} ({lref}) no longer sits on a line "
+            f"that names {want}; {where}"]
 
 
 # ── rendering ─────────────────────────────────────────────────────────────────
