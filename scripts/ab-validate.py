@@ -9067,7 +9067,8 @@ def _sr_score(tree):
     flat = " ".join(text.split())
     has_format = ("spend request <id>: <item> from <vendor>;" in flat
                   and "ledger: NOT_REFUSED <id>" in flat
-                  and "to decline: ledger.py --root <repo> withdraw" in flat)
+                  and "to decline: <ledger> --root <repo> withdraw" in flat
+                  and "<run-id>-<task slug>-<n>-<h>" in flat)
     has_check = ("ledger.py\" --root <repo> check --id <id>" in flat
                  and "The executor never runs it" in flat)
     return 1 if has_format and has_check else 0
