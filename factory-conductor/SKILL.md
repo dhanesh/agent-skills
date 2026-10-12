@@ -554,11 +554,24 @@ change rather than worked around in silence.
   the ledger check yourself, from the repository root, and put the result into the question.
   The executor never runs it: its worktree is not the repository root, so a check there would
   reserve budget in the wrong state directory. Take these steps:
-  1. Make the request id `<run-id>-<task>`, then cut it to fit the ledger's kebab-case limit,
-     the same way every time: lowercase it, turn every run of characters outside `a-z0-9` into
-     one `-`, strip `-` from both ends, keep the first 64 characters, strip a trailing `-`.
-     A resumed run then gets the same id and checks again, and the ledger counts a replay
-     once, where a new id would reserve the money twice.
+  1. Make the request id with this one-liner, which prints `<run-id>-<task slug>-<n>-<h>`.
+     `<n>` is the 1-based index of the paid item within that task (1 for the first spend the
+     task reports, 2 for the next). The slug is the task id lowercased, with each run of
+     characters outside `a-z0-9` turned into one `-` and approval words dropped, cut so the
+     whole id fits the ledger's 64-character cap. `<h>` is the first 8 hex of the sha256 of
+     `<run-id>`, `<task id>` and `<n>` on three lines, so two task ids that fold to the same
+     slug (`T1` and `t1`, `a.b` and `a_b`) or are cut alike still get different ids. The same
+     inputs give the same id, so a resumed run checks the same request again and the ledger
+     counts that replay once; a new id would reserve the money twice. A resumed run also
+     reuses the month, `<n>` and amount of the earlier request line (read it from the task's
+     parked question or the run log), because a replay with other fields is refused and the
+     current month would be a different proposal. When you cannot find the earlier line, tell
+     the human the old id so they can withdraw it.
+
+     ```sh
+     python3 -c 'import sys,re,hashlib;sys.path.insert(0,sys.argv[1]);from ledger import APPROVAL_WORDS as A;r,t,n=sys.argv[2:5];h=hashlib.sha256(("%s\n%s\n%s"%(r,t,n)).encode()).hexdigest()[:8];e="-%s-%s"%(n,h);f=lambda x:[w for w in x.split("-") if w and w not in A];m=max(64-len(r)-1-len(e),0);g="-".join(f("-".join(f(re.sub("[^a-z0-9]+","-",t.lower())))[:m]));print("-".join([r.lower()]+([g] if g else []))+e)' "$SKILL_DIR/assets" <run-id> <task-id> <n>
+     ```
+
   2. Run `python3 "$SKILL_DIR/assets/ledger.py" --root <repo> check --id <id> --category <c>
      --amount <a> --currency <CUR> --what "<item> from <vendor>"` with `--month YYYY-MM` or
      `--recurring monthly --start YYYY-MM [--end YYYY-MM]`. The Money ledger section has the
@@ -566,12 +579,17 @@ change rather than worked around in silence.
   3. Write the question as one line in this format, because `status` prints the question
      JSON-escaped and the PR body puts it inside inline code, and a multi-line request is hard
      to read in both:
-     `spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: ledger.py --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: ledger.py --root <repo> withdraw --id <id> --by <your name> --reason <text>`
-     The `record` and `withdraw` parts stay in, because a reservation holds budget until the
+     `spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: <ledger> --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: <ledger> --root <repo> withdraw --id <id> --by <your name> --reason <text>`
+     Write `<ledger>` as the resolved path, `python3 "$SKILL_DIR/assets/ledger.py"` with
+     `$SKILL_DIR` filled in (or the absolute path), so the human can run it as it stands. The
+     `record` and `withdraw` parts stay in, because a reservation holds budget until the
      human records or withdraws it, and a declined request would otherwise hold it for good.
      When the check printed `REFUSED: <reason>`, write `ledger: REFUSED <reason>` and leave out
      the `after buying` and `to decline` parts. When it refused for want of a registered
-     budget, write `ledger: no registered budget`. The task parks either way.
+     budget, write `ledger: no registered budget`. When it exited 2 (any `STOP:` line), write
+     `ledger: STOP <the STOP line>` and leave out the same two parts; do not change the id, the
+     month or the category to get round the stop, for the reason the Money ledger section
+     gives. The task parks in every case.
   4. Run `conductor decision <task> --question "<that line>"` and carry on. Only that task
      parks. Its dependents become `blocked` and the other ready tasks continue.
   5. Put no payment link in the line, only the vendor and the item, because the text comes
@@ -735,6 +753,10 @@ caps and spend. It can now print `REFUSED` (a cap was cut, or a record pushed a 
 The reservation stays; show the human the reason. An open-ended recurring proposal prints
 `NOTE: open-ended; reserved only to YYYY-MM`: tell the human that the ledger counts nothing
 for it after that month.
+
+The request line of a spend request, amount included, goes into the run log, the run-result
+envelope and the PR body, so anyone who can read those sees it. It is never sent to a model
+(see "No figures to a model").
 
 The ledger's limits: recorded spend is a claim, and `--by` names are self-declared. The
 committed budget file shows the budget to anyone who can read the repository. The tool cannot

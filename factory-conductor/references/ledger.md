@@ -158,29 +158,38 @@ directory. The controller writes one request line and runs `conductor decision <
 run goes on. The human buys the item. No code moves money, and the ledger commands do not
 change.
 
-The request id is `<run-id>-<task>`, cut to fit the 64-character limit in the same way every
-time. Lowercase it. Turn each run of characters outside `a-z0-9` into one `-`. Strip `-` from
-both ends. Keep the first 64 characters. Strip a trailing `-`. A resumed run gets the same id,
-so its second `check` is a replay. The ledger counts a replay once. A new id would reserve the
-money twice.
+The request id is `<run-id>-<task slug>-<n>-<h>`. SKILL.md ("Stop and park rules", spend step 1)
+holds the one-liner that prints it, and is the only copy. `n` counts the paid items of one task
+from 1. `h` is a hash of the run id, the task id and `n`, so task ids that fold to the same
+slug still get different ids. The same inputs give the same id. A resumed run checks the same
+request again, and the ledger counts that replay once. A resumed run also reuses the month
+and `n` of the earlier request line. If it cannot find that line, it tells the human the old
+id so the human can withdraw it.
 
 The request is one line, because `status` prints the question JSON-escaped and the PR body puts
 it in inline code:
 
 ```
-spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: ledger.py --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: ledger.py --root <repo> withdraw --id <id> --by <your name> --reason <text>
+spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: <ledger> --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: <ledger> --root <repo> withdraw --id <id> --by <your name> --reason <text>
 ```
 
 The line names `record` and `withdraw`, because a reservation holds budget until the human
 records it or withdraws it. When `check` prints `REFUSED:`, the line says
 `ledger: REFUSED <reason>` and has no `after buying` or `to decline` part. Without a
-registered budget, the line says `ledger: no registered budget`. The line holds no payment link,
+registered budget, the line says `ledger: no registered budget`. When `check` exits 2 with a
+`STOP:` line, the line says `ledger: STOP <the STOP line>` and has no `after buying` or
+`to decline` part. The task parks in every case, and the controller does not change the id to get round a stop.
+`<ledger>` is the resolved path of `ledger.py`, so the human can run the line as it stands.
+The line, amount included, goes into the run log, the run-result envelope and the PR body, so
+anyone who can read those sees it. It is never sent to a model (see "No figures to a model" in
+SKILL.md). The line holds no payment link,
 only the vendor and the item.
 
-Example:
+Example (the id is what the one-liner prints for run `run-20261012T101530Z-a1b2c3`, task
+`add-domain`, n 1; `<hash>` stands for its 8 hex digits):
 
 ```
-spend request run-20261012T101530Z-a1b2c3-add-domain: example.dev domain from Namecheap; 12.00 USD once in 2026-10; category domains; ledger: NOT_REFUSED run-20261012T101530Z-a1b2c3-add-domain; why: the landing task needs a real hostname; blocks: deploy-landing; after buying: ledger.py --root /work/shop record --id run-20261012T101530Z-a1b2c3-add-domain --amount 12.00 --currency USD --month 2026-10 --by Dana; to decline: ledger.py --root /work/shop withdraw --id run-20261012T101530Z-a1b2c3-add-domain --by Dana --reason not needed
+spend request run-20261012t101530z-a1b2c3-add-domain-1-<hash>: example.dev domain from Namecheap; 12.00 USD once in 2026-10; category domains; ledger: NOT_REFUSED run-20261012t101530z-a1b2c3-add-domain-1-<hash>; why: the landing task needs a real hostname; blocks: deploy-landing; after buying: python3 /skills/factory-conductor/assets/ledger.py --root /work/shop record --id run-20261012t101530z-a1b2c3-add-domain-1-<hash> --amount 12.00 --currency USD --month 2026-10 --by <your name>; to decline: python3 /skills/factory-conductor/assets/ledger.py --root /work/shop withdraw --id run-20261012t101530z-a1b2c3-add-domain-1-<hash> --by <your name> --reason not needed
 ```
 
 ## Output and exit codes

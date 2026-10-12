@@ -74,6 +74,9 @@ import contract_check as CC  # noqa: E402
 import reentry as R  # noqa: E402
 import conductor_testkit as TK  # noqa: E402
 import ledger_testkit as LK  # noqa: E402
+import ledger as LG  # noqa: E402
+import re  # noqa: E402
+import shlex  # noqa: E402
 
 _checks = []
 
@@ -234,16 +237,13 @@ def spend_request_parks_only_that_task_arm():
         TK.write_grant(root, plan_env)
         rc, out, err = run(["init", "--plan", plan_env, "--root", root])
         run_id = out.split("RUN:", 1)[1].split()[0] if "RUN:" in out else "run-x"
-        rid = "%s-t1" % run_id
+        rid = "%s-t1-1-0a1b2c3d" % run_id.lower()  # fixture text only; the real asserts follow
         line = ("spend request %s: example.dev domain from Namecheap; 12.00 USD once in 2026-10; "
                 "category domains; ledger: NOT_REFUSED %s; why: the task needs a hostname; "
                 "blocks: T2; after buying: ledger.py --root %s record --id %s --amount 12.00 "
                 "--currency USD --month 2026-10 --by Dana; to decline: ledger.py --root %s "
                 "withdraw --id %s --by Dana --reason not-needed"
                 % (rid, rid, root, rid, root, rid))
-        well_formed = (line.count("\n") == 0 and line.startswith("spend request ")
-                       and "; ledger: NOT_REFUSED " in line and "; blocks: " in line
-                       and "http" not in line and len(rid) <= 64)
         rc, out, err = run(["decision", "T1", "--question", line, "--root", root])
         parked = (rc == 0 and out.strip() == "PARK: T1 new_human_decision"
                   and status(root, "T1") == "parked")
@@ -251,12 +251,59 @@ def spend_request_parks_only_that_task_arm():
         check("NEGATIVE: a decision whose question is a spend request line parks only that "
               "task: its dependent T2 is blocked, the independent T3 is still offered, and "
               "the run does not stop",
-              well_formed and parked and status(root, "T2") == "blocked"
+              parked and status(root, "T2") == "blocked"
               and rc == 0 and out.strip() == "READY: T3" and status(root, "T3") != "parked",
-              "well_formed=%r parked=%r T2=%r rc=%r out=%r"
-              % (well_formed, parked, status(root, "T2"), rc, out.strip()))
+              "parked=%r T2=%r rc=%r out=%r"
+              % (parked, status(root, "T2"), rc, out.strip()))
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def _request_id_oneliner():
+    """The canonical request-id one-liner, cut out of SKILL.md exactly as written:
+    (argv list up to the three placeholder args)."""
+    with open(os.path.join(SKILL, "SKILL.md"), encoding="utf-8") as f:
+        lines = [l.strip() for l in f if l.strip().startswith("python3 -c '")]
+    if len(lines) != 1:
+        return None
+    return shlex.split(lines[0])[:-3]
+
+
+def spend_request_id_arm():
+    base = _request_id_oneliner()
+    if base is None:
+        check("NEGATIVE: SKILL.md holds exactly one request-id one-liner", False, "not found")
+        return
+    base = [ASSETS if x == "$SKILL_DIR/assets" else x for x in base]
+    run_id = "run-20261012T101530Z-a1b2c3"
+
+    def mk(task_id, n=1, rid=run_id):
+        r = subprocess.run(base + [rid, task_id, str(n)], capture_output=True, text=True)
+        return r.stdout.strip() if r.returncode == 0 else "ERR " + r.stderr[-200:]
+
+    api = "buy-the-domain-for-the-api-"
+    pairs = [("T1", "t1"), ("a.b", "a_b"), (api + "eu", api + "us")]
+    distinct = all(mk(x) != mk(y) for x, y in pairs) and mk("t1", 1) != mk("t1", 2)
+    check("NEGATIVE: colliding task ids (T1/t1, a.b/a_b, a name cut at the cap) and two "
+          "items of one task get distinct request ids", distinct,
+          "; ".join("%s=%s %s=%s" % (x, mk(x), y, mk(y)) for x, y in pairs))
+    long_task = "x" * 40 + "-for-the-api-eu"
+    samples = ["T1", "t1", "a.b", "a_b", "ok", "grant-access", "OK", "Approved.Grant",
+               api + "eu", api + "us", long_task, "okra" * 12, "a" * 64]
+    ids = [mk(t, n) for t in samples for n in (1, 2, 12)]
+    bad = [i for i in ids if not LG._kebab_ok(i)]
+    check("every request id passes ledger.py's own id validation (kebab-case, at most 64, "
+          "no approval word), including long and approval-word task ids",
+          not bad and len(ids) == 39, "bad=%r" % bad[:3])
+    check("the same inputs give the same id (a resumed run replays the request)",
+          mk("add-domain") == mk("add-domain") and mk("ok") == mk("ok"),
+          "%s" % mk("add-domain"))
+    check("NEGATIVE: a task id made only of approval words (ok, grant-access) still yields "
+          "a valid id that holds none of those words as a part",
+          all(LG._kebab_ok(mk(t)) for t in ("ok", "grant-access"))
+          and mk("ok").startswith(run_id.lower() + "-1-")
+          and "grant" not in mk("grant-access").split("-"),
+          "ok=%s grant-access=%s" % (mk("ok"), mk("grant-access")))
 
 
 def revoked_grant_stops_at_next_gate_arm():
@@ -937,6 +984,7 @@ def main():
     dep_order_and_finish_arm()
     decision_parks_and_run_continues_arm()
     spend_request_parks_only_that_task_arm()
+    spend_request_id_arm()
     revoked_grant_stops_at_next_gate_arm()
     expired_grant_stops_at_next_gate_arm()
     max_dispatches_one_stops_the_run_arm()
