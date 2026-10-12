@@ -14,7 +14,7 @@ license: MIT
 compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. python3 >= 3.10 is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.4.2"
+  version: "1.4.3"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
@@ -94,8 +94,9 @@ SKILL_DIR="<this skill's base directory>"   # your harness provides it when the 
 test -f "$SKILL_DIR/assets/contract_check.py"   # verify before proceeding
 ```
 
-Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
-Python 3.10 or newer.
+Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `$SKILL_PYTHON`, `python3` (skipped
+when it is the macOS install stub: `/usr/bin/python3` while `xcode-select -p` fails), `python`,
+`py -3` that is Python 3.10 or newer.
 
 1. **Check first.** Run
    `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <envelope> --root <repo-root> --for "$SKILL_DIR" --json`.

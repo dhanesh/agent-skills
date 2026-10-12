@@ -188,6 +188,10 @@ The first that succeeds wins. If none does, the checker cannot run, and commandm
 applies. In that path the model reads the envelope against SPEC.md itself. The checker also verifies its
 own Python version and exits 2 with a message rather than a traceback.
 
+2026-10-12: the portability retrofit added `SKILL_PYTHON` after `SKILL_CONTRACT_PYTHON`. On macOS the
+lookup also skips `/usr/bin/python3` without running it when `xcode-select -p` fails. See
+`docs/superpowers/specs/2026-10-12-portability-retrofit-design.md`.
+
 ## 3. Discovery (C8)
 
 `discover` gathers `## Contract` blocks from these roots, in precedence order. For a given skill name,
@@ -303,7 +307,8 @@ SKILL.md says what to do with it, so there are no invocation templates in the co
 
 - **The macOS `python3` stub.** Without the Command Line Tools, running `/usr/bin/python3` can open an
   install dialog, and the probe may trigger it. Verify this, and if needed, check `xcode-select -p` first
-  on darwin.
+  on darwin. Resolved 2026-10-12 by the portability retrofit: `resolve_python()` skips the stub
+  without running it.
 - **`installed_plugins.json` is internal to Claude Code.** It may change. The checker degrades to a
   warning.
 - **BCP 14 keywords do not guarantee that a model complies.** They make each obligation unambiguous. The

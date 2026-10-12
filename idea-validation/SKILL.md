@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool needs no network and no credentials.
 metadata:
   author: dhanesh
-  version: "0.1.3"
+  version: "0.1.4"
   skill-contract: "1"
   tags: "factory,ideas,validation,skill-contract"
 ---

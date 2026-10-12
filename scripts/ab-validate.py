@@ -281,6 +281,9 @@ SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the ca
 SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
 # mermaid diagrams in README.md and every <skill>/README.md are rendered from
 # docs/skill-graph/graph.json and checked against it, the skills and their contracts.
+SINCE_PORTABILITY_RESOLVER = "f81be19"  # skill-contract portability retrofit, PR 1:
+# resolve_python() reads SKILL_PYTHON and skips the macOS python3 install stub without
+# running it. The commit that changes the reference checker.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
@@ -9067,6 +9070,51 @@ def check_money_ledger(old, new):
         "trees: the ledger changes nothing about who may spend", kind="guard")
 
 
+# ── skill-contract: resolve_python() skips the macOS install stub ─────────────
+_PR_PROBE = r"""
+import contextlib, subprocess
+from unittest import mock
+import contract_check as cc
+d = tempfile.mkdtemp()
+py = os.path.join(d, "python")
+with open(py, "w") as f:
+    f.write("#!/bin/sh\nexec \"%s\" \"$@\"\n" % sys.executable)
+os.chmod(py, 0o755)
+which = {"python3": "/usr/bin/python3", "python": py, "xcode-select": "/usr/bin/xcode-select"}
+ran = []
+real_run = subprocess.run
+def fake_run(argv, **kw):
+    ran.append(list(argv))
+    if os.path.basename(argv[0]) == "xcode-select":
+        return subprocess.CompletedProcess(argv, 2, b"", b"")
+    if argv[0] == "/usr/bin/python3":  # never run the real stub from a probe
+        return subprocess.CompletedProcess(argv, 1, b"", b"")
+    return real_run(argv, **kw)
+with contextlib.ExitStack() as st:
+    st.enter_context(mock.patch.object(cc.sys, "platform", "darwin"))
+    st.enter_context(mock.patch.object(cc.shutil, "which", lambda n, path=None: which.get(n)))
+    st.enter_context(mock.patch.object(cc.subprocess, "run", fake_run))
+    got = cc.resolve_python({"PATH": d})
+v = int("/usr/bin/python3" not in [a[0] for a in ran] and got == [py])
+print(json.dumps({"v": v}))
+"""
+
+
+def check_portability_resolver(old, new):
+    sub = os.path.join("docs", "skill-contract", "reference")
+    if not os.path.isfile(os.path.join(new, sub, "contract_check.py")):
+        PROBE_ERRORS.append((new, sub, "the tree under review has no reference checker"))
+        return
+    a, b = probe(old, sub, _PR_PROBE), probe(new, sub, _PR_PROBE)
+    if _errored(a, b):
+        return
+    row("skill-contract", "macOS python3 stub never run by the {python} lookup (higher=better)",
+        a.get("v"), b.get("v"), a.get("v") == 0 and b.get("v") == 1,
+        "darwin, python3 at /usr/bin/python3, xcode-select -p exits 2: the baseline probes the "
+        "stub (an install dialog on a real Mac) and the branch skips it and resolves python, "
+        "an honest 0 -> 1", kind="delta", since=SINCE_PORTABILITY_RESOLVER)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9158,6 +9206,7 @@ def main():
         check_idea_names(old, REPO)
         check_money_ledger(old, REPO)
         check_agent_names(old, REPO)
+        check_portability_resolver(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

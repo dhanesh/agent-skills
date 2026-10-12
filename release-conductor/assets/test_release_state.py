@@ -169,5 +169,14 @@ class EvidenceCoreIdentityTests(unittest.TestCase):
                                  "%s differs from conductor.py's: keep the copies in step" % name)
 
 
+class VersionPin(unittest.TestCase):
+    def test_skill_version_matches_skill_md(self):
+        # every envelope names this constant as its producer version: it must be the
+        # version SKILL.md ships
+        skill_md = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "SKILL.md")
+        with open(skill_md, encoding="utf-8") as f:
+            self.assertIn('  version: "%s"\n' % RL.SKILL_VERSION, f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

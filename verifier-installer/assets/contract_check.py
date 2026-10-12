@@ -597,18 +597,39 @@ def claim_status(statement, root=None, rerun_results=None):
     return status
 
 
+_MACOS_STUB = "/usr/bin/python3"
+
+
+def _is_macos_stub(exe, env):
+    """True for the macOS install stub: darwin, exactly /usr/bin/python3, and
+    `xcode-select -p` failing. Running the stub opens an install dialog, so it is never
+    probed. When xcode-select cannot run, the candidate is not treated as the stub."""
+    if sys.platform != "darwin" or exe != _MACOS_STUB:
+        return False
+    xs = shutil.which("xcode-select", path=env.get("PATH")) or "/usr/bin/xcode-select"
+    try:
+        r = subprocess.run([xs, "-p"], capture_output=True, timeout=5, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode != 0
+
+
 def resolve_python(env=None, min_version=(3, 10)):
-    """The {python} lookup: SKILL_CONTRACT_PYTHON, python3, python, py -3; first to pass the probe."""
+    """The {python} lookup: SKILL_CONTRACT_PYTHON, SKILL_PYTHON, python3 (not the macOS
+    install stub), python, py -3; the first to pass the probe."""
     env = dict(os.environ if env is None else env)
     candidates = []
-    override = env.get("SKILL_CONTRACT_PYTHON", "").strip()
-    if override:
-        candidates.append([p.strip('"') for p in shlex.split(override, posix=(os.name != "nt"))])
+    for var in ("SKILL_CONTRACT_PYTHON", "SKILL_PYTHON"):
+        override = env.get(var, "").strip()
+        if override:
+            candidates.append([p.strip('"') for p in shlex.split(override, posix=(os.name != "nt"))])
     candidates += [["python3"], ["python"], ["py", "-3"]]
     probe = "import sys; sys.exit(0 if sys.version_info >= (%d, %d) else 1)" % min_version
     for cand in candidates:
         exe = shutil.which(cand[0], path=env.get("PATH"))
         if exe is None:
+            continue
+        if cand == ["python3"] and _is_macos_stub(exe, env):
             continue
         try:
             r = subprocess.run([exe] + cand[1:] + ["-I", "-c", probe],

@@ -332,6 +332,77 @@ class RuntimeTests(unittest.TestCase):
             env = {"PATH": d, "SKILL_CONTRACT_PYTHON": "%s -X utf8" % quoted_python()}
             self.assertEqual(cc.resolve_python(env), [sys.executable, "-X", "utf8"])
 
+    def test_skill_python_wins_over_python3(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.stub(d, "python3", 'exec "%s" "$@"' % sys.executable)
+            env = {"PATH": d, "SKILL_PYTHON": quoted_python()}
+            self.assertEqual(cc.resolve_python(env), [sys.executable])
+
+    def test_skill_contract_python_wins_over_skill_python(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {"PATH": d, "SKILL_CONTRACT_PYTHON": "%s -X utf8" % quoted_python(),
+                   "SKILL_PYTHON": quoted_python()}
+            self.assertEqual(cc.resolve_python(env), [sys.executable, "-X", "utf8"])
+
+    def _darwin(self, which, xcode_rc):
+        """Patch sys.platform to darwin, shutil.which to the given map, and the
+        xcode-select call to exit xcode_rc (None: it cannot run). Records every argv run."""
+        ran = []
+        real_run = cc.subprocess.run
+        def fake_run(argv, **kw):
+            ran.append(list(argv))
+            if os.path.basename(argv[0]) == "xcode-select":
+                if xcode_rc is None:
+                    raise OSError("no xcode-select")
+                return subprocess.CompletedProcess(argv, xcode_rc, b"", b"")
+            if argv[0] == "/usr/bin/python3":
+                # never run the real macOS stub: answer as a python that fails the probe
+                return subprocess.CompletedProcess(argv, 1, b"", b"")
+            return real_run(argv, **kw)
+        return ran, [
+            mock.patch.object(cc.sys, "platform", "darwin"),
+            mock.patch.object(cc.shutil, "which", lambda n, path=None: which.get(n)),
+            mock.patch.object(cc.subprocess, "run", fake_run)]
+
+    def _with(self, patches, fn):
+        with contextlib.ExitStack() as st:
+            for p in patches:
+                st.enter_context(p)
+            return fn()
+
+    def test_the_macos_stub_is_skipped_without_running_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            py = self.stub(d, "python", 'exec "%s" "$@"' % sys.executable)
+            ran, ps = self._darwin({"python3": "/usr/bin/python3", "python": py,
+                                    "xcode-select": "/usr/bin/xcode-select"}, 2)
+            self.assertEqual(self._with(ps, lambda: cc.resolve_python({"PATH": d})), [py])
+            self.assertNotIn("/usr/bin/python3", [a[0] for a in ran])
+
+    def test_usr_bin_python3_is_kept_when_xcode_select_succeeds(self):
+        ran, ps = self._darwin({"python3": "/usr/bin/python3",
+                                "xcode-select": "/usr/bin/xcode-select"}, 0)
+        self._with(ps, lambda: cc.resolve_python({"PATH": "/x"}))
+        self.assertIn("/usr/bin/python3", [a[0] for a in ran])
+
+    def test_a_homebrew_python3_is_never_the_stub(self):
+        ran, ps = self._darwin({"python3": "/opt/homebrew/bin/python3",
+                                "xcode-select": "/usr/bin/xcode-select"}, 2)
+        self._with(ps, lambda: cc.resolve_python({"PATH": "/x"}))
+        self.assertIn("/opt/homebrew/bin/python3", [a[0] for a in ran])
+        self.assertNotIn("xcode-select", [os.path.basename(a[0]) for a in ran])
+
+    def test_xcode_select_that_cannot_run_is_not_the_stub(self):
+        ran, ps = self._darwin({"python3": "/usr/bin/python3",
+                                "xcode-select": "/usr/bin/xcode-select"}, None)
+        self._with(ps, lambda: cc.resolve_python({"PATH": "/x"}))
+        self.assertIn("/usr/bin/python3", [a[0] for a in ran])
+
+    def test_linux_never_asks_xcode_select(self):
+        ran, ps = self._darwin({"python3": "/usr/bin/python3"}, 2)
+        ps[0] = mock.patch.object(cc.sys, "platform", "linux")
+        self._with(ps, lambda: cc.resolve_python({"PATH": "/x"}))
+        self.assertNotIn("xcode-select", [os.path.basename(a[0]) for a in ran])
+
     def test_nothing_resolves(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(cc.resolve_python({"PATH": d}))
