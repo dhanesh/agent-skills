@@ -1,0 +1,164 @@
+{
+ "state": {
+  "goal": "An autonomous indie software factory built from a skill collection: idea validation -> spec -> build -> verify -> review -> release/deploy -> operate -> support/feedback -> growth/monetise. Acceptance test: Q1 the repo can act as a software factory for whoever installs all or a subset of skills; Q2 the README tells a user which skills they need; Q3 unattended mode: the user keeps full control, skills ask every human-decision question upfront during requirements/design, then implementation runs with full autonomy.",
+  "shipped_on_main": [
+   "skill-contract v1: typed envelopes between skills with a shared checker, 5+ adopters",
+   "BCP 14 normative language enforced by a register gate; prompt audit for current models; PP-5 requires a reason on every absolute rule",
+   "spec-first-planning: unattended mode runs a full planning loop, asks every human decision upfront, requires a runnable check command on every acceptance criterion, asks for re-entry consent, writes an autonomy grant (max 7 days; never merge/deploy/spend/external messages/delete; never the default branch)",
+   "factory-conductor: runs the approved plan unattended to an open PR - waves from depends_on, a worktree and fresh executor per task, the tool re-runs each task's checks itself, an independent reviewer, an evidence gate (no merge without independent runtime proof from a project verify skill), integration re-verify of the merged branch before push, push pinned to the verified commit, enforced dispatch/wall-clock/repair budgets, mechanical NEXT: resume that a memoryless session can follow",
+   "scheduled re-entry (PR #68): with consent in the grant, a launchd/systemd/cron timer runs `conductor watch`, which restarts the user's own headless agent on a stalled run; never while another driver is live, never while the run waits on the human, never under a lapsed grant, bounded by max_reentries; verified on real systemd, cron, busybox and a macOS launchd smoke test",
+   "verification-skill-forge: generates project-local verify skills that drive the real running app and record SHA-bound runtime evidence",
+   "README: a Software factory section mapping skills to stages, an 'Unattended: plan to PR' install recipe, and a 'Without gh' path",
+   "release-conductor (PR #70, merge 11cd42d): after the human merges, `prep` writes a release grant with the human present and opens a release PR; `stage` builds the merged commit in isolation, requires independent-verifier runtime evidence at that exact commit, deploys to staging (grantable), polls the version probe, runs staging checks, and pushes or holds the version tag (held when CI may deploy on tags); `deploy` to production runs only on the human's in-session yes to a summary naming the rollback target, never unattended, never grant-covered, never re-run after a crash; `verify-prod` proves production runs the release and writes a release-result envelope; `rollback` and `abandon` need the human's yes; refuses any agent allowlist that could run the production commands",
+   "CI runs on Ubuntu only (owner choice for Actions cost); macOS is proven by the owner's local make gate",
+   "ops-intake (PR #77, merge 8133acb): the agent pipes CLI/MCP output (gh issues, gh CI runs and jobs, release status, a generic JSONL format) into a pure local importer that never runs a command or holds a token; signals are deduped and ranked into a local queue with recurrence; the human picks an item and spec-first-planning drafts a spec with fenced untrusted evidence and a task plan naming the item; the human approves every check command verbatim; a verified release whose history contains the fix resolves the item; untrusted text never reaches a command; customer evidence stays git-ignored",
+   "spec-first-planning 2.6.0: intake requests, copy-tripwire warnings, hidden-character lint on check commands",
+   "ops-intake hardening (PR #79): no silent CI-run loss, wider allowlist check, one stage yes per step",
+   "idea-validation (PR #80, merge 2d94bdc): turns an idea into a brief whose riskiest assumptions each carry a test, metric, pre-registered pass/kill thresholds and a deadline; computes GO/KILL/STALLED/PENDING from reported results; desk research cannot pass a critical assumption; agent-recorded experiment results are refused; decide and handoff are human-only; a go hands an idea-brief/v1 envelope to spec-first-planning. The human runs every experiment; results are claimed, not proven",
+   "spend metering (PR #81, merge 3025754): factory-conductor 1.4.0 opt-in budget.enforce caps run tokens and/or USD from usage the agent claims from its harness; unmetered usage stops the run fail-closed; overshoot at most 2 dispatches per task. spend stays non-grantable; no project money ledger yet",
+   "ops-intake 0.2.0 feedback (PR #82, merged): support messages, app reviews and form answers enter through a generic feedback-jsonl transform of the human export; grouped by an agent-chosen topic into one counted item; email/phone redaction in text, url and ids; old messages never re-open a dismissed item; no customer text to any model; the factory never replies to a customer (draft only); vendor adapters (App Store Connect, Zendesk) wait for samples",
+   "factory hardening (PR #84): ops-intake link counts unseen messages; seen keys carry their source; idea-validation --today works only in tests",
+   "growth-review (PR #85): the human exports metrics; thresholds registered by the human before the data; per-metric OK/WARN/BREACH/NO_DATA for the last complete UTC period; edits after register keep judging on the frozen thresholds and exit 3; each breach becomes an ops-intake signal; never publishes, emails, changes a price or spends",
+   "money ledger (PR #87, factory-conductor 1.5.0): committed monthly budget registered by the human; a pre-spend check the agent runs before proposing any spend that can only refuse (prints NOT_REFUSED, never approval); reservations; human-only record/withdraw; spend stays never-grantable",
+   "AC9 record (PR #88)",
+   "skill call-graph diagrams (PR #89): a who-calls-whom mermaid diagram in the root README (by stage, entry points marked) and in every skill README, rendered from one graph.json with file:line evidence and gated against drift; CLAUDE.md requires updating it whenever a skill's calls change (PR #95)",
+   "portability retrofit (PRs #90-#92): every skill that runs Python finds the interpreter the same way (SKILL_PYTHON override, python3 unless it is the macOS install stub, python, py -3; Python 3.10+); hooks and installers use a shared sh resolver and exit quietly without Python; the contract checker skips the macOS stub; a gate keeps the shared rule in all 23 Python-running SKILL.md files",
+   "remote re-entry spike (PR #93): recommends an always-on host now; remote resume from CI or a hosted session not built (run state is local and git-ignored, the run lock is single-host, a tracked grant covers nothing)",
+   "owner decisions closed (2026-10-12): spend stays never grantable; tracker and app-store feedback use documented export-and-transform recipes into ops-intake's existing formats (PR #94: Jira, Linear, App Store, Play, Zendesk, Intercom; private temp dir, fail loudly, titles masked) instead of dedicated readers; launch and pricing stay manual by design; always-on host documented (PR #94)",
+   "spend requests (PR #96, factory-conductor 1.5.3): at a paid step found mid-run, the controller runs the refuse-only ledger check and parks only that task with a one-line spend request (item, vendor, amount, recurrence, ledger result, record/withdraw commands, no links, collision-proof id); the rest of the run goes on; the human buys"
+  ],
+  "known_limits": [
+   "merge to the default branch, production deploy, rollback, spend and external messages always stay with the human by design (staging deploy and a non-deploying tag push are grantable); spend is never grantable (owner decision)",
+   "re-entry needs the machine that started the run to be on (launchd agent while logged in, or a systemd user timer with linger on an always-on Linux host); remote resume is not built; POSIX only",
+   "a live but idle session can get a second driver after stall_min; the run lock and dispatch cap bound the damage",
+   "executor and reviewer are ordinary subagents, not tool-restricted agents",
+   "proof is only as strong as each spec's check commands and verify skill",
+   "token/USD caps are enforced only when the grant opts in and rely on usage the agent claims",
+   "ops-intake: tracker and app-store feedback need the human to run an export-and-transform recipe; on demand only; redaction is a safety net",
+   "idea validation and support depend on the human running experiments and exporting messages",
+   "growth-review and the ledger rely on human exports and human-recorded spend; launch and pricing stay manual by owner decision",
+   "skills' prose rules (interpreter lookup, spend requests) are not yet tested with model runs"
+  ],
+  "not_started": [
+   "launch/pricing drafting (left manual by owner decision)",
+   "remote re-entry (spike done; waits on owner decisions)"
+  ]
+ },
+ "questions": {
+  "q1": {
+   "type": "choice",
+   "instructions": "Can the repo act as a software factory for whoever installs all or a subset of the skills? Judge against `goal`.",
+   "criteria": {
+    "yes": "yes, and the whole loop in goal is covered or explicitly out of scope",
+    "partly": "yes for spec-to-PR, but other stages of goal are missing",
+    "no": "no"
+   }
+  },
+  "q2": {
+   "type": "choice",
+   "instructions": "Does the README tell a user which skills they need (Q2 of `goal`)?",
+   "criteria": {
+    "yes": "a new user can tell which skills to install for which stage and for unattended runs",
+    "partly": "some guidance, but a user would still guess",
+    "no": "no guidance"
+   }
+  },
+  "q3": {
+   "type": "choice",
+   "instructions": "Does unattended mode as defined in Q3 of `goal` work now?",
+   "criteria": {
+    "yes": "decisions are asked upfront and implementation then runs to a PR without the human, with only intentional human gates (merge, deploy, spend) remaining",
+    "partly": "it works but meaningful gaps remain before a user can hand off",
+    "no": "it does not work"
+   }
+  },
+  "e2e": {
+   "type": "noul",
+   "instructions": "Does implementation run end to end, from an approved plan to an open PR, without the human, for a typical small feature whose spec carries runnable check commands?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "factory": {
+   "type": "noul",
+   "instructions": "Is the repo a complete autonomous indie software factory as described in `goal`, every stage from idea validation through growth and monetisation?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "blocker": {
+   "type": "choice",
+   "instructions": "Which single remaining limit most keeps Q3 of `goal` from a clear yes?",
+   "criteria": {
+    "machine": "re-entry needs the machine on and the user logged in",
+    "idle": "a live but idle session can get a second driver",
+    "spend": "spend caps are opt-in and rely on claimed usage",
+    "agents": "executor and reviewer are not tool-restricted agents",
+    "proof": "proof is only as strong as the spec's checks and verify skill",
+    "merge": "merging, release and deploy stay with the human",
+    "none": "none; it is a clear yes"
+   }
+  },
+  "next_step": {
+   "type": "choice",
+   "instructions": "Given `goal`, `shipped_on_main`, `known_limits` and `not_started`, which work should come next?",
+   "criteria": {
+    "plugin": "a Claude Code plugin with tool-restricted executor/reviewer agents",
+    "hosted": "remote re-entry from CI or a hosted session so runs survive the machine being off",
+    "sweep": "a scheduled intake and growth sweep so signals arrive without a human asking",
+    "model_eval": "a model-run protocol that tests whether agents follow the skills' prose rules",
+    "hardening": "close the small review follow-ups (interpreter pointer for resumed runs, temp-dir cleanup on failed exports, line-number-pinned diagram evidence)"
+   }
+  },
+  "release": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, can a merged change now be carried to verified production with the human's only required action being an explicit yes to the production deploy (plus merging the release PR)?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "intake": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, do operational signals now flow back into planning, so that a production problem can become an approved plan without the human writing the request by hand?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "idea": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, can a raw product idea now become an approved spec through a checked validation brief, with the human only running experiments and making the go decision?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "feedback": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, can repeated customer feedback now become a counted queue item and then an approved plan without the human writing the request by hand (the human still exports the messages)?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "growth": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, can a falling product metric now reach the ranked queue and an approved plan without the human writing the request (the human still exports the data and sets thresholds)?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  },
+  "spend_gov": {
+   "type": "noul",
+   "instructions": "Given `shipped_on_main`, does the factory now have a project spend governor that keeps the agent from proposing spend that breaks the human's budget, while every spend still needs the human's approval?",
+   "criteria": {
+    "true": "yes",
+    "false": "no"
+   }
+  }
+ }
+}

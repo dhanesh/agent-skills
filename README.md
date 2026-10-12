@@ -158,12 +158,12 @@ can be tested against pre-registered pass and kill thresholds before it is plann
 hands it to planning (see [Idea → plan](#idea--plan)); you run the experiments yourself.
 Product metrics can be checked against thresholds you register first, and a breach goes into
 the same queue (see [Growth → queue](#growth--queue)).
-Incident response, support, launch and pricing stay with you. The evidence behind this section, and the gaps, are
+Incident response, support, launch and pricing stay with you. Launch and pricing are outside what the factory automates, by design: the agent never publishes, changes a price or spends. The evidence behind this section, and the gaps, are
 in the dated [readiness assessment](docs/factory/2026-09-19-assessment.md).
 
 ### Which skills cover which stage
 
-Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning, Support / feedback and Growth / monetise rows are the exceptions: they describe idea-validation, release-conductor, ops-intake and growth-review as built and were not produced by the dated assessment. Jev re-judged the repo after all five (AC9, 2026-10-12, at `dcb53a5`): Q1 leans yes (0.54 against partly 0.46, uncertain), so the table keeps the conservative reading.
+Status is the more conservative of the assessment's two judges (Claude and Jev). The Idea validation, Release / deploy, Operate → planning, Support / feedback and Growth / monetise rows are the exceptions: they describe idea-validation, release-conductor, ops-intake and growth-review as built and were not produced by the dated assessment. Jev re-judged the repo after all five, and again after the portability retrofit and spend requests (AC10, 2026-10-13, at `859eb0c`). Q1 is now yes: the repo can act as a factory for whoever installs all or a subset of the skills, with launch and pricing out of scope by design (0.88, confident; 0.70 with the earlier method, which showed Jev its past scores). Each stage row stays partly, because you still choose the next skill and confirm each handoff. Unattended mode stays partial (Q3 leans yes, 0.71, uncertain). The factory is not complete (0.22).
 
 | Stage | Skills | Status |
 |---|---|---|
