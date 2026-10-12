@@ -447,6 +447,28 @@ Tests and the eval set `FACTORY_CONDUCTOR_TIMER_HOME` (a temp home),
 `FACTORY_CONDUCTOR_TIMER_DRYRUN=1` (no loader runs) and `FACTORY_CONDUCTOR_TIMER_KIND`
 (`launchd`, `systemd` or `cron`), so the real system is never touched.
 
+#### Run on an always-on host
+
+A timer can restart a stalled run only while its machine is on and awake. A laptop that
+sleeps or shuts down misses every tick until it wakes. The owner's decision (2026-10-12) is
+to document an always-on host rather than offer a hosted timer. Do these steps:
+
+1. Choose the host. Use an always-on Mac (a Mac mini, for example) or a home server. A
+   laptop also works if it stays plugged in and awake.
+2. Keep a Mac awake. On power, run `caffeinate -s` in a terminal for the length of the run.
+   It stops system sleep while it runs, and only on AC power (`man caffeinate`). For a
+   lasting setting, run `sudo pmset -c sleep 0`. It turns off system sleep on the charger
+   (`man pmset`). You can also set this in System Settings, under Energy or Battery.
+3. Stay logged in on a Mac. The launchd agent runs only while you are logged in, so lock the
+   screen instead of logging out.
+4. On Linux, use cron, or a systemd user timer with `loginctl enable-linger <user>`. Linger
+   keeps the timer running after you log out.
+5. Start the run on that host. Run state lives in the git-ignored
+   `<repo>/.skill-contract/runs/<run-id>/` of the machine that ran `init`. It is not
+   committed or pushed, so a timer on another machine cannot see the run. Clone the repo on
+   the host. Then run `init` and `reentry install` there, from a session whose PATH finds
+   the agent and the plan's tools.
+
 ## Evidence gate
 
 A plan payload may carry `"verification": {"skill": "<repo-relative verify-<app> dir>",

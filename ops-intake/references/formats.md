@@ -23,9 +23,9 @@ only as one-line code spans.
 | `intake-signals-jsonl` | your own transform, one signal per line | any configured name | an item per line, `trust: low` (flag `+low-trust`) |
 | `feedback-jsonl` | your transform of an inbox, review or form export, one message per line | any configured name | an item per topic, kind `feedback`, `trust: low` (flag `+low-trust`) |
 
-`jira-mcp`, `jira-acli` and `linear-mcp` are not built. Their output is not documented. Each
-adapter waits for a redacted real sample from the owner. Until then, send Jira and Linear data
-through `intake-signals-jsonl`.
+There is no `jira-mcp`, `jira-acli` or `linear-mcp` format. The owner decided on
+2026-10-12 not to build dedicated readers. Send Jira and Linear data through
+`intake-signals-jsonl`. `conversion-recipes.md` has a recipe for each tool.
 
 ### release-envelope
 
@@ -184,8 +184,8 @@ One support message, app review or form answer per line:
 - Recurrence: a dismissed or resolved feedback item comes back as `new` + `regressed` only
   for a message with a key the item has not seen and a `created_at` later than the close
   time. Re-importing an export never brings it back.
-- App Store Connect, Play Console, Zendesk and Intercom have no built-in format. Each waits for
-  a real sample and a CLI or MCP tool that owns its login.
+- App Store Connect, Play Console, Zendesk and Intercom have no dedicated reader. Transform
+  their exports into this format. `conversion-recipes.md` has a recipe for each tool.
 
 ### Rules for every format
 

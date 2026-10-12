@@ -90,6 +90,15 @@ it, the run waits on you, or the grant no longer covers it. A run lock and a lea
 drivers from writing at once. `conductor reentry status` shows the timer and the attempts;
 `conductor reentry uninstall` removes the timer, and a finished run removes its own.
 
+**Use an always-on host for re-entry.** The timer can restart a stalled run only while the
+machine is on and awake. So run the factory on an always-on Mac or home server, or keep a
+laptop plugged in and awake (`caffeinate -s`, or `sudo pmset -c sleep 0` for the charger).
+On Linux, use cron or a systemd user timer with `loginctl enable-linger`. Start the run on
+that host and install the timer there. The run state lives in the git-ignored
+`.skill-contract/runs/` directory of the machine that started the run, so a timer on
+another machine cannot resume it. The steps are in `references/run-protocol.md`, under
+"Run on an always-on host".
+
 You can stop a run at any time by revoking the grant
 (`contract_check.py revoke-grant --root <repo>`): the next gate asks and the run stops.
 

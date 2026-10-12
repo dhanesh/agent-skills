@@ -53,7 +53,9 @@ parsed table, so an edit to the prose around it changes nothing.
   `ａｇｅｎｔ:x`, `аgent:x` (Cyrillic `а`), `agent：x`, `agent :x`, `agent-x`, `agent.x`,
   `agent x`, `a gent:x` and `ᴀgent:x`. A human name that starts with that word, such as
   `Agent Smith`, is refused too: the check fails closed. `Agentha Ray`, `agentur GmbH` and
-  `Reagent:x` pass. idea-validation and factory-conductor's ledger use the same check.
+  `Reagent:x` pass. idea-validation and factory-conductor's ledger use the same check. The
+  check stays strict (owner decision, 2026-10-12): a person whose name starts with `Agent`
+  signs with a surname or initials instead, for example `A. Smith`.
 - A new registration prints `REGISTERED: <sha12> by <name> at <time>, <n> metrics`.
 - The same thresholds registered again print `REGISTERED: <sha> (no change …)` and exit 0.
 - Different thresholds after an earlier registration need `--reason`. Without it the tool

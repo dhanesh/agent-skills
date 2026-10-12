@@ -73,7 +73,8 @@ registration, recorded_at}`, one JSON line in `.skill-contract/ideas/<slug>/resu
   apart (`a gent:x`), and fullwidth, Cyrillic, Greek or small-capital letters. A human name
   that starts with that word, such as `Agent Smith`, is refused too: the check fails closed.
   `Agentha`, `agentur GmbH` and `Reagent` pass. growth-review and factory-conductor's ledger
-  use the same check.
+  use the same check. The check stays strict (owner decision, 2026-10-12): a person whose
+  name starts with `Agent` signs with a surname or initials instead, for example `A. Smith`.
 - `kind: desk` is research. Its `--by` is `agent:<name>`, or a human's name when the human did
   the research.
 - `--observed` has to be a real date, no later than today.
