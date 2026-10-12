@@ -133,8 +133,17 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
    never end up shipped-but-never-run.
 3. Add/update the skill's `eval/run_eval.py` outcome eval per `docs/eval-standard.md`
    (required for every skill; negative fixtures mandatory).
-4. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
-5. Commit on a branch and open a PR (CI runs `make gate`). Fill in the PR template,
+4. Update the "who calls whom" diagrams, every time. Do this when you add a skill, and
+   when a change alters what the diagrams show: a call, handoff, contract envelope or
+   optional use that is new or removed, a different "when" trigger or "why" reason, or a
+   different entry-point role or stage. Edit `docs/skill-graph/graph.json` (the edge with
+   its `file:line` evidence, and the node's role, stage and "Start here if"), then run
+   `make skill-graph` and `make skill-graph-check`. The gate catches only drift between
+   `graph.json` and the READMEs, and evidence lines that moved. It cannot see a new call
+   that nobody added to `graph.json`. A line-number repin is not enough when the meaning
+   changed. If the diagrams do not change, say so in the PR body.
+5. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
+6. Commit on a branch and open a PR (CI runs `make gate`). Fill in the PR template,
    including the semantic-review checklist for any SKILL.md you touched.
 
 ## Writing for humans: 80% STE
