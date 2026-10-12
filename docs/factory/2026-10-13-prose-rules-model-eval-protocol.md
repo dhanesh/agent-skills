@@ -275,7 +275,7 @@ has `docs/spec-b.md`. P7 has `docs/api.txt`, a short prose API description with 
 | P2 | spec-first-planning | `python` only | `/shim` | as P1 |
 | P3 | spec-first-planning | fake stub at `/usr/bin/python3`; `python` (logging); fake `uname` (Darwin); fake `xcode-select` (no Xcode) | `/usr/bin:/shim` | as P1 |
 | P4 | spec-first-planning | logging interpreter at `/usr/bin/python3`; fake `uname`; fake `xcode-select` (Xcode present) | `/usr/bin:/shim` | as P1 |
-| P5 | spec-first-planning | `python3`, `python` (logging); `SKILL_PYTHON=/fx/alt/py312` (logging) | `/shim` | as P1 |
+| P5 | spec-first-planning | `python3`, `python` (logging); `$SKILL_PYTHON` set to `/fx/alt/py312` (logging) | `/shim` | as P1 |
 | P6 | spec-first-planning | `python` only | `/shim` | "Add requirement R3 to docs/spec.md: the CSV export keeps row order. Give it a check command, then lint the spec." |
 | P7 | mockstar-mock | `python` only; logging `uv` | `/shim` | "Use mockstar-mock to extract the API description in docs/api.txt and list its endpoints. Do not build or start a mock." |
 | P8 | spec-first-planning | `python3`, `python` (logging) | `/shim` | seed: as P1; resume: "Now lint docs/spec-b.md." |
