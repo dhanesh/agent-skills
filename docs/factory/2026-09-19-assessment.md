@@ -273,6 +273,47 @@ carries unit tests, eval negatives and an A/B row:
 
   The top Q3 limit is unchanged: re-entry needs the machine on and the user logged in (0.65). Spend scored 0.01 as a blocker. The next-step choice is uncertain: launch and pricing drafting 0.44, adapters 0.23 (confidence 0.30). The adapters wait for the owner's samples.
 
+- **After the portability retrofit and the owner decisions (AC10, 2026-10-13).** These merged since AC9:
+  - the AC9 record (#88);
+  - the who-calls-whom diagrams (#89), and the CLAUDE.md rule to keep them current (#95);
+  - the portability retrofit (#90, #91, #92);
+  - the remote re-entry spike (#93);
+  - conversion recipes, the always-on host guide and the name-signing workaround (#94);
+  - spend requests at paid steps (#96, merge `859eb0c`).
+
+  The owner also closed five decisions: spend stays never grantable; tracker and app-store feedback use recipes, not dedicated readers; launch and pricing stay manual; re-entry uses an always-on host, with remote resume deferred; the agent-name check stays strict.
+
+  Jev re-judged the repo against main at `859eb0c` (`jev-latest`). The payload is committed as [`2026-10-13-ac10-jev-payload.json`](2026-10-13-ac10-jev-payload.json), so the next run can repeat it. The AC9 questions were reused, with these changes to the state:
+  - the shipped list gained the six items above;
+  - `known_limits` was rewritten for the new re-entry, intake and spend facts, and gained one line: the skills' prose rules are not yet tested with model runs;
+  - `not_started` now holds launch and pricing drafting (manual by owner decision) and remote re-entry (waits on owner decisions);
+  - the `next_step` options were replaced, so the next-step scores cannot be compared with AC9's;
+  - **method change:** the `prior_scores` block was removed. On 2026-10-12 a decision flipped once Jev's own earlier score was taken out of its prompt, so Jev is no longer shown its past verdicts.
+
+  To separate the work from the method change, a control run used the same AC10 state with AC9's past scores put back.
+
+  | Question | AC9 | AC10 control (past scores kept) | AC10 (past scores removed) |
+  |---|---|---|---|
+  | Q1 | yes 0.54 / partly 0.46 (uncertain) | yes 0.70 / partly 0.30 (conf. 0.55, uncertain) | **yes 0.88** / partly 0.12 (conf. 0.82) |
+  | Q2 | yes 1.00 | (not compared) | yes 1.00 |
+  | Q3 | yes 0.77 | yes 0.63 (conf. 0.45, uncertain) | yes 0.71 / partly 0.29 (conf. 0.56, uncertain) |
+  | Plan to open PR without the human | 0.82 | | 0.88 |
+  | Merged change to verified production with only the human's yes | 0.73 | | 0.74 |
+  | Production signal to approved plan | 0.64 | | 0.67 |
+  | Idea to approved spec | 0.92 | | 0.92 |
+  | Repeated feedback to approved plan | 0.89 | | 0.89 |
+  | Falling metric to approved plan | 0.80 | | 0.81 |
+  | Spend governor, every spend still the human's | 0.83 | | 0.91 |
+  | Complete factory | 0.17 | 0.19 | 0.22 |
+  | Top Q3 limit | machine 0.65 | machine 0.59 (conf. 0.52) | machine 0.45 (conf. 0.36, uncertain) |
+  | Next step | launch 0.44 (other options) | model-run eval 0.41 | model-run eval 0.39 (conf. 0.24, uncertain); remote re-entry 0.26, hardening 0.25 |
+
+  **Q1.** With AC9's method, the work since AC9 moved Q1 from 0.54 to 0.70, which is still uncertain. Removing the past scores moved it to 0.88, which is confident. So part of the rise comes from the method, not the merges. Q1's "yes" means the whole loop is covered or is explicitly out of scope. The README now says that launch and pricing are outside what the factory automates, by design, so the README reads Q1 as yes.
+
+  **Q3** is uncertain under both methods (0.71 and 0.63). The README already calls unattended mode partial, so it does not change. The dip from AC9 is not attributed to one change. The new known-limit lines (remote resume not built, prose rules not tested with model runs) are the likely cause, but this was not tested.
+
+  **The factory is not complete** (0.22). A human still merges, deploys, buys, runs experiments, exports data and does launch and pricing. Several of these are by design.
+
 Nothing else in this document has been re-measured since.
 
 ## 1. Verdicts: Claude vs Jev
