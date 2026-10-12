@@ -5,7 +5,7 @@ Claude Code runs this from its hooks (installed into ~/.claude/settings.json by
 install.sh) with the event JSON on stdin and $TMUX_PANE in the environment:
 
   agent-hook claude                         < hook payload JSON
-  agent-hook install-claude <settings.json> [--remove]   (used by install.sh)
+  agent-hook install-claude <settings.json> [--remove] [--python <path>]   (used by install.sh)
 
 The status lands in panes/<id>.hook, which agent-status-scan prefers over
 screen-scraping. It MUST stay silent and always exit 0: hook stdout can be fed
@@ -59,7 +59,7 @@ def on_claude_event(payload):
                              stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def install_claude(path, remove):
+def install_claude(path, remove, python=None):
     try:
         with open(path) as fh:
             text = fh.read()
@@ -69,7 +69,7 @@ def install_claude(path, remove):
     except (OSError, ValueError) as exc:
         print(f"agent-hook: {path} is not readable JSON ({exc}); left unchanged", file=sys.stderr)
         return 1
-    merged = ah.merge_claude_settings(settings, SCRIPT_DIR, enable=not remove)
+    merged = ah.merge_claude_settings(settings, SCRIPT_DIR, enable=not remove, python=python)
     if merged == settings and os.path.exists(path):
         return 0
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -83,7 +83,11 @@ def install_claude(path, remove):
 
 def main(argv):
     if len(argv) >= 3 and argv[1] == "install-claude":
-        return install_claude(argv[2], "--remove" in argv[3:])
+        rest = argv[3:]
+        python = sys.executable or None
+        if "--python" in rest and rest.index("--python") + 1 < len(rest):
+            python = rest[rest.index("--python") + 1]
+        return install_claude(argv[2], "--remove" in rest, python)
     if len(argv) >= 2 and argv[1] == "claude":
         try:
             payload = json.load(sys.stdin)

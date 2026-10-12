@@ -35,6 +35,12 @@ bash scripts/install.sh
 
 Nothing is copied onto your PATH and there are no new commands to learn: the installer generates a tmux config that references the skill's scripts in place, and everything human-facing lives behind one prefix key: `prefix a` enters the cockpit table, then a single key — `m` for the action menu (launch an agent, jump by status, worktrees, resume), `d` for the dashboard, `s` to rescan, `t` for the session tree. The `agent-*` scripts are the API your coding agents use to coordinate with each other.
 
+### Python
+
+`SKILL_PYTHON` names the interpreter. In the hooks and installers it is one executable, a name or a path, with no arguments.
+
+Version 2.3.1: the installer finds Python with `find_python.sh` and checks that it is 3.10 or newer. It writes that interpreter into the Claude Code hook commands that it registers, so the hooks run on a machine that has only `python`. The `agent-*` scripts that tmux key bindings start still need `python3` on `PATH`.
+
 ## What it sets up
 
 - **Popup menus and dashboard** — `prefix a d` opens the dashboard popup; `prefix a m` opens an action menu (jump, worktree, resume, splits); `prefix a s` rescans; `prefix a t` opens the session tree.

@@ -42,6 +42,13 @@ for arg in "$@"; do
   esac
 done
 
+# ── Interpreter ──────────────────────────────────────────────────────────────
+# Same resolver the hooks use; ships next to them in assets/hooks/.
+. "$ASSETS/hooks/find_python.sh"
+find_python
+{ [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
+  || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
+
 # ── Operate-only fast path ───────────────────────────────────────────────────
 # If the caller only wants to seed/prune and the skill is ALREADY installed
 # (project-local files, or a global ~/.claude install), just (re)build the CURRENT
@@ -60,7 +67,7 @@ if { [ "$SEED" = 1 ] || [ "$PRUNE" = 1 ]; } && [ "$MODE" = "project" ] && [ "$WI
       printf '\n# world-model-ledger runtime store\n.world-model/\n' >> "$PWD/.gitignore"
     mkdir -p "$PWD/.world-model"
     args="build ."; [ "$PRUNE" = 1 ] && args="build . --prune"
-    python3 "$WM/world_model.py" --db ".world-model/model.db" $args 2>&1 \
+    "$PY" "$WM/world_model.py" --db ".world-model/model.db" $args 2>&1 \
       | grep -E '"(files_registered|edges|entities_added|interactions_added|pruned_stale_edges)"' \
       | sed 's/^/  •/' || true
     echo "✓ done (existing install; hooks already active)."
@@ -121,9 +128,9 @@ if [[ "$MODE" == "project" ]]; then
   grep -qxF '.world-model/' "$GI" 2>/dev/null || printf '\n# world-model-ledger runtime store\n.world-model/\n' >> "$GI"
   mkdir -p "$TARGET/.world-model"
   # Initialize the DB schema so the pre-call hook has something to query.
-  ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" stats >/dev/null )
+  ( cd "$TARGET" && "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" stats >/dev/null )
   if [[ "$WITH_CONSTRAINTS" == "1" ]]; then
-    ( cd "$TARGET" && python3 - "$KIT_HOME" <<'PY'
+    ( cd "$TARGET" && "$PY" - "$KIT_HOME" <<'PY'
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
 from world_model import WorldModel
@@ -141,7 +148,7 @@ PY
   if [[ "$SEED" == "1" || "$PRUNE" == "1" ]]; then
     # Repo-wide world building: register files + structural edges (observation-only).
     ba="build ."; [[ "$PRUNE" == "1" ]] && ba="build . --prune"
-    ( cd "$TARGET" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
+    ( cd "$TARGET" && "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
         | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' || true )
   fi
 fi
@@ -156,14 +163,14 @@ if [[ "$MODE" == "global" && ( "$SEED" == "1" || "$PRUNE" == "1" ) ]]; then
   mkdir -p "$REPO/.world-model"
   ba="build ."; [[ "$PRUNE" == "1" ]] && ba="build . --prune"
   echo "→ seeding current repo ($REPO):"
-  ( cd "$REPO" && python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
+  ( cd "$REPO" && "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" $ba 2>&1 \
       | grep -E '"(files_registered|edges)"' | sed 's/^/  •/' || true )
-  echo "  (other projects start empty — run 'python3 $KIT_HOME/wm.py build .' in each to seed)"
+  echo "  (other projects start empty — run '$PY $KIT_HOME/wm.py build .' in each to seed)"
 fi
 
 # 4. Install gate — the guarantees are only real if these pass.
 echo "→ running test suite as install gate…"
-( cd "$KIT_HOME" && python3 test_world_model.py 2>&1 | tail -3 )
+( cd "$KIT_HOME" && "$PY" test_world_model.py 2>&1 | tail -3 )
 
 echo "✓ done. Restart Claude Code so the new hooks load."
 echo "  Record facts inline with WM-OBSERVE:/WM-VALIDATED:/WM-CONSTRAINT:/WM-MAPS: — harvested every turn."

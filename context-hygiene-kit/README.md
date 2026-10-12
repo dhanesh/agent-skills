@@ -61,6 +61,12 @@ A global install puts the scripts + hooks in `~/.claude/context-hygiene/` and re
 
 After setup the three hooks run automatically every turn — you don't re-invoke the skill. Requires `python3` (stdlib only — no pip installs) and `jq` for clean settings merging (falls back to a manual-merge file without it).
 
+### Python
+
+`SKILL_PYTHON` names the interpreter. In the hooks and installers it is one executable, a name or a path, with no arguments.
+
+Version 1.2.4: the hooks and the installer now find Python through `find_python.sh`. They use `python3` or `python` on `PATH`, so a machine with only `python` works, and a hook with no interpreter exits quietly.
+
 ## How it works — three cadences
 
 | Hook | Fires | Job |

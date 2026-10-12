@@ -16,10 +16,13 @@ set -uo pipefail
 # hooks/. Works for both layouts: project-root install (KIT_HOME=<project>) and
 # global install (KIT_HOME=~/.claude/context-hygiene). Must run BEFORE the cd below.
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 # Hook input arrives as JSON on stdin: { cwd, transcript_path, session_id, ... }.
 input="$(cat)"
-get() { printf '%s' "$input" | python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
+get() { printf '%s' "$input" | "$PY" -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
 cwd="$(get cwd)"
 transcript="$(get transcript_path)"
 
@@ -33,7 +36,7 @@ ANCHOR="$(cat .context/anchor.txt 2>/dev/null || true)"
 BUDGET="${CONTEXT_HOT_BUDGET:-8000}"
 
 # Never block the session lifecycle: best-effort, always exit 0.
-python3 "$KIT_HOME/harvest.py" --transcript "$transcript" --budget "$BUDGET" --anchor "$ANCHOR" >&2 || true
+"$PY" "$KIT_HOME/harvest.py" --transcript "$transcript" --budget "$BUDGET" --anchor "$ANCHOR" >&2 || true
 
 echo '{"continue": true}'
 exit 0

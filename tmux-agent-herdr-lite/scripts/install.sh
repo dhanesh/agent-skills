@@ -9,6 +9,10 @@ set -euo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_BIN="$SKILL_DIR/scripts"
+. "$AGENT_BIN/find_python.sh"
+find_python
+{ [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
+  || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
 TMUX_AGENT_DIR="${HOME}/.tmux/agent-panes"
 TMUX_CONF="${HOME}/.tmux.conf"
 
@@ -82,7 +86,7 @@ fi
 # Generates a zsh hook and sources it from ~/.zshrc, so running `claude`/`codex`/…
 # in any pane registers that pane automatically (and deregisters on exit). No
 # agent-pane, no commands for the human to learn.
-AGENT_NAMES="$(python3 "$AGENT_BIN/agent-observe" agents 2>/dev/null || true)"
+AGENT_NAMES="$("$PY" "$AGENT_BIN/agent-observe" agents 2>/dev/null || true)"
 HOOK="$TMUX_AGENT_DIR/agent-shell-hook.zsh"
 # NB: AGENT_NAMES is a '|'-joined list, so it needs a delimiter other than '|'.
 sed -e "s|@AGENT_BIN@|$AGENT_BIN|g" \
@@ -150,11 +154,11 @@ chmod +x "$AGENT_BIN/agent-hook" 2>/dev/null || true
 if [[ ! -d "$CLAUDE_DIR" ]]; then
   echo "Claude Code config dir not found ($CLAUDE_DIR); skipping status hooks"
 elif [[ -f "$HOOKS_OFF" ]]; then
-  python3 "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" --remove \
+  "$PY" "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" --remove \
     && echo "Claude status hooks off (re-enable: AGENT_CLAUDE_HOOKS=on bash $0)" \
     || echo "warning: could not update $CLAUDE_DIR/settings.json" >&2
 else
-  python3 "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" \
+  "$PY" "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" --python "$PY" \
     && echo "Claude status hooks installed in $CLAUDE_DIR/settings.json (restart Claude sessions to pick them up)" \
     || echo "warning: could not update $CLAUDE_DIR/settings.json; status falls back to screen scraping" >&2
 fi

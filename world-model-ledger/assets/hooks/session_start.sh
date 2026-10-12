@@ -9,9 +9,12 @@
 # Wire under hooks.SessionStart.
 set -uo pipefail
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-get() { printf '%s' "$input" | python3 -c "import json,sys
+get() { printf '%s' "$input" | "$PY" -c "import json,sys
 try: print(json.load(sys.stdin).get('$1',''))
 except Exception: print('')" 2>/dev/null; }
 
@@ -29,16 +32,16 @@ if [[ -d ".git" ]]; then
   mkdir -p .world-model
   grep -qxF '.world-model/' .gitignore 2>/dev/null \
     || printf '\n# world-model-ledger runtime store\n.world-model/\n' >> .gitignore 2>/dev/null || true
-  python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" bootstrap . >&2 2>/dev/null || true
+  "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" bootstrap . >&2 2>/dev/null || true
 fi
 
 digest=".world-model/digest.md"
 # Refresh the digest so a freshly-bootstrapped model still injects something useful.
 [[ -f ".world-model/model.db" && ! -f "$digest" ]] && \
-  python3 "$KIT_HOME/world_model.py" --db ".world-model/model.db" digest > "$digest" 2>/dev/null || true
+  "$PY" "$KIT_HOME/world_model.py" --db ".world-model/model.db" digest > "$digest" 2>/dev/null || true
 [[ -f "$digest" ]] || { echo '{"continue": true}'; exit 0; }
 
-python3 - "$digest" <<'PY'
+"$PY" - "$digest" <<'PY'
 import json, sys
 try:
     ctx = open(sys.argv[1]).read()

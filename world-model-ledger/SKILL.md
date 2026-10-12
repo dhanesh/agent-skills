@@ -18,7 +18,7 @@ compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.2"
+  version: "1.2.3"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 

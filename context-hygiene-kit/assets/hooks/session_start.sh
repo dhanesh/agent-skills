@@ -11,18 +11,21 @@ set -euo pipefail
 # so this works whether the kit is installed at the project root or globally in
 # ~/.claude/context-hygiene. The .context/ cache stays per-project (in CLAUDE_PROJECT_DIR).
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$KIT_HOME}"
 
 ANCHOR="$(cat .context/anchor.txt 2>/dev/null || true)"
 BUDGET="${CONTEXT_HOT_BUDGET:-8000}"
 
 # Rebuild the digest fresh so re-rank reflects the current anchor, then emit it.
-python3 "$KIT_HOME/context_ledger.py" curate --budget "$BUDGET" --anchor "$ANCHOR" >/dev/null 2>&1 || true
+"$PY" "$KIT_HOME/context_ledger.py" curate --budget "$BUDGET" --anchor "$ANCHOR" >/dev/null 2>&1 || true
 DIGEST="$(cat .context/digest.md 2>/dev/null || echo '(no digest yet)')"
 
 # additionalContext is injected as trusted scaffold; the digest itself already
 # fences untrusted card content in <data> blocks (two-channel boundary, LSC-7).
-python3 - "$DIGEST" <<'PY'
+"$PY" - "$DIGEST" <<'PY'
 import json, sys
 print(json.dumps({
     "hookSpecificOutput": {

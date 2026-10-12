@@ -7,9 +7,12 @@
 # Wire under hooks.Stop.
 set -uo pipefail
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
-get() { printf '%s' "$input" | python3 -c "import json,sys
+get() { printf '%s' "$input" | "$PY" -c "import json,sys
 try: print(json.load(sys.stdin).get('$1',''))
 except Exception: print('')" 2>/dev/null; }
 
@@ -19,6 +22,6 @@ transcript="$(get transcript_path)"
 cd "$cwd" || { echo '{"continue": true}'; exit 0; }
 [[ -z "$transcript" || ! -f "$transcript" ]] && { echo '{"continue": true}'; exit 0; }
 
-python3 "$KIT_HOME/harvest.py" --db ".world-model/model.db" --transcript "$transcript" --mode stop >&2 || true
+"$PY" "$KIT_HOME/harvest.py" --db ".world-model/model.db" --transcript "$transcript" --mode stop >&2 || true
 echo '{"continue": true}'
 exit 0
