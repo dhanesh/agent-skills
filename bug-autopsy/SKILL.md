@@ -17,7 +17,7 @@ license: MIT
 compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.1.1"
+  version: "1.1.2"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 
@@ -64,6 +64,18 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
   `base-in-reality`.
 
 ## Workflow
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 1. **Scope.** One light round: what failed (the user-visible symptom), the blast radius
    (who/what was affected, for how long), and what the learner will do with the

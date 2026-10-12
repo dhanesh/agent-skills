@@ -41,7 +41,7 @@ import time
 import unicodedata
 
 SKILL_NAME = "factory-conductor"
-LEDGER_VERSION = "1.5.1"
+LEDGER_VERSION = "1.5.2"
 # --today moves the clock that decides the current month, so it is honoured only when this
 # variable is "1". Only the tests and the eval set it; no STOP line names it.
 TEST_CLOCK_ENV = "LEDGER_TEST_CLOCK"

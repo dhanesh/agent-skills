@@ -373,7 +373,7 @@ class AgentLookalikes(unittest.TestCase):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('  version: "%s"\n' % G.VERSION, f.read())
-        self.assertEqual(G.VERSION, "0.1.1")
+        self.assertEqual(G.VERSION, "0.1.2")
 
 
 class WhoRegistered(unittest.TestCase):

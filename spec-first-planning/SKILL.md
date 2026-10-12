@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.7.2"
+  version: "2.7.3"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -86,6 +86,18 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
 `references/spec-format.md`.
 
 ## Workflow
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 0. **Pick the mode.** Attended is the default: a light pass through the planning loop.
    Unattended runs only when the user asks for it, and then the full loop MUST run, plus the
@@ -172,9 +184,8 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    MUST NOT treat that as a failure, because the plan is still done: give the user the envelope
    path.
    In unattended mode, the grant is written between `check-envelope` and this check (see
-   `## Unattended mode`). Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `$SKILL_PYTHON`, `python3` (skipped
-   when it is the macOS install stub: `/usr/bin/python3` while `xcode-select -p` fails), `python`,
-   `py -3` that is Python 3.10 or newer.
+   `## Unattended mode`). Run the checker with `$SKILL_CONTRACT_PYTHON` when it is set, otherwise with the
+   interpreter found under "Python interpreter" above.
 
 ## Requests from ops-intake
 

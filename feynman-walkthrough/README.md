@@ -101,3 +101,7 @@ solid and which were re-coached. Optionally, on opt-in: a dated review schedule.
   schedule generator for the opt-in recall track, stdlib-only.
 
 See `SKILL.md` for the full procedure.
+
+## Changes
+
+- **1.2.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

@@ -84,3 +84,7 @@ npx skills add dhanesh/agent-skills --skill ai-migration-operating-model
 
 - `spec-first-planning` — when the ask is *new* behavior, not preserved behavior
 - `crafting-self-prompting-loops` — builds the execution loops that consume the pack
+
+## Changes
+
+- **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

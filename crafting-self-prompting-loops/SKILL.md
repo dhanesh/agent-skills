@@ -14,7 +14,7 @@ license: MIT
 compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. python3 >= 3.10 is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.4.3"
+  version: "1.4.4"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
@@ -28,6 +28,18 @@ A self-prompting loop is a **trusted harness that re-invokes a model with update
 Your job with this skill: turn a fuzzy "make it keep going until it's good" request into a **sound** loop — one that always terminates, never drifts unnoticed, never executes its own output as instructions, and stays within budget. Skipping these is how loops burn money, never stop, or get hijacked.
 
 ## The workflow
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 Follow these steps in order. The canonical 10-item spine is in `references/checklist.md` (items `LSC-1`…`LSC-10`); the terse per-item design rules are in `references/spec.md`; the research grounding for every non-obvious rule (citations → slot) is in `references/literature.md`. Read them if you need the full definitions — the summaries below are enough for most loops.
 
@@ -94,9 +106,8 @@ SKILL_DIR="<this skill's base directory>"   # your harness provides it when the 
 test -f "$SKILL_DIR/assets/contract_check.py"   # verify before proceeding
 ```
 
-Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `$SKILL_PYTHON`, `python3` (skipped
-when it is the macOS install stub: `/usr/bin/python3` while `xcode-select -p` fails), `python`,
-`py -3` that is Python 3.10 or newer.
+Run the checker with `$SKILL_CONTRACT_PYTHON` when it is set, otherwise with the interpreter
+found under "Python interpreter" above.
 
 1. **Check first.** Run
    `python3 "$SKILL_DIR/assets/contract_check.py" check-envelope <envelope> --root <repo-root> --for "$SKILL_DIR" --json`.

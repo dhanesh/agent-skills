@@ -168,11 +168,14 @@ class AllowlistMatchTests(unittest.TestCase):
         'Bash(bash -c "python3 release.py deploy")',
         'Bash(sh -c "npm test && python3 release.py rollback")',
         "Bash(xargs -n1 python3 *)", "Bash(env -i python3 *)", "Bash(nice -10 python3 *)",
+        # the Windows launcher: `py -3` is an interpreter spelling too
+        "Bash(py -3 *)", "Bash(py *)", "Bash(py -3 */release.py *)", "Bash(env py -3 *)",
         # long-form value options (hardening 5, regression): each can still run any command
         "Bash(xargs --max-args 1 *)", "Bash(xargs --max-procs 4 *)",
         "Bash(stdbuf --output L *)", "Bash(env --unset FOO python3 *)",
         "Bash(timeout --signal KILL 60 python3 *)")
     HARMLESS = ("Bash(git status)", "Bash(python3 tests/run_tests.py)",
+                "Bash(py -3 tests/run_tests.py)",
                 "Bash(/usr/bin/python3 tests/run_tests.py)", "Bash(uv run pytest *)",
                 "Bash(env FOO=1 make test)", "Bash(uvx ruff check *)", "BashOutput",
                 "Bash(python3 -m pytest *)", "Bash(uv run --with x pytest *)",

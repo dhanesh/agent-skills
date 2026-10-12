@@ -76,3 +76,7 @@ existing directory. Flags: `--author`, `--version`, `--tags`.
 `base-in-reality` checks a codebase's claims against authoritative sources;
 `crafting-self-prompting-loops` designs single agent loops. repo2skill owns the
 narrower job of one skill directory versus this repo's standard.
+
+## Changes
+
+- **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

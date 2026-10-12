@@ -104,3 +104,7 @@ TypeSafe API key from https://console.typesafe.ai/.
   `assets/jev-instructions.md` — the managed block.
 - `assets/test_install_jev_setup.py` — stdlib test suite.
 - `eval/run_eval.py` — deterministic outcome eval (see the repo's docs/eval-standard.md).
+
+## Changes
+
+- **0.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

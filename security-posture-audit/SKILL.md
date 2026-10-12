@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
-  version: "1.0.3"
+  version: "1.0.4"
   tags: "security,audit,posture,hygiene,dependency-pinning,ci-security,defensive"
 ---
 
@@ -55,6 +55,18 @@ You MUST audit only repositories the user owns or is explicitly authorized to re
 authorization is unclear, you MUST ask before running.
 
 ## Workflow
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 1. **Scope with the user.** Confirm the repo path and that they are authorized to audit
    it. Agree what is in and out of scope — vendored or generated trees go to

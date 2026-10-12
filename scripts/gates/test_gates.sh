@@ -586,4 +586,43 @@ reg_case "a row matches a blockquote inside a list item" PASS \
 reg_case "a table-separator row matches its raw line" PASS \
   "$(mkreg sep '| c1 | 9 | \|---\|---\| | plain (0.80, 0.10) | plain | table separator |' '| a | b |' '|---|---|' '| 1 | 2 |')"
 
+# ── python-interpreter: a skill that runs Python carries the shared rule ─────
+# Each case plants a fresh skill. Only the rule text is allowed to vary, and only
+# in whitespace: one changed word must fail, a re-wrap must pass.
+RULE="$GATES/python-interpreter-rule.txt"
+mkpy() {  # $1 name, $2 body line, $3 'rule'|'rewrap'|'edited'|'' , $4 references line or ''
+  d="$WORK/py-$1"
+  rm -rf "$d"; mkdir -p "$d/references"
+  {
+    printf -- '---\nname: py-%s\ndescription: Fixture.\nlicense: MIT\ncompatibility: Needs python3 on PATH.\nmetadata:\n  author: dhanesh\n  version: "1.0.0"\n  tags: "fixture"\n---\n# fixture\n\n' "$1"
+    case "$3" in
+      rule) cat "$RULE"; echo ;;
+      rewrap) tr ' ' '\n' < "$RULE" | paste -sd'  ' - | fold -s -w 40; echo ;;
+      edited) sed 's/Find the interpreter once/Find the interpreter twice/' "$RULE" ;;
+    esac
+    printf '\n```\n%s\n```\n' "$2"
+    [ "$3" != late ] || { echo; cat "$RULE"; }
+  } > "$d/SKILL.md"
+  [ -z "${4:-}" ] || printf '%s\n' "$4" > "$d/references/r.md"
+  printf '%s\n' "$d"
+}
+py_case() {  # $1 label, $2 expected PASS|FAIL, $3 skill dir
+  out="$(sh "$GATES/python-interpreter.sh" "$3" 2>&1)" || true
+  if printf '%s\n' "$out" | grep -q "^PYTHON_INTERPRETER_RESULT: $2"; then
+    ok "python-interpreter: $1"
+  else
+    bad "python-interpreter: $1 (expected PYTHON_INTERPRETER_RESULT: $2)"
+  fi
+}
+CMD='python3 "$SKILL_DIR/assets/x.py"'
+py_case "a python3 command with no rule fails" FAIL "$(mkpy norule "$CMD" '')"
+py_case "a python3 command with the rule passes" PASS "$(mkpy rule "$CMD" rule)"
+py_case "the rule with one word changed fails" FAIL "$(mkpy edited "$CMD" edited)"
+py_case "the rule re-wrapped across lines passes" PASS "$(mkpy rewrap "$CMD" rewrap)"
+py_case "the rule placed after the first command fails" FAIL "$(mkpy late "$CMD" late)"
+py_case "python3 only in frontmatter compatibility passes without the rule" PASS "$(mkpy compat 'Do the thing.' '')"
+py_case "a python3 command only in references fails without the rule" FAIL "$(mkpy ref 'Do the thing.' '' 'python3 -m pytest')"
+py_case "a VERIFY: output line passes without the rule" PASS "$(mkpy verify 'VERIFY: T1 ok /usr/bin/python3 -c "print(1)"' '')"
+py_case "a {python} command passes without the rule" PASS "$(mkpy placeholder '{python} "$SKILL_DIR/assets/x.py"' '')"
+
 exit $rc

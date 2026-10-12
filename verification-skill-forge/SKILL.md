@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires python3 >= 3.10 (stdlib only) and git; offline. The generated skill runs whatever the target app needs (a browser driver, a PTY, curl).
 metadata:
   author: dhanesh
-  version: "1.0.0"
+  version: "1.0.1"
   tags: "verification,runtime-evidence,feature-map,manifold,factory"
 ---
 
@@ -42,6 +42,18 @@ SKILL_DIR="<this skill's base directory>"   # your harness provides it when the 
 SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'verification-skill-forge' 2>/dev/null | head -1)
 test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
 ```
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 `forge` below means `python3 "$SKILL_DIR/assets/forge.py"`.
 

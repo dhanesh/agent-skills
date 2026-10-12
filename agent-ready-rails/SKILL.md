@@ -5,7 +5,7 @@ license: MIT
 compatibility: Any agent harness with shell access to the target repo; the evidence collector needs python3 (stdlib only). Audit mode is read-only.
 metadata:
   author: dhanesh
-  version: "1.1.2"
+  version: "1.1.3"
   tags: "agent-readiness,audit,coding-agents,ci,verification,repo-hygiene"
 ---
 
@@ -63,6 +63,18 @@ Full probe/score/fix detail is in `references/rubric.md`; the evidence for each 
 Each rail scores **0 (absent) / 1 (partial) / 2 (agent-grade)**. You MUST report the two tiers as **separate subtotals** — Tier 1 is 0–12, Tier 2 is 0–8 — and MUST NOT fold them together: a repo can be perfectly ready for PR work (Tier 1 = 12) and unsafe to run unattended (Tier 2 = 0). Within Tier 1 the **minimum rail matters more than the sum** — R1/R2 are load-bearing, so a repo strong everywhere except the verify→repair loop is still not agent-ready. Lead the report with the weakest rail in whichever tier is in scope.
 
 ## Workflow
+
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 Follow these steps in order. Steps 1–4 MUST stay read-only and always run, because the scorecard is the deliverable even when nothing gets installed; step 5 MUST write only on explicit request; step 6 verifies the writes.
 
