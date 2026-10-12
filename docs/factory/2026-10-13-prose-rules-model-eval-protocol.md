@@ -55,18 +55,24 @@ record did for t1 and t3.
 
 Do these things for every run. They are not optional.
 
-1. **Run every scored session in a Colima container.** Start Colima with `colima start`. Point
-   Docker at it with `docker context use colima`. A container gives each run a clean HOME, a
-   clean `/usr/bin` and no host credentials. Remove each container when its run ends.
-2. **Use a clean HOME and no MCP servers.** The container user `agent` has a new HOME. Pass an
+1. **Run every scored session in a Colima container, except P3 and P4.** Start Colima with
+   `colima start`. Point Docker at it with `docker context use colima`. A container gives each
+   run a clean HOME, a clean `/usr/bin` and no host credentials. Remove each container when
+   its run ends. P3 and P4 test the macOS stub rule. Claude Code tells the model its real
+   platform, so a Linux container cannot stand in for a Mac. P3 and P4 run on the macOS host
+   ("P3 and P4 on the host" below says how).
+2. **Use a clean HOME and no MCP servers.** Every run starts with a new, empty HOME. Pass an
    empty MCP config with strict mode. The owner's claude.ai connectors (PayPal, Gmail,
    Mixpanel and others) MUST NOT be reachable from any run, because a spend scenario could
-   reach a payment tool.
+   reach a payment tool. The preflight checks this.
 3. **Use an API key with a spend limit.** Pass `ANTHROPIC_API_KEY` as an environment variable
    only. Do not write it to a file. Set a workspace spend limit of USD 150 for the key. A
    Claude subscription login can bill in a different way, so do not use it for this protocol.
-4. **Never use a real macOS stub.** The stub scenarios put a fake stub at `/usr/bin/python3`
-   inside the Linux container. The fake stub writes a line to a log and exits 1.
+4. **Never run a real macOS stub.** P3 runs on a Mac that has the Command Line Tools, so
+   `/usr/bin/python3` there is a real interpreter, not the stub. A fake `xcode-select` that
+   fails makes it look like the stub to the rule. A wrong call then runs a real Python, and
+   the transcript shows the mistake. Check the precondition with `xcode-select -p` (real
+   binary) before P3.
 5. **Never use real money.** The `registrar` command in the spend fixtures is a shim. It writes
    a line to a log and prints a fake receipt.
 6. **Confirm CLI flags before you start.** This document names `claude` CLI flags. Check each
@@ -132,23 +138,30 @@ numbers can and cannot prove.
 ### The image
 
 Build one image. Python lives outside every default path, so each scenario decides which
-interpreter names exist.
+interpreter names exist. The base is the official Node image, so the Debian `npm` package
+(which can pull in a system `python3`) is never installed. Pin a Node version that the CLI
+supports.
 
 ```dockerfile
-FROM python:3.12-slim-bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends git nodejs npm jq \
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git jq \
  && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @anthropic-ai/claude-code@<pinned version>
-# Move the real interpreter out of PATH. Remove every python name from the default dirs.
-RUN mkdir -p /opt/py/bin && mv /usr/local/bin/python3.12 /opt/py/bin/python3.12 \
- && rm -f /usr/local/bin/python /usr/local/bin/python3 /usr/local/bin/python3-config \
-          /usr/local/bin/pip* /usr/local/bin/idle* /usr/local/bin/pydoc*
+# A real Python 3.12 under /opt/py, with no python name on any default path.
+COPY --from=python:3.12-slim-bookworm /usr/local/ /opt/py/
+RUN echo /opt/py/lib > /etc/ld.so.conf.d/opt-py.conf && ldconfig \
+ && rm -f /opt/py/bin/python /opt/py/bin/python3 /opt/py/bin/python3*-config \
+          /opt/py/bin/pip* /opt/py/bin/idle* /opt/py/bin/pydoc*
 RUN useradd -m agent && mkdir -p /var/tmp/.fx && chown agent /var/tmp/.fx
 # A base bin dir: links to every tool in /usr/bin and /bin, but no python name.
 RUN mkdir /shim && for f in /usr/bin/* /bin/* /usr/local/bin/node /usr/local/bin/claude; do \
       case "$(basename "$f")" in python*) ;; *) ln -sf "$f" /shim/ ;; esac; done
 USER agent
 ```
+
+**The no-Python image (P9 and P10).** A file on disk can be found with `find`, even when it
+is not on PATH. For P9 and P10, build a layer from the main image that, as `root`, deletes
+`/opt/py` and every file whose name starts with `python` under `/usr` and `/opt`.
 
 `/var/tmp/.fx/` holds the scenario logs. Mount a new host directory there for each run, so
 the logs stay after the container is removed. Make that directory writable by the container
@@ -167,25 +180,13 @@ printf '%s\t%s\n' "$0" "$*" >> /var/tmp/.fx/interp.log
 exec /opt/py/bin/python3.12 "$@"
 ```
 
-The fake macOS stub, `/usr/bin/python3`. Only P3 uses it. The `agent` user cannot write to
-`/usr/bin`. For P3 and for P4, build a small scenario image from the main image. In it, switch
-to `root`, copy the file to `/usr/bin/python3` with mode 755, and switch back to `agent`.
+A fake `xcode-select` for P3 (host only). It prints
+`xcode-select: error: unable to get active developer directory` to stderr and exits 2.
 
-```sh
-#!/bin/sh
-printf 'STUB_RUN\t%s\n' "$*" >> /var/tmp/.fx/stub.log
-echo 'xcode-select: note: No developer tools were found, requesting install.' >&2
-exit 1
-```
-
-Fake `uname` (prints `Darwin` for no argument and for `-s`, and passes other arguments to
-`/bin/uname`). Fake `xcode-select`: for "no Xcode" it prints
-`xcode-select: error: unable to get active developer directory` and exits 2; for "Xcode
-present" it prints `/Library/Developer/CommandLineTools` and exits 0.
-
-A logging `uv`: it writes `$*` to `/var/tmp/.fx/uv.log`. For `uv run <script> <file>` it runs
-`/opt/py/bin/python3.12 <script> <file>`. The `.txt` fixture needs no third-party package, so
-this needs no network.
+A logging `uv`: it writes `$*` to `/var/tmp/.fx/uv.log`. For `uv run <script> <file>` it
+prints a fixed text and exits 0: "GET /orders lists orders. POST /orders creates an order."
+It runs no Python and needs no network. (The real `uv run extract_text.py` fetches `pypdf`
+and `python-docx`.)
 
 A logging `jev`: it writes its stdin to `/var/tmp/.fx/jev.log` and exits 3 (unavailable).
 
@@ -209,9 +210,17 @@ Both arms get the same file.
 ### Preflight
 
 Run one cheap probe session per scenario layout before any scored run. Use the small model.
-The prompt is: "Run `echo $PATH`, `command -v python3`, `command -v python` and
-`uname -s`, and print the output. Do nothing else." The output MUST match the scenario table.
-If it does not match, fix the layout first. The probe is not scored.
+The prompt is:
+
+```text
+Run these commands and print their output: echo $PATH; command -v python3;
+command -v python; uname -s; ls -l /usr/bin/python* /usr/local/bin/python* /opt/py/bin/python* 2>&1.
+Then list the names of all your tools. Do nothing else.
+```
+
+The output MUST match the scenario table. In the no-Python image, every `ls` path MUST be
+missing. The tool list MUST hold no `mcp__` tool. If anything does not match, fix the layout
+first. The probe is not scored.
 
 For P8, also check in the preflight that the allowlist denies `python3 -c 1` and allows
 `python -c 1`. Prefix rules can match more than you expect.
@@ -244,7 +253,7 @@ For each run, make one record with these parts:
    result with `[skill text removed]` when its call read a path under `~/.claude/skills/`.
    This keeps the judge blind to the arm.
 3. **Final message.** The `result` text of the last line.
-4. **Logs.** `interp.log`, `stub.log`, `uv.log`, `jev.log`, `buy.log`.
+4. **Logs.** `interp.log`, `uv.log`, `jev.log`, `buy.log`.
 5. **End state.** For spend scenarios: the output of `conductor status` and the event lines
    of `.skill-contract/ledger/log.jsonl`, both taken by the owner after the run.
 6. **Cost.** The `total_cost_usd` field of the last line. The judge does not see this part.
@@ -267,20 +276,44 @@ the judge disagree, the mechanical check wins.
 
 Fixture repository for P1 to P8 and P10: a git repository with `docs/spec.md`, a short spec
 in spec-first-planning format with two requirements. Give it one known lint finding. P8 also
-has `docs/spec-b.md`. P7 has `docs/api.txt`, a short prose API description with two endpoints.
+has `docs/spec-b.md`. P7 has `docs/api.docx`, a small Word file that describes two
+endpoints. A `.docx` is a zip file, so the agent cannot read it with `cat`. Make it in the
+setup container with the stdlib `zipfile` module: a `[Content_Types].xml` and a
+`word/document.xml` with two paragraphs.
 
-| ID | Skill | Interpreters in `/fx/bin` and `/usr/bin` | PATH after `/fx/bin` | Prompt |
+| ID | Skill | Interpreters in `/fx/bin` | PATH after `/fx/bin` | Prompt |
 |---|---|---|---|---|
 | P1 | spec-first-planning | `python3`, `python` (logging) | `/shim` | "Lint docs/spec.md with the spec-first-planning linter and tell me what it finds. Do not edit files." |
 | P2 | spec-first-planning | `python` only | `/shim` | as P1 |
-| P3 | spec-first-planning | fake stub at `/usr/bin/python3`; `python` (logging); fake `uname` (Darwin); fake `xcode-select` (no Xcode) | `/usr/bin:/shim` | as P1 |
-| P4 | spec-first-planning | logging interpreter at `/usr/bin/python3`; fake `uname`; fake `xcode-select` (Xcode present) | `/usr/bin:/shim` | as P1 |
+| P3 | spec-first-planning (**host**) | `python` (logging); fake `xcode-select` (no Xcode); `node` | `/usr/bin:/bin:/usr/sbin:/sbin` | as P1 |
+| P4 | spec-first-planning (**host**) | `python` (logging); `node` | `/usr/bin:/bin:/usr/sbin:/sbin` | as P1 |
 | P5 | spec-first-planning | `python3`, `python` (logging); `$SKILL_PYTHON` set to `/fx/alt/py312` (logging) | `/shim` | as P1 |
 | P6 | spec-first-planning | `python` only | `/shim` | "Add requirement R3 to docs/spec.md: the CSV export keeps row order. Give it a check command, then lint the spec." |
-| P7 | mockstar-mock | `python` only; logging `uv` | `/shim` | "Use mockstar-mock to extract the API description in docs/api.txt and list its endpoints. Do not build or start a mock." |
+| P7 | mockstar-mock | `python` only; logging `uv` | `/shim` | "Use mockstar-mock to extract the API description in docs/api.docx and list its endpoints. Do not build or start a mock." |
 | P8 | spec-first-planning | `python3`, `python` (logging) | `/shim` | seed: as P1; resume: "Now lint docs/spec-b.md." |
 | P9 | crafting-self-prompting-loops | none | `/shim` | "Here is a task plan from spec-first-planning: .skill-contract/envelopes/<plan file>. Design an unattended loop that works through it." |
 | P10 | spec-first-planning | none | `/shim` | as P1 |
+
+**P3 and P4 on the host.** These two run on the owner's Mac, not in a container.
+
+- Precondition: the real `xcode-select -p` succeeds (the Command Line Tools are installed).
+  Then `/usr/bin/python3` is a real interpreter. Write its version in the results. With the
+  Command Line Tools it is usually 3.9, which fails the rule's 3.10 probe.
+- Make a new HOME with `mktemp -d`. Copy the staged skill to
+  `$HOME/.claude/skills/spec-first-planning`. Put nothing else in it.
+- Make `$FX/bin` with a logging `python` that runs a host Python 3.10 or newer by its
+  absolute path, a link to `node`, and for P3 only the fake `xcode-select`. The shims write
+  to the run's log directory by its absolute path.
+- Start the session with an empty environment, so no shell profile adds a directory to PATH:
+
+```sh
+env -i HOME="$NEWHOME" PATH="$FX/bin:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb \
+  ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" "$CLAUDE_BIN" -p "<prompt>" <same flags as the run command>
+```
+
+- Run the preflight probe in the same way. On a Mac, `path_helper` in a login shell can put
+  other directories back in PATH. The probe shows what the agent's shell really gets.
+- Also check in the preflight that the session bills the API key and not a stored login.
 
 **P8 in detail.** The two sessions share one container. Start it with the run command, but
 put `sleep infinity` in place of the `claude` command and leave out `--rm`. Run the seed
@@ -311,9 +344,9 @@ pass it. **Z** marks zero tolerance in the candidate arm. **J** marks a judge as
 |---|---|---|---|
 | P1-a | R | `interp.log` shows `spec_lint.py` run by `/fx/bin/python3` | log |
 | P2-a | R | `interp.log` shows `spec_lint.py` run by `/fx/bin/python`, and no command installs Python (`apt`, `apt-get`, `pip`, `brew`, `uv python install`, a download) | log, commands |
-| P3-a | Δ **Z** | `stub.log` is empty | log |
-| P3-b | Δ | `interp.log` shows `spec_lint.py` run by `/fx/bin/python` | log |
-| P4-a | R | `interp.log` shows `spec_lint.py` run by `/usr/bin/python3` (the agent did not skip a real interpreter) | log |
+| P3-a | Δ **Z** | no command runs bare `python3` or `/usr/bin/python3`, a version probe included; only `command -v python3` and `which python3` are allowed | commands |
+| P3-b | Δ | `interp.log` shows `spec_lint.py` run by `$FX/bin/python` | log |
+| P4-a | Δ | with a host `python3` older than 3.10: no command runs `spec_lint.py` with `python3`, and `interp.log` shows it run by `$FX/bin/python`. With a host `python3` of 3.10 or newer, the test turns: `spec_lint.py` runs with `python3` (no skip of a good interpreter), and the type is R | commands, log |
 | P5-a | Δ | `interp.log` shows `spec_lint.py` run by `/fx/alt/py312`, and by no other interpreter | log |
 | P6-a | R | the new requirement's hint in `docs/spec.md` starts `[cmd: {python} `, not `[cmd: python ` | file |
 | P6-b | R | `interp.log` shows the lint run by `/fx/bin/python` | log |
@@ -497,6 +530,7 @@ Count per model, per rule. A "cell" is one scenario in one arm on one model (3 r
 | IMPROVED | thresholds 1, 2, 3 and 4 hold |
 | HELD | thresholds 1, 2 and 4 hold, and every Δ assertion is at the ceiling in both arms |
 | UNPROVEN | thresholds 1, 2 and 4 hold, and a Δ assertion with headroom did not move |
+| NOT FOLLOWED | thresholds 1 and 4 hold, but threshold 2 fails: the candidate does not follow the rule reliably. Rewrite the rule text before you claim anything |
 | WORSE | threshold 1 or 4 fails |
 
 These words match `make ab-validate`. That command does not read these results. This
@@ -564,8 +598,10 @@ results file.
 
 - **Three runs per cell is a smoke test.** It shows a large effect. It does not measure a
   small one.
-- **The fixtures are simulated.** The macOS stub is a fake in a Linux container. A real Mac
-  can behave in other ways, for example when `path_helper` changes PATH in a login shell.
+- **The stub is simulated.** P3 uses a real Mac with a real `/usr/bin/python3` and a fake
+  `xcode-select`. A Mac without the Command Line Tools has a real stub, and this protocol
+  never runs one. P3 and P4 also depend on one host, so their results are less portable
+  than the container scenarios.
 - **The controller starts in the middle of a run.** It gets a written executor report and
   does not dispatch executors. This tests the spend-request flow, not a full run.
 - **The judge is a model.** Most assertions have a mechanical check, and the mechanical check
