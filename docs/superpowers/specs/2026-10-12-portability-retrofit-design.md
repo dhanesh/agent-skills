@@ -68,7 +68,9 @@ A stub candidate is skipped without being run, so the dialog never opens.
 
 **The rule.** Each SKILL.md that tells the agent to run Python gets this paragraph, byte-identical, in its setup section, before the first command:
 
-> **Python interpreter.** The commands in this skill and its references are written with `python3`. Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it. Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and `py -3` that is not skipped and for which `<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter you found in place of `python3` in every command, and in any `Bash(...)` permission rule you suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
+> **Python interpreter.** Most commands in this skill and its references are written with `python3`. Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and `py -3` that is not skipped and for which `<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter you found in place of `python3` in every command, and in any `Bash(...)` permission rule you suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If none passes, follow this skill's own fallback for running without Python where it gives one; otherwise stop and tell the user that this skill needs Python 3.10 or newer.
+
+2026-10-12, after the PR 3 review: the rule now leaves `uv run` and `{python}` commands alone, skips the lookup in a session resumed under an allowlist (so unattended re-entry is not stalled by a refused probe), and defers to a skill's own no-Python fallback.
 
 **Which SKILL.md files.** A skill "runs Python" when its SKILL.md body or a `references/*.md` file has a command line that starts with `python3` or `python`. That is 24 skills today. The two skills that mention Python only in frontmatter (clean-code and tmux-agent-herdr-lite) do not get the rule. A frontmatter `compatibility:` line never counts.
 
@@ -96,4 +98,5 @@ A stub candidate is skipped without being run, so the dialog never opens.
 
 - An agent can ignore the prose rule. Only the hooks, the installers and the contract checker enforce the lookup in code.
 - `SKILL_PYTHON` with arguments (for example `py -3`) works in the prose rule and in skill-contract, but not in the `sh` function. The READMEs say so.
+- Python is optional, or comes from `uv`, in four skills: crafting-self-prompting-loops, feynman-walkthrough, mockstar-mock and base-in-reality. The rule defers to their own fallbacks for running without Python, so it does not stop them where Python is not needed.
 - A skill that worked on Python 3.8 or 3.9 now tells the agent to stop. All of the repository's test suites run on 3.10 and newer, so no supported setup is lost.

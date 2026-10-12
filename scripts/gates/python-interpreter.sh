@@ -57,6 +57,18 @@ rule="$(squash < "$RULE_FILE")"
 
 case "$body" in
     *"$rule"*)
+        # Ordering: the rule must begin before the first trigger line of SKILL.md's
+        # body. References are separate files, so they are not ordered.
+        first_trigger="$(printf '%s\n' "$triggers" | grep -F "$SKILL_MD:" | head -1 | cut -d: -f2 || true)"
+        if [ -n "$first_trigger" ]; then
+            rule_line="$(grep -nF -- '**Python interpreter.**' "$SKILL_MD" | head -1 | cut -d: -f1 || true)"
+            if [ -z "$rule_line" ] || [ "$rule_line" -gt "$first_trigger" ]; then
+                printf 'FAIL: the shared rule begins at line %s of SKILL.md, after the first command at line %s\n' \
+                    "${rule_line:-?}" "$first_trigger"
+                printf 'PYTHON_INTERPRETER_RESULT: FAIL\n'
+                exit 1
+            fi
+        fi
         printf 'PASS: python interpreter: SKILL.md carries the shared rule\n'
         printf 'PYTHON_INTERPRETER_RESULT: PASS\n'
         exit 0 ;;

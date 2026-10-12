@@ -598,9 +598,10 @@ mkpy() {  # $1 name, $2 body line, $3 'rule'|'rewrap'|'edited'|'' , $4 reference
     case "$3" in
       rule) cat "$RULE"; echo ;;
       rewrap) tr ' ' '\n' < "$RULE" | paste -sd'  ' - | fold -s -w 40; echo ;;
-      edited) sed 's/find the interpreter once/find the interpreter twice/' "$RULE" ;;
+      edited) sed 's/Find the interpreter once/Find the interpreter twice/' "$RULE" ;;
     esac
     printf '\n```\n%s\n```\n' "$2"
+    [ "$3" != late ] || { echo; cat "$RULE"; }
   } > "$d/SKILL.md"
   [ -z "${4:-}" ] || printf '%s\n' "$4" > "$d/references/r.md"
   printf '%s\n' "$d"
@@ -618,6 +619,7 @@ py_case "a python3 command with no rule fails" FAIL "$(mkpy norule "$CMD" '')"
 py_case "a python3 command with the rule passes" PASS "$(mkpy rule "$CMD" rule)"
 py_case "the rule with one word changed fails" FAIL "$(mkpy edited "$CMD" edited)"
 py_case "the rule re-wrapped across lines passes" PASS "$(mkpy rewrap "$CMD" rewrap)"
+py_case "the rule placed after the first command fails" FAIL "$(mkpy late "$CMD" late)"
 py_case "python3 only in frontmatter compatibility passes without the rule" PASS "$(mkpy compat 'Do the thing.' '')"
 py_case "a python3 command only in references fails without the rule" FAIL "$(mkpy ref 'Do the thing.' '' 'python3 -m pytest')"
 py_case "a VERIFY: output line passes without the rule" PASS "$(mkpy verify 'VERIFY: T1 ok /usr/bin/python3 -c "print(1)"' '')"

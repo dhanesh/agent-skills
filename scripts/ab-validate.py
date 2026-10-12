@@ -288,7 +288,7 @@ SINCE_PORTABILITY_HOOKS = "729f9bf"  # portability retrofit, PR 2: world-model-l
 # context-hygiene-kit hooks find their interpreter with find_python.sh (a `python`-only
 # PATH works; the macOS python3 stub is skipped, never run). The commit that bumps the
 # three skills and adds the A/B rows.
-SINCE_PORTABILITY_RULE = "28eaca1"  # portability retrofit, PR 3: every skill that runs Python
+SINCE_PORTABILITY_RULE = "04df5d0"  # portability retrofit, PR 3: every skill that runs Python
 # carries the shared Python interpreter rule. The commit that inserts the rules; repinned
 # to its own short hash right after it lands.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
@@ -9299,14 +9299,32 @@ def check_portability_rule(old, new):
         return
     with open(rule_file) as f:
         rule = _pr_collapse(f.read())
-    # The set of skills that run Python: those the gate flags in the baseline tree.
+    # The skills that run Python, read from the tree under review: copy each skill, strip
+    # the rule paragraph from the copy, and run the gate. A gate failure on the stripped
+    # copy means the skill has a command that needs the rule. (Asking the baseline would
+    # find nothing once the rule has landed, and a stale pin would make that look WORSE.)
     runs = []
-    for name in sorted(os.listdir(old)):
-        if not os.path.isfile(os.path.join(old, name, "SKILL.md")):
-            continue
-        r = subprocess.run(["sh", gate, os.path.join(old, name)], capture_output=True, text=True)
-        if r.returncode != 0:
-            runs.append(name)
+    scratch = tempfile.mkdtemp(prefix="ab-portability-")
+    try:
+        for name in sorted(os.listdir(new)):
+            src = os.path.join(new, name)
+            if not os.path.isfile(os.path.join(src, "SKILL.md")):
+                continue
+            dst = os.path.join(scratch, name)
+            os.makedirs(dst)
+            shutil.copy(os.path.join(src, "SKILL.md"), dst)
+            if os.path.isdir(os.path.join(src, "references")):
+                shutil.copytree(os.path.join(src, "references"), os.path.join(dst, "references"))
+            with open(os.path.join(dst, "SKILL.md")) as f:
+                text = f.read()
+            text = re.sub(r"\*\*Python interpreter\.\*\*.*?(\n\s*\n|\Z)", "", text, flags=re.S)
+            with open(os.path.join(dst, "SKILL.md"), "w") as f:
+                f.write(text)
+            r = subprocess.run(["sh", gate, dst], capture_output=True, text=True)
+            if r.returncode != 0:
+                runs.append(name)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     def carrying(tree):
         n = 0
@@ -9319,10 +9337,10 @@ def check_portability_rule(old, new):
         return n
     a, b = carrying(old), carrying(new)
     row("portability", "skills that run Python and carry the interpreter rule (higher=better)",
-        a, b, len(runs) > 0 and a == 0 and b == len(runs),
-        "prompt-only: checks the text is present, not model behaviour. The baseline has the "
-        "rule in none of the %d skills the gate flags; the branch has it in all %d, an "
-        "honest 0 -> %d" % (len(runs), len(runs), len(runs)),
+        a, b, len(runs) > 0 and b == len(runs),
+        "prompt-only: checks the text is present, not model behaviour. The %d skills that "
+        "run Python are read from the branch's own trigger lines; the baseline carries the "
+        "rule in %d of them, the branch in %d" % (len(runs), a, b),
         kind="delta", since=SINCE_PORTABILITY_RULE)
 
 

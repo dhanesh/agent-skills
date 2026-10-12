@@ -146,7 +146,11 @@ and skip what the conversation has already answered:
    claude` prints it: a timer runs with the PATH captured at `reentry install`, and
    `write_grant.py` warns on a bare name), with an explicit tool allowlist that lets it
    drive the whole run: `python3 <abs>/conductor.py …`, the subagent tool (`Agent` in
-   Claude Code), the plan's verify programs, git and file edits (see the example below). If the Python interpreter rule found an interpreter other than `python3`, write that one instead, here and in the grant's `Bash(...)` rule, so the two match.
+   Claude Code), the plan's verify programs, git and file edits (see the example below).
+   If the Python interpreter rule found an interpreter other than `python3`, write that one
+   instead, here and in the grant's `Bash(...)` rule, so the two match. A resumed session does
+   not run the interpreter lookup; it writes the interpreter that the grant's `Bash(...)` rule
+   names.
    Warn against any permission-bypass flag, because the resumed agent acts with the
    user's own permissions and no one watches it. Without an answer, no block is written and nothing
    re-enters. When the project has a `.release/recipe.json` (release-conductor),
@@ -155,7 +159,7 @@ and skip what the conversation has already answered:
    `release.py deploy`, `rollback` or `abandon` unprompted. It reads rules as
    release-conductor does (see the wrapper and interpreter list in its SKILL.md, honest
    limits): `Bash(python3 *)`, `Bash(uv run *)`, `Bash(sh -c *)` and a rule whose program is
-   a path glob, such as `Bash(./scripts/*)` or `Bash(.venv/bin/*)`, all reach those. If the Python interpreter rule found an interpreter other than `python3`, write that one instead, here and in the grant's `Bash(...)` rule, so the two match. The
+   a path glob, such as `Bash(./scripts/*)` or `Bash(.venv/bin/*)`, all reach those. The
    refusal names the rule. Never put those commands, or a glob wide enough to reach them,
    in this allowlist, because a release always goes through `release prep`'s own grant, with the human present (design spec D10).
 9. **System One use.** May the run consult a System One model such as Jev for
@@ -307,7 +311,10 @@ given, it is exactly `bump`, `grant_staging` and `grant_tag` — no subset, no e
 
 In `reentry.agent_cmd`, replace both paths with your own (`command -v claude`, and where
 the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with the plan's
-own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own. If the Python interpreter rule found an interpreter other than `python3`, write that one instead, here and in the grant's `Bash(...)` rule, so the two match.
+own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own.
+If the Python interpreter rule found an interpreter other than `python3`, write that one
+instead, here and in the grant's `Bash(...)` rule, so the two match. A resumed session does not
+run the interpreter lookup; it writes the interpreter that the grant's `Bash(...)` rule names.
 Claude Code matches each `Bash(...)` rule against the literal command text, before any
 variable is expanded. A resumed agent therefore writes the conductor's absolute path out in
 each command, as factory-conductor's "Scheduled re-entry" section says, so give the rule that

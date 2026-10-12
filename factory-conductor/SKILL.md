@@ -47,14 +47,17 @@ SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'factory-conductor'
 test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
 ```
 
-**Python interpreter.** The commands in this skill and its references are written with `python3`.
-Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
-Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
-that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
-and `py -3` that is not skipped and for which
+**Python interpreter.** Most commands in this skill and its references are written with `python3`.
+Find the interpreter once, before the first of them. If `$SKILL_PYTHON` is set, use it. Otherwise,
+on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails, that
+`python3` is the install stub: skip it without running it. Use the first of `python3`, `python` and
+`py -3` that is not skipped and for which
 `<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
 you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
-suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
+suggest. Commands that start with `uv run` or `{python}` keep their own form. In a session resumed
+under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
+none passes, follow this skill's own fallback for running without Python where it gives one;
+otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
 Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --root <repo>`,
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
@@ -344,7 +347,9 @@ match the command text as written, before any variable is expanded, and a comman
 rule is refused. So in a resumed session, write the conductor's absolute path out in each command,
 as `python3 /abs/path/to/factory-conductor/assets/conductor.py <command> --root <repo>`. Use no
 `$SKILL_DIR`, no `cd … &&` and no variable assignment, so each command matches the grant's
-`Bash(python3 /abs/…/conductor.py *)` rule. If the Python interpreter rule found an interpreter other than `python3`, write that one instead, here and in the grant's `Bash(...)` rule, so the two match.
+`Bash(python3 /abs/…/conductor.py *)` rule.
+A resumed session does not run the interpreter lookup. It writes the interpreter that the
+grant's `Bash(...)` rule names, in place of `python3` in the command and the rule above.
 
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
 command, with a fixed resume prompt, only when the run is not finished, not waiting on the

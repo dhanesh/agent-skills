@@ -774,7 +774,8 @@ class TestProductionAllowlistRefusal(WriteGrantBase):
                       "Bash(uv run *)", "Bash(uv run python *)", "Bash(uvx *)",
                       "Bash(python3 ~/.claude/skills/release-conductor/assets/release.py *)",
                       "Bash(env -u FOO python3 *)", "Bash(uv run --with x python *)",
-                      "Bash(bash -c *)", "Bash(sudo *)", "Bash(python3 -u *)"):
+                      "Bash(bash -c *)", "Bash(sudo *)", "Bash(python3 -u *)",
+                      "Bash(py -3 *)", "Bash(py *)", "Bash(py -3 */release.py *)"):
             with self.subTest(rules=rules):
                 answers = self._answers([CLAUDE, "-p", "{prompt}", "--allowedTools", rules])
                 with self.assertRaises(write_grant.GrantRefused) as cm:

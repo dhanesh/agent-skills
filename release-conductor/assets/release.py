@@ -2294,7 +2294,7 @@ _WRAPPER_VALUE_OPTS = {
 }
 _SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "fish")
 _SHELL_VALUE_OPTS = ("-o", "-O", "+o", "+O")
-_PYTHON = re.compile(r"python(3(\.\S+)?)?\Z")
+_PYTHON = re.compile(r"(python(3(\.\S+)?)?|py)\Z")  # py: the Windows launcher, `py -3`
 _FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 # Modules that run a script or code given to them: `python3 -m <one> *` runs anything.
 _PYTHON_RUN_MODULES = ("pdb", "runpy", "cProfile", "profile", "trace", "timeit", "code")
@@ -2545,7 +2545,8 @@ RELEASE_TOOL_PATHS = ("release.py", "assets/release.py", "$SKILL_DIR/assets/rele
 RELEASE_PROD_COMMANDS = ("deploy", "rollback", "abandon")
 # Each interpreter spelling an agent may type before release.py (an empty one runs the
 # script by its shebang). _rule_readings covers more (python3.N, env options).
-RELEASE_TOOL_INTERPRETERS = (("python3",), ("python",), ("/usr/bin/python3",),
+RELEASE_TOOL_INTERPRETERS = (("python3",), ("python",), ("py",), ("py", "-3"),
+                             ("/usr/bin/python3",),
                              ("/usr/local/bin/python3",), ("env", "python3"),
                              ("/usr/bin/env", "python3"), ("uv", "run", "python"),
                              ("uv", "run"), ("uvx", "python"), ())
