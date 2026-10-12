@@ -90,7 +90,7 @@ class New(unittest.TestCase):
     def test_version_matches_skill_md(self):
         with open(os.path.join(os.path.dirname(HERE), "SKILL.md"), encoding="utf-8") as f:
             self.assertIn('  version: "%s"\n' % ID.VERSION, f.read())
-        self.assertEqual(ID.VERSION, "0.1.3")
+        self.assertEqual(ID.VERSION, "0.1.4")
 
     def test_today_without_the_test_clock_is_refused(self):
         """L5: --today outside a test would let --observed reach any date up to it."""
