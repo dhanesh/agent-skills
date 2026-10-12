@@ -1025,6 +1025,28 @@ def check_audit_guardrails(old, new):
         "file:line evidence forced line-number repins in 4 PRs in one week",
         since=SINCE_SKILL_GRAPH_QUOTES)
 
+    # 9) skill-graph: a rewrapped frontmatter description does not fail the graph
+    # check. The first description line of spec-first-planning's SKILL.md is split
+    # in two at a space: the folded YAML text is the same, but the "Use when" line
+    # below it moves down one. Old arm: the use_when file:line now points at the
+    # wrong line, so the gate fails (0).
+    def rewrap_description(dst):
+        md = os.path.join(dst, "spec-first-planning", "SKILL.md")
+        lines = open(md, encoding="utf-8").read().split("\n")
+        i = next(n for n, l in enumerate(lines) if l.startswith("  Turn a fuzzy feature request"))
+        cut = lines[i].index(" ", 30)
+        lines[i:i + 1] = [lines[i][:cut], "  " + lines[i][cut + 1:]]
+        open(md, "w", encoding="utf-8").write("\n".join(lines))
+
+    def rewrap_passes(tree):
+        r = graph_probe(tree, rewrap_description)
+        return 1 if r and r[0] and r[1] else 0
+
+    a, b = rewrap_passes(old), rewrap_passes(new)
+    row("gates", "a rewrapped SKILL.md description no longer fails the graph check (1=yes)", a, b, b > a,
+        "the node use_when was a file:line inside the frontmatter description",
+        since=SINCE_SKILL_GRAPH_QUOTES)
+
     def deleted_evidence_caught(tree):
         r = graph_probe(tree, lambda d: sfp_edit(d, True))
         return 1 if r and r[0] and not r[1] else 0

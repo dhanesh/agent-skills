@@ -5,8 +5,10 @@
 # <skill>/README.md are generated from docs/skill-graph/graph.json, and must not
 # drift from it or from the skills. It fails when a README block differs from
 # the generator's output; when an edge's evidence quote is gone from its file,
-# occurs more than once, or no longer sits on a line that names the other skill; when a skill dir is missing from the graph or a graph node is not
-# a skill; or when the contract edges no longer match the skills' own
+# occurs more than once, or no longer sits on a line that names the other
+# skill; when a node's use_when quote no longer says "use when"; when a skill
+# dir is missing from the graph or a graph node is not a skill; or when the
+# contract edges no longer match the skills' own
 # ```json skill-contract provides/consumes blocks. The logic is in
 # skill_graph.py (stdlib). Fix a stale block with `make skill-graph`.
 #

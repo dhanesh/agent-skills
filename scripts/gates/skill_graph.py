@@ -22,7 +22,8 @@ The data rules (`--check` fails on any of them):
             A node has `stage` (one of `stages`), `role` (`entry`: a human usually
             starts here; `called`: usually reached from another skill, so it needs at
             least one caller), `start` (the "Start here if ..." clause) and `use_when`
-            (path:line of its own SKILL.md, a line that says "use when"). A node in
+            ({"file": "<node>/SKILL.md", "quote": "<words>"}: a quote, matched as
+            for evidence below, on a line that says "use when"). A node in
             the `alone` stage has no edges; a node with no edges is in `alone`.
   edges     `from` -> `to` means `from` sends work or data to `to` (producer ->
             consumer). One edge per ordered pair. `kind` is one of:
@@ -36,7 +37,7 @@ The data rules (`--check` fails on any of them):
             `quote` is a short verbatim run of words from the file (6-15 words is a
             good size). Runs of whitespace, line breaks too, count as one space, so a
             line that moves or a paragraph that is rewrapped does not break it. The
-            quote occurs exactly once in the file, and the line(s) it spans name
+            quote starts and ends on a word boundary, occurs exactly once in the file, and the line(s) it spans name
             `mentions`. A file under references/ is linked from that skill's
             SKILL.md. Every non-contract edge has at least one item.
   contract  The contract edges are exactly the pairs where `from`'s
@@ -91,11 +92,6 @@ def name_re(name: str) -> re.Pattern:
     return re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])")
 
 
-def read_lines(path: str) -> list[str]:
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return fh.read().split("\n")
-
-
 def contract_blocks(root: str, skills: list[str]) -> dict[str, dict]:
     out = {}
     pat = re.compile(r"^```json skill-contract\n(.*?)\n```", re.M | re.S)
@@ -136,15 +132,8 @@ def validate(root: str, g: dict) -> list[str]:
         start = d.get("start", "")
         if not start or UNSAFE.search(start):
             fails.append(f"node {n}: `start` is empty or has a character mermaid cannot carry")
-        at = d.get("use_when", "")
-        path, _, line = at.rpartition(":")
-        if path != f"{n}/SKILL.md" or not line.isdigit():
-            fails.append(f"node {n}: use_when {at!r} is not {n}/SKILL.md:<line>")
-        elif n in skills:
-            lines = read_lines(os.path.join(root, path))
-            i = int(line)
-            if not (1 <= i <= len(lines)) or not re.search(r"use when", lines[i - 1], re.I):
-                fails.append(f"node {n}: {at} no longer says 'use when'")
+        if n in skills:
+            fails.extend(check_use_when(root, n, d.get("use_when")))
         if (d.get("stage") == "alone") != (n not in linked):
             fails.append(f"node {n}: a node is in stage 'alone' exactly when it has no edges")
         if d.get("role") == "called" and not any(e["to"] == n for e in edges):
@@ -221,11 +210,65 @@ def normalise(text: str) -> tuple[str, list[int], list[int]]:
 
 
 def find_all(hay: str, needle: str) -> list[int]:
+    """Every start of `needle` in `hay` that begins and ends on a word boundary,
+    so "closes the" does not match inside "encloses the"."""
     out, i = [], hay.find(needle)
     while i != -1:
-        out.append(i)
+        j = i + len(needle)
+        cut_in = i > 0 and hay[i - 1].isalnum() and needle[0].isalnum()
+        cut_out = j < len(hay) and hay[j].isalnum() and needle[-1].isalnum()
+        if not (cut_in or cut_out):
+            out.append(i)
         i = hay.find(needle, i + 1)
     return out
+
+
+def locate(root: str, path: str, quote: str, says: re.Pattern, what: str) -> str | None:
+    """Find `quote` in the file at `path` and check that the line(s) it spans match
+    `says`. Return None when it does, else the reason it does not (`what` names
+    the thing `says` looks for, in the message)."""
+    q = " ".join(quote.split())
+    if len(q.split(" ")) < MIN_QUOTE_WORDS:
+        return f"{path} needs a `quote` of at least {MIN_QUOTE_WORDS} words"
+    with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
+    norm, offs, wline = normalise(text)
+    lines = text.split("\n")
+    now = [str(n) for n, l in enumerate(lines, 1) if says.search(l)]
+    where = (f"{what} is now on line(s) {', '.join(now[:8])}" if now
+             else f"the file no longer has {what}")
+    hits = find_all(norm, q)
+
+    def span(i: int) -> tuple[int, int]:
+        first = bisect.bisect_right(offs, i) - 1
+        last = bisect.bisect_right(offs, i + len(q) - 1) - 1
+        return wline[first], wline[last]
+
+    if not hits:
+        return f"quote {quote!r} is not in {path}; {where}"
+    if len(hits) > 1:
+        at = ", ".join(str(span(i)[0]) for i in hits[:8])
+        return (f"quote {quote!r} occurs {len(hits)} times in {path} "
+                f"(lines {at}); use a longer quote")
+    lo, hi = span(hits[0])
+    if says.search("\n".join(lines[lo - 1:hi])):
+        return None
+    lref = f"line {lo}" if lo == hi else f"lines {lo}-{hi}"
+    return f"quote {quote!r} in {path} ({lref}) no longer sits on a line that has {what}; {where}"
+
+
+USE_WHEN = re.compile(r"use\s+when", re.I)
+
+
+def check_use_when(root: str, n: str, item) -> list[str]:
+    if not isinstance(item, dict) or set(item) != {"file", "quote"}:
+        return [f"node {n}: use_when must be {{\"file\": \"{n}/SKILL.md\", \"quote\": \"...\"}}, not {item!r}"]
+    if item["file"] != f"{n}/SKILL.md":
+        return [f"node {n}: use_when file {item['file']!r} is not {n}/SKILL.md"]
+    if not os.path.isfile(os.path.join(root, item["file"])):
+        return []  # the missing skill is reported on its own
+    why = locate(root, item["file"], item.get("quote", ""), USE_WHEN, "'use when'")
+    return [f"node {n}: use_when {why}"] if why else []
 
 
 def check_evidence(root: str, tag: str, a: str, b: str, item: dict) -> list[str]:
@@ -239,9 +282,6 @@ def check_evidence(root: str, tag: str, a: str, b: str, item: dict) -> list[str]
     other = b if owner == a else a
     if want != other:
         return [f"{tag}: evidence in {path} must mention {other}, not {want!r}"]
-    q = " ".join(quote.split())
-    if len(q.split(" ")) < MIN_QUOTE_WORDS:
-        return [f"{tag}: evidence in {path} needs a `quote` of at least {MIN_QUOTE_WORDS} words"]
     full = os.path.join(root, path)
     if not os.path.isfile(full):
         return [f"{tag}: evidence file {path} does not exist"]
@@ -250,33 +290,8 @@ def check_evidence(root: str, tag: str, a: str, b: str, item: dict) -> list[str]
         with open(os.path.join(root, owner, "SKILL.md"), encoding="utf-8") as fh:
             if rel not in fh.read():
                 return [f"{tag}: {path} is not linked from {owner}/SKILL.md"]
-    with open(full, encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
-    norm, offs, wline = normalise(text)
-    pat = name_re(want)
-    lines = text.split("\n")
-    now = [str(n) for n, l in enumerate(lines, 1) if pat.search(l)]
-    where = (f"{want} is now on line(s) {', '.join(now[:8])}" if now
-             else f"the file no longer names {want}")
-    hits = find_all(norm, q)
-
-    def span(i: int) -> tuple[int, int]:
-        first = bisect.bisect_right(offs, i) - 1
-        last = bisect.bisect_right(offs, i + len(q) - 1) - 1
-        return wline[first], wline[last]
-
-    if not hits:
-        return [f"{tag}: evidence quote {quote!r} is not in {path}; {where}"]
-    if len(hits) > 1:
-        at = ", ".join(str(span(i)[0]) for i in hits[:8])
-        return [f"{tag}: evidence quote {quote!r} occurs {len(hits)} times in {path} "
-                f"(lines {at}); use a longer quote"]
-    lo, hi = span(hits[0])
-    if pat.search("\n".join(lines[lo - 1:hi])):
-        return []
-    lref = f"line {lo}" if lo == hi else f"lines {lo}-{hi}"
-    return [f"{tag}: evidence quote {quote!r} in {path} ({lref}) no longer sits on a line "
-            f"that names {want}; {where}"]
+    why = locate(root, path, quote, name_re(want), want)
+    return [f"{tag}: evidence {why}"] if why else []
 
 
 # ── rendering ─────────────────────────────────────────────────────────────────

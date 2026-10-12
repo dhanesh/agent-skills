@@ -24,7 +24,7 @@ failing check for that one skill.) The checks:
 | Python interpreter | `scripts/gates/python-interpreter.sh` | every SKILL.md that runs Python (in its body or `references/`) carries the shared 'Python interpreter' rule byte-for-byte (whitespace-insensitive), placed before the first command in SKILL.md, so every skill finds Python the same way |
 | skill-contract | `scripts/gates/skill-contract.sh` | commandments 1–2 of [`docs/skill-contract/SPEC.md`](docs/skill-contract/SPEC.md) on **every** skill: frontmatter keys stay inside the Agent Skills allowed set, the `skill-contract` opt-in and the `## Contract` block come together or not at all, and an adopter's `assets/contract_check.py` is byte-identical to the reference (fix drift with `make contract-vendor`). `make contract` runs the reference checker's conformance vectors and the end-to-end handoff once per `make gate` |
 | README catalog | `scripts/gates/readme-catalog.sh` | the root `README.md` lists **every** skill (an `npx skills add … --skill <name>` install line **and** a Skills-table row) and nothing that isn't one — runs once per `make gate`, `make readme` alone. A new skill isn't shipped until it's in the catalog |
-| Skill graph | `scripts/gates/skill-graph.sh` | the "who calls whom" mermaid diagrams in the root `README.md` and in every `<skill>/README.md` (between `<!-- skill-graph:start -->` and `<!-- skill-graph:end -->`) match what `scripts/gates/skill_graph.py` renders from `docs/skill-graph/graph.json`; every skill dir is a graph node and every node is a skill; every edge's evidence `quote` occurs exactly once in its `file`, on a line that names the other skill (a line that moves still passes); the contract edges equal the skills' `json skill-contract` provides/consumes pairs — runs once per `make gate`, `make skill-graph-check` alone. Change who calls whom in `graph.json`, then run `make skill-graph` to regenerate the blocks |
+| Skill graph | `scripts/gates/skill-graph.sh` | the "who calls whom" mermaid diagrams in the root `README.md` and in every `<skill>/README.md` (between `<!-- skill-graph:start -->` and `<!-- skill-graph:end -->`) match what `scripts/gates/skill_graph.py` renders from `docs/skill-graph/graph.json`; every skill dir is a graph node and every node is a skill; every edge's evidence `quote` occurs exactly once in its `file`, on a line that names the other skill, and every node's `use_when` quote occurs exactly once in its SKILL.md, on a line that says "use when" (a line that moves or is rewrapped still passes); the contract edges equal the skills' `json skill-contract` provides/consumes pairs — runs once per `make gate`, `make skill-graph-check` alone. Change who calls whom in `graph.json`, then run `make skill-graph` to regenerate the blocks |
 | BCP 14 register | `scripts/gates/bcp14-registry.sh` | every capitalised MUST/SHOULD/MAY in a `SKILL.md` has a row in `docs/rfc2119/2026-09-19-classification.md` at the level the text uses (rows match on sentence text, not line number), every skill has a register section, and no `SKILL.md` prose uses a lowercase "must" or "shall" — runs once per `make gate`, `make bcp14` alone. Changing a keyword sentence means changing its row |
 | Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
@@ -137,12 +137,14 @@ Conventions worth honoring (the gate enforces the mechanical ones; these are the
    when a change alters what the diagrams show: a call, handoff, contract envelope or
    optional use that is new or removed, a different "when" trigger or "why" reason, or a
    different entry-point role or stage. Edit `docs/skill-graph/graph.json` (the edge with
-   its evidence, and the node's role, stage and "Start here if"), then run
+   its evidence, and the node's role, stage, "Start here if" and `use_when`), then run
    `make skill-graph` and `make skill-graph-check`. Each evidence item is a `file` and a
-   short verbatim `quote` (6 to 15 words) from a line that names the other skill. The
-   quote must occur only once in the file. A line that only moves needs no change. The
-   gate catches only drift between `graph.json` and the READMEs, and evidence quotes that
-   were removed, edited or no longer name the other skill. It cannot see a new call that
+   short verbatim `quote` (6 to 15 words) from a line that names the other skill. A
+   node's `use_when` is a `file` (its own SKILL.md) and a `quote` from the line that
+   says "Use when". Each quote must occur only once in its file, and it must start and
+   end on whole words. A line that only moves or is rewrapped needs no change. The gate
+   catches only drift between `graph.json` and the READMEs, and quotes that were
+   removed, edited or no longer name the other skill or say "use when". It cannot see a new call that
    nobody added to `graph.json`. A new quote is not enough when the meaning changed. If
    the diagrams do not change, say so in the PR body.
 5. `make gate-skill SKILL=<dir>` until green, then `make gate` for the whole repo.
