@@ -16,7 +16,7 @@ description: >-
 license: MIT
 compatibility: >-
   Prompt-driven; the bundled ranker needs Python 3.10+
-  (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, and, for the churn signal, the git
+  (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and, for the churn signal, the git
   CLI. Writes and proves tests on four stacks — python 3.10–3.14 (pytest, falling back to
   unittest), node/TypeScript on the LTS lines 18, 20, 22, 24 and 26 (`node --test`), go 1.22–1.26
   (`go test`, on darwin and linux) and rust 1.82–1.99 (`cargo test`, on darwin and linux; 1.82,

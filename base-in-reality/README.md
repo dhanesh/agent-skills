@@ -56,5 +56,5 @@ See `SKILL.md` for the full procedure, flags, and invariants.
 
 ## Changes
 
-- **1.2.4.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
+- **1.2.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.2.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

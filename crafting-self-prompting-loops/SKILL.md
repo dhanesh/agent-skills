@@ -11,7 +11,7 @@ description: >-
   loop spec, a runnable scaffold, and bakes in the mandatory safety properties (a hard stop backstop and
   the trusted/untrusted two-channel boundary) that loops fail without. Accepts a skill-contract task-plan envelope as the loop's plan. Honors a skill-contract autonomy grant at its write gate.
 license: MIT
-compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`) is optional, used only to validate skill-contract handoffs and check grants.
+compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`) is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
   version: "1.4.5"

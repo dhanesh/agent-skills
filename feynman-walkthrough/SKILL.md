@@ -15,7 +15,7 @@ description: >-
   study regimen: retention tooling (spaced retrieval, self-quizzing, review schedules)
   exists but is strictly opt-in.
 license: MIT
-compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
 metadata:
   spec_version: "1.0"
   author: dhanesh

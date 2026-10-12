@@ -13,7 +13,7 @@ description: >-
   checks; rollback asks too. Ends with a release-result/v1 envelope. Not the planner
   (spec-first-planning), not the builder (factory-conductor), not a deploy platform.
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only and git >= 2.31; the default PR step uses the gh CLI. The recipe's own commands (build, deploys, probes, checks) run with the user's credentials and reach whatever they target.
+compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only and git >= 2.31; the default PR step uses the gh CLI. The recipe's own commands (build, deploys, probes, checks) run with the user's credentials and reach whatever they target.
 metadata:
   author: dhanesh
   version: "0.1.3"

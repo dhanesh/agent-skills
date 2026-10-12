@@ -2,7 +2,7 @@
 name: security-posture-audit
 description: "Read-only, offline audit of a repository's security hygiene posture: deterministic checks for unpinned dependencies (requirements/package.json/Dockerfile), committed .env/.pem/id_rsa files, hardcoded debug and wildcard-CORS flags, plain-http transports and pip trusted-host, risky GitHub Actions patterns (pull_request_target + head checkout, curl|sh), world-writable/setuid modes, and a missing SECURITY.md — every finding severity-graded with file:line evidence and a concrete remediation. Use when asked to \"audit this repo's security posture\", \"run a security hygiene check\", or \"are our deps pinned / env files committed / workflows safe?\" on a repo the user owns or is authorized to review. Not a CVE scanner (no advisory DB, no network), not SAST dataflow analysis, not a secrets-content scanner, and not norms verification — use base-in-reality for norms and agent-ready-rails for agent-readiness."
 license: MIT
-compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell. Fully offline — no network, no pip; file-mode checks are POSIX-only.
 metadata:
   author: dhanesh
   version: "1.0.5"

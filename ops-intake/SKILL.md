@@ -14,7 +14,7 @@ description: >-
   never writes to one), not the planner (spec-first-planning), not an incident responder or
   a scheduled sweep.
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only. The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
   version: "0.2.4"

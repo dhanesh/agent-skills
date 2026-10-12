@@ -12,7 +12,7 @@ description: >-
   a subject or creating new bundles — use feynman-walkthrough for that — and not for
   building the website itself — use okf-site-kit; this skill maintains what both produce.
 license: MIT
-compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, and a POSIX shell; git is needed only to check git-pinned sources. Fully offline.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX shell; git is needed only to check git-pinned sources. Fully offline.
 metadata:
   author: dhanesh
   version: "1.0.4"

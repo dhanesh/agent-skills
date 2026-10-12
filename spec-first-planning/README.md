@@ -50,7 +50,7 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
-**2.7.4.** `references/unattended.md` tells a resumed session to read its interpreter from the grant's `agent_cmd`. One long line in SKILL.md is rewrapped. The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
+**2.7.4.** `references/unattended.md` tells a resumed session to read its interpreter from the `argv` that `watch` logged in the run's `autonomy-log.jsonl`. One long line in SKILL.md is rewrapped. The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 
 **2.7.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
 

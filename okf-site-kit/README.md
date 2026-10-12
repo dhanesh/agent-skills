@@ -82,5 +82,5 @@ green (9 pages + search index), homepage and concept pages visually checked.
 
 ## Changes
 
-- **1.1.5.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
+- **1.1.5.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.1.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

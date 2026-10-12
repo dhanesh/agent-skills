@@ -14,7 +14,7 @@ description: >-
   bundles, spec-canonical bundles, and producer-extended bundles — reporting conformance
   warnings instead of failing.
 license: MIT
-compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, to inspect bundles and generate the project; Node.js 18+ with npm to build/preview the emitted Astro + Starlight site (network needed only for npm install).
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, to inspect bundles and generate the project; Node.js 18+ with npm to build/preview the emitted Astro + Starlight site (network needed only for npm install).
 metadata:
   spec_version: "1.0"
   author: dhanesh
