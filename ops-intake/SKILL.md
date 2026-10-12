@@ -110,10 +110,10 @@ Read each command's output lines, not only its exit code.
    jobs `NEXT:` line). A failing run with no failing job (a `startup_failure` has no jobs)
    becomes one item for the run itself, `<workflow>/(run)/<branch>`. Jira and Linear have no
    dedicated reader: follow their recipe in `references/conversion-recipes.md` (a read-only
-   export piped through a small transform), or, from an MCP search result under step 2's
+   export run through a small transform), or, from an MCP search result under step 2's
    rule, write the `intake-signals-jsonl` records yourself. Their `source` field equals
-   `--source`, and the `ITEM:` flag of those items carries `+low-trust`. An issue that is already closed when
-   intake first sees it makes no item: it is history, not a signal.
+   `--source`, and the `ITEM:` flag of those items carries `+low-trust`. An issue that is
+   already closed when intake first sees it makes no item: it is history, not a signal.
 
    Each import prints `IMPORT: <source> <format> ok <n> problems <m>` and up to 50
    `PROBLEM:` lines. A bad record is a problem and the other records still import (exit 3). A
@@ -200,9 +200,10 @@ Support messages, app reviews and feedback-form answers come in through `feedbac
 CLI owns the inbox, the store console or the form, so the human exports the messages and you
 (or the human) transform the export: one JSON line per message with `id`, `topic`, `channel`
 (`email`, `review`, `form`, `chat` or `other`), `created_at` and `text`, and optionally
-`rating` (1 to 5), `severity` (1 to 3; a 4 is capped at 3) and `url`. `references/formats.md` has the format.
-`references/conversion-recipes.md` has an export and transform recipe for App Store Connect, Play
-Console, Zendesk and Intercom; its transforms leave `topic` for you to fill in.
+`rating` (1 to 5), `severity` (1 to 3; a 4 is capped at 3) and `url`.
+`references/formats.md` has the format. `references/conversion-recipes.md` has an export
+and transform recipe for App Store Connect, Play Console, Zendesk and Intercom; its
+transforms leave `topic` for you to fill in.
 Messages with the same topic become one item titled `feedback: <topic>`, and each new message
 raises its count, so twelve people with one problem show as one item with a count of 12.
 
