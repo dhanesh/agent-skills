@@ -252,6 +252,69 @@ catalog_case "a table row for a non-skill fails" FAIL "$r"
 r="$(mkcatalog mislink)"; catalog_readme "$r" alpha beta -- '[`alpha`](alpha/)' '[`beta`](alpha/)'
 catalog_case "a row whose label and link disagree fails" FAIL "$r"
 
+# ── skill-graph: README diagrams match graph.json, and graph.json the skills ──
+# The diagrams are generated, so the risks are drift: a README edited by hand, an
+# evidence line that no longer names the other skill, a skill the graph forgot,
+# a node that is no longer a skill, or a contract pair with no edge. Each case is
+# a fresh three-skill repo (alpha hands off to beta; gamma works alone), written
+# once with --write, then broken in one way.
+mkgraph() {
+  r="$WORK/graph-$1"
+  rm -rf "$r"; mkdir -p "$r/alpha" "$r/beta" "$r/gamma" "$r/docs/skill-graph"
+  for s in alpha beta gamma; do
+    printf 'Use when you test %s.\n' "$s" > "$r/$s/SKILL.md"
+    printf '# %s\n\nIntro.\n\n## Install\n\nRun it.\n' "$s" > "$r/$s/README.md"
+  done
+  printf 'Hand the result to beta next.\n' >> "$r/alpha/SKILL.md"
+  printf '# Repo\n\n## Install\n\n## Software factory\n\nText.\n' > "$r/README.md"
+  cat > "$r/docs/skill-graph/graph.json" <<'EOF'
+{"root_insert_before": "## Software factory", "where_to_start": ["Start with alpha."],
+ "stages": [{"id": "find", "title": "Find"}, {"id": "alone", "title": "Works alone"}],
+ "nodes": {
+  "alpha": {"stage": "find", "role": "entry", "use_when": "alpha/SKILL.md:1", "start": "you test alpha"},
+  "beta": {"stage": "find", "role": "called", "use_when": "beta/SKILL.md:1", "start": "you test beta"},
+  "gamma": {"stage": "alone", "role": "entry", "use_when": "gamma/SKILL.md:1", "start": "you test gamma"}},
+ "edges": [{"from": "alpha", "to": "beta", "kind": "handoff", "short": "result", "when": "alpha is done",
+            "why": "beta goes on", "evidence": [{"at": "alpha/SKILL.md:2", "mentions": "beta"}]}]}
+EOF
+  python3 -I "$GATES/skill_graph.py" --write --root "$r" >/dev/null 2>&1
+  printf '%s\n' "$r"
+}
+graph_case() {  # $1 label, $2 expected PASS|FAIL, $3 repo, [$4 text the output must hold]
+  out="$(sh "$GATES/skill-graph.sh" "$3" 2>&1)" || true
+  if printf '%s\n' "$out" | grep -q "^SKILL_GRAPH_RESULT: $2" && { [ -z "${4:-}" ] || printf '%s\n' "$out" | grep -qF "$4"; }; then
+    ok "skill-graph: $1"
+  else
+    bad "skill-graph: $1 (expected SKILL_GRAPH_RESULT: $2${4:+ and \"$4\"})"
+  fi
+}
+r="$(mkgraph clean)"
+graph_case "a freshly written repo passes" PASS "$r"
+if grep -q '```mermaid' "$r/README.md" && grep -q 'self_alpha' "$r/alpha/README.md" && grep -q 'Works alone' "$r/gamma/README.md"; then
+  ok "skill-graph: --write puts a block in the root and every skill README"
+else
+  bad "skill-graph: --write puts a block in the root and every skill README"
+fi
+if [ -z "$(python3 -I "$GATES/skill_graph.py" --write --root "$r" | grep '^WROTE:')" ]; then
+  ok "skill-graph: a second --write changes nothing"
+else
+  bad "skill-graph: a second --write changes nothing"
+fi
+r="$(mkgraph stale)"; sed 's/alpha is done/alpha is edited/' "$r/beta/README.md" > "$r/x" && mv "$r/x" "$r/beta/README.md"
+graph_case "a hand-edited README block fails" FAIL "$r" "beta/README.md: the skill-graph block differs"
+r="$(mkgraph nomarkers)"; printf '# beta\n' > "$r/beta/README.md"
+graph_case "a README with no block fails" FAIL "$r" "beta/README.md has no single"
+r="$(mkgraph badev)"; printf 'Use when you test alpha.\nHand the result on.\nThen ask beta.\n' > "$r/alpha/SKILL.md"
+graph_case "an evidence line that no longer names the callee fails" FAIL "$r" "it is now on line(s) 3"
+r="$(mkgraph missing)"; mkdir -p "$r/delta"; printf 'Use when.\n' > "$r/delta/SKILL.md"
+graph_case "a skill missing from the graph fails" FAIL "$r" "skill delta is missing"
+r="$(mkgraph notskill)"; rm "$r/gamma/SKILL.md"
+graph_case "a graph node that is not a skill fails" FAIL "$r" "graph node gamma is not a skill"
+r="$(mkgraph contract)"
+printf '```json skill-contract\n{"provides": ["https://github.com/dhanesh/agent-skills/skill-contract/k/v1"], "consumes": []}\n```\n' >> "$r/gamma/SKILL.md"
+printf '```json skill-contract\n{"provides": [], "consumes": ["https://github.com/dhanesh/agent-skills/skill-contract/k/v1"]}\n```\n' >> "$r/beta/SKILL.md"
+graph_case "a contract pair with no edge fails" FAIL "$r" "contract pair gamma -> beta (k/v1) has no contract edge"
+
 # ── skill-contract: half-adoptions, drifted copies and stray keys all fail ───
 # docs/skill-contract/SPEC.md commandment 1. Each case is a fresh fixture skill,
 # so a checker that passes everything (or nothing) flips a row.

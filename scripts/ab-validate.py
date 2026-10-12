@@ -278,6 +278,9 @@ SINCE_IDEA_NAMES = "3531d6a"  # idea-validation 0.1.2: the --today refusal no lo
 SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the campaign's
 # FIRST commit, factory-conductor's ledger.py and its tests. One constant for the campaign:
 # it lands at one merge.
+SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
+# mermaid diagrams in README.md and every <skill>/README.md are rendered from
+# docs/skill-graph/graph.json and checked against it, the skills and their contracts.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
@@ -909,6 +912,56 @@ def check_audit_guardrails(old, new):
     row("gates", "README catalog entries missing or stale", a, b, b < a,
         "test-safety-net shipped with no install line: no gate read the root README",
         since=SINCE_README_CATALOG)
+
+    # 6) skill-graph: README call-graph blocks that match docs/skill-graph/graph.json,
+    # each tree measured by the NEW checker (the baseline has no graph, so 0).
+    def graph_blocks(tree):
+        r = sp.run([sys.executable, "-I", os.path.join(new, "scripts", "gates", "skill_graph.py"),
+                    "--check", "--root", tree], capture_output=True, text=True, timeout=120)
+        return sum(1 for line in r.stdout.splitlines()
+                   if line.startswith("PASS:") and line.endswith("block is current"))
+
+    a, b = graph_blocks(old), graph_blocks(new)
+    row("gates", "READMEs with a current who-calls-whom diagram", a, b, b > a,
+        "nothing showed where to start or which skill hands work to which",
+        since=SINCE_SKILL_GRAPH)
+
+    # 7) skill-graph: a hand-edited diagram block is caught by the tree's OWN gate.
+    # Each tree's README/SKILL.md/references/graph files are copied, and the
+    # spec-first-planning block is edited by hand. A tree with no skill-graph.sh
+    # cannot catch it (0).
+    def stale_block_caught(tree):
+        gate = os.path.join(tree, "scripts", "gates", "skill-graph.sh")
+        if not os.path.isfile(gate):
+            return 0
+        dst = tempfile.mkdtemp()
+        for top in ["README.md", os.path.join("docs", "skill-graph")]:
+            src = os.path.join(tree, top)
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(dst, top))
+            elif os.path.isfile(src):
+                shutil.copy(src, os.path.join(dst, top))
+        for d in os.listdir(tree):
+            if not os.path.isfile(os.path.join(tree, d, "SKILL.md")):
+                continue
+            os.makedirs(os.path.join(dst, d))
+            for f in ("SKILL.md", "README.md"):
+                if os.path.isfile(os.path.join(tree, d, f)):
+                    shutil.copy(os.path.join(tree, d, f), os.path.join(dst, d, f))
+            if os.path.isdir(os.path.join(tree, d, "references")):
+                shutil.copytree(os.path.join(tree, d, "references"), os.path.join(dst, d, "references"))
+        rc0, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
+        md = os.path.join(dst, "spec-first-planning", "README.md")
+        text = open(md, encoding="utf-8").read()
+        open(md, "w", encoding="utf-8").write(text.replace("the human decides go", "the human says so", 1))
+        rc1, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
+        shutil.rmtree(dst, ignore_errors=True)
+        return 1 if rc0 == 0 and rc1 != 0 else 0
+
+    a, b = stale_block_caught(old), stale_block_caught(new)
+    row("gates", "a hand-edited call-graph block is caught (1=yes)", a, b, b > a,
+        "a generated diagram drifts silently unless a gate compares it",
+        since=SINCE_SKILL_GRAPH)
 
 
 # ── bug-autopsy (evidence, not just structure) ──────────────────────────────
