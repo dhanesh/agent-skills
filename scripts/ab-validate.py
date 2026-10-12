@@ -296,7 +296,7 @@ SINCE_PORTABILITY_HOOKS = "729f9bf"  # portability retrofit, PR 2: world-model-l
 SINCE_PORTABILITY_RULE = "04df5d0"  # portability retrofit, PR 3: every skill that runs Python
 # carries the shared Python interpreter rule. The commit that inserts the rules; repinned
 # to its own short hash right after it lands.
-SINCE_PY_GATE_GLUED = "HEAD"  # gates: python-interpreter.sh also sees a Python command
+SINCE_PY_GATE_GLUED = "f226871"  # gates: python-interpreter.sh also sees a Python command
 # glued to `|`, `;`, `&` or `=` (x|python3 -c ...). The commit that widens the regex;
 # repinned to its own short hash right after it lands.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
