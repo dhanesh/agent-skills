@@ -281,7 +281,7 @@ SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the ca
 SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
 # mermaid diagrams in README.md and every <skill>/README.md are rendered from
 # docs/skill-graph/graph.json and checked against it, the skills and their contracts.
-SINCE_PORTABILITY_RESOLVER = "pending"  # skill-contract portability retrofit, PR 1:
+SINCE_PORTABILITY_RESOLVER = "f81be19"  # skill-contract portability retrofit, PR 1:
 # resolve_python() reads SKILL_PYTHON and skips the macOS python3 install stub without
 # running it. The commit that changes the reference checker (set after committing).
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
