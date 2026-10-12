@@ -33,15 +33,30 @@ redaction.
   only signal.
 - **Use a private temporary directory.** Each script makes one with `mktemp -d` (mode 700)
   and removes it with `trap 'rm -rf "$d"' EXIT`. Write every export page and every
-  intermediate file under `"$d"`, and nothing in the repo.
+  intermediate file under `"$d"`, and nothing in the repo. The feedback export scripts are
+  the one exception: they keep `$d` after a successful export, for the next step. When a
+  feedback export fails, it removes `$d` too ("Feedback tools: the shared flow").
 - **Keep secrets off the command line.** A token in a curl argument (`-u` or `-H`) is
   visible to `ps` while curl runs. The scripts write the token into a curl config file in
-  `"$d"` with the shell's `printf` builtin and pass it with `-K`. Keep tokens in environment
-  variables, for example `$JIRA_TOKEN`, and never in a file in the repo, because the repo
-  is shared.
+  `"$d"` and pass it with `-K`. Keep tokens in exported environment variables, for example
+  `$JIRA_TOKEN`, and never in a file in the repo, because the repo is shared.
+- **Quote secrets for the curl config file.** In a `-K` file, a value goes between double
+  quotes. Inside the quotes, curl reads `\\` as `\` and `\"` as `"` (`man curl`, `--config`).
+  A token that holds `"` or `\` breaks the line if you write it as it is. The `curlq` helper
+  in the scripts reads the variable by its name from the environment, so the value is never
+  in a command line. It escapes `\` and `"`. It refuses a value that holds a line break,
+  because a line break in a header is not safe to pass. Use `curlq` for every secret that
+  you write into a `-K` file.
 - **Fetch every page.** Each script follows the next-page cursor until the last page. If you
   change a script, compare the number of imported records with the total that the tool
   shows. A single page of 100 cuts the list without an error.
+- **Stop a cursor that does not move.** A loop that follows a cursor stops with an error and
+  a non-zero exit in two cases. The first case: the API sends the same cursor (or next-page
+  link) as the one that the script just sent. The second case: page 1000 still has a next
+  cursor. The limit of 1000 pages is `max=1000` in each script. 1000 pages of 100 records
+  is far more than one queue holds. The limit also stops a cursor that goes round in a
+  cycle (A, B, A), which the first check does not see. Use the same two checks in the
+  recipes that have no script.
 - **Keep only what the signal needs.** The scripts drop names, nicknames, email addresses,
   requester and author fields, devices and territories. Do not add them back.
 - **Titles are not redacted.** `intake-signals-jsonl` stores a title as it is. A Jira
@@ -77,9 +92,16 @@ Run it with `bash jira-import.sh`. Set `JIRA_SITE` (for example
 # jira-import.sh
 set -euo pipefail
 intake() { python3 "$SKILL_DIR/assets/intake.py" --root "$REPO" "$@"; }
+curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
+  python3 -c 'import os, sys
+v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
+if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
+}
 d=$(mktemp -d); chmod 700 "$d"; trap 'rm -rf "$d"' EXIT
-printf 'user = "%s:%s"\n' "$JIRA_USER" "$JIRA_TOKEN" > "$d/auth"
-cursor=""; n=0
+u=$(curlq JIRA_USER); t=$(curlq JIRA_TOKEN)
+printf 'user = "%s:%s"\n' "$u" "$t" > "$d/auth"
+max=1000; cursor=""; n=0
 while :; do
   n=$((n + 1))
   curl -fsS -K "$d/auth" -G "$JIRA_SITE/rest/api/3/search/jql" \
@@ -87,8 +109,11 @@ while :; do
     --data-urlencode 'fields=summary,priority,created,updated' \
     --data-urlencode 'maxResults=100' \
     ${cursor:+--data-urlencode "nextPageToken=$cursor"} -o "$d/page$n.json"
-  cursor=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("nextPageToken") or "")' "$d/page$n.json")
-  [ -n "$cursor" ] || break
+  next=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("nextPageToken") or "")' "$d/page$n.json")
+  [ -n "$next" ] || break
+  [ "$next" != "$cursor" ] || { echo "jira: same nextPageToken twice, stopped" >&2; exit 1; }
+  [ "$n" -lt "$max" ] || { echo "jira: more than $max pages, stopped" >&2; exit 1; }
+  cursor=$next
 done
 for f in "$d"/page*.json; do python3 jira2signals.py jira "$JIRA_SITE" < "$f"; done > "$d/signals.jsonl"
 intake import --format intake-signals-jsonl --source jira < "$d/signals.jsonl"
@@ -142,21 +167,31 @@ Run it with `bash linear-import.sh`. Set `LINEAR_API_KEY` first.
 # linear-import.sh
 set -euo pipefail
 intake() { python3 "$SKILL_DIR/assets/intake.py" --root "$REPO" "$@"; }
+curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
+  python3 -c 'import os, sys
+v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
+if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
+}
 d=$(mktemp -d); chmod 700 "$d"; trap 'rm -rf "$d"' EXIT
-printf 'header = "Authorization: %s"\n' "$LINEAR_API_KEY" > "$d/auth"
+k=$(curlq LINEAR_API_KEY)
+printf 'header = "Authorization: %s"\n' "$k" > "$d/auth"
 q='query($after: String) { issues(first: 100, after: $after, filter: { or: [
   {state: {type: {eq: "triage"}}}, {state: {type: {eq: "backlog"}}},
   {state: {type: {eq: "unstarted"}}}, {state: {type: {eq: "started"}}} ] }) {
   nodes { identifier title url priority createdAt updatedAt }
   pageInfo { hasNextPage endCursor } } }'
-after=""; n=0
+max=1000; after=""; n=0
 while :; do
   n=$((n + 1))
   python3 -c 'import json, sys; print(json.dumps({"query": sys.argv[1], "variables": {"after": sys.argv[2] or None}}))' "$q" "$after" > "$d/body.json"
   curl -fsS -K "$d/auth" -H 'Content-Type: application/json' \
     --data @"$d/body.json" https://api.linear.app/graphql -o "$d/page$n.json"
-  after=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["data"]["issues"]["pageInfo"]; print(p["endCursor"] if p["hasNextPage"] else "")' "$d/page$n.json")
-  [ -n "$after" ] || break
+  next=$(python3 -c 'import json, sys; p = json.load(open(sys.argv[1]))["data"]["issues"]["pageInfo"]; print(p["endCursor"] if p["hasNextPage"] else "")' "$d/page$n.json")
+  [ -n "$next" ] || break
+  [ "$next" != "$after" ] || { echo "linear: same endCursor twice, stopped" >&2; exit 1; }
+  [ "$n" -lt "$max" ] || { echo "linear: more than $max pages, stopped" >&2; exit 1; }
+  after=$next
 done
 for f in "$d"/page*.json; do python3 linear2signals.py linear < "$f"; done > "$d/signals.jsonl"
 intake import --format intake-signals-jsonl --source linear < "$d/signals.jsonl"
@@ -197,9 +232,15 @@ message into one item. You read the messages between the export and the import, 
 has three parts. The raw customer text stays in one private temporary directory until intake
 has redacted it:
 
-1. **Export.** Run the tool's export script (below). It prints the path of a private
-   directory, `$d`. The raw pages are removed when the script exits. Only
-   `$d/feedback.jsonl` stays: one line per message, with every field except `topic`.
+1. **Export.** Run the tool's export script (below), for example
+   `d=$(bash appstore-export.sh)`. The raw pages are removed when the script exits.
+   - **On success** (exit 0), the script prints the path of a private directory, `$d`, on
+     standard output. Only `$d/feedback.jsonl` stays: one line per message, with every
+     field except `topic`. The script also prints the exact cleanup command on standard
+     error.
+   - **On a failure** (any non-zero exit, also Ctrl-C), the script removes `$d` and all of
+     its contents, and prints no path. Nothing that it exported stays on the disk. Report
+     the source as skipped, and do not go on to step 2.
 2. **Choose topics.** Read `$d/feedback.jsonl`. Write `$d/topics.json`, a JSON object that
    maps each message `id` to the topic you chose, for example `{"35436": "checkout-crash"}`.
    Reuse topics that are already in the queue.
@@ -231,12 +272,29 @@ for line in sys.stdin:
 ```
 
 Every export script below starts the same way. The `raw` directory holds the API pages and
-is removed on exit. `$d` stays for steps 2 and 3:
+is removed on exit. The `EXIT` trap keeps `$d` only when the script exits 0. Then it prints
+`$d` and the cleanup command. On any other exit it removes `$d`. Do not print `$d`
+yourself at the end of the script, because the trap does it.
 
 ```bash
 set -euo pipefail
-d=$(mktemp -d); chmod 700 "$d"
-raw=$(mktemp -d); chmod 700 "$raw"; trap 'rm -rf "$raw"' EXIT
+curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
+  python3 -c 'import os, sys
+v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
+if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
+}
+end_export() {  # EXIT trap: keep $d only after a successful export
+  rc=$?; rm -rf "$raw"
+  if [ "$rc" -ne 0 ]; then
+    rm -rf "$d"; echo "export failed (exit $rc): removed $d" >&2; exit "$rc"
+  fi
+  echo "$d"
+  echo "Unredacted customer text is in $d. feedback-import.sh removes it." >&2
+  echo "To stop without an import, run: rm -rf '$d'" >&2
+}
+raw=""; d=$(mktemp -d); trap end_export EXIT; trap 'exit 130' INT TERM HUP
+chmod 700 "$d"; raw=$(mktemp -d); chmod 700 "$raw"
 ```
 
 ## App Store Connect (customer reviews)
@@ -249,15 +307,19 @@ in `data` has an `id` and `attributes`: `rating`, `title`, `body`, `reviewerNick
 
 ```bash
 # appstore-export.sh (after the shared start). Set APP_ID and ASC_TOKEN first.
-printf 'header = "Authorization: Bearer %s"\n' "$ASC_TOKEN" > "$raw/auth"
-url="https://api.appstoreconnect.apple.com/v1/apps/$APP_ID/customerReviews"; n=0
-while [ -n "$url" ]; do
+tok=$(curlq ASC_TOKEN)
+printf 'header = "Authorization: Bearer %s"\n' "$tok" > "$raw/auth"
+max=1000; url="https://api.appstoreconnect.apple.com/v1/apps/$APP_ID/customerReviews"; n=0
+while :; do
   n=$((n + 1))
   curl -fsS -K "$raw/auth" "$url" -o "$raw/page$n.json"
-  url=$(python3 -c 'import json, sys; print((json.load(open(sys.argv[1])).get("links") or {}).get("next") or "")' "$raw/page$n.json")
+  next=$(python3 -c 'import json, sys; print((json.load(open(sys.argv[1])).get("links") or {}).get("next") or "")' "$raw/page$n.json")
+  [ -n "$next" ] || break
+  [ "$next" != "$url" ] || { echo "appstore: same links.next twice, stopped" >&2; exit 1; }
+  [ "$n" -lt "$max" ] || { echo "appstore: more than $max pages, stopped" >&2; exit 1; }
+  url=$next
 done
 for f in "$raw"/page*.json; do python3 appstore2feedback.py < "$f"; done > "$d/feedback.jsonl"
-echo "$d"
 ```
 
 **Convert** (`appstore2feedback.py`):
@@ -282,7 +344,7 @@ reviews with a written comment. It also returns only reviews from the last week.
 review has `reviewId`, `authorName` and `comments`. A user comment holds `text`,
 `starRating` and `lastModified` (`seconds` and `nanos`). Use the shared start, save each
 response page under `"$raw"`, and follow the page token that your response gives until it
-is empty. Then compare the count with the Play Console, because a single page cuts the list
+is empty. Use the same `max` and repeated-cursor checks as the App Store loop. Then compare the count with the Play Console, because a single page cuts the list
 without an error. Convert each page into `"$d/feedback.jsonl"`, as in the App Store script.
 
 **Convert** (`play2feedback.py`):
@@ -320,8 +382,9 @@ app versions). A developer reply is your text, not a signal, so the script skips
 **Export.** Use the Zendesk Ticketing API, `GET /api/v2/tickets`, or a search or view that
 returns tickets. Each ticket has `id`, `subject`, `description` (the first comment),
 `created_at`, `priority` (`urgent`, `high`, `normal` or `low`), `requester_id` and `url`.
-Use the shared start, put your credentials in `"$raw/auth"` with `printf`, and save each
-page under `"$raw"`. Follow the next-page link that your response gives until it is empty.
+Use the shared start. Write your credentials into `"$raw/auth"` with `curlq` and `printf`,
+as in the App Store script, and save each page under `"$raw"`. Follow the next-page link
+that your response gives until it is empty, with the same `max` and repeated-link checks.
 Compare the count with the total in Zendesk.
 
 **Convert** (`zendesk2feedback.py`):
@@ -347,10 +410,12 @@ for t in json.load(sys.stdin)["tickets"]:
 ## Intercom (conversations)
 
 **Export.** Use the Intercom REST API, `GET https://api.intercom.io/conversations`, with your
-access token in `"$raw/auth"` (`header = "Authorization: Bearer …"`). Each conversation has
+access token in `"$raw/auth"` (`header = "Authorization: Bearer …"`, written with `curlq` as
+in the App Store script). Each conversation has
 `id` (a string), `created_at` (a whole number of seconds) and `source`. The `source.body`
 field holds the first message as HTML. The list response has a `pages` object. Follow its
-next-page cursor until it is empty, and compare the count with Intercom.
+next-page cursor until it is empty, with the same `max` and repeated-cursor checks, and
+compare the count with Intercom.
 
 A conversation can start with a message from your team (an outbound or operator message),
 not from a customer. The `source` object says how the conversation started
@@ -385,6 +450,22 @@ examples below. The output went through `intake import`, and each import printed
 `problems 0`. The Jira script also ran against a host that does not answer. It exited
 non-zero before the import. The fixtures are not in the repo. These checks do not prove that
 your own export has the same shape.
+
+On 2026-10-13, the Jira, Linear and App Store scripts ran under macOS `/bin/bash` 3.2
+against a local stub server. The stub checked the `Authorization` header, sent pages and
+cursors, and could fail on demand. The App Store run also went through
+`feedback-import.sh`. These are the results:
+
+- With a token that holds `"` and `\`, each script imported 3 records with `problems 0`.
+  The earlier scripts got HTTP 401 with the same token.
+- A token with a line break stopped the script before curl ran.
+- A cursor that the stub sent twice stopped each script with exit 1. The earlier scripts
+  did not stop in 6 seconds.
+- With `max=3`, 3 pages imported and 4 pages stopped with exit 1.
+- The App Store export failed in four ways: HTTP 500 on page 2, a converter error on
+  page 2, a repeated `links.next`, and SIGTERM. Each time, the export removed `$d` and
+  printed no path. After an earlier export failed on a converter error, `$d/feedback.jsonl`
+  stayed on the disk with the review text.
 
 Sources for the field names:
 
