@@ -263,8 +263,9 @@ has redacted it:
      source as skipped, and do not go on to step 2.
    - **When the trap cannot run**, `$d` (mode 700) stays: after SIGKILL, after a power
      loss, or after Ctrl-C in a background run that ignores it. To find such a directory,
-     run `find "${TMPDIR:-/tmp}" -maxdepth 2 -name feedback.jsonl -user "$(id -u)"`. Then
-     remove the directory that holds the file with `rm -rf`.
+     run `find "${TMPDIR:-/tmp}" -maxdepth 2 -path '*/tmp.*/feedback.jsonl' -user "$(id -u)"`.
+     It lists only files inside a `tmp.*` directory that `mktemp -d` made. Check that the
+     directory holds only export files, then remove it with `rm -rf`.
 2. **Choose topics.** Read `$d/feedback.jsonl`. Write `$d/topics.json`, a JSON object that
    maps each message `id` to the topic you chose, for example `{"35436": "checkout-crash"}`.
    Reuse topics that are already in the queue.
@@ -379,7 +380,8 @@ review has `reviewId`, `authorName` and `comments`. A user comment holds `text`,
 `starRating` and `lastModified` (`seconds` and `nanos`). Use the shared start, save each
 response page under `"$raw"`, and follow the page token that your response gives until it
 is empty. Use the same `max` and repeated-cursor checks as the App Store loop. Then compare
-the count with the Play Console, because a single page cuts the list without an error. Convert each page into `"$d/feedback.jsonl"`, as in the App Store script.
+the count with the Play Console, because a single page cuts the list without an error.
+Convert each page into `"$d/feedback.jsonl"`, as in the App Store script.
 
 **Convert** (`play2feedback.py`):
 
