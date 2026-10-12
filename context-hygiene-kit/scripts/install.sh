@@ -33,6 +33,12 @@ for arg in "$@"; do
   esac
 done
 
+# ---- interpreter -------------------------------------------------------------
+# Same resolver the hooks use; ships next to them in assets/hooks/.
+. "$ASSETS/hooks/find_python.sh"
+find_python
+[ -n "$PY" ] || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
+
 # ---- resolve layout per mode ------------------------------------------------
 # KIT_HOME = where the scripts + hooks/ land. SETTINGS = which settings.json to merge.
 # CMD_PREFIX = what the hook command paths are rooted at in settings.json.
@@ -101,7 +107,7 @@ fi
 
 # 4. Install gate — the kit's guarantees are only real if these pass.
 echo "→ running test suite as install gate…"
-( cd "$KIT_HOME" && python3 test_context_ledger.py 2>&1 | tail -3 )
+( cd "$KIT_HOME" && "$PY" test_context_ledger.py 2>&1 | tail -3 )
 
 echo "✓ done. Restart Claude Code so the new hooks load."
 if [[ "$MODE" == "global" ]]; then

@@ -125,5 +125,21 @@ class Adoption(unittest.TestCase):
         self.assertNotIn(105, {p for p, _ in got})
 
 
+class InstallerResolvesInterpreter(unittest.TestCase):
+    """Review focus 5: the installer sources the resolver that ships beside it."""
+    SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+
+    def test_resolver_ships_next_to_installer(self):
+        self.assertTrue(os.path.isfile(os.path.join(self.SCRIPTS, "find_python.sh")))
+
+    def test_installer_sources_resolver_and_has_no_bare_python3(self):
+        text = open(os.path.join(self.SCRIPTS, "install.sh")).read()
+        self.assertIn('. "$AGENT_BIN/find_python.sh"', text)
+        self.assertIn("SKILL_PYTHON", text)
+        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        self.assertFalse([ln for ln in code if "python3" in ln.replace("install python3", "")
+                          and "echo" not in ln])
+
+
 if __name__ == "__main__":
     unittest.main()

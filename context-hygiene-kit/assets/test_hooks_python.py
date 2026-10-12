@@ -85,5 +85,58 @@ class HooksPython(unittest.TestCase):
                 self.assertEqual(files, ["t.jsonl"])
 
 
+INSTALL_TOOLS = ["bash", "sh", "cp", "mkdir", "sed", "grep", "chmod", "dirname", "cat",
+                 "printf", "tail", "tr", "jq", "uname", "env", "cut", "head", "awk",
+                 "mktemp", "rm", "mv", "ls", "wc", "sort", "date", "xcode-select",
+                 "git", "find", "basename", "pwd", "touch", "tee", "diff"]
+
+
+class InstallerShipsResolver(unittest.TestCase):
+    """An installed kit has find_python.sh beside its hooks, and the installer
+    itself resolves its interpreter the same way the hooks do."""
+    INSTALLER = HOOKS.parent.parent / "scripts" / "install.sh"
+    EXTRA = 'hooks'
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.root = Path(self._td.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        for t in INSTALL_TOOLS:
+            src = shutil.which(t)
+            if src:
+                (self.bin / t).symlink_to(src)
+        self.target = self.root / "proj"
+        self.target.mkdir()
+        (self.root / "home").mkdir()
+
+    def install(self, path, **env):
+        e = {"PATH": path, "HOME": str(self.root / "home")}
+        e.update(env)
+        return subprocess.run(["/bin/bash", str(self.INSTALLER), str(self.target)],
+                              env=e, capture_output=True, text=True, timeout=120)
+
+    def test_installed_kit_has_find_python_next_to_hooks(self):
+        r = self.install(os.environ["PATH"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.target / self.EXTRA / "find_python.sh").is_file())
+
+    def test_installer_runs_with_only_a_python_shim(self):
+        shim = self.bin / "python"
+        shim.write_text('#!/bin/sh\nexec "%s" "$@"\n' % sys.executable)
+        shim.chmod(0o755)
+        r = self.install(str(self.bin))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.target / self.EXTRA / "find_python.sh").is_file())
+
+    def test_installer_without_python_stops_with_a_message(self):
+        r = self.install(str(self.bin))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("needs Python 3.10 or newer", r.stderr)
+        self.assertIn("SKILL_PYTHON", r.stderr)
+        self.assertFalse((self.target / self.EXTRA).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

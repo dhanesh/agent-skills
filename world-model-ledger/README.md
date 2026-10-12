@@ -53,6 +53,12 @@ scripts/install.sh --with-constraints     # also load the optional starter const
 Requires `python3` (stdlib only — no pip, no network); `jq` optional for clean settings
 merging. Restart Claude Code afterward so the hooks load. The install runs a 116-test gate.
 
+### Python
+
+`SKILL_PYTHON` names the interpreter. In the hooks and installers it is one executable, a name or a path, with no arguments.
+
+Version 1.2.3: the hooks and the installer now find Python through `find_python.sh`. They use `python3` or `python` on `PATH`, so a machine with only `python` works, and a hook with no interpreter exits quietly.
+
 ## What gets installed
 
 - **Four lifecycle hooks** wired into `settings.json`:

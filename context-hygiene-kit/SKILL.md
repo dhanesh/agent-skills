@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires Claude Code lifecycle hooks (Stop/PreCompact/SessionStart), bash, and python3 (stdlib only, no pip); jq optional for clean settings.json merging.
 metadata:
   author: dhanesh
-  version: "1.2.3"
+  version: "1.2.4"
   tags: "claude-code,hooks,context-management,memory,anti-bloat,anti-rot,compaction"
 ---
 
