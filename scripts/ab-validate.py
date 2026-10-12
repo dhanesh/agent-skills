@@ -273,6 +273,8 @@ SINCE_FACTORY_HARDENING = "06018f7"  # fix/factory-hardening: the campaign's FIR
 # --today test clock (L5) came next. One constant for the campaign: it lands at one merge.
 SINCE_GROWTH_REVIEW = "982cba2"  # growth-review (roadmap step 6D, part 1): the campaign's
 # FIRST commit, growth.py itself. One constant for the campaign: it lands at one merge.
+SINCE_SPEND_REQUEST = "c0f328f"  # factory-conductor 1.5.3: SKILL.md carries the spend-request
+# format and the controller-run ledger check (prompt-only). One constant: it lands at one merge.
 SINCE_IDEA_NAMES = "3531d6a"  # idea-validation 0.1.2: the --today refusal no longer names
 # the test switch, and lookalike agent: names are refused. One constant: it lands at one merge.
 SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the campaign's
@@ -9053,6 +9055,34 @@ _ML_ROWS = (
 )
 
 
+def _sr_score(tree):
+    """1 when factory-conductor/SKILL.md carries the one-line spend request format and tells
+    the controller to run the ledger check with --root; else 0. Missing file is 0."""
+    path = os.path.join(tree, "factory-conductor", "SKILL.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return 0
+    flat = " ".join(text.split())
+    has_format = ("spend request <id>: <item> from <vendor>;" in flat
+                  and "ledger: NOT_REFUSED <id>" in flat
+                  and "to decline: <ledger> --root <repo> withdraw" in flat
+                  and "<run-id>-<task slug>-<n>-<h>" in flat)
+    has_check = ("ledger.py\" --root <repo> check --id <id>" in flat
+                 and "The executor never runs it" in flat)
+    return 1 if has_format and has_check else 0
+
+
+def check_spend_request(old, new):
+    """Prompt-only: this row reads SKILL.md text. It does not show that a model follows it."""
+    a, b = _sr_score(old), _sr_score(new)
+    row("factory-conductor", "SKILL.md carries the spend request format and the controller-run "
+        "check with --root (higher=better)", a, b, a == 0 and b == 1,
+        "prompt-only: checks the text, not model behaviour; the baseline has no spend request "
+        "flow, an honest 0 -> 1", kind="delta", since=SINCE_SPEND_REQUEST)
+
+
 def check_money_ledger(old, new):
     s = "factory-conductor"
     if not os.path.isfile(os.path.join(new, "factory-conductor", "assets", "ledger.py")):
@@ -9434,6 +9464,7 @@ def main():
         check_growth_review(old, REPO)
         check_idea_names(old, REPO)
         check_money_ledger(old, REPO)
+        check_spend_request(old, REPO)
         check_agent_names(old, REPO)
         check_portability_resolver(old, REPO)
         check_portability_hooks(old, REPO)
