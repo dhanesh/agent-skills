@@ -36,6 +36,13 @@ redaction.
   intermediate file under `"$d"`, and nothing in the repo. The feedback export scripts are
   the one exception: they keep `$d` after a successful export, for the next step. When a
   feedback export fails, it removes `$d` too ("Feedback tools: the shared flow").
+- **Mark success on the last line.** On macOS `/bin/bash` 3.2, a script with an `EXIT` trap
+  exits with status 0 when `set -u` stops it on an unset variable or when `${X:?}` fails.
+  So the exit status alone does not show the failure. Each script sets `ok=0` before its
+  trap and `ok=1` on its last line. The trap treats every other end as a failure: it
+  removes the temporary directory and exits non-zero. Each script also checks its required
+  variables with `: "${X:?…}"` before the trap, where the exit status is correct. Keep both
+  when you change a script, and use both in a new one.
 - **Keep secrets off the command line.** A token in a curl argument (`-u` or `-H`) is
   visible to `ps` while curl runs. The scripts write the token into a curl config file in
   `"$d"` and pass it with `-K`. Keep tokens in exported environment variables, for example
@@ -91,16 +98,22 @@ Run it with `bash jira-import.sh`. Set `JIRA_SITE` (for example
 ```bash
 # jira-import.sh
 set -euo pipefail
+: "${SKILL_DIR:?set SKILL_DIR}" "${REPO:?set REPO}" "${JIRA_SITE:?set JIRA_SITE}" \
+  "${JIRA_USER:?set JIRA_USER}" "${JIRA_TOKEN:?set JIRA_TOKEN}"
 intake() { python3 "$SKILL_DIR/assets/intake.py" --root "$REPO" "$@"; }
 curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
   python3 -c 'import os, sys
-v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
-if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+n = sys.argv[1]; v = os.environ.get(n)
+if v is None: sys.exit(n + " is not set or not exported")
+if not v: sys.exit(n + " is empty")
+if "\n" in v or "\r" in v: sys.exit(n + " holds a line break: refused")
 sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
 }
-d=$(mktemp -d); chmod 700 "$d"; trap 'rm -rf "$d"' EXIT
+ok=0; d=$(mktemp -d); chmod 700 "$d"
+trap 'rc=$?; rm -rf "$d"; [ "$rc" -eq 0 ] && [ "$ok" = 1 ] ||
+  { echo "jira: failed, see the error above" >&2; exit $((rc ? rc : 1)); }' EXIT
 u=$(curlq JIRA_USER); t=$(curlq JIRA_TOKEN)
-printf 'user = "%s:%s"\n' "$u" "$t" > "$d/auth"
+(umask 077; printf 'user = "%s:%s"\n' "$u" "$t" > "$d/auth")
 max=1000; cursor=""; n=0
 while :; do
   n=$((n + 1))
@@ -117,6 +130,7 @@ while :; do
 done
 for f in "$d"/page*.json; do python3 jira2signals.py jira "$JIRA_SITE" < "$f"; done > "$d/signals.jsonl"
 intake import --format intake-signals-jsonl --source jira < "$d/signals.jsonl"
+ok=1  # the last line: the trap treats an end before this line as a failure
 ```
 
 **Convert** (`jira2signals.py`):
@@ -166,16 +180,21 @@ Run it with `bash linear-import.sh`. Set `LINEAR_API_KEY` first.
 ```bash
 # linear-import.sh
 set -euo pipefail
+: "${SKILL_DIR:?set SKILL_DIR}" "${REPO:?set REPO}" "${LINEAR_API_KEY:?set LINEAR_API_KEY}"
 intake() { python3 "$SKILL_DIR/assets/intake.py" --root "$REPO" "$@"; }
 curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
   python3 -c 'import os, sys
-v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
-if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+n = sys.argv[1]; v = os.environ.get(n)
+if v is None: sys.exit(n + " is not set or not exported")
+if not v: sys.exit(n + " is empty")
+if "\n" in v or "\r" in v: sys.exit(n + " holds a line break: refused")
 sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
 }
-d=$(mktemp -d); chmod 700 "$d"; trap 'rm -rf "$d"' EXIT
+ok=0; d=$(mktemp -d); chmod 700 "$d"
+trap 'rc=$?; rm -rf "$d"; [ "$rc" -eq 0 ] && [ "$ok" = 1 ] ||
+  { echo "linear: failed, see the error above" >&2; exit $((rc ? rc : 1)); }' EXIT
 k=$(curlq LINEAR_API_KEY)
-printf 'header = "Authorization: %s"\n' "$k" > "$d/auth"
+(umask 077; printf 'header = "Authorization: %s"\n' "$k" > "$d/auth")
 q='query($after: String) { issues(first: 100, after: $after, filter: { or: [
   {state: {type: {eq: "triage"}}}, {state: {type: {eq: "backlog"}}},
   {state: {type: {eq: "unstarted"}}}, {state: {type: {eq: "started"}}} ] }) {
@@ -195,6 +214,7 @@ while :; do
 done
 for f in "$d"/page*.json; do python3 linear2signals.py linear < "$f"; done > "$d/signals.jsonl"
 intake import --format intake-signals-jsonl --source linear < "$d/signals.jsonl"
+ok=1  # the last line: the trap treats an end before this line as a failure
 ```
 
 **Convert** (`linear2signals.py`):
@@ -238,9 +258,13 @@ has redacted it:
      standard output. Only `$d/feedback.jsonl` stays: one line per message, with every
      field except `topic`. The script also prints the exact cleanup command on standard
      error.
-   - **On a failure** (any non-zero exit, also Ctrl-C), the script removes `$d` and all of
-     its contents, and prints no path. Nothing that it exported stays on the disk. Report
-     the source as skipped, and do not go on to step 2.
+   - **On a failure** (a non-zero exit, Ctrl-C, SIGTERM, SIGHUP, or an end before the last
+     line), the script removes `$d` and all of its contents, and prints no path. Report the
+     source as skipped, and do not go on to step 2.
+   - **When the trap cannot run**, `$d` (mode 700) stays: after SIGKILL, after a power
+     loss, or after Ctrl-C in a background run that ignores it. To find such a directory,
+     run `find "${TMPDIR:-/tmp}" -maxdepth 2 -name feedback.jsonl -user "$(id -u)"`. Then
+     remove the directory that holds the file with `rm -rf`.
 2. **Choose topics.** Read `$d/feedback.jsonl`. Write `$d/topics.json`, a JSON object that
    maps each message `id` to the topic you chose, for example `{"35436": "checkout-crash"}`.
    Reuse topics that are already in the queue.
@@ -252,10 +276,14 @@ has redacted it:
 ```bash
 # feedback-import.sh <dir from step 1> <source name>
 set -euo pipefail
+d=${1:?usage: feedback-import.sh <dir> <source name>}; ok=0
+trap 'rc=$?; rm -rf "$d"; [ "$rc" -eq 0 ] && [ "$ok" = 1 ] ||
+  { echo "feedback import failed: removed $d" >&2; exit $((rc ? rc : 1)); }' EXIT
+: "${2:?usage: feedback-import.sh <dir> <source name>}" "${SKILL_DIR:?}" "${REPO:?}"
 intake() { python3 "$SKILL_DIR/assets/intake.py" --root "$REPO" "$@"; }
-d=$1; trap 'rm -rf "$d"' EXIT
 python3 add_topics.py "$d/topics.json" < "$d/feedback.jsonl" > "$d/ready.jsonl"
 intake import --format feedback-jsonl --source "$2" < "$d/ready.jsonl"
+ok=1  # the last line: the trap treats an end before this line as a failure
 ```
 
 `add_topics.py`:
@@ -272,28 +300,33 @@ for line in sys.stdin:
 ```
 
 Every export script below starts the same way. The `raw` directory holds the API pages and
-is removed on exit. The `EXIT` trap keeps `$d` only when the script exits 0. Then it prints
-`$d` and the cleanup command. On any other exit it removes `$d`. Do not print `$d`
-yourself at the end of the script, because the trap does it.
+is removed on exit. The `EXIT` trap keeps `$d` only when the script exits 0 and its last
+line has set `ok=1` (see "Mark success on the last line"). Then it prints `$d` and the
+cleanup command. In every other case it removes `$d` and exits non-zero. Line 2 checks the
+variables that the export needs: change it for your tool. Make `ok=1` the last line of
+every export script, and do not print `$d` yourself, because the trap does it.
 
 ```bash
 set -euo pipefail
+: "${APP_ID:?set APP_ID}" "${ASC_TOKEN:?set ASC_TOKEN}"  # the variables that your export needs
 curlq() {  # print the env var named $1, quoted for a curl -K file (man curl, --config)
   python3 -c 'import os, sys
-v = os.environ.get(sys.argv[1]) or sys.exit(sys.argv[1] + " is not set or not exported")
-if "\n" in v or "\r" in v: sys.exit(sys.argv[1] + " holds a line break: refused")
+n = sys.argv[1]; v = os.environ.get(n)
+if v is None: sys.exit(n + " is not set or not exported")
+if not v: sys.exit(n + " is empty")
+if "\n" in v or "\r" in v: sys.exit(n + " holds a line break: refused")
 sys.stdout.write(v.replace("\\", "\\\\").replace("\"", "\\\""))' "$1"
 }
-end_export() {  # EXIT trap: keep $d only after a successful export
+end_export() {  # EXIT trap: keep $d only when the export reached its last line, ok=1
   rc=$?; rm -rf "$raw"
-  if [ "$rc" -ne 0 ]; then
-    rm -rf "$d"; echo "export failed (exit $rc): removed $d" >&2; exit "$rc"
+  if [ "$rc" -ne 0 ] || [ "$ok" != 1 ]; then
+    rm -rf "$d"; echo "export failed: removed $d" >&2; exit $((rc ? rc : 1))
   fi
   echo "$d"
   echo "Unredacted customer text is in $d. feedback-import.sh removes it." >&2
   echo "To stop without an import, run: rm -rf '$d'" >&2
 }
-raw=""; d=$(mktemp -d); trap end_export EXIT; trap 'exit 130' INT TERM HUP
+ok=0; raw=""; d=$(mktemp -d); trap end_export EXIT; trap 'exit 130' INT TERM HUP
 chmod 700 "$d"; raw=$(mktemp -d); chmod 700 "$raw"
 ```
 
@@ -308,7 +341,7 @@ in `data` has an `id` and `attributes`: `rating`, `title`, `body`, `reviewerNick
 ```bash
 # appstore-export.sh (after the shared start). Set APP_ID and ASC_TOKEN first.
 tok=$(curlq ASC_TOKEN)
-printf 'header = "Authorization: Bearer %s"\n' "$tok" > "$raw/auth"
+(umask 077; printf 'header = "Authorization: Bearer %s"\n' "$tok" > "$raw/auth")
 max=1000; url="https://api.appstoreconnect.apple.com/v1/apps/$APP_ID/customerReviews"; n=0
 while :; do
   n=$((n + 1))
@@ -320,6 +353,7 @@ while :; do
   url=$next
 done
 for f in "$raw"/page*.json; do python3 appstore2feedback.py < "$f"; done > "$d/feedback.jsonl"
+ok=1  # the last line: end_export keeps $d only after this line
 ```
 
 **Convert** (`appstore2feedback.py`):
@@ -344,8 +378,8 @@ reviews with a written comment. It also returns only reviews from the last week.
 review has `reviewId`, `authorName` and `comments`. A user comment holds `text`,
 `starRating` and `lastModified` (`seconds` and `nanos`). Use the shared start, save each
 response page under `"$raw"`, and follow the page token that your response gives until it
-is empty. Use the same `max` and repeated-cursor checks as the App Store loop. Then compare the count with the Play Console, because a single page cuts the list
-without an error. Convert each page into `"$d/feedback.jsonl"`, as in the App Store script.
+is empty. Use the same `max` and repeated-cursor checks as the App Store loop. Then compare
+the count with the Play Console, because a single page cuts the list without an error. Convert each page into `"$d/feedback.jsonl"`, as in the App Store script.
 
 **Convert** (`play2feedback.py`):
 
@@ -466,6 +500,13 @@ cursors, and could fail on demand. The App Store run also went through
   page 2, a repeated `links.next`, and SIGTERM. Each time, the export removed `$d` and
   printed no path. With the script from before this change, a converter error on page 2
   left `$d/feedback.jsonl` on the disk with the review text.
+- An unset or empty required variable stopped each script with exit 1, with no files left
+  and no path printed. A version without the `ok=1` check exited 0 with `APP_ID` unset,
+  kept `$d` and printed its path. With the line-2 check removed, the `ok=1` check alone
+  still made that export exit 1 and remove `$d`.
+- `feedback-import.sh` with a missing argument, `SKILL_DIR` or `REPO` exited non-zero and
+  removed `$d`.
+- The auth file had mode 600.
 
 Sources for the field names:
 
