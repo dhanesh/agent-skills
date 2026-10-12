@@ -65,7 +65,7 @@ LEGEND = [
     "- `==>` thick arrow, **contract**: a skill-contract envelope (a typed, checked file) goes to the next skill.",
     "- `-->` solid arrow, **required**: a step runs the next skill, or needs it first.",
     "- `--o` circle end, **handoff**: the result goes to the next skill, and you start that skill.",
-    "- `-.->` dashed arrow, **optional**: used only when the next skill is installed.",
+    "- `-.->` dashed arrow, **optional**: used only when you install the next skill.",
 ]
 
 
@@ -257,8 +257,8 @@ def render_root(g: dict) -> str:
     linked = len(nodes) - len(alone)
     line = f"The diagram shows the {linked} linked skills and all {len(edges)} links."
     if alone:
-        line += (f" It leaves out the {len(alone)} skills that work alone (no skill calls them, and they call none): "
-                 f"{code_list(alone)}.")
+        line += (f" It leaves out {len(alone)} skills that work alone: {code_list(alone)}. "
+                 "They call no skill, and no skill calls them.")
     out += [line, "",
             "Each skill's README has a smaller diagram with its own callers and callees, and the full when and why of each link.",
             END]

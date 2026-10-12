@@ -136,10 +136,10 @@ How to read it. An arrow from A to B means A sends work or data to B.
 - `==>` thick arrow, **contract**: a skill-contract envelope (a typed, checked file) goes to the next skill.
 - `-->` solid arrow, **required**: a step runs the next skill, or needs it first.
 - `--o` circle end, **handoff**: the result goes to the next skill, and you start that skill.
-- `-.->` dashed arrow, **optional**: used only when the next skill is installed.
+- `-.->` dashed arrow, **optional**: used only when you install the next skill.
 - A thick border marks a good place to start.
 
-The diagram shows the 18 linked skills and all 31 links. It leaves out the 8 skills that work alone (no skill calls them, and they call none): `base-in-reality`, `context-hygiene-kit`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`.
+The diagram shows the 18 linked skills and all 31 links. It leaves out 8 skills that work alone: `base-in-reality`, `context-hygiene-kit`, `jev-agent-setup`, `repo2skill`, `security-posture-audit`, `starlight-handbook-kit`, `tmux-agent-herdr-lite` and `world-model-ledger`. They call no skill, and no skill calls them.
 
 Each skill's README has a smaller diagram with its own callers and callees, and the full when and why of each link.
 <!-- skill-graph:end -->
