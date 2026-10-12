@@ -461,8 +461,9 @@ to document an always-on host rather than offer a hosted timer. Do these steps:
    (`man pmset`). You can also set this in System Settings, under Energy or Battery.
 3. Stay logged in on a Mac. The launchd agent runs only while you are logged in, so lock the
    screen instead of logging out.
-4. On Linux, use cron, or a systemd user timer with `loginctl enable-linger <user>`. Linger
-   keeps the timer running after you log out.
+4. On Linux, `install` uses a systemd user timer when `systemctl --user` works, and cron
+   otherwise. For the systemd timer, run `loginctl enable-linger <user>`. Linger keeps the
+   timer running after you log out.
 5. Start the run on that host. Run state lives in the git-ignored
    `<repo>/.skill-contract/runs/<run-id>/` of the machine that ran `init`. It is not
    committed or pushed, so a timer on another machine cannot see the run. Clone the repo on

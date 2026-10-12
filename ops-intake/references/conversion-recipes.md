@@ -34,6 +34,11 @@ redaction.
 - **Check your own export.** The field names below come from the vendor documents listed at
   the end of this page. A site can rename fields or add custom fields. If a field is missing,
   find the field in your export that holds the same value and change the script.
+- **A failed export is a skipped source.** An error response (a bad token or a rate limit)
+  has no records. The scripts read the records key directly, so an error response stops the
+  script with a traceback. If curl or the script prints an error, report that source as
+  skipped (SKILL.md step 1), even when the import printed `ok 0`. Use `curl -fsS`, so that
+  curl fails on an HTTP error.
 - **Exclude closed work.** `intake-signals-jsonl` has no state field, so the export query
   must ask only for open issues.
 
@@ -51,7 +56,7 @@ but their output shapes are not documented. Check that the issues still carry `k
 `fields` before you use the script below.
 
 ```bash
-curl -s -G -u "$JIRA_USER:$JIRA_TOKEN" "https://<site>/rest/api/3/search/jql" \
+curl -fsS -G -u "$JIRA_USER:$JIRA_TOKEN" "https://<site>/rest/api/3/search/jql" \
   --data-urlencode 'jql=project = OPS AND statusCategory != Done' \
   --data-urlencode 'fields=summary,priority,created,updated' \
   --data-urlencode 'maxResults=100' \
@@ -67,7 +72,7 @@ curl -s -G -u "$JIRA_USER:$JIRA_TOKEN" "https://<site>/rest/api/3/search/jql" \
 import json, sys
 SEV = {"highest": 4, "high": 3, "medium": 2, "low": 1, "lowest": 1}  # site-defined names
 source, site = sys.argv[1], sys.argv[2].rstrip("/")
-for issue in json.load(sys.stdin).get("issues", []):
+for issue in json.load(sys.stdin)["issues"]:
     f = issue.get("fields") or {}
     prio = ((f.get("priority") or {}).get("name") or "").lower()
     print(json.dumps({
@@ -97,7 +102,7 @@ in the `Authorization` header as it is, with no `Bearer` word. Ask for `identifi
 with the connection's page info.
 
 ```bash
-curl -s https://api.linear.app/graphql \
+curl -fsS https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" -H 'Content-Type: application/json' \
   -d '{"query":"{ issues(first: 100, filter: { or: [ {state: {type: {eq: \"triage\"}}}, {state: {type: {eq: \"backlog\"}}}, {state: {type: {eq: \"unstarted\"}}}, {state: {type: {eq: \"started\"}}} ] }) { nodes { identifier title url priority createdAt updatedAt } } }"}' \
   | python3 linear2signals.py linear \
@@ -171,7 +176,7 @@ in `data` has an `id` and `attributes`: `rating`, `title`, `body`, `reviewerNick
 ```python
 # App Store Connect customerReviews result (stdin) -> feedback-jsonl without topics (stdout).
 import json, sys
-for r in json.load(sys.stdin).get("data", []):
+for r in json.load(sys.stdin)["data"]:
     a = r.get("attributes") or {}
     text = "\n".join(t for t in (a.get("title"), a.get("body")) if t)
     print(json.dumps({"id": r["id"], "channel": "review", "created_at": a["createdDate"],
@@ -229,7 +234,7 @@ returns tickets. Each ticket has `id`, `subject`, `description` (the first comme
 # Zendesk tickets list result (stdin) -> feedback-jsonl without topics (stdout).
 import json, sys
 SEV = {"urgent": 3, "high": 3, "normal": 2, "low": 1}
-for t in json.load(sys.stdin).get("tickets", []):
+for t in json.load(sys.stdin)["tickets"]:
     text = "\n".join(x for x in (t.get("subject"), t.get("description")) if x)
     print(json.dumps({"id": t["id"], "channel": "email", "created_at": t["created_at"],
                       "text": text, "severity": SEV.get(t.get("priority"))}))
@@ -254,7 +259,7 @@ seconds) and `source`. The `source.body` field holds the first message as HTML.
 ```python
 # Intercom conversations list result (stdin) -> feedback-jsonl without topics (stdout).
 import datetime, html, json, re, sys
-for c in json.load(sys.stdin).get("conversations", []):
+for c in json.load(sys.stdin)["conversations"]:
     body = (c.get("source") or {}).get("body") or ""
     text = html.unescape(re.sub(r"<[^>]+>", " ", body)).strip()  # body is HTML
     when = datetime.datetime.fromtimestamp(int(c["created_at"]), datetime.timezone.utc)
