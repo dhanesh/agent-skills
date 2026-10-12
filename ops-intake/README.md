@@ -120,6 +120,7 @@ only when its source sees it again after the dismissal.
 
 ## Changes
 
+- **0.2.4.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **0.2.3.** Jira, Linear, App Store Connect, Play Console, Zendesk and Intercom get no
   dedicated reader. This is the owner's decision. The new `references/conversion-recipes.md`
   gives a recipe for each tool: how to export, a short stdlib Python transform, and the

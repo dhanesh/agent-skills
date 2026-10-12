@@ -37,7 +37,7 @@ import time
 import unicodedata
 
 SKILL_NAME = "growth-review"
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 # --today moves the clock that decides which period is complete and which record is from
 # the future, so it is honoured only when this variable is "1". Only the tests and the
 # eval set it.

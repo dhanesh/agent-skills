@@ -86,6 +86,7 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
 
 ## Changes
 
+- **0.1.3.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **0.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
 - **0.1.1.** One agent-name check for growth-review, idea-validation and factory-conductor's
   ledger. `register` now refuses a name that starts with the word `agent` in any form: a bare

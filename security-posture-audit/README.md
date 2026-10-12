@@ -79,4 +79,5 @@ or above it, `2` usage error.
 
 ## Changes
 
+- **1.0.5.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

@@ -11,10 +11,10 @@ description: >-
   loop spec, a runnable scaffold, and bakes in the mandatory safety properties (a hard stop backstop and
   the trusted/untrusted two-channel boundary) that loops fail without. Accepts a skill-contract task-plan envelope as the loop's plan. Honors a skill-contract autonomy grant at its write gate.
 license: MIT
-compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. python3 >= 3.10 is optional, used only to validate skill-contract handoffs and check grants.
+compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`) is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.4.4"
+  version: "1.4.5"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
@@ -125,7 +125,8 @@ found under "Python interpreter" above.
    too: its `run_url` or its `assertedBy`.
    `--rerun` executes every assertion's `command` under the one approval you give
    `contract_check.py`, so before you propose it, list each assertion's `command` verbatim, one
-   per line. Show `{python}` resolved to the interpreter you found above and each
+   per line. This is display only: the commands themselves keep `{python}`. In the list you
+   show the user, display `{python}` resolved to the interpreter you found above and each
    `{skill_dir:<name>}` resolved to that skill's directory where you know it; mark the rest
    unresolved (the checker skips those). Ask the user to approve that exact list, and re-run
    with `--rerun` only after they say yes to it. If they decline, keep the claims as they are.

@@ -14,10 +14,10 @@ description: >-
   never writes to one), not the planner (spec-first-planning), not an incident responder or
   a scheduled sweep.
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only. The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
-  version: "0.2.3"
+  version: "0.2.4"
   skill-contract: "1"
   tags: "factory,operations,intake,skill-contract"
 ---

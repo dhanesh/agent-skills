@@ -296,6 +296,9 @@ SINCE_PORTABILITY_HOOKS = "729f9bf"  # portability retrofit, PR 2: world-model-l
 SINCE_PORTABILITY_RULE = "04df5d0"  # portability retrofit, PR 3: every skill that runs Python
 # carries the shared Python interpreter rule. The commit that inserts the rules; repinned
 # to its own short hash right after it lands.
+SINCE_PY_GATE_GLUED = "HEAD"  # gates: python-interpreter.sh also sees a Python command
+# glued to `|`, `;`, `&` or `=` (x|python3 -c ...). The commit that widens the regex;
+# repinned to its own short hash right after it lands.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
@@ -9455,6 +9458,33 @@ def check_portability_rule(old, new):
         kind="delta", since=SINCE_PORTABILITY_RULE)
 
 
+def check_py_gate_glued(old, new):
+    """Plant one skill whose only Python command is glued to a pipe (`x|python3 -c`) and
+    carries no interpreter rule, then count how many trees' gates flag it."""
+    scratch = tempfile.mkdtemp(prefix="ab-pyglued-")
+    try:
+        d = os.path.join(scratch, "py-glued")
+        os.makedirs(d)
+        with open(os.path.join(d, "SKILL.md"), "w") as f:
+            f.write("---\nname: py-glued\ndescription: Fixture.\n---\n# fixture\n\n"
+                    "```\nx|python3 -c 'print(1)'\n```\n")
+
+        def flagged(tree):
+            gate = os.path.join(tree, "scripts", "gates", "python-interpreter.sh")
+            if not os.path.isfile(gate):
+                return 0
+            r = subprocess.run(["sh", gate, d], capture_output=True, text=True)
+            return int(r.returncode != 0)
+        a, b = flagged(old), flagged(new)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    row("gates", "python-interpreter gate flags a glued `x|python3 -c` command (higher=better)",
+        a, b, b == 1 and a == 0,
+        "a command glued to |, ;, & or = runs Python as surely as one after a space; the "
+        "gate missed it, so a skill could run Python without the shared rule",
+        kind="delta", since=SINCE_PY_GATE_GLUED)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9550,6 +9580,7 @@ def main():
         check_portability_resolver(old, REPO)
         check_portability_hooks(old, REPO)
         check_portability_rule(old, REPO)
+        check_py_gate_glued(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

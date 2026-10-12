@@ -32,7 +32,9 @@ fi
 squash() { tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
 
 # The file:line: prefix ends in ": ", so ": " stands for the start of the line.
-RUNS='(: |[[:space:]`(])python3?[[:space:]]+(-[A-Za-z]|"|\$|<|[A-Za-z0-9_./-]+\.py)'
+# A command glued to a pipe, a separator or an assignment (x|python3, a;python3,
+# a&&python3, X=python3) starts the word too.
+RUNS='(: |[[:space:]`(|;&=])python3?[[:space:]]+(-[A-Za-z]|"|\$|<|[A-Za-z0-9_./-]+\.py)'
 
 # file:line: text for every line that runs Python. SKILL.md counts only after
 # the frontmatter; every references/*.md counts whole.

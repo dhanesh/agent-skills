@@ -14,11 +14,11 @@ description: >-
   bundles, spec-canonical bundles, and producer-extended bundles — reporting conformance
   warnings instead of failing.
 license: MIT
-compatibility: Requires python3 (stdlib only) to inspect bundles and generate the project; Node.js 18+ with npm to build/preview the emitted Astro + Starlight site (network needed only for npm install).
+compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, to inspect bundles and generate the project; Node.js 18+ with npm to build/preview the emitted Astro + Starlight site (network needed only for npm install).
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.4"
+  version: "1.1.5"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 

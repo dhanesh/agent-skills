@@ -107,4 +107,5 @@ TypeSafe API key from https://console.typesafe.ai/.
 
 ## Changes
 
+- **0.1.3.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **0.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

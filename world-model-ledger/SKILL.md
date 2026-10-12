@@ -14,11 +14,11 @@ description: >-
   via four lifecycle hooks; invoke ONCE, then they run automatically. Not a linter, LSP server,
   RAG vector store, or model-driven fact extractor.
 license: MIT
-compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop/SessionStart), bash, and python3 with its stdlib sqlite3 (no pip, no network); jq optional for clean settings.json merging.
+compatibility: Requires Claude Code lifecycle hooks (PreToolUse/PostToolUse/Stop/SessionStart), bash, and Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`) with its stdlib sqlite3 (no pip, no network); jq optional for clean settings.json merging.
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.4"
+  version: "1.2.5"
   tags: "claude-code,hooks,world-model,sqlite,memory,confidence,provenance,contradictions,ontology"
 ---
 

@@ -11,10 +11,10 @@ description: >-
   base-in-reality; not for designing or repairing a single agent loop — use
   crafting-self-prompting-loops.
 license: MIT
-compatibility: Requires python3 (stdlib only, offline) plus make and a POSIX shell for the gate loop. Built for this repo's layout — the quality gates under scripts/gates were vendored from this skill — but the scaffolder runs anywhere python3 does.
+compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, offline, plus make and a POSIX shell for the gate loop. Built for this repo's layout — the quality gates under scripts/gates were vendored from this skill — but the scaffolder runs anywhere python3 does.
 metadata:
   author: dhanesh
-  version: "1.0.3"
+  version: "1.0.4"
   tags: "agent-skills,skill-authoring,scaffolding,prompting-playbook,quality-gates,code-review"
 ---
 

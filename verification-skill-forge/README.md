@@ -94,4 +94,5 @@ join, the SHA-bound recorder and the maintain guard are this repo's.
 
 ## Changes
 
+- **1.0.2.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.1.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

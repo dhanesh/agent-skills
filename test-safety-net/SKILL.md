@@ -15,7 +15,8 @@ description: >-
   Honors a skill-contract autonomy grant at its write gate.
 license: MIT
 compatibility: >-
-  Prompt-driven; the bundled ranker needs python3 (stdlib only) and, for the churn signal, the git
+  Prompt-driven; the bundled ranker needs Python 3.10+
+  (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, and, for the churn signal, the git
   CLI. Writes and proves tests on four stacks — python 3.10–3.14 (pytest, falling back to
   unittest), node/TypeScript on the LTS lines 18, 20, 22, 24 and 26 (`node --test`), go 1.22–1.26
   (`go test`, on darwin and linux) and rust 1.82–1.99 (`cargo test`, on darwin and linux; 1.82,
@@ -27,7 +28,7 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.4.3"
+  version: "1.4.4"
   skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---

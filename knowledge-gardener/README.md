@@ -102,4 +102,5 @@ make gate-skill SKILL=knowledge-gardener                 # everything CI checks
 
 ## Changes
 
+- **1.0.4.** The `compatibility` line now names `python3`, `python` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

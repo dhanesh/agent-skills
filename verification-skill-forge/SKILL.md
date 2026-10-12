@@ -13,10 +13,10 @@ description: >-
   that fails a map edited to match buggy behaviour. Not the verifier itself (the
   generated skill is), not a test-suite generator (test-safety-net).
 license: MIT
-compatibility: Requires python3 >= 3.10 (stdlib only) and git; offline. The generated skill runs whatever the target app needs (a browser driver, a PTY, curl).
+compatibility: Requires Python 3.10+ (`python3`, `python` or `$SKILL_PYTHON`), stdlib only, and git; offline. The generated skill runs whatever the target app needs (a browser driver, a PTY, curl).
 metadata:
   author: dhanesh
-  version: "1.0.1"
+  version: "1.0.2"
   tags: "verification,runtime-evidence,feature-map,manifold,factory"
 ---
 
