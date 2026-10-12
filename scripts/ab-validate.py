@@ -283,7 +283,7 @@ SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the ca
 SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
 # mermaid diagrams in README.md and every <skill>/README.md are rendered from
 # docs/skill-graph/graph.json and checked against it, the skills and their contracts.
-SINCE_SKILL_GRAPH_QUOTES = "PENDING"  # gates: skill-graph evidence is a verbatim quote
+SINCE_SKILL_GRAPH_QUOTES = "f05e2bd"  # gates: skill-graph evidence is a verbatim quote
 # in a file, not a file:line, so a line that moves no longer fails the check. The commit
 # that changes skill_graph.py; repinned to its own short hash right after it lands.
 SINCE_PORTABILITY_RESOLVER = "f81be19"  # skill-contract portability retrofit, PR 1:
