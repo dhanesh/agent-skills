@@ -168,7 +168,10 @@ class InstallerResolvesInterpreter(unittest.TestCase):
                 fh.write('#!/bin/sh\ncase "$*" in *version_info*) exit 1;; esac\nexit 0\n')
             os.chmod(shim, 0o755)
             r = subprocess.run(["/bin/bash", os.path.join(self.SCRIPTS, "install.sh")],
-                               env={"PATH": bin_ + ":/bin:/usr/bin", "HOME": td},
+                               # SKILL_PYTHON pins the shim: /usr/bin/python3 may be >= 3.10 on the host
+                               # (Ubuntu) and find_python prefers python3 over python.
+                               env={"PATH": bin_ + ":/bin:/usr/bin", "HOME": td,
+                                    "SKILL_PYTHON": shim},
                                capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("needs Python 3.10 or newer", r.stderr)
