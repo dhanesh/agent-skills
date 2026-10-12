@@ -49,6 +49,7 @@ gate: clean
 		out=$$(sh $(GATES)/prompting-playbook.sh "$$d" $(PLAYBOOK_FLAGS) 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d playbook" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/frontmatter-standard.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d frontmatter" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/asset-paths.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d asset-paths" "$$out"; rc=1; }; \
+		out=$$(sh $(GATES)/python-interpreter.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d python-interpreter" "$$out"; rc=1; }; \
 		out=$$(sh $(GATES)/skill-contract.sh "$$d" 2>&1); st=$$?; printf '%s\n' "$$out" | tail -1; [ $$st -eq 0 ] || { _fail "$$d skill-contract" "$$out"; rc=1; }; \
 		if [ -f "$$d/PARAMETERS.md" ]; then \
 			scratch=$$(mktemp -d); \
@@ -233,6 +234,7 @@ gate-skill: clean
 	fi
 	@sh $(GATES)/frontmatter-standard.sh "$(SKILL)"
 	@sh $(GATES)/asset-paths.sh "$(SKILL)"
+	@sh $(GATES)/python-interpreter.sh "$(SKILL)"
 	@sh $(GATES)/skill-contract.sh "$(SKILL)"
 	@for t in "$(SKILL)"/assets/test_*.py; do \
 		[ -f "$$t" ] || continue; \

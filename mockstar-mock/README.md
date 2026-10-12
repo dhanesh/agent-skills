@@ -101,3 +101,7 @@ speculative inferences that should be reviewed before using in production.
 
 - `SKILL.md` — full procedure, invariants, flags, and subagent dispatch notes.
 - [mockstar repository](https://github.com/dhanesh/mockstar) — CLI reference, config schema, and Tier 2 token docs.
+
+## Changes
+
+- **1.1.5.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

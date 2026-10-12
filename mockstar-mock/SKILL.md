@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.4"
+  version: "1.1.5"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -87,6 +87,15 @@ generating.
 - `--image <ref>` — the Docker image reference used when `--runtime` is `docker` or `auto` resolves to Docker (default: `ghcr.io/dhanesh/mockstar:latest`). For reproducibility, pin by digest: `ghcr.io/dhanesh/mockstar@sha256:<digest>`.
 
 ## Procedure
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 Run these stages in order. Fan out subagents where noted.
 

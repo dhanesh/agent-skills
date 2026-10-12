@@ -288,6 +288,9 @@ SINCE_PORTABILITY_HOOKS = "729f9bf"  # portability retrofit, PR 2: world-model-l
 # context-hygiene-kit hooks find their interpreter with find_python.sh (a `python`-only
 # PATH works; the macOS python3 stub is skipped, never run). The commit that bumps the
 # three skills and adds the A/B rows.
+SINCE_PORTABILITY_RULE = "611880d"  # portability retrofit, PR 3: every skill that runs Python
+# carries the shared Python interpreter rule. The commit that inserts the rules; repinned
+# to its own short hash right after it lands.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
@@ -9281,6 +9284,48 @@ def check_portability_hooks(old, new):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _pr_collapse(s):
+    return " ".join(s.split())
+
+
+def check_portability_rule(old, new):
+    """Count the skills that run Python and carry the shared interpreter rule.
+
+    Prompt-only: it checks the text is present, not model behaviour."""
+    gate = os.path.join(new, "scripts", "gates", "python-interpreter.sh")
+    rule_file = os.path.join(new, "scripts", "gates", "python-interpreter-rule.txt")
+    if not (os.path.isfile(gate) and os.path.isfile(rule_file)):
+        PROBE_ERRORS.append((new, "scripts/gates", "the tree under review has no python-interpreter gate"))
+        return
+    with open(rule_file) as f:
+        rule = _pr_collapse(f.read())
+    # The set of skills that run Python: those the gate flags in the baseline tree.
+    runs = []
+    for name in sorted(os.listdir(old)):
+        if not os.path.isfile(os.path.join(old, name, "SKILL.md")):
+            continue
+        r = subprocess.run(["sh", gate, os.path.join(old, name)], capture_output=True, text=True)
+        if r.returncode != 0:
+            runs.append(name)
+
+    def carrying(tree):
+        n = 0
+        for name in runs:
+            try:
+                with open(os.path.join(tree, name, "SKILL.md")) as f:
+                    n += int(rule in _pr_collapse(f.read()))
+            except OSError:
+                pass
+        return n
+    a, b = carrying(old), carrying(new)
+    row("portability", "skills that run Python and carry the interpreter rule (higher=better)",
+        a, b, len(runs) > 0 and a == 0 and b == len(runs),
+        "prompt-only: checks the text is present, not model behaviour. The baseline has the "
+        "rule in none of the %d skills the gate flags; the branch has it in all %d, an "
+        "honest 0 -> %d" % (len(runs), len(runs), len(runs)),
+        kind="delta", since=SINCE_PORTABILITY_RULE)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9374,6 +9419,7 @@ def main():
         check_agent_names(old, REPO)
         check_portability_resolver(old, REPO)
         check_portability_hooks(old, REPO)
+        check_portability_rule(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

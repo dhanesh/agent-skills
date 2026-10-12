@@ -101,3 +101,7 @@ is exactly the "the agent can't stop short of the loop" property the Honk case t
 
 The rails and their evidence come from Spotify Engineering's *Background Coding Agents* series (*Context Engineering*, Nov 2025; *Feedback Loops*, Dec 2025) and the June 2026 Niklas Gustavsson × Boris Cherny interview ([youtu.be/9DHZLw5653E](https://youtu.be/9DHZLw5653E)), cross-referenced against the research grounding already in this repo's [`crafting-self-prompting-loops`](../crafting-self-prompting-loops/) and [`context-hygiene-kit`](../context-hygiene-kit/) skills. Headline metrics are vendor-reported — a strong practitioner signal, not an independently replicated result. See [`references/grounding.md`](./references/grounding.md) for the per-rail citations and tags.
 </content>
+
+## Changes
+
+- **1.1.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

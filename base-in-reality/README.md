@@ -53,3 +53,7 @@ one file it creates on the default path is the report itself, at
 `docs/base-in-reality/<date>-audit.md` — announced before it is written.
 
 See `SKILL.md` for the full procedure, flags, and invariants.
+
+## Changes
+
+- **1.2.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

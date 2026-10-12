@@ -15,7 +15,7 @@ license: MIT
 compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.2.3"
+  version: "1.2.4"
   skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---
@@ -60,6 +60,15 @@ adds noise. When only *part* of the loop is missing (say, tests exist but CI
 doesn't), install just the missing rails.
 
 ## What gets installed
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 Per the confirmed plan, some subset of:
 

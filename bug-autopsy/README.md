@@ -81,3 +81,7 @@ is flagged as a warning to reframe.
   stdlib-only, offline, deterministic.
 - `eval/run_eval.py` — outcome eval per the repo standard: known-good and known-bad
   fixture post-mortems through the linter, plus a filled-template usability check.
+
+## Changes
+
+- **1.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

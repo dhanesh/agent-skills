@@ -38,7 +38,7 @@ import unicodedata
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "idea-validation"
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 # --today moves the clock that deadlines, expiry and the --observed future-date check
 # read, so it is honoured only when this variable is "1". Only the tests and the eval set it.
 TEST_CLOCK_ENV = "IDEAS_TEST_CLOCK"

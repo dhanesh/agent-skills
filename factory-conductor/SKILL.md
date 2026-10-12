@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.5.1"
+  version: "1.5.2"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -46,6 +46,15 @@ SKILL_DIR="<this skill's base directory>"   # your harness provides it when the 
 SKILL_DIR=$(find ~/.claude ~/.config ~/.agents -type d -name 'factory-conductor' 2>/dev/null | head -1)
 test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before proceeding
 ```
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --root <repo>`,
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
@@ -335,7 +344,7 @@ match the command text as written, before any variable is expanded, and a comman
 rule is refused. So in a resumed session, write the conductor's absolute path out in each command,
 as `python3 /abs/path/to/factory-conductor/assets/conductor.py <command> --root <repo>`. Use no
 `$SKILL_DIR`, no `cd … &&` and no variable assignment, so each command matches the grant's
-`Bash(python3 /abs/…/conductor.py *)` rule.
+`Bash(python3 /abs/…/conductor.py *)` rule. If the Python interpreter rule found an interpreter other than `python3`, write that one instead, here and in the grant's `Bash(...)` rule, so the two match.
 
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
 command, with a fixed resume prompt, only when the run is not finished, not waiting on the

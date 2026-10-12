@@ -76,3 +76,7 @@ or above it, `2` usage error.
   rationale, remediation
 - `eval/run_eval.py` — outcome eval against hardened + leaky fixture repos, with
   false-positive negatives and exit-code checks
+
+## Changes
+
+- **1.0.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

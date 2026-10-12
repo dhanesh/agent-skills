@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires Claude Code lifecycle hooks (Stop/PreCompact/SessionStart), bash, and python3 (stdlib only, no pip); jq optional for clean settings.json merging.
 metadata:
   author: dhanesh
-  version: "1.2.4"
+  version: "1.2.5"
   tags: "claude-code,hooks,context-management,memory,anti-bloat,anti-rot,compaction"
 ---
 
@@ -87,6 +87,15 @@ To **deliberately** persist a fact, write a marker line (e.g. `DECISION: chose X
 3. **Deterministic capture only.** No model summarises the session. The harvester extracts verbatim signals. If you are tempted to add free-prose "decision extraction", you MUST leave it out — getting it wrong is rot. That is the explicit reason this kit replaces local-model session-summarisers.
 
 ## Operating it
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 - **Optional deep loop:** `/loop curate_loop.md` re-curates each round with a visible `STATUS: DONE` flag and a hard BACKSTOP (round/token/oscillation/error caps). Use when idle; the trusted control prompt is `curate_loop.md`.
 - **Tune scoring weights (bounded, converges, halts):** `python3 optimize_weights.py`.

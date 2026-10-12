@@ -99,3 +99,7 @@ cd knowledge-gardener/assets && python3 test_garden.py   # unit suite
 python3 knowledge-gardener/eval/run_eval.py              # outcome eval
 make gate-skill SKILL=knowledge-gardener                 # everything CI checks
 ```
+
+## Changes
+
+- **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

@@ -79,3 +79,7 @@ handling rules live in `references/bundle-variations.md`.
 
 Verified end-to-end: generated from a ga4-shaped fixture bundle, `npm run build`
 green (9 pages + search index), homepage and concept pages visually checked.
+
+## Changes
+
+- **1.1.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

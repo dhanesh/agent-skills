@@ -91,3 +91,7 @@ A worked example, driven live by the eval, is in `eval/fixtures/notes-app/`.
 The generated-skill shape and maintain pass adapt Lauren Tan's pstack
 (`create-verification-skill`, `maintain-verification-skill`) to Claude Code. The Manifold
 join, the SHA-bound recorder and the maintain guard are this repo's.
+
+## Changes
+
+- **1.0.1.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

@@ -18,7 +18,7 @@ compatibility: Requires python3 (stdlib only) to inspect bundles and generate th
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.3"
+  version: "1.1.4"
   tags: "okf,static-site,astro,starlight,knowledge-base,documentation,site-generator"
 ---
 
@@ -62,6 +62,15 @@ test -d "$SKILL_DIR/assets" || test -d "$SKILL_DIR/scripts"   # verify before pr
   SHOULD update the generator before emitting a stale dialect.
 
 ## Workflow
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 1. **Locate and inspect the bundle.** The bundle root is the directory whose `index.md`
    (or concept tree) the user means — for bundles made by the `feynman-walkthrough`

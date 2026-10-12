@@ -27,7 +27,7 @@ compatibility: >-
   under `RUSTUP_AUTO_INSTALL=0`, so no toolchain or crate is ever fetched.
 metadata:
   author: dhanesh
-  version: "1.4.2"
+  version: "1.4.3"
   skill-contract: "1"
   tags: "testing,characterization,legacy-code,agent-safety,pytest,node,typescript,go,rust"
 ---
@@ -84,6 +84,15 @@ what Invariant 2 is enforced by, and a hand-rolled substitute that patches the w
 than none, because it makes the invariant look enforced when it is not.
 
 ## Workflow
+
+**Python interpreter.** The commands in this skill and its references are written with `python3`.
+Before you run the first one, find the interpreter once. If `$SKILL_PYTHON` is set, use it.
+Otherwise, on macOS, if `command -v python3` prints `/usr/bin/python3` and `xcode-select -p` fails,
+that `python3` is the install stub: skip it without running it. Use the first of `python3`, `python`
+and `py -3` that is not skipped and for which
+`<interpreter> -c 'import sys; sys.exit(sys.version_info < (3, 10))'` exits 0. Write the interpreter
+you found in place of `python3` in every command, and in any `Bash(...)` permission rule you
+suggest. If none passes, stop and tell the user that this skill needs Python 3.10 or newer.
 
 1. **Detect** the stack and — critically — how to run exactly **one** test, not just the suite.
    The ranker detects the stack itself and prints its verdict and the evidence behind it on
