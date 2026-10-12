@@ -284,10 +284,10 @@ SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
 SINCE_PORTABILITY_RESOLVER = "f81be19"  # skill-contract portability retrofit, PR 1:
 # resolve_python() reads SKILL_PYTHON and skips the macOS python3 install stub without
 # running it. The commit that changes the reference checker.
-SINCE_PORTABILITY_HOOKS = "738fb0e"  # portability retrofit, PR 2: world-model-ledger and
+SINCE_PORTABILITY_HOOKS = "729f9bf"  # portability retrofit, PR 2: world-model-ledger and
 # context-hygiene-kit hooks find their interpreter with find_python.sh (a `python`-only
 # PATH works; the macOS python3 stub is skipped, never run). The commit that bumps the
-# three skills and adds the A/B rows (repinned after committing).
+# three skills and adds the A/B rows.
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
