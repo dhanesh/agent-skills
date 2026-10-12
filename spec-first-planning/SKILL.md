@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.7.1"
+  version: "2.7.2"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -172,8 +172,9 @@ the convergence criteria are in `references/unattended.md`; the section grammar 
    MUST NOT treat that as a failure, because the plan is still done: give the user the envelope
    path.
    In unattended mode, the grant is written between `check-envelope` and this check (see
-   `## Unattended mode`). Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `python3`, `python`, `py -3` that is
-   Python 3.10 or newer.
+   `## Unattended mode`). Run the checker with the first of `$SKILL_CONTRACT_PYTHON`, `$SKILL_PYTHON`, `python3` (skipped
+   when it is the macOS install stub: `/usr/bin/python3` while `xcode-select -p` fails), `python`,
+   `py -3` that is Python 3.10 or newer.
 
 ## Requests from ops-intake
 

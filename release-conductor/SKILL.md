@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only) and git >= 2.31; the default PR step uses the gh CLI. The recipe's own commands (build, deploys, probes, checks) run with the user's credentials and reach whatever they target.
 metadata:
   author: dhanesh
-  version: "0.1.0"
+  version: "0.1.1"
   skill-contract: "1"
   tags: "factory,release,deploy,skill-contract"
 ---

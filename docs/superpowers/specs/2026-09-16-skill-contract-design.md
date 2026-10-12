@@ -303,7 +303,8 @@ SKILL.md says what to do with it, so there are no invocation templates in the co
 
 - **The macOS `python3` stub.** Without the Command Line Tools, running `/usr/bin/python3` can open an
   install dialog, and the probe may trigger it. Verify this, and if needed, check `xcode-select -p` first
-  on darwin.
+  on darwin. Resolved 2026-10-12 by the portability retrofit: `resolve_python()` skips the stub
+  without running it.
 - **`installed_plugins.json` is internal to Claude Code.** It may change. The checker degrades to a
   warning.
 - **BCP 14 keywords do not guarantee that a model complies.** They make each obligation unambiguous. The

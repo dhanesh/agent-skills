@@ -43,6 +43,7 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**0.1.1.** The contract checker finds Python the same way as every other skill: `SKILL_PYTHON` overrides it, and it skips the macOS `python3` install stub without running it.
 
 ## Install
 

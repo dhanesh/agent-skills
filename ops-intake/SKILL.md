@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
-  version: "0.2.0"
+  version: "0.2.1"
   skill-contract: "1"
   tags: "factory,operations,intake,skill-contract"
 ---
