@@ -8,7 +8,9 @@
 find_python() {
   PY=""
   if [ -n "${SKILL_PYTHON:-}" ]; then
-    _fp=$(command -v "$SKILL_PYTHON" 2>/dev/null) && [ -n "$_fp" ] && { PY=$_fp; return 0; }
+    _fp=$(command -v "$SKILL_PYTHON" 2>/dev/null) || _fp=""
+    # Only a program path counts: a builtin or function name prints as a bare word.
+    case $_fp in /*) PY=$_fp; return 0 ;; esac
   fi
   _fp=$(command -v python3 2>/dev/null) || _fp=""
   if [ -n "$_fp" ]; then

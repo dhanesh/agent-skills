@@ -46,7 +46,8 @@ done
 # Same resolver the hooks use; ships next to them in assets/hooks/.
 . "$ASSETS/hooks/find_python.sh"
 find_python
-[ -n "$PY" ] || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
+{ [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
+  || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
 
 # ── Operate-only fast path ───────────────────────────────────────────────────
 # If the caller only wants to seed/prune and the skill is ALREADY installed

@@ -7,9 +7,9 @@
 # Wire under hooks.Stop.
 set -uo pipefail
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-. "$(dirname "$0")/find_python.sh"
-find_python
-[ -n "$PY" ] || { echo '{"continue": true}'; exit 0; }
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 input="$(cat)"
 get() { printf '%s' "$input" | "$PY" -c "import json,sys

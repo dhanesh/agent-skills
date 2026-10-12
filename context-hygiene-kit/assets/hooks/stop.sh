@@ -16,9 +16,9 @@ set -uo pipefail
 # hooks/. Works for both layouts: project-root install (KIT_HOME=<project>) and
 # global install (KIT_HOME=~/.claude/context-hygiene). Must run BEFORE the cd below.
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-. "$(dirname "$0")/find_python.sh"
-find_python
-[ -n "$PY" ] || { echo '{"continue": true}'; exit 0; }
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 
 # Hook input arrives as JSON on stdin: { cwd, transcript_path, session_id, ... }.
 input="$(cat)"

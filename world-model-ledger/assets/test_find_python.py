@@ -64,6 +64,21 @@ class FindPython(unittest.TestCase):
         p3 = self.fake("python3")
         self.assertEqual(self.run_fp(SKILL_PYTHON="missing").stdout, str(p3))
 
+    def test_skill_python_builtin_falls_through(self):
+        # `command -v echo` prints the bare word "echo": not a program path.
+        p3 = self.fake("python3")
+        self.assertEqual(self.run_fp(SKILL_PYTHON="echo").stdout, str(p3))
+
+    def test_skill_python_absolute_path_works(self):
+        m = self.fake("mypy3")
+        self.fake("python3")
+        self.assertEqual(self.run_fp(SKILL_PYTHON=str(m)).stdout, str(m))
+
+    def test_skill_python_with_arguments_falls_through(self):
+        p3 = self.fake("python3")
+        self.fake("mypy3")
+        self.assertEqual(self.run_fp(SKILL_PYTHON="mypy3 -I").stdout, str(p3))
+
     def _stub_setup(self, uname, xcode_rc):
         marker = self.bin / "ran"
         p3 = self.fake("python3", f"touch '{marker}'")
@@ -185,6 +200,22 @@ class HooksPython(unittest.TestCase):
                 self.assertNotIn(".world-model/digest.md", files)
 
 
+    def test_hook_without_find_python_exits_quietly(self):
+        # A hook copied alone (no find_python.sh beside it) must not abort noisily.
+        for name in self.NAMES:
+            with self.subTest(hook=name):
+                d = self.root / ("lone_" + name.replace(".", "_")) / "hooks"
+                d.mkdir(parents=True)
+                shutil.copy(self.HOOKS / name, d / name)
+                r = subprocess.run(["bash", str(d / name)], input="{}",
+                                   env={"PATH": self.path_for("python3"),
+                                        "HOME": str(self.root)},
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.strip(), '{"continue": true}')
+                self.assertEqual(r.stderr, "")
+
+
 INSTALL_TOOLS = ["bash", "sh", "cp", "mkdir", "sed", "grep", "chmod", "dirname", "cat",
                  "printf", "tail", "tr", "jq", "uname", "env", "cut", "head", "awk",
                  "mktemp", "rm", "mv", "ls", "wc", "sort", "date", "xcode-select",
@@ -229,6 +260,15 @@ class InstallerShipsResolver(unittest.TestCase):
         r = self.install(str(self.bin))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue((self.target / self.EXTRA / "find_python.sh").is_file())
+
+    def test_installer_rejects_python_older_than_3_10(self):
+        shim = self.bin / "python"
+        shim.write_text('#!/bin/sh\ncase "$*" in *version_info*) exit 1;; esac\nexit 0\n')
+        shim.chmod(0o755)
+        r = self.install(str(self.bin))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("needs Python 3.10 or newer", r.stderr)
+        self.assertFalse((self.target / self.EXTRA).exists())
 
     def test_installer_without_python_stops_with_a_message(self):
         r = self.install(str(self.bin))

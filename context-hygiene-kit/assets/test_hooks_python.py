@@ -85,6 +85,22 @@ class HooksPython(unittest.TestCase):
                 self.assertEqual(files, ["t.jsonl"])
 
 
+    def test_hook_without_find_python_exits_quietly(self):
+        for hook in ("stop.sh", "precompact.sh", "session_start.sh"):
+            with self.subTest(hook=hook):
+                d = self.root / ("lone_" + hook.replace(".", "_")) / "hooks"
+                d.mkdir(parents=True)
+                shutil.copy(HOOKS / hook, d / hook)
+                r = subprocess.run(["bash", str(d / hook)], input="{}",
+                                   env={"PATH": self.path_for("python3"),
+                                        "HOME": str(self.root)},
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                want = "" if hook == "session_start.sh" else '{"continue": true}'
+                self.assertEqual(r.stdout.strip(), want)
+                self.assertEqual(r.stderr, "")
+
+
 INSTALL_TOOLS = ["bash", "sh", "cp", "mkdir", "sed", "grep", "chmod", "dirname", "cat",
                  "printf", "tail", "tr", "jq", "uname", "env", "cut", "head", "awk",
                  "mktemp", "rm", "mv", "ls", "wc", "sort", "date", "xcode-select",
@@ -129,6 +145,15 @@ class InstallerShipsResolver(unittest.TestCase):
         r = self.install(str(self.bin))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue((self.target / self.EXTRA / "find_python.sh").is_file())
+
+    def test_installer_rejects_python_older_than_3_10(self):
+        shim = self.bin / "python"
+        shim.write_text('#!/bin/sh\ncase "$*" in *version_info*) exit 1;; esac\nexit 0\n')
+        shim.chmod(0o755)
+        r = self.install(str(self.bin))
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("needs Python 3.10 or newer", r.stderr)
+        self.assertFalse((self.target / self.EXTRA).exists())
 
     def test_installer_without_python_stops_with_a_message(self):
         r = self.install(str(self.bin))

@@ -11,7 +11,8 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENT_BIN="$SKILL_DIR/scripts"
 . "$AGENT_BIN/find_python.sh"
 find_python
-[ -n "$PY" ] || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
+{ [ -n "$PY" ] && "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; } \
+  || { echo "error: this skill needs Python 3.10 or newer; set SKILL_PYTHON or install python3" >&2; exit 1; }
 TMUX_AGENT_DIR="${HOME}/.tmux/agent-panes"
 TMUX_CONF="${HOME}/.tmux.conf"
 
@@ -157,7 +158,7 @@ elif [[ -f "$HOOKS_OFF" ]]; then
     && echo "Claude status hooks off (re-enable: AGENT_CLAUDE_HOOKS=on bash $0)" \
     || echo "warning: could not update $CLAUDE_DIR/settings.json" >&2
 else
-  "$PY" "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" \
+  "$PY" "$AGENT_BIN/agent-hook" install-claude "$CLAUDE_DIR/settings.json" --python "$PY" \
     && echo "Claude status hooks installed in $CLAUDE_DIR/settings.json (restart Claude sessions to pick them up)" \
     || echo "warning: could not update $CLAUDE_DIR/settings.json; status falls back to screen scraping" >&2
 fi

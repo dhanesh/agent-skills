@@ -11,9 +11,9 @@ set -euo pipefail
 # Resolve the kit's scripts (one level up from hooks/) BEFORE cd-ing into the project,
 # so this works for a project-root install or a global ~/.claude/context-hygiene install.
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-. "$(dirname "$0")/find_python.sh"
-find_python
-[ -n "$PY" ] || { echo '{"continue": true}'; exit 0; }
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || { echo '{"continue": true}'; exit 0; }
 cd "${CLAUDE_PROJECT_DIR:-$KIT_HOME}"
 
 # The current task anchor drives relevance re-ranking. Keep it in a 1-line file the

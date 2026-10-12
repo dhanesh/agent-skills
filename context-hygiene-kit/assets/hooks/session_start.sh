@@ -11,9 +11,9 @@ set -euo pipefail
 # so this works whether the kit is installed at the project root or globally in
 # ~/.claude/context-hygiene. The .context/ cache stays per-project (in CLAUDE_PROJECT_DIR).
 KIT_HOME="$(cd "$(dirname "$0")/.." && pwd)"
-. "$(dirname "$0")/find_python.sh"
-find_python
-[ -n "$PY" ] || exit 0
+[ -f "$(dirname "$0")/find_python.sh" ] && . "$(dirname "$0")/find_python.sh"
+command -v find_python >/dev/null 2>&1 && find_python
+[ -n "${PY:-}" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-$KIT_HOME}"
 
 ANCHOR="$(cat .context/anchor.txt 2>/dev/null || true)"

@@ -9147,41 +9147,70 @@ def _ph_wm_hook(tree, path, env_extra=None):
     """Run world-model-ledger's pretooluse.sh from `tree` in a seeded project; return
     (stdout with the project path masked, additionalContext seen)."""
     root = tempfile.mkdtemp(prefix="ab-ph-")
-    proj = os.path.join(root, "proj")
-    os.makedirs(os.path.join(proj, ".git"))
-    with open(os.path.join(proj, "x.py"), "w") as f:
-        f.write("print(1)\n")
-    assets = os.path.join(tree, "world-model-ledger", "assets")
-    db = os.path.join(proj, ".world-model", "model.db")
-    wm = os.path.join(assets, "world_model.py")
-    subprocess.run([sys.executable, wm, "--db", db, "bootstrap", proj], cwd=proj,
-                   capture_output=True)
-    subprocess.run([sys.executable, wm, "--db", db, "observe", "x.py", "reads", "db.py",
-                    "--subj-kind", "file", "--obj-kind", "file", "--evidence", "ab"],
-                   cwd=proj, capture_output=True)
-    payload = {"cwd": proj, "tool_name": "Edit", "tool_input": {"file_path": "x.py"}}
-    env = {"PATH": path, "HOME": root}
-    env.update(env_extra or {})
-    r = subprocess.run(["bash", os.path.join(assets, "hooks", "pretooluse.sh")],
-                       input=json.dumps(payload), env=env, capture_output=True, text=True)
-    out = r.stdout.replace(proj, "P")
-    return out, int("x.py reads db.py" in out)
+    try:
+        proj = os.path.join(root, "proj")
+        os.makedirs(os.path.join(proj, ".git"))
+        with open(os.path.join(proj, "x.py"), "w") as f:
+            f.write("print(1)\n")
+        assets = os.path.join(tree, "world-model-ledger", "assets")
+        db = os.path.join(proj, ".world-model", "model.db")
+        wm = os.path.join(assets, "world_model.py")
+        subprocess.run([sys.executable, wm, "--db", db, "bootstrap", proj], cwd=proj,
+                       capture_output=True)
+        subprocess.run([sys.executable, wm, "--db", db, "observe", "x.py", "reads", "db.py",
+                        "--subj-kind", "file", "--obj-kind", "file", "--evidence", "ab"],
+                       cwd=proj, capture_output=True)
+        payload = {"cwd": proj, "tool_name": "Edit", "tool_input": {"file_path": "x.py"}}
+        env = {"PATH": path, "HOME": root}
+        env.update(env_extra or {})
+        r = subprocess.run(["bash", os.path.join(assets, "hooks", "pretooluse.sh")],
+                           input=json.dumps(payload), env=env, capture_output=True, text=True)
+        out = r.stdout.replace(proj, "P")
+        return out, int("x.py reads db.py" in out)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def _ph_chk_session_start(tree, path):
     """Run context-hygiene-kit's session_start.sh; 1 when it curated (wrote digest.md)."""
     root = tempfile.mkdtemp(prefix="ab-ph-")
-    proj = os.path.join(root, "proj")
-    os.makedirs(os.path.join(proj, ".context"))
-    t = os.path.join(proj, "t.jsonl")
-    with open(t, "w") as f:
-        f.write(json.dumps({"type": "user", "message": {"role": "user",
-                "content": "We decided to use sqlite for storage."}}) + "\n")
-    hook = os.path.join(tree, "context-hygiene-kit", "assets", "hooks", "session_start.sh")
-    subprocess.run(["bash", hook], env={"PATH": path, "CLAUDE_PROJECT_DIR": proj, "HOME": root},
-                   input=json.dumps({"cwd": proj, "transcript_path": t}),
-                   capture_output=True, text=True)
-    return int(os.path.isfile(os.path.join(proj, ".context", "digest.md")))
+    try:
+        proj = os.path.join(root, "proj")
+        os.makedirs(os.path.join(proj, ".context"))
+        t = os.path.join(proj, "t.jsonl")
+        with open(t, "w") as f:
+            f.write(json.dumps({"type": "user", "message": {"role": "user",
+                    "content": "We decided to use sqlite for storage."}}) + "\n")
+        hook = os.path.join(tree, "context-hygiene-kit", "assets", "hooks", "session_start.sh")
+        subprocess.run(["bash", hook], env={"PATH": path, "CLAUDE_PROJECT_DIR": proj, "HOME": root},
+                       input=json.dumps({"cwd": proj, "transcript_path": t}),
+                       capture_output=True, text=True)
+        return int(os.path.isfile(os.path.join(proj, ".context", "digest.md")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _ph_tmux_hook_runs(tree, path):
+    """Install tmux-agent-herdr-lite from `tree` on `path`, then run the Stop hook command it
+    registered with the same PATH; 1 when it exists and exits 0, 0 when none or it fails."""
+    root = tempfile.mkdtemp(prefix="ab-ph-")
+    try:
+        home, cfg = os.path.join(root, "home"), os.path.join(root, "claude")
+        os.makedirs(home)
+        os.makedirs(cfg)
+        env = {"PATH": path, "HOME": home, "CLAUDE_CONFIG_DIR": cfg}
+        installer = os.path.join(tree, "tmux-agent-herdr-lite", "scripts", "install.sh")
+        subprocess.run(["bash", installer], env=env, capture_output=True, text=True)
+        try:
+            with open(os.path.join(cfg, "settings.json")) as f:
+                groups = json.load(f)["hooks"]["Stop"]
+            cmd = groups[0]["hooks"][0]["command"]
+        except (OSError, ValueError, KeyError, IndexError):
+            return 0
+        r = subprocess.run(["sh", "-c", cmd], env=env, input="{}", capture_output=True, text=True)
+        return int(r.returncode == 0)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def check_portability_hooks(old, new):
@@ -9226,6 +9255,21 @@ def check_portability_hooks(old, new):
             "darwin, python3 is the stub, xcode-select -p exits 2: the baseline runs it (the "
             "fake leaves a marker; on a real Mac that is an install dialog); the branch skips "
             "it and runs `python`, an honest 0 -> 1", kind="delta", since=SINCE_PORTABILITY_HOOKS)
+        extra_tools = ["sed", "cp", "chmod", "rm", "touch", "ls", "tr", "cut", "head", "tail",
+                       "wc", "sort", "date", "uname", "awk", "mv", "basename", "find", "tee"]
+        tbin = _ph_bin(tmp, "tmuxbin", shim="python")
+        for t in extra_tools:
+            src = shutil.which(t)
+            if src and not os.path.exists(os.path.join(tbin, t)):
+                os.symlink(src, os.path.join(tbin, t))
+        a = _ph_tmux_hook_runs(old, tbin)
+        b = _ph_tmux_hook_runs(new, tbin)
+        row("tmux-agent-herdr-lite", "the registered Claude hook command runs with only `python` "
+            "on PATH (higher=better)", a, b, a == 0 and b == 1,
+            "no python3 on PATH, a `python` shim: the baseline installer needs python3 and "
+            "registers no hook; the branch registers a command that names the resolved "
+            "interpreter, and it exits 0 (not 127 from the agent-hook shebang), an honest "
+            "0 -> 1", kind="delta", since=SINCE_PORTABILITY_HOOKS)
         withpy3 = _ph_bin(tmp, "py3", shim="python3")
         oa, _ = _ph_wm_hook(old, withpy3)
         ob, seen = _ph_wm_hook(new, withpy3)

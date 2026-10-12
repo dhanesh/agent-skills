@@ -85,15 +85,19 @@ def claude_event_status(payload):
 
 # ── settings.json merge (pure) ───────────────────────────────────────────────
 
-def hook_command(agent_bin):
-    return f"{shlex.quote(os.path.join(agent_bin, 'agent-hook'))} claude {HOOK_MARKER}"
+def hook_command(agent_bin, python=None):
+    """Shell command Claude Code runs. With `python` it names the interpreter, so
+    the hook works where `agent-hook`'s `#!/usr/bin/env python3` shebang cannot."""
+    script = shlex.quote(os.path.join(agent_bin, 'agent-hook'))
+    prefix = f"{shlex.quote(python)} " if python else ""
+    return f"{prefix}{script} claude {HOOK_MARKER}"
 
 
 def _is_ours(hook):
     return HOOK_MARKER in str(hook.get("command", ""))
 
 
-def merge_claude_settings(settings, agent_bin, enable=True):
+def merge_claude_settings(settings, agent_bin, enable=True, python=None):
     """Return settings with our hook entries replaced (enable) or removed.
 
     Entries from other tools are left exactly as they were; groups and events
@@ -114,7 +118,7 @@ def merge_claude_settings(settings, agent_bin, enable=True):
         else:
             del hooks[event]
     if enable:
-        cmd = hook_command(agent_bin)
+        cmd = hook_command(agent_bin, python)
         for event in CLAUDE_EVENTS:
             hooks.setdefault(event, []).append(
                 {"hooks": [{"type": "command", "command": cmd, "timeout": 5}]})

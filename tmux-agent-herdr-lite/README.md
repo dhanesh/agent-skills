@@ -39,7 +39,7 @@ Nothing is copied onto your PATH and there are no new commands to learn: the ins
 
 `SKILL_PYTHON` names the interpreter. In the hooks and installers it is one executable, a name or a path, with no arguments.
 
-Version 2.3.1: the hooks and the installer now find Python through `find_python.sh`. They use `python3` or `python` on `PATH`, so a machine with only `python` works, and a hook with no interpreter exits quietly.
+Version 2.3.1: the installer finds Python with `find_python.sh` and checks that it is 3.10 or newer. It writes that interpreter into the Claude Code hook commands that it registers, so the hooks run on a machine that has only `python`. The `agent-*` scripts that tmux key bindings start still need `python3` on `PATH`.
 
 ## What it sets up
 
