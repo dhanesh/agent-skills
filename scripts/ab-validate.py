@@ -283,6 +283,9 @@ SINCE_MONEY_LEDGER = "117fb91"  # money ledger (roadmap step 6D, part 2): the ca
 SINCE_SKILL_GRAPH = "7ef969b"  # gates: skill-graph.sh -- the who-calls-whom
 # mermaid diagrams in README.md and every <skill>/README.md are rendered from
 # docs/skill-graph/graph.json and checked against it, the skills and their contracts.
+SINCE_SKILL_GRAPH_QUOTES = "f05e2bd"  # gates: skill-graph evidence is a verbatim quote
+# in a file, not a file:line, so a line that moves no longer fails the check. The commit
+# that changes skill_graph.py; repinned to its own short hash right after it lands.
 SINCE_PORTABILITY_RESOLVER = "f81be19"  # skill-contract portability retrofit, PR 1:
 # resolve_python() reads SKILL_PYTHON and skips the macOS python3 install stub without
 # running it. The commit that changes the reference checker.
@@ -926,10 +929,15 @@ def check_audit_guardrails(old, new):
         since=SINCE_README_CATALOG)
 
     # 6) skill-graph: README call-graph blocks that match docs/skill-graph/graph.json,
-    # each tree measured by the NEW checker (the baseline has no graph, so 0).
+    # each tree measured by its OWN checker when it has one (the NEW one otherwise:
+    # the baseline that predates the graph has no blocks, so 0). The tree's own
+    # checker matters since the evidence format changed: the NEW checker refuses an
+    # older graph.json, which would zero the old arm and fake an IMPROVED here.
     def graph_blocks(tree):
-        r = sp.run([sys.executable, "-I", os.path.join(new, "scripts", "gates", "skill_graph.py"),
-                    "--check", "--root", tree], capture_output=True, text=True, timeout=120)
+        own = os.path.join(tree, "scripts", "gates", "skill_graph.py")
+        checker = own if os.path.isfile(own) else os.path.join(new, "scripts", "gates", "skill_graph.py")
+        r = sp.run([sys.executable, "-I", checker, "--check", "--root", tree],
+                   capture_output=True, text=True, timeout=120)
         return sum(1 for line in r.stdout.splitlines()
                    if line.startswith("PASS:") and line.endswith("block is current"))
 
@@ -938,14 +946,10 @@ def check_audit_guardrails(old, new):
         "nothing showed where to start or which skill hands work to which",
         since=SINCE_SKILL_GRAPH)
 
-    # 7) skill-graph: a hand-edited diagram block is caught by the tree's OWN gate.
-    # Each tree's README/SKILL.md/references/graph files are copied, and the
-    # spec-first-planning block is edited by hand. A tree with no skill-graph.sh
-    # cannot catch it (0).
-    def stale_block_caught(tree):
-        gate = os.path.join(tree, "scripts", "gates", "skill-graph.sh")
-        if not os.path.isfile(gate):
-            return 0
+    # Each skill-graph probe below works on a copy of the tree's READMEs, SKILL.md
+    # and references/ files and graph.json, so it can break one thing and run the
+    # tree's OWN gate. A tree with no skill-graph.sh cannot catch anything (0).
+    def graph_copy(tree):
         dst = tempfile.mkdtemp()
         for top in ["README.md", os.path.join("docs", "skill-graph")]:
             src = os.path.join(tree, top)
@@ -962,18 +966,95 @@ def check_audit_guardrails(old, new):
                     shutil.copy(os.path.join(tree, d, f), os.path.join(dst, d, f))
             if os.path.isdir(os.path.join(tree, d, "references")):
                 shutil.copytree(os.path.join(tree, d, "references"), os.path.join(dst, d, "references"))
-        rc0, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
+        return dst
+
+    def graph_probe(tree, edit):
+        """Run the tree's own gate on a clean copy, apply `edit(copy)`, run it again.
+        Return (clean copy passed, edited copy passed), or None with no gate."""
+        if not os.path.isfile(os.path.join(tree, "scripts", "gates", "skill-graph.sh")):
+            return None
+        dst = graph_copy(tree)
+        try:
+            rc0, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
+            edit(dst)
+            rc1, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
+        finally:
+            shutil.rmtree(dst, ignore_errors=True)
+        return rc0 == 0, rc1 == 0
+
+    # 7) skill-graph: a hand-edited diagram block is caught by the tree's OWN gate.
+    # The spec-first-planning block is edited by hand.
+    def edit_block(dst):
         md = os.path.join(dst, "spec-first-planning", "README.md")
         text = open(md, encoding="utf-8").read()
         open(md, "w", encoding="utf-8").write(text.replace("the human decides go", "the human says so", 1))
-        rc1, _ = run(tree, "scripts/gates/skill-graph.sh", dst)
-        shutil.rmtree(dst, ignore_errors=True)
-        return 1 if rc0 == 0 and rc1 != 0 else 0
+
+    def stale_block_caught(tree):
+        r = graph_probe(tree, edit_block)
+        return 1 if r and r[0] and not r[1] else 0
 
     a, b = stale_block_caught(old), stale_block_caught(new)
     row("gates", "a hand-edited call-graph block is caught (1=yes)", a, b, b > a,
         "a generated diagram drifts silently unless a gate compares it",
         since=SINCE_SKILL_GRAPH)
+
+    # 8) skill-graph: a line shift in a SKILL.md does not fail the graph check.
+    # A blank line goes in just above the line of spec-first-planning's SKILL.md
+    # that is the evidence for its factory-conductor edge (found by its text, the
+    # same in both arms; well below the frontmatter, so no node's use_when line
+    # moves). Old arm: the file:line
+    # evidence below it now points at the wrong line, so the gate fails (0).
+    # The same edit, minus the blank line, deletes the evidence sentence: the
+    # guard row says both arms still fail on that.
+    def sfp_edit(dst, delete):
+        md = os.path.join(dst, "spec-first-planning", "SKILL.md")
+        lines = open(md, encoding="utf-8").read().split("\n")
+        i = next(n for n, l in enumerate(lines) if "when factory-conductor is among the" in l)
+        if delete:
+            del lines[i]
+        else:
+            lines.insert(i, "")
+        open(md, "w", encoding="utf-8").write("\n".join(lines))
+
+    def shift_passes(tree):
+        r = graph_probe(tree, lambda d: sfp_edit(d, False))
+        return 1 if r and r[0] and r[1] else 0
+
+    a, b = shift_passes(old), shift_passes(new)
+    row("gates", "a SKILL.md line shift no longer fails the graph check (1=yes)", a, b, b > a,
+        "file:line evidence forced line-number repins in 4 PRs in one week",
+        since=SINCE_SKILL_GRAPH_QUOTES)
+
+    # 9) skill-graph: a rewrapped frontmatter description does not fail the graph
+    # check. The first description line of spec-first-planning's SKILL.md is split
+    # in two at a space: the folded YAML text is the same, but the "Use when" line
+    # below it moves down one. Old arm: the use_when file:line now points at the
+    # wrong line, so the gate fails (0).
+    def rewrap_description(dst):
+        md = os.path.join(dst, "spec-first-planning", "SKILL.md")
+        lines = open(md, encoding="utf-8").read().split("\n")
+        i = next(n for n, l in enumerate(lines) if l.startswith("  Turn a fuzzy feature request"))
+        cut = lines[i].index(" ", 30)
+        lines[i:i + 1] = [lines[i][:cut], "  " + lines[i][cut + 1:]]
+        open(md, "w", encoding="utf-8").write("\n".join(lines))
+
+    def rewrap_passes(tree):
+        r = graph_probe(tree, rewrap_description)
+        return 1 if r and r[0] and r[1] else 0
+
+    a, b = rewrap_passes(old), rewrap_passes(new)
+    row("gates", "a rewrapped SKILL.md description no longer fails the graph check (1=yes)", a, b, b > a,
+        "the node use_when was a file:line inside the frontmatter description",
+        since=SINCE_SKILL_GRAPH_QUOTES)
+
+    def deleted_evidence_caught(tree):
+        r = graph_probe(tree, lambda d: sfp_edit(d, True))
+        return 1 if r and r[0] and not r[1] else 0
+
+    a, b = deleted_evidence_caught(old), deleted_evidence_caught(new)
+    row("gates", "a deleted call-graph evidence sentence is still caught (1=yes)", a, b, a == b == 1,
+        "quote evidence must not loosen the check: the call it proves is gone",
+        kind="guard")
 
 
 # ── bug-autopsy (evidence, not just structure) ──────────────────────────────

@@ -254,7 +254,8 @@ catalog_case "a row whose label and link disagree fails" FAIL "$r"
 
 # ── skill-graph: README diagrams match graph.json, and graph.json the skills ──
 # The diagrams are generated, so the risks are drift: a README edited by hand, an
-# evidence line that no longer names the other skill, a skill the graph forgot,
+# evidence quote that is gone, ambiguous or no longer names the other skill (a quote
+# that only moved is fine), a skill the graph forgot,
 # a node that is no longer a skill, or a contract pair with no edge. Each case is
 # a fresh three-skill repo (alpha hands off to beta; gamma works alone), written
 # once with --write, then broken in one way.
@@ -271,11 +272,11 @@ mkgraph() {
 {"root_insert_before": "## Software factory", "where_to_start": ["Start with alpha."],
  "stages": [{"id": "find", "title": "Find"}, {"id": "alone", "title": "Works alone"}],
  "nodes": {
-  "alpha": {"stage": "find", "role": "entry", "use_when": "alpha/SKILL.md:1", "start": "you test alpha"},
-  "beta": {"stage": "find", "role": "called", "use_when": "beta/SKILL.md:1", "start": "you test beta"},
-  "gamma": {"stage": "alone", "role": "entry", "use_when": "gamma/SKILL.md:1", "start": "you test gamma"}},
+  "alpha": {"stage": "find", "role": "entry", "use_when": {"file": "alpha/SKILL.md", "quote": "Use when you test alpha."}, "start": "you test alpha"},
+  "beta": {"stage": "find", "role": "called", "use_when": {"file": "beta/SKILL.md", "quote": "Use when you test beta."}, "start": "you test beta"},
+  "gamma": {"stage": "alone", "role": "entry", "use_when": {"file": "gamma/SKILL.md", "quote": "Use when you test gamma."}, "start": "you test gamma"}},
  "edges": [{"from": "alpha", "to": "beta", "kind": "handoff", "short": "result", "when": "alpha is done",
-            "why": "beta goes on", "evidence": [{"at": "alpha/SKILL.md:2", "mentions": "beta"}]}]}
+            "why": "beta goes on", "evidence": [{"file": "alpha/SKILL.md", "quote": "Hand the result to", "mentions": "beta"}]}]}
 EOF
   python3 -I "$GATES/skill_graph.py" --write --root "$r" >/dev/null 2>&1
   printf '%s\n' "$r"
@@ -304,8 +305,24 @@ r="$(mkgraph stale)"; sed 's/alpha is done/alpha is edited/' "$r/beta/README.md"
 graph_case "a hand-edited README block fails" FAIL "$r" "beta/README.md: the skill-graph block differs"
 r="$(mkgraph nomarkers)"; printf '# beta\n' > "$r/beta/README.md"
 graph_case "a README with no block fails" FAIL "$r" "beta/README.md has no single"
+r="$(mkgraph moved)"; printf 'Use when you test alpha.\nA new line.\n\nHand the result\n  to beta next.\n' > "$r/alpha/SKILL.md"
+graph_case "an evidence quote that moved and was rewrapped still passes" PASS "$r"
 r="$(mkgraph badev)"; printf 'Use when you test alpha.\nHand the result on.\nThen ask beta.\n' > "$r/alpha/SKILL.md"
-graph_case "an evidence line that no longer names the callee fails" FAIL "$r" "it is now on line(s) 3"
+graph_case "an edited evidence quote fails and says where the name is" FAIL "$r" "is not in alpha/SKILL.md; beta is now on line(s) 3"
+r="$(mkgraph twice)"; printf 'Hand the result to beta next.\n' >> "$r/alpha/SKILL.md"
+graph_case "an evidence quote that occurs twice fails" FAIL "$r" "occurs 2 times in alpha/SKILL.md (lines 2, 3)"
+r="$(mkgraph noname)"; printf 'Use when you test alpha.\nHand the result to gamma next.\nThen ask beta.\n' > "$r/alpha/SKILL.md"
+graph_case "an evidence quote whose line no longer names the callee fails" FAIL "$r" "(line 2) no longer sits on a line that has beta; beta is now on line(s) 3"
+r="$(mkgraph wrapped)"; printf -- '---\ndescription: A test skill.\n  Use when you\n  test alpha.\n---\nHand the result to beta next.\n' > "$r/alpha/SKILL.md"
+graph_case "a use_when quote in a moved and rewrapped description still passes" PASS "$r"
+r="$(mkgraph nousewhen)"; printf 'Run it as you test alpha.\nHand the result to beta next.\n' > "$r/alpha/SKILL.md"
+graph_case "a removed Use when clause fails" FAIL "$r" "node alpha: use_when quote 'Use when you test alpha.' is not in alpha/SKILL.md"
+r="$(mkgraph oldusewhen)"; sed 's|"use_when": {"file": "beta/SKILL.md", "quote": "Use when you test beta."}|"use_when": "beta/SKILL.md:1"|' "$r/docs/skill-graph/graph.json" > "$r/x" && mv "$r/x" "$r/docs/skill-graph/graph.json"
+graph_case "a use_when in the old file:line form fails" FAIL "$r" "node beta: use_when must be"
+r="$(mkgraph midword)"; printf 'Use when you test alpha.\nBeforehand the result to beta next.\n' > "$r/alpha/SKILL.md"
+graph_case "a quote does not match inside a longer word" FAIL "$r" "quote 'Hand the result to' is not in alpha/SKILL.md"
+r="$(mkgraph oldat)"; sed 's|"file": "alpha/SKILL.md", "quote": "Hand the result to"|"at": "alpha/SKILL.md:2"|' "$r/docs/skill-graph/graph.json" > "$r/x" && mv "$r/x" "$r/docs/skill-graph/graph.json"
+graph_case "an evidence item in the old file:line form fails" FAIL "$r" "uses the old \`at\` field"
 r="$(mkgraph missing)"; mkdir -p "$r/delta"; printf 'Use when.\n' > "$r/delta/SKILL.md"
 graph_case "a skill missing from the graph fails" FAIL "$r" "skill delta is missing"
 r="$(mkgraph notskill)"; rm "$r/gamma/SKILL.md"
