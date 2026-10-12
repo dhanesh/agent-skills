@@ -145,7 +145,7 @@
   "excluded": [
     {"pair": "context-hygiene-kit <-> world-model-ledger", "reason": "An install interop note: both install hooks into one repo. Neither calls the other."},
     {"pair": "ops-intake -> factory-conductor, release-conductor", "reason": "ops-intake/SKILL.md:229 forbids it: the human starts both."},
-    {"pair": "boundary lines (Not this skill: use X)", "reason": "They send a request that does not fit to another skill. They are not a step of the run."},
+    {"pair": "boundary lines (Not this skill: use X)", "reason": "Lines that only say what a skill is not. They are not a step of the run. A conditional redirect is kept as an edge, for example ai-migration-operating-model -> spec-first-planning when the ask changes behaviour."},
     {"pair": "agent-ready-rails -> context-hygiene-kit, world-model-ledger", "reason": "Rows in a grounding table, not steps."},
     {"pair": "factory-conductor, idea-validation, growth-review shared name check", "reason": "The three use the same algorithm. None calls another for it."}
   ]
