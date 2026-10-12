@@ -77,6 +77,9 @@ word, after the same fold: `OK`, `Dana yes`, `Dana_ok` and `ｏｋ` are a `STOP:
 tool echoes the name. `Grant` is a real first name and is refused too (fail closed).
 `Yesenia` passes, because the check matches whole words.
 
+The checks stay strict (owner decision, 2026-10-12). A person whose name starts with `Agent`
+or holds `Grant` signs with a surname or initials instead, for example `A. Smith` or `G. Lee`.
+
 Names are self-declared: the rule against an agent typing a human's name is in SKILL.md.
 
 ### register

@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
-  version: "0.2.2"
+  version: "0.2.3"
   skill-contract: "1"
   tags: "factory,operations,intake,skill-contract"
 ---
@@ -109,10 +109,11 @@ Read each command's output lines, not only its exit code.
    when its jobs are imported, so CI takes two passes (import the runs, sync, then run each
    jobs `NEXT:` line). A failing run with no failing job (a `startup_failure` has no jobs)
    becomes one item for the run itself, `<workflow>/(run)/<branch>`. Jira and Linear have no
-   built-in format yet: the human's transform (or you, from an MCP search result, under step
-   2's rule) writes `intake-signals-jsonl` records, whose `source` field equals `--source`;
-   the `ITEM:` flag of those items carries `+low-trust`. An issue that is already closed when
-   intake first sees it makes no item: it is history, not a signal.
+   dedicated reader: follow their recipe in `references/conversion-recipes.md` (a read-only
+   export run through a small transform), or, from an MCP search result under step 2's
+   rule, write the `intake-signals-jsonl` records yourself. Their `source` field equals
+   `--source`, and the `ITEM:` flag of those items carries `+low-trust`. An issue that is
+   already closed when intake first sees it makes no item: it is history, not a signal.
 
    Each import prints `IMPORT: <source> <format> ok <n> problems <m>` and up to 50
    `PROBLEM:` lines. A bad record is a problem and the other records still import (exit 3). A
@@ -199,7 +200,10 @@ Support messages, app reviews and feedback-form answers come in through `feedbac
 CLI owns the inbox, the store console or the form, so the human exports the messages and you
 (or the human) transform the export: one JSON line per message with `id`, `topic`, `channel`
 (`email`, `review`, `form`, `chat` or `other`), `created_at` and `text`, and optionally
-`rating` (1 to 5), `severity` (1 to 3; a 4 is capped at 3) and `url`. `references/formats.md` has the format.
+`rating` (1 to 5), `severity` (1 to 3; a 4 is capped at 3) and `url`.
+`references/formats.md` has the format. `references/conversion-recipes.md` has an export
+and transform recipe for App Store Connect, Play Console, Zendesk and Intercom; its
+transforms leave `topic` for you to fill in.
 Messages with the same topic become one item titled `feedback: <topic>`, and each new message
 raises its count, so twelve people with one problem show as one item with a count of 12.
 
@@ -271,16 +275,17 @@ A failure there, or counts that disagree, is a tool bug: report it, and do not e
   attacker's command in its own words, and no substring check sees that. Hidden and control
   characters fail the lint, but look-alike letters from another script (homoglyphs) are not
   flagged. The real boundary is the human reading every `CHECK_COMMAND:` line.
-- **Jira and Linear need real samples.** `jira-mcp`, `jira-acli` and `linear-mcp` are not built:
-  their output is undocumented, and the adapters wait for the owner's redacted real samples.
-  Until then those sources come in through `intake-signals-jsonl`.
+- **Jira and Linear have no dedicated reader.** There is no `jira-mcp`, `jira-acli` or
+  `linear-mcp` format, by the owner's choice: those sources come in through
+  `intake-signals-jsonl`, with the per-tool recipes in `references/conversion-recipes.md`.
 - **The generic format is lower trust.** An `intake-signals-jsonl` item has `trust: low` in its
   envelope and `+low-trust` in its `ITEM:` flag: its provenance is only what the transform
   claims. A `feedback-jsonl` item is lower trust for the same reason.
 - **Feedback topics are your judgement, and redaction is partial.** Intake does not cluster
   messages: the topic you write decides what is grouped. It redacts email addresses and phone
-  numbers only. App Store Connect, Play Console, Zendesk and Intercom have no built-in format;
-  they come in through your transform of their export.
+  numbers only. App Store Connect, Play Console, Zendesk and Intercom have no dedicated
+  reader; they come in through your transform of their export into `feedback-jsonl`, and
+  `references/conversion-recipes.md` has a recipe for each.
 - **Attribution is self-declared.** Sync accepts a task-plan, run-result or release-result only
   from its producer skill, but that name is what the envelope says, not a signature.
 - **Loop closing needs the history and can stop at needs-resolve.** Intake runs no git, so a

@@ -52,10 +52,12 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
 - GitHub issues (`gh issue list --json …`).
 - Jira, Linear or any other source, through one simple JSON-lines format that you or the agent
   write (`intake-signals-jsonl`). These items are marked lower trust.
+  `references/conversion-recipes.md` has a short recipe for Jira and for Linear.
 - Support messages, app reviews and feedback-form answers, through `feedback-jsonl`. You
   export them, and you or the agent transform the export to one line per message, with a
   topic for each. Messages with the same topic become one item with a count. These items are
-  marked lower trust too.
+  marked lower trust too. The same page has recipes for App Store Connect, Play Console,
+  Zendesk and Intercom.
 
 The agent runs each command or MCP search tool. It pipes CLI output straight into
 `intake.py import`, so it does not read that text first. The tool runs no command, opens no
@@ -94,8 +96,8 @@ only when its source sees it again after the dismissal.
 - Intake cannot stop an MCP tool from writing. Your permission prompts are the control.
 - The copy warning finds copied text, not a command that an attacker made the planner rewrite
   in its own words. Your review of the check commands is the real boundary.
-- Built-in Jira and Linear formats wait for real output samples. Until then, use
-  `intake-signals-jsonl`.
+- There is no dedicated Jira or Linear reader. Use `intake-signals-jsonl` with the recipe
+  for your tool.
 - Which skill made an envelope is what the envelope says. It is not signed.
 - For feedback, the agent reads every message to choose its topic. So the pipe does not keep
   that text away from the agent. Your review of the check commands is the backstop.
@@ -103,13 +105,24 @@ only when its source sees it again after the dismissal.
 - The tool writes email addresses and phone numbers as `[email]` and `[phone]`. Names,
   street addresses and account numbers still get through. The evidence stays in the
   git-ignored intake directory.
-- App Store Connect, Play Console, Zendesk and Intercom have no built-in format. You export
-  from them and transform the export.
+- App Store Connect, Play Console, Zendesk and Intercom have no dedicated reader. You export
+  from them and transform the export with the recipe for your tool.
 
 ## Files
 
 - `SKILL.md`: the agent's instructions.
 - `references/formats.md`: every format, the config, the states and the machine lines.
+- `references/conversion-recipes.md`: an export and transform recipe for Jira, Linear, App
+  Store Connect, Play Console, Zendesk and Intercom.
 - `assets/intake.py`, `assets/adapters.py`: the tool (Python 3.10+, standard library only).
 - `assets/schemas/intake-item.v1.json`: the envelope payload schema.
 - `eval/run_eval.py`: the outcome eval.
+
+## Changes
+
+- **0.2.3.** Jira, Linear, App Store Connect, Play Console, Zendesk and Intercom get no
+  dedicated reader. This is the owner's decision. The new `references/conversion-recipes.md`
+  gives a recipe for each tool: how to export, a short stdlib Python transform, and the
+  personal data to drop. Jira and Linear go to `intake-signals-jsonl`. The store and support
+  tools go to `feedback-jsonl`. SKILL.md now points to the recipes. It no longer says that
+  the readers wait for real samples.
