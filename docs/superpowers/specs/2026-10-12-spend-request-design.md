@@ -14,7 +14,7 @@ Jev scored the design and the Opus advisor decided where Jev was uncertain.
 |---|---|---|---|
 | R1 | **Prose only. The existing commands are used unchanged.** The executor reports `NEEDS_DECISION` with the spend fields. The controller runs `ledger.py check` against the repository root, then passes a one-line request to `conductor decision`. | B 0.60 against A 0.39 (conf. 0.40, uncertain); decided by the advisor | A `request` command in `ledger.py` would reopen the money tool's review surface. The #87 review found a cap bypass there (H1), and the command would add no guarantee that a test could pin. `conductor.py` stays isolated from the ledger, and a test already pins this. |
 | R2 | **The controller runs the check, never the executor.** It runs with `--root <repo>`. | advisor | Executors run in a task worktree. A check run there would reserve budget in the wrong state directory, and a resumed session's allowlist may refuse it. |
-| R3 | **A stable request id:** `<run-id>-<task>`, cut to the ledger's kebab-case limit. | advisor | A resumed run checks again. A replay is checked against the caps again (the H1 fix) and does not add a second reservation. A new id each time would. |
+| R3 | **A stable, collision-proof request id:** `<run-id>-<slug>-<n>-<h>` (see factory-conductor SKILL.md for the one-line command; the review found that `<run-id>-<task>` cut to 64 characters let two tasks share an id). | advisor | A resumed run checks again. A replay is checked against the caps again (the H1 fix) and does not add a second reservation. A new id each time would. |
 | R4 | **The request is one line in a fixed format.** | advisor | `status` prints the question JSON-escaped, and the PR body puts it inside inline code (`conductor.py:1502`, `:3390`). A multi-line request would be hard to read in both places. |
 | R5 | **The request names the `record` command and the `withdraw` command.** | advisor | A reservation stays until the human records it or withdraws it. A declined request would otherwise hold budget for good. |
 | R6 | **No payment links.** Only the vendor and the item. | advisor | The text comes from an agent that reads repository content, so a link could be injected. |
@@ -25,12 +25,14 @@ No amount or budget went to Jev.
 ## The request format
 
 ```
-spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: ledger.py --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: ledger.py --root <repo> withdraw --id <id> --by <your name> --reason <text>
+spend request <id>: <item> from <vendor>; <amount> <CUR> <once in YYYY-MM | monthly from YYYY-MM [to YYYY-MM]>; category <c>; ledger: NOT_REFUSED <id>; why: <one clause>; blocks: <task ids>; after buying: <ledger> --root <repo> record --id <id> --amount <a> --currency <CUR> --month <YYYY-MM> --by <your name>; to decline: <ledger> --root <repo> withdraw --id <id> --by <your name> --reason <text>
 ```
 
 When the check prints `REFUSED:`, the line says `ledger: REFUSED <reason>` and leaves out the `record` and `withdraw` parts. The task parks the same way, and the human decides whether to change the budget.
 
 Without a registered budget the check refuses, so the line says `ledger: no registered budget`.
+
+On any `STOP:` line (exit 2), the line says `ledger: STOP <the STOP line>`, leaves out the `record` and `withdraw` parts, and the task parks. `<ledger>` is the resolved path to `ledger.py`, written by the controller.
 
 ## Changes
 

@@ -162,8 +162,8 @@ The request id is `<run-id>-<task slug>-<n>-<h>`. SKILL.md ("Stop and park rules
 holds the one-liner that prints it, and is the only copy. `n` counts the paid items of one task
 from 1. `h` is a hash of the run id, the task id and `n`, so task ids that fold to the same
 slug still get different ids. The same inputs give the same id. A resumed run checks the same
-request again, and the ledger counts that replay once. A resumed run also reuses the month
-and `n` of the earlier request line. If it cannot find that line, it tells the human the old
+request again, and the ledger counts that replay once. A resumed run also reuses the month,
+`n` and amount of the earlier request line. If it cannot find that line, it tells the human the old
 id so the human can withdraw it.
 
 The request is one line, because `status` prints the question JSON-escaped and the PR body puts
