@@ -464,8 +464,8 @@ cursors, and could fail on demand. The App Store run also went through
 - With `max=3`, 3 pages imported and 4 pages stopped with exit 1.
 - The App Store export failed in four ways: HTTP 500 on page 2, a converter error on
   page 2, a repeated `links.next`, and SIGTERM. Each time, the export removed `$d` and
-  printed no path. After an earlier export failed on a converter error, `$d/feedback.jsonl`
-  stayed on the disk with the review text.
+  printed no path. With the script from before this change, a converter error on page 2
+  left `$d/feedback.jsonl` on the disk with the review text.
 
 Sources for the field names:
 
