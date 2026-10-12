@@ -79,7 +79,7 @@ for issue in json.load(sys.stdin).get("issues", []):
 
 **Notes.**
 
-- Priority names are set per site. The map uses the default names. A name that is not in
+- Each site sets its own priority names. The map uses the default names. A name that is not in
   the map gives severity 2. Edit the map to match your site.
 - The issue's `self` field is an API link, not a page link. The script builds the
   `/browse/<key>` page link from your site address.
@@ -123,8 +123,8 @@ for n in json.load(sys.stdin)["data"]["issues"]["nodes"]:
 - `priority` is a number: 0 is no priority, 1 Urgent, 2 High, 3 Medium and 4 Low. It can
   come back as `3.0`, so the script converts it to a whole number.
 - The query asks for no assignee, creator or description, so no personal data comes in.
-- A GraphQL error response has no `data`, so the script stops with an error and nothing is
-  imported. Run the query again after you fix it.
+- A GraphQL error response has no `data`, so the script stops with an error and intake
+  imports nothing. Run the query again after you fix it.
 
 ## Feedback tools: the shared last step
 
@@ -184,7 +184,7 @@ the script sends no `url`.
 ## Google Play Console (reviews)
 
 **Export, recent reviews.** The Google Play Developer API `reviews` list method returns only
-reviews that have a written comment and that users created or changed in the last week. Each
+reviews with a written comment. It also returns only reviews from the last week. Each
 review has `reviewId`, `authorName` and `comments`. A user comment holds `text`,
 `starRating` and `lastModified` (`seconds` and `nanos`).
 
@@ -205,10 +205,14 @@ for r in json.load(sys.stdin).get("reviews", []):
 ```
 
 **Export, older reviews.** Download the reviews as a CSV file from the Play Console. This
-page does not name the CSV columns, because they are not verified here. Map the column that
-holds the review text to `text`, the star rating to `rating`, the submit or last-update time
-to `created_at` (convert it to RFC 3339), and a review id or review link to `id`. Use
-Python's `csv` module. Check the column names in your own file.
+page does not name the CSV columns, because nobody verified them here. Map these columns:
+
+- the column that holds the review text to `text`;
+- the star rating to `rating`;
+- the submit or last-update time to `created_at`, converted to RFC 3339;
+- a review id or review link to `id`.
+
+Use Python's `csv` module. Check the column names in your own file.
 
 **Drop:** `authorName` and every device field (`device`, `deviceMetadata`, the Android and
 app versions). A developer reply is your text, not a signal, so the script skips it.
