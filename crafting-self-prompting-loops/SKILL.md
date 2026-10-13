@@ -14,7 +14,7 @@ license: MIT
 compatibility: Runtime-agnostic prompt skill; scaffolds target Claude Code primitives (/goal, /loop, Routines, ScheduleWakeup, Workflow) but degrade to framework-agnostic pseudocode. Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`) is optional, used only to validate skill-contract handoffs and check grants.
 metadata:
   author: dhanesh
-  version: "1.4.5"
+  version: "1.5.0"
   skill-contract: "1"
   tags: "agents,loops,self-prompting,safety,prompt-injection,termination,backstop"
 ---
@@ -87,7 +87,7 @@ Produce two things:
 
 ### 6. Sanity pass against the failure modes
 
-Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock, evaluation degradation/sycophancy, and oversight degradation/rubber-stamping (human-checkpointed). For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
+Before you call it done, walk `references/failure-modes.md` and check the loop against each mode relevant to its family: oscillation, drift, premature stop, runaway, prompt-injection, context/state bloat, cost blowout, multi-agent deadlock, evaluation degradation/sycophancy, and oversight degradation/rubber-stamping (human-checkpointed). For a loop that runs for hours unattended or fans out to parallel lanes, also walk the operational modes: a script edited while it runs, an orphaned background job, a rejected cleanup step, parallel units that overwrite one shared target, state lost from a wiped temp directory, and host sleep. For each real risk, confirm the spec has a detector and a recovery. This is cheap and catches the problems that only show up at round 20.
 
 ## Audit mode (existing loops)
 

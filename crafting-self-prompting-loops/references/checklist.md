@@ -56,7 +56,7 @@ SAFE_STATE: stopped
 
 **Across families:** identical in all four — the cap lives in the harness, not the model, so it fires regardless of family (a)/(b)/(c)/(d).
 
-**✓ Verify:** Does the loop terminate when an external cap is hit, with zero dependence on the model choosing to stop?
+**✓ Verify:** Does the loop terminate when an external cap is hit, with zero dependence on the model choosing to stop? If the loop runs for hours on a host that can sleep, does it detect a sleep gap (heartbeat or monotonic-clock check) and resume, rather than count the sleep as work?
 
 - [ ] LSC-3 satisfied
 
@@ -171,7 +171,7 @@ CACHE_AWARENESS: <how pacing respects the prompt-cache TTL, e.g. ~5 min>
 
 **Across families:** (a) cap refinement rounds; (b) budget the full task run; (c) budget per agent and in aggregate; (d) pacing aligned to human availability at checkpoints.
 
-**✓ Verify:** Are spend, iteration count, and pacing all bounded, with cadence chosen against the cache TTL rather than a round number?
+**✓ Verify:** Are spend, iteration count, and pacing all bounded, with cadence chosen against the cache TTL rather than a round number? For parallel lanes, is the lane count sized from the scarcest shared resource (not host cores), and does each non-shareable resource have a machine-wide lock with an owner file?
 
 - [ ] LSC-9 satisfied
 

@@ -29,6 +29,8 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**1.5.0.** The references now cover long unattended runs. LSC-9 has a capacity rule: probe the machine, size parallel lanes from the scarcest shared resource, and lock what lanes cannot share. LSC-3 has a host-sleep rule. `failure-modes.md` adds modes #11–#15 (a script edited while it runs, an orphaned background job, a rejected cleanup step, a whole-unit integration clobber, state in a wiped temp directory). `claude-code-primitives.md` adds the background-job, worker, resume and ledger pattern.
+
 **1.4.5.** SKILL.md says that `{python}` is resolved only in the list you show the user. The commands keep `{python}`. The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 
 **1.4.4.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

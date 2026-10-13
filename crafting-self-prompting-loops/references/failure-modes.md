@@ -23,6 +23,11 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 | 8 | Multi-agent deadlock / over-fanout | Agents wait on each other or spawn unboundedly | LSC-3, LSC-9, LSC-2 | (c) |
 | 9 | Evaluation degradation / sycophancy | Self-grading inflates perceived quality while real quality stalls or falls | **LSC-5**, LSC-2 | (a), (b), (c) |
 | 10 | Oversight degradation / rubber-stamping | Human gate stays in place but approvals go reflexive — performative, not protective | **LSC-8**, LSC-5 | (d), (b) |
+| 11 | In-place edit of a running script | A running loop script fails with a syntax error, or re-enters its own lock, after someone edits it | **LSC-10**, LSC-6 | (b), (c) |
+| 12 | Orphaned background job | A worker dies on a transient error, but its background job keeps running; a restart starts a duplicate | **LSC-4**, LSC-10 | (c), (b) |
+| 13 | Rejected cleanup step | The permission layer rejects a delete mid-task and the loop stalls or routes around it | **LSC-8**, LSC-6 | (b) |
+| 14 | Whole-unit integration clobber | Parallel units each replace one shared unit, and the last writer erases the others | **LSC-9**, LSC-6 | (c) |
+| 15 | Loop state in a wiped temp directory | Logs, prompts or the ledger vanish from `/tmp`, and the loop cannot resume | **LSC-4** | (b), (c) |
 
 ---
 
@@ -111,6 +116,41 @@ Families referenced throughout: **(a) self-refinement/reflexion**, **(b) autonom
 - **Detection (don't just name it — measure it):** log the approve/block ratio over time (a ratio that only climbs is a tell), and **red-team the gate with canaries** — periodically route a known-bad plan through it and check whether the human actually blocks it. A gate that never blocks anything, including planted failures, has degraded to a rubber stamp regardless of how it looks.
 - **Most prone:** (d) human-checkpointed by construction; (b) autonomous loops with a nominal human gate that is rarely exercised.
 
+### 11. In-place edit of a running script
+
+- **Symptom:** A loop script (a wrapper, a driver, a lane runner) fails with a syntax error at a line nobody touched, or runs a stale branch, or re-enters its own lock and waits on itself. It starts soon after someone edits that script while it runs.
+- **Cause:** A shell reads a script incrementally, by byte offset, while it executes. An in-place edit moves the bytes under the running shell, so the shell resumes in the middle of a different line. A loop that re-runs its own file can also take its own lock a second time.
+- **Mitigation:** Never edit a running script in place, because the running shell reads the new bytes at the old offsets. Write the new version to a new file and rename it over the old path: the rename is atomic, and the running shell keeps the old file open. Put each wrapper body in a function and call it on the last line (`main "$@"`), so the shell parses the whole body before it runs any of it. Make the lock re-entrant by owner (compare the pid in the owner file) or refuse to start when the caller already holds it (**LSC-10**, **LSC-6**).
+- **Most prone:** (b) long autonomous runs that the operator patches while they run; (c) fan-out loops whose lanes share one driver script.
+
+### 12. Orphaned background job
+
+- **Symptom:** A worker agent ends with a transient API or network error. Its background job (a build, a test run, a server) keeps running. The orchestrator restarts the work, and now two jobs race for the same pid file, port, database or lock, or one overwrites the other's output.
+- **Cause:** The worker's death and its job's death are separate events. The orchestrator treats "agent failed" as "work not started" and starts from zero, because it does not check for a job that the dead worker left behind.
+- **Mitigation:** Before you restart any failed worker, look for its orphaned job: check the pid or owner file and the job's output. If the job is alive, resume the same agent (it keeps its context) and tell it the new fact: wait on the existing pid and read its output. Never start a duplicate job, because two jobs then race for the same pid, port and lock and corrupt each other's results. Record every job start and finish in the loop's state (a ledger line with the pid), so a resumed orchestrator can find live jobs without guessing (**LSC-4**, **LSC-10**).
+- **Most prone:** (c) orchestrators that fan out to worker agents; (b) long runs that start background jobs.
+
+### 13. Rejected cleanup step
+
+- **Symptom:** In the middle of a task, the permission layer or auto-mode classifier rejects a cleanup step (`rm -rf out/old`, a branch delete). The loop stalls, or the agent retries the delete in another form to get past the rejection.
+- **Cause:** The workflow needs deletion to make progress (it reuses one output directory and must clear it first). Deletion is the action class that permission systems guard most strictly, so an unattended loop hits the rejection with no human present.
+- **Mitigation:** Design the workflow so it never needs to delete: write each run to a new timestamped output directory, and overwrite by copy instead of delete-then-write. Accept a rejected destructive action; do not route around it, because the rejection is the loop's human gate working as designed (**LSC-8**). If the rejection blocks the loop, stop the affected lane and give the human the exact command to run, then continue with work that does not depend on it (**LSC-6**).
+- **Most prone:** (b) autonomous loops in auto mode or in a Routine, where nobody is watching the prompt.
+
+### 14. Whole-unit integration clobber
+
+- **Symptom:** Parallel units each finish and each report success, but the shared target (a registry file, a router table, a generated index) holds only the last unit's work. Earlier units' changes are gone with no conflict reported.
+- **Cause:** Each unit integrates by replacing a whole shared unit (it writes the full file) instead of making a merge-safe edit. Parallel writers then follow last-writer-wins, and nothing detects the loss.
+- **Mitigation:** Units that share an integration target run sequentially; run in parallel only the units whose outputs do not overlap. Plan the lanes from the integration targets, not only from the units (**LSC-9**). After each integration, check that the earlier units' entries are still present (**LSC-6**). This is a fan-out design fault, so it belongs with #8.
+- **Most prone:** (c) fan-out loops whose lanes register into one shared file.
+
+### 15. Loop state in a wiped temp directory
+
+- **Symptom:** After a reboot, a cleanup job or a long idle, the loop's logs, prompts or ledger are gone. The loop cannot resume, and nobody can audit what it did.
+- **Cause:** The loop wrote its state under `/tmp` or another system temp directory, which the OS may clear at any time.
+- **Mitigation:** Keep all loop state (ledger, logs, prompts, lock owner files) in a repo-local, git-ignored directory such as `out/`. Treat the state directory as part of the loop's durable state (**LSC-4**).
+- **Most prone:** (b) multi-day runs; (c) fan-out loops with one log per lane.
+
 ---
 
 ## Part B — Cost & cadence playbook (LSC-9 / O2)
@@ -147,6 +187,15 @@ Rule of thumb: **don't think in round-number minutes (5 min, 10 min) — think i
 
 For (d) human-checkpointed loops, align idle cadence to human availability — long idle ticks between checkpoints are the norm, so eat the cache miss and wait.
 
+### Capacity-sized parallelism
+
+When the machine can run lanes in parallel, size the lanes from what the machine really has, not from a guess.
+
+1. **Probe first.** Read the host cores, the CPUs and memory of any container VM that the lanes share, and the free disk.
+2. **Size from the scarcest shared resource.** A host with many cores still runs one lane per slot of a small container VM. Use host cores only when nothing else is shared.
+3. **Lock what cannot be shared.** A resource that lanes cannot share safely (one container VM that runs a heavy server per lane) gets one machine-wide lock. The lock has an owner file with the pid, the worker, the task and the start time, so a waiter can see who holds it and check that the holder is still alive.
+4. **Feed the lock into cadence.** The holder's expected duration sets when a waiter wakes. Wake on the holder's completion, not on a polling timer.
+
 ### Different model for review
 
 - Use a **separate, often cheaper, model for self-evaluation / review passes** (LSC-5).
@@ -165,3 +214,6 @@ For (d) human-checkpointed loops, align idle cadence to human availability — l
 - [ ] Is cadence chosen against the **cache TTL**, not a round-number minute?
 - [ ] Are review/self-eval passes run on a **separate/cheaper model** to cut cost and shared bias?
 - [ ] For multi-agent: is there an **aggregate** budget and agent-count/spawn-depth cap, not just per-agent?
+- [ ] For parallel lanes: did the loop **probe** the machine (cores, container-VM CPUs and memory, free disk) and size lanes from the **scarcest shared resource**?
+- [ ] Does each non-shareable resource have a **machine-wide lock with an owner file** (pid, worker, task, start time), and does the waiter wake on the holder's completion instead of polling?
+- [ ] Do units that share an integration target run **sequentially** (Part A #14)?

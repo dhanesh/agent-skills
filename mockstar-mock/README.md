@@ -104,4 +104,5 @@ speculative inferences that should be reviewed before using in production.
 
 ## Changes
 
+- **1.2.0.** Opt-in per-scenario `contentEncoding` (gzip, deflate, br) with correctly compressed bodies. gzip and deflate are built at generation time by `assets/encode_body.py`. br and negotiation run through a dynamic handler, because mockstar static responses cannot carry compressed bytes; the coverage report lists that gap and `references/mockstar-mapping.md` proposes the mockstar feature. `assets/smoke.sh` decodes encoded routes. `assets/header_coverage.py` adds a per-mock list of matched request headers, spelled as written, so a consumer can see whether header casing is exercised.
 - **1.1.5.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

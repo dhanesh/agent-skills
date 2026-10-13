@@ -262,6 +262,148 @@ def main():
         check("test plan fixture wires plan to judge (names parity_check.sh)",
               "parity_check.sh" in plan)
 
+        # ── Parallel-ready judge: capacity, sharding, impact, mutants ────────
+        probe_py = os.path.join(dst, "assets", "capacity_probe.py")
+        r = run(probe_py, "--host-cpus", "10", "--vm-cpus", "4", "--vm-gib",
+                "6", "--free-disk-gib", "80")
+        check("capacity probe sizes lanes from the VM, not host cores",
+              r.returncode == 0 and "LANES: 3 (parallel: limited by VM CPUs"
+              in r.stdout, r.stdout.strip().splitlines()[-1])
+        r = run(probe_py, "--host-cpus", "10", "--vm-cpus", "8", "--vm-gib",
+                "16", "--free-disk-gib", "2")
+        check("capacity probe goes serial on low disk (negative arm)",
+              "LANES: 1 (serial: free disk" in r.stdout)
+
+        golden = os.path.join(tmp, "e2e-golden")
+        for suite, n in (("pay", 3), ("fees", 2), ("kyc", 1)):
+            for i in range(n):
+                os.makedirs(golden, exist_ok=True)
+                with open(os.path.join(golden, "%s__s%d.json" % (suite, i)),
+                          "w", encoding="utf-8") as f:
+                    json.dump({"id": i, "topic": "evt-l{lane}"}, f)
+        cap = os.path.join(tmp, "capture.py")
+        with open(cap, "w", encoding="utf-8") as f:
+            f.write(textwrap.dedent("""\
+                import json, os, sys
+                golden, suite, out, lane, broken = sys.argv[1:6]
+                if suite == broken:
+                    sys.exit(4)
+                for name in sorted(os.listdir(golden)):
+                    if name.startswith(suite + "__"):
+                        with open(os.path.join(golden, name)) as fh:
+                            v = json.load(fh)
+                        v["topic"] = v["topic"].replace("-l{lane}", "-l" + lane)
+                        with open(os.path.join(out, name), "w") as fh:
+                            json.dump(v, fh)
+                """))
+        shard_py = os.path.join(dst, "assets", "e2e_shard.py")
+
+        def shard(broken="none", *extra):
+            return run(shard_py, "--golden", golden,
+                       "--out-dir", os.path.join(tmp, "e2e-runs"),
+                       "--capture-cmd", "%s %s %s {suite} {out} {lane} %s"
+                       % (sys.executable, cap, golden, broken),
+                       "--lanes", "2", "--no-lock", *extra)
+        r = shard("none", "--lane-echo=-l{lane}")
+        check("sharded e2e merges lanes and judges them as one corpus",
+              r.returncode == 0
+              and "PARITY_RESULT: PASS (6 scenario(s), 0 diff(s))" in r.stdout)
+        r = shard("fees", "--lane-echo=-l{lane}")
+        check("a lane whose capture failed is judged missing, not skipped",
+              r.returncode == 1 and "scenario missing in new" in r.stdout)
+        r = shard("none")
+        check("lane-echo normalisation is load-bearing (fails without it)",
+              r.returncode == 1 and "PARITY_RESULT: FAIL" in r.stdout)
+
+        repo = os.path.join(tmp, "impact-repo")
+        files = {"internal/app/app.go": "w", "internal/pay/h.go": "p",
+                 "internal/fees/h.go": "f", "go.mod": "m",
+                 "judge/golden/pay__a.json": "{}",
+                 "judge/golden/fees__a.json": "{}"}
+        for rel, body in files.items():
+            os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
+            with open(os.path.join(repo, rel), "w", encoding="utf-8") as f:
+                f.write(body)
+        cfg = os.path.join(repo, "impact.json")
+        with open(cfg, "w", encoding="utf-8") as f:
+            json.dump({"manifest": "out/manifest.json",
+                       "track": ["internal/*", "go.mod", "judge/*"],
+                       "full_on": ["internal/app/", "go.mod"],
+                       "suite_files": [r"^judge/golden/(?P<suite>[a-z]+)__"],
+                       "units": [r"^(?P<unit>internal/[^/]+)/[^/]+\.go$"],
+                       "golden": "judge/golden",
+                       "deps_cmd": "echo internal/{suite}"}, f)
+        impact_py = os.path.join(dst, "assets", "impact.py")
+        r = run(impact_py, "--config", cfg, "suites")
+        check("impact selection fails closed to ALL with no baseline",
+              r.stdout.strip() == "ALL")
+        red = os.path.join(tmp, "red-status.json")
+        with open(red, "w", encoding="utf-8") as f:
+            json.dump({"verdict": "PARITY_RESULT: FAIL (2 diff(s))",
+                       "suites": "all"}, f)
+        r = run(impact_py, "--config", cfg, "record", "--status", red)
+        check("impact refuses a baseline from a red run (negative arm)",
+              r.returncode == 1 and "not green" in r.stderr)
+        tree = run(impact_py, "--config", cfg, "tree-id").stdout.strip()
+        green = os.path.join(tmp, "green-status.json")
+        with open(green, "w", encoding="utf-8") as f:
+            json.dump({"verdict": "PARITY_RESULT: PASS (2 scenario(s), "
+                       "0 diff(s))", "suites": "all", "tree_id": tree}, f)
+        with open(os.path.join(repo, "go.mod"), "w") as f:
+            f.write("integrated while the wave ran")
+        r = run(impact_py, "--config", cfg, "record", "--status", green)
+        check("impact refuses a baseline for a tree the run did not test",
+              r.returncode == 1 and "tested tree" in r.stderr)
+        with open(os.path.join(repo, "go.mod"), "w") as f:
+            f.write("m")
+        r = run(impact_py, "--config", cfg, "record", "--status", green)
+        check("impact records the baseline after a green FULL run of this tree",
+              r.returncode == 0 and "manifest recorded" in r.stdout)
+        with open(os.path.join(repo, "internal/fees/h.go"), "w") as f:
+            f.write("f2")
+        r = run(impact_py, "--config", cfg, "suites")
+        check("impact selects only the suite whose package changed",
+              r.stdout.strip() == "fees", r.stdout.strip())
+        with open(os.path.join(repo, "internal/app/app.go"), "w") as f:
+            f.write("rewired")
+        r = run(impact_py, "--config", cfg, "suites")
+        check("impact fails closed to ALL on a wiring change",
+              r.stdout.strip() == "ALL")
+
+        src = os.path.join(tmp, "legacy")
+        os.makedirs(os.path.join(src, "pay"))
+        with open(os.path.join(src, "pay", "fees.py"), "w") as f:
+            f.write("RATE = 5\n\ndef fee(x):\n    return x * RATE\n\n"
+                    "def unused():\n    return 1\n")
+        cov = os.path.join(tmp, "cov.json")
+        with open(cov, "w") as f:
+            json.dump({"pay/fees.py": {"1": [""], "3": [""],
+                                       "4": ["pay__a"], "6": [""]}}, f)
+        mut = os.path.join(tmp, "mutants.json")
+        with open(mut, "w") as f:
+            json.dump({"body": ["pay/fees.py", "return x * RATE", "return x"],
+                       "const": ["pay/fees.py", "RATE = 5", "RATE = 6"]}, f)
+        sel_py = os.path.join(dst, "assets", "mutant_select.py")
+        r = run(sel_py, "--coverage", cov, "--mutants", mut, "--src-root", src)
+        check("mutants run on reaching scenarios; import-time code gets all",
+              r.returncode == 0 and "MUTANT: body subset 1 scenario(s)"
+              in r.stdout and "MUTANT: const full" in r.stdout)
+        with open(mut, "w") as f:
+            json.dump({"dead": ["pay/fees.py", "return 1", "return 2"]}, f)
+        r = run(sel_py, "--coverage", cov, "--mutants", mut, "--src-root", src)
+        check("a mutant no scenario reaches is rejected (negative arm)",
+              r.returncode == 1 and "REJECTED" in r.stdout)
+
+        r = run(parity_py, old_dir, new_ok, "--ignore", "generated_at",
+                "--tolerance", "1e-9", "--require", "cache=cache_writes")
+        check("the verdict line counts unrecorded effect classes",
+              r.returncode == 0 and "unjudged: 2)" in r.stdout)
+        r = run(parity_py, old_dir, new_ok, "--ignore", "generated_at",
+                "--tolerance", "1e-9", "--require", "cache=cache_writes",
+                "--fail-on-unjudged")
+        check("an unjudged class fails the coverage gate (negative arm)",
+              r.returncode == 1)
+
         # ── Invocation surface: the model's four parts are separately callable
         with open(os.path.join(dst, "SKILL.md"), encoding="utf-8") as f:
             skill_md = f.read()

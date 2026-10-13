@@ -302,6 +302,11 @@ SINCE_PY_GATE_GLUED = "f226871"  # gates: python-interpreter.sh also sees a Pyth
 SINCE_AGENT_NAMES = "5d1d6b0"  # growth-review 0.1.1 and idea-validation 0.1.3: one agent-name
 # check (a bare `agent`, any separator, letters apart, small-capital and IPA lookalikes are
 # refused). The commit that changes those two skills; it lands with the money ledger.
+SINCE_MIGRATION_JUDGE = "5a025c4"  # ai-migration-operating-model 1.1.0: the parallel-ready
+# judge (capacity probe, sharded e2e, impact selection, reaching-scenario mutants, unjudged count).
+SINCE_LOOPS_LONG_RUN = "88006b1"  # crafting-self-prompting-loops 1.5.0: long unattended run
+# failure modes #11-#15, the LSC-9 capacity rule and the LSC-3 host-sleep rule.
+SINCE_MOCKSTAR_ENCODING = "9a95258"  # mockstar-mock 1.2.0: encoded responses and header coverage.
 
 
 def _git_out(*args):
@@ -9485,6 +9490,155 @@ def check_py_gate_glued(old, new):
         kind="delta", since=SINCE_PY_GATE_GLUED)
 
 
+def check_migration_judge(old, new):
+    """ai-migration-operating-model: a judge that is fast and still honest at scale."""
+    scratch = tempfile.mkdtemp(prefix="ab-migjudge-")
+    sk = "ai-migration-operating-model"
+    try:
+        def tool(tree, name):
+            p = os.path.join(tree, sk, "assets", name)
+            return p if os.path.isfile(p) else None
+
+        def run(*args):
+            return subprocess.run([sys.executable, *args], capture_output=True,
+                                  text=True, timeout=120)
+
+        # Mutation proof cost: a 10-scenario suite, the mutated line reached by 2.
+        src = os.path.join(scratch, "legacy")
+        os.makedirs(os.path.join(src, "pay"))
+        with open(os.path.join(src, "pay", "fees.py"), "w") as f:
+            f.write("RATE = 5\n\ndef fee(x):\n    return x * RATE\n")
+        cov, mut = os.path.join(scratch, "cov.json"), os.path.join(scratch, "m.json")
+        with open(cov, "w") as f:
+            json.dump({"pay/fees.py": {"1": [""], "3": [""], "4": ["pay__a", "pay__b"]}}, f)
+        with open(mut, "w") as f:
+            json.dump({"body": ["pay/fees.py", "return x * RATE", "return x"]}, f)
+
+        def replayed(tree):
+            t = tool(tree, "mutant_select.py")
+            if not t:
+                return 10            # no selector: every mutant replays the whole suite
+            plan = os.path.join(scratch, "plan-%d.json" % len(tree))
+            run(t, "--coverage", cov, "--mutants", mut, "--src-root", src, "--plan", plan)
+            with open(plan) as f:
+                return len(json.load(f)["body"]["scenarios"])
+
+        # Unjudged effect class and the unchanged verdict line.
+        g, n = os.path.join(scratch, "g"), os.path.join(scratch, "n")
+        for d in (g, n):
+            os.makedirs(d)
+            with open(os.path.join(d, "a.json"), "w") as f:
+                json.dump({"effects": [{"kind": "http"}]}, f)
+
+        def unjudged_visible(tree):
+            r = run(os.path.join(tree, sk, "assets", "parity_diff.py"), g, n,
+                    "--require", "h=effects[kind=http].headers")
+            return int("unjudged: 1)" in r.stdout)
+
+        def verdict(tree):
+            r = run(os.path.join(tree, sk, "assets", "parity_diff.py"), g, n)
+            return r.stdout.strip().splitlines()[-1]
+
+        # A sharded run whose one lane fails must report the suite missing.
+        golden = os.path.join(scratch, "golden")
+        os.makedirs(golden)
+        for s_, k in (("pay", 2), ("fees", 1)):
+            for i in range(k):
+                with open(os.path.join(golden, "%s__%d.json" % (s_, i)), "w") as f:
+                    json.dump({"i": i}, f)
+        cap = os.path.join(scratch, "cap.py")
+        with open(cap, "w") as f:
+            f.write("import os, shutil, sys\ng, s, o = sys.argv[1:4]\n"
+                    "if s == 'fees': sys.exit(3)\n"
+                    "[shutil.copy(os.path.join(g, x), o) for x in os.listdir(g) "
+                    "if x.startswith(s + '__')]\n")
+
+        def lane_loss_caught(tree):
+            t = tool(tree, "e2e_shard.py")
+            if not t:
+                return 0
+            r = run(t, "--golden", golden, "--out-dir", os.path.join(scratch, "runs%d" % len(tree)),
+                    "--capture-cmd", "%s %s %s {suite} {out}" % (sys.executable, cap, golden),
+                    "--lanes", "2", "--no-lock")
+            return int(r.returncode == 1 and "fees__0.json — scenario missing in new" in r.stdout)
+
+        a, b = replayed(old), replayed(new)
+        row(sk, "scenarios replayed per mutant on a suite of 10 where 2 reach it (lower=better)",
+            a, b, b < a,
+            "a scenario that never executes the mutated line cannot tell the mutant from the "
+            "original; replaying it is pure cost. Dropping it can only turn CAUGHT into MISSED",
+            since=SINCE_MIGRATION_JUDGE)
+        a2, b2 = lane_loss_caught(old), lane_loss_caught(new)
+        row(sk, "a sharded e2e run with one failed lane reports that suite missing (1=yes)",
+            a2, b2, b2 == 1,
+            "parallel lanes merged and judged as ONE corpus: a lane that captured nothing must "
+            "fail the wave, never shrink it", since=SINCE_MIGRATION_JUDGE)
+        a3, b3 = unjudged_visible(old), unjudged_visible(new)
+        row(sk, "an unrecorded effect class shows on the verdict line (1=yes)",
+            a3, b3, b3 == 1,
+            "a PASS covers only what the judge records; `--require` makes the gap a number",
+            since=SINCE_MIGRATION_JUDGE)
+        va, vb = verdict(old), verdict(new)
+        row(sk, "PARITY_RESULT line without --require is byte-identical", va, vb, va == vb,
+            "existing parity_check scripts grep this line; the new option only appends",
+            kind="guard")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def check_loops_long_run(old, new):
+    """crafting-self-prompting-loops: operational failure modes of long unattended runs."""
+    heads = ("In-place edit of a running script", "Orphaned background job",
+             "Rejected cleanup step", "Whole-unit integration clobber",
+             "Loop state in a wiped temp directory")
+
+    def count(tree):
+        try:
+            with open(os.path.join(tree, "crafting-self-prompting-loops", "references",
+                                   "failure-modes.md")) as f:
+                t = f.read()
+        except OSError:
+            return 0
+        return sum(h in t for h in heads)
+    a, b = count(old), count(new)
+    row("crafting-self-prompting-loops", "long-run failure modes documented, out of 5 (higher=better)",
+        a, b, b == 5,
+        "prompt-only: checks the text is present, not model behaviour (script edited while "
+        "running, orphaned job, rejected cleanup, integration clobber, wiped temp dir)",
+        since=SINCE_LOOPS_LONG_RUN)
+
+
+def check_mockstar_encoding(old, new):
+    """mockstar-mock: an encoded response the consumer can decode end to end."""
+    scratch = tempfile.mkdtemp(prefix="ab-mockenc-")
+    try:
+        body = os.path.join(scratch, "body.json")
+        with open(body, "w") as f:
+            f.write('{"ok": true}')
+
+        def round_trips(tree):
+            t = os.path.join(tree, "mockstar-mock", "assets", "encode_body.py")
+            if not os.path.isfile(t):
+                return 0
+            raw = os.path.join(scratch, "raw-%d" % len(tree))
+            n = 0
+            for enc in ("gzip", "deflate"):
+                subprocess.run([sys.executable, t, "encode", "--encoding", enc,
+                                "--body-file", body, "--out", raw], capture_output=True)
+                r = subprocess.run([sys.executable, t, "verify", "--encoding", enc,
+                                    "--raw", raw, "--expected", body], capture_output=True)
+                n += int(r.returncode == 0)
+            return n
+        a, b = round_trips(old), round_trips(new)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    row("mockstar-mock", "encodings (gzip, deflate) built and decoded back to the body, out of 2",
+        a, b, b == 2,
+        "mocks never returned compressed bodies, so a consumer's Content-Encoding decoding "
+        "could only be pinned by unit oracles; br needs node or bun and is not measured here",
+        since=SINCE_MOCKSTAR_ENCODING)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9581,6 +9735,9 @@ def main():
         check_portability_hooks(old, REPO)
         check_portability_rule(old, REPO)
         check_py_gate_glued(old, REPO)
+        check_migration_judge(old, REPO)
+        check_loops_long_run(old, REPO)
+        check_mockstar_encoding(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

@@ -5,19 +5,20 @@ description: >-
   operating model — rulebook + queues + reviewers + objective verification — instead of a
   pile of agent edits. Use when the user says "migrate this service", "port X to Y",
   "rewrite this in TypeScript/Go", "upgrade the framework", or wants agents to do a large
-  rewrite. Builds the judge first (golden scenarios + a shipped parity differ), then a
-  lintable Migration Control Pack (rulebook, dependency map, gap inventory, portability
-  test plan, parity script, work queue, reviewer prompts, phase gates) that implementing
-  agents execute against; includes a candidate filter that says "don't migrate yet" when
-  behavior can't be captured. Callable as one whole workflow or via four standalone
-  modes — economics, judge, pack, qualify — one per part of the model. Not the bulk
+  rewrite, or says its parity judge is too slow. Builds the judge first (golden
+  scenarios + a parity differ, parallel-ready: lane isolation, sharding, impact
+  selection), then a lintable Migration Control Pack (rulebook, dependency map, gap
+  inventory, portability test plan, parity script, work queue, reviewer prompts, phase
+  gates) that implementing agents execute against; includes a candidate filter that says
+  "don't migrate yet" when behavior can't be captured. Callable whole or as four modes:
+  economics, judge, pack, qualify. Not the bulk
   executor of the migration itself — it sets up and verifies the machine; complements
   spec-first-planning and crafting-self-prompting-loops.
 license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.0.4"
+  version: "1.1.0"
   tags: "migration,rewrite,port,parity,golden-tests,rulebook,agent-orchestration,phase-gates"
 ---
 
@@ -55,17 +56,19 @@ separately callable:
    workers, old code as the spec, compiler/test feedback) changes for *this* target,
    and the honest cost frame — agentic migrations are serious engineering investment,
    not free — ending with whether the chronic pain clears the bar now that a migration
-   no longer has to be existential. Grounding: the preamble of
-   `references/candidate-filter.md`.
+   no longer has to be existential. Include the judge throughput estimate (wall-clock
+   per e2e wave and per mutation proof, from `assets/capacity_probe.py`). Grounding:
+   the preamble and "Throughput estimate" of `references/candidate-filter.md`.
 2. **`judge [target]`** — build the verification foundation, alone (workflow step 2).
-   Deliverable: golden scenarios, a parity runner wired to `assets/parity_diff.py`,
-   and the transcript proving the judge catches a deliberately broken case.
+   Deliverable: golden scenarios, a parity runner wired to `assets/parity_diff.py`
+   that honours the judge isolation contract, the capacity verdict (serial or N
+   lanes), and the transcript proving the judge catches a deliberately broken case.
 3. **`pack [target]`** — produce the Migration Control Pack, alone (workflow steps
    3–4). Deliverable: the eight artifacts of `references/control-pack.md` in a
    `migration/` directory, linted to `PACK_RESULT: PASS`.
 4. **`qualify [target]`** — run the candidate filter, alone (workflow step 1).
    Deliverable: the row-by-row decision-table verdict — go, no-go, or the precursor
-   work that would convert a no into a yes.
+   work that would convert a no into a yes — with the wall-clock per wave.
 
 Standalone modes still respect order of operations: `pack` presumes a judge exists
 (its gate 1 demands one) — when there isn't one, say so and offer to run `judge`
@@ -108,7 +111,21 @@ otherwise stop and tell the user that this skill needs Python 3.10 or newer.
    included: failures, retries, timeouts, reversals) and wire a parity check with
    `assets/parity_diff.py` (`--ignore` for timestamp/id noise, `--tolerance` for float
    drift; single-file or golden-corpus directory mode). Prove the judge catches a
-   deliberately broken case before trusting any pass.
+   deliberately broken case before trusting any pass. Build it parallel-ready:
+   - **Isolation first.** The judge MUST key every stateful resource (database,
+     cache namespace, bus topic, document DB, bucket, queues, every port) by one
+     lane id, because shared names make lanes corrupt each other's state. The
+     contract is in `references/control-pack.md` ("Judge isolation contract").
+   - **Probe, then choose.** Run `python3 "$SKILL_DIR/assets/capacity_probe.py"`
+     and size lanes from the container VM, not from host cores. One lane means
+     serial; say which limit decided it.
+   - **Count what is not judged.** List every outbound-effect class and pass it to
+     the differ with `--require LABEL=PATH`, so the verdict line carries
+     `unjudged: <n>`.
+   - **Prove mutants on the scenarios that reach them.** Capture per-scenario
+     coverage once, then select with `python3 "$SKILL_DIR/assets/mutant_select.py"`;
+     a mutant that no scenario reaches is rejected, not counted.
+   Detail and recipes: "Judge throughput" in `references/pilot-playbook.md`.
 3. **Author the Migration Control Pack** (steps 3–4 = mode: `pack`) in a `migration/`
    directory next to the target,
    one artifact per section of `references/control-pack.md`: `RULEBOOK.md`,
@@ -128,7 +145,11 @@ otherwise stop and tell the user that this skill needs Python 3.10 or newer.
    Implementer agents claim units from the work queue (statuses machine-readable,
    queue rebuilt from facts so the run is resumable); reviewer agents attack output
    using the reviewer prompts and cite `MR` rule ids. Batch defects route through
-   the doctrine: rule, regenerate, re-judge.
+   the doctrine: rule, regenerate, re-judge. Hand over the fast judge with the
+   pack: `assets/e2e_shard.py` for parallel waves (trusted only after it matches a
+   serial run), `assets/impact.py` for impact-selected waves with a nightly full
+   run, `assets/machine_lock.py` around proofs and waves, and the operational rules
+   in `references/pilot-playbook.md`.
 7. **Advance only through phase gates.** Each gate in `PHASE_GATES.md` is passed by its
    named check — gate 1 is the judge existing and catching broken code; the last gates
    are behavioral parity green (`PARITY_RESULT: PASS` across the golden corpus) and an
@@ -140,7 +161,9 @@ A **candidate verdict plus a lint-clean Migration Control Pack plus a proven jud
 the filter's row-by-row verdict, the pack directory passing `assets/control_pack_lint.py`
 (`PACK_RESULT: PASS`), and a parity run showing the judge both catches a seeded break
 and reports `PARITY_RESULT: PASS` on the pilot slice. Present these with the current
-phase-gate status and the open gaps (`G<n>` entries still ending in `?`).
+phase-gate status, the open gaps (`G<n>` entries still ending in `?`), the
+`unjudged` count per effect class, and the capacity verdict with the estimated
+wall-clock per wave (serial and at the probed lane count).
 
 **Output style.** Write reports and explanations for the user in about 80% ASD-STE100 Simplified Technical English. Use short sentences, common words, active voice and one action per step.
 

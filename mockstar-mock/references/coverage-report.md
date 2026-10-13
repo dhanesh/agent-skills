@@ -41,11 +41,39 @@ Scenarios, dynamic handlers, and webhooks that were inferred, not documented:
 
 - <handler|scenario|webhook> — <endpoint> — why inferred — source.
 
+## Request-header matching
+
+Paste the output of `python3 "$SKILL_DIR/assets/header_coverage.py" <out>/mocks` here. It
+lists, for each mock, the request header names it matches on, spelled as in the mock file
+(route `match.headers` and scenario `when.headers`). A consumer reads it to see whether
+header casing is exercised. The last line says "Casing exercised: yes" when at least one
+name has capitals, else "no".
+
+| Method | Path | Mock file | Predicate | Header names (as written) | Casing |
+|---|---|---|---|---|---|
+| GET | /me | mocks/default/auth.json | match | `Authorization` | mixed |
+
+## Encoded responses
+
+One row per response that sends `Content-Encoding` (see `references/mockstar-mapping.md`
+"Encoded responses"). Write "none" when no response is encoded.
+
+| Method | Path | Scenario | Encoding | Handler | Smoke check |
+|---|---|---|---|---|---|
+| GET | /pets/:id | gzip-pet | gzip | handlers/getPetGzip.ts | PASS (header + decoded body) |
+
 ## Gaps
 
 Endpoints/behaviors documented but NOT mocked:
 
 - <method path> — <reason> — <source locator>.
+- Always list these when they apply (they are limits of mockstar, not of the sources):
+  - Static or scenario `Content-Encoding` — mockstar 0.4.0 has no compressed or byte body
+    for static responses, so an encoded response is a dynamic handler. Proposal: native
+    `response.encoding` (mapping reference, "Encoded responses").
+  - `br` responses — no stdlib encoder; the handler needs Bun or Node at load time, and the
+    smoke check needs `node` or `bun` to decode (`SKIP` otherwise).
+  - `when.params` on an encoded scenario — no `match` form; needs a literal path segment.
 
 ## Dropped
 
