@@ -357,8 +357,8 @@ field is the command that `watch` ran. Read the file with the file-reading tool,
 command to print it matches no `Bash(...)` rule. Take the interpreter from the
 `Bash(<interpreter> <abs>/conductor.py *)` rule in the `--allowedTools` value of that `argv`, and
 write it in place of `python3` in each command. If the log cannot be read or holds no such line,
-use `python3`, the form of the example allowlist in spec-first-planning's
-`references/unattended.md`.
+use `python3`, the form of the example allowlist in spec-first-planning's unattended-mode
+reference.
 
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
 command, with a fixed resume prompt, only when the run is not finished, not waiting on the
