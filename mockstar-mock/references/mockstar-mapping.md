@@ -240,6 +240,90 @@ Rules:
 
 ---
 
+## Encoded responses
+
+A response can opt in to `Content-Encoding: gzip | deflate | br`. This lets a client test
+its decoding paths against real compressed bytes.
+
+### What mockstar supports (checked against 0.4.0)
+
+| Path | Compressed body? | Evidence |
+|---|---|---|
+| `static` response, scenario response | **No.** The body is a string or JSON value, rendered through the template engine. A `content-encoding` header on it only labels plain text, so a client fails to decode it. | `renderStatic` builds `new Response(bodyOut, …)` with a string; the config has no byte or base64 body field. |
+| `dynamic` handler | **Yes.** The handler returns a `Response`, and mockstar forwards its body and headers unchanged. It does not compress or strip them. | `renderDynamic` returns the handler's `Response`; a handler that returned gzip, deflate and br bodies was served by a real `mockstar 0.4.0` and decoded back to the expected body. |
+| Server-side compression of any response | **No.** There is no compression middleware and no `Accept-Encoding` negotiation. | No gzip, brotli or zlib use in the served code path. |
+
+So the skill uses a dynamic handler. It is the only supported way today. A native option is
+proposed at the end of this section.
+
+### How a scenario opts in
+
+In the Endpoint Inventory, set `contentEncoding` on the `responses[]` entry
+(`references/inventory.schema.json`). Allowed values: `gzip`, `deflate`, `br`. Without the
+field, nothing changes: the response stays a normal static response or scenario.
+
+### How to generate it (Stage 3)
+
+1. Write the plain body to `<out>/expected/<name>.body`. This is the body a client must see
+   after decoding. Use fixed values, not Tier 2 tokens, because a compressed body is not
+   rendered by the template engine.
+2. Run the helper. `$ENCODE` is `"$SKILL_DIR/assets/encode_body.py"`:
+   ```sh
+   python3 "$ENCODE" handler --name getPetGzip --encoding gzip \
+     --body-file <out>/expected/getPetGzip.body \
+     --content-type application/json --out <out>/handlers/getPetGzip.ts
+   ```
+   - `gzip` and `deflate`: the helper compresses with the Python stdlib (`gzip`, `zlib`) at
+     generation time and embeds the bytes as base64. `gzip` uses mtime 0, so the output is
+     the same on every run. `deflate` is the zlib format, as HTTP requires.
+   - `br`: Python has **no stdlib brotli encoder**. The generated handler calls
+     `brotliCompressSync` from `node:zlib` when the server loads it. This works on Bun and
+     Node. Decoding `br` in the smoke check also needs `node` or `bun` on `PATH`; without
+     one, the smoke check prints `SKIP` for that route and the report lists it under Gaps.
+3. Emit a **separate `dynamic` entry** for the encoded response. It reuses the parent's
+   `match`, adds the scenario's `when.headers`, `when.query` and `when.body` predicates to
+   `match`, and sets `priority` one above the parent so it wins:
+   ```jsonc
+   {
+     "id": "get-pet-gzip",
+     "match": { "method": "GET", "path": "/pets/:id",
+                "headers": { "x-want-encoding": "gzip" }, "priority": 10 },
+     "response": { "kind": "dynamic", "handler": "getPetGzip" }
+   }
+   ```
+   A `when.params` predicate has no `match` form. Use a literal path segment instead
+   (`/pets/rex`), or record the scenario under Gaps.
+4. Handlers are `confidence: "inferred"`: list them under "Review me" with the reason
+   "Content-Encoding requested in the inventory; body compressed by the helper".
+
+The handler returns the encoded body for every request. It does not read `Accept-Encoding`.
+It sets `Vary: Accept-Encoding`.
+
+### How to check it (Stage 5)
+
+Add the optional TSV columns `ENCODING` and `EXPECTED_BODY_FILE` to the route
+(`METHOD<TAB>/path<TAB>STATUS<TAB>gzip<TAB>../expected/getPetGzip.body`). When the entry
+matches on a request header, add a sixth column with that header
+(`x-want-encoding: gzip`). `assets/smoke.sh` then sends `Accept-Encoding`, checks the
+`Content-Encoding` response header, decodes the body and compares it with the expected file.
+
+### Proposal: native `response.encoding` in mockstar
+
+Static and scenario responses cannot carry compressed bodies. Proposed change:
+
+- Add `response.encoding: "gzip" | "deflate" | "br"` (and the same field on scenario
+  responses). When it is set, mockstar renders the body as today, then compresses the bytes
+  with its runtime (`Bun.gzipSync`, `node:zlib`) and sets `Content-Encoding` and `Vary`.
+- Add an optional `negotiate: true` flag. When set, mockstar picks the encoding from
+  `Accept-Encoding` and sends the plain body if the client accepts none.
+- Add a byte body for static responses, `body: { "base64": "…" }`, so a captured payload
+  can be replayed byte for byte.
+
+Until this exists, the dynamic-handler path above is the supported route, and the coverage
+report lists "static or scenario Content-Encoding" under Gaps.
+
+---
+
 ## Webhooks
 
 When an IR endpoint record has a `webhookHints[]` array, map each element to a `webhooks[]` entry on the triggering mock entry.
