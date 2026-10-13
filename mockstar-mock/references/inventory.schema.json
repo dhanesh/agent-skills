@@ -54,6 +54,10 @@
                 "status": { "type": "integer", "minimum": 100, "maximum": 599 },
                 "headers": { "type": "object" },
                 "body": {},
+                "contentEncoding": {
+                  "enum": ["gzip", "deflate", "br"],
+                  "description": "Opt in to a compressed response body. Needs a dynamic handler; see references/mockstar-mapping.md 'Encoded responses'. Omit for a plain body."
+                },
                 "when": {
                   "type": "object",
                   "description": "If present, this response becomes a mockstar scenario (scenarios[].when on params/query/headers/body)."

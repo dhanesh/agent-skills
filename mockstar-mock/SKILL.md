@@ -6,7 +6,7 @@ compatibility: Requires Bun (`bunx @dhaneshpurohit/mockstar` >= 0.2.2; >= 0.3.0 
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.1.5"
+  version: "1.2.0"
   tags: "mockstar,mock-server,openapi,postman,har,graphql,api-testing"
 ---
 
@@ -109,8 +109,9 @@ dispatching any subagent, resolve this skill's absolute base directory once and 
 absolute paths into every subagent prompt:
 
 - Obtain the skill's base directory from the harness (it is provided when the skill loads).
-- Set `EXTRACT="$SKILL_DIR/assets/extract_text.py"` and
-  `SMOKE="$SKILL_DIR/assets/smoke.sh"`.
+- Set `EXTRACT="$SKILL_DIR/assets/extract_text.py"`,
+  `SMOKE="$SKILL_DIR/assets/smoke.sh"`, `ENCODE="$SKILL_DIR/assets/encode_body.py"` and
+  `HEADERS="$SKILL_DIR/assets/header_coverage.py"`.
 - If the harness does not expose the base directory, discover it:
   `find ~/.claude ~/.config ~/.agents -path '*mockstar-mock*/assets/extract_text.py' 2>/dev/null | head -1`
 - Verify: `python3 "$EXTRACT" --help` should print usage and exit 0.
@@ -280,6 +281,21 @@ mock JSON entries by hand per `references/mockstar-mapping.md` and write them to
 
 Prefer literal example values in the initial output; Tier 2 token rewriting is deferred to Stage 4.
 
+**Encoded responses (opt-in).** When a `responses[]` entry sets `contentEncoding`
+(`gzip`, `deflate` or `br`), mockstar cannot serve it as a static response or scenario,
+because static bodies are text or JSON only. Make a `dynamic` entry instead:
+
+1. Save the plain body to `<out>/expected/<name>.body`.
+2. Run `python3 "$ENCODE" handler --name <name> --encoding <enc> --body-file <out>/expected/<name>.body --out <out>/handlers/<name>.ts`.
+   `gzip` and `deflate` bytes are made at generation time with the Python stdlib. `br` has no
+   stdlib encoder, so its handler compresses with `node:zlib` when the server loads.
+3. Point a new `dynamic` entry at the handler, with the scenario's predicates in `match`
+   and a higher `priority` than the parent.
+4. List the handler under "Review me" in the report.
+
+Details, evidence of what mockstar supports and the native-feature proposal are in
+`references/mockstar-mapping.md` § Encoded responses.
+
 ---
 
 ### Stage 4 — Enhance
@@ -311,7 +327,11 @@ Unless `--no-verify` is set:
    METHOD<TAB>/path<TAB>EXPECTED_STATUS
    ```
    Use the primary (no-`when`) status code from the Endpoint Inventory. For endpoints without
-   a grounded status, use `200`.
+   a grounded status, use `200`. For each encoded response, add a route with more columns:
+   `ENCODING`, `EXPECTED_BODY_FILE` (path relative to the TSV, for example
+   `../expected/<name>.body`) and, only when the entry matches on a request header, a sixth
+   column `HEADER` (`Name: value`). `smoke.sh` sends `Accept-Encoding`, checks the
+   `Content-Encoding` header, decodes the body and compares it with that file.
 
 2. Run the smoke suite using the absolute `$SMOKE` path resolved under "Locating asset
    helpers" (before Stage 0), passing the
@@ -355,8 +375,13 @@ Write `MOCKSTAR-COVERAGE.md` to the output directory root, following the templat
 - **Grounded vs. inferred** — counts and explanation.
 - **Review me (speculative)** — every inferred scenario, dynamic handler, webhook, and
   webhook signing scheme with the reason it was inferred and its source.
+- **Request-header matching** — run `python3 "$HEADERS" <out>/mocks` and paste the result. It
+  shows, per mock, the header names matched on, spelled as written, so a reader sees whether
+  header casing is exercised.
+- **Encoded responses** — one row per `Content-Encoding` response, with its smoke result.
 - **Gaps** — endpoints or behaviors present in the source docs but not mocked (e.g. prose
-  that names an endpoint without a path, or a schema type with no example).
+  that names an endpoint without a path, or a schema type with no example), plus the
+  mockstar limits that the template lists (static `Content-Encoding`, `br` tooling).
 - **Dropped** — endpoints cut by `--max-endpoints`, with source.
 - **Conflicts** — endpoints described differently across inputs and how conflicts were resolved.
 
@@ -480,7 +505,9 @@ The template (`assets/Dockerfile.template`) copies `mocks/` into `/config/mocks`
 ## Assets
 
 - `assets/extract_text.py` — converts local PDF/DOCX/Markdown/text inputs to plain text (a documentation URL is fetched separately, per stage 1).
-- `assets/smoke.sh` — boots mockstar and smoke-tests every route in a TSV file.
+- `assets/smoke.sh` — boots mockstar and smoke-tests every route in a TSV file, including optional encoded-response checks.
+- `assets/encode_body.py` — compresses bodies (gzip, deflate), emits encoded-response handlers, and decodes or verifies bodies for the smoke check.
+- `assets/header_coverage.py` — lists the request header names each mock matches on, for the coverage report.
 - `assets/fixtures/` — sample inputs used by the test suite (petstore-mini.yaml, routes.tsv).
 
 ## Subagent dispatch note

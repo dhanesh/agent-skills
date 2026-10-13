@@ -226,6 +226,10 @@ def validate_inventory(doc, schema):
                 st = r.get("status")
                 if isinstance(st, int) and not (status_min <= st <= status_max):
                     errors.append(f"{rwhere}: status {st} outside {status_min}-{status_max}")
+                enc_enum = resp_schema["items"]["properties"]["contentEncoding"]["enum"]
+                if "contentEncoding" in r and r["contentEncoding"] not in enc_enum:
+                    errors.append(
+                        f"{rwhere}: contentEncoding {r['contentEncoding']!r} not in {enc_enum}")
         elif "responses" in ep:
             errors.append(f"{where}: responses must be an array")
 
@@ -451,6 +455,94 @@ def main():
                         if name != "custom" and f"| `{name}` |" not in mapping_text]
         check("every IR signing provider has a cookbook row in mockstar-mapping.md",
               undocumented == [], f"undocumented: {undocumented}")
+
+        # ── Encoded responses (opt-in Content-Encoding) ──────────────────
+        enc_helper = os.path.join(ASSETS, "encode_body.py")
+        enc_ok = endpoint(responses=[{"status": 200, "body": {"id": "pet_1"},
+                                      "contentEncoding": "gzip"}])
+        errs = validate_inventory({"endpoints": [enc_ok]}, schema)
+        check("inventory with contentEncoding gzip validates", errs == [], "; ".join(errs)[:80])
+        enc_bad = endpoint(responses=[{"status": 200, "body": {}, "contentEncoding": "zstd"}])
+        errs = validate_inventory({"endpoints": [enc_bad]}, schema)
+        check("inventory with contentEncoding zstd is rejected",
+              any("contentEncoding" in e for e in errs), "; ".join(errs)[:80])
+
+        plain_path = os.path.join(tmp, "pet.body")
+        with open(plain_path, "wb") as f:
+            f.write(b'{"id":"pet_1","name":"Rex"}')
+        for enc_name in ("gzip", "deflate"):
+            raw_path = os.path.join(tmp, f"pet.{enc_name}")
+            r = subprocess.run([sys.executable, enc_helper, "encode", "--encoding", enc_name,
+                                "--body-file", plain_path, "--out", raw_path],
+                               capture_output=True, text=True, timeout=30)
+            r2 = subprocess.run([sys.executable, enc_helper, "verify", "--encoding", enc_name,
+                                 "--raw", raw_path, "--expected", plain_path],
+                                capture_output=True, text=True, timeout=30)
+            check(f"{enc_name} body compressed at generation time decodes to the plain body",
+                  r.returncode == 0 and r2.returncode == 0, f"rc={r.returncode}/{r2.returncode}")
+            with open(raw_path, "rb") as f:
+                raw_bytes = f.read()
+            check(f"{enc_name} body is not the plain body (it is really compressed)",
+                  raw_bytes != b'{"id":"pet_1","name":"Rex"}')
+
+        gz_path = os.path.join(tmp, "pet.gzip")
+        r = subprocess.run([sys.executable, enc_helper, "verify", "--encoding", "deflate",
+                            "--raw", gz_path, "--expected", plain_path],
+                           capture_output=True, text=True, timeout=30)
+        check("gzip bytes labelled deflate are rejected (wrong-encoding negative)",
+              r.returncode != 0, f"rc={r.returncode}")
+        other_path = os.path.join(tmp, "other.body")
+        with open(other_path, "wb") as f:
+            f.write(b"different body")
+        r = subprocess.run([sys.executable, enc_helper, "verify", "--encoding", "gzip",
+                            "--raw", gz_path, "--expected", other_path],
+                           capture_output=True, text=True, timeout=30)
+        check("decoded body that differs from the expected body fails verify with exit 1",
+              r.returncode == 1, f"rc={r.returncode}")
+        r = subprocess.run([sys.executable, enc_helper, "encode", "--encoding", "br",
+                            "--body-file", plain_path], capture_output=True, timeout=30)
+        check("br is refused by the stdlib encoder (no fake brotli)",
+              r.returncode != 0, f"rc={r.returncode}")
+        r = subprocess.run([sys.executable, enc_helper, "handler", "--name", "petBr",
+                            "--encoding", "br", "--body-file", plain_path],
+                           capture_output=True, text=True, timeout=30)
+        check("br handler compresses with node:zlib at load and labels Content-Encoding br",
+              r.returncode == 0 and "brotliCompressSync" in r.stdout
+              and '"content-encoding": "br"' in r.stdout)
+
+        mapping_has_section = "## Encoded responses" in mapping_text
+        check("mapping reference documents Encoded responses, the br gap and the proposal",
+              mapping_has_section and "no stdlib brotli" in mapping_text.lower()
+              and "Proposal: native `response.encoding`" in mapping_text)
+
+        # ── Coverage report: request-header matching ─────────────────────
+        hdr_helper = os.path.join(ASSETS, "header_coverage.py")
+        r = subprocess.run([sys.executable, hdr_helper,
+                            os.path.join(ASSETS, "fixtures", "header-mocks")],
+                           capture_output=True, text=True, timeout=30)
+        check("header coverage keeps header casing as written and flags mixed case",
+              r.returncode == 0 and "`Authorization`" in r.stdout and "`x-api-key`" in r.stdout
+              and "Casing exercised: yes" in r.stdout)
+        plain_root = os.path.join(tmp, "plain-mocks", "default")
+        os.makedirs(plain_root)
+        with open(os.path.join(plain_root, "a.json"), "w", encoding="utf-8") as f:
+            json.dump({"mocks": [{"id": "a", "match": {"method": "GET", "path": "/a"},
+                                  "response": {"kind": "static", "status": 200}}]}, f)
+        r = subprocess.run([sys.executable, hdr_helper, os.path.join(tmp, "plain-mocks")],
+                           capture_output=True, text=True, timeout=30)
+        check("mocks with no header predicate report none and casing not exercised",
+              r.returncode == 0 and "none: no mock matches on a request header" in r.stdout
+              and "Casing exercised: no" in r.stdout)
+        r = subprocess.run([sys.executable, hdr_helper, os.path.join(tmp, "missing-dir")],
+                           capture_output=True, text=True, timeout=30)
+        check("header coverage rejects a missing mocks directory", r.returncode == 2,
+              f"rc={r.returncode}")
+        with open(os.path.join(SKILL, "references", "coverage-report.md"), encoding="utf-8") as f:
+            report_text = f.read()
+        check("coverage template has header-matching and encoded-response sections and the gap",
+              "## Request-header matching" in report_text
+              and "## Encoded responses" in report_text
+              and "Static or scenario `Content-Encoding`" in report_text)
 
         # ── Stage-5 surface: shipped routes fixture obeys the TSV protocol ─
         with open(os.path.join(ASSETS, "fixtures", "routes.tsv"), encoding="utf-8") as f:
