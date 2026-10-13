@@ -5,12 +5,13 @@ description: >-
   operating model — rulebook + queues + reviewers + objective verification — instead of a
   pile of agent edits. Use when the user says "migrate this service", "port X to Y",
   "rewrite this in TypeScript/Go", "upgrade the framework", or wants agents to do a large
-  rewrite. Builds the judge first (golden scenarios + a shipped parity differ), then a
-  lintable Migration Control Pack (rulebook, dependency map, gap inventory, portability
-  test plan, parity script, work queue, reviewer prompts, phase gates) that implementing
-  agents execute against; includes a candidate filter that says "don't migrate yet" when
-  behavior can't be captured. Callable as one whole workflow or via four standalone
-  modes — economics, judge, pack, qualify — one per part of the model. Not the bulk
+  rewrite, or says its parity judge is too slow. Builds the judge first (golden
+  scenarios + a parity differ, parallel-ready: lane isolation, sharding, impact
+  selection), then a lintable Migration Control Pack (rulebook, dependency map, gap
+  inventory, portability test plan, parity script, work queue, reviewer prompts, phase
+  gates) that implementing agents execute against; includes a candidate filter that says
+  "don't migrate yet" when behavior can't be captured. Callable whole or as four modes:
+  economics, judge, pack, qualify. Not the bulk
   executor of the migration itself — it sets up and verifies the machine; complements
   spec-first-planning and crafting-self-prompting-loops.
 license: MIT
