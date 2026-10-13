@@ -321,7 +321,7 @@ Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec
 |---|---|---|---|---|---|
 | c1 | 31 | **Locating this skill's helpers (do this first).** The steps below run bundled … | MUST (0.81, 0.73) | MUST | the SKILL.md `$SKILL_DIR` convention is linted by asset-paths.sh; the subagent hand-off itself is not gate-checked; PP-5 reasons 2026-09-25: the shared preamble's "and MUST NOT receive a relative form" (Jev plain 0.61, kept for the old PP-5) is dropped; the MUST keeps the rule, and the sentence before it already gives the reason (a relative path will not resolve from the target repo), so none is repeated; Jev on the decision: drop_clause 0.54 vs keep_with_reason 0.46, P(dropping loses a rule) = 0.28. Level unchanged |
 
-## ai-migration-operating-model (4 candidates · 3 MUST · 0 SHOULD · 0 MAY · 1 plain · 0 departures)
+## ai-migration-operating-model (5 candidates · 4 MUST · 0 SHOULD · 0 MAY · 1 plain · 0 departures)
 
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
@@ -329,6 +329,7 @@ Line numbers refreshed in the factory-conductor final fix wave (2026-09-23, spec
 | c2 | 135 | - **Not the bulk executor.** This skill ends when the machine is built and the … | plain (0.50, 0.49) | plain | describes the skill's scope boundary, not a directive — matches the security-posture-audit/spec-first-planning Boundaries precedent |
 | c3 | 138 | - **Honest about "no".** If no judge can be built, the answer MUST be "don't migrate yet"… | MUST (0.39, 0.63) | MUST | confidence 0.39 < 0.6, decided ourselves; harm 0.63 justifies MUST on its own — a false "go" verdict on an unverifiable migration is the harm this doctrine exists to prevent |
 | c4 | 140 | - **Parity over aesthetics.** For money movement, fees, schedules, reconciliat… | MUST (0.76, 0.85) | MUST | |
+| c5 | 114 | - **Isolation first.** The judge MUST key every stateful resource (database, … | MUST (1.00, 0.93) | MUST | added 2026-10-13 with the parallel-ready judge (1.1.0) |
 
 ## factory-conductor (37 candidates · 28 MUST · 1 SHOULD · 3 MAY · 5 plain · 1 departure)
 

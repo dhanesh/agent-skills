@@ -17,10 +17,21 @@ Options:
   --ignore k1,k2    drop these object keys (at any depth) before comparing
                     (timestamps, request ids — noise that is not behavior)
   --tolerance F     absolute tolerance for numeric comparisons (default 0)
+  --require L=PATH  an effect class the judge must record (repeatable). Each
+                    golden is checked for PATH; every place it is absent counts
+                    as "unjudged" for label L: the differ cannot compare what
+                    nobody recorded. PATH is dotted keys; `name[]` walks a
+                    list, `name[k=v]` walks only list items whose k equals v.
+                    Examples: `cache=cache_writes`,
+                    `http-headers=effects[kind=http].headers`. A missing
+                    intermediate key means "no such effect", not unjudged.
+  --fail-on-unjudged  make any unjudged count a failure (exit 1)
 
 Output: one "DIFF: ..." line per difference (with a $.path[i] locator),
 "SCENARIO: <name> — PASS|FAIL" per scenario in corpus mode, then a final
-"PARITY_RESULT: PASS (...)" or "PARITY_RESULT: FAIL (...)" line.
+"PARITY_RESULT: PASS (...)" or "PARITY_RESULT: FAIL (...)" line. With
+--require, one "UNJUDGED: <label> <n>" line per class precedes the verdict, and
+the verdict ends with ", unjudged: <total>" (a coverage gate wants 0).
 Exit 0 iff parity holds; 1 on any diff; 2 on usage errors.
 Stdlib-only, offline, deterministic.
 """
@@ -28,6 +39,7 @@ Stdlib-only, offline, deterministic.
 import argparse
 import json
 import os
+import re
 import sys
 
 
@@ -152,6 +164,64 @@ def run(old, new, ignore=frozenset(), tolerance=0.0, out=sys.stdout):
     return 1, len(diffs)
 
 
+def _walk(nodes, token):
+    m = re.match(r"^([^\[\]]+)(?:\[([^\]]*)\])?$", token)
+    if not m:
+        raise ValueError("bad --require path token: %r" % token)
+    name, sel = m.group(1), m.group(2)
+    out = []
+    for n in nodes:
+        if not isinstance(n, dict) or name not in n:
+            continue
+        v = n[name]
+        if sel is None:
+            out.append(v)
+            continue
+        items = v if isinstance(v, list) else []
+        if sel:
+            k, _, want = sel.partition("=")
+            items = [i for i in items if isinstance(i, dict) and str(i.get(k)) == want]
+        out.extend(items)
+    return out
+
+
+def missing_at(value, path):
+    """How many places in `value` lack the leaf of `path` (see --require)."""
+    tokens = path.split(".")
+    nodes = [value]
+    for t in tokens[:-1]:
+        nodes = _walk(nodes, t)
+    leaf = tokens[-1]
+    return sum(1 for n in nodes if isinstance(n, dict) and leaf not in n)
+
+
+def parse_requires(specs):
+    out = []
+    for spec in specs or ():
+        label, sep, path = spec.partition("=")
+        if not sep or not label or not path:
+            raise ValueError("--require wants LABEL=PATH, got %r" % spec)
+        missing_at({}, path)  # validates the token grammar early
+        out.append((label, path))
+    return out
+
+
+def count_unjudged(old, requires):
+    """{label: places missing} over the golden side (a file or a directory)."""
+    files = ([os.path.join(old, f) for f in _scenario_names(old)]
+             if os.path.isdir(old) else [old])
+    counts = {label: 0 for label, _ in requires}
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                v = json.load(fh)
+        except (OSError, ValueError):
+            continue  # already reported as a diff by run()
+        for label, path in requires:
+            counts[label] += missing_at(v, path)
+    return counts
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Behavioral parity diff between old and new outputs."
@@ -166,7 +236,20 @@ def main(argv=None):
         "--tolerance", type=float, default=0.0,
         help="absolute tolerance for numeric comparisons (default 0)",
     )
+    ap.add_argument(
+        "--require", action="append", default=[], metavar="LABEL=PATH",
+        help="effect class the goldens must record; absences count as unjudged",
+    )
+    ap.add_argument(
+        "--fail-on-unjudged", action="store_true",
+        help="exit 1 when any --require class has unjudged places",
+    )
     args = ap.parse_args(argv)
+    try:
+        requires = parse_requires(args.require)
+    except ValueError as e:
+        print("ERROR: %s" % e, file=sys.stderr)
+        return 2
 
     for p in (args.old, args.new):
         if not os.path.exists(p):
@@ -181,12 +264,20 @@ def main(argv=None):
 
     ignore = frozenset(k for k in args.ignore.split(",") if k)
     scenarios, diffs = run(args.old, args.new, ignore, args.tolerance)
-    if diffs == 0:
-        print("PARITY_RESULT: PASS (%d scenario(s), 0 diff(s))" % scenarios)
+    tail, unjudged = "", 0
+    if requires:
+        counts = count_unjudged(args.old, requires)
+        for label, n in counts.items():
+            print("UNJUDGED: %s %d" % (label, n))
+        unjudged = sum(counts.values())
+        tail = ", unjudged: %d" % unjudged
+    failed = diffs > 0 or (args.fail_on_unjudged and unjudged > 0)
+    if not failed:
+        print("PARITY_RESULT: PASS (%d scenario(s), 0 diff(s)%s)" % (scenarios, tail))
         return 0
     print(
-        "PARITY_RESULT: FAIL (%d diff(s) across %d scenario(s))"
-        % (diffs, scenarios)
+        "PARITY_RESULT: FAIL (%d diff(s) across %d scenario(s)%s)"
+        % (diffs, scenarios, tail)
     )
     return 1
 

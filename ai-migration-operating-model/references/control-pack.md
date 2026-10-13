@@ -64,6 +64,34 @@ stay wired together. Include edge cases: failed states, retries, timeouts, rever
 - S2: Fee calculation for a zero-balance account — outputs must match after normalization.
 ```
 
+**Two layers, two jobs.** The golden scenarios judge what a client can see. A
+second layer, **oracle unit tests**, pins the effects the e2e judge cannot see
+or cannot see exactly: cache writes, binary serialisation bytes, outbound header
+names and their casing, `Content-Length` on body-less calls, compression
+decoding. Generate their expected values from the real legacy code and commit
+them as testdata, so the oracle is the old system and not a guess. Header tests
+MUST read the raw request bytes from a socket, never through an HTTP server
+library that canonicalises names, because canonicalisation hides exactly the
+divergence under test.
+
+Unit tests are cheap (a cold run of ~100 packages takes seconds); the e2e wave
+is the slow layer. So:
+
+- **Wave gate:** cached unit tests for everything, plus race/sanitiser runs only
+  on changed packages and their importers (`assets/impact.py changed-units`,
+  then the language's reverse-dependency query).
+- **Nightly:** the full uncached unit run, race/sanitiser on everything, and a
+  full e2e run.
+- **Optional:** mutation-test the new system's unit tests on changed packages
+  (Go: gremlins or go-mutesting; Python: mutmut), so the oracles are also seen
+  to fail.
+
+Add one `- S<n>:` entry per oracle family, so the plan lists them:
+
+```md
+- S7: Outbound header casing for the payment client — raw-socket oracle test, values captured from the legacy client.
+```
+
 ## parity_check.* — the mechanical judge
 
 Any file named `parity_check.*` (shell, python, …), non-empty. It runs a scenario
@@ -78,6 +106,45 @@ old_tool run "$1" > old.json
 new_tool run "$1" > new.json
 python3 parity_diff.py old.json new.json --ignore generated_at
 ```
+
+### Judge isolation contract — what makes parallel judging possible
+
+A judge that uses fixed resource names can run only one scenario stream per
+machine. Every speed-up below (parallel lanes, parallel workers, a proof beside
+a wave) needs this contract first. Write it into the parity script and the
+`RULEBOOK.md` before the first fan-out.
+
+- The judge MUST key every stateful resource by one worker or lane id `N`:
+  database name, cache key namespace, message-bus topic suffix, document-DB
+  name, object-store bucket, queue names, temp and output directories.
+- A cache namespace MUST be an exact prefix that cannot match another lane's.
+  `_JUDGE_W2_` is safe; `_JUDGE_W2` also matches `_JUDGE_W20_`, so a flush of
+  lane 2 wipes lane 20's cache in the middle of a scenario. Lane 0 gets a
+  numbered name too, never a bare `_JUDGE_` that matches every lane.
+- Every port (legacy, mutant, recording sink, sidecars, target) MUST come from
+  one formula, for example `BASE + 10*N + k` with a fixed `k` per role. A port
+  chosen by hand in one place collides the day a second lane starts.
+- A value that echoes a lane name into a response or a recorded effect (a topic
+  suffix, a sink `host:port` in an error URL) MUST be normalised by exact
+  per-lane replacement before the diff, so goldens do not depend on the lane
+  that captured them. `assets/e2e_shard.py --lane-echo` does this.
+- Development workers and judge lanes use disjoint id ranges (for example
+  workers 0–9, e2e lanes 20–25), so a sharded wave never collides with a worker
+  that is still implementing.
+
+Check: start two lanes at once on one suite, then diff the two captures. Any
+diff is a resource that is not keyed by lane.
+
+### Coverage of the judge — "unjudged" is a number, not a feeling
+
+A parity PASS covers only the effects the judge records. List every outbound
+effect class the old system has (HTTP calls with their headers, cache writes,
+bus messages, document writes, object-store writes, emails) and give each one
+a recorder. `assets/parity_diff.py --require LABEL=PATH` counts goldens that
+lack a class (for example `--require http-headers=effects[kind=http].headers`)
+and appends `, unjudged: <n>` to the verdict line. A class with no recorder yet
+is listed with a path nobody writes, so its count stays visible until it is
+built.
 
 ## AGENT_WORK_QUEUE.md — resumable state, rebuilt from facts
 
@@ -109,3 +176,27 @@ advances until the judge exists and demonstrably catches broken code. Later gate
 typically: rulebook stress-tested on a pilot slice → bulk migration compiles → smoke
 tests pass → behavioral parity green → rollout/rollback approved. A gate is passed by
 its named check, not by volume of generated code.
+
+Gates that keep the judge honest as the corpus grows (add them to every pack
+whose corpus has outbound effects):
+
+- **Judge coverage gate.** Every outbound-effect class is recorded and compared:
+  the verdict line shows `unjudged: 0`. A large corpus can pass for weeks with a
+  whole class (request headers, cache writes) unrecorded; the count makes that
+  visible.
+- **Drift guard before any golden recapture.** Before goldens are recaptured to
+  add a newly recorded field, diff old goldens against the new capture with the
+  new field ignored (`parity_diff.py old/ new/ --ignore <new_field>`). It MUST
+  pass. A scenario that fails it changed behaviour, not just shape, and keeps its
+  old golden until a human decides.
+- **Baseline before replacement.** Before a recapture replaces goldens, run the
+  current new-system binary against the new goldens. Every diff must fall in the
+  class the change targets, so a fix cannot hide divergences of other classes.
+- **Nondeterminism rule.** Three back-to-back legacy captures of one scenario
+  that differ mean the scenario needs canonicalisation (an unordered key set, a
+  normalised id, a declared `--ignore`), never a recapture: a recaptured flaky
+  golden passes or fails at random.
+- **Sharded runs earn trust.** A parallel e2e run counts for a gate only after
+  it reproduces a serial run's exact scenario, diff and unjudged counts on the
+  same tree (`e2e_shard.py --expect`).
+

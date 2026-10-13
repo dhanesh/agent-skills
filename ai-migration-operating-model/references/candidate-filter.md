@@ -26,6 +26,29 @@ project into a smaller precursor project (add golden tests, add observability, c
 a bounded module). Mostly-"no" means recommend against — saying "don't migrate yet, and
 here is the precursor work" is a fully successful outcome of this skill.
 
+## Throughput estimate — state the wall-clock per wave
+
+A verdict that ignores judge time hides the real cost: an agent fan-out stalls on a
+slow judge, not on slow agents. Run `assets/capacity_probe.py` with the corpus size and
+put its estimate in the `economics` brief and the `qualify` verdict:
+
+```text
+e2e wave     = scenarios x s/scenario / lanes
+proof (once) = mutants x reaching scenarios x s/scenario      (proofs share one lock)
+```
+
+```sh
+python3 "$SKILL_DIR/assets/capacity_probe.py" --scenarios 15000 --secs-per-scenario 0.7 \
+    --mutants 9 --reaching 60
+```
+
+Take `s/scenario` from a timed pilot capture, never a guess. Take "reaching scenarios"
+from `assets/mutant_select.py` once the pilot has coverage contexts; before that, use
+the full suite size and say the estimate is an upper bound. When a wave is longer than
+a working session (a few hours), the plan MUST include the parallel judge (isolation
+contract, sharding, impact selection) as precursor work, or every fix waits hours for
+its verdict.
+
 ## Good candidates
 
 Measurable behavior, real current pain, enough tests or reconstructable scenarios,

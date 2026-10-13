@@ -42,7 +42,10 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
    `GAP_INVENTORY.md`, `PORTABILITY_TEST_PLAN.md`, `parity_check.*`,
    `AGENT_WORK_QUEUE.md`, `REVIEWER_PROMPTS.md`, `PHASE_GATES.md` — and lints it
    mechanically until clean.
-4. **Pilots on a disposable slice**, folding every lesson back into the rulebook, then
+4. **Makes the judge parallel-ready**: every stateful resource keyed by a lane id,
+   lanes sized from the container VM, sharded and impact-selected e2e waves, and
+   mutation proofs that replay only the scenarios that reach the mutant.
+5. **Pilots on a disposable slice**, folding every lesson back into the rulebook, then
    fans out implementer/reviewer agents under phase gates. Batch defects are fixed by
    updating the rule and regenerating — never by hand-patching fifty files.
 
@@ -63,7 +66,12 @@ Invoke bare for the full workflow, or pass a mode to run one part standalone
 | Tool | Job |
 |---|---|
 | `assets/control_pack_lint.py` | Deterministic linter for the Control Pack: required artifacts, sequential `MR`/`G`/`S` ids, binding modals, machine-readable queue statuses, judge-first phase gates. Prints `PACK_RESULT: PASS\|FAIL`. |
-| `assets/parity_diff.py` | The mechanical judge: normalizes and diffs old-vs-new JSON outputs (single case or golden-corpus directories), with `--ignore` for noise keys and `--tolerance` for float drift. Prints `PARITY_RESULT: PASS\|FAIL`. |
+| `assets/parity_diff.py` | The mechanical judge: normalizes and diffs old-vs-new JSON outputs (single case or golden-corpus directories), with `--ignore` for noise keys and `--tolerance` for float drift. `--require LABEL=PATH` counts effect classes the goldens do not record (`unjudged: <n>` on the verdict). Prints `PARITY_RESULT: PASS\|FAIL`. |
+| `assets/capacity_probe.py` | Sizes judge lanes from the scarcest resource (container VM CPUs and memory, host cores, free disk) and estimates the wall-clock per e2e wave and per mutation proof. Prints `LANES: <n> (serial\|parallel: <limit>)`. |
+| `assets/e2e_shard.py` | Replays the golden corpus in parallel lanes from command templates, packs suites longest-first, normalises lane echoes, and judges the merged capture with ONE diff. `--expect` checks a sharded run against a serial one. |
+| `assets/impact.py` | Picks the suites a change can affect from a content-hash baseline and the language's dependency graph; fails closed to `ALL`. |
+| `assets/mutant_select.py` | Runs each mutant only on the scenarios whose coverage reached its lines; import-time code gets the full suite, unreached mutants are rejected. |
+| `assets/machine_lock.py` | Machine-wide lock with an owner file (pid, host, worker, task, time) for proofs and waves that cannot share the VM. |
 
 ## Install
 
@@ -77,7 +85,7 @@ npx skills add dhanesh/agent-skills --skill ai-migration-operating-model
 - `references/control-pack.md` — artifact-by-artifact grammar of the Control Pack
 - `references/candidate-filter.md` — the go / no-go decision table
 - `references/pilot-playbook.md` — disposable pilot, fan-out mechanics, "fix the loop, not the files"
-- `assets/` — the two tools above plus their unit suites (`test_*.py`)
+- `assets/` — the tools above plus their unit suites (`test_*.py`)
 - `eval/run_eval.py` — deterministic outcome eval (gate-run; see `docs/eval-standard.md`)
 
 ## Sibling skills
@@ -86,6 +94,8 @@ npx skills add dhanesh/agent-skills --skill ai-migration-operating-model
 - `crafting-self-prompting-loops` — builds the execution loops that consume the pack
 
 ## Changes
+
+- **1.1.0.** The judge is parallel-ready and fast by design. New: the judge isolation contract, judge coverage gates (`unjudged` count, drift guard, nondeterminism rule, sharded-run trust), the unit-oracle layer of the test plan, and the operational rules for long fan-outs. New tools: `capacity_probe.py`, `e2e_shard.py`, `impact.py`, `mutant_select.py`, `machine_lock.py`; `parity_diff.py` gains `--require` and `--fail-on-unjudged`. The `economics` and `qualify` modes now state the wall-clock per wave.
 
 - **1.0.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

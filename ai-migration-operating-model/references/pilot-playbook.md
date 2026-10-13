@@ -56,9 +56,92 @@ module/service, clear operational pain, measurable parity, limited blast radius.
   timezone drift, nullability, error handling, idempotency, authz, observability) and
   cite `MR` ids in findings.
 - **Batch defects route through the doctrine above** — rule, regenerate, re-judge.
+- **Workers are isolated by id.** Each implementer worker owns a copy of the
+  tree and a lane id that keys its database, cache namespace and ports (see
+  the isolation contract in `control-pack.md`); only the orchestrator
+  integrates into the main tree.
 - **Progress is gated, not narrated.** Advance phases only via `PHASE_GATES.md`; "we
   generated a lot of code" is not a gate. Volume masquerading as progress is the
   signature failure of agentic migrations.
+
+## Judge throughput — make the wave fast by design
+
+Measure before you optimise. In a large port the unit tests were not the
+bottleneck (seconds, cold). The slow layers were the serial e2e wave (about
+3 h for a ~15k-scenario corpus at ~0.7 s each) and mutation proofs (more than
+6 h for one suite, because every mutant replayed the whole suite while a
+machine-wide lock kept proofs serial). Four tools attack those two layers. All
+of them depend on the judge isolation contract in `control-pack.md`.
+
+1. **Size from the scarcest resource.** Run `assets/capacity_probe.py` before
+   you choose serial or parallel. It reads host cores, the container VM's CPUs
+   and memory (the stateful services run in the VM, not on the host) and free
+   disk: `lanes = min(VM CPUs - 1, VM GiB / 1.5, host cores / 2, 6)`, at least 1.
+   A 10-core host with a 4-CPU / 6 GiB VM gets 2–3 lanes, not 5; sizing from
+   host cores once crashed the document DB under load. When the answer is 1,
+   run serial and say which limit decided it.
+2. **Shard the e2e wave.** `assets/e2e_shard.py` packs suites into lanes
+   longest-first (by last run's seconds, else scenario count x mean
+   s/scenario), runs lane setups one at a time (they often share tool state,
+   such as one virtualenv), captures in parallel, then merges and judges with
+   ONE diff against the whole golden directory. A suite no lane captured shows
+   as "missing in new"; it cannot pass by being skipped. Trust a sharded run
+   only after it reproduces a serial run's counts on the same tree, and re-run
+   serially any diff that appears only when sharded: fixed sleeps that wait for
+   async side effects miss under load.
+3. **Select by impact.** `assets/impact.py` maps changed files to suites through
+   the target language's dependency graph (Go: `go list -deps` from each suite's
+   own package, never through the app-wiring package that imports everything).
+   Its baseline is a content-hash manifest written only after a green FULL run,
+   so it works without git history. It fails closed to ALL on routing/wiring,
+   shared platform or config code, build files, sidecars, the judge's own
+   tooling, or any file it cannot map. A nightly full run stays mandatory.
+4. **Prove mutants on reaching scenarios only.** Replay the legacy rerun once on
+   the full suite with per-scenario coverage contexts, then give each mutant
+   only the scenarios that executed its lines (`assets/mutant_select.py`).
+   Python recipe: run the legacy server under coverage.py, and in a middleware
+   call `coverage.Coverage.current().switch_context(<scenario id>)` from a
+   header the judge sends; then `coverage json --show-contexts`. Any tool that
+   yields a `{file: {line: [scenario, ...]}}` map works too. A line that ran
+   only at import time (settings, URL tables, module constants) falls back to
+   the full suite. A line no scenario reaches is rejected: a mutant the suite
+   cannot reach proves nothing, CAUGHT or MISSED. The subset is safe because
+   dropping a scenario that does not reach the mutant can only turn CAUGHT into
+   MISSED, never the reverse.
+
+Mutation proofs and sharded waves take the same machine-wide lock
+(`assets/machine_lock.py`): a wave that fills every lane plus a proof that boots
+extra servers starves the VM. The lock's owner file (pid, host, worker, task,
+start time) tells a waiting agent who holds it and for how long, so the loop
+wakes on the holder's completion instead of polling.
+
+## Operational rules for a long fan-out
+
+These come from runs that died for reasons unrelated to the code under test
+(host sleep, a full disk and a VM restart each killed a multi-hour run). Put the
+ones that apply into `RULEBOOK.md` as `MR` rules.
+
+- **Never rewrite a running script or binary in place.** `sh` reads a script as
+  it runs, so an edit changes what a running wrapper executes next; one such
+  edit killed a proof and left its lock held forever. Install by writing a new
+  file and renaming it over the old path, and keep a long shell wrapper's body
+  in a function called on the last line (`main "$@"; exit`).
+- **Locks record their owner.** A lock is a directory plus an owner file (pid,
+  host, worker, task, time), so a stale lock is visible and a dead owner can be
+  detected. A bare `mkdir` lock with no owner turns a crash into a deadlock.
+- **Logs, prompts and ledgers live in the repo's `out/` directory**, never in
+  `/tmp`, which the host may wipe in the middle of a run.
+- **Snapshots exclude what can be regenerated** (staging copies, virtualenvs,
+  build output), and old snapshots are pruned to the newest N when free disk
+  drops below a threshold. A full disk fails every lane at once.
+- **One integration target, one writer at a time.** When `integrate` replaces a
+  whole unit (an app directory, a route table), two sub-slices of that unit
+  that integrate in parallel erase each other's work. Sub-slices of one unit
+  run in sequence.
+- **Expect host sleep.** A laptop's maintenance sleep can stretch a 35-minute
+  step to hours. Run long waves on a host that does not sleep, or treat sleep
+  as a failure mode with a resume path (the work queue and timestamped run
+  directories make a rerun cheap).
 
 ## The trap to avoid
 
