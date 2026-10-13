@@ -49,6 +49,16 @@ The article's worked example for unattended streams of work (incoming bug report
 
 **Composition caveat:** auto mode + Routines removes *both* human touchpoints (per-tool and per-run). LSC-8 must then be explicit and structural — gate on the deliverable (PR needing review, not a direct push), scope tools to least privilege (LSC-6), and keep the LSC-3 caps per task, because there is nobody left to notice a runaway.
 
+### Long unattended fan-out — background jobs, workers and a ledger
+
+A pattern for a loop that runs for hours or days and fans out to parallel worker lanes (for example, a multi-day unattended fan-out loop with 6 worker lanes). Each primitive fills one slot; the failures it prevents are in [`failure-modes.md`](./failure-modes.md) #11–#15.
+
+- **Background `Bash` + task notification for one long job (LSC-9 cadence).** Start a long job (a full test suite, a build) with `run_in_background`. The harness wakes the session when the job exits, so the loop needs no polling and pays no idle cache misses. Use `Monitor` only when you need the job's output while it runs. Record the job's pid in the ledger when it starts, so a resumed session can find it (#12).
+- **`Agent` for workers, each with its own resources (LSC-9 / LSC-6).** Give each worker its own port range, database and output directory, written into its prompt as fixed facts. Shared mutable resources are where parallel lanes collide. Size the lane count from the scarcest shared resource, and put a machine-wide lock with an owner file on any resource that lanes cannot share (`spec.md` LSC-9 capacity rule).
+- **`SendMessage` to resume a failed worker (LSC-10 recovery).** When a worker ends with a transient API or network error, do not start a new worker for the same task. First check for its orphaned background job. Then resume the same agent with `SendMessage`: it keeps its context, and you give it the new facts ("your job pid 4121 is still running; wait on it and read its output; do not start a second one"). A new worker starts from zero and can start a duplicate job.
+- **A JSONL ledger as the resumable state (LSC-4).** Append one JSON line per state change (task claimed, job started with pid, gate passed, task done, task failed with reason) to a repo-local file such as `out/loop_ledger.jsonl`. On resume, rebuild the current state by replaying the ledger; do not trust the conversation's memory of it. Append-only lines survive a crash mid-write better than a rewritten state file, and they give an audit trail for free. Validate each line against the state schema when you replay it (`STATE_VALIDATION`).
+- **Does NOT cover LSC-3 by itself.** None of these primitives stops the run. Keep the harness caps, and treat host sleep as a failure mode with a resume path (`spec.md` LSC-3 host-sleep rule), because a wall-clock cap counts sleep time.
+
 ## Quality & cost practices (article → slot)
 
 | Practice | Slot | Rule |

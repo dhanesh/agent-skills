@@ -101,6 +101,45 @@ def grade_state_typing(text):
     return (not missing, missing)
 
 
+# Operational failure modes for long unattended runs: each one is a numbered
+# section in failure-modes.md AND carries its mitigation phrase, so a heading
+# kept with its fix stripped still fails.
+OPS_MODES = {
+    "### 11. In-place edit of a running script": "rename it over the old path",
+    "### 12. Orphaned background job": "wait on the existing pid",
+    "### 13. Rejected cleanup step": "never needs to delete",
+    "### 14. Whole-unit integration clobber": "run sequentially",
+    "### 15. Loop state in a wiped temp directory": "repo-local",
+}
+# spec.md rules: LSC-9 sizes lanes from the scarcest resource; LSC-3 handles sleep.
+SPEC_RULES = ("Capacity rule (parallel loops):", "scarcest shared resource",
+              "owner file", "Host-sleep rule:", "monotonic")
+
+
+def _section(text, heading):
+    start = text.find(heading)
+    if start < 0:
+        return None
+    end = text.find("\n### ", start + len(heading))
+    end2 = text.find("\n---", start + len(heading))
+    ends = [e for e in (end, end2) if e > 0]
+    return text[start:min(ends) if ends else len(text)]
+
+
+def grade_ops_modes(text):
+    """Each operational mode has its section, and the section names its fix."""
+    missing = []
+    for heading, fix in OPS_MODES.items():
+        sec = _section(text, heading)
+        if sec is None or fix not in sec or "**Mitigation:**" not in sec:
+            missing.append(heading)
+    return not missing, missing
+
+
+def grade_spec_rules(text):
+    missing = [m for m in SPEC_RULES if m not in text]
+    return not missing, missing
+
 INTAKE_HEADING = "## Receiving a skill-contract envelope"
 INTAKE_MARKERS = ("check-envelope", "--for", "UNVALIDATED", "LSC-1", "LSC-4", "LSC-7", "LSC-8")
 TASK_PLAN = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
@@ -422,6 +461,30 @@ def main():
         stripped = "\n".join(ln for ln in skill_text.splitlines() if "LSC-7" not in ln)
         check("negative: grader flags an intake section with the LSC-7 mapping stripped",
               not grade_intake(stripped)[0])
+
+        # ── Long-run operational arm: failure modes #11-#15 + LSC-3/LSC-9 rules ──
+        with open(os.path.join(pristine, "references", "failure-modes.md"), encoding="utf-8") as f:
+            fm_text = f.read()
+        ok, missing = grade_ops_modes(fm_text)
+        check("failure-modes.md carries operational modes #11-#15, each with its mitigation",
+              ok, f"missing: {missing}")
+        no_fix = fm_text.replace("wait on the existing pid", "restart it")
+        check("negative: grader flags an orphaned-job mode whose wait-on-pid fix is stripped",
+              not grade_ops_modes(no_fix)[0])
+        no_mode = fm_text.replace("### 14. Whole-unit integration clobber", "### 14. Something")
+        check("negative: grader flags a missing integration-clobber mode",
+              not grade_ops_modes(no_mode)[0])
+        with open(os.path.join(pristine, "references", "spec.md"), encoding="utf-8") as f:
+            spec_text = f.read()
+        ok, missing = grade_spec_rules(spec_text)
+        check("spec.md carries the LSC-9 capacity rule and the LSC-3 host-sleep rule",
+              ok, f"missing: {missing}")
+        sized_by_cores = spec_text.replace("scarcest shared resource", "host core count")
+        check("negative: grader flags a capacity rule that sizes lanes from host cores",
+              not grade_spec_rules(sized_by_cores)[0])
+        no_sleep = "\n".join(ln for ln in spec_text.splitlines() if "Host-sleep rule:" not in ln)
+        check("negative: grader flags a spec with the host-sleep rule stripped",
+              not grade_spec_rules(no_sleep)[0])
 
         # ── Autonomy grant arm ──────────────────────────────────────────────
         grant_checks()

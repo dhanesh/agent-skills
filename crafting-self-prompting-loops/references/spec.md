@@ -46,6 +46,7 @@ SAFE_STATE: stopped
 
 Design rule: implement at least one backstop in the harness, independent of LSC-2; the model is never trusted to be the sole terminator, and SAFE_STATE is always `stopped`.
 Decision criteria: set each cap above the expected legitimate run length but below the point of unacceptable cost/runaway; when in doubt, halt.
+Host-sleep rule: a wall-clock cap counts time the host spends asleep, so it does not bound the work it claims to bound. On a laptop, maintenance sleep stretched one 35-minute step past 3 hours, and `caffeinate` did not prevent it. Run a long unattended loop on a host that does not sleep. If you cannot, treat sleep as a failure mode with a resume path: write a heartbeat timestamp each step, and compare wall-clock time with a monotonic clock (or check the gap between heartbeats). A gap that is much larger than the step takes means the host slept. Then do not count the step as a timeout or as progress: check what the step left behind, and resume it from the last good state.
 Runtime note (Claude Code): the SDK's `max_turns` / `max_budget_usd` and `/loop`'s 7-day auto-expiry are real harness-level backstops; `/goal`'s "or stop after N turns" clause is **not** — it's judged by the evaluator model, i.e. an LSC-2 soft stop. See [`claude-code-primitives.md`](./claude-code-primitives.md).
 
 ## LSC-4: State-passing
@@ -170,6 +171,7 @@ CACHE_AWARENESS: <how pacing respects the prompt-cache TTL, e.g. ~5 min>
 Design rule: set TOKEN_BUDGET, MAX_ITERATIONS (cost, distinct from the LSC-3 safety cap), and CADENCE explicitly; pace against CACHE_AWARENESS, not a round number.
 Decision criteria: choose CADENCE so re-invocation lands within the prompt-cache TTL (~5 min) to reuse cached context; size budgets to the task's value. Also match CADENCE to how often the *watched thing actually changes* — never run a recurring loop more often than its inputs move.
 Cost levers (Claude Code team guidance): **pilot before a large run** — gauge token usage on a small slice before fanning out; **ship scripts for deterministic sub-steps** instead of re-deriving them by reasoning each round; **tier models** — smaller/faster models for routine stages, the most capable for judgment calls; **instrument** with `/usage`, bare `/goal` (turns + spend), and `/workflows` (per-agent spend). See [`claude-code-primitives.md`](./claude-code-primitives.md).
+Capacity rule (parallel loops): when the machine can run lanes in parallel, probe it before you fan out. Read the host cores, the CPUs and memory of any container VM, and the free disk. Size the number of concurrent lanes from the scarcest shared resource, not from the host core count: ten host cores do not help when every lane shares one 4-CPU container VM. A resource that lanes cannot share safely (for example, one container VM that runs a heavy test server per lane) gets one machine-wide lock. The lock has an owner file that records the pid, the worker, the task and the start time, so a waiter or a resumed loop can see who holds it and whether that process is still alive. Feed the lock holder's expected duration into CADENCE: schedule the next wake-up for when the holder should finish, or wake on its completion signal, and do not poll the lock.
 
 ## LSC-10: Failure-mode handling
 
@@ -184,6 +186,7 @@ RUNAWAY_MITIGATION: <handling never stopping / non-termination>
 
 Design rule: define all four mitigations; RUNAWAY_MITIGATION must include the LSC-3 backstop, PREMATURE_STOP must re-check LSC-1's SUCCESS_DEFINITION, DRIFT must re-anchor to LSC-1, OSCILLATION must use LSC-5 progress history.
 Decision criteria: per family, pick the dominant failure modes (e.g. drift/oscillation in self-refinement, runaway/premature-stop in long autonomous tasks, deadlock in multi-agent) and ensure each has an observable detector plus a recovery path.
+Operational modes (long unattended runs): a loop that runs for hours or days, with background jobs and parallel workers, also breaks in ways the model does not cause. Give each of these a detector and a recovery too: a script edited while it runs, a worker killed while its background job keeps running, a cleanup step that the permission layer rejects, parallel units that overwrite one shared target, loop state lost from a wiped temp directory, and host sleep (LSC-3). See [`failure-modes.md`](./failure-modes.md) #11–#15.
 
 ### Termination contract (LSC-2 / LSC-3)
 
