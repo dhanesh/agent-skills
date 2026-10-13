@@ -730,8 +730,10 @@ class GrantTests(unittest.TestCase):
 
     @unittest.skipIf(shutil.which("git") is None, "git is not installed")
     def test_a_tag_named_like_the_branch_does_not_hide_it(self):
+        # No global/system config: a global tag.gpgsign=true makes `git tag` demand a message.
         env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
-                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t",
+                   GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
         for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "x"],
                      ["tag", "main"]):
             subprocess.run(["git", "-C", self.tmp] + args, check=True, capture_output=True, env=env)
