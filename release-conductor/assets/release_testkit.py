@@ -28,8 +28,12 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# The developer's global and system git config never reach a test repo: a
+# global tag.gpgsign=true, for one, turns a lightweight `git tag` into
+# "fatal: no tag message?".
 GIT = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+       "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+       "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 _TMPDIRS = []
 
