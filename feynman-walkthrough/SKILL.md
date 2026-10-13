@@ -15,11 +15,11 @@ description: >-
   study regimen: retention tooling (spaced retrieval, self-quizzing, review schedules)
   exists but is strictly opt-in.
 license: MIT
-compatibility: Requires python3 (stdlib only) for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, for the OKF bundle and spaced-schedule tools; git optional, used to fingerprint repo sources. Conversation-only environments still get the full walkthrough, minus persistence.
 metadata:
   spec_version: "1.0"
   author: dhanesh
-  version: "1.2.3"
+  version: "1.2.4"
   tags: "learning,feynman,walkthrough,explainer,okf,knowledge-base,spaced-repetition,onboarding"
 ---
 
@@ -94,6 +94,10 @@ suggest. Commands that start with `uv run` or `{python}` keep their own form. In
 under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the allowlist names. If
 none passes, follow this skill's own fallback for running without Python where it gives one;
 otherwise stop and tell the user that this skill needs Python 3.10 or newer.
+
+This skill's fallback without Python: when no interpreter passes, do not stop. Run the full
+walkthrough in conversation and skip persistence (the OKF bundle, its source fingerprints and any
+review schedule), and tell the user that the explainer was not saved.
 
 1. **Scope.** One light round: what's the material, what will they use the understanding
    for (ship a change, review a paper, general orientation, teach it onward), and what

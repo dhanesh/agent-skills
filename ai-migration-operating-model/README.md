@@ -87,4 +87,5 @@ npx skills add dhanesh/agent-skills --skill ai-migration-operating-model
 
 ## Changes
 
+- **1.0.4.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

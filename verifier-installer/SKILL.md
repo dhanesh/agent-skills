@@ -12,10 +12,10 @@ description: >-
   a green verify+CI loop — use agent-ready-rails to audit first; this skill installs what that
   audit finds missing. Honors a skill-contract autonomy grant at its write gate.
 license: MIT
-compatibility: Requires python3 and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`) and a POSIX shell. The target repo's own toolchain (npm, go, cargo, make, pytest) is needed only to run the verifiers it already implies; detection itself is offline and stdlib-only.
 metadata:
   author: dhanesh
-  version: "1.2.4"
+  version: "1.2.5"
   skill-contract: "1"
   tags: "verifiers,ci,github-actions,agent-readiness,test-loop,scaffolding"
 ---

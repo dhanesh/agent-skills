@@ -14,10 +14,10 @@ description: >-
   healthy system (use feynman-walkthrough); not for auditing a codebase's claims (use
   base-in-reality).
 license: MIT
-compatibility: Any filesystem agent with python3 (stdlib-only, offline). Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
+compatibility: Any filesystem agent with Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline. Git history, CI logs, and issue-tracker access improve evidence quality but are optional; degrades to whatever records exist.
 metadata:
   author: dhanesh
-  version: "1.1.2"
+  version: "1.1.3"
   tags: "postmortem,incident-review,root-cause,five-whys,blameless,okf,knowledge"
 ---
 

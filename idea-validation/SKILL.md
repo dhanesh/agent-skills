@@ -14,10 +14,10 @@ description: >-
   the human publishes, sends and spends. Not the planner (spec-first-planning), not a
   survey, analytics or market-size tool.
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool needs no network and no credentials.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool needs no network and no credentials.
 metadata:
   author: dhanesh
-  version: "0.1.5"
+  version: "0.1.6"
   skill-contract: "1"
   tags: "factory,ideas,validation,skill-contract"
 ---

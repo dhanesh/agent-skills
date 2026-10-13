@@ -14,10 +14,10 @@ description: >-
   metric figure to any model. Not ops-intake (it ranks the queue), not idea-validation
   (experiments before a build), not an analytics, forecasting or launch tool.
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux), python3 >= 3.10 (stdlib only). The tool needs no network and no credentials; the human exports the data with their own login. Breaches go to ops-intake through its intake-signals-jsonl format.
+compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool needs no network and no credentials; the human exports the data with their own login. Breaches go to ops-intake through its intake-signals-jsonl format.
 metadata:
   author: dhanesh
-  version: "0.1.2"
+  version: "0.1.3"
   tags: "factory,growth,metrics,ops-intake"
 ---
 

@@ -14,10 +14,10 @@ description: >-
   budget/budget.md, never approve one. Not the planner (spec-first-planning), not the loop
   designer (crafting-self-prompting-loops).
 license: MIT
-compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), python3 >= 3.10 (stdlib only), git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
+compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.5.3"
+  version: "1.5.4"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -348,8 +348,17 @@ rule is refused. So in a resumed session, write the conductor's absolute path ou
 as `python3 /abs/path/to/factory-conductor/assets/conductor.py <command> --root <repo>`. Use no
 `$SKILL_DIR`, no `cd … &&` and no variable assignment, so each command matches the grant's
 `Bash(python3 /abs/…/conductor.py *)` rule.
-A resumed session does not run the interpreter lookup. It writes the interpreter that the
-grant's `Bash(...)` rule names, in place of `python3` in the command and the rule above.
+A resumed session does not run the interpreter lookup, and it cannot see its own allowlist, so
+it reads the command that started it before its first command. `watch` logs that command when it
+starts an agent: in the newest run directory, `<repo>/.skill-contract/runs/<run-id>/` (run ids
+start with their UTC start time, so the newest sorts last), the file `autonomy-log.jsonl` holds
+one JSON object per line, and the last line whose `event` is `reentry` and that has an `argv`
+field is the command that `watch` ran. Read the file with the file-reading tool, because a shell
+command to print it matches no `Bash(...)` rule. Take the interpreter from the
+`Bash(<interpreter> <abs>/conductor.py *)` rule in the `--allowedTools` value of that `argv`, and
+write it in place of `python3` in each command. If the log cannot be read or holds no such line,
+use `python3`, the form of the example allowlist in spec-first-planning's unattended-mode
+reference.
 
 The timer calls `conductor watch` every `interval_min`. `watch` starts the user's own agent
 command, with a fixed resume prompt, only when the run is not finished, not waiting on the

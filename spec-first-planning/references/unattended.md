@@ -149,8 +149,11 @@ and skip what the conversation has already answered:
    Claude Code), the plan's verify programs, git and file edits (see the example below).
    If the Python interpreter rule found an interpreter other than `python3`, write that one
    instead, here and in the grant's `Bash(...)` rule, so the two match. A resumed session does
-   not run the interpreter lookup; it writes the interpreter that the grant's `Bash(...)` rule
-   names.
+   not run the interpreter lookup and cannot see its own allowlist. It reads the `argv` that
+   `watch` logged in the last `reentry` event of the run's
+   `.skill-contract/runs/<run-id>/autonomy-log.jsonl` (this `agent_cmd`), and takes the
+   interpreter from its `Bash(<interpreter> <abs>/conductor.py *)` rule, as factory-conductor's
+   "Scheduled re-entry" section says. If it cannot read the log, it uses `python3`.
    Warn against any permission-bypass flag, because the resumed agent acts with the
    user's own permissions and no one watches it. Without an answer, no block is written and nothing
    re-enters. When the project has a `.release/recipe.json` (release-conductor),
@@ -314,7 +317,11 @@ the factory-conductor skill is installed) and `Bash(python3 -m pytest *)` with t
 own verify programs. `Agent` is Claude Code's subagent tool; another agent names its own.
 If the Python interpreter rule found an interpreter other than `python3`, write that one
 instead, here and in the grant's `Bash(...)` rule, so the two match. A resumed session does not
-run the interpreter lookup; it writes the interpreter that the grant's `Bash(...)` rule names.
+run the interpreter lookup and cannot see its own allowlist. It reads the `argv` that `watch`
+logged in the last `reentry` event of the run's `.skill-contract/runs/<run-id>/autonomy-log.jsonl`
+(this `agent_cmd`), and takes the interpreter from its `Bash(<interpreter> <abs>/conductor.py *)`
+rule, as factory-conductor's "Scheduled re-entry" section says. If it cannot read the log, it uses
+`python3`.
 Claude Code matches each `Bash(...)` rule against the literal command text, before any
 variable is expanded. A resumed agent therefore writes the conductor's absolute path out in
 each command, as factory-conductor's "Scheduled re-entry" section says, so give the rule that

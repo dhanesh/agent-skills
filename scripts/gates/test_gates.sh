@@ -641,5 +641,11 @@ py_case "python3 only in frontmatter compatibility passes without the rule" PASS
 py_case "a python3 command only in references fails without the rule" FAIL "$(mkpy ref 'Do the thing.' '' 'python3 -m pytest')"
 py_case "a VERIFY: output line passes without the rule" PASS "$(mkpy verify 'VERIFY: T1 ok /usr/bin/python3 -c "print(1)"' '')"
 py_case "a {python} command passes without the rule" PASS "$(mkpy placeholder '{python} "$SKILL_DIR/assets/x.py"' '')"
+py_case "a command glued to a pipe (x|python3 -c) fails without the rule" FAIL "$(mkpy pipe "x|python3 -c 'print(1)'" '')"
+py_case "a command glued to a separator (a;python3 x.py) fails without the rule" FAIL "$(mkpy semi 'a;python3 x.py' '')"
+py_case "a command glued to && fails without the rule" FAIL "$(mkpy amp 'a&&python -c 1' '')"
+py_case "a command glued to an assignment (X=python3 -c) fails without the rule" FAIL "$(mkpy assign "X=python3 -c 'print(1)'" '')"
+py_case "a command opening a single-quoted string (sh -c 'python3 x.py') fails without the rule" FAIL "$(mkpy squote "sh -c 'python3 x.py'" '')"
+py_case "a glued command with the rule passes" PASS "$(mkpy pipe-rule "x|python3 -c 'print(1)'" rule)"
 
 exit $rc

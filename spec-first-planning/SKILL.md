@@ -14,10 +14,10 @@ description: >-
   crafting-self-prompting-loops; not a project-management tracker; complements, not replaces,
   heavier PRD workflows.
 license: MIT
-compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.7.3"
+  version: "2.7.4"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -184,8 +184,8 @@ otherwise stop and tell the user that this skill needs Python 3.10 or newer.
    MUST NOT treat that as a failure, because the plan is still done: give the user the envelope
    path.
    In unattended mode, the grant is written between `check-envelope` and this check (see
-   `## Unattended mode`). Run the checker with `$SKILL_CONTRACT_PYTHON` when it is set, otherwise with the
-   interpreter found under "Python interpreter" above.
+   `## Unattended mode`). Run the checker with `$SKILL_CONTRACT_PYTHON` when it is set,
+   otherwise with the interpreter found under "Python interpreter" above.
 
 ## Requests from ops-intake
 

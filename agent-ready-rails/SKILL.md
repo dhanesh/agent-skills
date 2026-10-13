@@ -2,10 +2,10 @@
 name: agent-ready-rails
 description: 'Read-only audit that scores how ready a repository is for coding agents to work in safely and successfully, then optionally installs the missing rails. Use when asked "is our repo ready for agents / Claude Code / a background coding agent?", "why do agents keep failing or making messy PRs here?", or "how do we get agents to actually merge working changes?". Grades six rails — runnable verifiers (the format/build/test loop), green-CI ground truth, copyable house style, navigable context, scoped trusted tools, human checkpoints with reversibility — from observed repo evidence, emitting a severity-ranked scorecard with a prioritized fix list. For agents running unattended against production, an optional second tier grades four operate rails past the merge boundary. Grounded in Spotify''s Honk case. Not a linter, SAST, or CI-config generator: audits the engineering system agents run inside, not code correctness (base-in-reality) or one loop''s soundness (crafting-self-prompting-loops).'
 license: MIT
-compatibility: Any agent harness with shell access to the target repo; the evidence collector needs python3 (stdlib only). Audit mode is read-only.
+compatibility: Any agent harness with shell access to the target repo; the evidence collector needs Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. Audit mode is read-only.
 metadata:
   author: dhanesh
-  version: "1.1.3"
+  version: "1.1.4"
   tags: "agent-readiness,audit,coding-agents,ci,verification,repo-hygiene"
 ---
 

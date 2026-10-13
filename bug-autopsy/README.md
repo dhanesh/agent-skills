@@ -84,4 +84,5 @@ is flagged as a warning to reframe.
 
 ## Changes
 
+- **1.1.3.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.1.2.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

@@ -2,10 +2,10 @@
 name: jev-agent-setup
 description: "Install and verify a machine-wide Jev (TypeSafe System One) setup for coding agents: the `jev` CLI plus a managed BCP 14 instruction block in the global files of Claude Code, Codex, Gemini CLI and ~/.agents/AGENTS.md, so every agent offloads its rank/classify/yes-no decisions to Jev. Use when the user says 'set up Jev for my agents', 'install the jev CLI', 'make Codex and Gemini use Jev too', 'replicate my Jev setup on this machine', or 'check my Jev setup for drift'. Not for designing Jev judgments inside an application — use typesafe-ai for that."
 license: MIT
-compatibility: python3 stdlib for the installer; uv plus network and a TypeSafe API key when the jev CLI runs; macOS or Linux home-directory layout.
+compatibility: Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, for the installer; uv plus network and a TypeSafe API key when the jev CLI runs; macOS or Linux home-directory layout.
 metadata:
   author: dhanesh
-  version: "0.1.2"
+  version: "0.1.3"
   tags: "typesafe,jev,system-one,agent-setup,bcp14"
 ---
 

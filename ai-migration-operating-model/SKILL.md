@@ -14,10 +14,10 @@ description: >-
   executor of the migration itself — it sets up and verifies the machine; complements
   spec-first-planning and crafting-self-prompting-loops.
 license: MIT
-compatibility: Requires python3 (stdlib only) and a POSIX-like shell; fully offline, no network.
+compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "1.0.3"
+  version: "1.0.4"
   tags: "migration,rewrite,port,parity,golden-tests,rulebook,agent-orchestration,phase-gates"
 ---
 
