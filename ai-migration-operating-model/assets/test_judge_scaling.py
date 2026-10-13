@@ -85,6 +85,18 @@ class TestCapacity(unittest.TestCase):
         self.assertAlmostEqual(est["proof_wall_s"], 324)
         self.assertGreater(est["proof_full_suite_s"], est["proof_wall_s"])
 
+    def test_cli_goes_serial_when_the_vm_does_not_answer(self):
+        real = capacity_probe.probe_vm
+        capacity_probe.probe_vm = lambda: (None, None, "no container runtime answered")
+        out = io.StringIO()
+        sys_stdout, sys.stdout = sys.stdout, out
+        try:
+            rc = capacity_probe.main(["--host-cpus", "10", "--free-disk-gib", "50"])
+        finally:
+            sys.stdout, capacity_probe.probe_vm = sys_stdout, real
+        self.assertEqual(rc, 0)
+        self.assertIn("LANES: 1 (serial", out.getvalue())
+
     def test_cli_with_injected_values(self):
         out = io.StringIO()
         sys_stdout, sys.stdout = sys.stdout, out
@@ -97,6 +109,17 @@ class TestCapacity(unittest.TestCase):
         self.assertIn("LANES: 3 (parallel", out.getvalue())
 
 
+HOLDER = r"""
+import fcntl, os, sys, time
+d = sys.argv[1]
+os.makedirs(d, exist_ok=True)
+fd = os.open(os.path.join(d, "lock"), os.O_RDWR | os.O_CREAT)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print("held", flush=True)
+time.sleep(30)
+"""
+
+
 class TestLock(TempCase):
     def test_owner_file_and_release(self):
         lock = os.path.join(self.tmp, "judge.lock")
@@ -105,36 +128,42 @@ class TestLock(TempCase):
         self.assertEqual((owner["pid"], owner["worker"], owner["task"]), (os.getpid(), "3", "prove x"))
         self.assertIn("since", owner)
         machine_lock.release(lock)
-        self.assertFalse(os.path.exists(lock))
+        self.assertIsNone(machine_lock.read_owner(lock))
+        self.assertFalse(machine_lock.is_held(lock))
 
-    def test_stale_owner_is_taken_over(self):
+    def test_dead_holder_leaves_no_stale_lock(self):
         lock = os.path.join(self.tmp, "judge.lock")
-        p = subprocess.Popen([PY, "-c", "pass"])
+        p = subprocess.Popen([PY, "-c", HOLDER, lock], stdout=subprocess.PIPE, text=True)
+        p.stdout.readline()
+        self.assertTrue(machine_lock.is_held(lock))
+        p.kill()
         p.wait()
-        os.mkdir(lock)
-        _write(os.path.join(lock, "owner"), {"pid": p.pid, "host": machine_lock.socket.gethostname(),
-                                             "worker": "1", "task": "old", "since": "x"})
-        out = io.StringIO()
-        self.assertEqual(machine_lock.acquire(lock, "2", "new", wait_s=5, poll_s=0.05, out=out), 0)
-        self.assertIn("stale", out.getvalue())
+        p.stdout.close()
+        # The kernel dropped the flock with the process: no stale-lock logic needed.
+        self.assertEqual(machine_lock.acquire(lock, "2", "new", wait_s=5, poll_s=0.05,
+                                              out=io.StringIO()), 0)
         machine_lock.release(lock)
 
-    def test_live_owner_times_out(self):
+    def test_live_holder_times_out(self):
         lock = os.path.join(self.tmp, "judge.lock")
-        os.mkdir(lock)
-        _write(os.path.join(lock, "owner"), {"pid": os.getpid(), "host": machine_lock.socket.gethostname(),
-                                             "worker": "1", "task": "busy", "since": "x"})
-        out = io.StringIO()
-        rc = machine_lock.acquire(lock, "2", "t", wait_s=0, poll_s=0.01, out=out)
-        self.assertEqual(rc, machine_lock.EXIT_TIMEOUT)
-        self.assertIn("waiting for pid", out.getvalue())
+        p = subprocess.Popen([PY, "-c", HOLDER, lock], stdout=subprocess.PIPE, text=True)
+        try:
+            p.stdout.readline()
+            out = io.StringIO()
+            rc = machine_lock.acquire(lock, "2", "t", wait_s=0, poll_s=0.01, out=out)
+            self.assertEqual(rc, machine_lock.EXIT_TIMEOUT)
+            self.assertIn("LOCK: waiting", out.getvalue())
+        finally:
+            p.kill()
+            p.wait()
+            p.stdout.close()
 
     def test_run_returns_command_status_and_frees_lock(self):
         lock = os.path.join(self.tmp, "judge.lock")
         r = subprocess.run([PY, os.path.join(HERE, "machine_lock.py"), "run", "--lock", lock,
                             "--", PY, "-c", "import sys; sys.exit(3)"], capture_output=True)
         self.assertEqual(r.returncode, 3)
-        self.assertFalse(os.path.exists(lock))
+        self.assertFalse(machine_lock.is_held(lock))
 
 
 class TestRequire(TempCase):
@@ -212,6 +241,11 @@ class TestShard(TempCase):
         self.assertEqual(w, {"a": 20.0, "b": 8.0})
         self.assertEqual(e2e_shard.weights({"a": 2}, {}), {"a": 1.5})
 
+    def test_render_leaves_other_braces_alone(self):
+        cmd = e2e_shard.render("docker inspect -f '{{json .State}}' l{lane} {suite}",
+                               lane=21, suite="pay")
+        self.assertEqual(cmd, "docker inspect -f '{{json .State}}' l21 pay")
+
     def test_echo_replacement_is_exact_per_lane(self):
         pairs = e2e_shard.echo_pairs(["_JUDGE_W{lane}_"], 2, 0)
         self.assertEqual(e2e_shard._replace_strings("_JUDGE_W2_x", pairs), "_JUDGE_W{lane}_x")
@@ -275,9 +309,11 @@ class TestImpact(TempCase):
     def _sel(self, cfg):
         return impact.select(cfg, run_cmd=lambda cmd, root: self.DEPS.get(cmd))
 
-    def _green(self):
+    def _green(self, cfg=None):
         st = os.path.join(self.tmp, "status.json")
-        _write(st, {"verdict": "PARITY_RESULT: PASS (2 scenario(s), 0 diff(s))", "suites": "all"})
+        tid = impact.tree_id(cfg) if cfg else ""
+        _write(st, {"verdict": "PARITY_RESULT: PASS (2 scenario(s), 0 diff(s))", "suites": "all",
+                    "tree_id": tid})
         return st
 
     def test_no_manifest_is_all(self):
@@ -293,9 +329,18 @@ class TestImpact(TempCase):
         with self.assertRaises(ValueError):
             impact.record(cfg, bad)
 
+    def test_record_refuses_a_tree_changed_after_the_run(self):
+        cfg = self._repo()
+        st = self._green(cfg)  # the wave starts on this tree...
+        _write(os.path.join(self.tmp, "internal/fees/h.go"), "integrated mid-wave")
+        with self.assertRaises(ValueError) as e:
+            impact.record(cfg, st)  # ...and ends on another one
+        self.assertIn("tested tree", str(e.exception))
+        self.assertGreater(impact.record(cfg, st, force=True), 0)
+
     def test_selection_rules(self):
         cfg = self._repo()
-        self.assertGreater(impact.record(cfg, self._green()), 0)
+        self.assertGreater(impact.record(cfg, self._green(cfg)), 0)
         self.assertEqual(self._sel(cfg), ([], []))
         _write(os.path.join(self.tmp, "internal/money/m.go"), "m2")
         self.assertEqual(self._sel(cfg)[0], ["pay"])
@@ -308,19 +353,19 @@ class TestImpact(TempCase):
 
     def test_fails_closed(self):
         cfg = self._repo()
-        impact.record(cfg, self._green())
+        impact.record(cfg, self._green(cfg))
         _write(os.path.join(self.tmp, "internal/app/app.go"), "rewired")
         self.assertEqual(self._sel(cfg)[0], "ALL")
-        impact.record(cfg, self._green())
+        impact.record(cfg, self._green(cfg))
         _write(os.path.join(self.tmp, "README.md"), "unmappable")
         self.assertEqual(self._sel(cfg)[0], "ALL")
-        impact.record(cfg, self._green())
+        impact.record(cfg, self._green(cfg))
         _write(os.path.join(self.tmp, "judge/golden/newsuite__a.json"), "{}")
         self.assertEqual(self._sel(cfg)[0], ["newsuite"])  # a new suite selects itself
         cfg["suites"] = ["pay", "fees"]  # an explicit list: anything else is unknown
         self.assertEqual(self._sel(cfg)[0], "ALL")
         del cfg["suites"]
-        impact.record(cfg, self._green())
+        impact.record(cfg, self._green(cfg))
         _write(os.path.join(self.tmp, "internal/fees/h.go"), "f2")
         sel, why = impact.select(cfg, run_cmd=lambda cmd, root: None)
         self.assertEqual(sel, "ALL")

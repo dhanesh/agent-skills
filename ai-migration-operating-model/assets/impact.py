@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """impact.py — which golden suites a change can affect, failing closed to ALL.
 
+    python3 impact.py --config impact.json tree-id       # hash of the tracked tree
     python3 impact.py --config impact.json record --status <run>/status.json
     python3 impact.py --config impact.json suites        # ALL | NONE | suite names
     python3 impact.py --config impact.json changed-units # units for race/sanitiser runs
 
 The baseline is a content-hash manifest, not git history, so it works in a tree
 with no commits and in worker copies. `record` writes it, and only after a green
-FULL run: it reads the e2e_shard.py status.json and refuses unless the verdict
-is PASS and the run covered all suites (--force overrides, and says so).
+FULL run of THIS tree: it reads the e2e_shard.py status.json and refuses unless
+the verdict is PASS, the run covered all suites, and the run's tree_id equals
+the current tree-id (--force overrides, and says so). The tree-id check matters
+in a fan-out: slices integrated while a long wave ran were never tested by it,
+and recording them as the baseline would make later selections skip them.
+
+    TREE=$(python3 impact.py --config impact.json tree-id)
+    python3 e2e_shard.py ... --tree-id "$TREE"            # the full wave
+    python3 impact.py --config impact.json record --status <run>/status.json
 
 Config (JSON; every path is relative to "root", default the config's directory):
 
@@ -86,6 +94,12 @@ def tracked(cfg):
         with open(os.path.join(cfg["root"], rel), "rb") as f:
             out[rel] = hashlib.sha256(f.read()).hexdigest()
     return out
+
+
+def tree_id(cfg, files=None):
+    """sha256 over the sorted tracked-file map: one id per tested tree."""
+    files = tracked(cfg) if files is None else files
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _manifest_path(cfg):
@@ -187,9 +201,13 @@ def record(cfg, status_path, force=False):
             raise ValueError("IMPACT: refusing to record: last run is not green (%s)" % st.get("verdict"))
         if st.get("suites") != "all":
             raise ValueError("IMPACT: refusing to record: last run was impact-selected, not FULL")
+    m = tracked(cfg)
+    if not force and st.get("tree_id") != tree_id(cfg, m):
+        raise ValueError("IMPACT: refusing to record: the green run tested tree %s, the "
+                         "tree is now %s (pass --tree-id to e2e_shard.py, or re-run)"
+                         % (st.get("tree_id") or "<none>", tree_id(cfg, m)))
     path = _manifest_path(cfg)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    m = tracked(cfg)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(m, f, indent=0, sort_keys=True)
@@ -207,6 +225,7 @@ def main(argv=None):
     s = sub.add_parser("suites")
     s.add_argument("--json", action="store_true")
     sub.add_parser("changed-units")
+    sub.add_parser("tree-id")
     a = ap.parse_args(argv)
     cfg = load_config(a.config)
 
@@ -217,6 +236,9 @@ def main(argv=None):
             print(e, file=sys.stderr)
             return 1
         print("IMPACT: manifest recorded (%d files)%s" % (n, " [forced]" if a.force else ""))
+        return 0
+    if a.cmd == "tree-id":
+        print(tree_id(cfg))
         return 0
     if a.cmd == "changed-units":
         u = changed_units(cfg)

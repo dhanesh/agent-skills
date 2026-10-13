@@ -79,7 +79,9 @@ of them depend on the judge isolation contract in `control-pack.md`.
    disk: `lanes = min(VM CPUs - 1, VM GiB / 1.5, host cores / 2, 6)`, at least 1.
    A 10-core host with a 4-CPU / 6 GiB VM gets 2–3 lanes, not 5; sizing from
    host cores once crashed the document DB under load. When the answer is 1,
-   run serial and say which limit decided it.
+   run serial and say which limit decided it. A runtime that does not answer
+   (installed but stopped) also means serial: start it and probe again, rather
+   than let host cores stand in for a VM nobody measured.
 2. **Shard the e2e wave.** `assets/e2e_shard.py` packs suites into lanes
    longest-first (by last run's seconds, else scenario count x mean
    s/scenario), runs lane setups one at a time (they often share tool state,
@@ -93,7 +95,14 @@ of them depend on the judge isolation contract in `control-pack.md`.
    the target language's dependency graph (Go: `go list -deps` from each suite's
    own package, never through the app-wiring package that imports everything).
    Its baseline is a content-hash manifest written only after a green FULL run,
-   so it works without git history. It fails closed to ALL on routing/wiring,
+   so it works without git history, and only for the tree that run tested:
+   ```sh
+   TREE=$(python3 "$SKILL_DIR/assets/impact.py" --config impact.json tree-id)
+   python3 "$SKILL_DIR/assets/e2e_shard.py" ... --tree-id "$TREE"   # full wave
+   python3 "$SKILL_DIR/assets/impact.py" --config impact.json record --status <run>/status.json
+   ```
+   `record` refuses when slices were integrated while the wave ran, because
+   those changes were never tested. It fails closed to ALL on routing/wiring,
    shared platform or config code, build files, sidecars, the judge's own
    tooling, or any file it cannot map. A nightly full run stays mandatory.
 4. **Prove mutants on reaching scenarios only.** Replay the legacy rerun once on
@@ -126,9 +135,12 @@ ones that apply into `RULEBOOK.md` as `MR` rules.
   edit killed a proof and left its lock held forever. Install by writing a new
   file and renaming it over the old path, and keep a long shell wrapper's body
   in a function called on the last line (`main "$@"; exit`).
-- **Locks record their owner.** A lock is a directory plus an owner file (pid,
-  host, worker, task, time), so a stale lock is visible and a dead owner can be
-  detected. A bare `mkdir` lock with no owner turns a crash into a deadlock.
+- **Locks die with their holder and record their owner.** Use a kernel file
+  lock (`flock`), which the kernel drops when the process dies, plus an owner
+  file (pid, host, worker, task, time) so a waiter can see who holds it. A bare
+  `mkdir` lock turns a crash into a deadlock, and breaking "stale" mkdir locks
+  races when two waiters see the same dead owner. `assets/machine_lock.py` does
+  this.
 - **Logs, prompts and ledgers live in the repo's `out/` directory**, never in
   `/tmp`, which the host may wipe in the middle of a run.
 - **Snapshots exclude what can be regenerated** (staging copies, virtualenvs,

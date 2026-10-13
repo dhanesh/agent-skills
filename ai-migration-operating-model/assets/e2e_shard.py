@@ -100,8 +100,11 @@ def pack(w, lanes):
 
 
 def render(tpl, **kw):
-    return tpl.format(**{k: (shlex.quote(str(v)) if k in ("out", "suite") else v)
-                         for k, v in kw.items()})
+    """Substitute {lane} {port} {suite} {out} {run} only; any other brace text
+    (a Go template `{{json .}}`, a JSON literal) passes through untouched."""
+    for k, v in kw.items():
+        tpl = tpl.replace("{%s}" % k, shlex.quote(str(v)) if k in ("out", "suite") else str(v))
+    return tpl
 
 
 def _sh(cmd, log):
@@ -125,7 +128,7 @@ def _replace_strings(v, pairs):
 
 def echo_pairs(echoes, lane, port):
     """(rendered value, template text) pairs, longest value first."""
-    pairs = [(e.format(lane=lane, port=port), e) for e in echoes]
+    pairs = [(e.replace("{lane}", str(lane)).replace("{port}", str(port)), e) for e in echoes]
     return sorted(pairs, key=lambda p: -len(p[0]))
 
 
@@ -210,7 +213,7 @@ def main(argv=None):
         ap.error("--lock is required unless --no-lock (the caller holds it)")
     lanes = a.lanes
     if lanes is None:
-        lanes, why = capacity_probe.compute_lanes(*_probe())
+        lanes, why = capacity_probe.compute_lanes(*capacity_probe.measure()[:4])
         print("E2E_SHARD: probe says %d lane(s) (%s)" % (lanes, why))
     if lanes < 1:
         ap.error("--lanes must be at least 1")
@@ -336,18 +339,6 @@ def main(argv=None):
             print(line)
         ok = ok and t_ok
     return 0 if ok else 1
-
-
-def _probe():
-    host = os.cpu_count() or 1
-    cpus, gib, src = capacity_probe.probe_vm()
-    if cpus is None and src == "no container runtime answered":
-        cpus, gib = host, capacity_probe._host_gib()
-    try:
-        disk = shutil.disk_usage(".").free / capacity_probe.GIB
-    except OSError:
-        disk = None
-    return host, cpus, gib, disk
 
 
 if __name__ == "__main__":

@@ -344,11 +344,21 @@ def main():
         r = run(impact_py, "--config", cfg, "record", "--status", red)
         check("impact refuses a baseline from a red run (negative arm)",
               r.returncode == 1 and "not green" in r.stderr)
+        tree = run(impact_py, "--config", cfg, "tree-id").stdout.strip()
         green = os.path.join(tmp, "green-status.json")
         with open(green, "w", encoding="utf-8") as f:
             json.dump({"verdict": "PARITY_RESULT: PASS (2 scenario(s), "
-                       "0 diff(s))", "suites": "all"}, f)
-        run(impact_py, "--config", cfg, "record", "--status", green)
+                       "0 diff(s))", "suites": "all", "tree_id": tree}, f)
+        with open(os.path.join(repo, "go.mod"), "w") as f:
+            f.write("integrated while the wave ran")
+        r = run(impact_py, "--config", cfg, "record", "--status", green)
+        check("impact refuses a baseline for a tree the run did not test",
+              r.returncode == 1 and "tested tree" in r.stderr)
+        with open(os.path.join(repo, "go.mod"), "w") as f:
+            f.write("m")
+        r = run(impact_py, "--config", cfg, "record", "--status", green)
+        check("impact records the baseline after a green FULL run of this tree",
+              r.returncode == 0 and "manifest recorded" in r.stdout)
         with open(os.path.join(repo, "internal/fees/h.go"), "w") as f:
             f.write("f2")
         r = run(impact_py, "--config", cfg, "suites")

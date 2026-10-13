@@ -25,8 +25,10 @@ upward. Override any measurement with --host-cpus, --vm-cpus, --vm-gib or
 
 Probes, in order: os.cpu_count() for the host; `docker info` (NCPU,
 MemTotal: what the containers actually get), then `colima list --json` for
-the VM; shutil.disk_usage() for free disk. When no container runtime answers,
-the services run on the host, so the host's figures stand in for the VM's.
+the VM; shutil.disk_usage() for free disk. When no container runtime answers
+(it may be installed but stopped), the verdict is serial: start the runtime and
+probe again. Only --no-vm (the services really run on the host) lets the
+host's figures stand in for the VM's.
 
 Output: CAPACITY: lines, ESTIMATE: lines when asked, and a final
 "LANES: <n> (<serial|parallel>: <limiting reason>)" line. Exit 0.
@@ -107,7 +109,31 @@ def probe_vm():
             if d.get("status") == "Running" and d.get("cpus"):
                 mem = int(d.get("memory") or 0)
                 return int(d["cpus"]), mem / GIB if mem else None, "colima list"
-    return None, None, "no container runtime answered"
+    return None, None, "no container runtime answered (start it and re-probe)"
+
+
+def measure(host_cpus=None, vm_cpus=None, vm_gib=None, free_disk_gib=None,
+            no_vm=False, disk_path="."):
+    """Fill in what the caller did not give. Returns (host, vm_cpus, vm_gib, disk, source).
+
+    No implicit host fallback: a VM that does not answer stays None, so
+    compute_lanes() goes serial. Only no_vm=True uses the host's figures."""
+    host = host_cpus or os.cpu_count() or 1
+    source = "flags"
+    if no_vm:
+        vm_cpus = vm_cpus or host
+        vm_gib = vm_gib or _host_gib()
+        source = "host (--no-vm)"
+    elif vm_cpus is None or vm_gib is None:
+        p_cpus, p_gib, source = probe_vm()
+        vm_cpus = vm_cpus if vm_cpus is not None else p_cpus
+        vm_gib = vm_gib if vm_gib is not None else p_gib
+    if free_disk_gib is None:
+        try:
+            free_disk_gib = shutil.disk_usage(disk_path).free / GIB
+        except OSError:
+            free_disk_gib = None
+    return host, vm_cpus, vm_gib, free_disk_gib, source
 
 
 def main(argv=None):
@@ -130,26 +156,8 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
-    host = a.host_cpus or os.cpu_count() or 1
-    source = "flags"
-    vm_cpus, vm_gib = a.vm_cpus, a.vm_gib
-    if a.no_vm:
-        vm_cpus = vm_cpus or host
-        vm_gib = vm_gib or _host_gib()
-        source = "host (no VM)"
-    elif vm_cpus is None or vm_gib is None:
-        p_cpus, p_gib, source = probe_vm()
-        if p_cpus is None and source == "no container runtime answered":
-            # Nothing containerised: the services share the host.
-            p_cpus, p_gib, source = host, _host_gib(), "host (no container runtime)"
-        vm_cpus = vm_cpus if vm_cpus is not None else p_cpus
-        vm_gib = vm_gib if vm_gib is not None else p_gib
-    disk = a.free_disk_gib
-    if disk is None:
-        try:
-            disk = shutil.disk_usage(a.disk_path).free / GIB
-        except OSError:
-            disk = None
+    host, vm_cpus, vm_gib, disk, source = measure(
+        a.host_cpus, a.vm_cpus, a.vm_gib, a.free_disk_gib, a.no_vm, a.disk_path)
 
     lanes, reason = compute_lanes(host, vm_cpus, vm_gib, disk,
                                   a.gib_per_lane, a.max_lanes, a.min_free_gib)
