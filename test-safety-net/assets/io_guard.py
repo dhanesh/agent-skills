@@ -440,6 +440,24 @@ _frame_verdicts = {}
 # still block.
 _DIAGNOSTIC_FRAMES = frozenset(("linecache.py", "traceback.py", "inspect.py"))
 
+# pytest's assertion reporter does the same job for a failed `assert`: it
+# formats the comparison while the test frame is still live. From pytest 9.2,
+# `truncate._get_truncation_parameters` calls `compat.running_on_ci()`, which
+# reads `os.environ`, so every honest failing assert in a tier 1 unit read as an
+# environment violation ("reclassify to Tier 3") instead of an AssertionError.
+# Matched as a directory segment, never a basename, so another library's
+# `assertion/` or `truncate.py` is not exempted. The rule only applies to a
+# library frame, and a user `__repr__` or a conftest `pytest_assertrepr_compare`
+# hook is a target-repo frame nearer than any of these, so its I/O still blocks.
+_REPORTER_SEGMENTS = ("/_pytest/assertion/",)
+
+
+def _is_reporter_frame(filename):
+    if os.path.basename(filename) in _DIAGNOSTIC_FRAMES:
+        return True
+    path = filename.replace(os.sep, "/")
+    return any(seg in path for seg in _REPORTER_SEGMENTS)
+
 
 def _is_library_frame(filename):
     verdict = _frame_verdicts.get(filename)
@@ -572,9 +590,10 @@ def _initiated_by_code_under_test(depth=2):
       carries `pkgutil.get_data` and then its caller instead;
     * a `<frozen ...>` frame for any other frozen stdlib module (`runpy`, which
       is how `python -m pytest` starts) is a library frame and is transparent;
-    * a stdlib diagnostic frame (`linecache`, `traceback`, `inspect`) also
-      stops the walk: reading a source file to FORMAT a failure is the
-      reporter's I/O, not the unit's;
+    * a stdlib diagnostic frame (`linecache`, `traceback`, `inspect`), or a
+      frame of pytest's assertion reporter (`_pytest/assertion/`), also stops
+      the walk: reading a source file or the environment to FORMAT a failure is
+      the reporter's I/O, not the unit's;
     * anything else is the target repo -- the test module, the unit under test,
       or a `<stdin>`/`exec()`/`compile()` frame whose provenance cannot be
       established -- and the call blocks. Unattributable frames block by
@@ -600,7 +619,7 @@ def _initiated_by_code_under_test(depth=2):
                 continue
             return True
         if _is_library_frame(filename):
-            if os.path.basename(filename) in _DIAGNOSTIC_FRAMES:
+            if _is_reporter_frame(filename):
                 return False
             frame = frame.f_back
             continue
