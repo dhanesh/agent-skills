@@ -1,7 +1,7 @@
 # forge-feature-map: lint a verify skill and read its feature map
 
 - id: forge-feature-map
-- proven: no
+- proven: 9ebad708af9a37fdb0b81d0d0334f7de37dcc8f3
 - anchors: verification-skill-forge/assets/forge.py, verification-skill-forge/references/feature-map.md
 
 ## What it is

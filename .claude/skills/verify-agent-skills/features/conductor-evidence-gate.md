@@ -1,7 +1,7 @@
 # conductor-evidence-gate: accept or reject a task's evidence before merge
 
 - id: conductor-evidence-gate
-- proven: no
+- proven: 9ebad708af9a37fdb0b81d0d0334f7de37dcc8f3
 - anchors: factory-conductor/assets/conductor.py, factory-conductor/assets/schemas/run-result.v1.json
 
 ## What it is
