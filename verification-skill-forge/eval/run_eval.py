@@ -8,13 +8,15 @@ side by side. Grader: model-free checks on exit codes, output lines and files.
 
 Negative fixtures: a scaffold with FILL: markers, a placeholder name, screen
 coordinates, a cleanup that deletes evidence, a proven feature whose source is gone, a
-port claimed by a second owner, and a feature map rewritten to match a bug. Each MUST be
-rejected. stdlib only, offline (loopback HTTP only), no repo writes.
+port claimed by a second owner, a feature map rewritten to match a bug, a proof tool
+outside its tier, a mutant the check does not notice and a mutant that only breaks the
+build. Each MUST be rejected. stdlib only, offline (loopback HTTP only), no repo writes.
 """
 import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,6 +75,55 @@ def lint_after(tmp, name, rel, old, new):
     found = mutate(root, rel, old, new)
     rc, out = forge("lint", os.path.join(root, SKILL))
     return found and rc == 1, out
+
+
+# A fake property tool for the proof-tier fixtures: what it prints and how it exits
+# depends only on target.txt, so a mutant patch picks the outcome.
+FAKE_TOOL = '''import sys
+mode = open("target.txt").read().strip()
+if mode == "caught":
+    print("Falsifying example: test_create(title='')\\n1 failed in 0.01s")
+    sys.exit(1)
+if mode == "broken":
+    print("ERROR collecting tests/test_notes.py\\n1 error during collection")
+    sys.exit(2)
+print("1 passed in 0.01s")
+'''
+
+
+def tier_repo(tmp):
+    root = os.path.join(tmp, "tiers")
+    os.makedirs(root)
+    with open(os.path.join(root, "tool.py"), "w") as f:
+        f.write(FAKE_TOOL)
+    with open(os.path.join(root, "target.txt"), "w") as f:
+        f.write("good\n")
+    sh(root, "git", "init", "-q", "-b", "main")
+    sh(root, "git", "add", "-A")
+    sh(root, "git", "commit", "-q", "-m", "fixture")
+    patches = {}
+    for mode in ("unnoticed", "caught", "broken"):
+        with open(os.path.join(root, "target.txt"), "w") as f:
+            f.write(mode + "\n")
+        patches[mode] = os.path.join(tmp, mode + ".diff")
+        with open(patches[mode], "w") as f:
+            f.write(sh(root, "git", "diff").stdout)
+        sh(root, "git", "checkout", "--", ".")
+    return root, patches
+
+
+def record_tier(root, tier, tool, *extra):
+    cmd = "%s tool.py" % shlex.quote(sys.executable)
+    r = sh(root, sys.executable, os.path.join(ASSETS, "verify_evidence.py"), "record",
+           "--instance", "a", "--feature", "notes-create", "--verifier", "verifier-1",
+           "--tier", tier, "--tool", tool, "--clauses", "C1", "--cmd", cmd, *extra)
+    err = r.stderr.strip().replace("verify_evidence: ", "", 1)
+    return r.returncode, r.stdout.strip(), err.replace(sys.executable, "python")
+
+
+def refusal(rc, err):
+    """The refusal a check saw: the exit status and the reason, without the advice."""
+    return "exit %d: %s" % (rc, err.split(": nothing")[0])
 
 
 def main():
@@ -205,6 +256,33 @@ def main():
         rc2, _ = forge("check-maintain", os.path.join(root8, SKILL), "--base", "HEAD")
         check("probe 8: the bug is recorded as a finding and the map stays",
               rc == 0 and rc2 == 0 and "FINDING:" in out)
+
+        # 8. Proof tiers: the real recorder refuses a tool outside its tier, a mutant
+        # the check does not notice and a mutant that only breaks the build.
+        rt, patches = tier_repo(tmp)
+        evd = os.path.join(rt, ".verify")
+        rc, _, err = record_tier(rt, "proved", "hypothesis")
+        check("negative: tool outside its tier (--tier proved --tool hypothesis) is "
+              "refused", rc == 2 and not os.path.exists(evd)
+              and "not allowed for --tier proved" in err, refusal(rc, err))
+        rc, _, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+                                 patches["unnoticed"], "--mutant-author", "verifier")
+        check("negative: a mutant the check does not notice (mutant run exits 0) is "
+              "refused", rc == 1 and not os.path.exists(evd)
+              and "does not catch the mutant" in err, refusal(rc, err))
+        rc, _, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+                                 patches["broken"], "--mutant-author", "verifier")
+        check("negative: a mutant that only breaks the build (no failure signature) is "
+              "refused", rc == 1 and not os.path.exists(evd)
+              and "lacks" in err, refusal(rc, err))
+        rc, out, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+                                   patches["caught"], "--mutant-author", "verifier")
+        head = sh(rt, "git", "rev-parse", "HEAD").stdout.strip()
+        rec = os.path.join(evd, "a", "notes-create", head,
+                           "proof-property-hypothesis-C1.json")
+        check("tiers: a mutant that fails with the tool's signature is recorded",
+              rc == 0 and os.path.isfile(rec) and out.startswith("PROOF: property"),
+              "exit %d: %s" % (rc, os.path.basename(out) or refusal(rc, err)))
     finally:
         for r0, h in live:  # a failed check never strands an instance
             for inst in ("a", "b"):
