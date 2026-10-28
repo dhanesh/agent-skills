@@ -29,6 +29,35 @@ git.
  "captured_at": "2026-09-29T10:00:00Z"}
 ```
 
+## Proof records (`record --tier`)
+
+```bash
+python3 verify_evidence.py record --instance a --feature notes-create --verifier "$VERIFIER" \
+  --tier proved --tool verus --clauses C1 --cmd "verus src/notes.rs" [--timeout 900]
+```
+
+The recorder runs the command itself. It splits `--cmd` with shlex, uses no shell, and
+runs from the worktree root with a timeout. It writes a record only when the command
+exits 0 and HEAD did not move. Otherwise it exits 1 and writes nothing. It refuses
+`--result`, `--action`, `--observed`, `--side-effect` and `--artifact` with `--tier`,
+because the tool's own output is the proof. All checks run before the first write.
+
+The record is `<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json`. It has the
+evidence.json fields and artifact shape, so the conductor's artifact check applies to
+it. It adds `tier`, `tool`, `clauses`, `argv`, `cwd`, `timeout` and `exit_status`. The
+artifacts are the pinned `proof-<tier>-<tool>-<clause>.stdout` and `.stderr` files.
+
+```json
+{"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
+ "feature": "notes-create", "sha": "<40 hex>", "verifier": "<agent id>",
+ "result": "pass", "tier": "proved", "tool": "verus", "clauses": ["C1"],
+ "argv": ["verus", "src/notes.rs"], "cwd": "<worktree root>", "timeout": 900,
+ "exit_status": 0,
+ "artifacts": [{"path": "proof-proved-verus-C1.stdout", "sha256": "<64 hex>"},
+               {"path": "proof-proved-verus-C1.stderr", "sha256": "<64 hex>"}],
+ "captured_at": "…"}
+```
+
 ## doctor.json
 
 ```json
