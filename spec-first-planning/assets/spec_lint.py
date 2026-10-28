@@ -49,6 +49,12 @@ references/spec-template.md. This linter enforces the mechanical half of
       with `## Idea` keeps its `## External evidence (untrusted)` section, and
       an evidence section needs `## Intake` or `## Idea`.
 
+  5f. Optional proof-tier hints on a requirement: `[tier: <t>]` with <t> one
+      of proved, bounded, property, runtime, and `[contract: <feature>:C<n>, ...]`
+      naming the feature-map contract clauses the tier applies to. An unknown
+      tier, a malformed clause entry, or a `[contract: ...]` with no
+      `[tier: ...]` fails. spec_to_tasks.py emits them as `min_tier` and `clauses`.
+
 --converged adds the Tension + Choose full-loop rules (10-16): Tensions,
 Solution options and Iterations sections; tension grammar, known ids, and a
 decision for an accepted tension; every required truth SATISFIED or
@@ -183,6 +189,14 @@ FEATURE_RE = re.compile(r"\[feature:\s*([^\]]*)\]", re.IGNORECASE)
 PROOF_RE = re.compile(r"\[proof:\s*([^\]]*)\]", re.IGNORECASE)
 PSAFE_RE = re.compile(r"\[parallel-safe\]", re.IGNORECASE)
 _FEATURE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+# Proof-tier hints on a requirement (proof-tiered verification): "[tier: property]" is
+# the weakest proof tier factory-conductor accepts for the task's clauses, and
+# "[contract: notes-create:C1, notes-create:C2]" names those clauses as
+# <feature id>:C<n>. spec_to_tasks.py emits them as the task's min_tier and clauses.
+TIER_RE = re.compile(r"\[tier:\s*([^\]]*)\]", re.IGNORECASE)
+CONTRACT_RE = re.compile(r"\[contract:\s*([^\]]*)\]", re.IGNORECASE)
+TIERS = ("proved", "bounded", "property", "runtime")
+_CLAUSE_REF_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*:C[0-9]+$")
 # "Verify skill: <repo-relative verify-<app> dir>" in an optional ## Verification section.
 VERIFY_SKILL_RE = re.compile(r"^\s*(?:[-*]\s*)?verify skill:\s*`?([^`\s]+)`?\s*$",
                              re.IGNORECASE)
@@ -194,8 +208,10 @@ NOT_OBSERVABLE_RE = re.compile(
 
 
 def strip_proof_hints(text):
-    """A requirement's statement without its [feature:], [proof:] and [parallel-safe]
-    hints, so a hint's words neither satisfy the modal rule nor trip the vague-term one."""
+    """A requirement's statement without its [feature:], [proof:], [parallel-safe],
+    [tier:] and [contract:] hints, so a hint's words neither satisfy the modal rule nor
+    trip the vague-term one."""
+    text = CONTRACT_RE.sub("", TIER_RE.sub("", text))
     return PSAFE_RE.sub("", PROOF_RE.sub("", FEATURE_RE.sub("", text)))
 
 
@@ -787,6 +803,7 @@ def parse_spec(text):
     # a typo shows up as a lint failure instead of a hint that just does
     # nothing.
     features, proofs, parallel_safe, malformed_features = {}, {}, {}, []
+    tiers, clauses, contract_hint, malformed_clauses = {}, {}, {}, []
     for num, rtext in requirements:
         fm = FEATURE_RE.search(rtext)
         ids = []
@@ -800,6 +817,18 @@ def parse_spec(text):
         pm = PROOF_RE.search(rtext)
         proofs[num] = pm.group(1).strip() if pm else None
         parallel_safe[num] = bool(PSAFE_RE.search(rtext))
+        tm = TIER_RE.search(rtext)
+        tiers[num] = tm.group(1).strip().strip("`") if tm else None
+        cm = CONTRACT_RE.search(rtext)
+        refs = []
+        for token in (cm.group(1).split(",") if cm else []):
+            token = token.strip().strip("`")
+            if _CLAUSE_REF_RE.match(token):
+                refs.append(token)
+            else:
+                malformed_clauses.append((num, token))
+        clauses[num] = list(dict.fromkeys(refs))
+        contract_hint[num] = cm is not None
     verify_skill = None
     for line in find_section(sections, "Verification") or []:
         vm = VERIFY_SKILL_RE.match(line)
@@ -880,6 +909,10 @@ def parse_spec(text):
         "malformed_features": malformed_features,
         "proofs": proofs,
         "parallel_safe": parallel_safe,
+        "tiers": tiers,
+        "clauses": clauses,
+        "contract_hint": contract_hint,
+        "malformed_clauses": malformed_clauses,
         "verify_skill": verify_skill,
         "criteria": criteria,
         "commands": commands,
@@ -1070,6 +1103,20 @@ def lint(text, mode="light"):
     for num, _ in reqs:
         if spec["parallel_safe"].get(num) and spec["after"].get(num):
             issues.append("R%d is both [parallel-safe] and [after: ...]; pick one" % num)
+
+    # 5f. Proof-tier hints: a known tier, well-formed <feature>:C<n> clause ids, and a
+    # [tier: ...] beside every [contract: ...] (a clause list with no tier gates nothing).
+    for num, _ in reqs:
+        tier = spec["tiers"].get(num)
+        if tier is not None and tier not in TIERS:
+            issues.append("R%d [tier: ...] has unknown tier '%s'; use one of %s"
+                          % (num, tier, ", ".join(TIERS)))
+        if spec["contract_hint"].get(num) and tier is None:
+            issues.append("R%d has a [contract: ...] hint but no [tier: ...] hint; add "
+                          "[tier: <%s>]" % (num, "|".join(TIERS)))
+    for num, token in spec["malformed_clauses"]:
+        issues.append("R%d [contract: ...] has a malformed entry '%s'; write it as "
+                      "<feature id>:C<n> (lowercase kebab-case feature id)" % (num, token))
 
     # 5b. [cmd: ...] hints: trailing, parseable, non-empty, and C6-clean.
     for bullet in spec["misplaced_cmds"]:

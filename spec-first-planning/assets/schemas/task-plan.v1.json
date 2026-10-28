@@ -35,6 +35,17 @@
             "description": "Optional: \"parallel-safe\" ([parallel-safe]) or the task ids this one depends on ([after: ...]); feeds factory-conductor's independence partition.",
             "oneOf": [{"const": "parallel-safe"}, {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^T[0-9]+$"}}]
           },
+          "min_tier": {
+            "type": "string",
+            "description": "Optional: the weakest proof tier factory-conductor accepts for this task's clauses (a requirement's [tier: ...] hint).",
+            "enum": ["proved", "bounded", "property", "runtime"]
+          },
+          "clauses": {
+            "type": "array",
+            "description": "Optional: the feature-map contract clauses min_tier applies to, as <feature>:C<n> (a requirement's [contract: ...] hint).",
+            "minItems": 1,
+            "items": {"type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*:C[0-9]+$"}
+          },
           "verify": {
             "type": "array",
             "minItems": 1,

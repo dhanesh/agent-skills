@@ -209,6 +209,8 @@ def derive_plan(text):
                 "_features": spec["features"].get(num, []),
                 "_proof": spec["proofs"].get(num),
                 "_parallel_safe": spec["parallel_safe"].get(num, False),
+                "_min_tier": spec["tiers"].get(num),
+                "_clauses": spec["clauses"].get(num, []),
             }
         )
         coverage[rid] = ["T%d" % tnum]
@@ -242,8 +244,9 @@ def derive_plan(text):
 
 def _proof_fields(t):
     """The runtime-proof keys a task carries, only when its requirement had the hints:
-    `features`, `predicate`, and `independence` ("parallel-safe", or the task ids it
-    depends on). A spec without them derives byte-identical plans."""
+    `features`, `predicate`, `independence` ("parallel-safe", or the task ids it
+    depends on), `min_tier` ([tier: ...]) and `clauses` ([contract: ...]). A spec
+    without them derives byte-identical plans."""
     out = {}
     if t["_features"]:
         out["features"] = list(t["_features"])
@@ -253,6 +256,10 @@ def _proof_fields(t):
         out["independence"] = "parallel-safe"
     elif t["_after"] and t.get("depends_on"):
         out["independence"] = list(t["depends_on"])
+    if t["_min_tier"]:
+        out["min_tier"] = t["_min_tier"]
+    if t["_clauses"]:
+        out["clauses"] = list(t["_clauses"])
     return out
 
 
@@ -373,6 +380,14 @@ def payload_errors(payload):
             deps = t.get("depends_on")
             if not (isinstance(deps, list) and deps and all(isinstance(d, str) for d in deps)):
                 errs.append("tasks[%d].depends_on must be a non-empty list of task id strings" % i)
+        if "min_tier" in t and t.get("min_tier") not in spec_lint.TIERS:
+            errs.append("tasks[%d].min_tier must be one of %s" % (i, ", ".join(spec_lint.TIERS)))
+        if "clauses" in t:
+            cl = t.get("clauses")
+            if not (isinstance(cl, list) and cl and all(
+                    isinstance(c, str) and spec_lint._CLAUSE_REF_RE.match(c) for c in cl)):
+                errs.append("tasks[%d].clauses must be a non-empty list of <feature>:C<n> "
+                            "strings" % i)
         verify = t.get("verify")
         if not (isinstance(verify, list) and verify):
             errs.append("tasks[%d].verify must be a non-empty list" % i)
