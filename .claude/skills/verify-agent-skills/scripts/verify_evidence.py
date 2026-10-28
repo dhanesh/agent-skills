@@ -21,6 +21,7 @@ Usage:
     python3 verify_evidence.py record  --instance I --feature F --verifier ID
                                         --tier proved|bounded|property --tool NAME
                                         --clauses C<n> --cmd ARGV [--timeout SECS]
+                                        [--mutant-patch DIFF --mutant-author verifier|forge]
                                         [--worktree W]  # PROOF: <tier> <path>
 
 A proof record (--tier) is taken by running the proof tool here: ARGV is split with shlex
@@ -33,6 +34,16 @@ evidence.json fields and artifact shape plus tier, tool, clauses, argv and exit_
 --tool must be on its tier's list in TIER_TOOLS (proved: verus; bounded: kani; property:
 proptest, hypothesis, fast-check, rapid) and --clauses must name exactly one clause.
 
+A bounded or property pass alone proves little, since a check that tests nothing passes
+too. So those tiers also take --mutant-patch (a diff that breaks the code) and
+--mutant-author (who wrote it). The recorder extracts HEAD (git archive) into a temporary
+directory outside the worktree, applies the patch there with git apply, and runs the same
+ARGV in that copy with the same timeout. The record is written only when the mutant run
+exits non-zero and its output matches the tool's entry in FAILURE_SIGNATURES, so a mutant
+that only breaks the build does not count. The patch and the mutant run's exit status,
+stdout and stderr are pinned as artifacts too. The worktree is never touched and the copy
+is always removed. proved takes no mutant flags.
+
 Where things go. Evidence lives under the evidence directory: $VERIFY_EVIDENCE_DIR when
 set, else <git toplevel of --worktree (default: cwd)>/.verify. Each record is
 <evidence dir>/<instance>/<feature-id>/<sha>/evidence.json; each doctor result is
@@ -43,8 +54,9 @@ already sits there is pinned where it is. Port claims and other per-instance run
 live under <evidence dir>/../.verify-run/, which cleanup may delete; nothing here ever
 deletes evidence.
 
-Exit 0 on success, 1 when a proof command did not exit 0 on the head, 2 on invalid
-input, 3 when a port is taken by another instance. Every check runs before any write.
+Exit 0 on success, 1 when a proof command did not exit 0 on the head or the mutant run
+did not fail with the tool's signature, 2 on invalid input (a patch that does not apply
+included), 3 when a port is taken by another instance. Every check runs before any write.
 """
 import argparse
 import datetime as _dt
@@ -57,6 +69,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import zlib
 
 SCHEMA = "verify-evidence/v1"
@@ -73,8 +87,27 @@ TIER_TOOLS = {
     "bounded": ("kani",),
     "property": ("proptest", "hypothesis", "fast-check", "rapid"),
 }
+# What a tool's output holds when the property or proof itself failed, for the mutant
+# run of a bounded or property record: every "require" pattern matches and no "reject"
+# pattern does. These are heuristics over the tools' usual output. They exist to tell a
+# failed check apart from a mutant that broke the build or crashed the harness, so each
+# needs positive evidence of a failed check. references/proof-tiers.md mirrors this table.
+FAILURE_SIGNATURES = {
+    "kani": {"require": (r"VERIFICATION:- FAILED",),
+             "reject": (r"error\[E\d+\]", r"could not compile")},
+    "proptest": {"require": (r"test result: FAILED", r"minimal failing input"),
+                 "reject": (r"error\[E\d+\]", r"could not compile")},
+    "hypothesis": {"require": (r"Falsifying example", r"\b\d+ failed\b"),
+                   "reject": (r"errors? during collection", r"ERROR collecting")},
+    "fast-check": {"require": (r"Property failed after \d+ tests?",),
+                   "reject": (r"Test suite failed to run", r"error TS\d+")},
+    "rapid": {"require": (r"--- FAIL", r"\[rapid\] failed"),
+              "reject": (r"\[build failed\]", r"\[setup failed\]")},
+}
+MUTANT_AUTHORS = ("verifier", "forge")
 CLAUSE_RE = re.compile(r"^C[1-9][0-9]*\Z")
 RUNTIME_ONLY = ("result", "action", "observed", "side_effect", "artifact")
+MUTANT_TIERS = ("bounded", "property")
 
 
 def _now():
@@ -335,28 +368,77 @@ def cmd_record_tier(a):
         return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
     if not argv:
         return _fail("--cmd is required with --tier and cannot be blank")
+    patch = None
+    if a.tier not in MUTANT_TIERS:
+        given = [f for f, n in (("--mutant-patch", "mutant_patch"),
+                                ("--mutant-author", "mutant_author"))
+                 if getattr(a, n) is not None]
+        if given:
+            return _fail("%s cannot be used with --tier %s: only bounded and property "
+                         "records take a mutant; drop them" % (", ".join(given), a.tier))
+    else:
+        if not a.mutant_patch or a.mutant_author is None:
+            return _fail("--tier %s needs --mutant-patch DIFF and --mutant-author "
+                         "verifier|forge: a %s record counts only when the same command "
+                         "fails on a recorded mutant of the code" % (a.tier, a.tier))
+        if a.mutant_author not in MUTANT_AUTHORS:
+            return _fail("--mutant-author %r: use %s"
+                         % (a.mutant_author, " or ".join(MUTANT_AUTHORS)))
+        try:
+            with open(os.path.abspath(a.mutant_patch), "rb") as f:
+                patch = f.read()
+        except OSError as e:
+            return _fail("cannot read --mutant-patch %s (%s): pass the diff file of the "
+                         "mutant" % (a.mutant_patch, e))
+        if not patch.strip():
+            return _fail("--mutant-patch %s is empty: pass a diff that changes the code"
+                         % a.mutant_patch)
     root = _worktree_root(wt)
     if root is None:
         return _fail("cannot find the git toplevel of %s" % wt)
+    copy = None
     try:
-        run = subprocess.run(argv, cwd=root, capture_output=True, timeout=a.timeout)
-    except subprocess.TimeoutExpired:
-        return _fail("%s did not finish in %d seconds: nothing recorded; raise --timeout "
-                     "or narrow the proof" % (argv[0], a.timeout), 1)
-    except OSError as e:
-        return _fail("cannot run %s (%s): nothing recorded; check the tool is installed "
-                     "and on PATH" % (argv[0], e), 1)
-    if run.returncode != 0:
-        return _fail("%s exited %d on %s: nothing recorded; a proof tier needs the tool "
-                     "to pass on the head" % (argv[0], run.returncode, sha[:12]), 1)
-    if head_sha(wt) != sha:
-        return _fail("HEAD moved from %s while %s ran: nothing recorded; record again on "
-                     "a fixed head" % (sha[:12], argv[0]), 1)
+        if patch is not None:
+            copy, err = _mutant_copy(root, sha, patch)
+            if err is not None:
+                return err
+        run, err = _run_proof(argv, root, a.timeout)
+        if err is not None:
+            return err
+        if run.returncode != 0:
+            return _fail("%s exited %d on %s: nothing recorded; a proof tier needs the "
+                         "tool to pass on the head" % (argv[0], run.returncode, sha[:12]), 1)
+        mutant = None
+        if copy is not None:
+            mutant, err = _run_proof(argv, copy, a.timeout, "on the mutant ")
+            if err is not None:
+                return err
+            if mutant.returncode == 0:
+                return _fail("%s exited 0 on the mutant: nothing recorded; the check does "
+                             "not catch the mutant, so strengthen it or write a mutant it "
+                             "should catch" % argv[0], 1)
+            missing = _signature_miss(a.tool, mutant.stdout + b"\n" + mutant.stderr)
+            if missing:
+                return _fail("%s exited %d on the mutant but its output %s: nothing "
+                             "recorded; a mutant that breaks the build or the harness "
+                             "proves nothing, so write one that makes the check itself "
+                             "fail (see references/proof-tiers.md)"
+                             % (argv[0], mutant.returncode, missing), 1)
+        if head_sha(wt) != sha:
+            return _fail("HEAD moved from %s while %s ran: nothing recorded; record again "
+                         "on a fixed head" % (sha[:12], argv[0]), 1)
+    finally:
+        if copy is not None:
+            shutil.rmtree(os.path.dirname(copy), ignore_errors=True)
     out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
     stem = "proof-%s-%s-%s" % (a.tier, a.tool, a.clauses)
+    files = [("stdout", run.stdout), ("stderr", run.stderr)]
+    if mutant is not None:
+        files += [("mutant.patch", patch), ("mutant.exit", b"%d\n" % mutant.returncode),
+                  ("mutant.stdout", mutant.stdout), ("mutant.stderr", mutant.stderr)]
     os.makedirs(out, exist_ok=True)
     arts = []
-    for ext, data in (("stdout", run.stdout), ("stderr", run.stderr)):
+    for ext, data in files:
         name = "%s.%s" % (stem, ext)
         with open(os.path.join(out, name), "wb") as f:
             f.write(data)
@@ -364,14 +446,82 @@ def cmd_record_tier(a):
     path = os.path.join(out, stem + ".json")
     # kind stays "evidence" and result "pass" so the conductor's record check (sha,
     # artifacts, verifier) reads a proof record exactly as it reads evidence.json.
-    _write_json(path, {"schema": SCHEMA, "kind": "evidence", "instance": a.instance,
-                       "feature": a.feature, "sha": sha, "verifier": a.verifier,
-                       "result": "pass", "tier": a.tier, "tool": a.tool,
-                       "clauses": [a.clauses], "argv": argv, "cwd": root,
-                       "timeout": a.timeout, "exit_status": run.returncode,
-                       "artifacts": arts, "captured_at": _now()})
+    doc = {"schema": SCHEMA, "kind": "evidence", "instance": a.instance,
+           "feature": a.feature, "sha": sha, "verifier": a.verifier,
+           "result": "pass", "tier": a.tier, "tool": a.tool,
+           "clauses": [a.clauses], "argv": argv, "cwd": root,
+           "timeout": a.timeout, "exit_status": run.returncode,
+           "artifacts": arts, "captured_at": _now()}
+    if mutant is not None:
+        doc.update(mutant_author=a.mutant_author, mutant_exit_status=mutant.returncode)
+    _write_json(path, doc)
     print("PROOF: %s %s" % (a.tier, path))
     return 0
+
+
+def _run_proof(argv, cwd, timeout, where=""):
+    """(CompletedProcess, None), or (None, exit code) once the reason is reported."""
+    try:
+        return subprocess.run(argv, cwd=cwd, capture_output=True, timeout=timeout), None
+    except subprocess.TimeoutExpired:
+        return None, _fail("%s did not finish %sin %d seconds: nothing recorded; raise "
+                           "--timeout or narrow the proof" % (argv[0], where, timeout), 1)
+    except OSError as e:
+        return None, _fail("cannot run %s %s(%s): nothing recorded; check the tool is "
+                           "installed and on PATH" % (argv[0], where, e), 1)
+
+
+def _mutant_copy(root, sha, patch):
+    """(copy dir, None): HEAD's committed tree extracted into a new temporary directory
+    with patch applied. (None, exit code) when it cannot be made; nothing is left behind.
+    The worktree is only read (git archive), never written."""
+    tmp = tempfile.mkdtemp(prefix="verify-mutant-")
+    copy, done = os.path.join(tmp, "head"), False
+    try:
+        tar = os.path.join(tmp, "head.tar")
+        r = _git(root, "archive", "--format=tar", "-o", tar, sha)
+        if r.returncode != 0:
+            return None, _fail("git archive of %s failed (%s): nothing recorded"
+                               % (sha[:12], r.stderr.strip()), 1)
+        os.makedirs(copy)
+        with tarfile.open(tar) as t:
+            if hasattr(tarfile, "tar_filter"):
+                t.extractall(copy, filter="tar")
+            else:  # Python without extraction filters: the archive is our own HEAD.
+                t.extractall(copy)
+        os.remove(tar)
+        diff = os.path.join(tmp, "mutant.patch")
+        with open(diff, "wb") as f:
+            f.write(patch)
+        # The ceiling stops git apply from finding a repository above the copy, so the
+        # patch applies to the copy's files as plain paths.
+        r = subprocess.run(["git", "apply", "--whitespace=nowarn", diff], cwd=copy,
+                           capture_output=True, text=True,
+                           env=dict(os.environ, GIT_CEILING_DIRECTORIES=tmp))
+        os.remove(diff)
+        if r.returncode != 0:
+            return None, _fail("--mutant-patch does not apply to %s (%s): nothing ran or "
+                               "was recorded; make the diff against this commit with "
+                               "paths from the repository root"
+                               % (sha[:12], r.stderr.strip() or "git apply failed"))
+        done = True
+        return copy, None
+    finally:
+        if not done:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _signature_miss(tool, output):
+    """None when output matches tool's FAILURE_SIGNATURES entry, else what is wrong."""
+    text = output.decode("utf-8", "replace")
+    sig = FAILURE_SIGNATURES[tool]
+    for pat in sig["require"]:
+        if not re.search(pat, text):
+            return "lacks %r, which a failed %s check prints" % (pat, tool)
+    for pat in sig["reject"]:
+        if re.search(pat, text):
+            return "matches %r, which means the build or harness failed" % pat
+    return None
 
 
 def main(argv=None):
@@ -406,6 +556,8 @@ def main(argv=None):
             s.add_argument("--clauses")
             s.add_argument("--cmd", dest="proof_cmd")
             s.add_argument("--timeout", type=int, default=900)
+            s.add_argument("--mutant-patch")
+            s.add_argument("--mutant-author")
     a = p.parse_args(argv)
     if a.cmd == "record" and a.tier is None:
         # A runtime record keeps its required flags; only --tier lifts them.
@@ -415,7 +567,9 @@ def main(argv=None):
             parsers["record"].error("the following arguments are required: %s"
                                     % ", ".join(missing))
         stray = [f for f, n in (("--tool", "tool"), ("--clauses", "clauses"),
-                                ("--cmd", "proof_cmd")) if getattr(a, n) is not None]
+                                ("--cmd", "proof_cmd"), ("--mutant-patch", "mutant_patch"),
+                                ("--mutant-author", "mutant_author"))
+                 if getattr(a, n) is not None]
         if stray:
             parsers["record"].error("%s only apply to a proof record: add --tier"
                                     % ", ".join(stray))
