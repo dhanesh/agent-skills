@@ -8,7 +8,15 @@
 
 A planner runs `spec_lint.py` on a spec to check that every requirement is testable and
 traceable, then `spec_to_tasks.py --json` to compile it into a task plan whose tasks carry
-the requirement's hints (`where`, `after`, `feature`, `proof`) as task fields.
+the requirement's hints as task fields. The field names differ from the hint names:
+
+| Hint on the requirement | Task field |
+|---|---|
+| `[where: ...]` | `where` (list of paths) |
+| `[feature: ...]` | `features` (list of feature ids) |
+| `[proof: ...]` | `predicate` (string) |
+| `[after: R<n>, ...]` or `[parallel-safe]` | `independence` (list of task ids, or the string `parallel-safe`) |
+| `[tier: ...]`, `[contract: ...]` (only when the spec uses them) | `min_tier`, `clauses` |
 
 ## How to reach it
 
@@ -17,8 +25,9 @@ the requirement's hints (`where`, `after`, `feature`, `proof`) as task fields.
 
 ## Drive it
 
-Use the spec-first-planning eval's own clean fixture, or a spec of your own written into
-the instance directory:
+The commands below drive the repository's proof-tiers spec. To prove the feature on a
+different spec, put that spec's path in place of the `docs/factory/...` path. Run from
+`$WT`, because `drive.py capture` runs the command from `$WT` and the paths are relative:
 
 ```sh
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name sh-lint -- \
@@ -27,14 +36,34 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name sh-plan 
   python3 spec-first-planning/assets/spec_to_tasks.py --json docs/factory/2026-10-22-proof-tiered-verification-spec.md
 ```
 
-Expect exit 0 from both: `LINT_RESULT: PASS (... mode=unattended)`, then a JSON plan whose
-tasks carry `features`, `predicate` and `independence`, with titles free of `[...]` hints.
+Expect exit 0 from both: `LINT_RESULT: PASS (... mode=unattended)`, then a JSON object
+with `tasks`, `coverage` and `uncovered`. Every task carries `features`, `predicate` and
+`independence`, `coverage` maps every requirement to a task, and `uncovered` is `[]`. No
+title keeps a hint (`[where:`, `[feature:`, `[proof:`, `[after:`, `[parallel-safe]`).
+A title can still contain square brackets that are part of the requirement text (in the
+proof-tiers spec, T1 and T9 do), so check for the hint prefixes, not for any `[`.
 
 ## Proof
 
 The lint capture's result line and the plan capture's task fields. Neither command writes
-a file (`git status --short` unchanged); `--envelope <root>` is the one form that writes,
-under `<root>/.skill-contract/envelopes/`.
+a tracked or untracked project file; `--envelope <root>` is the one form that writes,
+under `<root>/.skill-contract/envelopes/`. Python can write ignored `__pycache__/` files.
+
+Do not use `git status --short` alone as the side-effect proof. An envelope from an
+earlier `--envelope` run, or a change to `.git/info/exclude`, changes its output without
+any action from these commands. Instead, touch a marker file, run both commands again,
+and list the files that are newer than the marker:
+
+```sh
+touch "$WT/.verify-run/$INSTANCE/marker"
+python3 spec-first-planning/assets/spec_lint.py --unattended docs/factory/2026-10-22-proof-tiered-verification-spec.md
+python3 spec-first-planning/assets/spec_to_tasks.py --json docs/factory/2026-10-22-proof-tiered-verification-spec.md >/dev/null
+find "$WT" -path "$WT/.git" -prune -o -newer "$WT/.verify-run/$INSTANCE/marker" -print \
+  | grep -v "/.verify-run/" > "$WT/.verify-run/$INSTANCE/newer-files.txt"
+```
+
+Expect only `__pycache__` entries. Give `newer-files.txt` to `record` as an extra
+`--artifact` (the flag can be repeated), together with both captures.
 
 ## Gotchas
 

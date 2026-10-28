@@ -63,7 +63,9 @@ worth driving.
 python3 "$SKILL/scripts/drive.py" doctor --instance "$INSTANCE"
 ```
 
-Record its result for this head (the conductor reads it):
+Record its result for this head (the conductor reads it). `cli=pass` means every CLI
+check in the doctor's JSON is true and `git=pass` means its `git` check is true; when
+any is false, record `--fail` with that check as `=fail` and stop:
 
 ```sh
 python3 $SKILL/scripts/verify_evidence.py doctor --instance "$INSTANCE" --ok --check cli=pass --check git=pass --verifier "$VERIFIER"
@@ -105,10 +107,17 @@ python3 "$SKILL/scripts/verify_evidence.py" record --instance "$INSTANCE" --feat
   --side-effect "$EFFECT" --artifact "$WT/.verify-run/$INSTANCE/captures/$CAPTURE.json"
 ```
 
-Under factory-conductor, export `VERIFY_EVIDENCE_DIR=<run root>/.verify` before you
-record. The gated-run fixture has its own `.verify`: when you record into it, set the
+`--artifact` can be repeated: give it every capture and observation file the proof
+relies on. Outside factory-conductor, leave `VERIFY_EVIDENCE_DIR` unset: the record goes
+to `$WT/.verify/$INSTANCE/$FEATURE/<head sha>/evidence.json` (git ignores `.verify/`), and
+`record` prints that path on its `EVIDENCE:` line. Under factory-conductor, export
+`VERIFY_EVIDENCE_DIR=<run root>/.verify` before you record. The gated-run fixture has its own `.verify`: when you record into it, set the
 variable on that one command only (`VERIFY_EVIDENCE_DIR=<fixture root>/.verify python3
 ...`), so your own records still land where the conductor reads them.
+
+When the recipe passed on a head, set the feature file's `- proven:` line to that
+40-hex commit. A commit cannot name itself, so that edit goes in a follow-up change that
+touches only `features/` (see `verification-skill-forge/references/feature-map.md`).
 
 ## Cleanup
 
