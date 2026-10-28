@@ -13,8 +13,9 @@ a tier proof with `verify_evidence.py record`. The record format is in `evidence
 | `property` | holds for N generated inputs, shrunk on failure | proptest | Hypothesis | fast-check | rapid |
 | `runtime` | the running app did it once, as a user would | verify-<app> | verify-<app> | verify-<app> | verify-<app> |
 
-Order: `proved` > `bounded` > `property` > `runtime` > `none`. A `—` cell means that no
-backend is trusted for an unattended gate in v1. CrossHair is not a `bounded` backend,
+Order: `proved` > `bounded` > `property` > `runtime` > `none`. `none` means that the
+clause has no record. A `—` cell means that no backend is trusted for an unattended gate
+in v1. CrossHair is not a `bounded` backend,
 because its bound is a time budget and not an input bound. Python has no `bounded`
 backend in v1.
 
@@ -66,6 +67,23 @@ writes nothing. Write a mutant that makes the check itself fail, not one that br
 build. The record adds `mutant_author` and `mutant_exit_status`, and pins four more
 artifacts: `<stem>.mutant.patch`, `<stem>.mutant.exit`, `<stem>.mutant.stdout` and
 `<stem>.mutant.stderr`, where `<stem>` is `proof-<tier>-<tool>-<clause>`.
+
+Exit codes of `record --tier`:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Recorded. It prints `PROOF: <tier> <path>`. |
+| 1 | Nothing recorded. The command failed or timed out on HEAD, the mutant run exited 0 or did not match the signature, or HEAD moved during the run. |
+| 2 | Nothing ran or was recorded. The input is not valid: for example a `--tool` outside its tier, a `--clauses` value that is not one clause, a missing mutant flag, or a patch that does not apply. |
+
+### Known limits
+
+- A command that is rigged on purpose to act differently on its second run, or to read
+  its working directory, can fake a caught mutant. This is the same deliberate forgery
+  that the recorder cannot stop for any command.
+- The HEAD run uses the worktree as it is, with uncommitted changes, but the mutant run
+  uses a copy of committed HEAD. Run the record from a clean worktree, so that both runs
+  check the same code.
 
 ## Failure signatures
 
