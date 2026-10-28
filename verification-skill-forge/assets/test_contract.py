@@ -86,7 +86,10 @@ class ContractTests(unittest.TestCase):
         self.assertNotEqual(F.parse_contract(edited)["sha256"], base)
 
     def test_contract_section_keeps_lint_passing(self):
-        self.write(self.with_contract())
+        # Lint needs every clause id named in `## Proof` (test_contract_lint.py).
+        self.write(self.with_contract().replace(
+            "(the side effect, not just the response).",
+            "(the side effect, not just the response). This proves C1, C2 and C3.", 1))
         r = cli("lint", self.vd)
         self.assertIn("LINT_RESULT: PASS", r.stdout)
 

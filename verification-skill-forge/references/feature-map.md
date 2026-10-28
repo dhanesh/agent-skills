@@ -76,7 +76,11 @@ newline after the last line) and encoded as UTF-8. Blank lines inside the sectio
 including the ones before the next heading, are part of the text. A change to any clause, or to any other
 text in the section, changes the hash. Trailing spaces do not.
 
-A feature file without a `## Contract` section lints as before.
+Lint fails a contract when a clause id is listed twice, when the ids skip a number or
+are out of order (`C1` then `C3`), when a clause has no statement or a kind outside the
+four above, or when a clause id does not occur as a whole word in the same feature's
+`## Proof` section (`C10` does not name `C1`). Each failure line names the feature file
+and the clause id. A feature file without a `## Contract` section lints as before.
 
 ## IDs and anchors
 

@@ -552,6 +552,45 @@ def lint_features(L, verify_dir):
                 claim = "claims proven at %s but " % proven[:12] if proven and proven != "no" \
                     else ""
                 L.fail("%s: %s%s: re-derive it from source (maintain mode)" % (rel, claim, why))
+        lint_contract(L, rel, text)
+
+
+CLAUSE_KINDS = ("pre", "post", "inv", "trans")
+
+
+def lint_contract(L, rel, text):
+    """Fail a malformed `## Contract`: every clause id C1..Cn once, in order, with a known
+    kind and a statement, and named in the same feature's `## Proof`. No section, no check."""
+    section = contract_section(text)
+    if section is None:
+        return
+    for line in section.splitlines()[1:]:
+        m = re.match(r"^- (C\d+)\b", line.strip())
+        if m and not CLAUSE_RE.match(line.strip()):
+            L.fail("%s: contract clause %s is not '- %s [kind]: statement': write it in "
+                   "that form" % (rel, m.group(1), m.group(1)))
+    proof = sections(text).get("Proof", "")
+    seen, last = set(), 0
+    for c in parse_contract(text)["clauses"]:
+        cid, n = c["id"], int(c["id"][1:])
+        if cid in seen:
+            L.fail("%s: contract clause %s is listed twice: give each clause its own id"
+                   % (rel, cid))
+            continue
+        if n != last + 1:
+            L.fail("%s: contract clause %s follows %s: number the clauses C1..Cn in order "
+                   "with no gap" % (rel, cid, "C%d" % last if last else "the heading"))
+        seen.add(cid)
+        last = max(last, n)
+        if c["kind"] not in CLAUSE_KINDS:
+            L.fail("%s: contract clause %s has the unknown kind %r: use one of %s"
+                   % (rel, cid, c["kind"], ", ".join(CLAUSE_KINDS)))
+        if not c["text"]:
+            L.fail("%s: contract clause %s has no statement: write what must hold after "
+                   "the colon" % (rel, cid))
+        if not re.search(r"\b%s\b" % cid, proof):
+            L.fail("%s: contract clause %s is not named in '## Proof': say there which "
+                   "observation proves %s" % (rel, cid, cid))
 
 
 def cmd_lint(a):
