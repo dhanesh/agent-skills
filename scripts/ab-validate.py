@@ -307,6 +307,8 @@ SINCE_MIGRATION_JUDGE = "5a025c4"  # ai-migration-operating-model 1.1.0: the par
 SINCE_LOOPS_LONG_RUN = "88006b1"  # crafting-self-prompting-loops 1.5.0: long unattended run
 # failure modes #11-#15, the LSC-9 capacity rule and the LSC-3 host-sleep rule.
 SINCE_MOCKSTAR_ENCODING = "9a95258"  # mockstar-mock 1.2.0: encoded responses and header coverage.
+SINCE_TSN_PYTEST_REPORTER = "ae1a2dc"  # test-safety-net: pytest 9.2 reads os.environ while
+# it formats a failed assert; io_guard now treats _pytest/assertion/ as a reporter frame.
 
 
 def _git_out(*args):
@@ -9639,6 +9641,58 @@ def check_mockstar_encoding(old, new):
         since=SINCE_MOCKSTAR_ENCODING)
 
 
+# Three functions with the same body, `os.environ.get('CI')`, compiled under three
+# filenames: pytest's assertion reporter (under the interpreter's real purelib), another
+# library there, and a unit in a temp dir. Each is called from a target-repo frame with
+# the guard armed at tier 1. No pytest needed: the frame rule itself is measured.
+_PYTEST_REPORTER_PROBE = r"""
+import sysconfig
+import io_guard as G
+lib = sysconfig.get_paths()["purelib"]
+src = "def f():\n    return os.environ.get('CI')\n"
+def mk(path, code, name):
+    ns = {"os": os}
+    exec(compile(code, path, "exec"), ns)
+    return ns[name]
+rep = mk(os.path.join(lib, "_pytest", "assertion", "truncate.py"), src, "f")
+other = mk(os.path.join(lib, "somelib", "assertion_truncate.py"), src, "f")
+unit = mk(os.path.join(tempfile.mkdtemp(), "unit.py"), src, "f")
+call = mk(os.path.join(tempfile.mkdtemp(), "test_unit.py"),
+          "def call(fn):\n    try:\n        fn()\n        return 0\n"
+          "    except BaseException as e:\n"
+          "        return 1 if type(e).__name__ == 'IOGuardViolation' else 2\n", "call")
+G.arm(1)
+try:
+    out = {"reporter": call(rep), "other_library": call(other), "unit": call(unit)}
+finally:
+    G.disarm()
+print(json.dumps(out))
+"""
+
+
+def check_tsn_pytest_reporter(old, new):
+    """test-safety-net: does pytest's assertion reporter's own env read stay exempt,
+    while every other library's read, and the unit's, still blocks at tier 1?"""
+    s = "test-safety-net"
+    sub = os.path.join("test-safety-net", "assets")
+    oldp = probe(old, sub, _PYTEST_REPORTER_PROBE)
+    newp = probe(new, sub, _PYTEST_REPORTER_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "env reads by pytest's assertion reporter wrongly blocked at tier 1 (lower=better)",
+        oldp["reporter"], newp["reporter"], newp["reporter"] < oldp["reporter"],
+        "pytest 9.2 calls running_on_ci() -> os.environ while formatting a failed assert, so "
+        "every honest failing assert in a tier 1 unit read as 'reclassify to Tier 3'",
+        since=SINCE_TSN_PYTEST_REPORTER)
+    row(s, "env read by another library's frame, called from the test, still blocks",
+        oldp["other_library"], newp["other_library"], newp["other_library"] == 1,
+        "the exemption matches the _pytest/assertion/ directory segment, never a basename",
+        kind="guard")
+    row(s, "env read by the unit under test still blocks at tier 1",
+        oldp["unit"], newp["unit"], newp["unit"] == 1,
+        "the reporter exemption must never reach the code under test", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9738,6 +9792,7 @@ def main():
         check_migration_judge(old, REPO)
         check_loops_long_run(old, REPO)
         check_mockstar_encoding(old, REPO)
+        check_tsn_pytest_reporter(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

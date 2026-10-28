@@ -931,6 +931,38 @@ class TestPytestPluginIntegration(unittest.TestCase):
                 self.assertIn("AssertionError", result.stdout)
                 self.assertNotIn("IOGuardViolation", result.stdout)
 
+    def test_a_unit_that_reads_the_environment_before_a_failed_assert_trips(self):
+        # NEGATIVE for the pytest-reporter exemption: pytest 9.2 reads
+        # os.environ while it formats a failed assert, and that read is exempt.
+        # The unit's own read, made before the assert fails, is not.
+        self._write("sneaky.py",
+                    "import os\n\n\ndef region():\n"
+                    "    return os.environ.get('APP_REGION')\n")
+        self._write("test_sneaky.py",
+                    "import sneaky\n\n\ndef test_region():\n"
+                    "    assert sneaky.region() == 'nope'\n")
+        for label, result in self._run("test_sneaky.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("IOGuardViolation", result.stdout)
+                self.assertIn("environment", result.stdout)
+
+    def test_a_repr_that_reads_the_environment_while_reporting_still_trips(self):
+        # NEGATIVE: the user __repr__ that pytest calls to format the failure is
+        # a target-repo frame nearer than _pytest/assertion/, so its read blocks
+        # (pytest shows it inside the repr rather than as the failure type).
+        self._write("boxed.py",
+                    "import os\n\n\nclass Box:\n"
+                    "    def __repr__(self):\n"
+                    "        return 'Box(%s)' % os.environ.get('APP_REGION')\n")
+        self._write("test_boxed.py",
+                    "import boxed\n\n\ndef test_box():\n"
+                    "    assert boxed.Box() == 1\n")
+        for label, result in self._run("test_boxed.py"):
+            with self.subTest(invocation=label):
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("IOGuardViolation", result.stdout)
+
     def test_a_tier_1_unit_that_lists_a_directory_trips_the_guard(self):
         # NEGATIVE, end to end: exactly the C3 case. Before the marker fix the
         # filter called this Tier 1; a guard patching only os.open/read/write
