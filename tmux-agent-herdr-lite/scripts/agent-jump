@@ -20,7 +20,11 @@ if [[ -x "$SCAN" ]]; then "$SCAN" >/dev/null 2>&1 || true; fi
 CURRENT="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
 ORDER="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)"
 
-PANE_ID="$(python3 - "$STATE" "$TARGET_STATUS" "$CURRENT" "$ORDER" <<'PY'
+# The heredoc lives in a function, never inside $( ... ): bash 3.2 (macOS
+# /bin/bash) mis-parses a quoted heredoc opened inside a command substitution
+# when its body holds an unbalanced single quote, and the script dies.
+pick_pane() {
+python3 - "$STATE" "$TARGET_STATUS" "$CURRENT" "$ORDER" <<'PY'
 import json, os, sys
 state, wanted, current, order = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].split()
 if not os.path.exists(state): raise SystemExit(1)
@@ -36,7 +40,9 @@ pos = rank.get(current, -1)
 after = [p for p in matches if rank.get(p, len(rank)) > pos]
 print((after or matches)[0])
 PY
-)" || {
+}
+
+PANE_ID="$(pick_pane)" || {
   MSG="agent-jump: no pane with status '$TARGET_STATUS'"
   echo "$MSG" >&2
   tmux display-message "$MSG" 2>/dev/null || true
