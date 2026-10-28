@@ -394,4 +394,19 @@ else
   echo "PASS: zsh or git absent — shell-function checks skipped"
 fi
 
+# ── bash 3.2 parse guard ─────────────────────────────────────────────────────
+# macOS ships bash 3.2 as /bin/bash, and `#!/usr/bin/env bash` picks it up there.
+# bash 3.2 mis-parses a quoted heredoc opened inside `$( ... )` when its body
+# holds a single quote: agent-jump died with "unexpected EOF" and the jump key did
+# nothing. CI's bash 5 parses the same text, so check twice: parse every bash
+# script with the bash on PATH, and reject any heredoc opened inside $( ).
+for f in "$SCRIPTS"/*; do
+  [ -f "$f" ] && head -1 "$f" | grep -q bash || continue
+  name="$(basename "$f")"
+  if err="$(bash -n "$f" 2>&1)"; then ok "parse: $name parses under $(bash -c 'echo $BASH_VERSION')"
+  else bad "parse: $name does not parse: $err"; fi
+  hit="$(grep -n '\$(.*<<' "$f" || true)"
+  want "parse: $name opens no heredoc inside \$( )" "$hit" ""
+done
+
 exit $rc
