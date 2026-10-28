@@ -30,6 +30,8 @@ the caller supplies stands in for them, so --result, --action, --observed, --sid
 and --artifact are refused with --tier. The record is
 <evidence dir>/<instance>/<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json, with the
 evidence.json fields and artifact shape plus tier, tool, clauses, argv and exit_status.
+--tool must be on its tier's list in TIER_TOOLS (proved: verus; bounded: kani; property:
+proptest, hypothesis, fast-check, rapid) and --clauses must name exactly one clause.
 
 Where things go. Evidence lives under the evidence directory: $VERIFY_EVIDENCE_DIR when
 set, else <git toplevel of --worktree (default: cwd)>/.verify. Each record is
@@ -63,6 +65,14 @@ INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
 RESERVED = ("doctor", "findings")
 TIERS = ("proved", "bounded", "property")
+# The tools each proof tier accepts for --tool. A tool earns a tier by what its pass
+# means: verus proves for all inputs, kani checks every input up to a stated bound, and
+# the property tools sample inputs. CrossHair is not bounded: its bound is a time budget.
+TIER_TOOLS = {
+    "proved": ("verus",),
+    "bounded": ("kani",),
+    "property": ("proptest", "hypothesis", "fast-check", "rapid"),
+}
 CLAUSE_RE = re.compile(r"^C[1-9][0-9]*\Z")
 RUNTIME_ONLY = ("result", "action", "observed", "side_effect", "artifact")
 
@@ -301,13 +311,19 @@ def cmd_record_tier(a):
     if given:
         return _fail("%s cannot be used with --tier: a proof record holds only what the "
                      "recorder saw the tool do; drop them" % ", ".join(given))
-    for flag, name in (("verifier", "verifier"), ("tool", "tool"), ("clauses", "clauses"),
-                       ("cmd", "proof_cmd")):
+    for flag, name in (("verifier", "verifier"), ("tool", "tool"), ("cmd", "proof_cmd")):
         if not (getattr(a, name) or "").strip():
             return _fail("--%s is required with --tier and cannot be blank" % flag)
-    if not ID_RE.match(a.tool):
-        return _fail("bad --tool %r: give the tool's name in lowercase kebab-case, such "
-                     "as verus" % a.tool)
+    allowed = TIER_TOOLS[a.tier]
+    if a.tool not in allowed:
+        return _fail("--tool %r is not allowed for --tier %s: use %s, or record the proof "
+                     "at the tier its tool earns" % (a.tool, a.tier, ", ".join(allowed)))
+    # One record proves one clause: a list, or nothing, would credit clauses the run
+    # may not cover.
+    named = [c for c in re.split(r"[\s,;]+", a.clauses or "") if c]
+    if len(named) != 1:
+        return _fail("--clauses %r names %d clauses: exactly one clause is required, such "
+                     "as C1; record each clause separately" % (a.clauses or "", len(named)))
     if not CLAUSE_RE.match(a.clauses):
         return _fail("bad --clauses %r: name one contract clause id, such as C1"
                      % a.clauses)
