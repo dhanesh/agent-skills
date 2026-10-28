@@ -60,6 +60,12 @@ evidence.json fields and artifact shape, so the conductor's artifact check appli
 it. It adds `tier`, `tool`, `clauses`, `argv`, `cwd`, `timeout` and `exit_status`. The
 artifacts are the pinned `proof-<tier>-<tool>-<clause>.stdout` and `.stderr` files.
 
+A `bounded` or `property` record also needs `--mutant-patch` and `--mutant-author`. The
+recorder runs the same command on a mutated copy of HEAD and writes the record only when
+that run fails with the tool's failure signature. The record then adds `mutant_author`,
+`mutant_exit_status` and the pinned `.mutant.patch`, `.mutant.exit`, `.mutant.stdout` and
+`.mutant.stderr` artifacts. The steps and the signatures are in `proof-tiers.md`.
+
 ```json
 {"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
  "feature": "notes-create", "sha": "<40 hex>", "verifier": "<agent id>",

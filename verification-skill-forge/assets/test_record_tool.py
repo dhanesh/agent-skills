@@ -61,13 +61,25 @@ class RecordTool(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def record(self, tier, tool, clauses="C1"):
+    def record(self, tier, tool, clauses="C1", *extra):
         cmd = "%s tool.py %s" % (sys.executable, self.marker)
         return subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", tier, "--tool", tool,
-             "--clauses", clauses, "--cmd", cmd, "--worktree", self.root],
+             "--clauses", clauses, "--cmd", cmd, "--worktree", self.root, *extra],
             capture_output=True, text=True, env=self.env)
+
+    def mutant(self, tool):
+        """--mutant-* flags for a mutant on which tool fails with its signature (R5)."""
+        sig = {"kani": "VERIFICATION:- FAILED", "proptest": "minimal failing input: "
+               "x = 0\\ntest result: FAILED", "hypothesis": "Falsifying example: f()"
+               "\\n1 failed", "fast-check": "Property failed after 1 tests",
+               "rapid": "--- FAIL: T\\n[rapid] failed after 1 tests"}[tool]
+        path = os.path.join(self.tmp, "mutant.diff")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("--- a/tool.py\n+++ b/tool.py\n@@ -3 +3 @@\n"
+                    "-print('0 errors')\n+print('%s'); sys.exit(1)\n" % sig)
+        return ["--mutant-patch", path, "--mutant-author", "verifier"]
 
     def assertRefused(self, r, *needles):
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -113,7 +125,8 @@ class RecordTool(unittest.TestCase):
         for tier, tools in sorted(V.TIER_TOOLS.items()):
             for tool in tools:
                 with self.subTest(tier=tier, tool=tool):
-                    r = self.record(tier, tool)
+                    extra = self.mutant(tool) if tier in V.MUTANT_TIERS else []
+                    r = self.record(tier, tool, "C1", *extra)
                     self.assertEqual(r.returncode, 0, r.stderr)
                     path = os.path.join(self.ev, "a", "notes-create", self.sha,
                                         "proof-%s-%s-C1.json" % (tier, tool))
