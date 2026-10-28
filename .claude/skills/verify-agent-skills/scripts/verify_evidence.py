@@ -18,6 +18,18 @@ Usage:
                                         --side-effect TEXT [--side-effect TEXT ...]
                                         --artifact PATH [--artifact PATH ...] [--worktree W]
                                                         # EVIDENCE: <path>
+    python3 verify_evidence.py record  --instance I --feature F --verifier ID
+                                        --tier proved|bounded|property --tool NAME
+                                        --clauses C<n> --cmd ARGV [--timeout SECS]
+                                        [--worktree W]  # PROOF: <tier> <path>
+
+A proof record (--tier) is taken by running the proof tool here: ARGV is split with shlex
+(no shell) and run from the worktree root under --timeout, and the record is written only
+when it exits 0 on the same HEAD. Its stdout and stderr are pinned as artifacts; nothing
+the caller supplies stands in for them, so --result, --action, --observed, --side-effect
+and --artifact are refused with --tier. The record is
+<evidence dir>/<instance>/<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json, with the
+evidence.json fields and artifact shape plus tier, tool, clauses, argv and exit_status.
 
 Where things go. Evidence lives under the evidence directory: $VERIFY_EVIDENCE_DIR when
 set, else <git toplevel of --worktree (default: cwd)>/.verify. Each record is
@@ -29,7 +41,8 @@ already sits there is pinned where it is. Port claims and other per-instance run
 live under <evidence dir>/../.verify-run/, which cleanup may delete; nothing here ever
 deletes evidence.
 
-Exit 0 on success, 2 on invalid input, 3 when a port is taken by another instance.
+Exit 0 on success, 1 when a proof command did not exit 0 on the head, 2 on invalid
+input, 3 when a port is taken by another instance. Every check runs before any write.
 """
 import argparse
 import datetime as _dt
@@ -37,6 +50,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -48,6 +62,9 @@ ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*\Z")
 INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
 RESERVED = ("doctor", "findings")
+TIERS = ("proved", "bounded", "property")
+CLAUSE_RE = re.compile(r"^C[1-9][0-9]*\Z")
+RUNTIME_ONLY = ("result", "action", "observed", "side_effect", "artifact")
 
 
 def _now():
@@ -214,13 +231,23 @@ def cmd_doctor(a):
     return 0
 
 
-def cmd_record(a):
+def _record_target(a):
+    """(wt, sha, err) after the checks every record shares: instance, head, feature."""
     wt, sha, err = _instance_and_head(a)
     if err is not None:
-        return err
+        return None, None, err
     if not ID_RE.match(a.feature) or a.feature in RESERVED:
-        return _fail("bad feature id %r (lowercase kebab-case, not %s)"
-                     % (a.feature, " or ".join(RESERVED)))
+        return None, None, _fail("bad feature id %r (lowercase kebab-case, not %s)"
+                                 % (a.feature, " or ".join(RESERVED)))
+    return wt, sha, None
+
+
+def cmd_record(a):
+    if a.tier is not None:
+        return cmd_record_tier(a)
+    wt, sha, err = _record_target(a)
+    if err is not None:
+        return err
     for name in ("verifier", "action", "observed"):
         if not (getattr(a, name) or "").strip():
             return _fail("--%s is required and cannot be blank" % name)
@@ -231,8 +258,6 @@ def cmd_record(a):
     if not a.artifact:
         return _fail("at least one --artifact is required: the captured action and state")
     out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
-    os.makedirs(out, exist_ok=True)
-    arts = []
     names = [os.path.basename(os.path.abspath(x)) for x in a.artifact]
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
@@ -241,9 +266,12 @@ def cmd_record(a):
         return _fail("artifacts share a file name (%s): rename one before recording"
                      % ", ".join(dup))
     for src in a.artifact:
+        if not os.path.isfile(os.path.abspath(src)):
+            return _fail("artifact %s does not exist" % os.path.abspath(src))
+    os.makedirs(out, exist_ok=True)
+    arts = []
+    for src in a.artifact:
         src = os.path.abspath(src)
-        if not os.path.isfile(src):
-            return _fail("artifact %s does not exist" % src)
         if os.path.dirname(src) != out:
             dest = os.path.join(out, os.path.basename(src))
             shutil.copyfile(src, dest)
@@ -258,11 +286,84 @@ def cmd_record(a):
     return 0
 
 
+def _worktree_root(wt):
+    r = _git(wt, "rev-parse", "--show-toplevel")
+    top = r.stdout.strip()
+    return os.path.abspath(top) if r.returncode == 0 and top else None
+
+
+def cmd_record_tier(a):
+    """A proof record: run the tool on the head, and write only on exit 0."""
+    wt, sha, err = _record_target(a)
+    if err is not None:
+        return err
+    given = ["--" + n.replace("_", "-") for n in RUNTIME_ONLY if getattr(a, n) is not None]
+    if given:
+        return _fail("%s cannot be used with --tier: a proof record holds only what the "
+                     "recorder saw the tool do; drop them" % ", ".join(given))
+    for flag, name in (("verifier", "verifier"), ("tool", "tool"), ("clauses", "clauses"),
+                       ("cmd", "proof_cmd")):
+        if not (getattr(a, name) or "").strip():
+            return _fail("--%s is required with --tier and cannot be blank" % flag)
+    if not ID_RE.match(a.tool):
+        return _fail("bad --tool %r: give the tool's name in lowercase kebab-case, such "
+                     "as verus" % a.tool)
+    if not CLAUSE_RE.match(a.clauses):
+        return _fail("bad --clauses %r: name one contract clause id, such as C1"
+                     % a.clauses)
+    if a.timeout <= 0:
+        return _fail("--timeout must be a positive number of seconds, got %d" % a.timeout)
+    try:
+        argv = shlex.split(a.proof_cmd)
+    except ValueError as e:
+        return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
+    if not argv:
+        return _fail("--cmd is required with --tier and cannot be blank")
+    root = _worktree_root(wt)
+    if root is None:
+        return _fail("cannot find the git toplevel of %s" % wt)
+    try:
+        run = subprocess.run(argv, cwd=root, capture_output=True, timeout=a.timeout)
+    except subprocess.TimeoutExpired:
+        return _fail("%s did not finish in %d seconds: nothing recorded; raise --timeout "
+                     "or narrow the proof" % (argv[0], a.timeout), 1)
+    except OSError as e:
+        return _fail("cannot run %s (%s): nothing recorded; check the tool is installed "
+                     "and on PATH" % (argv[0], e), 1)
+    if run.returncode != 0:
+        return _fail("%s exited %d on %s: nothing recorded; a proof tier needs the tool "
+                     "to pass on the head" % (argv[0], run.returncode, sha[:12]), 1)
+    if head_sha(wt) != sha:
+        return _fail("HEAD moved from %s while %s ran: nothing recorded; record again on "
+                     "a fixed head" % (sha[:12], argv[0]), 1)
+    out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
+    stem = "proof-%s-%s-%s" % (a.tier, a.tool, a.clauses)
+    os.makedirs(out, exist_ok=True)
+    arts = []
+    for ext, data in (("stdout", run.stdout), ("stderr", run.stderr)):
+        name = "%s.%s" % (stem, ext)
+        with open(os.path.join(out, name), "wb") as f:
+            f.write(data)
+        arts.append({"path": name, "sha256": hashlib.sha256(data).hexdigest()})
+    path = os.path.join(out, stem + ".json")
+    # kind stays "evidence" and result "pass" so the conductor's record check (sha,
+    # artifacts, verifier) reads a proof record exactly as it reads evidence.json.
+    _write_json(path, {"schema": SCHEMA, "kind": "evidence", "instance": a.instance,
+                       "feature": a.feature, "sha": sha, "verifier": a.verifier,
+                       "result": "pass", "tier": a.tier, "tool": a.tool,
+                       "clauses": [a.clauses], "argv": argv, "cwd": root,
+                       "timeout": a.timeout, "exit_status": run.returncode,
+                       "artifacts": arts, "captured_at": _now()})
+    print("PROOF: %s %s" % (a.tier, path))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="verify_evidence.py")
     sub = p.add_subparsers(dest="cmd", required=True)
+    parsers = {}
     for name in ("port", "claim", "release", "doctor", "record"):
-        s = sub.add_parser(name)
+        s = parsers[name] = sub.add_parser(name)
         s.add_argument("--instance", required=True)
         s.add_argument("--worktree", default=".")
         if name == "port":
@@ -279,12 +380,29 @@ def main(argv=None):
         if name == "record":
             s.add_argument("--feature", required=True)
             s.add_argument("--verifier", required=True)
-            s.add_argument("--result", required=True, choices=("pass", "fail"))
-            s.add_argument("--action", required=True)
-            s.add_argument("--observed", required=True)
+            s.add_argument("--result", choices=("pass", "fail"))
+            s.add_argument("--action")
+            s.add_argument("--observed")
             s.add_argument("--side-effect", action="append")
             s.add_argument("--artifact", action="append")
+            s.add_argument("--tier", choices=TIERS)
+            s.add_argument("--tool")
+            s.add_argument("--clauses")
+            s.add_argument("--cmd", dest="proof_cmd")
+            s.add_argument("--timeout", type=int, default=900)
     a = p.parse_args(argv)
+    if a.cmd == "record" and a.tier is None:
+        # A runtime record keeps its required flags; only --tier lifts them.
+        missing = ["--" + n for n in ("result", "action", "observed")
+                   if getattr(a, n) is None]
+        if missing:
+            parsers["record"].error("the following arguments are required: %s"
+                                    % ", ".join(missing))
+        stray = [f for f, n in (("--tool", "tool"), ("--clauses", "clauses"),
+                                ("--cmd", "proof_cmd")) if getattr(a, n) is not None]
+        if stray:
+            parsers["record"].error("%s only apply to a proof record: add --tier"
+                                    % ", ".join(stray))
     return {"port": cmd_port, "claim": cmd_claim, "release": cmd_release,
             "doctor": cmd_doctor, "record": cmd_record}[a.cmd](a)
 
