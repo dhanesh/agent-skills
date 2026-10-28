@@ -16,6 +16,7 @@ duplicate or dead entry.
                                 #   commit that touches only features/
 - anchors: <path>[:<symbol>], … # source paths relative to the app root
 - constraints: <manifold>:<id>, …   # optional: anchored Manifold constraints it proves
+- trusted: <entry>, …           # optional: what the contract takes as given
 
 ## What it is
 ## How to reach it
@@ -34,6 +35,48 @@ Each section answers, from the user's point of view:
 4. **Proof.** The observable result that shows it worked, including the side effect.
 5. **Gotchas.** What misleads a driver: a slow first load, a per-instance data store, a
    flag that only exists in dev.
+
+## The contract (optional)
+
+A feature can state a contract: the clauses a proof must show. Put it in a
+`## Contract` section, one bullet per clause:
+
+```markdown
+## Contract
+
+- C1 [pre]: the title is a non-empty string
+- C2 [post]: the response is 201 with the stored note's id
+- C3 [inv]: notes.jsonl holds one row per stored note
+```
+
+- The id is `C` and a number: `C1`, `C2`, `C3`.
+- The kind is one of `pre` (holds before the action), `post` (holds after it),
+  `inv` (holds before and after) or `trans` (relates the state before to the state after).
+- The text after the colon is the statement.
+
+The optional `- trusted:` header line lists, comma-separated, what the contract takes as
+given and does not prove. Like the other header lines, it comes before the first `##`.
+
+`forge contract <feature file>` prints the contract as one JSON object:
+
+```json
+{"clauses": [{"id": "C1", "kind": "pre", "text": "the title is a non-empty string"}],
+ "sha256": "<64 hex>", "trusted": ["the JSON parser"]}
+```
+
+- `clauses` lists every clause bullet in order. It is empty when there is no section.
+- `trusted` lists the `- trusted:` entries. It is empty when there is no such line.
+- `sha256` is the SHA-256 of the section text, in hex. It is `null` when there is no
+  section.
+
+The section text is fixed exactly, so two commits can be compared by hash. It starts at
+the line `## Contract` and ends before the next line that starts with `## `, or at the end
+of the file. Each line is right-stripped. The lines are joined with a single newline (no
+newline after the last line) and encoded as UTF-8. Blank lines inside the section,
+including the ones before the next heading, are part of the text. A change to any clause, or to any other
+text in the section, changes the hash. Trailing spaces do not.
+
+A feature file without a `## Contract` section lints as before.
 
 ## IDs and anchors
 

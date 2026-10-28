@@ -19,6 +19,8 @@ Usage:
                                         [--worktree W] # FINDING: <path>
     python3 forge.py check-maintain <verify dir> --base <ref>
                                                        # MAINTAIN_RESULT: PASS|FAIL
+    python3 forge.py contract <feature file>           # one JSON object: clauses,
+                                                       #   trusted, sha256
 
 A verify skill lives at <app root>/.claude/skills/verify-<app>/ and holds SKILL.md (five
 sections: Launch, Doctor, Drive, Evidence, Cleanup), scripts/verify_evidence.py (a
@@ -32,6 +34,7 @@ constraint.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -160,10 +163,51 @@ def feature_meta(text):
     for line in text.splitlines():
         if line.startswith("## "):
             break
-        m = re.match(r"^- (id|proven|anchors|constraints):\s*(.*)$", line.strip())
+        m = re.match(r"^- (id|proven|anchors|constraints|trusted):\s*(.*)$", line.strip())
         if m:
             meta[m.group(1)] = m.group(2).strip()
     return meta
+
+
+# A contract clause bullet: `- C<n> [kind]: statement`. The kind is captured as written
+# (not only pre|post|inv|trans) so lint can name an unknown kind instead of skipping it.
+CLAUSE_RE = re.compile(r"^- (C\d+)\s*\[([^\]]*)\]:\s*(.*)$")
+
+
+def contract_section(text):
+    """The `## Contract` section of a feature file, or None when it has none.
+
+    The section runs from the `## Contract` heading line up to, not including, the next
+    line that starts with `## ` (or the end of the file). Each line is right-stripped and
+    the lines are joined with a newline. This exact text is what `contract` hashes, so two
+    commits hold the same contract exactly when this function returns the same string."""
+    out = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if out is None:
+            if line == "## Contract":
+                out = [line]
+        elif line.startswith("## "):
+            break
+        else:
+            out.append(line)
+    return None if out is None else "\n".join(out)
+
+
+def parse_contract(text):
+    """{clauses: [{id, kind, text}], trusted: [..], sha256: hex or None} for a feature
+    file. sha256 is of contract_section() as UTF-8, None when there is no section."""
+    section = contract_section(text)
+    clauses = []
+    for line in (section or "").splitlines()[1:]:
+        m = CLAUSE_RE.match(line.strip())
+        if m:
+            clauses.append({"id": m.group(1), "kind": m.group(2).strip(),
+                            "text": m.group(3).strip()})
+    return {"clauses": clauses,
+            "trusted": split_list(feature_meta(text).get("trusted")),
+            "sha256": None if section is None else
+            hashlib.sha256(section.encode("utf-8")).hexdigest()}
 
 
 def split_list(value):
@@ -858,6 +902,17 @@ def cmd_check_maintain(a):
     return 1 if fails else 0
 
 
+def cmd_contract(a):
+    try:
+        text = read(a.feature_file)
+    except (OSError, UnicodeDecodeError) as e:
+        sys.stderr.write("cannot read feature file %s (%s): pass the path of a "
+                         "features/<id>.md file\n" % (a.feature_file, e))
+        return 2
+    _out(json.dumps(parse_contract(text), sort_keys=True))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -885,10 +940,12 @@ def main(argv=None):
     s = sub.add_parser("check-maintain")
     s.add_argument("verify_dir")
     s.add_argument("--base", required=True)
+    sub.add_parser("contract").add_argument("feature_file")
     a = p.parse_args(argv)
     return {"detect": cmd_detect, "scaffold": cmd_scaffold, "vendor": cmd_vendor,
             "lint": cmd_lint, "coverage": cmd_coverage, "seed": cmd_seed,
-            "finding": cmd_finding, "check-maintain": cmd_check_maintain}[a.cmd](a)
+            "finding": cmd_finding, "check-maintain": cmd_check_maintain,
+            "contract": cmd_contract}[a.cmd](a)
 
 
 if __name__ == "__main__":
