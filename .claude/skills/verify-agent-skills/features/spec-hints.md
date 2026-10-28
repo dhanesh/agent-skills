@@ -1,7 +1,7 @@
 # spec-hints: lint a spec and compile it into a task plan
 
 - id: spec-hints
-- proven: no
+- proven: a6fe65645bf97894f1bd8e7d8dbab9f5042722f2
 - anchors: spec-first-planning/assets/spec_lint.py, spec-first-planning/assets/spec_to_tasks.py, spec-first-planning/references/spec-format.md, spec-first-planning/assets/schemas/task-plan.v1.json
 
 ## What it is
