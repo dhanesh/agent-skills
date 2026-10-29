@@ -51,9 +51,10 @@ references/spec-template.md. This linter enforces the mechanical half of
 
   5f. Optional proof-tier hints on a requirement: `[tier: <t>]` with <t> one
       of proved, bounded, property, runtime, and `[contract: <feature>:C<n>, ...]`
-      naming the feature-map contract clauses the tier applies to. An unknown
-      tier, a malformed clause entry, or a `[contract: ...]` with no
-      `[tier: ...]` fails. spec_to_tasks.py emits them as `min_tier` and `clauses`.
+      naming the feature-map contract clauses the tier applies to, n from 1
+      with no leading zero. An unknown tier, a malformed clause entry, a
+      `[contract: ...]` with no `[tier: ...]`, or a `[tier: ...]` with no
+      `[contract: ...]` fails. spec_to_tasks.py emits them as `min_tier` and `clauses`.
 
 --converged adds the Tension + Choose full-loop rules (10-16): Tensions,
 Solution options and Iterations sections; tension grammar, known ids, and a
@@ -196,7 +197,9 @@ _FEATURE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 TIER_RE = re.compile(r"\[tier:\s*([^\]]*)\]", re.IGNORECASE)
 CONTRACT_RE = re.compile(r"\[contract:\s*([^\]]*)\]", re.IGNORECASE)
 TIERS = ("proved", "bounded", "property", "runtime")
-_CLAUSE_REF_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*:C[0-9]+$")
+# A clause number starts at 1 and has no leading zero. Callers use fullmatch(), so a
+# trailing newline does not slip past the end of the pattern the way "$" lets it.
+_CLAUSE_REF_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*")
 # "Verify skill: <repo-relative verify-<app> dir>" in an optional ## Verification section.
 VERIFY_SKILL_RE = re.compile(r"^\s*(?:[-*]\s*)?verify skill:\s*`?([^`\s]+)`?\s*$",
                              re.IGNORECASE)
@@ -823,7 +826,7 @@ def parse_spec(text):
         refs = []
         for token in (cm.group(1).split(",") if cm else []):
             token = token.strip().strip("`")
-            if _CLAUSE_REF_RE.match(token):
+            if _CLAUSE_REF_RE.fullmatch(token):
                 refs.append(token)
             else:
                 malformed_clauses.append((num, token))
@@ -1104,8 +1107,9 @@ def lint(text, mode="light"):
         if spec["parallel_safe"].get(num) and spec["after"].get(num):
             issues.append("R%d is both [parallel-safe] and [after: ...]; pick one" % num)
 
-    # 5f. Proof-tier hints: a known tier, well-formed <feature>:C<n> clause ids, and a
-    # [tier: ...] beside every [contract: ...] (a clause list with no tier gates nothing).
+    # 5f. Proof-tier hints: a known tier, well-formed <feature>:C<n> clause ids, and
+    # [tier: ...] and [contract: ...] only together (a clause list with no tier gates
+    # nothing; a tier with no clause list names nothing to gate, D3).
     for num, _ in reqs:
         tier = spec["tiers"].get(num)
         if tier is not None and tier not in TIERS:
@@ -1114,9 +1118,13 @@ def lint(text, mode="light"):
         if spec["contract_hint"].get(num) and tier is None:
             issues.append("R%d has a [contract: ...] hint but no [tier: ...] hint; add "
                           "[tier: <%s>]" % (num, "|".join(TIERS)))
+        if tier is not None and not spec["contract_hint"].get(num):
+            issues.append("R%d has a [tier: ...] hint but no [contract: ...] hint; add "
+                          "[contract: <feature id>:C<n>, ...] or remove the tier" % num)
     for num, token in spec["malformed_clauses"]:
         issues.append("R%d [contract: ...] has a malformed entry '%s'; write it as "
-                      "<feature id>:C<n> (lowercase kebab-case feature id)" % (num, token))
+                      "<feature id>:C<n> (lowercase kebab-case feature id, n from 1 with "
+                      "no leading zero)" % (num, token))
 
     # 5b. [cmd: ...] hints: trailing, parseable, non-empty, and C6-clean.
     for bullet in spec["misplaced_cmds"]:

@@ -14,10 +14,17 @@ fixtures one verifier builds and the captures it makes. Two instances never shar
   fixture  commit --instance I --name N --put REL=SRC [...]   write files, commit them
   fixture  stack --instance I --name N --lang rust|python|typescript|go
   fixture  gated-run --instance I --name N --feature ID=ANCHOR [...]
-           [--feature-file ID=SRC ...] [--task-json JSON] [--edit REL=SRC ...]
+           [--feature-file ID=SRC ...] [--task-json JSON] [--plan-json JSON]
+           [--edit REL=SRC ...]
            build a repo with a verify-app skill, a plan under the evidence gate and a
            covering grant; run conductor init, start (owner "writer"), commit the edits,
            verify and review (reviewer "reviewer"). The task then waits for evidence.
+           --plan-json merges keys into the plan payload; a null value removes the key
+           (`{"verification": null}` builds a plan with no evidence gate).
+  fixture  proof-tool --instance I --name N
+           write a fake hypothesis run (tool.py), its target (target.txt: good) and a
+           mutant diff it catches (mutant.diff) into the instance; commit the first two
+           with gated-run --edit, then record a property proof with the diff
   cleanup  --instance I                 delete .verify-run/<instance>/ (never .verify/)
 
 Every command prints one JSON object. Paths in it are absolute.
@@ -239,6 +246,11 @@ def cmd_gated_run(a):
     task.update(json.loads(a.task_json or "{}"))
     plan = {"title": "Gate", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
             "tasks": [task], "verification": {"skill": GATE_SKILL}}
+    for key, value in json.loads(a.plan_json or "{}").items():
+        if value is None:
+            plan.pop(key, None)
+        else:
+            plan[key] = value
     st = CC.build_statement(TASK_PLAN_KIND, "spec-first-planning", "2.1.0", d,
                             ["docs/spec.md"], plan)
     plan_path = CC.write_envelope(d, st)
@@ -286,6 +298,35 @@ def cmd_gated_run(a):
                 "owner": "writer", "steps": steps})
 
 
+# A fake allowlisted proof tool: it passes on "good" and prints Hypothesis's failure
+# report when the mutant sets target.txt to "caught". No dependency.
+PROOF_TOOL = '''import sys
+mode = open("target.txt").read().strip()
+if mode == "caught":
+    print("Falsifying example: test_create(title='')\\n1 failed in 0.01s")
+    sys.exit(1)
+print("1 passed in 0.01s")
+'''
+PROOF_MUTANT = """diff --git a/target.txt b/target.txt
+--- a/target.txt
++++ b/target.txt
+@@ -1 +1 @@
+-good
++caught
+"""
+
+
+def cmd_proof_tool(a):
+    wt = worktree()
+    d = inst_dir(wt, a.instance, a.name)
+    fresh(d)
+    files = {"tool.py": PROOF_TOOL, "target.txt": "good\n", "mutant.diff": PROOF_MUTANT}
+    for name, text in files.items():
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(text)
+    return out({name.replace(".", "_"): os.path.join(d, name) for name in files})
+
+
 def cmd_cleanup(a):
     wt = worktree()
     d = inst_dir(wt, a.instance)
@@ -306,7 +347,8 @@ def main(argv=None):
     s.set_defaults(fn=cmd_cleanup)
     fx = sub.add_parser("fixture").add_subparsers(dest="kind", required=True)
     for kind, fn in (("verify-skill", cmd_verify_skill), ("commit", cmd_commit),
-                     ("stack", cmd_stack), ("gated-run", cmd_gated_run)):
+                     ("stack", cmd_stack), ("gated-run", cmd_gated_run),
+                     ("proof-tool", cmd_proof_tool)):
         s = fx.add_parser(kind)
         s.add_argument("--instance", required=True)
         s.add_argument("--name", required=True)
@@ -321,6 +363,7 @@ def main(argv=None):
             s.add_argument("--feature", action="append", required=True)
             s.add_argument("--feature-file", action="append", default=[])
             s.add_argument("--task-json")
+            s.add_argument("--plan-json")
             s.add_argument("--edit", action="append", default=[])
     a = p.parse_args(argv)
     return a.fn(a)

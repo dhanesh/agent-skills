@@ -38,7 +38,9 @@ Usage:
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
 fresh subjects, a schedulable plan, and a runnable command on every verify step: a task
 with no verify step, or a step whose command is null or empty, is refused with
-FAIL: task <id> verify step <n> has no command, exit 2), then requires `check-grant` to cover
+FAIL: task <id> verify step <n> has no command, exit 2; a malformed `min_tier` or
+`clauses`, one without the other, or either in a plan with no `verification` block is
+refused first with FAIL: task <id> <field>: <why>, exit 2), then requires `check-grant` to cover
 local_reversible for that plan (`--subject <plan envelope>`, so a grant covers only the
 plan it pins) on the current branch, which must match the grant's branch_pattern and
 not be the default branch. It cuts factory/<plan-slug> from the current branch (that
@@ -251,7 +253,7 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.5.4"
+CONDUCTOR_VERSION = "1.6.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -271,15 +273,33 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 # A reject the verifier can fix by recording again (a fresh verifier dispatch); the
 # other rejects park the task (feature-unmapped, no-features) or send it back to its
 # executor (evidence-failed: the app did the wrong thing).
+# contract-changed: in a tiered plan the task's head changed a feature's `## Contract`
+# against the run base (contract_changed); a human decides whether the contract moves.
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
-                 "evidence-diff-unreadable")
+                 "evidence-diff-unreadable", "tier-field-unreadable", "contract-changed")
+# Rejects that send the task back to its executor: the app did the wrong thing
+# (evidence-failed), or a clause lacks a record at the plan's min_tier
+# (tier-below-required).
+EVIDENCE_REPAIR = ("evidence-failed", "tier-below-required")
 EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
+# Proof tiers (the second slice). A task in a gated plan MAY carry `min_tier` (the
+# weakest tier its clauses accept) and `clauses` (<feature>:C<n> refs, its feature among
+# the task's features), always together. init refuses a malformed pair (plan_tier_problems).
+TIERS = ("proved", "bounded", "property", "runtime")
+CLAUSE_RE = r"[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*"
+# The tools each recorded tier accepts (verify_evidence.py's TIER_TOOLS), and the tiers
+# whose record must also hold a caught mutant. runtime has no proof record: the
+# feature's accepted evidence.json meets it.
+TIER_TOOLS = {"proved": ("verus",), "bounded": ("kani",),
+              "property": ("proptest", "hypothesis", "fast-check", "rapid")}
+MUTANT_TIERS = ("bounded", "property")
+MUTANT_ARTIFACTS = ("mutant.patch", "mutant.exit", "mutant.stdout", "mutant.stderr")
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
                  "evidence-artifact-altered", "doctor-missing", "doctor-red")
 # Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
-# EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
+# EVIDENCE_REDO, or EVIDENCE_REPAIR; test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported; they are enforced only for the metrics `enforce` names (opt-in: the runtime
 # does not expose usage to this tool, so the agent reports it with `usage`).
@@ -1333,6 +1353,14 @@ def cmd_init(args):
         waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
     except PlanError as e:
         return _init_fail("invalid plan: %s" % e)
+    tier_bad = plan_tier_problems(plan)
+    if tier_bad:
+        for why in tier_bad:
+            sys.stderr.write("FAIL: %s\n" % why)
+        return _init_fail("invalid plan: a task's min_tier and clauses must come together, "
+                          "in a plan with a verification block, min_tier one of %s and "
+                          "clauses distinct <feature>:C<n> refs to the task's features; "
+                          "see the lines above" % ", ".join(TIERS))
     missing = missing_commands(plan)
     if missing:
         for why in missing:
@@ -1513,7 +1541,60 @@ def cmd_status(args):
             print("STATUS: unmetered %s dispatch=%d kind=%s" % (d["task"], d["n"], d["kind"]))
         print(_usage_line(st))
     print("STATUS: budget " + budget_note_text(st.budget))
+    for item in assurance(st) or []:
+        print("ASSURANCE: %s %s %s" % (item["feature"], item["tier"],
+                                       ",".join(item["clauses"])))
     return 0
+
+
+ASSURANCE_ORDER = TIERS + ("none",)
+
+
+def _clause_key(cid):
+    return int(cid[1:])
+
+
+def assurance(st, plan_doc=None):
+    """The weakest tier per feature (R5): [{feature, tier, clauses}] in feature-id order,
+    or None when no task in the pinned plan carries `clauses` (an untiered plan reports
+    nothing). A clause's tier is the strongest tier that a proven task naming it recorded
+    at its evidence pass, else none. A feature's tier is its weakest clause's tier, and
+    clauses lists the clause ids at that tier in numeric order. Read from the pinned
+    plan, as the tier check reads it; never raises."""
+    if plan_doc is None:
+        plan_doc, why = _pinned_plan(st)
+        if why:
+            return None
+    tasks = _plan_payload(plan_doc).get("tasks")
+    if not isinstance(tasks, list) or not any(
+            isinstance(x, dict) and "clauses" in x for x in tasks):
+        return None
+    best = {}  # clause ref -> index into ASSURANCE_ORDER
+    for x in tasks:
+        named = x.get("clauses") if isinstance(x, dict) else None
+        if not isinstance(named, list):
+            continue
+        t = st.tasks.get(x.get("id")) if isinstance(x.get("id"), str) else None
+        ev = t.get("evidence") if isinstance(t, dict) else None
+        met = ev.get("clause_tiers") if isinstance(ev, dict) and \
+            t.get("status") == "proven" else None
+        for c in named:
+            if not (isinstance(c, str) and re.fullmatch(CLAUSE_RE, c)):
+                continue
+            tier = met.get(c) if isinstance(met, dict) else None
+            rank = ASSURANCE_ORDER.index(tier) if tier in TIERS else len(TIERS)
+            best[c] = min(best.get(c, len(TIERS)), rank)
+    per_feature = {}
+    for c, rank in best.items():
+        feature, cid = c.split(":", 1)
+        per_feature.setdefault(feature, []).append((rank, cid))
+    out = []
+    for feature in sorted(per_feature):
+        weakest = max(rank for rank, _ in per_feature[feature])
+        ids = sorted((cid for rank, cid in per_feature[feature] if rank == weakest),
+                     key=_clause_key)
+        out.append({"feature": feature, "tier": ASSURANCE_ORDER[weakest], "clauses": ids})
+    return out
 
 
 def _num(x):
@@ -1570,7 +1651,7 @@ def next_actions(st):
             ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
             if review.get("verdict") == "fail":
                 out.append((tid, "dispatch-repair review"))
-            elif ev.get("reason") == "evidence-failed":
+            elif ev.get("reason") in EVIDENCE_REPAIR:
                 out.append((tid, "dispatch-repair evidence"))
             elif _moved_after_review(t):
                 out.append((tid, "verify"))
@@ -2092,10 +2173,11 @@ def cmd_verify(args):
         return _verify_refused(st, args.task, "no new commit since the review failed",
                                "unchanged since failed review", keep_review=True)
     ev = t.get("evidence")
-    if isinstance(ev, dict) and ev.get("reason") == "evidence-failed" \
+    if isinstance(ev, dict) and ev.get("reason") in EVIDENCE_REPAIR \
             and ev.get("verified_head") == head:
-        # The running app already failed on this very commit: a green verify of it
-        # proves nothing new. It counts as a failure, so the repair loop stays bounded.
+        # The running app already failed on this very commit (or a clause lacked its
+        # tier): a green verify of it proves nothing new. It counts as a failure, so the
+        # repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the evidence failed",
                                "unchanged since failed evidence", keep_evidence=True)
     if not clean:
@@ -2434,7 +2516,7 @@ def _check_record(doc, feature, sha, verifier, directory, base):
     return None
 
 
-def evidence_verdict(st, t, sha, verifier):
+def evidence_verdict(st, t, sha, verifier, task_id=None):
     """The evidence predicate for a task's verified head. Returns
     {ok, reason, feature, features, paths, doctor}: ok only when the verifier is not the
     task's owner, every touched feature has a map entry, and each touched feature has a
@@ -2500,8 +2582,166 @@ def evidence_verdict(st, t, sha, verifier):
         out["paths"].append(_rel(st, os.path.join(chosen, "evidence.json")))
         if _rel(st, dpath) not in out["doctor"]:
             out["doctor"].append(_rel(st, dpath))
+    # Proof tiers, last: only a head that passes every check above is judged for them.
+    if task_id is None:
+        task_id = next((k for k, v in st.tasks.items() if v is t), None)
+    fields, unreadable = _pinned_tier_fields(st, task_id)
+    if unreadable:
+        out["reason"], out["feature"] = "tier-field-unreadable", unreadable
+        return out
+    if fields:
+        min_tier, clauses = fields
+        met = {}
+        for clause in clauses:
+            met[clause] = _clause_tier(st, clause, sha, verifier, feats)
+            if not _meets(met[clause], min_tier):
+                out["reason"], out["feature"] = "tier-below-required", clause
+                return out
+        # The tier each clause met, for the run's ASSURANCE report (R5). Only a tiered
+        # task carries the key, so an untiered verdict is unchanged.
+        out["clause_tiers"] = met
     out["ok"] = True
     return out
+
+
+def _pinned_tier_fields(st, task_id):
+    """((min_tier, clauses), None) for a tiered task, (None, None) for a task with
+    neither key, or (None, "min_tier" | "clauses") when a value cannot be read.
+
+    Read only from the pinned plan file, never from state.json, as _pinned_verify reads
+    the verify commands. init refuses malformed fields (plan_tier_problems), but a plan
+    pinned some other way may still carry them, so every value is checked again here
+    and a bad one fails closed. Never raises."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return None, "min_tier"
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    task = None
+    if isinstance(tasks, list):
+        task = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id),
+                    None)
+    if task is None:
+        return None, "min_tier"
+    if "min_tier" not in task and "clauses" not in task:
+        return None, None
+    tier = task.get("min_tier")
+    if not (isinstance(tier, str) and tier in TIERS):
+        return None, "min_tier"
+    if "clauses" not in task or _clauses_problem(task["clauses"], task.get("features")):
+        return None, "clauses"
+    return (tier, list(task["clauses"])), None
+
+
+def _meets(tier, min_tier):
+    """True when tier (one of TIERS, or None for no tier) is at or above min_tier."""
+    return tier is not None and TIERS.index(tier) <= TIERS.index(min_tier)
+
+
+def _clause_tier(st, clause, sha, verifier, accepted):
+    """The strongest tier clause (<feature>:C<n>) meets for sha, or None: the strongest
+    proof record by verifier that passes the record check and the tier rules, else
+    runtime when the feature's evidence.json was accepted (`accepted`)."""
+    feature, cid = clause.split(":", 1)
+    best = None
+    base = _evidence_root(st)
+    name_re = r"proof-(%s)-(.+)-%s\.json" % ("|".join(TIER_TOOLS), re.escape(cid))
+    for path in sorted(glob.glob(os.path.join(base, "*", feature, sha,
+                                              "proof-*-%s.json" % cid))):
+        m = re.fullmatch(name_re, os.path.basename(path))
+        if not m or (best is not None and TIERS.index(m.group(1)) >= best):
+            continue
+        tier, tool = m.group(1), m.group(2)
+        doc = _load_record(path, base)
+        if not isinstance(doc, dict) or _check_record(
+                doc, feature, sha, verifier, os.path.dirname(path), base) is not None:
+            continue
+        if doc.get("tier") != tier or doc.get("tool") != tool \
+                or tool not in TIER_TOOLS[tier] or doc.get("clauses") != [cid]:
+            continue
+        if tier in MUTANT_TIERS:
+            status = doc.get("mutant_exit_status")
+            if not isinstance(status, int) or isinstance(status, bool) or status == 0:
+                continue
+            listed = {a.get("path") for a in doc["artifacts"] if isinstance(a, dict)}
+            stem = "proof-%s-%s-%s" % (tier, tool, cid)
+            if any("%s.%s" % (stem, ext) not in listed for ext in MUTANT_ARTIFACTS):
+                continue
+        best = TIERS.index(tier)
+    if best is not None:
+        return TIERS[best]
+    return "runtime" if feature in accepted else None
+
+
+def _tiered_plan(st):
+    """True when the pinned plan is a tiered plan: at least one task carries `min_tier`.
+    Read only from the pinned plan, as _pinned_tier_fields reads it. A plan that cannot
+    be read is not judged here: evidence_verdict fails closed on it for a tiered task."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return False
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    return isinstance(tasks, list) and any(isinstance(x, dict) and "min_tier" in x
+                                           for x in tasks)
+
+
+def contract_section(text):
+    """The `## Contract` section of a feature file, or None when it has none: the same
+    definition as verification-skill-forge's forge.py contract_section (feature-map.md).
+    It runs from the `## Contract` line up to, not including, the next line that starts
+    with `## `, each line right-stripped, joined with a newline."""
+    out = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if out is None:
+            if line == "## Contract":
+                out = [line]
+        elif line.startswith("## "):
+            break
+        else:
+            out.append(line)
+    return None if out is None else "\n".join(out)
+
+
+def _contracts_at(st, sha):
+    """{feature id: contract text or None} for each features/<id>.md other than README.md
+    in the verify skill as committed at sha, or None when git cannot list the directory.
+    A file git lists but cannot read maps to a value no real text equals."""
+    skill = st.verification["skill"]
+    ok, r = _git_ok(st.root, "ls-tree", "--name-only", "%s:%s/features" % (sha, skill))
+    if not ok:
+        return None
+    out = {}
+    for name in r.stdout.split():
+        if not name.endswith(".md") or name == "README.md":
+            continue
+        text = _blob(st, sha, "%s/features/%s" % (skill, name))
+        out[name[:-3]] = object() if text is None else contract_section(text)
+    return out
+
+
+def contract_changed(st, sha):
+    """The first feature id, in sorted order, whose `## Contract` text differs between the
+    run base (git merge-base <run branch> sha) and sha, or None. A feature file on one
+    side only counts as changed, whatever it holds, and so does a section on one side
+    only. When the head's features or the merge base
+    cannot be read, None: evidence_verdict then fails closed with its own reason. A base
+    whose features cannot be listed holds no contracts."""
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return None
+    head = _contracts_at(st, sha)
+    if head is None:
+        return None
+    before = _contracts_at(st, base) or {}
+    for fid in sorted(set(head) | set(before)):
+        if (fid in head) != (fid in before) or head.get(fid) != before.get(fid):
+            return fid
+    return None
 
 
 def cmd_evidence(args):
@@ -2534,12 +2774,29 @@ def cmd_evidence(args):
     if not _gated(st, "local_reversible"):  # clause 5: the grant is live at verdict time
         return 3
     verifier = (args.verifier or "").strip() or None
-    v = evidence_verdict(st, t, pinned, verifier)
+    # Every task in a tiered plan, before the verdict: a head that changes a contract
+    # parks, whatever its records say (an ungated task too, so it cannot merge a contract
+    # edit that parks later tiered tasks).
+    changed = contract_changed(st, pinned) if _tiered_plan(st) else None
+    if changed:
+        record = {"verdict": "reject", "reason": "contract-changed", "feature": changed,
+                  "observed": None, "verifier": verifier, "verified_head": pinned,
+                  "features": [], "paths": [], "doctor": [], "at": _rfc3339(_now())}
+        st.log("evidence", task=args.task, ok=False, reason="contract-changed",
+               feature=changed, verifier=verifier, verified_head=pinned, features=[],
+               paths=[])
+        print("EVIDENCE: %s reject contract-changed %s" % (args.task, changed))
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "contract-changed")
+        return 3
+    v = evidence_verdict(st, t, pinned, verifier, args.task)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
               "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
               "verified_head": pinned,
               "features": v["features"], "paths": v["paths"], "doctor": v["doctor"],
               "at": _rfc3339(_now())}
+    if v["ok"] and "clause_tiers" in v:
+        record["clause_tiers"] = v["clause_tiers"]
     st.log("evidence", task=args.task, ok=v["ok"], reason=v["reason"], feature=v["feature"],
            verifier=verifier, verified_head=pinned, features=v["features"], paths=v["paths"])
     if v["ok"]:
@@ -2557,8 +2814,9 @@ def cmd_evidence(args):
         _park(st, args.task, "feature-unmapped" if v["reason"] in (
             "feature-unmapped", "no-features") else v["reason"])
         return 3
-    if v["reason"] == "evidence-failed":
-        # The app did the wrong thing on this head: a repair, like a failing verify.
+    if v["reason"] in EVIDENCE_REPAIR:
+        # The app did the wrong thing on this head, or a clause has no record at its
+        # min_tier: a repair, like a failing verify.
         st.set_status(args.task, "verifying", review=None, evidence=record)
         _count_failure(st, args.task)
         st.save()
@@ -2689,7 +2947,7 @@ def cmd_merge(args):
         return 3
     if st.verification:
         # The records are re-read now: one removed or altered since the verdict blocks.
-        again = evidence_verdict(st, t, pinned, ev.get("verifier"))
+        again = evidence_verdict(st, t, pinned, ev.get("verifier"), args.task)
         if not again["ok"]:
             st.set_status(args.task, "reviewing", evidence=dict(
                 ev, verdict="reject", reason=again["reason"], feature=again["feature"],
@@ -3137,6 +3395,60 @@ def missing_commands(plan):
     return out
 
 
+def plan_tier_problems(plan):
+    """["task <id> <field>: <why>"] for every task whose proof-tier fields are malformed:
+    a `min_tier` that is not exactly one of TIERS, a `clauses` that is not a non-empty
+    list of distinct <feature>:C<n> refs whose feature the task names in `features`
+    (null is malformed for both), one key without the other, or either key in a plan
+    with no `verification` block. A task with neither key yields nothing. Reads only
+    the plan: no feature file."""
+    out = []
+    gated = plan.get("verification") is not None
+    for tid, t in _plan_tasks_by_id(plan).items():
+        present = [k for k in ("min_tier", "clauses") if k in t]
+        if not present:
+            continue
+        if not gated:
+            for k in present:
+                out.append("task %s %s: the plan declares no verification block, so no "
+                           "check reads tier fields; add one or remove the field" % (tid, k))
+            continue
+        if len(present) == 1:
+            missing = "clauses" if present[0] == "min_tier" else "min_tier"
+            out.append("task %s %s: missing; %s needs %s beside it (add it or remove %s)"
+                       % (tid, missing, present[0], missing, present[0]))
+        if "min_tier" in t and not (isinstance(t["min_tier"], str)
+                                    and t["min_tier"] in TIERS):
+            out.append("task %s min_tier: %s is not one of %s"
+                       % (tid, json.dumps(t["min_tier"]), ", ".join(TIERS)))
+        if "clauses" in t:
+            why = _clauses_problem(t["clauses"], t.get("features"))
+            if why:
+                out.append("task %s clauses: %s" % (tid, why))
+    return out
+
+
+def _clauses_problem(clauses, features):
+    """Why `clauses` is malformed for a task naming `features`, or None."""
+    if not isinstance(clauses, list) or not clauses:
+        return ("%s is not a non-empty list of <feature>:C<n> refs"
+                % json.dumps(clauses))
+    named = set(f for f in features if isinstance(f, str)) if isinstance(features, list) else set()
+    seen = set()
+    for c in clauses:
+        if not isinstance(c, str) or not re.fullmatch(CLAUSE_RE, c):
+            return ("%s is not a <feature>:C<n> ref (n from 1, no leading zero)"
+                    % json.dumps(c))
+        if c in seen:
+            return "%s is listed twice" % json.dumps(c)
+        seen.add(c)
+        feature = c.split(":", 1)[0]
+        if feature not in named:
+            return ("%s names feature %s, which is not in the task's features"
+                    % (json.dumps(c), feature))
+    return None
+
+
 def verify_command_problems(plan):
     """[(task id, command, why)] for every non-null verify command that breaks the
     skill-contract command rule (commandment 6: {python} rather than an interpreter name,
@@ -3220,6 +3532,7 @@ def run_result_payload(st, plan_doc=None, integration=None):
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
         stopped = {k: s[k] for k in ("reason", "at", "detail", "task", "previous") if k in s}
     grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
+    assured = assurance(st, plan_doc)
     return {
         "run_id": st.run_id,
         "plan": {"id": (pred or {}).get("id"), "path": plan_subject(st),
@@ -3235,7 +3548,8 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "budget_note": budget_note_text(st.budget), "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st),
         "evidence_gate": bool(st.verification), "trail": trail(st)["units"],
-        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {})}
+        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {}),
+        **({"assurance": assured} if assured is not None else {})}
 
 
 def _run_result_assertions(st, plan_doc, integration=None):
