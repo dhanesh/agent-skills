@@ -4,7 +4,7 @@
 Run from the app root. Every command takes --instance; the instance's port comes from
 verify_evidence.py's claim, its data store and pid file live under .verify-run/<instance>/.
 
-    launch  --instance I             # starts app.py, waits for /health, prints {"port":..}
+    launch  --instance I             # starts app.py, waits for its /health, prints {"port":..}
     doctor  --instance I [--record --verifier V]
     create  --instance I --title T --capture DIR   # POST /notes; request+response+rows
     list    --instance I
@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RECORDER = os.path.join(HERE, "verify_evidence.py")
 VERSION = "1.2.0"
 READY_SECONDS = 10
+LAUNCH_TRIES = 3
 
 
 def run_dir(instance):
@@ -60,23 +61,18 @@ def emit(doc, ok=True):
 def launch(a):
     d = run_dir(a.instance)
     os.makedirs(os.path.join(d, "data"), exist_ok=True)
-    port = port_of(a.instance)
-    log = open(os.path.join(d, "app.log"), "ab")
-    p = subprocess.Popen([sys.executable, "app.py", "--port", str(port), "--data",
-                          os.path.join(d, "data"), "--instance", a.instance],
-                         stdout=log, stderr=log, start_new_session=True)
-    with open(os.path.join(d, "pid"), "w") as f:
-        f.write(str(p.pid))
-    deadline = time.time() + READY_SECONDS
-    while time.time() < deadline:
-        try:
-            status, body = call(port, "GET", "/health")
-            if status == 200 and body.get("instance") == a.instance:
-                return emit({"instance": a.instance, "port": port, "pid": p.pid, "ready": True})
-        except (OSError, ValueError):
-            pass
-        time.sleep(0.1)
-    log.flush()
+    for _ in range(LAUNCH_TRIES):
+        port = port_of(a.instance)
+        p, ready = start(a.instance, d, port)
+        if ready:
+            return emit({"instance": a.instance, "port": port, "pid": p.pid, "ready": True})
+        if p.poll() is None:
+            break
+        # The server exited, so it lost the bind: a process outside this checkout's port
+        # locks (another checkout's instance, say) took the port after the claim. Drop
+        # the claim and let port_of skip the taken port.
+        subprocess.run([sys.executable, RECORDER, "release", "--instance", a.instance],
+                       capture_output=True, check=True)
     try:
         with open(os.path.join(d, "app.log"), encoding="utf-8", errors="replace") as f:
             tail = f.read()[-600:]
@@ -86,9 +82,31 @@ def launch(a):
                  "alive": p.poll() is None, "app_log_tail": tail}, ok=False)
 
 
+def start(instance, d, port):
+    """Start app.py on port. Ready only when /health answers from this process: a server
+    of another checkout can answer on the same port with the same instance name."""
+    with open(os.path.join(d, "app.log"), "ab") as log:
+        p = subprocess.Popen([sys.executable, "app.py", "--port", str(port), "--data",
+                              os.path.join(d, "data"), "--instance", instance],
+                             stdout=log, stderr=log, start_new_session=True)
+    with open(os.path.join(d, "pid"), "w") as f:
+        f.write(str(p.pid))
+    deadline = time.time() + READY_SECONDS
+    while time.time() < deadline and p.poll() is None:
+        try:
+            status, body = call(port, "GET", "/health")
+            if status == 200 and body.get("instance") == instance and body.get("pid") == p.pid:
+                return p, True
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.1)
+    return p, False
+
+
 def doctor(a):
     d = run_dir(a.instance)
     checks = {}
+    pid = None
     try:
         with open(os.path.join(d, "pid")) as f:
             pid = int(f.read())
@@ -101,7 +119,8 @@ def doctor(a):
         status, body = call(port, "GET", "/health")
     except OSError:
         status, body = None, {}
-    checks["port"] = "pass" if status == 200 and body.get("port") == port else "fail"
+    checks["port"] = ("pass" if status == 200 and body.get("port") == port
+                      and body.get("pid") == pid else "fail")
     checks["instance"] = "pass" if body.get("instance") == a.instance else "fail"
     checks["version"] = "pass" if body.get("version") == VERSION else "fail"
     ok = all(v == "pass" for v in checks.values())

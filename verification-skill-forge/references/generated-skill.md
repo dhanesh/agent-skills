@@ -40,7 +40,11 @@ user types (graph_d's harness: `--no-quiet`), so a verifier can prove the user-f
 - Per-instance data store (a directory, a database name, a schema) and per-instance
   auth session (a cookie jar, a profile directory, a token file).
 - Readiness: the signal (a log line, a health route answering for *this* instance) and
-  the timeout. Lint fails a Launch that names neither.
+  the timeout. Lint fails a Launch that names neither. The port locks belong to one
+  checkout, so a server of another checkout can take the port between the claim and the
+  bind and answer with the same instance name. Make the signal prove it came from the
+  process this launch started (the health route returns its pid, say). When that process
+  exits instead, release the claim and launch again on the next free port.
 - For a short-lived CLI there is no server: launch means build once, then every drive runs
   in its own PTY or temp directory keyed by the instance. Say "no port" (or "no network
   port") in Launch: lint accepts that in place of a port claim.
