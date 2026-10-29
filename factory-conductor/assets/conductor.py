@@ -2662,8 +2662,9 @@ def _contracts_at(st, sha):
 
 def contract_changed(st, sha):
     """The first feature id, in sorted order, whose `## Contract` text differs between the
-    run base (git merge-base <run branch> sha) and sha, or None. A section, or a file with
-    one, on one side only counts as changed. When the head's features or the merge base
+    run base (git merge-base <run branch> sha) and sha, or None. A feature file on one
+    side only counts as changed, whatever it holds, and so does a section on one side
+    only. When the head's features or the merge base
     cannot be read, None: evidence_verdict then fails closed with its own reason. A base
     whose features cannot be listed holds no contracts."""
     ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
@@ -2675,7 +2676,7 @@ def contract_changed(st, sha):
         return None
     before = _contracts_at(st, base) or {}
     for fid in sorted(set(head) | set(before)):
-        if head.get(fid) != before.get(fid):
+        if (fid in head) != (fid in before) or head.get(fid) != before.get(fid):
             return fid
     return None
 

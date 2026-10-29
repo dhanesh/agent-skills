@@ -151,8 +151,9 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name contract
 ```
 
 Expect `EVIDENCE: T1 reject contract-changed notes-create` and `PARK: T1 contract-changed`,
-with exit 3. `conductor status --root <root>` shows T1 as parked. A section or a file
-with a contract that is on one side only is also a change. Trailing spaces and text
+with exit 3. `conductor status --root <root>` shows T1 as parked. A feature file that
+is on one side only is also a change, with or without a contract. So is a section on
+one side only. Trailing spaces and text
 outside the section are not. Run the same fixture without `--task-json`: the plan has
 no `min_tier`, so `evidence` prints `EVIDENCE: T1 pass <sha>`.
 `factory-conductor/assets/test_conductor_contract.py` also covers a task with no tier

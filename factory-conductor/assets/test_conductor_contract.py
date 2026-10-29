@@ -158,6 +158,19 @@ class TieredPlan(ContractGate):
         self.record_all(sha, feature="notes-list", proofs=False)
         self.assert_parked("T1", "notes-create", *self.evidence())
 
+    def test_a_new_feature_file_without_a_contract_is_a_change(self):
+        self.init([tiered()])
+        sha = self.build_with({feature_path("notes-zap"):
+                               feature_text("notes-zap", "z", contract="")})
+        self.record_all(sha)
+        self.assert_parked("T1", "notes-zap", *self.evidence())
+
+    def test_a_deleted_feature_file_without_a_contract_is_a_change(self):
+        self.init([tiered()])
+        sha = self.build_with({feature_path("notes-list"): None})
+        self.record_all(sha)
+        self.assert_parked("T1", "notes-list", *self.evidence())
+
     def test_the_first_changed_feature_in_sorted_order_is_named(self):
         self.init([tiered()])
         edits = self.edit_c1()
@@ -200,6 +213,20 @@ class PlanWithoutMinTier(ContractGate):
         rc, out, err = self.evidence()
         self.assertEqual((rc, out.strip()), (0, "EVIDENCE: T1 pass %s" % sha), err)
         self.assertNotIn("contract", out + err)
+
+    def assert_passes(self, edits):
+        self.init([task("T1", ["notes-create"])])
+        sha = self.build_with(edits)
+        self.record("notes-create", sha)
+        rc, out, err = self.evidence()
+        self.assertEqual((rc, out.strip()), (0, "EVIDENCE: T1 pass %s" % sha), err)
+
+    def test_a_new_feature_file_without_a_contract_does_not_reject(self):
+        self.assert_passes({feature_path("notes-zap"):
+                            feature_text("notes-zap", "z", contract="")})
+
+    def test_a_deleted_feature_file_without_a_contract_does_not_reject(self):
+        self.assert_passes({feature_path("notes-list"): None})
 
     def test_no_base_commit_is_recorded_at_init(self):
         self.init([tiered()])
