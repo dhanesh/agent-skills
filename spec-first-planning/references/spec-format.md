@@ -44,8 +44,9 @@ A spec is one markdown file:
   tier factory-conductor accepts: `proved`, `bounded`, `property` or `runtime`)
   and `[contract: <feature>:C<n>, ...]` (the feature-map contract clauses that
   tier applies to; the feature id is lowercase kebab-case, as in
-  `[contract: notes-create:C1, notes-create:C2]`). A `[contract: ...]` hint
-  needs a `[tier: ...]` hint on the same requirement.
+  `[contract: notes-create:C1, notes-create:C2]`, and `<n>` starts at 1 with no
+  leading zero). Each of the two hints needs the other on the same requirement:
+  a `[tier: ...]` with no `[contract: ...]` names no clause to gate, so it fails.
 - **Verification** (optional `## Verification` section): one line
   `Verify skill: <repo-relative verify-<app> dir>`. Required whenever a
   requirement names a feature, because factory-conductor refuses a plan whose
@@ -141,7 +142,7 @@ pre-mortem and the decision sweep are in `references/unattended.md`:
 | 5 | Every requirement referenced by ≥1 criterion; no criterion references an unknown id | a requirement nothing can prove; a check proving nothing |
 | 5a | Every id in a requirement's `[after: ...]` hint names a known requirement; the after-hints as a whole contain no cycle (message: "after: hints have a cycle") | a task ordered after a requirement that doesn't exist, or a dependency loop no schedule can satisfy |
 | 5c | Every `[feature: ...]` id is lowercase kebab-case; a spec that names a feature has a `## Verification` section whose `Verify skill:` is a repo-relative `verify-<app>` path; no requirement is both `[parallel-safe]` and `[after: ...]` | a plan the evidence gate cannot run, or contradictory independence markers |
-| 5f | A `[tier: ...]` hint names `proved`, `bounded`, `property` or `runtime`; every `[contract: ...]` entry is `<feature>:C<n>` with a lowercase kebab-case feature id; a requirement with `[contract: ...]` also has `[tier: ...]` | a tier the evidence gate does not know, a clause id it cannot find, or a clause list with no tier to gate it |
+| 5f | A `[tier: ...]` hint names `proved`, `bounded`, `property` or `runtime`; every `[contract: ...]` entry is `<feature>:C<n>` in full, with a lowercase kebab-case feature id and `<n>` from 1 with no leading zero; a requirement with `[contract: ...]` also has `[tier: ...]`, and one with `[tier: ...]` also has `[contract: ...]` | a tier the evidence gate does not know, a clause id it cannot find, a clause list with no tier to gate it, or a tier with no clause to gate |
 | 5b | A criterion's `[cmd: ...]` hint ends the criterion, holds no hidden or control character (Unicode `Cc`, `Cf`, `Zl`, `Zp`, `Co`, `Cs`, or a space other than U+0020; the message names each as `U+XXXX`; a TAB or a no-break space between words fails too, so separate words with plain spaces), parses with `shlex`, is non-empty, and passes the C6 command rule (the vendored `contract_check`) | a command no machine can run, or one that names an interpreter or an absolute path; a bidi override, zero-width space, ESC sequence or NUL that makes the line a human approves differ from what runs |
 | 5d | Every `## Intake` bullet is an intake item id (`I` + 10 hex), the section names at least one, no id repeats, and the spec keeps its `## External evidence (untrusted)` section; an evidence section needs `## Intake` or `## Idea` | a plan that names an item ops-intake cannot find, so the item never closes; a deleted evidence block that silently switches the copy tripwire off |
 | 5e | `## Idea` has exactly one bullet, a lowercase kebab-case slug of 64 characters or fewer, and the spec keeps its `## External evidence (untrusted)` section | a plan that names no idea, or two; a deleted evidence block that silently switches the copy tripwire off |

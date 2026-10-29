@@ -43,6 +43,32 @@ title keeps a hint (`[where:`, `[feature:`, `[proof:`, `[after:`, `[parallel-saf
 A title can still contain square brackets that are part of the requirement text (in the
 proof-tiers spec, T1 and T9 do), so check for the hint prefixes, not for any `[`.
 
+### The lone-tier case
+
+Lint refuses a `[tier: ...]` hint with no `[contract: ...]` hint, and a clause number
+of 0 or with a leading zero. To drive it, copy the proof-tiers spec to a scratch file
+under the instance directory, then add `[tier: property]` to the end of the R2 line.
+Do not edit the tracked spec. Then lint the copy:
+
+```sh
+cp docs/factory/2026-10-22-proof-tiered-verification-spec.md "$WT/.verify-run/$INSTANCE/lone-tier.md"
+python3 - "$WT/.verify-run/$INSTANCE/lone-tier.md" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+s = re.sub(r"(?m)^(- R2: .*)$", r"\1 [tier: property]", s, count=1)
+open(p, "w", encoding="utf-8").write(s)
+PY
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name sh-lone-tier -- \
+  python3 spec-first-planning/assets/spec_lint.py --unattended .verify-run/$INSTANCE/lone-tier.md
+```
+
+Expect exit 1, the line `FAIL: R2 has a [tier: ...] hint but no [contract: ...] hint`
+and `LINT_RESULT: FAIL`. Add ` [contract: notes-create:C0]` after the tier and lint
+again: expect exit 1 and `FAIL: R2 [contract: ...] has a malformed entry
+'notes-create:C0'`. Change `C0` to `C1`: expect exit 0 and `LINT_RESULT: PASS`. If R2
+already has a tier or contract hint, pick a requirement that has neither.
+
 ## Proof
 
 The lint capture's result line and the plan capture's task fields. Neither command writes

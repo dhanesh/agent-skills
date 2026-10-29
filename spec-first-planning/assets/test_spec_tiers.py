@@ -226,12 +226,29 @@ class TierHintTests(unittest.TestCase):
             del hinted["tasks"][0][key]
         self.assertEqual(hinted, base)
 
-    def test_tier_alone_lints_clean_and_emits_only_min_tier(self):
-        rc, out = lint(spec(R1 + " [tier: runtime]", R2))
+    def test_tier_alone_fails_lint_naming_the_requirement(self):
+        # D3: a [tier: ...] hint with no [contract: ...] hint gates nothing, so lint
+        # refuses it rather than emit a min_tier that no check reads.
+        rc, out = lint(spec(R1 + " [tier: property]", R2))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("LINT_RESULT: FAIL", out)
+        self.assertIn("FAIL: R1 has a [tier: ...] hint but no [contract: ...] hint", out)
+        # Adding a well-formed clause makes the same requirement lint clean.
+        rc, out = lint(spec(R1 + " [tier: property] [contract: notes-create:C1]", R2))
         self.assertEqual(rc, 0, out)
-        t1 = json.loads(plan(spec(R1 + " [tier: runtime]", R2))[1])["tasks"][0]
-        self.assertEqual(t1["min_tier"], "runtime")
-        self.assertNotIn("clauses", t1)
+        self.assertIn("LINT_RESULT: PASS", out)
+
+    def test_clause_zero_fails_lint_naming_the_requirement(self):
+        rc, out = lint(spec(R1 + " [tier: property] [contract: notes-create:C0]", R2))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("LINT_RESULT: FAIL", out)
+        self.assertIn("FAIL: R1 [contract: ...] has a malformed entry 'notes-create:C0'", out)
+
+    def test_clause_numbers_from_one_lint_clean(self):
+        for good in ("notes-create:C1", "notes-create:C9", "notes-create:C10",
+                     "notes-create:C123"):
+            rc, out = lint(spec(R1 + " [tier: property] [contract: %s]" % good, R2))
+            self.assertEqual(rc, 0, "%s: %s" % (good, out))
 
     def test_every_known_tier_lints_clean(self):
         for tier in ("proved", "bounded", "property", "runtime"):
@@ -253,7 +270,8 @@ class TierHintTests(unittest.TestCase):
 
     def test_malformed_contract_entry_fails_lint(self):
         for bad in ("Notes:C1", "notes-create", "notes-create:c1", "notes-create:C",
-                    "notes-create:C1x"):
+                    "notes-create:C1x", "notes-create:C0", "notes-create:C01",
+                    "notes-create:C00"):
             rc, out = lint(spec(R1 + " [tier: property] [contract: %s]" % bad, R2))
             self.assertEqual(rc, 1, "%s: %s" % (bad, out))
             self.assertIn("R1 [contract: ...] has a malformed entry '%s'" % bad, out)
@@ -264,6 +282,32 @@ class TierHintTests(unittest.TestCase):
         self.assertEqual(props["min_tier"]["enum"], ["proved", "bounded", "property", "runtime"])
         self.assertEqual(props["clauses"]["type"], "array")
         self.assertEqual(props["clauses"]["items"]["type"], "string")
+
+    def test_schema_clause_pattern_is_the_lint_form(self):
+        with open(SCHEMA, encoding="utf-8") as f:
+            props = json.load(f)["properties"]["tasks"]["items"]["properties"]
+        self.assertEqual(props["clauses"]["items"]["pattern"],
+                         "^[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*$")
+
+    def test_payload_check_accepts_only_the_lint_clause_form(self):
+        sys.path.insert(0, _HERE)
+        try:
+            import spec_to_tasks
+        finally:
+            sys.path.remove(_HERE)
+
+        def errs(clauses):
+            task = {"id": "T1", "title": "t", "requirement_ids": ["R1"],
+                    "min_tier": "property", "clauses": clauses,
+                    "verify": [{"text": "x", "command": None}]}
+            payload = {"title": "t", "spec": "s.md", "tasks": [task],
+                       "coverage": {"R1": ["T1"]}, "uncovered": []}
+            return [e for e in spec_to_tasks.payload_errors(payload) if "clauses" in e]
+
+        self.assertEqual(errs(["notes-create:C1", "notes-create:C10"]), [])
+        for bad in ("notes-create:C0", "notes-create:C01", "notes-create:C1\n",
+                    "notes-create:C1x", "Notes:C1"):
+            self.assertEqual(len(errs([bad])), 1, repr(bad))
 
 
 class NoHintPlanUnchangedTests(unittest.TestCase):

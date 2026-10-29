@@ -385,9 +385,9 @@ def payload_errors(payload):
         if "clauses" in t:
             cl = t.get("clauses")
             if not (isinstance(cl, list) and cl and all(
-                    isinstance(c, str) and spec_lint._CLAUSE_REF_RE.match(c) for c in cl)):
+                    isinstance(c, str) and spec_lint._CLAUSE_REF_RE.fullmatch(c) for c in cl)):
                 errs.append("tasks[%d].clauses must be a non-empty list of <feature>:C<n> "
-                            "strings" % i)
+                            "strings, n from 1 with no leading zero" % i)
         verify = t.get("verify")
         if not (isinstance(verify, list) and verify):
             errs.append("tasks[%d].verify must be a non-empty list" % i)
