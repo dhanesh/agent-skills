@@ -126,6 +126,38 @@ tier-field-unreadable`, with exit 3. `init` refuses such a plan, so this fixture
 build one. `factory-conductor/assets/test_conductor_tiers.py` builds it with init's check
 turned off.
 
+### Edit a contract and read the park
+
+In a tiered plan, `evidence` compares the `## Contract` section of each feature file
+(not `README.md`) at the task's head with the run base. The run base is
+`git merge-base <run branch> <head>`. It does this for every task, before the other
+evidence checks. Write two feature files: `<c1>` with a `## Contract` that holds C1 and
+C2, and `<c1-edited>`, the same file with other text for C1. Build a tiered run that
+starts from `<c1>` and whose task commits `<c1-edited>`:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture gated-run --instance "$INSTANCE" --name contract \
+  --feature notes-create=a.txt --feature-file notes-create=<c1> \
+  --task-json '{"min_tier": "runtime", "clauses": ["notes-create:C1"]}' \
+  --edit .claude/skills/verify-app/features/notes-create.md=<c1-edited>
+```
+
+Record the doctor and the runtime `evidence.json` as in the first recipe, so every
+record passes. Then ask the gate:
+
+```sh
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name contract-park -- \
+  python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>
+```
+
+Expect `EVIDENCE: T1 reject contract-changed notes-create` and `PARK: T1 contract-changed`,
+with exit 3. `conductor status --root <root>` shows T1 as parked. A section or a file
+with a contract that is on one side only is also a change. Trailing spaces and text
+outside the section are not. Run the same fixture without `--task-json`: the plan has
+no `min_tier`, so `evidence` prints `EVIDENCE: T1 pass <sha>`.
+`factory-conductor/assets/test_conductor_contract.py` also covers a task with no tier
+field in a tiered plan: it parks the same way.
+
 ## Proof
 
 The two captures, plus the run state: `conductor status --root <root>` shows T1's evidence
