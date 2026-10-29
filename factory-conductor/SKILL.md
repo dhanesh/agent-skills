@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.5.4"
+  version: "1.6.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -63,7 +63,7 @@ Every command below is `python3 "$SKILL_DIR/assets/conductor.py" <command> --roo
 written `conductor <command>` for short. Run it with Python 3.10 or newer. Each command prints
 one machine line per event (`RUN:`, `READY:`, `NEXT:`, `START:`, `VERIFY:`, `REVIEW:`,
 `EVIDENCE:`, `MERGE:`, `PARK:`, `GATE:`, `STOP:`, `INTEGRATION:`, `FINISH:`, `STATUS:`,
-`TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, and
+`ASSURANCE:`, `TRAIL:`, `REENTRY:`, `USAGE:`, `PROBLEM:`, and
 `REMOTE: pending push pr (run finish --retry-remote)`) and exits **0** for OK, **3** when a
 human is needed, the run stopped, or a task was sent back or parked, and **2** when the step was
 refused or its input is invalid (usage errors exit 2 as well). One exit 2 is not a refusal,
@@ -93,7 +93,14 @@ You MUST have all three before you run `conductor init`:
    `{python}` or a bare program name and use no absolute paths. `init` refuses (exit 2) a step
    with a null or empty command (`FAIL: task <id> verify step <n> has no command`), a plan
    that breaks C6, a plan whose `depends_on` has a cycle or names an unknown task, and a stale
-   plan.
+   plan. A task can also carry the proof-tier pair `min_tier` and `clauses`. Before it checks
+   the verify commands or the grant, `init` refuses (exit 2, one
+   `FAIL: task <id> <field>: <why>` line each, no run directory and no branch) exactly four
+   cases: a `min_tier` that is not one of `proved`, `bounded`, `property` or `runtime`; a
+   `clauses` that is not a non-empty list of distinct `<feature>:C<n>` refs (n from 1, no
+   leading zero) whose feature is in the task's `features`; one key without the other (the
+   line names the missing key); and either key in a plan with no `verification` block. Null
+   is malformed for both keys. It reads no feature file for this check.
 2. **A grant that covers this plan.**
    `python3 "$SKILL_DIR/assets/contract_check.py" check-grant --root <repo> --action local_reversible --subject <plan path relative to the root>`
    exits 0 (`GRANT: COVERED`). The subject is what makes it this plan's grant.
@@ -166,7 +173,11 @@ Each step is one command. Read its output lines, not just the exit code.
    the task (run verification-skill-forge's maintain mode, then a new run);
    `evidence-failed` sends it back to its executor as a repair, with the verifier's
    observation (`tasks.<task>.evidence.observed` in `state.json`), and the repair has to be a
-   new commit; any other reason dispatches a new verifier (the conductor has already
+   new commit; `tier-below-required <feature>:C<n>` (a clause of a tiered task has no
+   record at its `min_tier`) takes the same repair route; `tier-field-unreadable <field>`
+   (the pinned plan's `min_tier` or `clauses` cannot be read) and `contract-changed <feature>`
+   (in a tiered plan, the head changed a feature's `## Contract` against the run base) park
+   the task; any other reason dispatches a new verifier (the conductor has already
    counted the dispatch). The reasons are listed in "The evidence gate" below.
 8. **Merge.** `conductor merge <task>` needs a pass from both verify and review on the same
    pinned commit, and under the gate a passing evidence verdict on it too; it re-reads the
@@ -300,9 +311,10 @@ A task's worktree is `<repo>/.skill-contract/runs/<run-id>/wt/<task>`; a `runnin
   `tasks.<task>.review.detail` from `state.json`, then verify on its report.
 - `NEXT: <task> dispatch-reviewer <sha>`: dispatch a reviewer on that commit, then record its
   verdict with `conductor review`.
-- `NEXT: <task> dispatch-repair evidence`: the running app failed the task's proof. Send the
-  executor `tasks.<task>.evidence.feature` and `.observed` from `state.json` (what the verifier
-  saw), then verify on its report. `verify` refuses the commit the evidence failed on, so the
+- `NEXT: <task> dispatch-repair evidence`: the running app failed the task's proof
+  (`evidence-failed`), or a clause has no record at its `min_tier` (`tier-below-required`). Send the
+  executor `tasks.<task>.evidence.reason`, `.feature` (the feature, or the `<feature>:C<n>`
+  clause) and `.observed` from `state.json` (what the verifier saw), then verify on its report. `verify` refuses the commit the evidence failed on, so the
   repair has to be a new commit.
 - `NEXT: <task> dispatch-verifier <sha>`: the reviewer passed it but no evidence verdict
   covers that commit. Dispatch the verifier brief, then `conductor evidence <task>`.
@@ -476,6 +488,8 @@ anchor the diff touches (`conductor evidence` names a missing one in its reject 
 verifier to drive directly, beside the recipes: a task that edits its own feature's recipe
 also wrote the script its verifier follows, so a recipe alone can step around the
 writer's bug, while the predicate came from the spec the human approved.
+`<min_tier>` and `<clauses>` are the task's `min_tier` and `clauses` from the pinned plan.
+When the task has neither, write `none` in both slots: the verifier records no proof then.
 
 If your harness assigns the verifier's id only when it spawns the agent, add one line to the
 brief saying its id arrives in a follow-up message and that it records nothing until then,
@@ -497,9 +511,19 @@ effects, and record it with the skill's verify_evidence.py record, --verifier <y
 The approved proof for this task is: <predicate>. Drive it yourself through the same
 harness even where the recipe does not, capture it as an artifact of the task's first
 feature, and record that feature as a fail if the running app does not show it.
+Proof tiers: the task needs tier <min_tier> on clauses <clauses> (none: skip this
+paragraph). For each clause <feature>:C<n> in <clauses> you MUST run
+verify_evidence.py record --tier <tier> --tool <tool> --clauses C<n> --cmd <argv>
+once, from the verify skill, with your instance, --feature <feature> and
+--verifier <your id>, at <min_tier> or a stronger tier, because the gate sends the task
+back as tier-below-required for a clause with no record. Order: proved (tool verus) >
+bounded (kani) > property (proptest, hypothesis, fast-check or rapid) > runtime. For
+bounded and property, also pass --mutant-patch <diff> --mutant-author verifier.
+runtime needs no proof record: the feature's passing evidence.json meets it.
 Then run the skill's Cleanup. Evidence stays.
 
-Report: Verdict: pass | fail, then one line per feature: <id> <evidence path> <observed>.
+Report: Verdict: pass | fail, then one line per feature: <id> <evidence path> <observed>,
+and one line per clause: <feature>:C<n> <tier> <proof path>.
 ```
 
 ## The evidence gate
@@ -513,7 +537,11 @@ with a task that names none.
 
 `conductor evidence` passes a verified head only when, in this order:
 
-1. the grant covers `local_reversible` now;
+1. the grant covers `local_reversible` now; then, for every task in a tiered plan (one where
+   any task carries `min_tier`), no `features/<id>.md` of the verify skill has a different
+   `## Contract` section at the head than at the run base, a file or section on one side
+   only counting as a change (`contract-changed <feature>`, the first in sorted order; it
+   parks the task, because a human decides whether a contract moves);
 2. the verifier is not the owner recorded at `start` (`writer-is-verifier`);
 3. every feature the task declares has a map entry at that commit (`feature-unmapped`);
 4. each touched feature (declared, plus every feature whose anchor the diff touches) has a
@@ -523,7 +551,16 @@ with a task that names none.
    (`evidence-verifier-mismatch`), with every artifact present and unaltered
    (`evidence-artifact-missing`, `evidence-artifact-altered`) and a passing result
    (`evidence-failed`);
-5. that instance's `doctor.json` for the same head is ok (`doctor-missing`, `doctor-red`).
+5. that instance's `doctor.json` for the same head is ok (`doctor-missing`, `doctor-red`);
+6. for a tiered task, last: its `min_tier` and `clauses`, read only from the pinned plan
+   and not from `state.json` (`tier-field-unreadable <min_tier|clauses>` when a value cannot be
+   read; it parks the task, because no executor can repair a pinned plan), and each clause,
+   in `clauses` order, has a record at `min_tier` or stronger, in the order proved > bounded >
+   property > runtime (`tier-below-required <feature>:C<n>`; a repair, as for
+   `evidence-failed`). A clause meets a tier through
+   `<evidence_dir>/*/<feature>/<sha>/proof-<tier>-<tool>-C<n>.json` recorded by this
+   verifier with an allowlisted tool and, for bounded and property, a caught mutant; it
+   meets runtime through the feature's accepted `evidence.json`.
 
 `merge` re-checks the grant and re-reads the records. A commit after the verdict (a
 rebase, a backdoor) moves the branch past the proven head, so `merge` clears the review and
@@ -621,8 +658,9 @@ change rather than worked around in silence.
   config makes the push and the PR ask (`ci-config`), because CI runs with the repository's
   secrets. `watch` stops it with `reentry_exhausted` once `max_reentries` agents have
   started.
-- **What parks a task.** An evidence verdict of `feature-unmapped` parks it with that
-  reason. Repairs reaching `max_repairs_per_task` (2 by default) park it with
+- **What parks a task.** An evidence verdict of `feature-unmapped`, `tier-field-unreadable`
+  or `contract-changed` parks it with that reason; `tier-below-required` does not park it
+  but sends it back as a repair, like `evidence-failed`. Repairs reaching `max_repairs_per_task` (2 by default) park it with
   `verify_red_after_repairs`; a dispatch it needs past `max_dispatches` parks it with
   `budget_dispatches`. `max_dispatches` counts every executor, repair and reviewer dispatch the
   tool records.
@@ -639,7 +677,10 @@ The report MUST state which of `max_tokens` and `max_usd` were enforced and whic
 recorded, as `conductor status` does, and, when one was enforced, the claimed usage totals
 and their trust. Name the grant id and each action class the run used. Say whether
 the evidence gate was on; when it was, give each proven task's evidence paths and verdict
-agent. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
+agent. When a task carries `clauses`, give the `ASSURANCE: <feature> <tier> <clause ids>`
+lines that `conductor status` prints after its last `STATUS:` line (the envelope's
+`assurance` items): the weakest tier each feature reached, `none` for a clause no merged
+task recorded. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
 owner, worktree, verified commit, reviewer, verdict agent, evidence paths, merge outcome);
 offer it to the user to commit when the stakes warrant an audit record.
 
