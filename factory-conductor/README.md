@@ -47,6 +47,8 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**1.6.0.** The evidence gate checks proof tiers. A task can carry `min_tier` and `clauses`. `init` refuses a malformed pair. `evidence` sends a clause with no record at its tier back as a repair (`tier-below-required`). It parks a pinned plan with unreadable tier fields (`tier-field-unreadable`), and in a tiered plan it parks a task that changes a feature's `## Contract` (`contract-changed`). `status` and the run result report the weakest tier per feature (`ASSURANCE:`). The verifier brief tells the verifier to record one proof per clause.
+
 **1.5.4.** A session that the re-entry timer resumes cannot see its own allowlist. SKILL.md now tells it to read the interpreter from the `argv` that `watch` logged in the run's `autonomy-log.jsonl`, and to use `python3` when it cannot read the log. The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 
 **1.5.3.** A run that reaches a paid step gives the human a spend request. The controller runs the ledger check from the repository root, then parks only that task with a one-line request. The human buys, then records or withdraws it. No code moves money. The ledger commands are unchanged.
