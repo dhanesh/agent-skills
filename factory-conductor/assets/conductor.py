@@ -274,19 +274,30 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 # other rejects park the task (feature-unmapped, no-features) or send it back to its
 # executor (evidence-failed: the app did the wrong thing).
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
-                 "evidence-diff-unreadable")
+                 "evidence-diff-unreadable", "tier-field-unreadable")
+# Rejects that send the task back to its executor: the app did the wrong thing
+# (evidence-failed), or a clause lacks a record at the plan's min_tier
+# (tier-below-required).
+EVIDENCE_REPAIR = ("evidence-failed", "tier-below-required")
 EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
 # Proof tiers (the second slice). A task in a gated plan MAY carry `min_tier` (the
 # weakest tier its clauses accept) and `clauses` (<feature>:C<n> refs, its feature among
 # the task's features), always together. init refuses a malformed pair (plan_tier_problems).
 TIERS = ("proved", "bounded", "property", "runtime")
 CLAUSE_RE = r"[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*"
+# The tools each recorded tier accepts (verify_evidence.py's TIER_TOOLS), and the tiers
+# whose record must also hold a caught mutant. runtime has no proof record: the
+# feature's accepted evidence.json meets it.
+TIER_TOOLS = {"proved": ("verus",), "bounded": ("kani",),
+              "property": ("proptest", "hypothesis", "fast-check", "rapid")}
+MUTANT_TIERS = ("bounded", "property")
+MUTANT_ARTIFACTS = ("mutant.patch", "mutant.exit", "mutant.stdout", "mutant.stderr")
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
                  "evidence-artifact-altered", "doctor-missing", "doctor-red")
 # Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
-# EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
+# EVIDENCE_REDO, or EVIDENCE_REPAIR; test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported; they are enforced only for the metrics `enforce` names (opt-in: the runtime
 # does not expose usage to this tool, so the agent reports it with `usage`).
@@ -1585,7 +1596,7 @@ def next_actions(st):
             ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
             if review.get("verdict") == "fail":
                 out.append((tid, "dispatch-repair review"))
-            elif ev.get("reason") == "evidence-failed":
+            elif ev.get("reason") in EVIDENCE_REPAIR:
                 out.append((tid, "dispatch-repair evidence"))
             elif _moved_after_review(t):
                 out.append((tid, "verify"))
@@ -2107,10 +2118,11 @@ def cmd_verify(args):
         return _verify_refused(st, args.task, "no new commit since the review failed",
                                "unchanged since failed review", keep_review=True)
     ev = t.get("evidence")
-    if isinstance(ev, dict) and ev.get("reason") == "evidence-failed" \
+    if isinstance(ev, dict) and ev.get("reason") in EVIDENCE_REPAIR \
             and ev.get("verified_head") == head:
-        # The running app already failed on this very commit: a green verify of it
-        # proves nothing new. It counts as a failure, so the repair loop stays bounded.
+        # The running app already failed on this very commit (or a clause lacked its
+        # tier): a green verify of it proves nothing new. It counts as a failure, so the
+        # repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the evidence failed",
                                "unchanged since failed evidence", keep_evidence=True)
     if not clean:
@@ -2449,7 +2461,7 @@ def _check_record(doc, feature, sha, verifier, directory, base):
     return None
 
 
-def evidence_verdict(st, t, sha, verifier):
+def evidence_verdict(st, t, sha, verifier, task_id=None):
     """The evidence predicate for a task's verified head. Returns
     {ok, reason, feature, features, paths, doctor}: ok only when the verifier is not the
     task's owner, every touched feature has a map entry, and each touched feature has a
@@ -2515,8 +2527,86 @@ def evidence_verdict(st, t, sha, verifier):
         out["paths"].append(_rel(st, os.path.join(chosen, "evidence.json")))
         if _rel(st, dpath) not in out["doctor"]:
             out["doctor"].append(_rel(st, dpath))
+    # Proof tiers, last: only a head that passes every check above is judged for them.
+    if task_id is None:
+        task_id = next((k for k, v in st.tasks.items() if v is t), None)
+    fields, unreadable = _pinned_tier_fields(st, task_id)
+    if unreadable:
+        out["reason"], out["feature"] = "tier-field-unreadable", unreadable
+        return out
+    if fields:
+        min_tier, clauses = fields
+        for clause in clauses:
+            if not _clause_met(st, clause, min_tier, sha, verifier, feats):
+                out["reason"], out["feature"] = "tier-below-required", clause
+                return out
     out["ok"] = True
     return out
+
+
+def _pinned_tier_fields(st, task_id):
+    """((min_tier, clauses), None) for a tiered task, (None, None) for a task with
+    neither key, or (None, "min_tier" | "clauses") when a value cannot be read.
+
+    Read only from the pinned plan file, never from state.json, as _pinned_verify reads
+    the verify commands. init refuses malformed fields (plan_tier_problems), but a plan
+    pinned some other way may still carry them, so every value is checked again here
+    and a bad one fails closed. Never raises."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return None, "min_tier"
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    task = None
+    if isinstance(tasks, list):
+        task = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id),
+                    None)
+    if task is None:
+        return None, "min_tier"
+    if "min_tier" not in task and "clauses" not in task:
+        return None, None
+    tier = task.get("min_tier")
+    if not (isinstance(tier, str) and tier in TIERS):
+        return None, "min_tier"
+    if "clauses" not in task or _clauses_problem(task["clauses"], task.get("features")):
+        return None, "clauses"
+    return (tier, list(task["clauses"])), None
+
+
+def _clause_met(st, clause, min_tier, sha, verifier, accepted):
+    """True when clause (<feature>:C<n>) is met at min_tier for sha: a proof record by
+    verifier at a tier at or above min_tier passes the record check and the tier rules,
+    or min_tier is runtime and the feature's evidence.json was accepted (`accepted`)."""
+    feature, cid = clause.split(":", 1)
+    if min_tier == "runtime" and feature in accepted:
+        return True
+    rank = TIERS.index(min_tier)
+    base = _evidence_root(st)
+    name_re = r"proof-(%s)-(.+)-%s\.json" % ("|".join(TIER_TOOLS), re.escape(cid))
+    for path in sorted(glob.glob(os.path.join(base, "*", feature, sha,
+                                              "proof-*-%s.json" % cid))):
+        m = re.fullmatch(name_re, os.path.basename(path))
+        if not m or TIERS.index(m.group(1)) > rank:
+            continue
+        tier, tool = m.group(1), m.group(2)
+        doc = _load_record(path, base)
+        if not isinstance(doc, dict) or _check_record(
+                doc, feature, sha, verifier, os.path.dirname(path), base) is not None:
+            continue
+        if doc.get("tier") != tier or doc.get("tool") != tool \
+                or tool not in TIER_TOOLS[tier] or doc.get("clauses") != [cid]:
+            continue
+        if tier in MUTANT_TIERS:
+            status = doc.get("mutant_exit_status")
+            if not isinstance(status, int) or isinstance(status, bool) or status == 0:
+                continue
+            listed = {a.get("path") for a in doc["artifacts"] if isinstance(a, dict)}
+            stem = "proof-%s-%s-%s" % (tier, tool, cid)
+            if any("%s.%s" % (stem, ext) not in listed for ext in MUTANT_ARTIFACTS):
+                continue
+        return True
+    return False
 
 
 def cmd_evidence(args):
@@ -2549,7 +2639,7 @@ def cmd_evidence(args):
     if not _gated(st, "local_reversible"):  # clause 5: the grant is live at verdict time
         return 3
     verifier = (args.verifier or "").strip() or None
-    v = evidence_verdict(st, t, pinned, verifier)
+    v = evidence_verdict(st, t, pinned, verifier, args.task)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
               "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
               "verified_head": pinned,
@@ -2572,8 +2662,9 @@ def cmd_evidence(args):
         _park(st, args.task, "feature-unmapped" if v["reason"] in (
             "feature-unmapped", "no-features") else v["reason"])
         return 3
-    if v["reason"] == "evidence-failed":
-        # The app did the wrong thing on this head: a repair, like a failing verify.
+    if v["reason"] in EVIDENCE_REPAIR:
+        # The app did the wrong thing on this head, or a clause has no record at its
+        # min_tier: a repair, like a failing verify.
         st.set_status(args.task, "verifying", review=None, evidence=record)
         _count_failure(st, args.task)
         st.save()
@@ -2704,7 +2795,7 @@ def cmd_merge(args):
         return 3
     if st.verification:
         # The records are re-read now: one removed or altered since the verdict blocks.
-        again = evidence_verdict(st, t, pinned, ev.get("verifier"))
+        again = evidence_verdict(st, t, pinned, ev.get("verifier"), args.task)
         if not again["ok"]:
             st.set_status(args.task, "reviewing", evidence=dict(
                 ev, verdict="reject", reason=again["reason"], feature=again["feature"],
