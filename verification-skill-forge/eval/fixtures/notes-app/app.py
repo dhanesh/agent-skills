@@ -4,7 +4,7 @@ generates a verify skill for and drives live. stdlib only.
 
     python3 app.py --port N --data DIR [--instance NAME]
 
-GET /health -> {"ok": true, "version": ..., "instance": ..., "port": ...}
+GET /health -> {"ok": true, "version": ..., "instance": ..., "port": ..., "pid": ...}
 POST /notes {"title": "..."} -> 201 {"id": n, "title": "..."}; appends to DIR/notes.jsonl
 GET /notes -> {"notes": [...]}
 """
@@ -50,7 +50,8 @@ def make_handler(data_dir, instance, port):
         def do_GET(self):
             if self.path == "/health":
                 return self._send(200, {"ok": True, "version": VERSION,
-                                        "instance": instance, "port": port})
+                                        "instance": instance, "port": port,
+                                        "pid": os.getpid()})
             if self.path == "/notes":
                 return self._send(200, {"notes": load()})
             return self._send(404, {"error": "not found"})

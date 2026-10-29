@@ -323,6 +323,24 @@ class RecorderTests(Base):
         self.rec("release", "--instance", "a")
         self.assertEqual(self.rec("claim", "--instance", "b", "--port", str(pa))[0], 0)
 
+    def test_an_instance_keeps_its_port_after_an_earlier_one_frees(self):
+        # Another process holds a's first-choice port, so a is given a later one. Once
+        # the first choice frees, port must still name the port a holds: a harness that
+        # re-asks would otherwise drive whatever listens on the first choice.
+        import socket
+        rc, out = self.rec("port", "--instance", "probe")
+        first = int(out.split()[1])
+        self.rec("release", "--instance", "probe")
+        held = socket.socket()
+        held.bind(("127.0.0.1", first))
+        try:
+            rc, out = self.rec("port", "--instance", "probe")
+            got = int(out.split()[1])
+        finally:
+            held.close()
+        self.assertNotEqual(got, first)
+        self.assertEqual(self.rec("port", "--instance", "probe")[1], "PORT: %d\n" % got)
+
     def test_doctor_red_when_a_check_fails(self):
         rc, out = self.rec("doctor", "--instance", "a", "--ok", "--check", "port=fail")
         self.assertIn("DOCTOR: red", out)

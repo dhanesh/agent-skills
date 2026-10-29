@@ -24,8 +24,10 @@ VERIFIER=<your agent id>
 Each instance gets its own port (claimed through `scripts/verify_evidence.py port`, so two
 owners never get the same one), its own data store (`.verify-run/$INSTANCE/data`) and its
 own process. The service needs no login, so there is no auth session to isolate. Launch
-waits for `/health` to answer for this instance and gives up after 10 seconds; it is
-usually ready in under 1 second.
+waits for `/health` to answer with this instance's name and the pid of the process it
+started, and gives up after 10 seconds; it is usually ready in under 1 second. The port
+locks belong to this checkout, so a server of another checkout can take the port after the
+claim. Then the new process exits, and launch drops the claim and tries the next free port.
 
 ```sh
 python3 "$SKILL/scripts/verify_evidence.py" port --instance "$INSTANCE"
@@ -37,8 +39,8 @@ python3 "$SKILL/scripts/notes_harness.py" launch --instance "$INSTANCE"
 ## Doctor
 
 Read-only: checks that the process this instance started is alive, that `/health` on the
-instance's port answers for this instance, and that the version is the one this skill
-knows. `--record` writes the result through `scripts/verify_evidence.py doctor` for the
+instance's port answers for this instance from that process's pid, and that the version is
+the one this skill knows. `--record` writes the result through `scripts/verify_evidence.py doctor` for the
 current head. Run it first, and again after anything surprising.
 
 ```sh

@@ -309,6 +309,8 @@ SINCE_LOOPS_LONG_RUN = "88006b1"  # crafting-self-prompting-loops 1.5.0: long un
 SINCE_MOCKSTAR_ENCODING = "9a95258"  # mockstar-mock 1.2.0: encoded responses and header coverage.
 SINCE_TSN_PYTEST_REPORTER = "ae1a2dc"  # test-safety-net: pytest 9.2 reads os.environ while
 # it formats a failed assert; io_guard now treats _pytest/assertion/ as a reporter frame.
+SINCE_FORGE_PORT_STABLE = "cd595da"  # verification-skill-forge: port names the port an
+# instance holds, never an earlier one that freed since (a launch drove another checkout).
 
 
 def _git_out(*args):
@@ -9693,6 +9695,46 @@ def check_tsn_pytest_reporter(old, new):
         "the reporter exemption must never reach the code under test", kind="guard")
 
 
+_FORGE_PORT_PROBE = r"""
+import socket, subprocess
+rec = os.path.join(sys.path[0], "verify_evidence.py")
+wt = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q", wt], check=True)
+def port(inst):
+    r = subprocess.run([sys.executable, rec, "port", "--instance", inst, "--worktree", wt],
+                       cwd=wt, capture_output=True, text=True)
+    return int(r.stdout.split()[1])
+first = port("a")
+subprocess.run([sys.executable, rec, "release", "--instance", "a", "--worktree", wt],
+               cwd=wt, capture_output=True)
+held = socket.socket()
+held.bind(("127.0.0.1", first))
+got = port("a")
+held.close()
+b = port("b")
+print(json.dumps({"moved": int(port("a") != got), "distinct": int(b != got)}))
+"""
+
+
+def check_forge_port_stable(old, new):
+    """verification-skill-forge: once the first-choice port frees, does port still name
+    the port the instance holds? And do two instances still get different ports?"""
+    s = "verification-skill-forge"
+    sub = os.path.join("verification-skill-forge", "assets")
+    oldp = probe(old, sub, _FORGE_PORT_PROBE)
+    newp = probe(new, sub, _FORGE_PORT_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "port names a different port than the one the instance holds (lower=better)",
+        oldp["moved"], newp["moved"], newp["moved"] < oldp["moved"],
+        "after the first-choice port freed, port claimed it, so the harness drove whatever "
+        "listened there: another checkout's server, in parallel evals",
+        since=SINCE_FORGE_PORT_STABLE)
+    row(s, "two instances in one checkout still get different ports",
+        oldp["distinct"], newp["distinct"], newp["distinct"] == 1,
+        "preferring a held port must not hand one port to two instances", kind="guard")
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9793,6 +9835,7 @@ def main():
         check_loops_long_run(old, REPO)
         check_mockstar_encoding(old, REPO)
         check_tsn_pytest_reporter(old, REPO)
+        check_forge_port_stable(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
