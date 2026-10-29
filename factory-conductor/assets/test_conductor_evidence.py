@@ -569,13 +569,21 @@ class ReviewFindingTests(Gate):
             self.assertIn("evidence_dir", err)
 
     def test_every_reject_reason_has_one_route(self):
-        routes = [set(C.EVIDENCE_PARK), set(C.EVIDENCE_REDO), {"evidence-failed"}]
-        self.assertFalse(routes[0] & routes[1])
+        routes = [set(C.EVIDENCE_PARK), set(C.EVIDENCE_REDO), set(C.EVIDENCE_REPAIR)]
+        self.assertFalse(routes[0] & routes[1] or routes[0] & routes[2]
+                         or routes[1] & routes[2])
+        self.assertIn("evidence-failed", routes[2])
         with open(C.__file__) as f:
             src = f.read()
         import re as _re
-        reasons = set(_re.findall(r'"((?:evidence|doctor|feature|verifier|writer|no)-[a-z-]+)"',
-                                  src.split("def evidence_verdict")[1].split("def cmd_evidence")[0]))
+        # evidence_verdict and its tier helpers, up to cmd_evidence, plus cmd_evidence
+        # itself (a reason its own checks print before the verdict, such as a contract
+        # check, needs a route too).
+        body = src.split("def evidence_verdict")[1].split("def cmd_trail")[0]
+        reasons = set(_re.findall(
+            r'"((?:evidence|doctor|feature|verifier|writer|no|tier|contract)-[a-z-]+)"', body))
+        # The tier reasons are produced on the tier path; each must be on a route.
+        self.assertTrue({"tier-below-required", "tier-field-unreadable"} <= reasons)
         reasons |= set(_re.findall(r'"((?:evidence|doctor)-[a-z-]+)"',
                                    src.split("def _check_record")[1].split("def evidence_verdict")[0]))
         reasons |= {"feature-map-unreadable", "evidence-diff-unreadable"}

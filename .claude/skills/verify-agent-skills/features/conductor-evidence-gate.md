@@ -73,6 +73,59 @@ directory), and `git -C <root> branch` lists only `main` and `factory/base` (no 
 With `{"min_tier": "property", "clauses": ["notes-create:C1"]}`, or with no `--task-json`,
 the fixture exits 0: the run starts.
 
+### Record a property proof and read the tier reject
+
+A tiered task merges only when each clause in its `clauses` has a proof record at or
+above its `min_tier`. The check runs after every other evidence check passes. First get
+a fake allowlisted tool (it acts as `hypothesis`, so it needs no dependency) and a mutant
+that the tool catches:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture proof-tool --instance "$INSTANCE" --name tool
+```
+
+Expect exit 0 and JSON with `tool_py`, `target_txt` and `mutant_diff`. Build a gated run
+whose task needs `property` on C1 and C2, and commit the tool and its target with the
+task:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture gated-run --instance "$INSTANCE" --name tier \
+  --feature notes-create=a.txt \
+  --task-json '{"min_tier": "property", "clauses": ["notes-create:C1", "notes-create:C2"]}' \
+  --edit tool.py=<tool_py> --edit target.txt=<target_txt>
+```
+
+Record the doctor and the runtime `evidence.json` as in the first recipe. Then record a
+property proof for C1 only:
+
+```sh
+VERIFY_EVIDENCE_DIR=<root>/.verify python3 verification-skill-forge/assets/verify_evidence.py record \
+  --instance fx --worktree <worktree> --feature notes-create --verifier fixture-verifier \
+  --tier property --tool hypothesis --clauses C1 --cmd "python3 tool.py" \
+  --mutant-patch <mutant_diff> --mutant-author verifier
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name tier-reject -- \
+  python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name tier-resume -- \
+  python3 factory-conductor/assets/conductor.py resume --root <root>
+```
+
+Expect `PROOF: property <path>` from the recorder. Expect
+`EVIDENCE: T1 reject tier-below-required notes-create:C2` with exit 3: C2 has only
+runtime evidence. This reject is a repair, so `resume` prints
+`NEXT: T1 dispatch-repair evidence`, and `conductor verify T1` refuses the same commit.
+
+In a second fixture (`--name tier-both`), record C1 and C2 the same way. Then `evidence`
+prints `EVIDENCE: T1 pass <sha>` with exit 0. A record does not count when the owner
+(`writer`) recorded it, or when one of its artifacts was edited (for example
+`proof-property-hypothesis-C2.stdout`). Then the reject names that clause again.
+
+When the pinned plan holds a tier field that cannot be read (`clauses` as `[5]`, `[null]`
+or `"x"`, or `min_tier` as null), `evidence` prints
+`EVIDENCE: T1 reject tier-field-unreadable <min_tier|clauses>` and `PARK: T1
+tier-field-unreadable`, with exit 3. `init` refuses such a plan, so this fixture cannot
+build one. `factory-conductor/assets/test_conductor_tiers.py` builds it with init's check
+turned off.
+
 ## Proof
 
 The two captures, plus the run state: `conductor status --root <root>` shows T1's evidence
