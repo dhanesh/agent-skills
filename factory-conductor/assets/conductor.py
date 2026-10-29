@@ -273,8 +273,10 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 # A reject the verifier can fix by recording again (a fresh verifier dispatch); the
 # other rejects park the task (feature-unmapped, no-features) or send it back to its
 # executor (evidence-failed: the app did the wrong thing).
+# contract-changed: in a tiered plan the task's head changed a feature's `## Contract`
+# against the run base (contract_changed); a human decides whether the contract moves.
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
-                 "evidence-diff-unreadable", "tier-field-unreadable")
+                 "evidence-diff-unreadable", "tier-field-unreadable", "contract-changed")
 # Rejects that send the task back to its executor: the app did the wrong thing
 # (evidence-failed), or a clause lacks a record at the plan's min_tier
 # (tier-below-required).
@@ -2609,6 +2611,76 @@ def _clause_met(st, clause, min_tier, sha, verifier, accepted):
     return False
 
 
+def _tiered_plan(st):
+    """True when the pinned plan is a tiered plan: at least one task carries `min_tier`.
+    Read only from the pinned plan, as _pinned_tier_fields reads it. A plan that cannot
+    be read is not judged here: evidence_verdict fails closed on it for a tiered task."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return False
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    return isinstance(tasks, list) and any(isinstance(x, dict) and "min_tier" in x
+                                           for x in tasks)
+
+
+def contract_section(text):
+    """The `## Contract` section of a feature file, or None when it has none: the same
+    definition as verification-skill-forge's forge.py contract_section (feature-map.md).
+    It runs from the `## Contract` line up to, not including, the next line that starts
+    with `## `, each line right-stripped, joined with a newline."""
+    out = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if out is None:
+            if line == "## Contract":
+                out = [line]
+        elif line.startswith("## "):
+            break
+        else:
+            out.append(line)
+    return None if out is None else "\n".join(out)
+
+
+def _contracts_at(st, sha):
+    """{feature id: contract text or None} for each features/<id>.md other than README.md
+    in the verify skill as committed at sha, or None when git cannot list the directory.
+    A file git lists but cannot read maps to a value no real text equals."""
+    skill = st.verification["skill"]
+    ok, r = _git_ok(st.root, "ls-tree", "--name-only", "%s:%s/features" % (sha, skill))
+    if not ok:
+        return None
+    out = {}
+    for name in r.stdout.split():
+        if not name.endswith(".md") or name == "README.md":
+            continue
+        text = _blob(st, sha, "%s/features/%s" % (skill, name))
+        out[name[:-3]] = object() if text is None else contract_section(text)
+    return out
+
+
+def contract_changed(st, sha):
+    """The first feature id, in sorted order, whose `## Contract` text differs between the
+    run base (git merge-base <run branch> sha) and sha, or None. A feature file on one
+    side only counts as changed, whatever it holds, and so does a section on one side
+    only. When the head's features or the merge base
+    cannot be read, None: evidence_verdict then fails closed with its own reason. A base
+    whose features cannot be listed holds no contracts."""
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return None
+    head = _contracts_at(st, sha)
+    if head is None:
+        return None
+    before = _contracts_at(st, base) or {}
+    for fid in sorted(set(head) | set(before)):
+        if (fid in head) != (fid in before) or head.get(fid) != before.get(fid):
+            return fid
+    return None
+
+
 def cmd_evidence(args):
     """Judge the task's verified head against the evidence predicate (spec 5.1): the root's
     independent runtime verdict. EVIDENCE: <task> pass <sha> (exit 0), or
@@ -2639,6 +2711,21 @@ def cmd_evidence(args):
     if not _gated(st, "local_reversible"):  # clause 5: the grant is live at verdict time
         return 3
     verifier = (args.verifier or "").strip() or None
+    # Every task in a tiered plan, before the verdict: a head that changes a contract
+    # parks, whatever its records say (an ungated task too, so it cannot merge a contract
+    # edit that parks later tiered tasks).
+    changed = contract_changed(st, pinned) if _tiered_plan(st) else None
+    if changed:
+        record = {"verdict": "reject", "reason": "contract-changed", "feature": changed,
+                  "observed": None, "verifier": verifier, "verified_head": pinned,
+                  "features": [], "paths": [], "doctor": [], "at": _rfc3339(_now())}
+        st.log("evidence", task=args.task, ok=False, reason="contract-changed",
+               feature=changed, verifier=verifier, verified_head=pinned, features=[],
+               paths=[])
+        print("EVIDENCE: %s reject contract-changed %s" % (args.task, changed))
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "contract-changed")
+        return 3
     v = evidence_verdict(st, t, pinned, verifier, args.task)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
               "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
