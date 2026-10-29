@@ -1541,7 +1541,60 @@ def cmd_status(args):
             print("STATUS: unmetered %s dispatch=%d kind=%s" % (d["task"], d["n"], d["kind"]))
         print(_usage_line(st))
     print("STATUS: budget " + budget_note_text(st.budget))
+    for item in assurance(st) or []:
+        print("ASSURANCE: %s %s %s" % (item["feature"], item["tier"],
+                                       ",".join(item["clauses"])))
     return 0
+
+
+ASSURANCE_ORDER = TIERS + ("none",)
+
+
+def _clause_key(cid):
+    return int(cid[1:])
+
+
+def assurance(st, plan_doc=None):
+    """The weakest tier per feature (R5): [{feature, tier, clauses}] in feature-id order,
+    or None when no task in the pinned plan carries `clauses` (an untiered plan reports
+    nothing). A clause's tier is the strongest tier that a proven task naming it recorded
+    at its evidence pass, else none. A feature's tier is its weakest clause's tier, and
+    clauses lists the clause ids at that tier in numeric order. Read from the pinned
+    plan, as the tier check reads it; never raises."""
+    if plan_doc is None:
+        plan_doc, why = _pinned_plan(st)
+        if why:
+            return None
+    tasks = _plan_payload(plan_doc).get("tasks")
+    if not isinstance(tasks, list) or not any(
+            isinstance(x, dict) and "clauses" in x for x in tasks):
+        return None
+    best = {}  # clause ref -> index into ASSURANCE_ORDER
+    for x in tasks:
+        named = x.get("clauses") if isinstance(x, dict) else None
+        if not isinstance(named, list):
+            continue
+        t = st.tasks.get(x.get("id")) if isinstance(x.get("id"), str) else None
+        ev = t.get("evidence") if isinstance(t, dict) else None
+        met = ev.get("clause_tiers") if isinstance(ev, dict) and \
+            t.get("status") == "proven" else None
+        for c in named:
+            if not (isinstance(c, str) and re.fullmatch(CLAUSE_RE, c)):
+                continue
+            tier = met.get(c) if isinstance(met, dict) else None
+            rank = ASSURANCE_ORDER.index(tier) if tier in TIERS else len(TIERS)
+            best[c] = min(best.get(c, len(TIERS)), rank)
+    per_feature = {}
+    for c, rank in best.items():
+        feature, cid = c.split(":", 1)
+        per_feature.setdefault(feature, []).append((rank, cid))
+    out = []
+    for feature in sorted(per_feature):
+        weakest = max(rank for rank, _ in per_feature[feature])
+        ids = sorted((cid for rank, cid in per_feature[feature] if rank == weakest),
+                     key=_clause_key)
+        out.append({"feature": feature, "tier": ASSURANCE_ORDER[weakest], "clauses": ids})
+    return out
 
 
 def _num(x):
@@ -2538,10 +2591,15 @@ def evidence_verdict(st, t, sha, verifier, task_id=None):
         return out
     if fields:
         min_tier, clauses = fields
+        met = {}
         for clause in clauses:
-            if not _clause_met(st, clause, min_tier, sha, verifier, feats):
+            met[clause] = _clause_tier(st, clause, sha, verifier, feats)
+            if not _meets(met[clause], min_tier):
                 out["reason"], out["feature"] = "tier-below-required", clause
                 return out
+        # The tier each clause met, for the run's ASSURANCE report (R5). Only a tiered
+        # task carries the key, so an untiered verdict is unchanged.
+        out["clause_tiers"] = met
     out["ok"] = True
     return out
 
@@ -2576,20 +2634,23 @@ def _pinned_tier_fields(st, task_id):
     return (tier, list(task["clauses"])), None
 
 
-def _clause_met(st, clause, min_tier, sha, verifier, accepted):
-    """True when clause (<feature>:C<n>) is met at min_tier for sha: a proof record by
-    verifier at a tier at or above min_tier passes the record check and the tier rules,
-    or min_tier is runtime and the feature's evidence.json was accepted (`accepted`)."""
+def _meets(tier, min_tier):
+    """True when tier (one of TIERS, or None for no tier) is at or above min_tier."""
+    return tier is not None and TIERS.index(tier) <= TIERS.index(min_tier)
+
+
+def _clause_tier(st, clause, sha, verifier, accepted):
+    """The strongest tier clause (<feature>:C<n>) meets for sha, or None: the strongest
+    proof record by verifier that passes the record check and the tier rules, else
+    runtime when the feature's evidence.json was accepted (`accepted`)."""
     feature, cid = clause.split(":", 1)
-    if min_tier == "runtime" and feature in accepted:
-        return True
-    rank = TIERS.index(min_tier)
+    best = None
     base = _evidence_root(st)
     name_re = r"proof-(%s)-(.+)-%s\.json" % ("|".join(TIER_TOOLS), re.escape(cid))
     for path in sorted(glob.glob(os.path.join(base, "*", feature, sha,
                                               "proof-*-%s.json" % cid))):
         m = re.fullmatch(name_re, os.path.basename(path))
-        if not m or TIERS.index(m.group(1)) > rank:
+        if not m or (best is not None and TIERS.index(m.group(1)) >= best):
             continue
         tier, tool = m.group(1), m.group(2)
         doc = _load_record(path, base)
@@ -2607,8 +2668,10 @@ def _clause_met(st, clause, min_tier, sha, verifier, accepted):
             stem = "proof-%s-%s-%s" % (tier, tool, cid)
             if any("%s.%s" % (stem, ext) not in listed for ext in MUTANT_ARTIFACTS):
                 continue
-        return True
-    return False
+        best = TIERS.index(tier)
+    if best is not None:
+        return TIERS[best]
+    return "runtime" if feature in accepted else None
 
 
 def _tiered_plan(st):
@@ -2732,6 +2795,8 @@ def cmd_evidence(args):
               "verified_head": pinned,
               "features": v["features"], "paths": v["paths"], "doctor": v["doctor"],
               "at": _rfc3339(_now())}
+    if v["ok"] and "clause_tiers" in v:
+        record["clause_tiers"] = v["clause_tiers"]
     st.log("evidence", task=args.task, ok=v["ok"], reason=v["reason"], feature=v["feature"],
            verifier=verifier, verified_head=pinned, features=v["features"], paths=v["paths"])
     if v["ok"]:
@@ -3467,6 +3532,7 @@ def run_result_payload(st, plan_doc=None, integration=None):
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
         stopped = {k: s[k] for k in ("reason", "at", "detail", "task", "previous") if k in s}
     grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
+    assured = assurance(st, plan_doc)
     return {
         "run_id": st.run_id,
         "plan": {"id": (pred or {}).get("id"), "path": plan_subject(st),
@@ -3482,7 +3548,8 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "budget_note": budget_note_text(st.budget), "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st),
         "evidence_gate": bool(st.verification), "trail": trail(st)["units"],
-        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {})}
+        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {}),
+        **({"assurance": assured} if assured is not None else {})}
 
 
 def _run_result_assertions(st, plan_doc, integration=None):

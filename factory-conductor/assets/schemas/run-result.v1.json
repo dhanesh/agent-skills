@@ -66,6 +66,19 @@
         "trust": {"type": ["string", "null"], "enum": ["claimed", "low", null], "description": "The weakest trust among the entries with figures: claimed (the agent's harness report) or low (a JSON-lines import); null with none. Unknown entries are counted in unknown, not here."}
       }
     },
+    "assurance": {
+      "type": "array",
+      "description": "Optional. Present only when at least one task in the plan carries clauses: one item per feature named in any task's clauses, in feature-id order, the same data as conductor.py status prints in its ASSURANCE: lines. A clause's tier is the strongest tier recorded at the evidence pass of a merged task that names it, else none; the feature's tier is its weakest clause's tier, in the order proved > bounded > property > runtime > none.",
+      "items": {
+        "type": "object",
+        "required": ["feature", "tier", "clauses"],
+        "properties": {
+          "feature": {"type": "string", "description": "The feature id."},
+          "tier": {"type": "string", "enum": ["proved", "bounded", "property", "runtime", "none"], "description": "The weakest tier among the feature's clauses."},
+          "clauses": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}, "description": "The clause ids at that tier, in numeric order (C2 before C10)."}
+        }
+      }
+    },
     "integration": {
       "type": "object",
       "required": ["head", "passed", "runs"],
