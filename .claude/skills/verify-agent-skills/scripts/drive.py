@@ -14,10 +14,13 @@ fixtures one verifier builds and the captures it makes. Two instances never shar
   fixture  commit --instance I --name N --put REL=SRC [...]   write files, commit them
   fixture  stack --instance I --name N --lang rust|python|typescript|go
   fixture  gated-run --instance I --name N --feature ID=ANCHOR [...]
-           [--feature-file ID=SRC ...] [--task-json JSON] [--edit REL=SRC ...]
+           [--feature-file ID=SRC ...] [--task-json JSON] [--plan-json JSON]
+           [--edit REL=SRC ...]
            build a repo with a verify-app skill, a plan under the evidence gate and a
            covering grant; run conductor init, start (owner "writer"), commit the edits,
            verify and review (reviewer "reviewer"). The task then waits for evidence.
+           --plan-json merges keys into the plan payload; a null value removes the key
+           (`{"verification": null}` builds a plan with no evidence gate).
   cleanup  --instance I                 delete .verify-run/<instance>/ (never .verify/)
 
 Every command prints one JSON object. Paths in it are absolute.
@@ -239,6 +242,11 @@ def cmd_gated_run(a):
     task.update(json.loads(a.task_json or "{}"))
     plan = {"title": "Gate", "spec": "docs/spec.md", "coverage": {}, "uncovered": [],
             "tasks": [task], "verification": {"skill": GATE_SKILL}}
+    for key, value in json.loads(a.plan_json or "{}").items():
+        if value is None:
+            plan.pop(key, None)
+        else:
+            plan[key] = value
     st = CC.build_statement(TASK_PLAN_KIND, "spec-first-planning", "2.1.0", d,
                             ["docs/spec.md"], plan)
     plan_path = CC.write_envelope(d, st)
@@ -321,6 +329,7 @@ def main(argv=None):
             s.add_argument("--feature", action="append", required=True)
             s.add_argument("--feature-file", action="append", default=[])
             s.add_argument("--task-json")
+            s.add_argument("--plan-json")
             s.add_argument("--edit", action="append", default=[])
     a = p.parse_args(argv)
     return a.fn(a)

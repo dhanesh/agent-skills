@@ -38,7 +38,9 @@ Usage:
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
 fresh subjects, a schedulable plan, and a runnable command on every verify step: a task
 with no verify step, or a step whose command is null or empty, is refused with
-FAIL: task <id> verify step <n> has no command, exit 2), then requires `check-grant` to cover
+FAIL: task <id> verify step <n> has no command, exit 2; a malformed `min_tier` or
+`clauses`, one without the other, or either in a plan with no `verification` block is
+refused first with FAIL: task <id> <field>: <why>, exit 2), then requires `check-grant` to cover
 local_reversible for that plan (`--subject <plan envelope>`, so a grant covers only the
 plan it pins) on the current branch, which must match the grant's branch_pattern and
 not be the default branch. It cuts factory/<plan-slug> from the current branch (that
@@ -274,6 +276,11 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
                  "evidence-diff-unreadable")
 EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
+# Proof tiers (the second slice). A task in a gated plan MAY carry `min_tier` (the
+# weakest tier its clauses accept) and `clauses` (<feature>:C<n> refs, its feature among
+# the task's features), always together. init refuses a malformed pair (plan_tier_problems).
+TIERS = ("proved", "bounded", "property", "runtime")
+CLAUSE_RE = r"[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*"
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
@@ -1333,6 +1340,14 @@ def cmd_init(args):
         waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
     except PlanError as e:
         return _init_fail("invalid plan: %s" % e)
+    tier_bad = plan_tier_problems(plan)
+    if tier_bad:
+        for why in tier_bad:
+            sys.stderr.write("FAIL: %s\n" % why)
+        return _init_fail("invalid plan: a task's min_tier and clauses must come together, "
+                          "in a plan with a verification block, min_tier one of %s and "
+                          "clauses distinct <feature>:C<n> refs to the task's features; "
+                          "see the lines above" % ", ".join(TIERS))
     missing = missing_commands(plan)
     if missing:
         for why in missing:
@@ -3135,6 +3150,60 @@ def missing_commands(plan):
             if cmd is None or cmd == []:
                 out.append("task %s verify step %d has no command" % (tid, n))
     return out
+
+
+def plan_tier_problems(plan):
+    """["task <id> <field>: <why>"] for every task whose proof-tier fields are malformed:
+    a `min_tier` that is not exactly one of TIERS, a `clauses` that is not a non-empty
+    list of distinct <feature>:C<n> refs whose feature the task names in `features`
+    (null is malformed for both), one key without the other, or either key in a plan
+    with no `verification` block. A task with neither key yields nothing. Reads only
+    the plan: no feature file."""
+    out = []
+    gated = plan.get("verification") is not None
+    for tid, t in _plan_tasks_by_id(plan).items():
+        present = [k for k in ("min_tier", "clauses") if k in t]
+        if not present:
+            continue
+        if not gated:
+            for k in present:
+                out.append("task %s %s: the plan declares no verification block, so no "
+                           "check reads tier fields; add one or remove the field" % (tid, k))
+            continue
+        if len(present) == 1:
+            missing = "clauses" if present[0] == "min_tier" else "min_tier"
+            out.append("task %s %s: missing; %s needs %s beside it (add it or remove %s)"
+                       % (tid, missing, present[0], missing, present[0]))
+        if "min_tier" in t and not (isinstance(t["min_tier"], str)
+                                    and t["min_tier"] in TIERS):
+            out.append("task %s min_tier: %s is not one of %s"
+                       % (tid, json.dumps(t["min_tier"]), ", ".join(TIERS)))
+        if "clauses" in t:
+            why = _clauses_problem(t["clauses"], t.get("features"))
+            if why:
+                out.append("task %s clauses: %s" % (tid, why))
+    return out
+
+
+def _clauses_problem(clauses, features):
+    """Why `clauses` is malformed for a task naming `features`, or None."""
+    if not isinstance(clauses, list) or not clauses:
+        return ("%s is not a non-empty list of <feature>:C<n> refs"
+                % json.dumps(clauses))
+    named = set(f for f in features if isinstance(f, str)) if isinstance(features, list) else set()
+    seen = set()
+    for c in clauses:
+        if not isinstance(c, str) or not re.fullmatch(CLAUSE_RE, c):
+            return ("%s is not a <feature>:C<n> ref (n from 1, no leading zero)"
+                    % json.dumps(c))
+        if c in seen:
+            return "%s is listed twice" % json.dumps(c)
+        seen.add(c)
+        feature = c.split(":", 1)[0]
+        if feature not in named:
+            return ("%s names feature %s, which is not in the task's features"
+                    % (json.dumps(c), feature))
+    return None
 
 
 def verify_command_problems(plan):
