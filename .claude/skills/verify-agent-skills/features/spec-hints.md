@@ -12,7 +12,7 @@ the requirement's hints as task fields. The field names differ from the hint nam
 
 | Hint on the requirement | Task field |
 |---|---|
-| `[where: ...]` | `where` (one string: the hint text, comma-separated paths, not a list) |
+| `[where: ...]` | `where` (list of paths) |
 | `[feature: ...]` | `features` (list of feature ids) |
 | `[proof: ...]` | `predicate` (string) |
 | `[after: R<n>, ...]` or `[parallel-safe]` | `independence` (list of task ids, or the string `parallel-safe`) |
