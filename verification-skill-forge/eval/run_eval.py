@@ -152,6 +152,24 @@ def main():
         r = sh(root, sys.executable, harness, "list", "--instance", "b")
         check("live: instance b's data store is its own",
               r.returncode == 0 and "groceries" not in r.stdout)
+        # Probe 10: another checkout claims the same port for its own instance a (port
+        # locks are per checkout), so its server loses the bind. Launch must not call
+        # the first checkout's server ready: it moves to a free port and drives its own.
+        root10 = repo(tmp, "p10")
+        live.append((root10, harness))
+        sh(root10, sys.executable, recorder, "claim", "--instance", "a", "--port",
+           str(ports["a"]))
+        r = sh(root10, sys.executable, harness, "launch", "--instance", "a")
+        try:
+            other = json.loads(r.stdout)
+        except ValueError:
+            other = {}
+        r = sh(root10, sys.executable, harness, "list", "--instance", "a")
+        check("probe 10: a launch that loses its port drives its own server, never "
+              "another checkout's",
+              other.get("ready") and other.get("port") != ports["a"]
+              and r.returncode == 0 and "groceries" not in r.stdout,
+              json.dumps(other)[:600] + " list=" + r.stdout.strip()[:200])
         r = sh(root, sys.executable, recorder, "record", "--instance", "a", "--feature",
                "notes-create", "--verifier", "verifier-1", "--result", "pass", "--action",
                "POST /notes title=groceries", "--observed", "201 and a stored row",

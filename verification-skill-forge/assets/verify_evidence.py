@@ -145,12 +145,18 @@ def cmd_port(a):
         return _fail("bad instance name %r" % a.instance)
     wt = os.path.abspath(a.worktree)
     start = a.base + zlib.crc32(a.instance.encode()) % a.span
-    for i in range(a.span):
-        port = a.base + (start - a.base + i) % a.span
-        lock = _lock_path(wt, port)
-        if _holder(lock) == a.instance:
+    order = [a.base + (start - a.base + i) % a.span for i in range(a.span)]
+    # A port the instance already holds wins over an earlier one that has freed since,
+    # so every call names the port its server is on.
+    d = os.path.join(run_dir(wt), "ports")
+    held = {name for name in (os.listdir(d) if os.path.isdir(d) else [])
+            if _holder(os.path.join(d, name)) == a.instance}
+    for port in order:
+        if "%d.lock" % port in held:
             print("PORT: %d" % port)
             return 0
+    for port in order:
+        lock = _lock_path(wt, port)
         if os.path.exists(lock) or not _bindable(port):
             continue
         if claim_port(wt, a.instance, port):
