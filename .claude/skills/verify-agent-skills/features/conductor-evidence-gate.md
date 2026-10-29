@@ -126,6 +126,46 @@ tier-field-unreadable`, with exit 3. `init` refuses such a plan, so this fixture
 build one. `factory-conductor/assets/test_conductor_tiers.py` builds it with init's check
 turned off.
 
+### Drive a gated run through finish and read the ASSURANCE lines
+
+The `gated-run` fixture stops after review. To finish the run, merge the task and run
+`finish` yourself. The fixture's grant asks for push and PR, so `finish` writes the
+run-result envelope and pushes nothing.
+
+Build the `tier-both` fixture of the recipe above, and record the doctor, the runtime
+`evidence.json` and a property proof for C1 and for C2. Then:
+
+```sh
+python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>
+python3 factory-conductor/assets/conductor.py merge T1 --root <root>
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name assure-finish -- \
+  python3 factory-conductor/assets/conductor.py finish --root <root>
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name assure-status -- \
+  python3 factory-conductor/assets/conductor.py status --root <root>
+```
+
+Expect `EVIDENCE: T1 pass <sha>` and `MERGE: T1 <commit>`. `finish` prints
+`INTEGRATION: pass`, `FINISH: <envelope path>`, `GATE: ASK` and
+`REMOTE: pending push pr`, with exit 3. `status` prints
+`ASSURANCE: notes-create property C1,C2` after its last `STATUS:` line. Open the envelope:
+`predicate.payload.assurance` is
+`[{"feature": "notes-create", "tier": "property", "clauses": ["C1", "C2"]}]`, the same
+data as the line.
+
+A clause's tier is the strongest tier that a merged task recorded for it at its evidence
+pass. The feature's tier is its weakest clause's tier. The line names the clauses at that
+tier, in numeric order (C2 before C10). Other cases:
+
+- A `proved` proof (tool `verus`) for C1 and a property proof for C2:
+  `ASSURANCE: notes-create property C2`.
+- `min_tier` `runtime` and no proof record: `ASSURANCE: notes-create runtime C1,C2`.
+- Before the merge, or when the task parks: the tier is `none`.
+- No `--task-json`: `status` prints no `ASSURANCE:` line, and the envelope has no
+  `assurance` key.
+
+The evidence record of T1 in `<root>/.skill-contract/runs/<run-id>/state.json` holds
+`clause_tiers`, the tier each clause met at pass.
+
 ### Edit a contract and read the park
 
 In a tiered plan, `evidence` compares the `## Contract` section of each feature file
