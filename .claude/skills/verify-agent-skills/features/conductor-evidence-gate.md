@@ -46,6 +46,33 @@ For contract and tier cases, pass the feature file and the task fields to the fi
 `--feature-file notes-create=<file with a ## Contract>`, `--task-json '{"min_tier": "property", "clauses": ["notes-create:C1"]}'`,
 and `--edit <path in the run repo>=<file>` for what the task commits.
 
+### Drive an init refusal of tier fields
+
+`conductor init` refuses a plan whose tier fields are malformed. It does this before it
+checks verify commands and the grant. Give the fixture a bad `--task-json`. The fixture
+stops at `init` and prints the refusal:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture gated-run --instance "$INSTANCE" --name tier-bad \
+  --feature notes-create=a.txt --task-json '{"min_tier": "fast", "clauses": ["notes-create:C1"]}'
+```
+
+Expect exit 1 and JSON with `error: "conductor init exited 2"`. The last item of `steps`
+has `"exit": 2`, and its `stderr` holds `FAIL: task T1 min_tier: ...`. Other cases:
+
+- `{"min_tier": null, ...}` or `{"min_tier": "Property", ...}`: `FAIL: task T1 min_tier:`.
+- `clauses` as `null`, a string, `[]`, `[5]`, `[null]`, a duplicate, `notes-create:C0`,
+  or a clause whose feature the task does not name (`notes-list:C1`): `FAIL: task T1 clauses:`.
+- One key alone: the FAIL line names the key that is missing. For example,
+  `{"min_tier": "property"}` gives `FAIL: task T1 clauses: missing; ...`.
+- No evidence gate: add `--plan-json '{"verification": null}'` with valid tier fields.
+  The FAIL lines say `the plan declares no verification block`.
+
+Then check that the refusal wrote nothing. `ls <root>/.skill-contract/runs` fails (no run
+directory), and `git -C <root> branch` lists only `main` and `factory/base` (no new branch).
+With `{"min_tier": "property", "clauses": ["notes-create:C1"]}`, or with no `--task-json`,
+the fixture exits 0: the run starts.
+
 ## Proof
 
 The two captures, plus the run state: `conductor status --root <root>` shows T1's evidence
