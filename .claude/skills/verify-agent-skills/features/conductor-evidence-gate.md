@@ -4,6 +4,14 @@
 - proven: 9ebad708af9a37fdb0b81d0d0334f7de37dcc8f3
 - anchors: factory-conductor/assets/conductor.py, factory-conductor/assets/schemas/run-result.v1.json
 
+## Contract
+
+- C1 [pre]: a proof record counts toward a clause's tier only when its stored argv is a runner of its stored tool
+- C2 [pre]: a clause counts toward a tier only when the `## Contract` section of its feature file at the verified head defines it
+- C3 [post]: in a tiered plan, a task whose diff from the run base adds a Rust escape hatch is rejected with `escape-hatch <path>:<line>` and sent back as a repair
+- C4 [post]: in a tiered plan, `finish` re-runs the source proof of each bounded, property or proved clause on the integration head, and a proof that fails twice turns the run red
+- C5 [post]: each `ASSURANCE:` line and each envelope `assurance` item names the integration head on which the proofs were re-run
+
 ## What it is
 
 Under a plan with a `verification` block, factory-conductor holds each task's merge until
@@ -204,6 +212,13 @@ field in a tiered plan: it parks the same way.
 The two captures, plus the run state: `conductor status --root <root>` shows T1's evidence
 verdict, and `<root>/.skill-contract/runs/<run-id>/autonomy-log.jsonl` gains an `evidence`
 event for each call (the side effect).
+
+For the contract: C1 holds when a property record whose stored argv is not a runner of its
+tool leaves its clause below the required tier. C2 holds when a clause that the contract
+does not define is rejected as `tier-below-required`. C3 holds when a task that adds
+`#[verifier::external_body]` gets `EVIDENCE: <task> reject escape-hatch <path>:<line>`.
+C4 holds when a proof broken by a later task gives `STOP: integration_red` at `finish`.
+C5 holds when the `ASSURANCE:` line ends with `@<first 12 characters of the integration head>`.
 
 ## Gotchas
 
