@@ -102,6 +102,18 @@
       "base": {"src/a.rs": "one\ntwo\nthree\nfour\n"},
       "head": {"src/a.rs": "four\nfive\nsix(admit(x))\n"},
       "escapes": [["src/a.rs", 3, "admit("]]
+    },
+    {
+      "name": "a moved .rs file: renames are off, so every line counts as added",
+      "base": {"src/old.rs": "#[verifier::external_body]\nfn g() {}\n"},
+      "head": {"src/new.rs": "#[verifier::external_body]\nfn g() {}\n"},
+      "escapes": [["src/new.rs", 1, "external_body"]]
+    },
+    {
+      "name": "a deleted .rs file that held a token",
+      "base": {"src/a.rs": "fn a(x: bool) { assume(x) }\n", "src/b.rs": "fn b() {}\n"},
+      "head": {"src/b.rs": "fn b() {}\n"},
+      "escapes": []
     }
   ]
 }
