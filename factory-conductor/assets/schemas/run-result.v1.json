@@ -99,6 +99,23 @@
               "returncode": {"type": ["integer", "null"]}
             }
           }
+        },
+        "proofs": {
+          "type": "array",
+          "description": "Present in a tiered plan once every run passed: finish re-ran the source proof record of each proved, bounded or property clause on head, in run order then clause number, and wrote no record. A fail outcome makes passed false. Every outcome but pass reports the clause below its recorded tier: none on fail, runtime otherwise.",
+          "items": {
+            "type": "object",
+            "required": ["task", "clause", "tier", "tool", "argv", "outcome", "mutant_rechecked"],
+            "properties": {
+              "task": {"type": "string", "description": "The proven task whose record was re-run: the one with the clause's strongest tier, the first in run order on a tie."},
+              "clause": {"type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*$"},
+              "tier": {"enum": ["proved", "bounded", "property", "runtime", "none"], "description": "The record's tier on pass, none on fail, runtime on every other outcome."},
+              "tool": {"type": ["string", "null"], "description": "The record's tool; null when the record cannot be read."},
+              "argv": {"type": ["array", "null"], "items": {"type": "string"}, "description": "The record's stored argv, run at the root of a clean checkout of head with its stored timeout; null when the record cannot be read."},
+              "outcome": {"enum": ["pass", "fail", "flaky", "unavailable", "stale-mutant", "uncaught"], "description": "fail: the head run failed twice. flaky: it failed, then passed. unavailable: the tool cannot start (or the record cannot be read). stale-mutant: the record's mutant patch does not apply to head. uncaught: the mutant run did not fail with the tool's failure signature, twice."},
+              "mutant_rechecked": {"type": ["boolean", "null"], "description": "bounded and property: true when the mutant patch applied to head and the run caught it. null for proved."}
+            }
+          }
         }
       }
     },

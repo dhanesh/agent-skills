@@ -315,6 +315,9 @@ SINCE_PROOF_TIER_GATE = "fe9ab44"  # factory-conductor 1.6.0, the proof-tier gat
 # commit of `git rev-list --first-parent --reverse <run base>..HEAD`, where the run base is
 # `git merge-base factory/proof-tiers-work HEAD`. Repin it if that commit's sha changes on the
 # way into main (a rebase or a squash), or its rows stay live claims after they land.
+SINCE_PROOF_TIER_TRUST = "e8f3fad"  # factory-conductor, proof-tier trust (slice 2): the
+# first commit of the run that adds finish's proof re-run. Repin it if that commit's sha
+# changes on the way into main (a rebase or a squash), or its rows stay live claims.
 
 
 def _git_out(*args):
@@ -9792,13 +9795,14 @@ def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="v
                    "mutant_author": verifier, "mutant_exit_status": 1}, f)
 
 
-def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False):
+def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False, path=None):
     """Drive T1 of a gated plan (tasks: [(id, [features], extra task keys)]) through init,
     start, a work commit (plus `edit`, the text of notes-create's feature file), verify,
     review, runtime evidence, the property proofs named in `proofs`, `evidence` and
     `merge`, then `finish` when asked. `contract` commits _PT_CONTRACT into notes-create's
-    feature file before init. Returns {init, evidence, merge, assurance}, or None when a
-    step that every tree runs the same way failed (the fixture, not the gate, is broken)."""
+    feature file before init. `path` is put first on PATH for every conductor call. Returns
+    {init, evidence, merge, assurance, integration_passed}, or None when a step that every
+    tree runs the same way failed (the fixture, not the gate, is broken)."""
     conductor, CC = _fc_tree(tree)
     if conductor is None:
         return None
@@ -9815,9 +9819,12 @@ def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False):
             subprocess.run(["git", "-C", root, "commit", "-q", "-m", "contract"], check=True,
                            capture_output=True, env=_FC_GENV)
 
+        env = dict(os.environ, PATH=path + os.pathsep + os.environ.get("PATH", "")) \
+            if path else None
+
         def run(*argv):
             return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
-                                  capture_output=True, text=True, timeout=300)
+                                  capture_output=True, text=True, timeout=300, env=env)
 
         out = {"init": run("init", "--plan", plan_env).returncode}
         if out["init"] != 0:
@@ -9857,7 +9864,10 @@ def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False):
             if not done:
                 return None
             with open(done[0][len("FINISH: "):], encoding="utf-8") as f:
-                out["assurance"] = "assurance" in json.load(f)["predicate"]["payload"]
+                pay = json.load(f)["predicate"]["payload"]
+            out["assurance"] = "assurance" in pay
+            out["integration_passed"] = int(bool((pay.get("integration") or {})
+                                                 .get("passed")))
         return out
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -9973,6 +9983,39 @@ def check_proof_tier_gate(old, new):
             "every record passes; the baseline merges the edited contract, the gate parks "
             "the task (EVIDENCE: T1 reject contract-changed notes-create)",
             since=SINCE_PROOF_TIER_GATE)
+
+    # C4: finish re-runs each property record's argv (pytest) on the integration head. A
+    # PATH shim named pytest that always fails stands for a proof a later change broke.
+    # Sanity-checked: with a shim that passes, the new tree's integration passes.
+    bins = {}
+    for name, code in (("red", 1), ("green", 0)):
+        bins[name] = tempfile.mkdtemp()
+        with open(os.path.join(bins[name], "pytest"), "w", encoding="utf-8") as f:
+            f.write("#!%s\nimport sys\nprint('1 failed')\nsys.exit(%d)\n"
+                    % (sys.executable, code))
+        os.chmod(os.path.join(bins[name], "pytest"), 0o755)
+    try:
+        green = measured(new, "integration_passed", tiered, contract=True,
+                         proofs=("C1", "C2"), finish=True, path=bins["green"])
+        if green is not None and green["integration_passed"] != 1:
+            PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                                 "proof re-run sanity check failed: a passing pytest shim "
+                                 "did not keep the integration green: %r" % green))
+        a = measured(old, "integration_passed", tiered, contract=True, proofs=("C1", "C2"),
+                     finish=True, path=bins["red"])
+        b = measured(new, "integration_passed", tiered, contract=True, proofs=("C1", "C2"),
+                     finish=True, path=bins["red"])
+    finally:
+        for d in bins.values():
+            shutil.rmtree(d, ignore_errors=True)
+    if a is not None and b is not None:
+        a, b = a["integration_passed"], b["integration_passed"]
+        row(s, "finish's integration passed with a property proof that now fails "
+            "(lower=better)", a, b, a == 1 and b == 0,
+            "the baseline never re-runs the proof, so a broken proof keeps its tier and the "
+            "run pushes; finish re-runs it twice, prints INTEGRATION: fail T1 proof "
+            "notes-create:C1 and stops with integration_red. Sanity-checked: a passing "
+            "shim stays green", since=SINCE_PROOF_TIER_TRUST)
 
     plain = [("T1", ["notes-create"], {})]
     a = measured(old, "assurance", plain, finish=True)

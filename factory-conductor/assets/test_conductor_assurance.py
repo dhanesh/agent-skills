@@ -13,10 +13,11 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
-from conductor_testkit import write_grant, write_plan_envelope  # noqa: E402
+from conductor_testkit import tmpdir, write_grant, write_plan_envelope  # noqa: E402
 from test_conductor_evidence import payload, task  # noqa: E402
 from test_conductor_tiers import TierGate, tiered  # noqa: E402
 
@@ -27,6 +28,21 @@ POLICY = {"read_only": "auto", "local_reversible": "grant", "push_branch": "ask"
 
 
 class Assurance(TierGate):
+    def setUp(self):
+        super().setUp()
+        # finish re-runs each proof record's argv on the integration head (proof-tier
+        # trust R7): PATH shims named after the runners pass, so the run stays green.
+        self.bin = tmpdir()
+        for name in ("pytest", "verus", "cargo"):
+            path = os.path.join(self.bin, name)
+            with open(path, "w") as f:
+                f.write("#!%s\nprint('1 passed in 0.01s')\n" % sys.executable)
+            os.chmod(path, 0o755)
+        patcher = mock.patch.dict(os.environ, {
+            "PATH": self.bin + os.pathsep + os.environ.get("PATH", "")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def init(self, tasks, verification=True, budget=None):
         plan = write_plan_envelope(self.root, plan=payload(tasks, verification))
         write_grant(self.root, plan, policy=POLICY, budget=budget)
@@ -49,7 +65,9 @@ class Assurance(TierGate):
         lines = [l for l in out.splitlines() if l.startswith("FINISH: ")]
         self.assertEqual(len(lines), 1, out + err)
         with open(lines[0][len("FINISH: "):], encoding="utf-8") as f:
-            return json.load(f)["predicate"]["payload"]
+            pay = json.load(f)["predicate"]["payload"]
+        self.assertTrue(pay["integration"]["passed"], out)
+        return pay
 
     def assurance_lines(self):
         """The ASSURANCE: lines of `status`, checked to come after its last STATUS: line."""

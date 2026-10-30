@@ -166,14 +166,15 @@ Build the `tier-both` fixture of the recipe above, and record the doctor, the ru
 ```sh
 python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>
 python3 factory-conductor/assets/conductor.py merge T1 --root <root>
-python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name assure-finish -- \
+PATH=<bin_dir>:$PATH python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name assure-finish -- \
   python3 factory-conductor/assets/conductor.py finish --root <root>
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name assure-status -- \
   python3 factory-conductor/assets/conductor.py status --root <root>
 ```
 
-Expect `EVIDENCE: T1 pass <sha>` and `MERGE: T1 <commit>`. `finish` prints
-`INTEGRATION: pass`, `FINISH: <envelope path>`, `GATE: ASK` and
+Expect `EVIDENCE: T1 pass <sha>` and `MERGE: T1 <commit>`. `finish` re-runs each
+proof with `pytest`, so `<bin_dir>` must be first on its PATH (see the next recipe).
+`finish` prints `INTEGRATION: pass`, `FINISH: <envelope path>`, `GATE: ASK` and
 `REMOTE: pending push pr`, with exit 3. `status` prints
 `ASSURANCE: notes-create property C1,C2` after its last `STATUS:` line. Open the envelope:
 `predicate.payload.assurance` is
@@ -193,6 +194,46 @@ tier, in numeric order (C2 before C10). Other cases:
 
 The evidence record of T1 in `<root>/.skill-contract/runs/<run-id>/state.json` holds
 `clause_tiers`, the tier each clause met at pass.
+
+### Break a proof in a later task and read the red finish
+
+In a tiered plan, once every verify run of the integration passes, `finish` re-runs the
+source proof of each proved, bounded or property clause on the integration head. The
+source is the record that the proven task with the strongest tier stored at its evidence
+pass (`clause_records` in its evidence record in `state.json`). `finish` runs the
+record's stored argv at the root of a clean checkout of that head, with its stored
+timeout, and writes no record. For bounded and property, it also applies the record's
+mutant patch to a second checkout and runs the argv there.
+
+Build the `tier-both` fixture of the property recipe and merge T1 as above, but do not
+finish. `init` left the run branch checked out in `<root>`. Commit a second change on
+it that sets `target.txt` to `caught`, a value that `tool.py` fails on. Then finish with
+`<bin_dir>` first on PATH:
+
+```sh
+printf 'caught\n' > <root>/target.txt && git -C <root> commit -qam "break the proof"
+PATH=<bin_dir>:$PATH python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name proof-red -- \
+  python3 factory-conductor/assets/conductor.py finish --root <root>
+```
+
+Expect `INTEGRATION: fail T1 proof notes-create:C1` and
+`INTEGRATION: fail T1 proof notes-create:C2`, then `FINISH: <envelope path>` and
+`STOP: integration_red`, with exit 3. Nothing is pushed. In the envelope,
+`predicate.payload.integration.proofs` holds one
+`{task, clause, tier, tool, argv, outcome, mutant_rechecked}` item per clause, and
+`passed` is false. Other outcomes, each of which prints
+`INTEGRATION: <outcome> T1 proof <clause>` before `INTEGRATION: pass <sha>`, and lets the
+run pass with that clause at `runtime`:
+
+- `flaky`: the head run fails once, then passes.
+- `unavailable`: the tool cannot start (for example, `<bin_dir>` is not on PATH).
+- `stale-mutant`: the mutant patch does not apply to the head (`target.txt` no longer
+  holds `good`).
+- `uncaught`: the mutant run does not fail with the tool's failure signature, twice.
+
+`factory-conductor/assets/test_conductor_finish_proofs.py` drives each outcome with a
+second task. A plan with no tier field re-runs no proof, and its `integration` has no
+`proofs` key.
 
 ### Edit a contract and read the park
 
