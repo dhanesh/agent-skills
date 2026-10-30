@@ -1597,8 +1597,10 @@ def cmd_status(args):
         print(_usage_line(st))
     print("STATUS: budget " + budget_note_text(st.budget))
     for item in assurance(st) or []:
-        print("ASSURANCE: %s %s %s" % (item["feature"], item["tier"],
-                                       ",".join(item["clauses"])))
+        # After finish re-ran the proofs, each line names the head they held on (R8).
+        at = (" @%s" % item["sha"][:12]) if item.get("sha") else ""
+        print("ASSURANCE: %s %s %s%s" % (item["feature"], item["tier"],
+                                         ",".join(item["clauses"]), at))
     return 0
 
 
@@ -1609,13 +1611,22 @@ def _clause_key(cid):
     return int(cid[1:])
 
 
-def assurance(st, plan_doc=None):
-    """The weakest tier per feature (R5): [{feature, tier, clauses}] in feature-id order,
-    or None when no task in the pinned plan carries `clauses` (an untiered plan reports
-    nothing). A clause's tier is the strongest tier that a proven task naming it recorded
-    at its evidence pass, else none. A feature's tier is its weakest clause's tier, and
-    clauses lists the clause ids at that tier in numeric order. Read from the pinned
-    plan, as the tier check reads it; never raises."""
+def assurance(st, plan_doc=None, integration=None):
+    """The weakest tier per feature (R5, R8): [{feature, tier, clauses, proofs[, sha]}]
+    in feature-id order, or None when no task in the pinned plan carries `clauses` (an
+    untiered plan reports nothing). Read from the pinned plan, as the tier check reads
+    it; never raises.
+
+    A clause's tier is the strongest tier that a proven task naming it recorded at its
+    evidence pass, else none. Once finish re-ran the proofs (`integration`, else the one
+    recorded in st.finished, carries `proofs`), a proved, bounded or property clause takes
+    its tier from its re-run on the integration head instead, and each item carries that
+    head as `sha`: a proof tier shows only when the proof held on that head. A feature's
+    tier is its weakest clause's tier, and clauses lists the clause ids at that tier in
+    numeric order. `proofs` holds one {clause, tier, tool, argv, mutant_rechecked} per
+    clause of the feature that any task names, in numeric order: tool and argv are null
+    for runtime and none, and mutant_rechecked is a boolean for bounded and property
+    (true only when finish re-ran the mutant and caught it) and null otherwise."""
     if plan_doc is None:
         plan_doc, why = _pinned_plan(st)
         if why:
@@ -1624,6 +1635,10 @@ def assurance(st, plan_doc=None):
     if not isinstance(tasks, list) or not any(
             isinstance(x, dict) and "clauses" in x for x in tasks):
         return None
+    if integration is None and isinstance(st.finished, dict):
+        integration = st.finished.get("integration")
+    reran = integration.get("proofs") if isinstance(integration, dict) else None
+    head = integration.get("head") if isinstance(reran, list) else None
     best = {}  # clause ref -> index into ASSURANCE_ORDER
     for x in tasks:
         named = x.get("clauses") if isinstance(x, dict) else None
@@ -1639,16 +1654,66 @@ def assurance(st, plan_doc=None):
             tier = met.get(c) if isinstance(met, dict) else None
             rank = ASSURANCE_ORDER.index(tier) if tier in TIERS else len(TIERS)
             best[c] = min(best.get(c, len(TIERS)), rank)
+    detail = _assurance_proofs(st, best, reran)
     per_feature = {}
-    for c, rank in best.items():
+    for c in best:
         feature, cid = c.split(":", 1)
-        per_feature.setdefault(feature, []).append((rank, cid))
+        per_feature.setdefault(feature, []).append(
+            (ASSURANCE_ORDER.index(detail[c]["tier"]), cid))
     out = []
     for feature in sorted(per_feature):
         weakest = max(rank for rank, _ in per_feature[feature])
         ids = sorted((cid for rank, cid in per_feature[feature] if rank == weakest),
                      key=_clause_key)
-        out.append({"feature": feature, "tier": ASSURANCE_ORDER[weakest], "clauses": ids})
+        item = {"feature": feature, "tier": ASSURANCE_ORDER[weakest], "clauses": ids}
+        if isinstance(head, str) and head:
+            item["sha"] = head
+        item["proofs"] = [dict(detail[feature + ":" + cid], clause=cid) for cid in
+                          sorted((cid for _, cid in per_feature[feature]), key=_clause_key)]
+        out.append(item)
+    return out
+
+
+def _assurance_proofs(st, best, reran):
+    """{clause ref: {clause, tier, tool, argv, mutant_rechecked}} for assurance(). Before
+    the proofs ran (reran not a list), a proof-tier clause shows its source record's tool
+    and argv, and mutant_rechecked false or null. After, a proof-tier clause takes tier,
+    tool, argv and mutant_rechecked from its re-run; a clause with no re-run entry, or one
+    whose re-run did not pass, reports the re-run tier (runtime when absent), with tool and
+    argv null. Never raises."""
+    rerun_by = {p.get("clause"): p for p in reran if isinstance(p, dict)} \
+        if isinstance(reran, list) else None
+    sources = {}
+    if rerun_by is None:
+        try:
+            sources = {c: (tid, rel) for tid, c, _, rel in _proof_sources(st)}
+        except (KeyError, TypeError, AttributeError):
+            sources = {}
+    out = {}
+    for c, rank in best.items():
+        tier = ASSURANCE_ORDER[rank]
+        tool = argv = None
+        if tier in PROOF_RERUN_TIERS and rerun_by is not None:
+            p = rerun_by.get(c) or {}
+            tier = p.get("tier") if p.get("tier") in ASSURANCE_ORDER else "runtime"
+            if tier in PROOF_RERUN_TIERS:
+                tool, argv = p.get("tool"), p.get("argv")
+            rechecked = p.get("mutant_rechecked") is True
+        else:
+            rechecked = False
+            if tier in PROOF_RERUN_TIERS:
+                rel = (sources.get(c) or (None, None))[1]
+                doc = _load_record(os.path.join(st.root, *rel.split("/")),
+                                   _evidence_root(st)) if rel else None
+                if isinstance(doc, dict):
+                    tool, argv = doc.get("tool"), doc.get("argv")
+        if not isinstance(tool, str):
+            tool = None
+        if not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
+            argv = None
+        out[c] = {"clause": c.split(":", 1)[1], "tier": tier, "tool": tool,
+                  "argv": list(argv) if argv is not None else None,
+                  "mutant_rechecked": rechecked if tier in MUTANT_TIERS else None}
     return out
 
 
@@ -3760,7 +3825,7 @@ def run_result_payload(st, plan_doc=None, integration=None):
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
         stopped = {k: s[k] for k in ("reason", "at", "detail", "task", "previous") if k in s}
     grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
-    assured = assurance(st, plan_doc)
+    assured = assurance(st, plan_doc, integration)
     return {
         "run_id": st.run_id,
         "plan": {"id": (pred or {}).get("id"), "path": plan_subject(st),
