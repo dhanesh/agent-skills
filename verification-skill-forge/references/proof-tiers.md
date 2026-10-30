@@ -159,3 +159,43 @@ mutant broke something else:
 
 A tool that prints its output in another format, or a test command that hides it, does
 not match. Run the tool in a mode that prints the default report.
+
+## Escape hatches
+
+A Rust proof can pass because the code tells the tool to skip the hard part. Verus
+`assume(...)` and `admit()` add a fact without a proof. `#[verifier::external_body]`
+trusts a function body without a check. `forge.py check-proof` finds these tokens on the
+lines that a diff adds:
+
+```bash
+python3 forge.py check-proof --root <repo> --base <ref> --head <ref>
+```
+
+The rule (`escape_hatches` in `forge.py`) looks at each line that the diff from `--base`
+to `--head` adds to a `.rs` file. A line has an escape hatch when it holds one of these:
+
+- `assume(` or `admit(` with no identifier character and no `::` just before it. So
+  `assume(x)` and `x.assume(` count. `prop_assume(`, `my_assume(` and `kani::assume(`
+  do not count.
+- `external_body` inside `#[verifier ...]` on the same line, by the regex
+  `#\[verifier\b[^\]]*\bexternal_body\b`. A bare `external_body` does not count.
+
+Comments and strings are not skipped, so a token in a comment is reported too. A line
+that the diff does not add, a removed line and a file that does not end in `.rs` are not
+scanned. Renames are off, so the lines of a moved file count as added.
+
+The output has one `ESCAPE: <path>:<line> <token>` line for each hit, sorted by path,
+line and column. `<path>` is relative to the repository root, `<line>` is the line
+number in the `--head` file, and `<token>` is `assume(`, `admit(` or `external_body`.
+The last line is `CHECK_PROOF_RESULT: FAIL` or `CHECK_PROOF_RESULT: PASS`. The command
+reads only commits, never the worktree.
+
+| Exit | Meaning |
+|---|---|
+| 0 | `CHECK_PROOF_RESULT: PASS`. The diff adds no escape hatch. |
+| 1 | `CHECK_PROOF_RESULT: FAIL`, after one `ESCAPE:` line for each hit. |
+| 2 | Nothing was scanned. `--root` (default `.`) is not in a git work tree, or `--base` or `--head` does not resolve to a commit. |
+
+factory-conductor holds a copy of this rule for its evidence gate. Both copies must pass
+the same vector list, `assets/escape_hatch_vectors.json`. Change the rule, the vectors
+and both copies together.

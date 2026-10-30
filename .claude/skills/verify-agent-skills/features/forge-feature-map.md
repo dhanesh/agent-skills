@@ -15,7 +15,16 @@ alive. It prints one line per defect and ends with `LINT_RESULT: PASS` or
 
 `python3 verification-skill-forge/assets/forge.py lint <verify dir>` from the repo root.
 Other forge subcommands (`detect`, `scaffold`, `vendor`, `coverage`, `seed`, `finding`,
-`check-maintain`) share the file; drive the one a change touches.
+`check-maintain`, `check-proof`) share the file; drive the one a change touches.
+
+To drive `check-proof`, build a Rust fixture with `drive.py fixture stack --lang rust`.
+Commit a `src/lib.rs` that adds `#[verifier::external_body]` on one line and `assume(`
+on a later line with `drive.py fixture commit --put src/lib.rs=<scratch file>`. Then run
+`forge.py check-proof --root <root> --base HEAD~1 --head HEAD`. Expect two `ESCAPE:`
+lines in line order, `CHECK_PROOF_RESULT: FAIL` and exit 1. Commit a head that adds only
+`prop_assume(` or `kani::assume(`, or a token in a `.md` file: expect
+`CHECK_PROOF_RESULT: PASS` and exit 0. The cases are in
+`verification-skill-forge/assets/escape_hatch_vectors.json`.
 
 ## Drive it
 
