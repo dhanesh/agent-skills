@@ -4,6 +4,11 @@
 - proven: no
 - anchors: verification-skill-forge/assets/verify_evidence.py
 
+## Contract
+
+- C1 [pre]: `record --tier` runs `--cmd` only when its argv is a runner of `--tool` in the recorder's literal runner table, after at most one wrapper is stripped and with no `/` in argv[0]; for any other argv it exits 2, runs nothing and writes nothing
+- C2 [pre]: `record --tier` refuses a worktree whose tracked files differ from the committed head, and runs the head proof and the mutant proof each in its own clean checkout of that head
+
 ## What it is
 
 A verifier runs `verify_evidence.py record` to store proof that a feature worked on a
@@ -49,6 +54,11 @@ Expect a non-zero exit and an error saying `--side-effect` is required.
 The written `evidence.json` names the fixture head as `sha`, and its `artifacts[].sha256`
 equals `shasum -a 256` of the stored copy (the side effect: one new record directory). The
 refused record leaves no `notes-list` directory under the fixture's `.verify/`.
+
+For the contract: C1 holds when a proof record whose `--cmd` is not a runner of its
+`--tool` exits 2 and leaves the evidence directory unchanged. C2 holds when a tracked edit
+makes `record --tier` exit 2, and a written proof record stores `cwd` `"."` and `ran_in`
+`"checkout"`.
 
 ## Gotchas
 
