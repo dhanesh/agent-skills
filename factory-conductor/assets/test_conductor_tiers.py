@@ -6,7 +6,10 @@ A tiered task carries `min_tier` and `clauses` in the pinned plan. Once every ex
 evidence check passes, `conductor evidence` rejects the first clause, in `clauses` order,
 that has no proof record at or above `min_tier`, as `tier-below-required <clause>`: a
 repair on the evidence-failed route. A tier field that cannot be read from the pinned
-plan rejects as `tier-field-unreadable <field>` and parks the task.
+plan rejects as `tier-field-unreadable <field>` and parks the task. A clause that the
+`## Contract` section of its feature file at the verified head does not define meets no
+tier, before any record is read (proof-tier trust R6), so every fixture here gives
+notes-create a contract that defines C1, C2 and C10.
 
 Proof records are written in the shape verification-skill-forge's verify_evidence.py
 writes (`record --tier`). One test also runs that recorder, with a fake allowlisted tool
@@ -26,10 +29,13 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 from conductor_testkit import write_grant, write_plan_envelope  # noqa: E402
-from test_conductor_evidence import Gate, git, now, payload, task  # noqa: E402
+from test_conductor_evidence import (FEATURE, SKILL, Gate, git, now, payload,  # noqa: E402
+                                     task)
 
 RECORDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                         "verification-skill-forge", "assets", "verify_evidence.py")
+FORGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                     "verification-skill-forge", "assets", "forge.py")
 TWO = ["notes-create:C1", "notes-create:C2"]
 # A fake hypothesis run: it passes on good code and prints Hypothesis's failure report
 # when the mutant sets target.txt to "caught".
@@ -85,7 +91,35 @@ def tiered(min_tier="property", clauses=TWO, features=("notes-create",)):
     return t
 
 
+def contract_text(ids):
+    """A `## Contract` section that defines the clause ids `ids`."""
+    return "\n## Contract\n\n" + "".join("- %s [post]: fixture clause %s\n" % (c, c)
+                                          for c in ids)
+
+
+def with_contract(fid, anchors, contract):
+    """The fixture's feature file for fid, with `contract` before its `## Proof`."""
+    head, tail = FEATURE.format(fid=fid, anchors=anchors).split("\n## Proof\n", 1)
+    return head + contract + "\n## Proof\n" + tail
+
+
 class TierGate(Gate):
+    # The clauses that notes-create's contract defines (R6: a clause counts at any tier
+    # only when its feature's `## Contract` at the verified head defines it).
+    DEFINED = ("C1", "C2", "C10")
+
+    def setUp(self):
+        super().setUp()
+        self.contract("notes-create", self.DEFINED)
+
+    def contract(self, fid, ids):
+        """Commit fid's feature file with a `## Contract` that defines `ids`, before init."""
+        path = os.path.join(self.root, *SKILL.split("/"), "features", fid + ".md")
+        with open(path, "w") as f:
+            f.write(with_contract(fid, self.FEATURES[fid], contract_text(ids)))
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "contract " + fid)
+
     def proof(self, clause, sha, tier="property", tool="hypothesis", verifier="verifier",
               instance="a", feature="notes-create", doc_tier=None, **over):
         """Write a proof record as `record --tier` does; `over` replaces fields (None
@@ -209,6 +243,90 @@ class BelowRequired(TierGate):
         self.assertEqual(rc, 2)
         self.assertIn("tier-below-required", err)
         self.assertFalse(self.proven())
+
+
+class UndefinedClauses(TierGate):
+    """R6: a clause that its feature's `## Contract` at the verified head does not define
+    meets no tier, before any record is read."""
+
+    def test_an_undefined_clause_at_runtime_rejects_although_runtime_evidence_passed(self):
+        sha = self.tiered_run(min_tier="runtime", clauses=["notes-create:C9"])
+        rc, out, err = self.evidence()
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C9")), err)
+        self.assertNotIn("Traceback", err)
+        # The runtime evidence itself passed: only the clause rule rejects.
+        self.assertEqual(self.state().tasks["T1"]["evidence"]["paths"],
+                         [".verify/a/notes-create/%s/evidence.json" % sha])
+        self.assertFalse(self.proven())
+
+    def test_a_proof_record_for_an_undefined_clause_does_not_count(self):
+        sha = self.tiered_run(clauses=["notes-create:C1", "notes-create:C9"])
+        self.proof("C1", sha)
+        self.proof("C9", sha)
+        self.proof("C9", sha, tier="proved", tool="verus")
+        rc, out, err = self.evidence()
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C9")), err)
+
+    def test_no_record_is_read_for_an_undefined_clause(self):
+        sha = self.tiered_run(clauses=["notes-create:C9"])
+        self.proof("C9", sha)
+        with mock.patch.object(C, "_load_record", wraps=C._load_record) as load:
+            self.assertEqual(self.evidence()[0], 3)
+        read = [c.args[0] for c in load.call_args_list]
+        self.assertFalse([p for p in read if "proof-" in os.path.basename(p)], read)
+
+    def test_a_feature_with_no_contract_section_defines_no_clause(self):
+        t = task("T1", ["notes-list"])
+        t.update(min_tier="runtime", clauses=["notes-list:C1"])
+        self.init([t])
+        _, sha = self.build(files=("src/list.py",))
+        self.record("notes-list", sha)
+        self.assertEqual(self.evidence()[1].strip(),
+                         self.reject_line("tier-below-required notes-list:C1"))
+
+    def test_a_defined_clause_still_passes(self):
+        sha = self.tiered_run(min_tier="runtime", clauses=["notes-create:C10"])
+        self.assertEqual(self.evidence()[:2], (0, "EVIDENCE: T1 pass %s\n" % sha))
+
+    def test_a_missing_feature_file_defines_no_clause(self):
+        self.init([tiered(min_tier="runtime")])
+        _, sha = self.build()
+        st = self.state()
+        self.assertEqual(C._defined_clauses(st, "notes-create", sha), list(self.DEFINED))
+        self.assertEqual(C._defined_clauses(st, "notes-gone", sha), [])
+        self.assertIsNone(C._clause_tier(st, "notes-gone:C1", sha, "verifier",
+                                         ["notes-gone"]))
+
+
+class ClauseRuleMatchesForge(unittest.TestCase):
+    """The conductor's clause rule (defined_clauses) agrees with forge's parse_contract."""
+    SAMPLES = [
+        "", "# x\n", "## Contract", "## Contract\n- C1 [pre]: a\n",
+        "## Contract  \n- C1 [pre]: a  \n\n## Proof\n- C2 [post]: b\n",
+        "## Contract\n  - C3 [inv]:   spaced  \n- C4[pre]: no space\n- C5 []: empty kind\n",
+        "## Contract\n- C1 pre: no brackets\n- C2 [pre] no colon\n- c3 [pre]: lower\n"
+        "-  C4 [pre]: two spaces\n* C5 [pre]: star\n- C6 [pre]:\n- C07 [x]: zero\n",
+        "## Contracts\n- C1 [pre]: a\n", "x\n## Contract\n- C1 [pre]: a\n## Contract\n"
+        "- C2 [post]: b\n", "## Contract\r\n- C1 [pre]: a\r\n- C2 [a]b]: c\r\n",
+        "- C1 [pre]: before the section\n## Contract\n- C9 [post]: z\n",
+        with_contract("notes-create", "t1.txt", contract_text(TierGate.DEFINED)),
+    ]
+
+    def test_defined_clauses_matches_parse_contract(self):
+        if not os.path.isfile(FORGE):
+            self.skipTest("this checkout ships no verification-skill-forge")
+        spec = importlib.util.spec_from_file_location("forge_r6", FORGE)
+        forge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(forge)
+        for text in self.SAMPLES:
+            self.assertEqual(C.defined_clauses(text),
+                             [c["id"] for c in forge.parse_contract(text)["clauses"]], text)
+
+    def test_the_samples_cover_defined_and_undefined_clauses(self):
+        self.assertEqual(C.defined_clauses(self.SAMPLES[-1]), ["C1", "C2", "C10"])
+        self.assertEqual(C.defined_clauses(self.SAMPLES[0]), [])
 
 
 class RecordsThatDoNotCount(TierGate):
