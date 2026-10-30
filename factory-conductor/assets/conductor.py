@@ -278,9 +278,11 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
                  "evidence-diff-unreadable", "tier-field-unreadable", "contract-changed")
 # Rejects that send the task back to its executor: the app did the wrong thing
-# (evidence-failed), or a clause lacks a record at the plan's min_tier
-# (tier-below-required).
-EVIDENCE_REPAIR = ("evidence-failed", "tier-below-required")
+# (evidence-failed), a clause lacks a record at the plan's min_tier
+# (tier-below-required), or in a tiered plan the task's diff adds a Rust escape hatch
+# (escape-hatch, escape_hatch_hits): the executor can remove it, and a task that truly
+# needs one spends its repair budget and parks for a human.
+EVIDENCE_REPAIR = ("evidence-failed", "tier-below-required", "escape-hatch")
 EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
 # Proof tiers (the second slice). A task in a gated plan MAY carry `min_tier` (the
 # weakest tier its clauses accept) and `clauses` (<feature>:C<n> refs, its feature among
@@ -2831,6 +2833,107 @@ def contract_changed(st, sha):
     return None
 
 
+# The escape-hatch rule (spec Terms), the conductor's copy. verification-skill-forge's
+# forge.py check-proof holds the other copy, and both pass the one shared vector list,
+# verification-skill-forge/assets/escape_hatch_vectors.json (test_conductor_escape_hatch).
+# On a line that a diff adds to a .rs file: `assume(` or `admit(` not preceded by an
+# identifier character or by `::` (so `prop_assume(`, `my_assume(` and `kani::assume(`
+# are not escapes, `x.assume(` is), or `external_body` inside `#[verifier ...]` on the
+# same line. Comments and strings are not skipped: a token there is still reported.
+ESCAPE_CALL_RE = re.compile(r"(?<!\w)(?<!::)(assume|admit)\(")
+ESCAPE_ATTR_RE = re.compile(r"#\[verifier\b[^\]]*\bexternal_body\b")
+# The diff flags. Like forge's DIFF_FLAGS: renames are off, so every line of a moved .rs
+# file counts as added (the scan errs towards a reject); no external diff, no textconv,
+# fixed prefixes. Unlike forge, also --text and --no-relative: a .gitattributes that the
+# task itself commits (`*.rs -diff` or `binary`) cannot hide its added lines as "Binary
+# files differ", and a diff.relative config cannot narrow the diff. GIT_SAFE and
+# git_env() come with every call (_escape_git).
+ESCAPE_DIFF = ("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
+               "--no-textconv", "--no-renames", "--text", "--no-relative",
+               "--src-prefix=a/", "--dst-prefix=b/")
+
+
+def escape_hatches(line):
+    """[(column, token)] for every escape hatch on one added source line, sorted by
+    column. The token is `assume(`, `admit(` or `external_body`; the column is where the
+    match starts (for external_body, the `#[verifier` that holds it)."""
+    hits = [(m.start(), m.group(1) + "(") for m in ESCAPE_CALL_RE.finditer(line)]
+    hits += [(m.start(), "external_body") for m in ESCAPE_ATTR_RE.finditer(line)]
+    return sorted(hits)
+
+
+def _added_lines(diff_text):
+    """[(head line number, text)] for every line a unified diff of one file adds."""
+    out, cur, in_hunk = [], 0, False
+    for line in diff_text.split("\n"):
+        if line.startswith("@@"):
+            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            in_hunk, cur = bool(m), int(m.group(1)) if m else 0
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
+            out.append((cur, line[1:]))
+            cur += 1
+        elif line.startswith(" "):
+            cur += 1
+    return out
+
+
+def _escape_git(root, *args):
+    """git with GIT_SAFE and git_env(), as bytes (a path need not be UTF-8), with
+    pathspecs read literally. A CompletedProcess, or None when git cannot run."""
+    env = git_env()
+    for k in ("GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+        env.pop(k, None)
+    env["GIT_LITERAL_PATHSPECS"] = "1"
+    try:
+        return subprocess.run(["git", "-C", root, *GIT_SAFE, *args], capture_output=True,
+                              timeout=300, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def escape_hatch_hits(root, base, head):
+    """([(path, head line, token)], None) for every escape hatch that the diff from base
+    to head adds to a .rs file: files in git's path order, then line, then column. Or
+    (None, why) when git cannot show the diff, so the caller fails closed."""
+    def err(r):
+        return "git is not runnable" if r is None else \
+            r.stderr.decode("utf-8", "replace").strip()
+    r = _escape_git(root, *ESCAPE_DIFF, "--name-only", "-z", base, head, "--")
+    if r is None or r.returncode != 0:
+        return None, "cannot diff %s..%s: %s" % (base[:12], head[:12], err(r))
+    names = [n for n in r.stdout.split(b"\0") if n.endswith(b".rs")]
+    hits = []
+    for name in names:
+        path = name.decode("utf-8", "surrogateescape")
+        r = _escape_git(root, *ESCAPE_DIFF, "-U0", base, head, "--", name)
+        if r is None or r.returncode != 0:
+            return None, "cannot diff %s in %s..%s: %s" % (path, base[:12], head[:12],
+                                                           err(r))
+        for lineno, text in _added_lines(r.stdout.decode("utf-8", "replace")):
+            hits += [(path, lineno, tok) for _col, tok in escape_hatches(text)]
+    return hits, None
+
+
+def escape_hatch_check(st, sha):
+    """(None, None) when the diff from the run base (git merge-base <run branch> sha) to
+    sha adds no escape hatch to a .rs file; ("escape-hatch", "<path>:<line>") for the
+    first hit in git's path order; ("evidence-diff-unreadable", why) when the merge base
+    or the diff cannot be read."""
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return "evidence-diff-unreadable", "no merge base of %s and %s" % (
+            st.run_branch, sha)
+    hits, why = escape_hatch_hits(st.root, base, sha)
+    if hits is None:
+        return "evidence-diff-unreadable", why
+    if hits:
+        return "escape-hatch", "%s:%d" % hits[0][:2]
+    return None, None
+
+
 def cmd_evidence(args):
     """Judge the task's verified head against the evidence predicate (spec 5.1): the root's
     independent runtime verdict. EVIDENCE: <task> pass <sha> (exit 0), or
@@ -2875,6 +2978,33 @@ def cmd_evidence(args):
         print("EVIDENCE: %s reject contract-changed %s" % (args.task, changed))
         st.set_status(args.task, "reviewing", evidence=record)
         _park(st, args.task, "contract-changed")
+        return 3
+    # Then, for every task in a tiered plan, the escape-hatch scan (spec Terms): a head
+    # whose diff from the run base adds one to a .rs file goes back to its executor as a
+    # repair; a diff git cannot show parks (fail closed).
+    hatch, where = escape_hatch_check(st, pinned) if _tiered_plan(st) else (None, None)
+    if hatch:
+        record = {"verdict": "reject", "reason": hatch,
+                  "feature": where if hatch == "escape-hatch" else None,
+                  "observed": None, "verifier": verifier, "verified_head": pinned,
+                  "features": [], "paths": [], "doctor": [], "at": _rfc3339(_now())}
+        st.log("evidence", task=args.task, ok=False, reason=hatch, feature=record["feature"],
+               verifier=verifier, verified_head=pinned, features=[], paths=[])
+        if hatch == "escape-hatch":
+            print("EVIDENCE: %s reject escape-hatch %s" % (args.task, where))
+            sys.stderr.write("task %s adds a Rust escape hatch at %s (assume(, admit( or "
+                             "#[verifier::external_body]): remove it and commit again\n"
+                             % (args.task, where))
+            st.set_status(args.task, "verifying", review=None, evidence=record)
+            _count_failure(st, args.task)
+            st.save()
+            _send_back(st, args.task)
+            return 3
+        print("EVIDENCE: %s reject evidence-diff-unreadable" % args.task)
+        sys.stderr.write("task %s: %s; the escape-hatch scan cannot run, so the task "
+                         "parks: repair the repository and resume\n" % (args.task, where))
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "evidence-diff-unreadable")
         return 3
     v = evidence_verdict(st, t, pinned, verifier, args.task)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],

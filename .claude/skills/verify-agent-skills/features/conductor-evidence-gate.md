@@ -227,6 +227,44 @@ no `min_tier`, so `evidence` prints `EVIDENCE: T1 pass <sha>`.
 `factory-conductor/assets/test_conductor_contract.py` also covers a task with no tier
 field in a tiered plan: it parks the same way.
 
+### Add a Rust escape hatch and read the repair
+
+In a tiered plan, `evidence` reads the diff from the run base to the task's head,
+limited to `.rs` files. It does this for every task, after the contract check and
+before the other evidence checks. Write `<lib.rs>` with `#[verifier::external_body]` on
+its first line, and build a tiered run whose task commits it:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture gated-run --instance "$INSTANCE" --name hatch \
+  --feature notes-create=a.txt \
+  --task-json '{"min_tier": "runtime", "clauses": ["notes-create:C1"]}' \
+  --edit src/lib.rs=<lib.rs>
+```
+
+Record the doctor and the runtime `evidence.json` as in the first recipe. Then:
+
+```sh
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name hatch-reject -- \
+  python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name hatch-resume -- \
+  python3 factory-conductor/assets/conductor.py resume --root <root>
+```
+
+Expect `EVIDENCE: T1 reject escape-hatch src/lib.rs:1` with exit 3. This reject is a
+repair, so `resume` prints `NEXT: T1 dispatch-repair evidence`. Other cases:
+
+- A file that adds `kani::assume(` (or `prop_assume(`) instead: `EVIDENCE: T1 pass <sha>`.
+- The same `external_body` file without `--task-json`: the plan has no `min_tier`, so
+  `evidence` prints `EVIDENCE: T1 pass <sha>`.
+- Hits in two files: the reject names the first one in git's path order.
+- A diff that git cannot show: `EVIDENCE: T1 reject evidence-diff-unreadable` and
+  `PARK: T1 evidence-diff-unreadable`. `factory-conductor/assets/test_conductor_escape_hatch.py`
+  covers this case.
+
+The rule is in the spec's Terms. The vectors in
+`verification-skill-forge/assets/escape_hatch_vectors.json` hold its cases, and the
+conductor's copy and forge's copy both pass them.
+
 ## Proof
 
 The two captures, plus the run state: `conductor status --root <root>` shows T1's evidence
