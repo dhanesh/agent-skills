@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.6.0"
+  version: "1.7.0"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -263,6 +263,13 @@ each other once merged: the envelope is written, but nothing is pushed and no PR
 Report the failing lines; `--retry-remote` refuses the run (exit 2). The run stays finished:
 the human fixes the conflict by hand on the run branch and pushes it themselves, or starts a
 new run (`init`) from a plan that orders or merges the two tasks.
+In a tiered plan, `finish` also re-runs each proved, bounded or property clause's proof on
+the integration head, and prints `INTEGRATION: <outcome> <task> proof <feature>:C<n>` for
+each one that did not pass, before `INTEGRATION: pass`. The outcomes are `pass`, `fail`
+(it failed twice), `flaky` (it failed, then passed), `unavailable` (the tool or the record
+cannot run), `stale-mutant` (the mutant patch no longer applies) and `uncaught` (the
+mutant passed twice). Only `fail` turns the run red (`STOP: integration_red`); every other
+outcome but `pass` lowers the clause to `runtime` and the run goes on.
 `INTEGRATION: skipped grant_ask` and `STOP: grant_ask` (exit 3) mean the grant lapsed before
 `finish`, so no check ran and nothing is pushed: report it. Once the user renews the grant,
 `conductor finish --retry-remote` runs the integration on the head the skip recorded, writes a
@@ -472,6 +479,11 @@ Diff: <output of git --no-replace-objects -C <worktree> -c core.fsmonitor=false 
 
 Building or running the code to check a claim is fine; leave every tracked file as it is.
 
+Escape hatches: when the diff touches a Rust (.rs) file, search its added lines for
+`assume(`, `admit(` and `external_body`. Each one tells a prover to trust a claim without
+proof, so a proof of that code proves less than it says. Name each hit as <path>:<line>.
+The answer to 1 is no for a diff that adds one, unless the requirement asks for it.
+
 Answer two questions about the diff:
 1. Does it satisfy the requirement?
 2. Does it do anything the task did not ask for?
@@ -541,7 +553,14 @@ with a task that names none.
    any task carries `min_tier`), no `features/<id>.md` of the verify skill has a different
    `## Contract` section at the head than at the run base, a file or section on one side
    only counting as a change (`contract-changed <feature>`, the first in sorted order; it
-   parks the task, because a human decides whether a contract moves);
+   parks the task, because a human decides whether a contract moves); then, for every task
+   in a tiered plan, the diff from the run base to the head adds no Rust escape hatch: no
+   added line of a `.rs` file holds `assume(` or `admit(` (not after an identifier
+   character or `::`, so `prop_assume(` and `kani::assume(` pass) or `external_body`
+   inside `#[verifier …]` (`escape-hatch <path>:<line>`, the first hit; a repair, as for
+   `evidence-failed`, because the executor can remove it; a task that truly needs one
+   spends its repair budget and parks for a human). A diff git cannot show parks the task
+   (`evidence-diff-unreadable`), because the scan then cannot run;
 2. the verifier is not the owner recorded at `start` (`writer-is-verifier`);
 3. every feature the task declares has a map entry at that commit (`feature-unmapped`);
 4. each touched feature (declared, plus every feature whose anchor the diff touches) has a
@@ -559,8 +578,12 @@ with a task that names none.
    property > runtime (`tier-below-required <feature>:C<n>`; a repair, as for
    `evidence-failed`). A clause meets a tier through
    `<evidence_dir>/*/<feature>/<sha>/proof-<tier>-<tool>-C<n>.json` recorded by this
-   verifier with an allowlisted tool and, for bounded and property, a caught mutant; it
-   meets runtime through the feature's accepted `evidence.json`.
+   verifier with an allowlisted tool whose stored argv starts with one of that tool's
+   runners (the runner table, a copy of verification-skill-forge's)
+   and, for bounded and property, a caught mutant; it meets runtime through the feature's
+   accepted `evidence.json`. The clause rule: a clause counts at any tier only when the
+   feature's `## Contract` at the head defines it, so a clause the contract does not
+   define meets no tier and shows as `tier-below-required`.
 
 `merge` re-checks the grant and re-reads the records. A commit after the verdict (a
 rebase, a backdoor) moves the branch past the proven head, so `merge` clears the review and
@@ -658,9 +681,10 @@ change rather than worked around in silence.
   config makes the push and the PR ask (`ci-config`), because CI runs with the repository's
   secrets. `watch` stops it with `reentry_exhausted` once `max_reentries` agents have
   started.
-- **What parks a task.** An evidence verdict of `feature-unmapped`, `tier-field-unreadable`
-  or `contract-changed` parks it with that reason; `tier-below-required` does not park it
-  but sends it back as a repair, like `evidence-failed`. Repairs reaching `max_repairs_per_task` (2 by default) park it with
+- **What parks a task.** An evidence verdict of `feature-unmapped`, `tier-field-unreadable`,
+  `contract-changed` or `evidence-diff-unreadable` parks it with that reason;
+  `tier-below-required` and `escape-hatch` do not park it but send it back as a repair,
+  like `evidence-failed`. Repairs reaching `max_repairs_per_task` (2 by default) park it with
   `verify_red_after_repairs`; a dispatch it needs past `max_dispatches` parks it with
   `budget_dispatches`. `max_dispatches` counts every executor, repair and reviewer dispatch the
   tool records.
@@ -677,10 +701,13 @@ The report MUST state which of `max_tokens` and `max_usd` were enforced and whic
 recorded, as `conductor status` does, and, when one was enforced, the claimed usage totals
 and their trust. Name the grant id and each action class the run used. Say whether
 the evidence gate was on; when it was, give each proven task's evidence paths and verdict
-agent. When a task carries `clauses`, give the `ASSURANCE: <feature> <tier> <clause ids>`
-lines that `conductor status` prints after its last `STATUS:` line (the envelope's
-`assurance` items): the weakest tier each feature reached, `none` for a clause no merged
-task recorded. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
+agent. When a task carries `clauses`, give the `ASSURANCE: <feature> <tier> <clause ids>
+@<head>` lines that `conductor status` prints after its last `STATUS:` line once `finish`
+ran (the envelope's `assurance` items, each with the integration head as `sha` and one
+`proofs` entry per clause): the weakest tier each feature reached on the integration head
+(`<head>` is its first 12 characters), `none` for a clause no merged task recorded.
+`finish` itself prints no `ASSURANCE:` line. Give the `INTEGRATION: <outcome> <task> proof
+<feature>:C<n>` lines too. `conductor trail --out <file>` writes the decision trail (per task: dispatch time,
 owner, worktree, verified commit, reviewer, verdict agent, evidence paths, merge outcome);
 offer it to the user to commit when the stakes warrant an audit record.
 
@@ -709,6 +736,37 @@ are caught there and not pushed. The push sends exactly the commit that re-run v
 refuses when the run branch has moved since. CI on the pushed branch is still the independent
 check outside this machine. A plan with weak checks gets weak proof, and the reviewer is the only
 thing that looks past them.
+
+A proof tier says how a clause was proved, and each says less than its name suggests. Every
+tier record counts only when the task's verifier, not its owner, recorded it, its stored
+argv starts with a runner of its tool on the runner table (so `--tool kani` on an argv that
+never runs kani counts for nothing), and the recorder ran it in a clean checkout of the
+committed head. In a tiered plan, a diff that adds a Rust escape hatch (`assume(`,
+`admit(`, `external_body`) goes back as a repair (`escape-hatch`), because a hatch makes a
+prover trust a claim without proof, and a clause counts only when its
+feature's `## Contract` at the head defines it.
+
+- **proved** (verus): the prover accepted the code for that clause on the recorded head. It
+  proves what the specification states, for every input. It does not prove that the
+  specification says what the clause means, and the escape-hatch scan does not see a hatch
+  outside Rust or one that was in the code before the run.
+- **bounded** (kani): the model checker found no failure up to its bounds, and it failed on
+  a mutant (the mutant floor: a check that passes a broken copy proves nothing). It does
+  not prove anything past the bounds, and one caught mutant shows only that the check can
+  fail, not that it catches every bug.
+- **property** (proptest, hypothesis, fast-check, rapid): generated inputs held the
+  property, and the same command failed on a mutant. It proves only the inputs it tried;
+  a rare failing input can still exist.
+- **runtime**: the verifier drove the running app and its passing `evidence.json` holds.
+  It proves the paths the verifier drove at that head. It does not prove the paths it did
+  not drive, and `finish` does not re-run it.
+
+At `finish`, each proved, bounded or property clause is re-run on the integration head
+(and its mutant, for bounded and property). A clause keeps its tier only on `pass`. `fail`
+(twice) stops the run as `integration_red`; `flaky`, `unavailable`, `stale-mutant` and
+`uncaught` lower the clause to `runtime` and the run goes on. The `ASSURANCE:` lines and
+the envelope's `assurance` items then name that head. The re-run records nothing and can
+only lower a tier: it does not prove a clause that no verifier recorded.
 
 Cost is bounded in every run, by dispatches and by wall clock: `max_dispatches` is derived when the
 grant sets none, and the grant's expiry caps the wall clock at 7 days even without
