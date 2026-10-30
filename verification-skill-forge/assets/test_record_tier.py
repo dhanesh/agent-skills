@@ -125,8 +125,12 @@ class RecordTier(Base):
         with open(os.path.join(self.outdir(), paths[0]), encoding="utf-8") as f:
             stdout = f.read()
         self.assertIn("verified 3 functions", stdout)
+        # The proof ran at the root of a checkout outside the worktree, and the record
+        # says so instead of naming a directory that is gone.
         cwd = stdout.split(" in ", 1)[1].strip()
-        self.assertEqual(os.path.realpath(cwd), os.path.realpath(self.root))
+        self.assertFalse(os.path.realpath(cwd).startswith(os.path.realpath(self.root)))
+        self.assertEqual((doc["cwd"], doc["ran_in"]), (".", "checkout"))
+        self.assertFalse(os.path.exists(cwd), "the checkout was left behind")
 
     def test_edited_stdout_is_reported_altered_by_conductor(self):
         rc, _, err = self.tier(0)

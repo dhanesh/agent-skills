@@ -83,19 +83,26 @@ is about. The recorder does these steps:
 1. It checks every flag. `--mutant-patch` and `--mutant-author` (`verifier` or `forge`,
    the one who wrote the mutant) are required for `bounded` and `property`, and refused
    for `proved`.
-2. It extracts the committed HEAD (`git archive`) into a temporary directory outside the
-   worktree, and applies the patch there with `git apply`. A patch that does not apply
-   exits 2 before any command runs. Make the diff against HEAD, with paths from the
-   repository root (`git diff > mutant.diff`, then `git checkout -- .`).
-3. It runs `--cmd` on HEAD from the worktree root. The command must exit 0.
-4. It runs the same argv, with the same timeout, from the root of the mutated copy. The
+2. It checks that the worktree is clean. When `git status --porcelain
+   --untracked-files=no` is not empty, it exits 2 and names the changed paths. A staged
+   or an unstaged change to a tracked file counts. An untracked file does not count.
+3. It checks out every tracked file of the committed HEAD into a temporary directory
+   outside the worktree, and applies the patch there with `git apply`. A patch that does
+   not apply exits 2 before any command runs. Make the diff against HEAD, with paths from
+   the repository root (`git diff > mutant.diff`, then `git checkout -- .`).
+4. It checks out HEAD again into a second temporary directory, and runs `--cmd` from its
+   root. The command must exit 0.
+5. It runs the same argv, with the same timeout, from the root of the mutated copy. The
    run must exit non-zero, and its stdout plus stderr must match the tool's failure
    signature below.
-5. It removes the copy on every path, and only then writes the record.
+6. It removes both checkouts on every path, and only then writes the record.
 
-The worktree is never written. Use paths relative to the worktree root in `--cmd`: an
-absolute path into the worktree makes the mutant run check the unmutated code. Files that
-are not committed (or that `export-ignore` drops) are not in the copy.
+`proved` does steps 1, 2, 4 and 6. The worktree and its index are never written. Each
+checkout holds every tracked file of HEAD, and a file that `export-ignore` marks is in
+it too. An untracked file is not in it, so a proof that needs one fails. Use paths
+relative to the repository root in `--cmd`: an absolute path into the worktree makes the
+run check the worktree and not the checkout. The record stores `"cwd": "."` and
+`"ran_in": "checkout"`, because the runs happened at the root of a checkout that is gone.
 
 A mutant run that exits 0, or whose output does not match the signature, exits 1 and
 writes nothing. Write a mutant that makes the check itself fail, not one that breaks the
@@ -109,16 +116,16 @@ Exit codes of `record --tier`:
 |---|---|
 | 0 | Recorded. It prints `PROOF: <tier> <path>`. |
 | 1 | Nothing recorded. The command failed or timed out on HEAD, the mutant run exited 0 or did not match the signature, or HEAD moved during the run. |
-| 2 | Nothing ran or was recorded. The input is not valid: for example a `--tool` outside its tier, a `--cmd` that is not a runner of its `--tool`, a `--clauses` value that is not one clause, a missing mutant flag, or a patch that does not apply. |
+| 2 | Nothing ran or was recorded. The input is not valid: for example a `--tool` outside its tier, a `--cmd` that is not a runner of its `--tool`, a `--clauses` value that is not one clause, a missing mutant flag, a worktree with tracked changes, or a patch that does not apply. |
 
 ### Known limits
 
 - A command that is rigged on purpose to act differently on its second run, or to read
   its working directory, can fake a caught mutant. This is the same deliberate forgery
   that the recorder cannot stop for any command.
-- The HEAD run uses the worktree as it is, with uncommitted changes, but the mutant run
-  uses a copy of committed HEAD. Run the record from a clean worktree, so that both runs
-  check the same code.
+- The checkouts hold only what git tracks. A proof that needs a build cache, a
+  submodule or a file that is not committed runs slower or fails. Commit what the proof
+  needs, or record the clause at the tier its evidence earns.
 
 ## Failure signatures
 

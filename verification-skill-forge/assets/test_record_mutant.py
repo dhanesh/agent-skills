@@ -249,8 +249,8 @@ class RecordMutant(unittest.TestCase):
         r = self.record("--mutant-patch", self.diff("pass"), "--mutant-author", "verifier")
         self.assertNothingWritten(r, 1, "exited 0 on the mutant", "nothing recorded")
         head, mutant = self.runs()
-        self.assertEqual(head, self.root)
-        self.assertNotEqual(mutant, self.root)
+        self.assertNotEqual(head, mutant)
+        self.assertNotIn(self.root, (head, mutant))
 
     def test_mutant_that_only_breaks_the_build_writes_nothing(self):
         for tier, tool in (("property", t) for t in V.TIER_TOOLS["property"]):
@@ -306,11 +306,14 @@ class RecordMutant(unittest.TestCase):
         self.assertEqual(read(".mutant.exit"), "1\n")
         self.assertEqual(read(".mutant.stdout"), FAILED["hypothesis"])
         self.assertIn("1 passed", read(".stdout"))
-        # Both runs used the same argv: once at the root, once in a copy elsewhere.
+        # Both runs used the same argv, each in its own checkout of HEAD, outside the
+        # worktree.
+        self.assertEqual((doc["cwd"], doc["ran_in"]), (".", "checkout"))
         head, mutant = self.runs()
-        self.assertEqual(head, self.root)
-        self.assertFalse(mutant.startswith(self.root))
-        self.assertTrue(mutant.startswith(self.scratch))
+        self.assertNotEqual(head, mutant)
+        for d in (head, mutant):
+            self.assertFalse(d.startswith(self.root))
+            self.assertTrue(d.startswith(self.scratch))
 
     def test_every_tool_records_with_its_signature(self):
         for tier in V.MUTANT_TIERS:
@@ -325,16 +328,16 @@ class RecordMutant(unittest.TestCase):
                         self.assertEqual(json.load(f)["mutant_author"], "forge")
                     self.assertClean()
 
-    def test_uncommitted_change_is_not_in_the_copy(self):
-        # The copy is HEAD, not the dirty worktree: a worktree edit that would make the
-        # patch not apply does not matter, and is left in place.
+    def test_uncommitted_change_is_refused(self):
+        # A tracked edit means the head run and the mutant run would not check the same
+        # code, so the recorder refuses before any checkout or run, and leaves the edit.
         with open(os.path.join(self.root, "mode.txt"), "w", encoding="utf-8") as f:
             f.write("ok\n\n")
         self.before = listing(self.root)
         r = self.record("--mutant-patch", self.diff("failed"), "--mutant-author",
                         "verifier")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertClean()
+        self.assertNothingWritten(r, 2, "tracked changes", "mode.txt")
+        self.assertEqual(self.runs(), [])
 
     # ── the signature table ───────────────────────────────────────────────────
     def test_signatures_cover_the_mutant_tiers(self):
