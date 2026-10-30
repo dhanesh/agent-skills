@@ -68,14 +68,30 @@
     },
     "assurance": {
       "type": "array",
-      "description": "Optional. Present only when at least one task in the plan carries clauses: one item per feature named in any task's clauses, in feature-id order, the same data as conductor.py status prints in its ASSURANCE: lines. A clause's tier is the strongest tier recorded at the evidence pass of a merged task that names it, else none; the feature's tier is its weakest clause's tier, in the order proved > bounded > property > runtime > none.",
+      "description": "Optional. Present only when at least one task in the plan carries clauses: one item per feature named in any task's clauses, in feature-id order, the same data as conductor.py status prints in its ASSURANCE: lines (with ' @<sha, first 12 characters>' once sha is present). A clause's tier is the strongest tier recorded at the evidence pass of a merged task that names it, else none; once finish re-ran the proofs, a proved, bounded or property clause takes the tier of its re-run in integration.proofs instead; the feature's tier is its weakest clause's tier, in the order proved > bounded > property > runtime > none.",
       "items": {
         "type": "object",
         "required": ["feature", "tier", "clauses"],
         "properties": {
           "feature": {"type": "string", "description": "The feature id."},
           "tier": {"type": "string", "enum": ["proved", "bounded", "property", "runtime", "none"], "description": "The weakest tier among the feature's clauses."},
-          "clauses": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}, "description": "The clause ids at that tier, in numeric order (C2 before C10)."}
+          "clauses": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}, "description": "The clause ids at that tier, in numeric order (C2 before C10)."},
+          "sha": {"type": "string", "pattern": "^[0-9a-f]{40,64}$", "description": "Present only when finish re-ran the proofs (integration.proofs exists): the integration head they ran on. Then a proved, bounded or property clause keeps its tier only when its proof held on this head; runtime is the task's own runtime evidence at its verified head, which finish does not re-run."},
+          "proofs": {
+            "type": "array",
+            "description": "One entry per clause of this feature that any task names, in numeric order (C2 before C10).",
+            "items": {
+              "type": "object",
+              "required": ["clause", "tier", "tool", "argv", "mutant_rechecked"],
+              "properties": {
+                "clause": {"type": "string", "pattern": "^C[1-9][0-9]*$", "description": "The clause id."},
+                "tier": {"type": "string", "enum": ["proved", "bounded", "property", "runtime", "none"], "description": "The clause's tier, as the feature's tier uses it."},
+                "tool": {"type": ["string", "null"], "description": "The proof record's tool; null for runtime and none, and when the record cannot be read."},
+                "argv": {"type": ["array", "null"], "items": {"type": "string"}, "description": "The proof record's stored argv; null for runtime and none, and when the record cannot be read."},
+                "mutant_rechecked": {"type": ["boolean", "null"], "description": "bounded and property: true only when finish applied the record's mutant patch to the integration head and the run caught it; false before finish. null for proved, runtime and none."}
+              }
+            }
+          }
         }
       }
     },
