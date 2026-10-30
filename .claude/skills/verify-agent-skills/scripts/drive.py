@@ -22,9 +22,11 @@ fixtures one verifier builds and the captures it makes. Two instances never shar
            --plan-json merges keys into the plan payload; a null value removes the key
            (`{"verification": null}` builds a plan with no evidence gate).
   fixture  proof-tool --instance I --name N
-           write a fake hypothesis run (tool.py), its target (target.txt: good) and a
-           mutant diff it catches (mutant.diff) into the instance; commit the first two
-           with gated-run --edit, then record a property proof with the diff
+           write a fake hypothesis run (tool.py), its target (target.txt: good), a
+           mutant diff it catches (mutant.diff) and bin/pytest, a PATH shim that runs
+           tool.py from its cwd, into the instance; commit the first two with
+           gated-run --edit, then record a property proof with the diff and
+           --cmd pytest, with bin_dir first on PATH
   cleanup  --instance I                 delete .verify-run/<instance>/ (never .verify/)
 
 Every command prints one JSON object. Paths in it are absolute.
@@ -307,6 +309,7 @@ if mode == "caught":
     sys.exit(1)
 print("1 passed in 0.01s")
 '''
+PROOF_SHIM = "#!%s\nimport runpy\nrunpy.run_path('tool.py', run_name='__main__')\n"
 PROOF_MUTANT = """diff --git a/target.txt b/target.txt
 --- a/target.txt
 +++ b/target.txt
@@ -324,7 +327,16 @@ def cmd_proof_tool(a):
     for name, text in files.items():
         with open(os.path.join(d, name), "w", encoding="utf-8") as f:
             f.write(text)
-    return out({name.replace(".", "_"): os.path.join(d, name) for name in files})
+    # The recorder runs only a runner of --tool, so the fake tool is reached through a
+    # PATH shim with the runner's name.
+    bin_dir = os.path.join(d, "bin")
+    os.makedirs(bin_dir)
+    shim = os.path.join(bin_dir, "pytest")
+    with open(shim, "w", encoding="utf-8") as f:
+        f.write(PROOF_SHIM % sys.executable)
+    os.chmod(shim, 0o755)
+    paths = {name.replace(".", "_"): os.path.join(d, name) for name in files}
+    return out(dict(paths, bin_dir=bin_dir))
 
 
 def cmd_cleanup(a):

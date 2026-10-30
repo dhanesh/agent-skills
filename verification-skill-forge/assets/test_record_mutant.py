@@ -4,6 +4,7 @@
 Each test drives the real CLI in a subprocess against a temp git repo. The proof tool is a
 small Python script that prints what the real tool prints for the state in mode.txt, and
 appends its cwd to a log outside the repo, so a test can see where (and whether) it ran.
+It is reached through PATH shims named after each tool's runner (pytest, cargo, ...).
 """
 import hashlib
 import json
@@ -89,6 +90,23 @@ TOOL = ("import json, os, sys\n"
         "sys.exit(2 if mode == 'broken' else 1)\n")
 
 
+# The --cmd each tool is recorded with, and the shims it needs: name -> words to drop.
+RUN = {"verus": "verus", "kani": "kani", "proptest": "cargo test", "hypothesis": "pytest",
+       "fast-check": "vitest", "rapid": "go test"}
+SHIMS = {"verus": 0, "kani": 0, "cargo": 1, "pytest": 0, "vitest": 0, "go": 1}
+
+
+def shim(bin_dir, name, skip=0):
+    """Write bin_dir/name: it drops its first skip args and runs tool.py from its cwd."""
+    path = os.path.join(bin_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!%s\nimport runpy, sys\nsys.argv = ['tool.py'] + sys.argv[%d:]\n"
+                "runpy.run_path('tool.py', run_name='__main__')\n"
+                % (sys.executable, 1 + skip))
+    os.chmod(path, 0o755)
+    return path
+
+
 def patch_to(mode):
     """A diff that changes mode.txt from ok to mode."""
     return ("diff --git a/mode.txt b/mode.txt\n--- a/mode.txt\n+++ b/mode.txt\n"
@@ -127,7 +145,12 @@ class RecordMutant(unittest.TestCase):
         # A private TMPDIR, so a mutant copy left behind shows up as a file here.
         self.scratch = os.path.join(self.tmp, "scratch")
         os.makedirs(self.scratch)
-        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev, TMPDIR=self.scratch)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        for name, skip in SHIMS.items():
+            shim(self.bin, name, skip)
+        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev, TMPDIR=self.scratch,
+                        PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
         self.before = listing(self.root)
 
     def tearDown(self):
@@ -140,7 +163,7 @@ class RecordMutant(unittest.TestCase):
         return path
 
     def record(self, *extra, tier="property", tool="hypothesis"):
-        cmd = "%s tool.py %s %s" % (sys.executable, self.log, tool)
+        cmd = "%s %s %s" % (RUN[tool], self.log, tool)
         return subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", tier, "--tool", tool,
@@ -243,7 +266,7 @@ class RecordMutant(unittest.TestCase):
     def test_mutant_failing_another_tools_way_lacks_the_signature(self):
         # A hypothesis record whose mutant output is a kani report: it failed, but not
         # the way a failed property test does.
-        cmd = "%s tool.py %s kani" % (sys.executable, self.log)
+        cmd = "pytest %s kani" % self.log
         r = subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", "property", "--tool",

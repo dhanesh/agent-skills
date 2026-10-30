@@ -2,7 +2,8 @@
 """Unit tests for the tier tool allowlist and the one-clause rule (spec R4; stdlib only).
 
 Each test drives the real CLI in a subprocess. The proof tool is a small Python script
-that writes a marker file, so a refused command can be shown never to have run.
+that writes a marker file, so a refused command can be shown never to have run. It is
+reached through PATH shims named after each tool's runner (verus, pytest, cargo, ...).
 """
 import hashlib
 import os
@@ -23,6 +24,23 @@ GENV = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
 FAKE = ("import sys\n"
         "open(sys.argv[1], 'w').write('ran\\n')\n"
         "print('0 errors')\n")
+
+
+# The --cmd each tool is recorded with, and the shims it needs: name -> words to drop.
+RUN = {"verus": "verus", "kani": "kani", "proptest": "cargo test", "hypothesis": "pytest",
+       "fast-check": "vitest", "rapid": "go test"}
+SHIMS = {"verus": 0, "kani": 0, "cargo": 1, "pytest": 0, "vitest": 0, "go": 1}
+
+
+def shim(bin_dir, name, skip=0):
+    """Write bin_dir/name: it drops its first skip args and runs tool.py from its cwd."""
+    path = os.path.join(bin_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!%s\nimport runpy, sys\nsys.argv = ['tool.py'] + sys.argv[%d:]\n"
+                "runpy.run_path('tool.py', run_name='__main__')\n"
+                % (sys.executable, 1 + skip))
+    os.chmod(path, 0o755)
+    return path
 
 
 def listing(root):
@@ -56,13 +74,18 @@ class RecordTool(unittest.TestCase):
         with open(os.path.join(old, "evidence.json"), "w", encoding="utf-8") as f:
             f.write('{"kind": "evidence"}\n')
         self.marker = os.path.join(self.tmp, "ran.marker")
-        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        for name, skip in SHIMS.items():
+            shim(self.bin, name, skip)
+        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev,
+                        PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def record(self, tier, tool, clauses="C1", *extra):
-        cmd = "%s tool.py %s" % (sys.executable, self.marker)
+        cmd = "%s %s" % (RUN.get(tool, "pytest"), self.marker)
         return subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", tier, "--tool", tool,
