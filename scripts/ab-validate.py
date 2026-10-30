@@ -9760,6 +9760,13 @@ def _pt_feature(contract):
     return head + contract + "\n## Proof\n" + tail
 
 
+# A runner argv per tool, so the stored argv runs the stored tool: a conductor that binds
+# records to their runner (proof-tier trust R2) counts these records.
+_PT_RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": ["pytest"],
+                   "proptest": ["cargo", "test"], "fast-check": ["vitest"],
+                   "rapid": ["go", "test"]}
+
+
 def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="verifier"):
     """A proof record in the shape `verify_evidence.py record --tier` writes, with its
     mutant artifacts (factory-conductor's test_conductor_tiers.py builds the same)."""
@@ -9779,7 +9786,8 @@ def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="v
         json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
                    "feature": "notes-create", "sha": sha, "verifier": verifier,
                    "result": "pass", "tier": tier, "tool": tool, "clauses": [clause],
-                   "argv": ["python3", "t.py"], "cwd": "/x", "timeout": 900,
+                   "argv": list(_PT_RUNNER_ARGV.get(tool, [tool])), "cwd": "/x",
+                   "timeout": 900,
                    "exit_status": 0, "artifacts": arts, "captured_at": _now_z(),
                    "mutant_author": verifier, "mutant_exit_status": 1}, f)
 

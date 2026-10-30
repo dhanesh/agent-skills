@@ -294,6 +294,59 @@ TIER_TOOLS = {"proved": ("verus",), "bounded": ("kani",),
               "property": ("proptest", "hypothesis", "fast-check", "rapid")}
 MUTANT_TIERS = ("bounded", "property")
 MUTANT_ARTIFACTS = ("mutant.patch", "mutant.exit", "mutant.stdout", "mutant.stderr")
+# A copy of verify_evidence.py's runner rule (RUNNERS, WRAPPERS, runner_matches) and
+# FAILURE_SIGNATURES. A proof record counts only when its stored argv runs its stored
+# tool, so a record whose --tool labels another command never meets a tier.
+# test_conductor_tiers checks that both copies are equal on one shared vector list.
+RUNNERS = {"verus": (("verus",), ("cargo", "verus")),
+           "kani": (("kani",), ("cargo", "kani")),
+           "hypothesis": (("pytest",), ("python", "-m", "pytest"),
+                          ("python3", "-m", "pytest")),
+           "proptest": (("cargo", "test"),),
+           "fast-check": (("vitest",), ("jest",)),
+           "rapid": (("go", "test"),)}
+WRAPPERS = (("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("pipenv", "run"),
+            ("hatch", "run"), ("pnpm", "exec"), ("yarn",), ("bunx",), ("npx",))
+PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?\Z")
+FAILURE_SIGNATURES = {
+    "kani": {"require": (r"VERIFICATION:- FAILED",),
+             "reject": (r"error\[E\d+\]", r"could not compile")},
+    "proptest": {"require": (r"test result: FAILED", r"minimal failing input"),
+                 "reject": (r"error\[E\d+\]", r"could not compile")},
+    "hypothesis": {"require": (r"Falsifying example", r"\b\d+ failed\b"),
+                   "reject": (r"errors? during collection", r"ERROR collecting")},
+    "fast-check": {"require": (r"Property failed after \d+ tests?",),
+                   "reject": (r"Test suite failed to run", r"error TS\d+")},
+    "rapid": {"require": (r"--- FAIL", r"\[rapid\] failed"),
+              "reject": (r"\[build failed\]", r"\[setup failed\]")},
+}
+
+
+def _runner_word(word):
+    """A python interpreter name counts as python (python, python3, python3.12)."""
+    return "python" if PYTHON_RE.match(word) else word
+
+
+def runner_matches(tool, argv):
+    """True when argv runs tool: after at most one leading wrapper, argv starts with one
+    of RUNNERS[tool], word for word. An argv[0] with a '/' never matches, because a path
+    names a file the caller chose, not the tool on PATH. An argv that is not a list of
+    strings never matches."""
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return False
+    if not argv or "/" in argv[0]:
+        return False
+    rests = [argv] + [argv[len(w):] for w in WRAPPERS if tuple(argv[:len(w)]) == w]
+    for rest in rests:
+        if not rest or "/" in rest[0]:
+            continue
+        for runner in RUNNERS.get(tool, ()):
+            head = rest[:len(runner)]
+            if len(head) == len(runner) and \
+                    [_runner_word(head[0])] + head[1:] == \
+                    [_runner_word(runner[0])] + list(runner[1:]):
+                return True
+    return False
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
@@ -2659,6 +2712,10 @@ def _clause_tier(st, clause, sha, verifier, accepted):
             continue
         if doc.get("tier") != tier or doc.get("tool") != tool \
                 or tool not in TIER_TOOLS[tier] or doc.get("clauses") != [cid]:
+            continue
+        # The stored argv must run the stored tool (R2): a record whose --tool names a
+        # tool the command never ran does not count.
+        if not runner_matches(tool, doc.get("argv")):
             continue
         if tier in MUTANT_TIERS:
             status = doc.get("mutant_exit_status")

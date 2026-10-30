@@ -12,7 +12,9 @@ Proof records are written in the shape verification-skill-forge's verify_evidenc
 writes (`record --tier`). One test also runs that recorder, with a fake allowlisted tool
 (a PATH shim named after its runner, pytest) and a mutant, when the checkout ships it.
 """
+import ast
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -45,6 +47,36 @@ MUTANT = """diff --git a/target.txt b/target.txt
 -good
 +caught
 """
+# A runner argv per tool, as `record --tier` stores it: the stored argv runs the tool.
+RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": ["pytest"],
+               "proptest": ["cargo", "test"], "fast-check": ["vitest"],
+               "rapid": ["go", "test"]}
+# (tool, argv, runner_matches) vectors that the conductor's copy and the recorder's
+# runner_matches both answer (R2). The recorder's own VECTORS are added when present.
+SHARED_VECTORS = [
+    ("hypothesis", "pytest", True),
+    ("hypothesis", "pytest -q tests/test_notes.py", True),
+    ("hypothesis", "python3 -m pytest", True),
+    ("hypothesis", "python3.12 -m pytest", True),
+    ("hypothesis", "uv run pytest", True),
+    ("hypothesis", "python3 t.py", False),
+    ("hypothesis", "./bin/pytest", False),
+    ("hypothesis", "uv run --with x pytest", False),
+    ("hypothesis", "uv run poetry run pytest", False),
+    ("hypothesis", "python -X dev -m pytest", False),
+    ("hypothesis", "pythonista -m pytest", False),
+    ("verus", "verus src/notes.rs", True),
+    ("verus", "cargo verus verify", True),
+    ("verus", "cargo test", False),
+    ("kani", "cargo kani --harness h", True),
+    ("proptest", "cargo test --release", True),
+    ("proptest", "cargo +nightly test", False),
+    ("fast-check", "npx vitest run", True),
+    ("fast-check", "jest", True),
+    ("rapid", "go test ./...", True),
+    ("rapid", "go vet", False),
+    ("crosshair", "crosshair check", False),
+]
 
 
 def tiered(min_tier="property", clauses=TWO, features=("notes-create",)):
@@ -75,7 +107,8 @@ class TierGate(Gate):
             arts.append({"path": name, "sha256": hashlib.sha256(data).hexdigest()})
         doc = {"schema": "verify-evidence/v1", "kind": "evidence", "instance": instance,
                "feature": feature, "sha": sha, "verifier": verifier, "result": "pass",
-               "tier": tier, "tool": tool, "clauses": [clause], "argv": ["python3", "t.py"],
+               "tier": tier, "tool": tool, "clauses": [clause],
+               "argv": list(RUNNER_ARGV.get(tool, [tool])),
                "cwd": "/x", "timeout": 900, "exit_status": 0, "artifacts": arts,
                "captured_at": now()}
         if tier in ("bounded", "property"):
@@ -239,6 +272,19 @@ class RecordsThatDoNotCount(TierGate):
         self.assertEqual(self.evidence()[1].strip(),
                          self.reject_line("tier-below-required notes-create:C2"))
 
+    def test_an_argv_that_does_not_run_the_tool(self):
+        # R2: --tool hypothesis on a command that runs a plain script does not count.
+        self.assert_c2_unmet(argv=["python3", "t.py"])
+
+    def test_an_argv_through_a_path_does_not_count(self):
+        self.assert_c2_unmet(argv=["./bin/pytest"])
+
+    def test_no_argv(self):
+        self.assert_c2_unmet(argv=None)
+
+    def test_an_argv_that_is_not_a_list(self):
+        self.assert_c2_unmet(argv="pytest")
+
     def test_a_record_at_another_head(self):
         sha = self.tiered_run()
         self.proof("C1", sha)
@@ -246,6 +292,75 @@ class RecordsThatDoNotCount(TierGate):
         self.proof("C2", other)
         self.assertEqual(self.evidence()[1].strip(),
                          self.reject_line("tier-below-required notes-create:C2"))
+
+
+class RunnerBoundRecords(TierGate):
+    """R2: the same property record counts with a runner argv and not without one."""
+
+    def gated_run(self, argv):
+        sha = self.tiered_run(clauses=["notes-create:C1"])
+        self.proof("C1", sha, argv=argv)
+        return sha, self.evidence()
+
+    def test_a_script_argv_is_rejected_below_the_tier(self):
+        _, (rc, out, err) = self.gated_run(["python3", "t.py"])
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C1")), err)
+        self.assertEqual(self.run_cmd("merge", "T1")[0], 2)
+        self.assertFalse(self.proven())
+
+    def test_the_same_record_with_a_runner_argv_passes(self):
+        sha, (rc, out, err) = self.gated_run(["pytest"])
+        self.assertEqual((rc, out), (0, "EVIDENCE: T1 pass %s\n" % sha), err)
+        self.assertEqual(self.run_cmd("merge", "T1")[0], 0)
+
+    def test_a_wrapped_runner_counts(self):
+        sha = self.tiered_run(clauses=["notes-create:C1"])
+        self.proof("C1", sha, argv=["uv", "run", "python3", "-m", "pytest", "-q"])
+        self.assertEqual(self.evidence()[0], 0)
+
+
+@unittest.skipUnless(os.path.isfile(RECORDER), "verification-skill-forge is not here")
+class RunnerTablesMatchTheRecorder(unittest.TestCase):
+    """R2: the conductor's runner table, wrappers and failure signatures are copies of the
+    recorder's, and both runner_matches give the same answer on one vector list."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("verify_evidence_r2", RECORDER)
+        cls.V = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.V)
+        cls.vectors = list(SHARED_VECTORS)
+        forge = os.path.join(os.path.dirname(RECORDER), "test_record_runner.py")
+        if os.path.isfile(forge):
+            with open(forge, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == "VECTORS"
+                        for t in node.targets):
+                    cls.vectors += ast.literal_eval(node.value)
+
+    def test_the_tables_are_equal(self):
+        self.assertEqual(C.RUNNERS, self.V.RUNNERS)
+        self.assertEqual(C.WRAPPERS, self.V.WRAPPERS)
+        self.assertEqual(C.FAILURE_SIGNATURES, self.V.FAILURE_SIGNATURES)
+        self.assertEqual(C.PYTHON_RE.pattern, self.V.PYTHON_RE.pattern)
+        self.assertEqual(set(C.RUNNERS), {t for ts in C.TIER_TOOLS.values() for t in ts})
+
+    def test_both_copies_answer_the_shared_vectors_the_same(self):
+        self.assertGreater(len(self.vectors), len(SHARED_VECTORS))
+        for tool, cmd, want in self.vectors:
+            with self.subTest(tool=tool, cmd=cmd):
+                self.assertIs(C.runner_matches(tool, cmd.split()), want)
+                self.assertIs(self.V.runner_matches(tool, cmd.split()), want)
+        self.assertFalse(C.runner_matches("hypothesis", []))
+
+    def test_every_fixture_argv_runs_its_tool(self):
+        for tool, argv in RUNNER_ARGV.items():
+            with self.subTest(tool=tool):
+                self.assertTrue(C.runner_matches(tool, argv))
+                self.assertTrue(self.V.runner_matches(tool, argv))
 
 
 class UnreadableFields(TierGate):
