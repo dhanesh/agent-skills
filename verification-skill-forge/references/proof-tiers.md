@@ -28,6 +28,41 @@ The recorder accepts only these `--tool` values for each tier (`TIER_TOOLS` in
 | `bounded` | `kani` |
 | `property` | `proptest`, `hypothesis`, `fast-check`, `rapid` |
 
+## Runners
+
+`--tool` is not only a label. The recorder runs `--cmd` only when its argv runs that
+tool (`runner_matches` in `verify_evidence.py`). The argv must start with one of the
+tool's runners in the table below, word for word. These are the `RUNNERS` and `WRAPPERS`
+tables in `verify_evidence.py`, and this section must stay equal to them.
+
+| Tool | Runners |
+|---|---|
+| `verus` | `verus`, `cargo verus` |
+| `kani` | `kani`, `cargo kani` |
+| `hypothesis` | `pytest`, `python -m pytest`, `python3 -m pytest` |
+| `proptest` | `cargo test` |
+| `fast-check` | `vitest`, `jest` |
+| `rapid` | `go test` |
+
+Wrappers: `uv run`, `poetry run`, `pdm run`, `pipenv run`, `hatch run`, `pnpm exec`,
+`yarn`, `bunx`, `npx`.
+
+The rules:
+
+- The recorder strips at most one wrapper from the start of the argv. Then the runner
+  must come next. A flag between the wrapper and the runner is refused
+  (`uv run --with x pytest`), and so is a second wrapper.
+- The runner words must be the first words, in order. No option may come between them
+  (`cargo +nightly test` is refused). Options and paths may follow the runner.
+- argv[0] must be a bare name that is found on PATH. An argv[0] that holds a `/` is
+  refused (`./bin/pytest`, `/usr/bin/python3`).
+- A first word such as `python`, `python3` or `python3.12` counts as `python` or
+  `python3`.
+
+Any other argv exits 2 before the other checks, runs nothing and writes nothing. The
+error is `--cmd runs <argv0>, which is not a runner of --tool <tool> (<runners>)`. To test
+the recorder without the real tool, put a script with the runner's name on PATH.
+
 ## Recording a tier proof
 
 ```bash
@@ -74,7 +109,7 @@ Exit codes of `record --tier`:
 |---|---|
 | 0 | Recorded. It prints `PROOF: <tier> <path>`. |
 | 1 | Nothing recorded. The command failed or timed out on HEAD, the mutant run exited 0 or did not match the signature, or HEAD moved during the run. |
-| 2 | Nothing ran or was recorded. The input is not valid: for example a `--tool` outside its tier, a `--clauses` value that is not one clause, a missing mutant flag, or a patch that does not apply. |
+| 2 | Nothing ran or was recorded. The input is not valid: for example a `--tool` outside its tier, a `--cmd` that is not a runner of its `--tool`, a `--clauses` value that is not one clause, a missing mutant flag, or a patch that does not apply. |
 
 ### Known limits
 

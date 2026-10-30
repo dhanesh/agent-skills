@@ -10,12 +10,12 @@ plan rejects as `tier-field-unreadable <field>` and parks the task.
 
 Proof records are written in the shape verification-skill-forge's verify_evidence.py
 writes (`record --tier`). One test also runs that recorder, with a fake allowlisted tool
-and a mutant, when the checkout ships it.
+(a PATH shim named after its runner, pytest) and a mutant, when the checkout ships it.
 """
 import hashlib
 import json
 import os
-import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -377,15 +377,25 @@ class RealRecorder(TierGate):
         patch = os.path.join(self.root, "..", "mutant-%s.diff" % os.getpid())
         with open(patch, "w") as f:
             f.write(MUTANT)
+        # The recorder runs only a runner of --tool, so the fake tool is reached through a
+        # PATH shim named pytest that runs tool.py from its cwd.
+        bin_dir = os.path.join(self.root, "..", "bin-%s" % os.getpid())
+        os.makedirs(bin_dir, exist_ok=True)
+        shim = os.path.join(bin_dir, "pytest")
+        with open(shim, "w") as f:
+            f.write("#!%s\nimport runpy\nrunpy.run_path('tool.py', run_name='__main__')\n"
+                    % sys.executable)
+        os.chmod(shim, 0o755)
         r = subprocess.run(
             [sys.executable, RECORDER, "record", "--instance", "a", "--worktree", wt,
              "--feature", "notes-create", "--verifier", "verifier", "--tier", "property",
              "--tool", "hypothesis", "--clauses", "C1",
-             "--cmd", "%s tool.py" % shlex.quote(sys.executable),
-             "--mutant-patch", patch, "--mutant-author", "verifier"],
+             "--cmd", "pytest", "--mutant-patch", patch, "--mutant-author", "verifier"],
             capture_output=True, text=True, cwd=wt,
-            env=dict(os.environ, VERIFY_EVIDENCE_DIR=self.evdir))
+            env=dict(os.environ, VERIFY_EVIDENCE_DIR=self.evdir,
+                     PATH=bin_dir + os.pathsep + os.environ.get("PATH", "")))
         os.remove(patch)
+        shutil.rmtree(bin_dir, ignore_errors=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("PROOF: property", r.stdout)
         self.assertEqual(self.evidence()[:2], (0, "EVIDENCE: T1 pass %s\n" % sha))

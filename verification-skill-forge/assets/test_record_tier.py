@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for `verify_evidence.py record --tier` (spec R3; stdlib only, offline).
 
-The proof tools are faked by small Python scripts in the test repo, so no verus or
-other prover is needed. The artifact check is factory-conductor's own _check_record.
+The proof tool is faked by a PATH shim named verus that runs a small Python script in
+the test repo, so no verus or other prover is needed. The artifact check is factory-conductor's own _check_record.
 """
 import contextlib
 import io
@@ -28,6 +28,17 @@ FAKE = ("import os, sys\n"
         "print('verified 3 functions, 0 errors in', os.getcwd())\n"
         "sys.stderr.write('note: fake prover\\n')\n"
         "sys.exit(int(sys.argv[1]))\n")
+
+
+def shim(bin_dir, name, script, body=None):
+    """Write bin_dir/name, a runner-named script that runs script from its cwd."""
+    path = os.path.join(bin_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!%s\n" % sys.executable)
+        f.write(body or "import runpy, sys\nsys.argv = [%r] + sys.argv[1:]\n"
+                "runpy.run_path(%r, run_name='__main__')\n" % (script, script))
+    os.chmod(path, 0o755)
+    return path
 
 
 def run(argv):
@@ -65,14 +76,20 @@ class Base(unittest.TestCase):
         self.sha = V.head_sha(self.root)
         self.env = os.environ.pop("VERIFY_EVIDENCE_DIR", None)
         self.ev = os.path.join(self.root, ".verify")
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        shim(self.bin, "verus", "prover.py")
+        self.path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.bin + os.pathsep + self.path
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+        os.environ["PATH"] = self.path
         if self.env is not None:
             os.environ["VERIFY_EVIDENCE_DIR"] = self.env
 
     def tier(self, code, *extra, worktree=None):
-        cmd = "%s prover.py %d" % (sys.executable, code)
+        cmd = "verus %d" % code
         return run(["record", "--instance", "a", "--feature", "notes-create",
                     "--verifier", "v1", "--tier", "proved", "--tool", "verus",
                     "--clauses", "C1", "--cmd", cmd,
@@ -91,7 +108,7 @@ class RecordTier(Base):
         self.assertIn("PROOF: proved %s" % path, out)
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
-        self.assertEqual(doc["argv"], [sys.executable, "prover.py", "0"])
+        self.assertEqual(doc["argv"], ["verus", "0"])
         self.assertEqual(doc["exit_status"], 0)
         self.assertEqual(doc["verifier"], "v1")
         self.assertEqual((doc["tier"], doc["tool"], doc["clauses"]),
@@ -144,16 +161,19 @@ class RecordTier(Base):
                 self.assertFalse(os.path.exists(self.ev))
 
     def test_missing_tool_writes_nothing(self):
+        # PATH holds git and no verus: the runner is valid, but it cannot start.
+        os.environ["PATH"] = os.path.dirname(shutil.which("git", path=self.path))
         rc, _, err = run(["record", "--instance", "a", "--feature", "notes-create",
                           "--verifier", "v1", "--tier", "proved", "--tool", "verus",
-                          "--clauses", "C1", "--cmd", "no-such-prover-xyz",
+                          "--clauses", "C1", "--cmd", "verus src/notes.rs",
                           "--worktree", self.root])
         self.assertEqual(rc, 1)
         self.assertIn("cannot run", err)
         self.assertFalse(os.path.exists(self.ev))
 
     def test_timeout_writes_nothing(self):
-        cmd = "%s -c 'import time; time.sleep(5)'" % sys.executable
+        shim(self.bin, "verus", None, "import time\ntime.sleep(5)\n")
+        cmd = "verus src/notes.rs"
         rc, _, err = run(["record", "--instance", "a", "--feature", "notes-create",
                           "--verifier", "v1", "--tier", "proved", "--tool", "verus",
                           "--clauses", "C1", "--cmd", cmd, "--timeout", "1",

@@ -33,6 +33,11 @@ and --artifact are refused with --tier. The record is
 evidence.json fields and artifact shape plus tier, tool, clauses, argv and exit_status.
 --tool must be on its tier's list in TIER_TOOLS (proved: verus; bounded: kani; property:
 proptest, hypothesis, fast-check, rapid) and --clauses must name exactly one clause.
+ARGV must run that tool: runner_matches(tool, argv) holds only when argv starts with one
+of the tool's runners in RUNNERS (verus: verus or cargo verus; hypothesis: pytest or
+python -m pytest; and so on), after at most one leading wrapper from WRAPPERS (uv run,
+npx, ...). argv[0] must be a bare name found on PATH, with no '/'. Any other ARGV exits 2
+before any other check, and nothing runs.
 
 A bounded or property pass alone proves little, since a check that tests nothing passes
 too. So those tiers also take --mutant-patch (a diff that breaks the code) and
@@ -87,6 +92,49 @@ TIER_TOOLS = {
     "bounded": ("kani",),
     "property": ("proptest", "hypothesis", "fast-check", "rapid"),
 }
+# The commands that run each tool. A tier record counts only when its argv starts with
+# one of these, so --tool cannot label a command that runs something else. A runner is
+# matched as an exact positional prefix: no option may sit between its words.
+# references/proof-tiers.md mirrors this table.
+RUNNERS = {"verus": (("verus",), ("cargo", "verus")),
+           "kani": (("kani",), ("cargo", "kani")),
+           "hypothesis": (("pytest",), ("python", "-m", "pytest"),
+                          ("python3", "-m", "pytest")),
+           "proptest": (("cargo", "test"),),
+           "fast-check": (("vitest",), ("jest",)),
+           "rapid": (("go", "test"),)}
+# Launchers that may come before a runner. At most one is stripped, and nothing (no flag)
+# may sit between it and the runner.
+WRAPPERS = (("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("pipenv", "run"),
+            ("hatch", "run"), ("pnpm", "exec"), ("yarn",), ("bunx",), ("npx",))
+PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?\Z")
+
+
+def _runner_word(word):
+    """A python interpreter name counts as python (python, python3, python3.12)."""
+    return "python" if PYTHON_RE.match(word) else word
+
+
+def runner_matches(tool, argv):
+    """True when argv runs tool: after at most one leading wrapper, argv starts with one
+    of RUNNERS[tool], word for word. An argv[0] with a '/' never matches, because a path
+    names a file the caller chose, not the tool on PATH."""
+    argv = list(argv)
+    if not argv or "/" in argv[0]:
+        return False
+    rests = [argv] + [argv[len(w):] for w in WRAPPERS if tuple(argv[:len(w)]) == w]
+    for rest in rests:
+        if not rest or "/" in rest[0]:
+            continue
+        for runner in RUNNERS.get(tool, ()):
+            head = rest[:len(runner)]
+            if len(head) == len(runner) and \
+                    [_runner_word(head[0])] + head[1:] == \
+                    [_runner_word(runner[0])] + list(runner[1:]):
+                return True
+    return False
+
+
 # What a tool's output holds when the property or proof itself failed, for the mutant
 # run of a bounded or property record: every "require" pattern matches and no "reject"
 # pattern does. These are heuristics over the tools' usual output. They exist to tell a
@@ -357,6 +405,19 @@ def cmd_record_tier(a):
     if a.tool not in allowed:
         return _fail("--tool %r is not allowed for --tier %s: use %s, or record the proof "
                      "at the tier its tool earns" % (a.tool, a.tier, ", ".join(allowed)))
+    # The runner check comes next, before any other: a --cmd that does not run --tool
+    # is refused whatever else the call holds, and it never runs.
+    try:
+        argv = shlex.split(a.proof_cmd)
+    except ValueError as e:
+        return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
+    if not argv:
+        return _fail("--cmd is required with --tier and cannot be blank")
+    if not runner_matches(a.tool, argv):
+        return _fail("--cmd runs %s, which is not a runner of --tool %s (%s): start --cmd "
+                     "with one of them, by name on PATH, after at most one wrapper such "
+                     "as uv run or npx" % (argv[0], a.tool, ", ".join(
+                         " ".join(r) for r in RUNNERS[a.tool])))
     # One record proves one clause: a list, or nothing, would credit clauses the run
     # may not cover.
     named = [c for c in re.split(r"[\s,;]+", a.clauses or "") if c]
@@ -368,12 +429,6 @@ def cmd_record_tier(a):
                      % a.clauses)
     if a.timeout <= 0:
         return _fail("--timeout must be a positive number of seconds, got %d" % a.timeout)
-    try:
-        argv = shlex.split(a.proof_cmd)
-    except ValueError as e:
-        return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
-    if not argv:
-        return _fail("--cmd is required with --tier and cannot be blank")
     patch = None
     if a.tier not in MUTANT_TIERS:
         given = [f for f, n in (("--mutant-patch", "mutant_patch"),

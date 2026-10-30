@@ -92,7 +92,9 @@ that the tool catches:
 python3 "$SKILL/scripts/drive.py" fixture proof-tool --instance "$INSTANCE" --name tool
 ```
 
-Expect exit 0 and JSON with `tool_py`, `target_txt` and `mutant_diff`. Build a gated run
+Expect exit 0 and JSON with `tool_py`, `target_txt`, `mutant_diff` and `bin_dir`.
+`bin_dir` holds `pytest`, a PATH shim that runs `tool.py`: the recorder runs only a
+runner of `--tool`, so `--cmd "python3 tool.py"` is refused. Build a gated run
 whose task needs `property` on C1 and C2, and commit the tool and its target with the
 task:
 
@@ -107,9 +109,10 @@ Record the doctor and the runtime `evidence.json` as in the first recipe. Then r
 property proof for C1 only:
 
 ```sh
-VERIFY_EVIDENCE_DIR=<root>/.verify python3 verification-skill-forge/assets/verify_evidence.py record \
+PATH=<bin_dir>:$PATH VERIFY_EVIDENCE_DIR=<root>/.verify \
+  python3 verification-skill-forge/assets/verify_evidence.py record \
   --instance fx --worktree <worktree> --feature notes-create --verifier fixture-verifier \
-  --tier property --tool hypothesis --clauses C1 --cmd "python3 tool.py" \
+  --tier property --tool hypothesis --clauses C1 --cmd pytest \
   --mutant-patch <mutant_diff> --mutant-author verifier
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name tier-reject -- \
   python3 factory-conductor/assets/conductor.py evidence T1 --verifier fixture-verifier --root <root>

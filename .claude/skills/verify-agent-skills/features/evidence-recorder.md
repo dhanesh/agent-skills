@@ -49,6 +49,19 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name er-refus
 
 Expect a non-zero exit and an error saying `--side-effect` is required.
 
+```sh
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name er-runner -- \
+  env VERIFY_EVIDENCE_DIR="$WT/.verify-run/$INSTANCE/er/.verify" \
+  python3 verification-skill-forge/assets/verify_evidence.py record --instance fx \
+  --worktree "$WT/.verify-run/$INSTANCE/er" --feature notes-create --verifier fixture-verifier \
+  --tier proved --tool verus --clauses C1 --cmd true
+```
+
+Expect exit 2 and `--cmd runs true, which is not a runner of --tool verus (verus, cargo
+verus)`. `true` would pass, but the recorder does not run it. To record a proof without
+the real tool, put a script with the runner's name first on PATH, as
+`drive.py fixture proof-tool` does (`bin_dir`).
+
 ## Proof
 
 The written `evidence.json` names the fixture head as `sha`, and its `artifacts[].sha256`
