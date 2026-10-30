@@ -25,8 +25,11 @@ Usage:
                                         [--worktree W]  # PROOF: <tier> <path>
 
 A proof record (--tier) is taken by running the proof tool here: ARGV is split with shlex
-(no shell) and run from the worktree root under --timeout, and the record is written only
-when it exits 0 on the same HEAD. Its stdout and stderr are pinned as artifacts; nothing
+(no shell) and run under --timeout from the root of a clean checkout of the committed
+HEAD, and the record is written only when it exits 0 on the same HEAD. A worktree whose
+tracked files differ from HEAD (git status --porcelain --untracked-files=no is not
+empty) exits 2 before any checkout or run, naming the changed paths; untracked files do
+not count, and are not in the checkout. Its stdout and stderr are pinned as artifacts; nothing
 the caller supplies stands in for them, so --result, --action, --observed, --side-effect
 and --artifact are refused with --tier. The record is
 <evidence dir>/<instance>/<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json, with the
@@ -41,13 +44,14 @@ before any other check, and nothing runs.
 
 A bounded or property pass alone proves little, since a check that tests nothing passes
 too. So those tiers also take --mutant-patch (a diff that breaks the code) and
---mutant-author (who wrote it). The recorder extracts HEAD (git archive) into a temporary
+--mutant-author (who wrote it). The recorder checks out HEAD again into a second temporary
 directory outside the worktree, applies the patch there with git apply, and runs the same
 ARGV in that copy with the same timeout. The record is written only when the mutant run
 exits non-zero and its output matches the tool's entry in FAILURE_SIGNATURES, so a mutant
 that only breaks the build does not count. The patch and the mutant run's exit status,
-stdout and stderr are pinned as artifacts too. The worktree is never touched and the copy
-is always removed. proved takes no mutant flags.
+stdout and stderr are pinned as artifacts too. The worktree is never touched and both
+checkouts are always removed. The record stores cwd "." and ran_in "checkout": the runs
+happened at the root of a checkout, not in the worktree. proved takes no mutant flags.
 
 Where things go. Evidence lives under the evidence directory: $VERIFY_EVIDENCE_DIR when
 set, else <git toplevel of --worktree (default: cwd)>/.verify. Each record is
@@ -74,7 +78,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tarfile
 import tempfile
 import zlib
 
@@ -457,13 +460,21 @@ def cmd_record_tier(a):
     root = _worktree_root(wt)
     if root is None:
         return _fail("cannot find the git toplevel of %s" % wt)
-    copy = None
+    err = _refuse_dirty(root)
+    if err is not None:
+        return err
+    copy = head = None
     try:
+        # The mutant copy comes first, so a patch that does not apply exits 2 before
+        # any command runs.
         if patch is not None:
             copy, err = _mutant_copy(root, sha, patch)
             if err is not None:
                 return err
-        run, err = _run_proof(argv, root, a.timeout)
+        head, err = _checkout(root, sha)
+        if err is not None:
+            return err
+        run, err = _run_proof(argv, head, a.timeout)
         if err is not None:
             return err
         if run.returncode != 0:
@@ -489,8 +500,9 @@ def cmd_record_tier(a):
             return _fail("HEAD moved from %s while %s ran: nothing recorded; record again "
                          "on a fixed head" % (sha[:12], argv[0]), 1)
     finally:
-        if copy is not None:
-            shutil.rmtree(os.path.dirname(copy), ignore_errors=True)
+        for d in (copy, head):
+            if d is not None:
+                shutil.rmtree(os.path.dirname(d), ignore_errors=True)
     out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
     stem = "proof-%s-%s-%s" % (a.tier, a.tool, a.clauses)
     files = [("stdout", run.stdout), ("stderr", run.stderr)]
@@ -510,7 +522,7 @@ def cmd_record_tier(a):
     doc = {"schema": SCHEMA, "kind": "evidence", "instance": a.instance,
            "feature": a.feature, "sha": sha, "verifier": a.verifier,
            "result": "pass", "tier": a.tier, "tool": a.tool,
-           "clauses": [a.clauses], "argv": argv, "cwd": root,
+           "clauses": [a.clauses], "argv": argv, "cwd": ".", "ran_in": "checkout",
            "timeout": a.timeout, "exit_status": run.returncode,
            "artifacts": arts, "captured_at": _now()}
     if mutant is not None:
@@ -532,25 +544,58 @@ def _run_proof(argv, cwd, timeout, where=""):
                            "installed and on PATH" % (argv[0], where, e), 1)
 
 
-def _mutant_copy(root, sha, patch):
-    """(copy dir, None): HEAD's committed tree extracted into a new temporary directory
-    with patch applied. (None, exit code) when it cannot be made; nothing is left behind.
-    The worktree is only read (git archive), never written."""
-    tmp = tempfile.mkdtemp(prefix="verify-mutant-")
+def _refuse_dirty(root):
+    """None when no tracked file differs from HEAD, else the exit code once reported.
+    Untracked files do not count: they are not in the checkout the proof runs in.
+    GIT_OPTIONAL_LOCKS=0 stops git status from refreshing the worktree's index."""
+    r = subprocess.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                       capture_output=True, text=True,
+                       env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    if r.returncode != 0:
+        return _fail("git status failed in %s (%s): nothing ran or was recorded"
+                     % (root, r.stderr.strip()))
+    paths = [line[3:] for line in r.stdout.splitlines() if line.strip()]
+    if paths:
+        return _fail("the worktree has tracked changes that are not committed: %s. "
+                     "Nothing ran or was recorded; a proof runs on the committed head, so "
+                     "commit or stash these changes and record again" % ", ".join(paths))
+    return None
+
+
+def _checkout(root, sha):
+    """(dir, None): every tracked file of commit sha, checked out into a new temporary
+    directory outside the worktree. (None, exit code) when it cannot be made; nothing is
+    left behind. A private index is used, so the worktree and its index are only read.
+    Unlike git archive, export-ignore in .gitattributes drops nothing."""
+    tmp = tempfile.mkdtemp(prefix="verify-proof-")
     copy, done = os.path.join(tmp, "head"), False
     try:
-        tar = os.path.join(tmp, "head.tar")
-        r = _git(root, "archive", "--format=tar", "-o", tar, sha)
-        if r.returncode != 0:
-            return None, _fail("git archive of %s failed (%s): nothing recorded"
-                               % (sha[:12], r.stderr.strip()), 1)
-        os.makedirs(copy)
-        with tarfile.open(tar) as t:
-            if hasattr(tarfile, "tar_filter"):
-                t.extractall(copy, filter="tar")
-            else:  # Python without extraction filters: the archive is our own HEAD.
-                t.extractall(copy)
-        os.remove(tar)
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+        for args in (("read-tree", sha),
+                     ("checkout-index", "-a", "-f", "--prefix=%s%s" % (copy, os.sep))):
+            r = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                               text=True, env=env)
+            if r.returncode != 0:
+                return None, _fail("cannot check out %s (git %s: %s): nothing recorded"
+                                   % (sha[:12], args[0], r.stderr.strip()), 1)
+        os.makedirs(copy, exist_ok=True)  # a commit with no files
+        os.remove(os.path.join(tmp, "index"))
+        done = True
+        return copy, None
+    finally:
+        if not done:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _mutant_copy(root, sha, patch):
+    """(copy dir, None): a clean checkout of commit sha in a new temporary directory,
+    with patch applied. (None, exit code) when it cannot be made; nothing is left behind.
+    The worktree is only read, never written."""
+    copy, err = _checkout(root, sha)
+    if err is not None:
+        return None, err
+    tmp, done = os.path.dirname(copy), False
+    try:
         diff = os.path.join(tmp, "mutant.patch")
         with open(diff, "wb") as f:
             f.write(patch)

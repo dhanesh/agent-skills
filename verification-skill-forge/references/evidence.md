@@ -57,7 +57,9 @@ tool and writes nothing.
 
 The record is `<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json`. It has the
 evidence.json fields and artifact shape, so the conductor's artifact check applies to
-it. It adds `tier`, `tool`, `clauses`, `argv`, `cwd`, `timeout` and `exit_status`. The
+it. It adds `tier`, `tool`, `clauses`, `argv`, `cwd`, `ran_in`, `timeout` and
+`exit_status`. `cwd` is `"."` and `ran_in` is `"checkout"`: the tool ran at the root of a
+clean checkout of HEAD, and a worktree with tracked changes is refused. The
 artifacts are the pinned `proof-<tier>-<tool>-<clause>.stdout` and `.stderr` files.
 
 A `bounded` or `property` record also needs `--mutant-patch` and `--mutant-author`. The
@@ -70,7 +72,8 @@ that run fails with the tool's failure signature. The record then adds `mutant_a
 {"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
  "feature": "notes-create", "sha": "<40 hex>", "verifier": "<agent id>",
  "result": "pass", "tier": "proved", "tool": "verus", "clauses": ["C1"],
- "argv": ["verus", "src/notes.rs"], "cwd": "<worktree root>", "timeout": 900,
+ "argv": ["verus", "src/notes.rs"], "cwd": ".", "ran_in": "checkout",
+ "timeout": 900,
  "exit_status": 0,
  "artifacts": [{"path": "proof-proved-verus-C1.stdout", "sha256": "<64 hex>"},
                {"path": "proof-proved-verus-C1.stderr", "sha256": "<64 hex>"}],

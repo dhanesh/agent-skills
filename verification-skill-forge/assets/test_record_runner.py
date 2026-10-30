@@ -219,7 +219,8 @@ class RecordRunner(unittest.TestCase):
                 with open(self.marker, encoding="utf-8") as f:
                     runs = f.read().split()
                 self.assertEqual(len(runs), 2, "one head run and one mutant run")
-                self.assertEqual(runs[0], self.root)
+                # Both runs used a checkout of the head, never the worktree itself.
+                self.assertNotIn(self.root, runs)
                 os.remove(self.marker)
                 os.remove(path)
 
