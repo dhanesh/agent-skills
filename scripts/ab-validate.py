@@ -9934,16 +9934,18 @@ def check_proof_tier_gate(old, new):
         return r
 
     tiered = [("T1", ["notes-create"], {"min_tier": "property", "clauses": _PT_TWO})]
-    # Sanity: with property records for both clauses the new tree passes and merges, so a
+    # Each tiered probe commits _PT_CONTRACT, which defines C1 and C2: a clause counts at
+    # a tier only when its feature's contract defines it (proof-tier trust R6).
+    # Sanity:with property records for both clauses the new tree passes and merges, so a
     # reject below is the gate, not a fixture the new tree cannot pass at all.
-    good = measured(new, "evidence", tiered, proofs=("C1", "C2"))
+    good = measured(new, "evidence", tiered, contract=True, proofs=("C1", "C2"))
     if good is not None and (good["evidence"][:1] != ["pass"] or good["merge"] != 0):
         PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
                              "proof-tier sanity check failed: property records for C1 and "
                              "C2 did not pass and merge T1: %r" % good))
 
-    a = measured(old, "evidence", tiered, proofs=("C1",))
-    b = measured(new, "evidence", tiered, proofs=("C1",))
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1",))
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1",))
     if a is not None and b is not None:
         a, b = _pt_rejects(a, "tier-below-required"), _pt_rejects(b, "tier-below-required")
         row(s, "tier-below-required rejects, C2 at runtime only under min_tier property "

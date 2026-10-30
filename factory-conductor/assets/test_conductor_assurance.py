@@ -109,6 +109,7 @@ class WeakestTier(Assurance):
     def test_a_clause_with_no_merged_record_reports_none(self):
         t2 = task("T2", ["notes-list"])
         t2.update(min_tier="property", clauses=["notes-list:C1"])
+        self.contract("notes-list", ["C1"])
         self.init([tiered(), t2])
         _, sha = self.build()
         self.record("notes-create", sha)

@@ -52,7 +52,8 @@ with exit 3 (the fixture's owner is `writer`).
 
 For contract and tier cases, pass the feature file and the task fields to the fixture:
 `--feature-file notes-create=<file with a ## Contract>`, `--task-json '{"min_tier": "property", "clauses": ["notes-create:C1"]}'`,
-and `--edit <path in the run repo>=<file>` for what the task commits.
+and `--edit <path in the run repo>=<file>` for what the task commits. Each `--feature`
+file of the fixture holds a `## Contract` that defines C1 and C2 only.
 
 ### Drive an init refusal of tier fields
 
@@ -129,6 +130,22 @@ In a second fixture (`--name tier-both`), record C1 and C2 the same way. Then `e
 prints `EVIDENCE: T1 pass <sha>` with exit 0. A record does not count when the owner
 (`writer`) recorded it, or when one of its artifacts was edited (for example
 `proof-property-hypothesis-C2.stdout`). Then the reject names that clause again.
+
+A clause counts at a tier only when the `## Contract` section of its feature file at
+the verified head defines it (C2). The conductor checks this before it reads a record.
+Build a fixture whose task names `notes-create:C9`, which the fixture's contract does
+not define:
+
+```sh
+python3 "$SKILL/scripts/drive.py" fixture gated-run --instance "$INSTANCE" --name tier-undefined \
+  --feature notes-create=a.txt \
+  --task-json '{"min_tier": "runtime", "clauses": ["notes-create:C9"]}'
+```
+
+Record the doctor and the runtime `evidence.json` as in the first recipe. Then
+`evidence` prints `EVIDENCE: T1 reject tier-below-required notes-create:C9` with exit 3,
+although the runtime evidence passed. A property proof recorded for C9 does not count
+either. A feature file with no `## Contract` section defines no clause.
 
 When the pinned plan holds a tier field that cannot be read (`clauses` as `[5]`, `[null]`
 or `"x"`, or `min_tier` as null), `evidence` prints

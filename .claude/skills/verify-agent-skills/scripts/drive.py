@@ -17,7 +17,8 @@ fixtures one verifier builds and the captures it makes. Two instances never shar
            [--feature-file ID=SRC ...] [--task-json JSON] [--plan-json JSON]
            [--edit REL=SRC ...]
            build a repo with a verify-app skill, a plan under the evidence gate and a
-           covering grant; run conductor init, start (owner "writer"), commit the edits,
+           covering grant (each --feature file holds a `## Contract` that defines C1 and
+           C2 only, so a clause such as C9 is undefined; --feature-file replaces it); run conductor init, start (owner "writer"), commit the edits,
            verify and review (reviewer "reviewer"). The task then waits for evidence.
            --plan-json merges keys into the plan payload; a null value removes the key
            (`{"verification": null}` builds a plan with no evidence gate).
@@ -82,9 +83,14 @@ true
 
 Expect exit 0.
 
+## Contract
+
+- C1 [pre]: fixture clause C1
+- C2 [post]: fixture clause C2
+
 ## Proof
 
-Fixture only.
+Fixture only. C1 and C2.
 
 ## Gotchas
 

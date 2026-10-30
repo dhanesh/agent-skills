@@ -2695,8 +2695,12 @@ def _meets(tier, min_tier):
 def _clause_tier(st, clause, sha, verifier, accepted):
     """The strongest tier clause (<feature>:C<n>) meets for sha, or None: the strongest
     proof record by verifier that passes the record check and the tier rules, else
-    runtime when the feature's evidence.json was accepted (`accepted`)."""
+    runtime when the feature's evidence.json was accepted (`accepted`). A clause that
+    the feature's `## Contract` at sha does not define meets no tier (R6), so no record
+    is read for it."""
     feature, cid = clause.split(":", 1)
+    if cid not in _defined_clauses(st, feature, sha):
+        return None
     best = None
     base = _evidence_root(st)
     name_re = r"proof-(%s)-(.+)-%s\.json" % ("|".join(TIER_TOOLS), re.escape(cid))
@@ -2729,6 +2733,32 @@ def _clause_tier(st, clause, sha, verifier, accepted):
     if best is not None:
         return TIERS[best]
     return "runtime" if feature in accepted else None
+
+
+# A clause bullet of a `## Contract` section: verification-skill-forge's forge.py CLAUSE_RE
+# without its text group, matched on the stripped line. test_conductor_tiers checks that
+# defined_clauses agrees with forge's parse_contract on shared texts.
+CONTRACT_BULLET_RE = re.compile(r"^- (C\d+)\s*\[([^\]]*)\]:")
+
+
+def defined_clauses(text):
+    """The clause ids that the `## Contract` section of a feature file's text defines, in
+    file order: each line of the section (after its heading) that, stripped, matches
+    CONTRACT_BULLET_RE. An empty list when the text has no section."""
+    section = contract_section(text)
+    out = []
+    for line in (section or "").splitlines()[1:]:
+        m = CONTRACT_BULLET_RE.match(line.strip())
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def _defined_clauses(st, feature, sha):
+    """The clause ids that <verification skill>/features/<feature>.md defines as committed
+    at sha. A missing file, or one git cannot read, defines none."""
+    text = _blob(st, sha, "%s/features/%s.md" % (st.verification["skill"], feature))
+    return [] if text is None else defined_clauses(text)
 
 
 def _tiered_plan(st):
