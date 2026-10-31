@@ -401,6 +401,23 @@ class ReviewFindingTests(Base):
                              "--worktree", self.root])
         self.assertEqual(rc, 2)
 
+    def test_artifacts_named_like_a_record_are_refused(self):
+        # evidence.json would be overwritten by the record itself; doctor.json and
+        # proof-*.json would sit where the conductor reads doctor and proof records, so a
+        # copied fixture record could pose as one.
+        for name in ("evidence.json", "doctor.json", "proof-proved-verus-C1.json",
+                     "proof-runtime-x.stdout"):
+            src = os.path.join(self.tmp, name)
+            with open(src, "w") as f:
+                f.write("{}")
+            rc, _ = run(V.main, ["record", "--instance", "a", "--feature", "notes-create",
+                                 "--verifier", "v", "--result", "pass", "--action", "x",
+                                 "--observed", "y", "--side-effect", "z", "--artifact", src,
+                                 "--worktree", self.root])
+            self.assertEqual(rc, 2, name)
+            out = os.path.join(self.root, ".verify", "a", "notes-create")
+            self.assertFalse(os.path.exists(out), name)
+
     def test_wrong_shaped_manifolds_degrade_instead_of_crashing(self):
         d = os.path.join(self.root, ".manifold")
         os.makedirs(d)

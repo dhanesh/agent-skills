@@ -16,7 +16,7 @@ license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and git; offline. The generated skill runs whatever the target app needs (a browser driver, a PTY, curl).
 metadata:
   author: dhanesh
-  version: "1.0.2"
+  version: "1.1.0"
   tags: "verification,runtime-evidence,feature-map,manifold,factory"
 ---
 

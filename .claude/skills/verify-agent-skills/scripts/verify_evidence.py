@@ -365,6 +365,14 @@ def cmd_record(a):
         # name would overwrite each other and the first hash would no longer match.
         return _fail("artifacts share a file name (%s): rename one before recording"
                      % ", ".join(dup))
+    owned = sorted({n for n in names if n in ("evidence.json", "doctor.json")
+                    or n.startswith("proof-")})
+    if owned:
+        # The recorder writes these names itself: evidence.json would overwrite the
+        # artifact, and a doctor.json or proof-* file beside the record would sit where the
+        # conductor reads doctor and proof records, so a copied record could pose as one.
+        return _fail("artifact name %s is the recorder's own (evidence.json, doctor.json, "
+                     "proof-*): rename it before recording" % ", ".join(owned))
     for src in a.artifact:
         if not os.path.isfile(os.path.abspath(src)):
             return _fail("artifact %s does not exist" % os.path.abspath(src))
