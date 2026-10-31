@@ -101,6 +101,13 @@ def tier_repo(tmp):
     sh(root, "git", "init", "-q", "-b", "main")
     sh(root, "git", "add", "-A")
     sh(root, "git", "commit", "-q", "-m", "fixture")
+    # The recorder runs only a runner of --tool: a PATH shim named pytest runs tool.py.
+    bin_dir = os.path.join(tmp, "tier-bin")
+    os.makedirs(bin_dir)
+    with open(os.path.join(bin_dir, "pytest"), "w") as f:
+        f.write("#!%s\nimport runpy\nrunpy.run_path('tool.py', run_name='__main__')\n"
+                % sys.executable)
+    os.chmod(os.path.join(bin_dir, "pytest"), 0o755)
     patches = {}
     for mode in ("unnoticed", "caught", "broken"):
         with open(os.path.join(root, "target.txt"), "w") as f:
@@ -109,14 +116,16 @@ def tier_repo(tmp):
         with open(patches[mode], "w") as f:
             f.write(sh(root, "git", "diff").stdout)
         sh(root, "git", "checkout", "--", ".")
-    return root, patches
+    return root, patches, bin_dir
 
 
-def record_tier(root, tier, tool, *extra):
-    cmd = "%s tool.py" % shlex.quote(sys.executable)
-    r = sh(root, sys.executable, os.path.join(ASSETS, "verify_evidence.py"), "record",
-           "--instance", "a", "--feature", "notes-create", "--verifier", "verifier-1",
-           "--tier", tier, "--tool", tool, "--clauses", "C1", "--cmd", cmd, *extra)
+def record_tier(root, bin_dir, tier, tool, *extra, cmd="pytest"):
+    r = subprocess.run(
+        [sys.executable, os.path.join(ASSETS, "verify_evidence.py"), "record",
+         "--instance", "a", "--feature", "notes-create", "--verifier", "verifier-1",
+         "--tier", tier, "--tool", tool, "--clauses", "C1", "--cmd", cmd, *extra],
+        cwd=root, capture_output=True, text=True, timeout=30,
+        env=dict(GENV, PATH=bin_dir + os.pathsep + GENV.get("PATH", "")))
     err = r.stderr.strip().replace("verify_evidence: ", "", 1)
     return r.returncode, r.stdout.strip(), err.replace(sys.executable, "python")
 
@@ -277,23 +286,29 @@ def main():
 
         # 8. Proof tiers: the real recorder refuses a tool outside its tier, a mutant
         # the check does not notice and a mutant that only breaks the build.
-        rt, patches = tier_repo(tmp)
+        rt, patches, tb = tier_repo(tmp)
         evd = os.path.join(rt, ".verify")
-        rc, _, err = record_tier(rt, "proved", "hypothesis")
+        rc, _, err = record_tier(rt, tb, "proved", "hypothesis")
         check("negative: tool outside its tier (--tier proved --tool hypothesis) is "
               "refused", rc == 2 and not os.path.exists(evd)
               and "not allowed for --tier proved" in err, refusal(rc, err))
-        rc, _, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+        rc, _, err = record_tier(rt, tb, "property", "hypothesis", "--mutant-patch",
+                                 patches["caught"], "--mutant-author", "verifier",
+                                 cmd="%s tool.py" % shlex.quote(sys.executable))
+        check("negative: a --cmd that is not a runner of its --tool (python tool.py "
+              "for hypothesis) is refused", rc == 2 and not os.path.exists(evd)
+              and "which is not a runner of --tool hypothesis" in err, refusal(rc, err))
+        rc, _, err = record_tier(rt, tb, "property", "hypothesis", "--mutant-patch",
                                  patches["unnoticed"], "--mutant-author", "verifier")
         check("negative: a mutant the check does not notice (mutant run exits 0) is "
               "refused", rc == 1 and not os.path.exists(evd)
               and "does not catch the mutant" in err, refusal(rc, err))
-        rc, _, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+        rc, _, err = record_tier(rt, tb, "property", "hypothesis", "--mutant-patch",
                                  patches["broken"], "--mutant-author", "verifier")
         check("negative: a mutant that only breaks the build (no failure signature) is "
               "refused", rc == 1 and not os.path.exists(evd)
               and "lacks" in err, refusal(rc, err))
-        rc, out, err = record_tier(rt, "property", "hypothesis", "--mutant-patch",
+        rc, out, err = record_tier(rt, tb, "property", "hypothesis", "--mutant-patch",
                                    patches["caught"], "--mutant-author", "verifier")
         head = sh(rt, "git", "rev-parse", "HEAD").stdout.strip()
         rec = os.path.join(evd, "a", "notes-create", head,

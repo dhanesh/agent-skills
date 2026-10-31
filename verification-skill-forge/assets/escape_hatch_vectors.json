@@ -1,0 +1,119 @@
+{
+  "about": "The shared vector list for the escape-hatch rule (spec Terms). forge.py check-proof and factory-conductor each hold a copy of the rule, and both copies must pass every vector here. 'lines' tests the rule on one added line: 'hits' is every [column, token] in column order. 'cases' tests a whole diff: 'base' and 'head' map a path to its file text, a null text means the file is absent, and 'escapes' is the ESCAPE output of check-proof, sorted by path, line and column.",
+  "rule": "On a line that the diff adds to a .rs file: assume( or admit( not preceded by an identifier character or by ::, or external_body inside #[verifier ...] on the same line (regex #\\[verifier\\b[^\\]]*\\bexternal_body\\b). Comments and strings are not skipped.",
+  "lines": [
+    {"line": "    assume(x > 0);", "hits": [[4, "assume("]]},
+    {"line": "assume(x)", "hits": [[0, "assume("]]},
+    {"line": "    admit();", "hits": [[4, "admit("]]},
+    {"line": "    x.assume(y);", "hits": [[6, "assume("]]},
+    {"line": "#[verifier::external_body]", "hits": [[0, "external_body"]]},
+    {"line": "#[verifier(external_body)]", "hits": [[0, "external_body"]]},
+    {"line": "#[verifier::external_body] fn f() { assume(true) }", "hits": [[0, "external_body"], [36, "assume("]]},
+    {"line": "// assume(x) is still reported in a comment", "hits": [[3, "assume("]]},
+    {"line": "let s = \"admit(\";", "hits": [[9, "admit("]]},
+    {"line": "(assume(a), assume(b))", "hits": [[1, "assume("], [12, "assume("]]},
+    {"line": "    prop_assume!(x > 0);", "hits": []},
+    {"line": "    prop_assume(x > 0);", "hits": []},
+    {"line": "    kani::assume(x > 0);", "hits": []},
+    {"line": "    my_assume(x);", "hits": []},
+    {"line": "    assume2(x);", "hits": []},
+    {"line": "    assume (x);", "hits": []},
+    {"line": "    admitted(x);", "hits": []},
+    {"line": "fn external_body() {}", "hits": []},
+    {"line": "#[external_body]", "hits": []},
+    {"line": "#[verifier::opaque] fn external_body() {}", "hits": []},
+    {"line": "#[verifier::external_bodyx]", "hits": []}
+  ],
+  "cases": [
+    {
+      "name": "the R4 proof fixture: assume( and #[verifier::external_body] added to src/lib.rs",
+      "base": {"src/lib.rs": "pub fn f(x: u32) -> u32 {\n    x\n}\n"},
+      "head": {"src/lib.rs": "#[verifier::external_body]\npub fn f(x: u32) -> u32 {\n    assume(x > 0);\n    x\n}\n"},
+      "escapes": [["src/lib.rs", 1, "external_body"], ["src/lib.rs", 3, "assume("]]
+    },
+    {
+      "name": "assume(x) added to a .rs file",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\nfn b(x: bool) { assume(x) }\n"},
+      "escapes": [["src/a.rs", 2, "assume("]]
+    },
+    {
+      "name": "x.assume( added to a .rs file",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\nfn b(x: S) { x.assume(1) }\n"},
+      "escapes": [["src/a.rs", 2, "assume("]]
+    },
+    {
+      "name": "a new .rs file with #[verifier::external_body]",
+      "base": {},
+      "head": {"src/new.rs": "#[verifier::external_body]\nfn g() {}\n"},
+      "escapes": [["src/new.rs", 1, "external_body"]]
+    },
+    {
+      "name": "hits in two files sort by path, then line, then column",
+      "base": {"b.rs": "fn b() {}\n", "a.rs": "fn a() {}\n"},
+      "head": {"b.rs": "fn b() { admit() }\n", "a.rs": "fn a() {}\nfn c() { assume(1); admit() }\n"},
+      "escapes": [["a.rs", 2, "assume("], ["a.rs", 2, "admit("], ["b.rs", 1, "admit("]]
+    },
+    {
+      "name": "only prop_assume( added",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\nproptest! { fn p(x: u8) { prop_assume(x > 0); } }\n"},
+      "escapes": []
+    },
+    {
+      "name": "only kani::assume( added",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\n#[kani::proof] fn h() { let x: u8 = kani::any(); kani::assume(x > 0); }\n"},
+      "escapes": []
+    },
+    {
+      "name": "only my_assume( added",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\nfn b() { my_assume(true) }\n"},
+      "escapes": []
+    },
+    {
+      "name": "a bare external_body, outside #[verifier ...]",
+      "base": {"src/a.rs": "fn a() {}\n"},
+      "head": {"src/a.rs": "fn a() {}\nfn external_body() {}\n"},
+      "escapes": []
+    },
+    {
+      "name": "the tokens added to a .md file",
+      "base": {"README.md": "# Notes\n"},
+      "head": {"README.md": "# Notes\n\nassume(x) and #[verifier::external_body]\n"},
+      "escapes": []
+    },
+    {
+      "name": "a token on an unchanged line",
+      "base": {"src/a.rs": "fn a(x: bool) { assume(x) }\n"},
+      "head": {"src/a.rs": "fn a(x: bool) { assume(x) }\nfn b() {}\n"},
+      "escapes": []
+    },
+    {
+      "name": "a removed token",
+      "base": {"src/a.rs": "fn a(x: bool) { assume(x) }\n"},
+      "head": {"src/a.rs": "fn a(x: bool) {}\n"},
+      "escapes": []
+    },
+    {
+      "name": "the line number is the one in the head file",
+      "base": {"src/a.rs": "one\ntwo\nthree\nfour\n"},
+      "head": {"src/a.rs": "four\nfive\nsix(admit(x))\n"},
+      "escapes": [["src/a.rs", 3, "admit("]]
+    },
+    {
+      "name": "a moved .rs file: renames are off, so every line counts as added",
+      "base": {"src/old.rs": "#[verifier::external_body]\nfn g() {}\n"},
+      "head": {"src/new.rs": "#[verifier::external_body]\nfn g() {}\n"},
+      "escapes": [["src/new.rs", 1, "external_body"]]
+    },
+    {
+      "name": "a deleted .rs file that held a token",
+      "base": {"src/a.rs": "fn a(x: bool) { assume(x) }\n", "src/b.rs": "fn b() {}\n"},
+      "head": {"src/b.rs": "fn b() {}\n"},
+      "escapes": []
+    }
+  ]
+}

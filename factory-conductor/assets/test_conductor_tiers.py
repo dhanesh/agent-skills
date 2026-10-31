@@ -6,16 +6,21 @@ A tiered task carries `min_tier` and `clauses` in the pinned plan. Once every ex
 evidence check passes, `conductor evidence` rejects the first clause, in `clauses` order,
 that has no proof record at or above `min_tier`, as `tier-below-required <clause>`: a
 repair on the evidence-failed route. A tier field that cannot be read from the pinned
-plan rejects as `tier-field-unreadable <field>` and parks the task.
+plan rejects as `tier-field-unreadable <field>` and parks the task. A clause that the
+`## Contract` section of its feature file at the verified head does not define meets no
+tier, before any record is read (proof-tier trust R6), so every fixture here gives
+notes-create a contract that defines C1, C2 and C10.
 
 Proof records are written in the shape verification-skill-forge's verify_evidence.py
 writes (`record --tier`). One test also runs that recorder, with a fake allowlisted tool
-and a mutant, when the checkout ships it.
+(a PATH shim named after its runner, pytest) and a mutant, when the checkout ships it.
 """
+import ast
 import hashlib
+import importlib.util
 import json
 import os
-import shlex
+import shutil
 import subprocess
 import sys
 import unittest
@@ -24,10 +29,13 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import conductor as C  # noqa: E402
 from conductor_testkit import write_grant, write_plan_envelope  # noqa: E402
-from test_conductor_evidence import Gate, git, now, payload, task  # noqa: E402
+from test_conductor_evidence import (FEATURE, SKILL, Gate, git, now, payload,  # noqa: E402
+                                     task)
 
 RECORDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                         "verification-skill-forge", "assets", "verify_evidence.py")
+FORGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
+                     "verification-skill-forge", "assets", "forge.py")
 TWO = ["notes-create:C1", "notes-create:C2"]
 # A fake hypothesis run: it passes on good code and prints Hypothesis's failure report
 # when the mutant sets target.txt to "caught".
@@ -45,6 +53,36 @@ MUTANT = """diff --git a/target.txt b/target.txt
 -good
 +caught
 """
+# A runner argv per tool, as `record --tier` stores it: the stored argv runs the tool.
+RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": ["pytest"],
+               "proptest": ["cargo", "test"], "fast-check": ["vitest"],
+               "rapid": ["go", "test"]}
+# (tool, argv, runner_matches) vectors that the conductor's copy and the recorder's
+# runner_matches both answer (R2). The recorder's own VECTORS are added when present.
+SHARED_VECTORS = [
+    ("hypothesis", "pytest", True),
+    ("hypothesis", "pytest -q tests/test_notes.py", True),
+    ("hypothesis", "python3 -m pytest", True),
+    ("hypothesis", "python3.12 -m pytest", True),
+    ("hypothesis", "uv run pytest", True),
+    ("hypothesis", "python3 t.py", False),
+    ("hypothesis", "./bin/pytest", False),
+    ("hypothesis", "uv run --with x pytest", False),
+    ("hypothesis", "uv run poetry run pytest", False),
+    ("hypothesis", "python -X dev -m pytest", False),
+    ("hypothesis", "pythonista -m pytest", False),
+    ("verus", "verus src/notes.rs", True),
+    ("verus", "cargo verus verify", True),
+    ("verus", "cargo test", False),
+    ("kani", "cargo kani --harness h", True),
+    ("proptest", "cargo test --release", True),
+    ("proptest", "cargo +nightly test", False),
+    ("fast-check", "npx vitest run", True),
+    ("fast-check", "jest", True),
+    ("rapid", "go test ./...", True),
+    ("rapid", "go vet", False),
+    ("crosshair", "crosshair check", False),
+]
 
 
 def tiered(min_tier="property", clauses=TWO, features=("notes-create",)):
@@ -53,7 +91,35 @@ def tiered(min_tier="property", clauses=TWO, features=("notes-create",)):
     return t
 
 
+def contract_text(ids):
+    """A `## Contract` section that defines the clause ids `ids`."""
+    return "\n## Contract\n\n" + "".join("- %s [post]: fixture clause %s\n" % (c, c)
+                                          for c in ids)
+
+
+def with_contract(fid, anchors, contract):
+    """The fixture's feature file for fid, with `contract` before its `## Proof`."""
+    head, tail = FEATURE.format(fid=fid, anchors=anchors).split("\n## Proof\n", 1)
+    return head + contract + "\n## Proof\n" + tail
+
+
 class TierGate(Gate):
+    # The clauses that notes-create's contract defines (R6: a clause counts at any tier
+    # only when its feature's `## Contract` at the verified head defines it).
+    DEFINED = ("C1", "C2", "C10")
+
+    def setUp(self):
+        super().setUp()
+        self.contract("notes-create", self.DEFINED)
+
+    def contract(self, fid, ids):
+        """Commit fid's feature file with a `## Contract` that defines `ids`, before init."""
+        path = os.path.join(self.root, *SKILL.split("/"), "features", fid + ".md")
+        with open(path, "w") as f:
+            f.write(with_contract(fid, self.FEATURES[fid], contract_text(ids)))
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "contract " + fid)
+
     def proof(self, clause, sha, tier="property", tool="hypothesis", verifier="verifier",
               instance="a", feature="notes-create", doc_tier=None, **over):
         """Write a proof record as `record --tier` does; `over` replaces fields (None
@@ -75,7 +141,8 @@ class TierGate(Gate):
             arts.append({"path": name, "sha256": hashlib.sha256(data).hexdigest()})
         doc = {"schema": "verify-evidence/v1", "kind": "evidence", "instance": instance,
                "feature": feature, "sha": sha, "verifier": verifier, "result": "pass",
-               "tier": tier, "tool": tool, "clauses": [clause], "argv": ["python3", "t.py"],
+               "tier": tier, "tool": tool, "clauses": [clause],
+               "argv": list(RUNNER_ARGV.get(tool, [tool])),
                "cwd": "/x", "timeout": 900, "exit_status": 0, "artifacts": arts,
                "captured_at": now()}
         if tier in ("bounded", "property"):
@@ -178,6 +245,90 @@ class BelowRequired(TierGate):
         self.assertFalse(self.proven())
 
 
+class UndefinedClauses(TierGate):
+    """R6: a clause that its feature's `## Contract` at the verified head does not define
+    meets no tier, before any record is read."""
+
+    def test_an_undefined_clause_at_runtime_rejects_although_runtime_evidence_passed(self):
+        sha = self.tiered_run(min_tier="runtime", clauses=["notes-create:C9"])
+        rc, out, err = self.evidence()
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C9")), err)
+        self.assertNotIn("Traceback", err)
+        # The runtime evidence itself passed: only the clause rule rejects.
+        self.assertEqual(self.state().tasks["T1"]["evidence"]["paths"],
+                         [".verify/a/notes-create/%s/evidence.json" % sha])
+        self.assertFalse(self.proven())
+
+    def test_a_proof_record_for_an_undefined_clause_does_not_count(self):
+        sha = self.tiered_run(clauses=["notes-create:C1", "notes-create:C9"])
+        self.proof("C1", sha)
+        self.proof("C9", sha)
+        self.proof("C9", sha, tier="proved", tool="verus")
+        rc, out, err = self.evidence()
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C9")), err)
+
+    def test_no_record_is_read_for_an_undefined_clause(self):
+        sha = self.tiered_run(clauses=["notes-create:C9"])
+        self.proof("C9", sha)
+        with mock.patch.object(C, "_load_record", wraps=C._load_record) as load:
+            self.assertEqual(self.evidence()[0], 3)
+        read = [c.args[0] for c in load.call_args_list]
+        self.assertFalse([p for p in read if "proof-" in os.path.basename(p)], read)
+
+    def test_a_feature_with_no_contract_section_defines_no_clause(self):
+        t = task("T1", ["notes-list"])
+        t.update(min_tier="runtime", clauses=["notes-list:C1"])
+        self.init([t])
+        _, sha = self.build(files=("src/list.py",))
+        self.record("notes-list", sha)
+        self.assertEqual(self.evidence()[1].strip(),
+                         self.reject_line("tier-below-required notes-list:C1"))
+
+    def test_a_defined_clause_still_passes(self):
+        sha = self.tiered_run(min_tier="runtime", clauses=["notes-create:C10"])
+        self.assertEqual(self.evidence()[:2], (0, "EVIDENCE: T1 pass %s\n" % sha))
+
+    def test_a_missing_feature_file_defines_no_clause(self):
+        self.init([tiered(min_tier="runtime")])
+        _, sha = self.build()
+        st = self.state()
+        self.assertEqual(C._defined_clauses(st, "notes-create", sha), list(self.DEFINED))
+        self.assertEqual(C._defined_clauses(st, "notes-gone", sha), [])
+        self.assertIsNone(C._clause_tier(st, "notes-gone:C1", sha, "verifier",
+                                         ["notes-gone"]))
+
+
+class ClauseRuleMatchesForge(unittest.TestCase):
+    """The conductor's clause rule (defined_clauses) agrees with forge's parse_contract."""
+    SAMPLES = [
+        "", "# x\n", "## Contract", "## Contract\n- C1 [pre]: a\n",
+        "## Contract  \n- C1 [pre]: a  \n\n## Proof\n- C2 [post]: b\n",
+        "## Contract\n  - C3 [inv]:   spaced  \n- C4[pre]: no space\n- C5 []: empty kind\n",
+        "## Contract\n- C1 pre: no brackets\n- C2 [pre] no colon\n- c3 [pre]: lower\n"
+        "-  C4 [pre]: two spaces\n* C5 [pre]: star\n- C6 [pre]:\n- C07 [x]: zero\n",
+        "## Contracts\n- C1 [pre]: a\n", "x\n## Contract\n- C1 [pre]: a\n## Contract\n"
+        "- C2 [post]: b\n", "## Contract\r\n- C1 [pre]: a\r\n- C2 [a]b]: c\r\n",
+        "- C1 [pre]: before the section\n## Contract\n- C9 [post]: z\n",
+        with_contract("notes-create", "t1.txt", contract_text(TierGate.DEFINED)),
+    ]
+
+    def test_defined_clauses_matches_parse_contract(self):
+        if not os.path.isfile(FORGE):
+            self.skipTest("this checkout ships no verification-skill-forge")
+        spec = importlib.util.spec_from_file_location("forge_r6", FORGE)
+        forge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(forge)
+        for text in self.SAMPLES:
+            self.assertEqual(C.defined_clauses(text),
+                             [c["id"] for c in forge.parse_contract(text)["clauses"]], text)
+
+    def test_the_samples_cover_defined_and_undefined_clauses(self):
+        self.assertEqual(C.defined_clauses(self.SAMPLES[-1]), ["C1", "C2", "C10"])
+        self.assertEqual(C.defined_clauses(self.SAMPLES[0]), [])
+
+
 class RecordsThatDoNotCount(TierGate):
     """Each record below is the only C2 record; each leaves C2 below its tier."""
 
@@ -239,6 +390,19 @@ class RecordsThatDoNotCount(TierGate):
         self.assertEqual(self.evidence()[1].strip(),
                          self.reject_line("tier-below-required notes-create:C2"))
 
+    def test_an_argv_that_does_not_run_the_tool(self):
+        # R2: --tool hypothesis on a command that runs a plain script does not count.
+        self.assert_c2_unmet(argv=["python3", "t.py"])
+
+    def test_an_argv_through_a_path_does_not_count(self):
+        self.assert_c2_unmet(argv=["./bin/pytest"])
+
+    def test_no_argv(self):
+        self.assert_c2_unmet(argv=None)
+
+    def test_an_argv_that_is_not_a_list(self):
+        self.assert_c2_unmet(argv="pytest")
+
     def test_a_record_at_another_head(self):
         sha = self.tiered_run()
         self.proof("C1", sha)
@@ -246,6 +410,75 @@ class RecordsThatDoNotCount(TierGate):
         self.proof("C2", other)
         self.assertEqual(self.evidence()[1].strip(),
                          self.reject_line("tier-below-required notes-create:C2"))
+
+
+class RunnerBoundRecords(TierGate):
+    """R2: the same property record counts with a runner argv and not without one."""
+
+    def gated_run(self, argv):
+        sha = self.tiered_run(clauses=["notes-create:C1"])
+        self.proof("C1", sha, argv=argv)
+        return sha, self.evidence()
+
+    def test_a_script_argv_is_rejected_below_the_tier(self):
+        _, (rc, out, err) = self.gated_run(["python3", "t.py"])
+        self.assertEqual((rc, out.strip()),
+                         (3, self.reject_line("tier-below-required notes-create:C1")), err)
+        self.assertEqual(self.run_cmd("merge", "T1")[0], 2)
+        self.assertFalse(self.proven())
+
+    def test_the_same_record_with_a_runner_argv_passes(self):
+        sha, (rc, out, err) = self.gated_run(["pytest"])
+        self.assertEqual((rc, out), (0, "EVIDENCE: T1 pass %s\n" % sha), err)
+        self.assertEqual(self.run_cmd("merge", "T1")[0], 0)
+
+    def test_a_wrapped_runner_counts(self):
+        sha = self.tiered_run(clauses=["notes-create:C1"])
+        self.proof("C1", sha, argv=["uv", "run", "python3", "-m", "pytest", "-q"])
+        self.assertEqual(self.evidence()[0], 0)
+
+
+@unittest.skipUnless(os.path.isfile(RECORDER), "verification-skill-forge is not here")
+class RunnerTablesMatchTheRecorder(unittest.TestCase):
+    """R2: the conductor's runner table, wrappers and failure signatures are copies of the
+    recorder's, and both runner_matches give the same answer on one vector list."""
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("verify_evidence_r2", RECORDER)
+        cls.V = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.V)
+        cls.vectors = list(SHARED_VECTORS)
+        forge = os.path.join(os.path.dirname(RECORDER), "test_record_runner.py")
+        if os.path.isfile(forge):
+            with open(forge, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == "VECTORS"
+                        for t in node.targets):
+                    cls.vectors += ast.literal_eval(node.value)
+
+    def test_the_tables_are_equal(self):
+        self.assertEqual(C.RUNNERS, self.V.RUNNERS)
+        self.assertEqual(C.WRAPPERS, self.V.WRAPPERS)
+        self.assertEqual(C.FAILURE_SIGNATURES, self.V.FAILURE_SIGNATURES)
+        self.assertEqual(C.PYTHON_RE.pattern, self.V.PYTHON_RE.pattern)
+        self.assertEqual(set(C.RUNNERS), {t for ts in C.TIER_TOOLS.values() for t in ts})
+
+    def test_both_copies_answer_the_shared_vectors_the_same(self):
+        self.assertGreater(len(self.vectors), len(SHARED_VECTORS))
+        for tool, cmd, want in self.vectors:
+            with self.subTest(tool=tool, cmd=cmd):
+                self.assertIs(C.runner_matches(tool, cmd.split()), want)
+                self.assertIs(self.V.runner_matches(tool, cmd.split()), want)
+        self.assertFalse(C.runner_matches("hypothesis", []))
+
+    def test_every_fixture_argv_runs_its_tool(self):
+        for tool, argv in RUNNER_ARGV.items():
+            with self.subTest(tool=tool):
+                self.assertTrue(C.runner_matches(tool, argv))
+                self.assertTrue(self.V.runner_matches(tool, argv))
 
 
 class UnreadableFields(TierGate):
@@ -377,15 +610,25 @@ class RealRecorder(TierGate):
         patch = os.path.join(self.root, "..", "mutant-%s.diff" % os.getpid())
         with open(patch, "w") as f:
             f.write(MUTANT)
+        # The recorder runs only a runner of --tool, so the fake tool is reached through a
+        # PATH shim named pytest that runs tool.py from its cwd.
+        bin_dir = os.path.join(self.root, "..", "bin-%s" % os.getpid())
+        os.makedirs(bin_dir, exist_ok=True)
+        shim = os.path.join(bin_dir, "pytest")
+        with open(shim, "w") as f:
+            f.write("#!%s\nimport runpy\nrunpy.run_path('tool.py', run_name='__main__')\n"
+                    % sys.executable)
+        os.chmod(shim, 0o755)
         r = subprocess.run(
             [sys.executable, RECORDER, "record", "--instance", "a", "--worktree", wt,
              "--feature", "notes-create", "--verifier", "verifier", "--tier", "property",
              "--tool", "hypothesis", "--clauses", "C1",
-             "--cmd", "%s tool.py" % shlex.quote(sys.executable),
-             "--mutant-patch", patch, "--mutant-author", "verifier"],
+             "--cmd", "pytest", "--mutant-patch", patch, "--mutant-author", "verifier"],
             capture_output=True, text=True, cwd=wt,
-            env=dict(os.environ, VERIFY_EVIDENCE_DIR=self.evdir))
+            env=dict(os.environ, VERIFY_EVIDENCE_DIR=self.evdir,
+                     PATH=bin_dir + os.pathsep + os.environ.get("PATH", "")))
         os.remove(patch)
+        shutil.rmtree(bin_dir, ignore_errors=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("PROOF: property", r.stdout)
         self.assertEqual(self.evidence()[:2], (0, "EVIDENCE: T1 pass %s\n" % sha))

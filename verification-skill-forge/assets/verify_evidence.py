@@ -25,24 +25,33 @@ Usage:
                                         [--worktree W]  # PROOF: <tier> <path>
 
 A proof record (--tier) is taken by running the proof tool here: ARGV is split with shlex
-(no shell) and run from the worktree root under --timeout, and the record is written only
-when it exits 0 on the same HEAD. Its stdout and stderr are pinned as artifacts; nothing
+(no shell) and run under --timeout from the root of a clean checkout of the committed
+HEAD, and the record is written only when it exits 0 on the same HEAD. A worktree whose
+tracked files differ from HEAD (git status --porcelain --untracked-files=no is not
+empty) exits 2 before any checkout or run, naming the changed paths; untracked files do
+not count, and are not in the checkout. Its stdout and stderr are pinned as artifacts; nothing
 the caller supplies stands in for them, so --result, --action, --observed, --side-effect
 and --artifact are refused with --tier. The record is
 <evidence dir>/<instance>/<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json, with the
 evidence.json fields and artifact shape plus tier, tool, clauses, argv and exit_status.
 --tool must be on its tier's list in TIER_TOOLS (proved: verus; bounded: kani; property:
 proptest, hypothesis, fast-check, rapid) and --clauses must name exactly one clause.
+ARGV must run that tool: runner_matches(tool, argv) holds only when argv starts with one
+of the tool's runners in RUNNERS (verus: verus or cargo verus; hypothesis: pytest or
+python -m pytest; and so on), after at most one leading wrapper from WRAPPERS (uv run,
+npx, ...). argv[0] must be a bare name found on PATH, with no '/'. Any other ARGV exits 2
+before any other check, and nothing runs.
 
 A bounded or property pass alone proves little, since a check that tests nothing passes
 too. So those tiers also take --mutant-patch (a diff that breaks the code) and
---mutant-author (who wrote it). The recorder extracts HEAD (git archive) into a temporary
+--mutant-author (who wrote it). The recorder checks out HEAD again into a second temporary
 directory outside the worktree, applies the patch there with git apply, and runs the same
 ARGV in that copy with the same timeout. The record is written only when the mutant run
 exits non-zero and its output matches the tool's entry in FAILURE_SIGNATURES, so a mutant
 that only breaks the build does not count. The patch and the mutant run's exit status,
-stdout and stderr are pinned as artifacts too. The worktree is never touched and the copy
-is always removed. proved takes no mutant flags.
+stdout and stderr are pinned as artifacts too. The worktree is never touched and both
+checkouts are always removed. The record stores cwd "." and ran_in "checkout": the runs
+happened at the root of a checkout, not in the worktree. proved takes no mutant flags.
 
 Where things go. Evidence lives under the evidence directory: $VERIFY_EVIDENCE_DIR when
 set, else <git toplevel of --worktree (default: cwd)>/.verify. Each record is
@@ -69,7 +78,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tarfile
 import tempfile
 import zlib
 
@@ -87,6 +95,49 @@ TIER_TOOLS = {
     "bounded": ("kani",),
     "property": ("proptest", "hypothesis", "fast-check", "rapid"),
 }
+# The commands that run each tool. A tier record counts only when its argv starts with
+# one of these, so --tool cannot label a command that runs something else. A runner is
+# matched as an exact positional prefix: no option may sit between its words.
+# references/proof-tiers.md mirrors this table.
+RUNNERS = {"verus": (("verus",), ("cargo", "verus")),
+           "kani": (("kani",), ("cargo", "kani")),
+           "hypothesis": (("pytest",), ("python", "-m", "pytest"),
+                          ("python3", "-m", "pytest")),
+           "proptest": (("cargo", "test"),),
+           "fast-check": (("vitest",), ("jest",)),
+           "rapid": (("go", "test"),)}
+# Launchers that may come before a runner. At most one is stripped, and nothing (no flag)
+# may sit between it and the runner.
+WRAPPERS = (("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("pipenv", "run"),
+            ("hatch", "run"), ("pnpm", "exec"), ("yarn",), ("bunx",), ("npx",))
+PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?\Z")
+
+
+def _runner_word(word):
+    """A python interpreter name counts as python (python, python3, python3.12)."""
+    return "python" if PYTHON_RE.match(word) else word
+
+
+def runner_matches(tool, argv):
+    """True when argv runs tool: after at most one leading wrapper, argv starts with one
+    of RUNNERS[tool], word for word. An argv[0] with a '/' never matches, because a path
+    names a file the caller chose, not the tool on PATH."""
+    argv = list(argv)
+    if not argv or "/" in argv[0]:
+        return False
+    rests = [argv] + [argv[len(w):] for w in WRAPPERS if tuple(argv[:len(w)]) == w]
+    for rest in rests:
+        if not rest or "/" in rest[0]:
+            continue
+        for runner in RUNNERS.get(tool, ()):
+            head = rest[:len(runner)]
+            if len(head) == len(runner) and \
+                    [_runner_word(head[0])] + head[1:] == \
+                    [_runner_word(runner[0])] + list(runner[1:]):
+                return True
+    return False
+
+
 # What a tool's output holds when the property or proof itself failed, for the mutant
 # run of a bounded or property record: every "require" pattern matches and no "reject"
 # pattern does. These are heuristics over the tools' usual output. They exist to tell a
@@ -357,6 +408,19 @@ def cmd_record_tier(a):
     if a.tool not in allowed:
         return _fail("--tool %r is not allowed for --tier %s: use %s, or record the proof "
                      "at the tier its tool earns" % (a.tool, a.tier, ", ".join(allowed)))
+    # The runner check comes next, before any other: a --cmd that does not run --tool
+    # is refused whatever else the call holds, and it never runs.
+    try:
+        argv = shlex.split(a.proof_cmd)
+    except ValueError as e:
+        return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
+    if not argv:
+        return _fail("--cmd is required with --tier and cannot be blank")
+    if not runner_matches(a.tool, argv):
+        return _fail("--cmd runs %s, which is not a runner of --tool %s (%s): start --cmd "
+                     "with one of them, by name on PATH, after at most one wrapper such "
+                     "as uv run or npx" % (argv[0], a.tool, ", ".join(
+                         " ".join(r) for r in RUNNERS[a.tool])))
     # One record proves one clause: a list, or nothing, would credit clauses the run
     # may not cover.
     named = [c for c in re.split(r"[\s,;]+", a.clauses or "") if c]
@@ -368,12 +432,6 @@ def cmd_record_tier(a):
                      % a.clauses)
     if a.timeout <= 0:
         return _fail("--timeout must be a positive number of seconds, got %d" % a.timeout)
-    try:
-        argv = shlex.split(a.proof_cmd)
-    except ValueError as e:
-        return _fail("--cmd does not parse as a command line (%s): fix its quoting" % e)
-    if not argv:
-        return _fail("--cmd is required with --tier and cannot be blank")
     patch = None
     if a.tier not in MUTANT_TIERS:
         given = [f for f, n in (("--mutant-patch", "mutant_patch"),
@@ -402,13 +460,21 @@ def cmd_record_tier(a):
     root = _worktree_root(wt)
     if root is None:
         return _fail("cannot find the git toplevel of %s" % wt)
-    copy = None
+    err = _refuse_dirty(root)
+    if err is not None:
+        return err
+    copy = head = None
     try:
+        # The mutant copy comes first, so a patch that does not apply exits 2 before
+        # any command runs.
         if patch is not None:
             copy, err = _mutant_copy(root, sha, patch)
             if err is not None:
                 return err
-        run, err = _run_proof(argv, root, a.timeout)
+        head, err = _checkout(root, sha)
+        if err is not None:
+            return err
+        run, err = _run_proof(argv, head, a.timeout)
         if err is not None:
             return err
         if run.returncode != 0:
@@ -434,8 +500,9 @@ def cmd_record_tier(a):
             return _fail("HEAD moved from %s while %s ran: nothing recorded; record again "
                          "on a fixed head" % (sha[:12], argv[0]), 1)
     finally:
-        if copy is not None:
-            shutil.rmtree(os.path.dirname(copy), ignore_errors=True)
+        for d in (copy, head):
+            if d is not None:
+                shutil.rmtree(os.path.dirname(d), ignore_errors=True)
     out = os.path.join(evidence_dir(wt), a.instance, a.feature, sha)
     stem = "proof-%s-%s-%s" % (a.tier, a.tool, a.clauses)
     files = [("stdout", run.stdout), ("stderr", run.stderr)]
@@ -455,7 +522,7 @@ def cmd_record_tier(a):
     doc = {"schema": SCHEMA, "kind": "evidence", "instance": a.instance,
            "feature": a.feature, "sha": sha, "verifier": a.verifier,
            "result": "pass", "tier": a.tier, "tool": a.tool,
-           "clauses": [a.clauses], "argv": argv, "cwd": root,
+           "clauses": [a.clauses], "argv": argv, "cwd": ".", "ran_in": "checkout",
            "timeout": a.timeout, "exit_status": run.returncode,
            "artifacts": arts, "captured_at": _now()}
     if mutant is not None:
@@ -477,25 +544,58 @@ def _run_proof(argv, cwd, timeout, where=""):
                            "installed and on PATH" % (argv[0], where, e), 1)
 
 
-def _mutant_copy(root, sha, patch):
-    """(copy dir, None): HEAD's committed tree extracted into a new temporary directory
-    with patch applied. (None, exit code) when it cannot be made; nothing is left behind.
-    The worktree is only read (git archive), never written."""
-    tmp = tempfile.mkdtemp(prefix="verify-mutant-")
+def _refuse_dirty(root):
+    """None when no tracked file differs from HEAD, else the exit code once reported.
+    Untracked files do not count: they are not in the checkout the proof runs in.
+    GIT_OPTIONAL_LOCKS=0 stops git status from refreshing the worktree's index."""
+    r = subprocess.run(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                       capture_output=True, text=True,
+                       env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    if r.returncode != 0:
+        return _fail("git status failed in %s (%s): nothing ran or was recorded"
+                     % (root, r.stderr.strip()))
+    paths = [line[3:] for line in r.stdout.splitlines() if line.strip()]
+    if paths:
+        return _fail("the worktree has tracked changes that are not committed: %s. "
+                     "Nothing ran or was recorded; a proof runs on the committed head, so "
+                     "commit or stash these changes and record again" % ", ".join(paths))
+    return None
+
+
+def _checkout(root, sha):
+    """(dir, None): every tracked file of commit sha, checked out into a new temporary
+    directory outside the worktree. (None, exit code) when it cannot be made; nothing is
+    left behind. A private index is used, so the worktree and its index are only read.
+    Unlike git archive, export-ignore in .gitattributes drops nothing."""
+    tmp = tempfile.mkdtemp(prefix="verify-proof-")
     copy, done = os.path.join(tmp, "head"), False
     try:
-        tar = os.path.join(tmp, "head.tar")
-        r = _git(root, "archive", "--format=tar", "-o", tar, sha)
-        if r.returncode != 0:
-            return None, _fail("git archive of %s failed (%s): nothing recorded"
-                               % (sha[:12], r.stderr.strip()), 1)
-        os.makedirs(copy)
-        with tarfile.open(tar) as t:
-            if hasattr(tarfile, "tar_filter"):
-                t.extractall(copy, filter="tar")
-            else:  # Python without extraction filters: the archive is our own HEAD.
-                t.extractall(copy)
-        os.remove(tar)
+        env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+        for args in (("read-tree", sha),
+                     ("checkout-index", "-a", "-f", "--prefix=%s%s" % (copy, os.sep))):
+            r = subprocess.run(["git", "-C", root, *args], capture_output=True,
+                               text=True, env=env)
+            if r.returncode != 0:
+                return None, _fail("cannot check out %s (git %s: %s): nothing recorded"
+                                   % (sha[:12], args[0], r.stderr.strip()), 1)
+        os.makedirs(copy, exist_ok=True)  # a commit with no files
+        os.remove(os.path.join(tmp, "index"))
+        done = True
+        return copy, None
+    finally:
+        if not done:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _mutant_copy(root, sha, patch):
+    """(copy dir, None): a clean checkout of commit sha in a new temporary directory,
+    with patch applied. (None, exit code) when it cannot be made; nothing is left behind.
+    The worktree is only read, never written."""
+    copy, err = _checkout(root, sha)
+    if err is not None:
+        return None, err
+    tmp, done = os.path.dirname(copy), False
+    try:
         diff = os.path.join(tmp, "mutant.patch")
         with open(diff, "wb") as f:
             f.write(patch)

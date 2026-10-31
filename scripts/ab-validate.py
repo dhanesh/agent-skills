@@ -9760,6 +9760,13 @@ def _pt_feature(contract):
     return head + contract + "\n## Proof\n" + tail
 
 
+# A runner argv per tool, so the stored argv runs the stored tool: a conductor that binds
+# records to their runner (proof-tier trust R2) counts these records.
+_PT_RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": ["pytest"],
+                   "proptest": ["cargo", "test"], "fast-check": ["vitest"],
+                   "rapid": ["go", "test"]}
+
+
 def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="verifier"):
     """A proof record in the shape `verify_evidence.py record --tier` writes, with its
     mutant artifacts (factory-conductor's test_conductor_tiers.py builds the same)."""
@@ -9779,7 +9786,8 @@ def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="v
         json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
                    "feature": "notes-create", "sha": sha, "verifier": verifier,
                    "result": "pass", "tier": tier, "tool": tool, "clauses": [clause],
-                   "argv": ["python3", "t.py"], "cwd": "/x", "timeout": 900,
+                   "argv": list(_PT_RUNNER_ARGV.get(tool, [tool])), "cwd": "/x",
+                   "timeout": 900,
                    "exit_status": 0, "artifacts": arts, "captured_at": _now_z(),
                    "mutant_author": verifier, "mutant_exit_status": 1}, f)
 
@@ -9926,16 +9934,18 @@ def check_proof_tier_gate(old, new):
         return r
 
     tiered = [("T1", ["notes-create"], {"min_tier": "property", "clauses": _PT_TWO})]
-    # Sanity: with property records for both clauses the new tree passes and merges, so a
+    # Each tiered probe commits _PT_CONTRACT, which defines C1 and C2: a clause counts at
+    # a tier only when its feature's contract defines it (proof-tier trust R6).
+    # Sanity:with property records for both clauses the new tree passes and merges, so a
     # reject below is the gate, not a fixture the new tree cannot pass at all.
-    good = measured(new, "evidence", tiered, proofs=("C1", "C2"))
+    good = measured(new, "evidence", tiered, contract=True, proofs=("C1", "C2"))
     if good is not None and (good["evidence"][:1] != ["pass"] or good["merge"] != 0):
         PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
                              "proof-tier sanity check failed: property records for C1 and "
                              "C2 did not pass and merge T1: %r" % good))
 
-    a = measured(old, "evidence", tiered, proofs=("C1",))
-    b = measured(new, "evidence", tiered, proofs=("C1",))
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1",))
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1",))
     if a is not None and b is not None:
         a, b = _pt_rejects(a, "tier-below-required"), _pt_rejects(b, "tier-below-required")
         row(s, "tier-below-required rejects, C2 at runtime only under min_tier property "

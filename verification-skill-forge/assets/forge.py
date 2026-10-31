@@ -21,6 +21,9 @@ Usage:
                                                        # MAINTAIN_RESULT: PASS|FAIL
     python3 forge.py contract <feature file>           # one JSON object: clauses,
                                                        #   trusted, sha256
+    python3 forge.py check-proof [--root <repo>] --base <ref> --head <ref>
+                                                       # ESCAPE: <path>:<line> <token>
+                                                       #   CHECK_PROOF_RESULT: PASS|FAIL
 
 A verify skill lives at <app root>/.claude/skills/verify-<app>/ and holds SKILL.md (five
 sections: Launch, Doctor, Drive, Evidence, Cleanup), scripts/verify_evidence.py (a
@@ -952,6 +955,92 @@ def cmd_contract(a):
     return 0
 
 
+# ── check-proof: the escape-hatch rule ───────────────────────────────────────
+# The one escape-hatch rule (spec Terms). factory-conductor holds a copy, and both copies
+# pass the same vector list, escape_hatch_vectors.json. On a line that a diff adds to a
+# .rs file: `assume(` or `admit(` not preceded by an identifier character or by `::`
+# (so `prop_assume(`, `my_assume(` and `kani::assume(` are not escapes, `x.assume(` is),
+# or `external_body` inside `#[verifier ...]` on the same line. Comments and strings are
+# not skipped: a token there is still reported.
+ESCAPE_CALL_RE = re.compile(r"(?<!\w)(?<!::)(assume|admit)\(")
+ESCAPE_ATTR_RE = re.compile(r"#\[verifier\b[^\]]*\bexternal_body\b")
+
+
+def escape_hatches(line):
+    """[(column, token)] for every escape hatch on one source line, sorted by column.
+    The token is `assume(`, `admit(` or `external_body`; the column is where the match
+    starts (for external_body, the `#[verifier` that holds it)."""
+    hits = [(m.start(), m.group(1) + "(") for m in ESCAPE_CALL_RE.finditer(line)]
+    hits += [(m.start(), "external_body") for m in ESCAPE_ATTR_RE.finditer(line)]
+    return sorted(hits)
+
+
+def added_lines(diff_text):
+    """[(head line number, text)] for every line a unified diff of one file adds."""
+    out, cur, in_hunk = [], 0, False
+    for line in diff_text.split("\n"):
+        if line.startswith("@@"):
+            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            in_hunk, cur = bool(m), int(m.group(1)) if m else 0
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
+            out.append((cur, line[1:]))
+            cur += 1
+        elif line.startswith(" "):
+            cur += 1
+    return out
+
+
+# Flags that keep the user's git config from changing what the diff shows. Renames are
+# off, so a moved file's lines all count as added: the scan errs towards a report.
+DIFF_FLAGS = ("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
+              "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/")
+
+
+def cmd_check_proof(a):
+    """Print every escape hatch that the diff from --base to --head adds to a .rs file."""
+    root = os.path.realpath(a.root)
+    r = git(root, "rev-parse", "--is-inside-work-tree") if os.path.isdir(root) else None
+    top = toplevel(root) if r is not None and r.stdout.strip() == "true" else None
+    if not top:
+        sys.stderr.write("--root %s is not a git work tree: pass the root of the "
+                         "repository whose diff to scan\n" % a.root)
+        return 2
+    shas = {}
+    for flag, ref in (("--base", a.base), ("--head", a.head)):
+        r = git(top, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                ref + "^{commit}")
+        if r.returncode != 0 or not SHA_RE.match(r.stdout.strip()):
+            sys.stderr.write("%s %s does not resolve to a commit in %s: pass a branch, "
+                             "tag or SHA that exists there\n" % (flag, ref, top))
+            return 2
+        shas[flag] = r.stdout.strip()
+    r = subprocess.run(["git", "-C", top, *DIFF_FLAGS, "--name-only", "-z",
+                        shas["--base"], shas["--head"], "--"], capture_output=True)
+    if r.returncode != 0:
+        sys.stderr.write("git diff %s %s failed in %s: %s\n" % (
+            a.base, a.head, top, r.stderr.decode("utf-8", "replace").strip()))
+        return 2
+    paths = sorted(p for p in r.stdout.decode("utf-8", "surrogateescape").split("\0")
+                   if p.endswith(".rs"))
+    hits = []
+    for path in paths:
+        r = subprocess.run(["git", "-C", top, *DIFF_FLAGS, "-U0", shas["--base"],
+                            shas["--head"], "--", ":(literal)" + path],
+                           capture_output=True)
+        if r.returncode != 0:
+            sys.stderr.write("git diff of %s failed in %s: %s\n" % (
+                path, top, r.stderr.decode("utf-8", "replace").strip()))
+            return 2
+        for lineno, text in added_lines(r.stdout.decode("utf-8", "replace")):
+            hits += [(path, lineno, col, tok) for col, tok in escape_hatches(text)]
+    for path, lineno, _col, tok in sorted(hits):
+        _out("ESCAPE: %s:%d %s" % (path, lineno, tok))
+    _out("CHECK_PROOF_RESULT: %s" % ("FAIL" if hits else "PASS"))
+    return 1 if hits else 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -980,11 +1069,15 @@ def main(argv=None):
     s.add_argument("verify_dir")
     s.add_argument("--base", required=True)
     sub.add_parser("contract").add_argument("feature_file")
+    s = sub.add_parser("check-proof")
+    s.add_argument("--root", default=".")
+    s.add_argument("--base", required=True)
+    s.add_argument("--head", required=True)
     a = p.parse_args(argv)
     return {"detect": cmd_detect, "scaffold": cmd_scaffold, "vendor": cmd_vendor,
             "lint": cmd_lint, "coverage": cmd_coverage, "seed": cmd_seed,
             "finding": cmd_finding, "check-maintain": cmd_check_maintain,
-            "contract": cmd_contract}[a.cmd](a)
+            "contract": cmd_contract, "check-proof": cmd_check_proof}[a.cmd](a)
 
 
 if __name__ == "__main__":

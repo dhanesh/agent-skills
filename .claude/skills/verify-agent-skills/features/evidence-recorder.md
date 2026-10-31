@@ -49,6 +49,25 @@ python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name er-refus
 
 Expect a non-zero exit and an error saying `--side-effect` is required.
 
+```sh
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name er-runner -- \
+  env VERIFY_EVIDENCE_DIR="$WT/.verify-run/$INSTANCE/er/.verify" \
+  python3 verification-skill-forge/assets/verify_evidence.py record --instance fx \
+  --worktree "$WT/.verify-run/$INSTANCE/er" --feature notes-create --verifier fixture-verifier \
+  --tier proved --tool verus --clauses C1 --cmd true
+```
+
+Expect exit 2 and `--cmd runs true, which is not a runner of --tool verus (verus, cargo
+verus)`. `true` would pass, but the recorder does not run it. To record a proof without
+the real tool, put a script with the runner's name first on PATH, as
+`drive.py fixture proof-tool` does (`bin_dir`).
+
+To see C2, edit a tracked file of the fixture (`echo x >> "$WT/.verify-run/$INSTANCE/er/app.py"`)
+and run `record --tier` with a runner shim on PATH. Expect exit 2 and an error that names
+`app.py` and says `tracked changes that are not committed`. Restore the file
+(`git -C "$WT/.verify-run/$INSTANCE/er" checkout -- app.py`), record again, and expect the
+written record to hold `"cwd": "."` and `"ran_in": "checkout"`.
+
 ## Proof
 
 The written `evidence.json` names the fixture head as `sha`, and its `artifacts[].sha256`
@@ -66,3 +85,5 @@ makes `record --tier` exit 2, and a written proof record stores `cwd` `"."` and 
   head, which is the checkout under test, not the fixture.
 - `env VERIFY_EVIDENCE_DIR=...` inside the capture keeps fixture records out of the run's
   own evidence directory.
+- A proof record runs in a checkout of the committed head, not in the fixture. A runner
+  shim that needs a file the fixture has not committed fails there.

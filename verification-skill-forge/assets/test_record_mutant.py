@@ -4,6 +4,7 @@
 Each test drives the real CLI in a subprocess against a temp git repo. The proof tool is a
 small Python script that prints what the real tool prints for the state in mode.txt, and
 appends its cwd to a log outside the repo, so a test can see where (and whether) it ran.
+It is reached through PATH shims named after each tool's runner (pytest, cargo, ...).
 """
 import hashlib
 import json
@@ -89,6 +90,23 @@ TOOL = ("import json, os, sys\n"
         "sys.exit(2 if mode == 'broken' else 1)\n")
 
 
+# The --cmd each tool is recorded with, and the shims it needs: name -> words to drop.
+RUN = {"verus": "verus", "kani": "kani", "proptest": "cargo test", "hypothesis": "pytest",
+       "fast-check": "vitest", "rapid": "go test"}
+SHIMS = {"verus": 0, "kani": 0, "cargo": 1, "pytest": 0, "vitest": 0, "go": 1}
+
+
+def shim(bin_dir, name, skip=0):
+    """Write bin_dir/name: it drops its first skip args and runs tool.py from its cwd."""
+    path = os.path.join(bin_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!%s\nimport runpy, sys\nsys.argv = ['tool.py'] + sys.argv[%d:]\n"
+                "runpy.run_path('tool.py', run_name='__main__')\n"
+                % (sys.executable, 1 + skip))
+    os.chmod(path, 0o755)
+    return path
+
+
 def patch_to(mode):
     """A diff that changes mode.txt from ok to mode."""
     return ("diff --git a/mode.txt b/mode.txt\n--- a/mode.txt\n+++ b/mode.txt\n"
@@ -127,7 +145,12 @@ class RecordMutant(unittest.TestCase):
         # A private TMPDIR, so a mutant copy left behind shows up as a file here.
         self.scratch = os.path.join(self.tmp, "scratch")
         os.makedirs(self.scratch)
-        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev, TMPDIR=self.scratch)
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        for name, skip in SHIMS.items():
+            shim(self.bin, name, skip)
+        self.env = dict(os.environ, VERIFY_EVIDENCE_DIR=self.ev, TMPDIR=self.scratch,
+                        PATH=self.bin + os.pathsep + os.environ.get("PATH", ""))
         self.before = listing(self.root)
 
     def tearDown(self):
@@ -140,7 +163,7 @@ class RecordMutant(unittest.TestCase):
         return path
 
     def record(self, *extra, tier="property", tool="hypothesis"):
-        cmd = "%s tool.py %s %s" % (sys.executable, self.log, tool)
+        cmd = "%s %s %s" % (RUN[tool], self.log, tool)
         return subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", tier, "--tool", tool,
@@ -226,8 +249,8 @@ class RecordMutant(unittest.TestCase):
         r = self.record("--mutant-patch", self.diff("pass"), "--mutant-author", "verifier")
         self.assertNothingWritten(r, 1, "exited 0 on the mutant", "nothing recorded")
         head, mutant = self.runs()
-        self.assertEqual(head, self.root)
-        self.assertNotEqual(mutant, self.root)
+        self.assertNotEqual(head, mutant)
+        self.assertNotIn(self.root, (head, mutant))
 
     def test_mutant_that_only_breaks_the_build_writes_nothing(self):
         for tier, tool in (("property", t) for t in V.TIER_TOOLS["property"]):
@@ -243,7 +266,7 @@ class RecordMutant(unittest.TestCase):
     def test_mutant_failing_another_tools_way_lacks_the_signature(self):
         # A hypothesis record whose mutant output is a kani report: it failed, but not
         # the way a failed property test does.
-        cmd = "%s tool.py %s kani" % (sys.executable, self.log)
+        cmd = "pytest %s kani" % self.log
         r = subprocess.run(
             [sys.executable, SCRIPT, "record", "--instance", "a", "--feature",
              "notes-create", "--verifier", "v1", "--tier", "property", "--tool",
@@ -283,11 +306,14 @@ class RecordMutant(unittest.TestCase):
         self.assertEqual(read(".mutant.exit"), "1\n")
         self.assertEqual(read(".mutant.stdout"), FAILED["hypothesis"])
         self.assertIn("1 passed", read(".stdout"))
-        # Both runs used the same argv: once at the root, once in a copy elsewhere.
+        # Both runs used the same argv, each in its own checkout of HEAD, outside the
+        # worktree.
+        self.assertEqual((doc["cwd"], doc["ran_in"]), (".", "checkout"))
         head, mutant = self.runs()
-        self.assertEqual(head, self.root)
-        self.assertFalse(mutant.startswith(self.root))
-        self.assertTrue(mutant.startswith(self.scratch))
+        self.assertNotEqual(head, mutant)
+        for d in (head, mutant):
+            self.assertFalse(d.startswith(self.root))
+            self.assertTrue(d.startswith(self.scratch))
 
     def test_every_tool_records_with_its_signature(self):
         for tier in V.MUTANT_TIERS:
@@ -302,16 +328,16 @@ class RecordMutant(unittest.TestCase):
                         self.assertEqual(json.load(f)["mutant_author"], "forge")
                     self.assertClean()
 
-    def test_uncommitted_change_is_not_in_the_copy(self):
-        # The copy is HEAD, not the dirty worktree: a worktree edit that would make the
-        # patch not apply does not matter, and is left in place.
+    def test_uncommitted_change_is_refused(self):
+        # A tracked edit means the head run and the mutant run would not check the same
+        # code, so the recorder refuses before any checkout or run, and leaves the edit.
         with open(os.path.join(self.root, "mode.txt"), "w", encoding="utf-8") as f:
             f.write("ok\n\n")
         self.before = listing(self.root)
         r = self.record("--mutant-patch", self.diff("failed"), "--mutant-author",
                         "verifier")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertClean()
+        self.assertNothingWritten(r, 2, "tracked changes", "mode.txt")
+        self.assertEqual(self.runs(), [])
 
     # ── the signature table ───────────────────────────────────────────────────
     def test_signatures_cover_the_mutant_tiers(self):
