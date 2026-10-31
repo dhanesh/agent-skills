@@ -310,6 +310,31 @@ class TierHintTests(unittest.TestCase):
             self.assertEqual(len(errs([bad])), 1, repr(bad))
 
 
+class BracketedHintTests(unittest.TestCase):
+    """A [proof: ...] or [where: ...] value may hold one level of brackets (a JSON list,
+    a Next.js route segment): the hint ends at its own closing bracket, not the first."""
+
+    R1_NESTED = (R1 + " [feature: notes-create] [proof: init refuses clauses [null] and"
+                 " clauses [] with exit 2] [where: app/notes/[id]/page.tsx] [parallel-safe]")
+
+    def test_nested_brackets_stay_out_of_the_title(self):
+        rc, out = plan(spec(self.R1_NESTED, R2))
+        self.assertEqual(rc, 0, out)
+        t1 = json.loads(out)["tasks"][0]
+        self.assertEqual(t1["title"], "The app must save a note when the user presses Save")
+
+    def test_nested_where_is_the_whole_path(self):
+        rc, out = _run(SPEC_TO_TASKS, spec(self.R1_NESTED, R2))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("app/notes/[id]/page.tsx", out)
+        self.assertNotIn("app/notes/[id\n", out)
+
+    def test_nested_proof_lints_clean(self):
+        rc, out = lint(spec(self.R1_NESTED, R2))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LINT_RESULT: PASS", out)
+
+
 class NoHintPlanUnchangedTests(unittest.TestCase):
     """O1: a spec with neither hint compiles to the plan it compiled to before."""
 

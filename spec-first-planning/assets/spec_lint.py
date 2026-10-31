@@ -187,7 +187,10 @@ _AFTER_ID_RE = re.compile(r"^[Rr](\d+)$")
 # drive and see when it works; "[parallel-safe]" marks it independent of every other
 # task (the alternative independence marker is an "[after: ...]" hint).
 FEATURE_RE = re.compile(r"\[feature:\s*([^\]]*)\]", re.IGNORECASE)
-PROOF_RE = re.compile(r"\[proof:\s*([^\]]*)\]", re.IGNORECASE)
+# A hint value that may hold one level of brackets ("clauses [null]", a route segment
+# "[id]"): the hint ends at its own closing bracket, not at the first "]" inside it.
+NESTED_VALUE = r"((?:[^\[\]]|\[[^\[\]]*\])*)"
+PROOF_RE = re.compile(r"\[proof:\s*" + NESTED_VALUE + r"\]", re.IGNORECASE)
 PSAFE_RE = re.compile(r"\[parallel-safe\]", re.IGNORECASE)
 _FEATURE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 # Proof-tier hints on a requirement (proof-tiered verification): "[tier: property]" is
