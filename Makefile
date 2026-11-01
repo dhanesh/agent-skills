@@ -12,7 +12,7 @@ SKILLS := $(patsubst %/SKILL.md,%,$(wildcard */SKILL.md))
 # as skills are added; it only has to be a floor, not an exact count.
 MIN_SKILLS ?= 15
 
-.PHONY: gate gate-selftest validate scan-leaks dry-run playbook ste test test-integration eval frontmatter readme bcp14 skill-graph skill-graph-check ab-validate contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
+.PHONY: gate gate-selftest validate scan-leaks dry-run playbook ste test test-integration eval frontmatter readme bcp14 skill-graph skill-graph-check ab-validate ab-report contract contract-vendor list-skills clean $(addprefix gate-,$(SKILLS))
 
 list-skills:
 	@printf '%s\n' $(SKILLS)
@@ -204,6 +204,16 @@ ste:
 #   make ab-validate BASE=<git-ref>  # against any other ref
 ab-validate: clean
 	@python3 scripts/ab-validate.py $(BASE)
+
+# The same A/B run, plus a per-skill improvement report for the skills this branch
+# changes: every A/B row that names the skill, its outcome eval on both arms, and a
+# verdict (improved, held, not measured, worse). It writes
+# docs/ab-reports/<date>-<branch>.md and rebuilds docs/ab-reports/README.md, the
+# per-skill history. Commit the report with the change.
+#   make ab-report [BASE=<git-ref>] [AB_REPORT_DIR=<dir>]
+AB_REPORT_DIR ?= docs/ab-reports
+ab-report: clean
+	@python3 scripts/ab-validate.py $(BASE) --report-dir $(AB_REPORT_DIR)
 
 # skill-contract (docs/skill-contract/SPEC.md): the reference checker's
 # conformance vectors and the end-to-end handoff proof. Also runs in `gate`.

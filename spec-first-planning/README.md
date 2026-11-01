@@ -42,7 +42,7 @@ flowchart LR
   self_spec_first_planning ==>|"when: the plan comes from an intake item<br/>why: ops-intake marks the item planned<br/>envelope: task-plan/v1"| out_ops_intake
   self_spec_first_planning ==>|"when: the project releases with release-conductor<br/>why: the grant carries release defaults<br/>envelope: autonomy-grant/v1"| out_release_conductor
   self_spec_first_planning ==>|"when: an unattended grant covers the run<br/>why: the grant lifts its confirm step<br/>envelope: autonomy-grant/v1"| out_test_safety_net
-  self_spec_first_planning -->|"when: an unattended plan, but the app has no verify skill<br/>why: it writes the verify skill that proves each feature"| out_verification_skill_forge
+  self_spec_first_planning -->|"when: unattended, with no verify skill or no contract for a tiered clause<br/>why: it writes the verify skill and the feature contracts"| out_verification_skill_forge
   self_spec_first_planning ==>|"when: an unattended grant covers the run<br/>why: the grant lifts its confirm step<br/>envelope: autonomy-grant/v1"| out_verifier_installer
   classDef self stroke-width:4px,font-weight:bold
   class self_spec_first_planning self
@@ -50,6 +50,8 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
+**2.8.1.** SKILL.md step 2 now tells the planner when to use the `[tier: ...]` and `[contract: ...]` hints, and to add a missing feature contract with verification-skill-forge before the run. Before, only `references/spec-format.md` described them.
+
 **2.8.0.** A requirement can carry `[tier: <t>]` and `[contract: <feature>:C<n>, ...]` hints. The compiler writes them to the task as `min_tier` and `clauses`, and the linter refuses a `tier:` hint that has no `contract:` hint. A `[proof: ...]` or `[where: ...]` value can now hold one level of brackets, such as `clauses [null]` or `app/notes/[id]/page.tsx`. Before, the first `]` ended the hint, and the rest of its text went into the task title.
 
 **2.7.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

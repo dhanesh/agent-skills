@@ -10367,7 +10367,17 @@ def main():
     if shutil.which("git") is None:
         print("AB_RESULT: SKIP (git not available)")
         return 0
-    base = sys.argv[1] if len(sys.argv) > 1 else default_base()
+    args = sys.argv[1:]
+    report_dir = None
+    if "--report-dir" in args:
+        i = args.index("--report-dir")
+        if i + 1 >= len(args):
+            print("usage: ab-validate.py [BASE_REF] [--report-dir DIR]", file=sys.stderr)
+            return 2
+        report_dir = args[i + 1]
+        del args[i:i + 2]
+    explicit = bool(args)
+    base = args[0] if args else default_base()
     if not base:
         print("AB_RESULT: SKIP (no merge base with %s — pass a ref explicitly, "
               "e.g. `make ab-validate BASE=<ref>`)" % " or ".join(INTEGRATION_REFS))
@@ -10391,7 +10401,7 @@ def main():
         short = _git_out("rev-parse", "--short", base) or base
         subject = _git_out("log", "-1", "--format=%s", base)
         origin = "merge base with %s" % " / ".join(INTEGRATION_REFS) \
-            if len(sys.argv) <= 1 else "explicit ref"
+            if not explicit else "explicit ref"
         print("baseline: %s (%s)  %s\ncandidate: working tree\n"
               % (short, origin, subject[:60]))
         check_world_model(old, REPO)
@@ -10466,6 +10476,12 @@ def main():
         check_proof_tier_trust(old, REPO)
         check_spec_hint_brackets(old, REPO)
         check_forge_recorder_names(old, REPO)
+        if report_dir:
+            # The evals need the baseline tree, so they run before it is removed.
+            import ab_report
+            changed = ab_report.changed_skills(REPO, base, ab_report.skill_dirs(REPO))
+            evals = {s: (ab_report.eval_score(old, s), ab_report.eval_score(REPO, s))
+                     for s in sorted(changed)}
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)
@@ -10503,6 +10519,23 @@ def main():
           "baseline) · %d unproven · %d worse"
           % (improved, held, landed, unproven, worse))
     ok = not worse and not unproven
+    if report_dir:
+        import ab_report
+        rows = [dict(r, mark=m) for r, m in zip(ROWS, marks)]
+        meta = {"branch": _git_out("rev-parse", "--abbrev-ref", "HEAD") or "detached",
+                "head": _git_out("rev-parse", "--short", "HEAD") or "?",
+                "base": short, "base_subject": subject[:60],
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "result": "PASS" if ok else "FAIL"}
+        if meta["branch"] == "HEAD":
+            meta["branch"] = "detached-" + meta["head"]
+        md, summary = ab_report.build_report(rows, meta, changed, evals)
+        path = ab_report.write_report(report_dir, md, summary)
+        print("AB_REPORT: %s" % os.path.relpath(path, REPO))
+        for s, v in sorted(summary["skills"].items()):
+            print("AB_SKILL: %s %s (improved=%d rows=%d eval %s -> %s)"
+                  % (s, v["verdict"], v["improved"], v["rows"], v["eval"][0],
+                     v["eval"][1]))
     print("AB_RESULT: %s" % ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 

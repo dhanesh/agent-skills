@@ -18,6 +18,8 @@
 - [ ] For any SKILL.md touched: ran the semantic review checklist (`repo2skill/references/semantic-review.md`)
 - [ ] Behavioural change? `make ab-validate` shows IMPROVED or HELD (never WORSE/UNPROVEN),
       and any new guardrail has an A/B row — a rule with no row is a claim nobody measured
+- [ ] Changed a skill? `make ab-report` wrote `docs/ab-reports/<date>-<branch>.md`, it is
+      committed, and every `not measured` skill is explained in Notes
 - [ ] Other checks (describe):
 
 ## Notes / scope

@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.8.0"
+  version: "2.8.1"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
@@ -138,6 +138,16 @@ otherwise stop and tell the user that this skill needs Python 3.10 or newer.
    whose only proof is "tests pass" or "builds clean" MUST NOT run unattended, because
    factory-conductor would then merge work nobody saw working: plan it attended, and the
    `--unattended` lint refuses it until you do.
+
+   **Proof tiers.** When one drive of the app is not proof enough (a rule has to hold for
+   every input, or up to a bound), add `[tier: proved|bounded|property|runtime]` and
+   `[contract: <feature>:C<n>, ...]` to the requirement. The tier is the weakest proof
+   factory-conductor's evidence gate accepts for those clauses. Each hint needs the
+   other, and both leave the task title. They become the task's `min_tier` and
+   `clauses`. Each clause has to exist in that feature's `## Contract` section, or the
+   gate rejects the task as `tier-below-required`: when the feature has no contract
+   yet, use verification-skill-forge to add the clauses before the run. The grammar is in
+   `references/spec-format.md`.
 3. **Lint and repair** with `python3 "$SKILL_DIR/assets/spec_lint.py" <spec.md>` for the
    light pass. Add `--converged` before the path for the full loop, or `--unattended` in
    unattended mode. Fix every `FAIL:` line (each names the requirement and the defect:
