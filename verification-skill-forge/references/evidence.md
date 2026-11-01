@@ -29,6 +29,13 @@ git.
  "captured_at": "2026-09-29T10:00:00Z"}
 ```
 
+The recorder copies each `--artifact` into the record's directory under its own file name.
+It refuses two artifacts with one name, and it refuses the names it writes itself:
+`evidence.json`, `doctor.json` and any name that starts with `proof-`. A copied
+`evidence.json` would overwrite the artifact. A copied `doctor.json` or `proof-*` file
+would sit where the conductor reads doctor and proof records, so it could pose as one.
+Rename the file before you record it.
+
 ## Proof records (`record --tier`)
 
 ```bash

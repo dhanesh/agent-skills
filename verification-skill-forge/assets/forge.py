@@ -993,9 +993,12 @@ def added_lines(diff_text):
 
 
 # Flags that keep the user's git config from changing what the diff shows. Renames are
-# off, so a moved file's lines all count as added: the scan errs towards a report.
+# off, so a moved file's lines all count as added: the scan errs towards a report. --text
+# keeps a committed `*.rs -diff` attribute from hiding the lines, and --no-relative keeps
+# diff.relative from cutting the paths. factory-conductor's ESCAPE_DIFF uses the same flags.
 DIFF_FLAGS = ("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
-              "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/")
+              "--no-textconv", "--no-renames", "--text", "--no-relative",
+              "--src-prefix=a/", "--dst-prefix=b/")
 
 
 def cmd_check_proof(a):
