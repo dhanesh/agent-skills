@@ -39,6 +39,9 @@ A spec is one markdown file:
   drive and see when it works) and `[parallel-safe]` (independent of every other
   task). `[parallel-safe]` and `[after: ...]` are the two independence markers; a
   requirement carries at most one.
+  The value of a `[proof: ...]` or a `[where: ...]` hint can hold one level of
+  brackets, such as `clauses [null]` or `app/notes/[id]/page.tsx`. The hint ends at
+  its own closing bracket.
 - **Proof-tier hints** on a requirement, each stripped from the task title and
   ignored by the modal and vague-term rules: `[tier: <tier>]` (the weakest proof
   tier factory-conductor accepts: `proved`, `bounded`, `property` or `runtime`)

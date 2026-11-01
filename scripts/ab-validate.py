@@ -319,6 +319,8 @@ SINCE_PROOF_TIER_TRUST = "4f2f8fc"  # proof-tier trust: the first commit of
 # `git rev-list --first-parent --reverse <run base>..HEAD`, where the run base is
 # `git merge-base factory/proof-tiers-work HEAD`. Repin it if that commit's sha changes on
 # the way into main (a rebase or a squash), or its rows stay live claims after they land.
+SINCE_SPEC_HINT_BRACKETS = "57193d5"  # spec-first-planning 2.8.0: a [proof: ...] or
+# [where: ...] value may hold one level of brackets.
 SINCE_RECORDER_NAMES = "8bf3201"  # verification-skill-forge 1.1.0: record refuses
 # its own artifact names, and check-proof diffs with --text.
 
@@ -10168,6 +10170,40 @@ def _ptt_integration_red(tree):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+
+def check_spec_hint_brackets(old, new):
+    """spec-first-planning: does a `]` inside a [proof: ...] hint stay out of the task
+    title, and does a [where: ...] path keep its `[id]` segment?"""
+    hints = ("[feature: notes-create] [proof: init refuses clauses [null] with exit 2] "
+             "[where: app/notes/[id]/page.tsx] [parallel-safe]")
+    want = "The app must save a note when the user presses Save"
+
+    def measured(tree):
+        compiler = os.path.join(tree, "spec-first-planning", "assets", "spec_to_tasks.py")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "spec.md")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(_PT_SPEC % hints)
+            r = subprocess.run([sys.executable, "-I", compiler, path, "--json"],
+                               capture_output=True, text=True, timeout=300)
+        try:
+            t1 = json.loads(r.stdout)["tasks"][0]
+        except (ValueError, KeyError, IndexError):
+            return None
+        return int(t1["title"] == want), int(t1.get("where") == "app/notes/[id]/page.tsx")
+
+    a, b = measured(old), measured(new)
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "spec-first-planning/assets/spec_to_tasks.py",
+                             "hint-bracket probe: no task plan (%r -> %r)" % (a, b)))
+        return
+    row("spec-first-planning", "(clean title, whole where path) for hints with nested "
+        "brackets (1=right)", "%d/%d" % a, "%d/%d" % b, a == (0, 0) and b == (1, 1),
+        "the baseline ends each hint at its first `]`: the title gets the rest of the "
+        "proof text, and the where path stops at `app/notes/[id`",
+        since=SINCE_SPEC_HINT_BRACKETS)
+
+
 def check_proof_tier_trust(old, new):
     """factory-conductor: does the gate reject an added escape hatch and a clause its
     contract does not define, and does finish stop a run whose proof a later task broke?"""
@@ -10323,6 +10359,7 @@ def main():
         check_forge_port_stable(old, REPO)
         check_proof_tier_gate(old, REPO)
         check_proof_tier_trust(old, REPO)
+        check_spec_hint_brackets(old, REPO)
         check_forge_recorder_names(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
