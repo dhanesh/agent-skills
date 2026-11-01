@@ -253,7 +253,7 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.7.0"
+CONDUCTOR_VERSION = "1.7.1"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -2772,6 +2772,15 @@ def _clause_tier(st, clause, sha, verifier, accepted):
     return _clause_proof(st, clause, sha, verifier, accepted)[0]
 
 
+def _copied_artifacts(directory, base):
+    """The artifact paths that the directory's evidence.json lists: files a verifier
+    copied in with --artifact. An empty set when there is no readable evidence.json."""
+    doc = _load_record(os.path.join(directory, "evidence.json"), base)
+    arts = doc.get("artifacts") if isinstance(doc, dict) else None
+    return {a.get("path") for a in arts if isinstance(a, dict)} \
+        if isinstance(arts, list) else set()
+
+
 def _clause_proof(st, clause, sha, verifier, accepted):
     """(_clause_tier's tier, the path of the proof record that gives it, or None for
     runtime and no tier). finish re-runs that record on the integration head (R7)."""
@@ -2787,6 +2796,10 @@ def _clause_proof(st, clause, sha, verifier, accepted):
         if not m or (best is not None and TIERS.index(m.group(1)) >= best):
             continue
         tier, tool = m.group(1), m.group(2)
+        if os.path.basename(path) in _copied_artifacts(os.path.dirname(path), base):
+            # A file that runtime evidence lists as an artifact the verifier copied in:
+            # an older recorder put an --artifact named proof-*.json here, not a proof.
+            continue
         doc = _load_record(path, base)
         if not isinstance(doc, dict) or _check_record(
                 doc, feature, sha, verifier, os.path.dirname(path), base) is not None:

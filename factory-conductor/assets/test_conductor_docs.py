@@ -7,8 +7,8 @@ runner table, the mutant floor, the escape-hatch scan, the `finish` re-run). The
 brief asks the reviewer to search a Rust diff for `assume(`, `admit(` and
 `external_body`. SKILL.md and run-protocol.md list `escape-hatch` as a repair, the clause
 rule and every `INTEGRATION:` proof outcome. CONDUCTOR_VERSION, LEDGER_VERSION and
-SKILL.md's `metadata.version` are 1.7.0, README.md has a 1.7.0 entry, and a run-result
-envelope that `finish` writes is attributed to version 1.7.0.
+SKILL.md's `metadata.version` are 1.7.1, README.md has a 1.7.1 entry, and a run-result
+envelope that `finish` writes is attributed to version 1.7.1.
 """
 import contextlib
 import io
@@ -27,7 +27,7 @@ from conductor_testkit import GIT, new_run, repo  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_ROOT = os.path.dirname(HERE)
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 TIERS = ("proved", "bounded", "property", "runtime")
 OUTCOMES = ("pass", "fail", "flaky", "unavailable", "stale-mutant", "uncaught")
 TOKENS = ("assume(", "admit(", "external_body")
@@ -153,7 +153,7 @@ class Versions(unittest.TestCase):
 @unittest.skipUnless(shutil.which("git"), "git not installed")
 class Envelope(unittest.TestCase):
     """A one-task run, finished with the push asking, writes a run-result envelope that
-    names this skill at 1.7.0."""
+    names this skill at 1.7.1."""
 
     def out(self, argv):
         buf, ebuf = io.StringIO(), io.StringIO()

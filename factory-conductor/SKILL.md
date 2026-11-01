@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux; it does not start on Windows), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, git >= 2.31 and a harness that can dispatch subagents; the default PR step uses the gh CLI. Offline except the push and PR.
 metadata:
   author: dhanesh
-  version: "1.7.0"
+  version: "1.7.1"
   skill-contract: "1"
   tags: "factory,autonomy,conductor,skill-contract"
 ---
@@ -267,9 +267,10 @@ In a tiered plan, `finish` also re-runs each proved, bounded or property clause'
 the integration head, and prints `INTEGRATION: <outcome> <task> proof <feature>:C<n>` for
 each one that did not pass, before `INTEGRATION: pass`. The outcomes are `pass`, `fail`
 (it failed twice), `flaky` (it failed, then passed), `unavailable` (the tool or the record
-cannot run), `stale-mutant` (the mutant patch no longer applies) and `uncaught` (the
-mutant passed twice). Only `fail` turns the run red (`STOP: integration_red`); every other
-outcome but `pass` lowers the clause to `runtime` and the run goes on.
+cannot run), `stale-mutant` (the mutant patch no longer applies) and `uncaught` (twice,
+the mutant run passed or failed without its failure signature). Only `fail` turns the
+run red (`STOP: integration_red`); every other outcome but `pass` lowers the clause to
+`runtime` and the run goes on.
 `INTEGRATION: skipped grant_ask` and `STOP: grant_ask` (exit 3) mean the grant lapsed before
 `finish`, so no check ran and nothing is pushed: report it. Once the user renews the grant,
 `conductor finish --retry-remote` runs the integration on the head the skip recorded, writes a
@@ -579,7 +580,8 @@ with a task that names none.
    `evidence-failed`). A clause meets a tier through
    `<evidence_dir>/*/<feature>/<sha>/proof-<tier>-<tool>-C<n>.json` recorded by this
    verifier with an allowlisted tool whose stored argv starts with one of that tool's
-   runners (the runner table, a copy of verification-skill-forge's)
+   runners (the runner table, a copy of verification-skill-forge's), that the
+   `evidence.json` beside it does not list as a copied artifact,
    and, for bounded and property, a caught mutant; it meets runtime through the feature's
    accepted `evidence.json`. The clause rule: a clause counts at any tier only when the
    feature's `## Contract` at the head defines it, so a clause the contract does not

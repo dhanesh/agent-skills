@@ -323,6 +323,8 @@ SINCE_SPEC_HINT_BRACKETS = "57193d5"  # spec-first-planning 2.8.0: a [proof: ...
 # [where: ...] value may hold one level of brackets.
 SINCE_RECORDER_NAMES = "8bf3201"  # verification-skill-forge 1.1.0: record refuses
 # its own artifact names, and check-proof diffs with --text.
+SINCE_COPIED_PROOF = "ce76b17"  # factory-conductor 1.7.1: a proof record that runtime
+# evidence lists as a copied artifact does not count.
 
 
 def _git_out(*args):
@@ -9835,9 +9837,12 @@ _PT_RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": 
                    "rapid": ["go", "test"]}
 
 
-def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="verifier"):
+def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="verifier",
+              argv=None, copied=False):
     """A proof record in the shape `verify_evidence.py record --tier` writes, with its
-    mutant artifacts (factory-conductor's test_conductor_tiers.py builds the same)."""
+    mutant artifacts (factory-conductor's test_conductor_tiers.py builds the same).
+    `argv` replaces the runner argv. `copied` also lists the record as an artifact of the
+    evidence.json beside it, as an older recorder did for an --artifact named proof-*."""
     d = os.path.join(root, ".verify", "a", "notes-create", sha)
     os.makedirs(d, exist_ok=True)
     stem = "proof-%s-%s-%s" % (tier, tool, clause)
@@ -9854,10 +9859,19 @@ def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="v
         json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
                    "feature": "notes-create", "sha": sha, "verifier": verifier,
                    "result": "pass", "tier": tier, "tool": tool, "clauses": [clause],
-                   "argv": list(_PT_RUNNER_ARGV.get(tool, [tool])), "cwd": "/x",
+                   "argv": argv or list(_PT_RUNNER_ARGV.get(tool, [tool])), "cwd": "/x",
                    "timeout": 900,
                    "exit_status": 0, "artifacts": arts, "captured_at": _now_z(),
                    "mutant_author": verifier, "mutant_exit_status": 1}, f)
+    if copied:
+        ev = os.path.join(d, "evidence.json")
+        with open(ev, encoding="utf-8") as f:
+            doc = json.load(f)
+        with open(os.path.join(d, stem + ".json"), "rb") as f:
+            doc["artifacts"].append({"path": stem + ".json",
+                                     "sha256": hashlib.sha256(f.read()).hexdigest()})
+        with open(ev, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
 
 
 def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False, files=None):
@@ -9920,7 +9934,9 @@ def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False, fil
             return None
         _fc_record(root, "notes-create", sha)
         for clause in proofs:
-            _pt_proof(root, clause, sha)
+            # A clause id, or (clause id, {_pt_proof keyword: value}).
+            clause, kw = (clause, {}) if isinstance(clause, str) else clause
+            _pt_proof(root, clause, sha, **kw)
         lines = [x for x in run("evidence", "T1", "--verifier", "verifier").stdout.splitlines()
                  if x.startswith("EVIDENCE: T1 ")]
         if not lines:
@@ -10103,6 +10119,41 @@ def _ptt_shims(d, *names):
     return d
 
 
+def _ptt_record_exit(tree, cmd, dirty=False):
+    """The exit status of the tree's `verify_evidence.py record --tier proved --tool verus
+    --cmd <cmd>`, every other flag valid, on a committed repo whose tool passes. `dirty`
+    leaves a tracked edit (one that still passes) in the worktree. None when the tree has
+    no recorder."""
+    script = os.path.join(tree, "verification-skill-forge", "assets", "verify_evidence.py")
+    if not os.path.isfile(script):
+        return None
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    root = os.path.join(tmp, "app")
+    try:
+        os.makedirs(root)
+        for name, text in (("tool.py", _PTT_TOOL), ("target.txt", "good\n")):
+            with open(os.path.join(root, name), "w", encoding="utf-8") as f:
+                f.write(text)
+        for args in (("init", "-q", "-b", "main"), ("add", "-A"), ("commit", "-q", "-m", "x")):
+            subprocess.run(["git", "-C", root, *args], check=True, capture_output=True,
+                           env=_FC_GENV)
+        if dirty:
+            with open(os.path.join(root, "target.txt"), "w", encoding="utf-8") as f:
+                f.write("good, edited\n")
+        bin_dir = _ptt_shims(os.path.join(tmp, "bin"), "verus")
+        scratch = os.path.join(tmp, "scratch")
+        os.makedirs(scratch)
+        env = dict(os.environ, VERIFY_EVIDENCE_DIR=os.path.join(tmp, "evidence"),
+                   TMPDIR=scratch, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+        return subprocess.run(
+            [sys.executable, "-I", script, "record", "--instance", "a", "--feature",
+             "notes-create", "--verifier", "verifier", "--tier", "proved", "--tool", "verus",
+             "--clauses", "C1", "--cmd", cmd, "--worktree", root],
+            capture_output=True, text=True, timeout=300, env=env).returncode
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _ptt_integration_red(tree):
     """1 when the tree's `finish` prints `STOP: integration_red`, else 0. T1 (property on
     notes-create:C1) commits tool.py and target.txt "good" with runtime evidence and a
@@ -10205,8 +10256,37 @@ def check_spec_hint_brackets(old, new):
 
 
 def check_proof_tier_trust(old, new):
-    """factory-conductor: does the gate reject an added escape hatch and a clause its
-    contract does not define, and does finish stop a run whose proof a later task broke?"""
+    """verification-skill-forge and factory-conductor: does the recorder refuse a --cmd
+    that does not run --tool and a dirty worktree, and does the conductor reject an added
+    escape hatch, a clause its contract does not define, a record whose argv does not run
+    its tool and a record that runtime evidence copied in, and stop a run whose proof a
+    later task broke?"""
+    s = "verification-skill-forge"
+    a, b = _ptt_record_exit(old, "true"), _ptt_record_exit(new, "true")
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "verification-skill-forge/assets/verify_evidence.py",
+                             "runner probe: no recorder (%r -> %r)" % (a, b)))
+    else:
+        row(s, "record exit for `--tier proved --tool verus --cmd true` (2=refused)",
+            a, b, a == 0 and b == 2,
+            "every other flag is valid; the baseline runs `true` and writes a proved "
+            "record, the recorder refuses a --cmd that is not a runner of --tool",
+            since=SINCE_PROOF_TIER_TRUST)
+
+    a = _ptt_record_exit(old, "verus", dirty=True)
+    b = _ptt_record_exit(new, "verus", dirty=True)
+    clean = _ptt_record_exit(new, "verus")
+    if a is None or b is None or clean != 0:
+        PROBE_ERRORS.append((new, "verification-skill-forge/assets/verify_evidence.py",
+                             "dirty-tree probe: %r -> %r, or the shim on a clean worktree "
+                             "did not record (exit %r)" % (a, b, clean)))
+    else:
+        row(s, "record exit for a shim `verus` on a worktree with a tracked edit "
+            "(2=refused)", a, b, a == 0 and b == 2,
+            "the baseline records the uncommitted tree as the head; the recorder refuses "
+            "it. Sanity-checked: the same shim on a clean worktree records (exit 0)",
+            since=SINCE_PROOF_TIER_TRUST)
+
     s = "factory-conductor"
 
     def measured(tree, what, *args, **kw):
@@ -10242,6 +10322,31 @@ def check_proof_tier_trust(old, new):
             "only C1 (higher=better)", a, b, a == 0 and b == 1,
             "runtime evidence alone: the baseline counts a clause the contract does not "
             "define, the gate counts it at no tier", since=SINCE_PROOF_TIER_TRUST)
+
+    # R2: a C2 record whose stored argv runs a plain script, not hypothesis's runner.
+    script = ("C2", {"argv": ["python3", "t.py"]})
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1", script))
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1", script))
+    if a is not None and b is not None:
+        a = _pt_rejects(a, "tier-below-required")
+        b = _pt_rejects(b, "tier-below-required")
+        row(s, "tier-below-required rejects, C2's record argv is `python3 t.py` under "
+            "--tool hypothesis (higher=better)", a, b, a == 0 and b == 1,
+            "the record names a tool its command never ran; the gate counts it at no tier. "
+            "The same records with runner argvs pass: the proof-tier gate's C2-at-runtime "
+            "row sanity-checks that", since=SINCE_PROOF_TIER_TRUST)
+
+    copied = ("C2", {"copied": True})
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1", copied))
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1", copied))
+    if a is not None and b is not None:
+        a = _pt_rejects(a, "tier-below-required")
+        b = _pt_rejects(b, "tier-below-required")
+        row(s, "tier-below-required rejects, C2's proof record is an artifact that runtime "
+            "evidence copied in (higher=better)", a, b, a == 0 and b == 1,
+            "an older recorder copied an --artifact named proof-*.json beside evidence.json, "
+            "where it read as a proof; the gate no longer counts a listed artifact",
+            since=SINCE_COPIED_PROOF)
 
     a, b = _ptt_integration_red(old), _ptt_integration_red(new)
     if a is None or b is None:
