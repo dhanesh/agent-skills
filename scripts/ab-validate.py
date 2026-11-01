@@ -321,6 +321,8 @@ SINCE_PROOF_TIER_TRUST = "4f2f8fc"  # proof-tier trust: the first commit of
 # the way into main (a rebase or a squash), or its rows stay live claims after they land.
 SINCE_SPEC_HINT_BRACKETS = "57193d5"  # spec-first-planning 2.8.0: a [proof: ...] or
 # [where: ...] value may hold one level of brackets.
+SINCE_RECORDER_NAMES = "8bf3201"  # verification-skill-forge 1.1.0: record refuses
+# its own artifact names, and check-proof diffs with --text.
 SINCE_COPIED_PROOF = "ce76b17"  # factory-conductor 1.7.1: a proof record that runtime
 # evidence lists as a copied artifact does not count.
 
@@ -9747,6 +9749,66 @@ def check_forge_port_stable(old, new):
         "preferring a held port must not hand one port to two instances", kind="guard")
 
 
+_FORGE_NAMES_PROBE = r"""
+import subprocess
+here = os.path.abspath(sys.path[0])
+wt = tempfile.mkdtemp()
+env = dict(os.environ, GIT_AUTHOR_NAME="a", GIT_AUTHOR_EMAIL="a@a", GIT_COMMITTER_NAME="a",
+           GIT_COMMITTER_EMAIL="a@a")
+env.pop("VERIFY_EVIDENCE_DIR", None)
+def git(*args):
+    subprocess.run(["git", "-C", wt, *args], check=True, capture_output=True, env=env)
+git("init", "-q")
+with open(os.path.join(wt, ".gitattributes"), "w") as f:
+    f.write("*.rs -diff\n")
+with open(os.path.join(wt, "lib.rs"), "w") as f:
+    f.write("fn f() {}\n")
+git("add", "-A")
+git("commit", "-q", "-m", "base")
+with open(os.path.join(wt, "lib.rs"), "w") as f:
+    f.write("fn f() { admit() }\n")
+git("commit", "-q", "-am", "head")
+art = tempfile.mkdtemp()
+refused = 0
+for name in ("evidence.json", "proof-proved-verus-C1.json"):
+    src = os.path.join(art, name)
+    with open(src, "w") as f:
+        f.write("{}")
+    r = subprocess.run([sys.executable, os.path.join(here, "verify_evidence.py"), "record",
+                        "--instance", "a", "--feature", "notes-create", "--verifier", "v",
+                        "--result", "pass", "--action", "x", "--observed", "y",
+                        "--side-effect", "z", "--artifact", src, "--worktree", wt],
+                       cwd=wt, capture_output=True, env=env)
+    refused += int(r.returncode == 2)
+r = subprocess.run([sys.executable, os.path.join(here, "forge.py"), "check-proof",
+                    "--root", wt, "--base", "HEAD~1", "--head", "HEAD"],
+                   capture_output=True, text=True, env=env)
+print(json.dumps({"refused": refused, "has_cmd": int(r.returncode != 2),
+                  "escapes": sum(l.startswith("ESCAPE: ") for l in r.stdout.splitlines())}))
+"""
+
+
+def check_forge_recorder_names(old, new):
+    """verification-skill-forge: does record refuse an artifact named like its own records,
+    and does check-proof see a .rs file that a committed `-diff` attribute marks binary?"""
+    s = "verification-skill-forge"
+    sub = os.path.join("verification-skill-forge", "assets")
+    oldp = probe(old, sub, _FORGE_NAMES_PROBE)
+    newp = probe(new, sub, _FORGE_NAMES_PROBE)
+    if _errored(oldp, newp):
+        return
+    row(s, "record refusals for artifacts named evidence.json and proof-*.json (of 2)",
+        oldp["refused"], newp["refused"], oldp["refused"] == 0 and newp["refused"] == 2,
+        "the baseline copies both beside the record: evidence.json is overwritten, and the "
+        "proof-*.json sits where the conductor reads proof records",
+        since=SINCE_RECORDER_NAMES)
+    row(s, "check-proof ESCAPE lines for an admit( added under `*.rs -diff` (higher=better)",
+        oldp["escapes"], newp["escapes"], oldp["escapes"] == 0 and newp["escapes"] == 1,
+        "without --text git prints 'Binary files differ' and no lines, so the scan passes. "
+        "NOTE: a baseline without check-proof at all (has_cmd=%d) also reads 0"
+        % oldp["has_cmd"], since=SINCE_RECORDER_NAMES)
+
+
 # ── the proof-tier gate ─────────────────────────────────────────────────────
 # Each probe drives the tree's conductor.py and spec_lint.py through the CLI, because the
 # baseline has no tier code to import: there, the tier fields are unknown task keys.
@@ -10403,6 +10465,7 @@ def main():
         check_proof_tier_gate(old, REPO)
         check_proof_tier_trust(old, REPO)
         check_spec_hint_brackets(old, REPO)
+        check_forge_recorder_names(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

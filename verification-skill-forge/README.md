@@ -94,5 +94,6 @@ join, the SHA-bound recorder and the maintain guard are this repo's.
 
 ## Changes
 
+- **1.1.0.** The recorder takes `record --tier`, `--tool`, `--clauses` and the mutant flags, and runs a proof only through a real runner for its tool, in a clean checkout. `forge contract` and `forge check-proof` are new. The recorder now refuses an artifact named `evidence.json`, `doctor.json` or `proof-*`, because a copied record could pose as one. `forge check-proof` now diffs with `--text` and `--no-relative`, so a committed `*.rs -diff` attribute cannot hide added lines.
 - **1.0.2.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.1.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

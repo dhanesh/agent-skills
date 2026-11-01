@@ -138,6 +138,20 @@ class TestCheckProofCases(unittest.TestCase):
         self.assertEqual((code, out.splitlines()),
                          (1, ["ESCAPE: src/lib.rs:1 admit(", "CHECK_PROOF_RESULT: FAIL"]))
 
+    def test_a_committed_minus_diff_attribute_does_not_hide_lines(self):
+        # `*.rs -diff` makes git print "Binary files differ" with no lines; --text keeps
+        # them, so the scan still sees what the head adds.
+        repo = Repo({".gitattributes": "*.rs -diff\n", "src/lib.rs": "fn f() {}\n"},
+                    {".gitattributes": "*.rs -diff\n",
+                     "src/lib.rs": "fn f() { admit() }\n"})
+        try:
+            code, out, _ = check_proof("--root", repo.dir, "--base", "HEAD~1",
+                                       "--head", "HEAD")
+        finally:
+            repo.close()
+        self.assertEqual((code, out.splitlines()),
+                         (1, ["ESCAPE: src/lib.rs:1 admit(", "CHECK_PROOF_RESULT: FAIL"]))
+
     def test_the_head_ref_is_scanned_not_the_worktree(self):
         repo = Repo({}, {"src/lib.rs": "fn f() {}\n"})
         try:
