@@ -50,7 +50,7 @@ flowchart LR
 
 An arrow from A to B means A sends work or data to B. `==>` contract envelope, `-->` required, `--o` handoff (you start the next skill), `-.->` optional (only when installed). The map of all skills is in the [root README](../README.md#how-the-skills-fit-together).
 <!-- skill-graph:end -->
-**2.7.4.** `references/unattended.md` tells a resumed session to read its interpreter from the `argv` that `watch` logged in the run's `autonomy-log.jsonl`. One long line in SKILL.md is rewrapped. The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
+**2.8.0.** A requirement can carry `[tier: <t>]` and `[contract: <feature>:C<n>, ...]` hints. The compiler writes them to the task as `min_tier` and `clauses`, and the linter refuses a `tier:` hint that has no `contract:` hint. A `[proof: ...]` or `[where: ...]` value can now hold one level of brackets, such as `clauses [null]` or `app/notes/[id]/page.tsx`. Before, the first `]` ended the hint, and the rest of its text went into the task title.
 
 **2.7.3.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.
 

@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and a POSIX-like shell; fully offline, no network.
 metadata:
   author: dhanesh
-  version: "2.7.4"
+  version: "2.8.0"
   skill-contract: "1"
   tags: "planning,spec,requirements,acceptance-criteria,task-decomposition,verification,coverage"
 ---
