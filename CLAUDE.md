@@ -26,7 +26,7 @@ failing check for that one skill.) The checks:
 | README catalog | `scripts/gates/readme-catalog.sh` | the root `README.md` lists **every** skill (an `npx skills add … --skill <name>` install line **and** a Skills-table row) and nothing that isn't one — runs once per `make gate`, `make readme` alone. A new skill isn't shipped until it's in the catalog |
 | Skill graph | `scripts/gates/skill-graph.sh` | the "who calls whom" mermaid diagrams in the root `README.md` and in every `<skill>/README.md` (between `<!-- skill-graph:start -->` and `<!-- skill-graph:end -->`) match what `scripts/gates/skill_graph.py` renders from `docs/skill-graph/graph.json`; every skill dir is a graph node and every node is a skill; every edge's evidence `quote` occurs exactly once in its `file`, on a line that names the other skill, and every node's `use_when` quote occurs exactly once in its SKILL.md, on a line that says "use when" (a line that moves or is rewrapped still passes); the contract edges equal the skills' `json skill-contract` provides/consumes pairs — runs once per `make gate`, `make skill-graph-check` alone. Change who calls whom in `graph.json`, then run `make skill-graph` to regenerate the blocks |
 | BCP 14 register | `scripts/gates/bcp14-registry.sh` | every capitalised MUST/SHOULD/MAY in a `SKILL.md` has a row in `docs/rfc2119/2026-09-19-classification.md` at the level the text uses (rows match on sentence text, not line number), every skill has a register section, and no `SKILL.md` prose uses a lowercase "must" or "shall" — runs once per `make gate`, `make bcp14` alone. Changing a keyword sentence means changing its row |
-| Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths |
+| Gate self-tests | `scripts/gates/test_gates.sh` | the gate scripts themselves: a planted secret per `scan-leaks` detector, the description-length check, `run-eval`'s verdict/exit agreement, `dry-run-replay`, bijection, dangling paths, the `ab-validate` row lifecycle and the `ab-report` unit suite (`scripts/test_ab_report.py`) |
 | **Unit tests** | `*/assets/test_*.py` | each skill's stdlib test suite (offline, deterministic) |
 | **Shell suites** | `*/assets/test_*.sh` | each shell suite marked `# gate: offline`. Every `test_*.sh` **must** carry a `# gate:` marker — `offline` (runs here) or `integration` (excluded); an unmarked suite **fails** the gate rather than silently skipping |
 | **Outcome eval** | `scripts/gates/run-eval.sh` → `*/eval/run_eval.py` | each skill ships an eval per `docs/eval-standard.md`. The gate mechanically enforces the parts it can: the eval **exists**, its final `EVAL_RESULT:` line and its exit status **agree**, and it finishes inside `EVAL_TIMEOUT` (120s). The rest of the standard — stdlib-only, offline, no repo writes, and **negative fixtures** — is a contract you uphold in review, not something the gate can see. **Missing eval fails the gate.** |
@@ -51,6 +51,7 @@ make contract                   # skill-contract: reference checker vectors + en
 make contract-vendor            # copy the reference checker into every adopting skill
 make playbook PLAYBOOK_FLAGS=--strict   # promote the advisories (PP-5, PP-6, PP-7 unused-declaration) to hard failures; fails a fresh repo2skill scaffold by design
 make ab-validate [BASE=<ref>]   # behavioural A/B vs a baseline commit (see below)
+make ab-report [BASE=<ref>]     # the same A/B, plus a per-skill improvement report in docs/ab-reports/
 make list-skills
 ```
 
@@ -95,6 +96,28 @@ Two honest limits, both worth respecting:
 - A fixture only proves what it actually exercises. When a probe shows no delta,
   suspect the probe before crediting the change — one row in the corpus is labelled
   `NOT a win` precisely because the baseline already handled that case.
+
+### Recording the result: `make ab-report`
+
+`make ab-validate` prints its verdicts and forgets them. `make ab-report` runs the same
+A/B and writes a report for the skills that the branch changes, to
+`docs/ab-reports/<date>-<branch>.md`. For each changed skill the report gives:
+
+- every A/B row that names the skill, with the base and head values and the mark;
+- the skill's outcome eval on both arms (`EVAL_RESULT: ... (k/n checks)`);
+- one verdict: `improved`, `held`, `not measured` or `worse`.
+
+`not measured` means that the branch changed the skill, but no A/B row names it. That is
+a gap: add a row, or say in the PR body why the change has no behaviour to measure (a
+docs-only change, for example). A report also counts the marks of every other row, so a
+regression outside the changed skills is visible. The command rebuilds
+`docs/ab-reports/README.md`, which lists every report per skill: the history of how each
+skill changed. Run it before you merge a behavioural change, and commit the report with
+the change. A second run on the same branch and day replaces that report.
+
+The row label is the first argument of `row(...)`. Use the skill's directory name, so
+that the report can find the row. Put a qualifier in brackets after it when you need one
+(`skill-contract (release)`).
 
 ## Anatomy of a skill
 

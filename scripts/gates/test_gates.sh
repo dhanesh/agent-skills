@@ -186,6 +186,18 @@ else
   bad "validate-skill fails PARAMETERS.md with no assets/templates/"
 fi
 
+# ── ab-report: the per-skill improvement report and its index ───────────────
+# `make ab-report` needs a baseline, so the gate cannot run it. The report's logic
+# (verdicts, tables, the summary that the index is rebuilt from) is pure, and its
+# unit suite runs here.
+ABR="$GATES/../test_ab_report.py"
+if out="$(python3 "$ABR" 2>&1)"; then
+  ok "ab-report verdicts, tables and index ($(printf '%s\n' "$out" | sed -n 's/^Ran \([0-9]*\) tests.*/\1/p') tests)"
+else
+  printf '%s\n' "$out" | tail -20 | sed 's/^/  /'
+  bad "ab-report unit suite"
+fi
+
 # ── ab-validate: the row lifecycle must survive its own merges ──────────────
 # When a delta lands in the baseline its row measures identically in both arms.
 # If that reported UNPROVEN, `make ab-validate` would fail forever the moment
