@@ -38,7 +38,9 @@ Usage:
 Gates. `init` validates the task-plan/v1 envelope with the vendored checker (C3-C7,
 fresh subjects, a schedulable plan, and a runnable command on every verify step: a task
 with no verify step, or a step whose command is null or empty, is refused with
-FAIL: task <id> verify step <n> has no command, exit 2), then requires `check-grant` to cover
+FAIL: task <id> verify step <n> has no command, exit 2; a malformed `min_tier` or
+`clauses`, one without the other, or either in a plan with no `verification` block is
+refused first with FAIL: task <id> <field>: <why>, exit 2), then requires `check-grant` to cover
 local_reversible for that plan (`--subject <plan envelope>`, so a grant covers only the
 plan it pins) on the current branch, which must match the grant's branch_pattern and
 not be the default branch. It cuts factory/<plan-slug> from the current branch (that
@@ -251,7 +253,7 @@ DEFAULT_REPAIRS = 2  # max_repairs_per_task when neither the grant nor --budget 
 TASK_PLAN_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/task-plan/v1"
 RUN_RESULT_KIND = "https://github.com/dhanesh/agent-skills/skill-contract/run-result/v1"
 CONDUCTOR_SKILL = "factory-conductor"
-CONDUCTOR_VERSION = "1.5.4"
+CONDUCTOR_VERSION = "1.7.0"
 
 ACTIVE = ("running", "verifying", "reviewing")
 FINAL = ("proven", "parked", "blocked")
@@ -271,15 +273,88 @@ SHA_RE = r"^[0-9a-f]{40}\Z"
 # A reject the verifier can fix by recording again (a fresh verifier dispatch); the
 # other rejects park the task (feature-unmapped, no-features) or send it back to its
 # executor (evidence-failed: the app did the wrong thing).
+# contract-changed: in a tiered plan the task's head changed a feature's `## Contract`
+# against the run base (contract_changed); a human decides whether the contract moves.
 EVIDENCE_PARK = ("feature-unmapped", "no-features", "feature-map-unreadable",
-                 "evidence-diff-unreadable")
+                 "evidence-diff-unreadable", "tier-field-unreadable", "contract-changed")
+# Rejects that send the task back to its executor: the app did the wrong thing
+# (evidence-failed), a clause lacks a record at the plan's min_tier
+# (tier-below-required), or in a tiered plan the task's diff adds a Rust escape hatch
+# (escape-hatch, escape_hatch_hits): the executor can remove it, and a task that truly
+# needs one spends its repair budget and parks for a human.
+EVIDENCE_REPAIR = ("evidence-failed", "tier-below-required", "escape-hatch")
 EVIDENCE_DIR_RE = r"^\.[A-Za-z0-9_-][A-Za-z0-9._-]*\Z"
+# Proof tiers (the second slice). A task in a gated plan MAY carry `min_tier` (the
+# weakest tier its clauses accept) and `clauses` (<feature>:C<n> refs, its feature among
+# the task's features), always together. init refuses a malformed pair (plan_tier_problems).
+TIERS = ("proved", "bounded", "property", "runtime")
+CLAUSE_RE = r"[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*"
+# The tools each recorded tier accepts (verify_evidence.py's TIER_TOOLS), and the tiers
+# whose record must also hold a caught mutant. runtime has no proof record: the
+# feature's accepted evidence.json meets it.
+TIER_TOOLS = {"proved": ("verus",), "bounded": ("kani",),
+              "property": ("proptest", "hypothesis", "fast-check", "rapid")}
+MUTANT_TIERS = ("bounded", "property")
+MUTANT_ARTIFACTS = ("mutant.patch", "mutant.exit", "mutant.stdout", "mutant.stderr")
+# A copy of verify_evidence.py's runner rule (RUNNERS, WRAPPERS, runner_matches) and
+# FAILURE_SIGNATURES. A proof record counts only when its stored argv runs its stored
+# tool, so a record whose --tool labels another command never meets a tier.
+# test_conductor_tiers checks that both copies are equal on one shared vector list.
+RUNNERS = {"verus": (("verus",), ("cargo", "verus")),
+           "kani": (("kani",), ("cargo", "kani")),
+           "hypothesis": (("pytest",), ("python", "-m", "pytest"),
+                          ("python3", "-m", "pytest")),
+           "proptest": (("cargo", "test"),),
+           "fast-check": (("vitest",), ("jest",)),
+           "rapid": (("go", "test"),)}
+WRAPPERS = (("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("pipenv", "run"),
+            ("hatch", "run"), ("pnpm", "exec"), ("yarn",), ("bunx",), ("npx",))
+PYTHON_RE = re.compile(r"^python(3(\.\d+)?)?\Z")
+FAILURE_SIGNATURES = {
+    "kani": {"require": (r"VERIFICATION:- FAILED",),
+             "reject": (r"error\[E\d+\]", r"could not compile")},
+    "proptest": {"require": (r"test result: FAILED", r"minimal failing input"),
+                 "reject": (r"error\[E\d+\]", r"could not compile")},
+    "hypothesis": {"require": (r"Falsifying example", r"\b\d+ failed\b"),
+                   "reject": (r"errors? during collection", r"ERROR collecting")},
+    "fast-check": {"require": (r"Property failed after \d+ tests?",),
+                   "reject": (r"Test suite failed to run", r"error TS\d+")},
+    "rapid": {"require": (r"--- FAIL", r"\[rapid\] failed"),
+              "reject": (r"\[build failed\]", r"\[setup failed\]")},
+}
+
+
+def _runner_word(word):
+    """A python interpreter name counts as python (python, python3, python3.12)."""
+    return "python" if PYTHON_RE.match(word) else word
+
+
+def runner_matches(tool, argv):
+    """True when argv runs tool: after at most one leading wrapper, argv starts with one
+    of RUNNERS[tool], word for word. An argv[0] with a '/' never matches, because a path
+    names a file the caller chose, not the tool on PATH. An argv that is not a list of
+    strings never matches."""
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return False
+    if not argv or "/" in argv[0]:
+        return False
+    rests = [argv] + [argv[len(w):] for w in WRAPPERS if tuple(argv[:len(w)]) == w]
+    for rest in rests:
+        if not rest or "/" in rest[0]:
+            continue
+        for runner in RUNNERS.get(tool, ()):
+            head = rest[:len(runner)]
+            if len(head) == len(runner) and \
+                    [_runner_word(head[0])] + head[1:] == \
+                    [_runner_word(runner[0])] + list(runner[1:]):
+                return True
+    return False
 EVIDENCE_REDO = ("verifier-missing", "writer-is-verifier", "evidence-missing",
                  "evidence-stale-sha", "evidence-sha-mismatch", "evidence-verifier-mismatch",
                  "evidence-malformed", "evidence-artifact-missing",
                  "evidence-artifact-altered", "doctor-missing", "doctor-red")
 # Every reason evidence_verdict can return is in exactly one of EVIDENCE_PARK,
-# EVIDENCE_REDO, or evidence-failed (a repair); test_conductor_evidence checks it.
+# EVIDENCE_REDO, or EVIDENCE_REPAIR; test_conductor_evidence checks it.
 # Budget keys and the values each accepts. max_tokens and max_usd are recorded and
 # reported; they are enforced only for the metrics `enforce` names (opt-in: the runtime
 # does not expose usage to this tool, so the agent reports it with `usage`).
@@ -1333,6 +1408,14 @@ def cmd_init(args):
         waves({k: {"depends_on": t["depends_on"]} for k, t in plan_tasks.items()})
     except PlanError as e:
         return _init_fail("invalid plan: %s" % e)
+    tier_bad = plan_tier_problems(plan)
+    if tier_bad:
+        for why in tier_bad:
+            sys.stderr.write("FAIL: %s\n" % why)
+        return _init_fail("invalid plan: a task's min_tier and clauses must come together, "
+                          "in a plan with a verification block, min_tier one of %s and "
+                          "clauses distinct <feature>:C<n> refs to the task's features; "
+                          "see the lines above" % ", ".join(TIERS))
     missing = missing_commands(plan)
     if missing:
         for why in missing:
@@ -1513,7 +1596,125 @@ def cmd_status(args):
             print("STATUS: unmetered %s dispatch=%d kind=%s" % (d["task"], d["n"], d["kind"]))
         print(_usage_line(st))
     print("STATUS: budget " + budget_note_text(st.budget))
+    for item in assurance(st) or []:
+        # After finish re-ran the proofs, each line names the head they held on (R8).
+        at = (" @%s" % item["sha"][:12]) if item.get("sha") else ""
+        print("ASSURANCE: %s %s %s%s" % (item["feature"], item["tier"],
+                                         ",".join(item["clauses"]), at))
     return 0
+
+
+ASSURANCE_ORDER = TIERS + ("none",)
+
+
+def _clause_key(cid):
+    return int(cid[1:])
+
+
+def assurance(st, plan_doc=None, integration=None):
+    """The weakest tier per feature (R5, R8): [{feature, tier, clauses, proofs[, sha]}]
+    in feature-id order, or None when no task in the pinned plan carries `clauses` (an
+    untiered plan reports nothing). Read from the pinned plan, as the tier check reads
+    it; never raises.
+
+    A clause's tier is the strongest tier that a proven task naming it recorded at its
+    evidence pass, else none. Once finish re-ran the proofs (`integration`, else the one
+    recorded in st.finished, carries `proofs`), a proved, bounded or property clause takes
+    its tier from its re-run on the integration head instead, and each item carries that
+    head as `sha`: a proof tier shows only when the proof held on that head. A feature's
+    tier is its weakest clause's tier, and clauses lists the clause ids at that tier in
+    numeric order. `proofs` holds one {clause, tier, tool, argv, mutant_rechecked} per
+    clause of the feature that any task names, in numeric order: tool and argv are null
+    for runtime and none, and mutant_rechecked is a boolean for bounded and property
+    (true only when finish re-ran the mutant and caught it) and null otherwise."""
+    if plan_doc is None:
+        plan_doc, why = _pinned_plan(st)
+        if why:
+            return None
+    tasks = _plan_payload(plan_doc).get("tasks")
+    if not isinstance(tasks, list) or not any(
+            isinstance(x, dict) and "clauses" in x for x in tasks):
+        return None
+    if integration is None and isinstance(st.finished, dict):
+        integration = st.finished.get("integration")
+    reran = integration.get("proofs") if isinstance(integration, dict) else None
+    head = integration.get("head") if isinstance(reran, list) else None
+    best = {}  # clause ref -> index into ASSURANCE_ORDER
+    for x in tasks:
+        named = x.get("clauses") if isinstance(x, dict) else None
+        if not isinstance(named, list):
+            continue
+        t = st.tasks.get(x.get("id")) if isinstance(x.get("id"), str) else None
+        ev = t.get("evidence") if isinstance(t, dict) else None
+        met = ev.get("clause_tiers") if isinstance(ev, dict) and \
+            t.get("status") == "proven" else None
+        for c in named:
+            if not (isinstance(c, str) and re.fullmatch(CLAUSE_RE, c)):
+                continue
+            tier = met.get(c) if isinstance(met, dict) else None
+            rank = ASSURANCE_ORDER.index(tier) if tier in TIERS else len(TIERS)
+            best[c] = min(best.get(c, len(TIERS)), rank)
+    detail = _assurance_proofs(st, best, reran)
+    per_feature = {}
+    for c in best:
+        feature, cid = c.split(":", 1)
+        per_feature.setdefault(feature, []).append(
+            (ASSURANCE_ORDER.index(detail[c]["tier"]), cid))
+    out = []
+    for feature in sorted(per_feature):
+        weakest = max(rank for rank, _ in per_feature[feature])
+        ids = sorted((cid for rank, cid in per_feature[feature] if rank == weakest),
+                     key=_clause_key)
+        item = {"feature": feature, "tier": ASSURANCE_ORDER[weakest], "clauses": ids}
+        if isinstance(head, str) and head:
+            item["sha"] = head
+        item["proofs"] = [dict(detail[feature + ":" + cid], clause=cid) for cid in
+                          sorted((cid for _, cid in per_feature[feature]), key=_clause_key)]
+        out.append(item)
+    return out
+
+
+def _assurance_proofs(st, best, reran):
+    """{clause ref: {clause, tier, tool, argv, mutant_rechecked}} for assurance(). Before
+    the proofs ran (reran not a list), a proof-tier clause shows its source record's tool
+    and argv, and mutant_rechecked false or null. After, a proof-tier clause takes tier,
+    tool, argv and mutant_rechecked from its re-run; a clause with no re-run entry, or one
+    whose re-run did not pass, reports the re-run tier (runtime when absent), with tool and
+    argv null. Never raises."""
+    rerun_by = {p.get("clause"): p for p in reran if isinstance(p, dict)} \
+        if isinstance(reran, list) else None
+    sources = {}
+    if rerun_by is None:
+        try:
+            sources = {c: (tid, rel) for tid, c, _, rel in _proof_sources(st)}
+        except (KeyError, TypeError, AttributeError):
+            sources = {}
+    out = {}
+    for c, rank in best.items():
+        tier = ASSURANCE_ORDER[rank]
+        tool = argv = None
+        if tier in PROOF_RERUN_TIERS and rerun_by is not None:
+            p = rerun_by.get(c) or {}
+            tier = p.get("tier") if p.get("tier") in ASSURANCE_ORDER else "runtime"
+            if tier in PROOF_RERUN_TIERS:
+                tool, argv = p.get("tool"), p.get("argv")
+            rechecked = p.get("mutant_rechecked") is True
+        else:
+            rechecked = False
+            if tier in PROOF_RERUN_TIERS:
+                rel = (sources.get(c) or (None, None))[1]
+                doc = _load_record(os.path.join(st.root, *rel.split("/")),
+                                   _evidence_root(st)) if rel else None
+                if isinstance(doc, dict):
+                    tool, argv = doc.get("tool"), doc.get("argv")
+        if not isinstance(tool, str):
+            tool = None
+        if not (isinstance(argv, list) and all(isinstance(a, str) for a in argv)):
+            argv = None
+        out[c] = {"clause": c.split(":", 1)[1], "tier": tier, "tool": tool,
+                  "argv": list(argv) if argv is not None else None,
+                  "mutant_rechecked": rechecked if tier in MUTANT_TIERS else None}
+    return out
 
 
 def _num(x):
@@ -1570,7 +1771,7 @@ def next_actions(st):
             ev = t.get("evidence") if isinstance(t.get("evidence"), dict) else {}
             if review.get("verdict") == "fail":
                 out.append((tid, "dispatch-repair review"))
-            elif ev.get("reason") == "evidence-failed":
+            elif ev.get("reason") in EVIDENCE_REPAIR:
                 out.append((tid, "dispatch-repair evidence"))
             elif _moved_after_review(t):
                 out.append((tid, "verify"))
@@ -2092,10 +2293,11 @@ def cmd_verify(args):
         return _verify_refused(st, args.task, "no new commit since the review failed",
                                "unchanged since failed review", keep_review=True)
     ev = t.get("evidence")
-    if isinstance(ev, dict) and ev.get("reason") == "evidence-failed" \
+    if isinstance(ev, dict) and ev.get("reason") in EVIDENCE_REPAIR \
             and ev.get("verified_head") == head:
-        # The running app already failed on this very commit: a green verify of it
-        # proves nothing new. It counts as a failure, so the repair loop stays bounded.
+        # The running app already failed on this very commit (or a clause lacked its
+        # tier): a green verify of it proves nothing new. It counts as a failure, so the
+        # repair loop stays bounded.
         return _verify_refused(st, args.task, "no new commit since the evidence failed",
                                "unchanged since failed evidence", keep_evidence=True)
     if not clean:
@@ -2434,7 +2636,7 @@ def _check_record(doc, feature, sha, verifier, directory, base):
     return None
 
 
-def evidence_verdict(st, t, sha, verifier):
+def evidence_verdict(st, t, sha, verifier, task_id=None):
     """The evidence predicate for a task's verified head. Returns
     {ok, reason, feature, features, paths, doctor}: ok only when the verifier is not the
     task's owner, every touched feature has a map entry, and each touched feature has a
@@ -2500,8 +2702,311 @@ def evidence_verdict(st, t, sha, verifier):
         out["paths"].append(_rel(st, os.path.join(chosen, "evidence.json")))
         if _rel(st, dpath) not in out["doctor"]:
             out["doctor"].append(_rel(st, dpath))
+    # Proof tiers, last: only a head that passes every check above is judged for them.
+    if task_id is None:
+        task_id = next((k for k, v in st.tasks.items() if v is t), None)
+    fields, unreadable = _pinned_tier_fields(st, task_id)
+    if unreadable:
+        out["reason"], out["feature"] = "tier-field-unreadable", unreadable
+        return out
+    if fields:
+        min_tier, clauses = fields
+        met, sources = {}, {}
+        for clause in clauses:
+            met[clause], path = _clause_proof(st, clause, sha, verifier, feats)
+            if not _meets(met[clause], min_tier):
+                out["reason"], out["feature"] = "tier-below-required", clause
+                return out
+            if path is not None:
+                sources[clause] = _rel(st, path)
+        # The tier each clause met, for the run's ASSURANCE report (R5), and the record
+        # that gave each proof tier, for finish's re-run on the integration head (R7).
+        # Only a tiered task carries the keys, so an untiered verdict is unchanged.
+        out["clause_tiers"] = met
+        out["clause_records"] = sources
     out["ok"] = True
     return out
+
+
+def _pinned_tier_fields(st, task_id):
+    """((min_tier, clauses), None) for a tiered task, (None, None) for a task with
+    neither key, or (None, "min_tier" | "clauses") when a value cannot be read.
+
+    Read only from the pinned plan file, never from state.json, as _pinned_verify reads
+    the verify commands. init refuses malformed fields (plan_tier_problems), but a plan
+    pinned some other way may still carry them, so every value is checked again here
+    and a bad one fails closed. Never raises."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return None, "min_tier"
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    task = None
+    if isinstance(tasks, list):
+        task = next((x for x in tasks if isinstance(x, dict) and x.get("id") == task_id),
+                    None)
+    if task is None:
+        return None, "min_tier"
+    if "min_tier" not in task and "clauses" not in task:
+        return None, None
+    tier = task.get("min_tier")
+    if not (isinstance(tier, str) and tier in TIERS):
+        return None, "min_tier"
+    if "clauses" not in task or _clauses_problem(task["clauses"], task.get("features")):
+        return None, "clauses"
+    return (tier, list(task["clauses"])), None
+
+
+def _meets(tier, min_tier):
+    """True when tier (one of TIERS, or None for no tier) is at or above min_tier."""
+    return tier is not None and TIERS.index(tier) <= TIERS.index(min_tier)
+
+
+def _clause_tier(st, clause, sha, verifier, accepted):
+    """The strongest tier clause (<feature>:C<n>) meets for sha, or None: the strongest
+    proof record by verifier that passes the record check and the tier rules, else
+    runtime when the feature's evidence.json was accepted (`accepted`). A clause that
+    the feature's `## Contract` at sha does not define meets no tier (R6), so no record
+    is read for it."""
+    return _clause_proof(st, clause, sha, verifier, accepted)[0]
+
+
+def _clause_proof(st, clause, sha, verifier, accepted):
+    """(_clause_tier's tier, the path of the proof record that gives it, or None for
+    runtime and no tier). finish re-runs that record on the integration head (R7)."""
+    feature, cid = clause.split(":", 1)
+    if cid not in _defined_clauses(st, feature, sha):
+        return None, None
+    best, source = None, None
+    base = _evidence_root(st)
+    name_re = r"proof-(%s)-(.+)-%s\.json" % ("|".join(TIER_TOOLS), re.escape(cid))
+    for path in sorted(glob.glob(os.path.join(base, "*", feature, sha,
+                                              "proof-*-%s.json" % cid))):
+        m = re.fullmatch(name_re, os.path.basename(path))
+        if not m or (best is not None and TIERS.index(m.group(1)) >= best):
+            continue
+        tier, tool = m.group(1), m.group(2)
+        doc = _load_record(path, base)
+        if not isinstance(doc, dict) or _check_record(
+                doc, feature, sha, verifier, os.path.dirname(path), base) is not None:
+            continue
+        if doc.get("tier") != tier or doc.get("tool") != tool \
+                or tool not in TIER_TOOLS[tier] or doc.get("clauses") != [cid]:
+            continue
+        # The stored argv must run the stored tool (R2): a record whose --tool names a
+        # tool the command never ran does not count.
+        if not runner_matches(tool, doc.get("argv")):
+            continue
+        if tier in MUTANT_TIERS:
+            status = doc.get("mutant_exit_status")
+            if not isinstance(status, int) or isinstance(status, bool) or status == 0:
+                continue
+            listed = {a.get("path") for a in doc["artifacts"] if isinstance(a, dict)}
+            stem = "proof-%s-%s-%s" % (tier, tool, cid)
+            if any("%s.%s" % (stem, ext) not in listed for ext in MUTANT_ARTIFACTS):
+                continue
+        best, source = TIERS.index(tier), path
+    if best is not None:
+        return TIERS[best], source
+    return ("runtime" if feature in accepted else None), None
+
+
+# A clause bullet of a `## Contract` section: verification-skill-forge's forge.py CLAUSE_RE
+# without its text group, matched on the stripped line. test_conductor_tiers checks that
+# defined_clauses agrees with forge's parse_contract on shared texts.
+CONTRACT_BULLET_RE = re.compile(r"^- (C\d+)\s*\[([^\]]*)\]:")
+
+
+def defined_clauses(text):
+    """The clause ids that the `## Contract` section of a feature file's text defines, in
+    file order: each line of the section (after its heading) that, stripped, matches
+    CONTRACT_BULLET_RE. An empty list when the text has no section."""
+    section = contract_section(text)
+    out = []
+    for line in (section or "").splitlines()[1:]:
+        m = CONTRACT_BULLET_RE.match(line.strip())
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def _defined_clauses(st, feature, sha):
+    """The clause ids that <verification skill>/features/<feature>.md defines as committed
+    at sha. A missing file, or one git cannot read, defines none."""
+    text = _blob(st, sha, "%s/features/%s.md" % (st.verification["skill"], feature))
+    return [] if text is None else defined_clauses(text)
+
+
+def _tiered_plan(st):
+    """True when the pinned plan is a tiered plan: at least one task carries `min_tier`.
+    Read only from the pinned plan, as _pinned_tier_fields reads it. A plan that cannot
+    be read is not judged here: evidence_verdict fails closed on it for a tiered task."""
+    doc, why = _pinned_plan(st)
+    if why:
+        return False
+    pred = doc.get("predicate") if isinstance(doc, dict) else None
+    plan = pred.get("payload") if isinstance(pred, dict) else doc
+    tasks = plan.get("tasks") if isinstance(plan, dict) else None
+    return isinstance(tasks, list) and any(isinstance(x, dict) and "min_tier" in x
+                                           for x in tasks)
+
+
+def contract_section(text):
+    """The `## Contract` section of a feature file, or None when it has none: the same
+    definition as verification-skill-forge's forge.py contract_section (feature-map.md).
+    It runs from the `## Contract` line up to, not including, the next line that starts
+    with `## `, each line right-stripped, joined with a newline."""
+    out = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if out is None:
+            if line == "## Contract":
+                out = [line]
+        elif line.startswith("## "):
+            break
+        else:
+            out.append(line)
+    return None if out is None else "\n".join(out)
+
+
+def _contracts_at(st, sha):
+    """{feature id: contract text or None} for each features/<id>.md other than README.md
+    in the verify skill as committed at sha, or None when git cannot list the directory.
+    A file git lists but cannot read maps to a value no real text equals."""
+    skill = st.verification["skill"]
+    ok, r = _git_ok(st.root, "ls-tree", "--name-only", "%s:%s/features" % (sha, skill))
+    if not ok:
+        return None
+    out = {}
+    for name in r.stdout.split():
+        if not name.endswith(".md") or name == "README.md":
+            continue
+        text = _blob(st, sha, "%s/features/%s" % (skill, name))
+        out[name[:-3]] = object() if text is None else contract_section(text)
+    return out
+
+
+def contract_changed(st, sha):
+    """The first feature id, in sorted order, whose `## Contract` text differs between the
+    run base (git merge-base <run branch> sha) and sha, or None. A feature file on one
+    side only counts as changed, whatever it holds, and so does a section on one side
+    only. When the head's features or the merge base
+    cannot be read, None: evidence_verdict then fails closed with its own reason. A base
+    whose features cannot be listed holds no contracts."""
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return None
+    head = _contracts_at(st, sha)
+    if head is None:
+        return None
+    before = _contracts_at(st, base) or {}
+    for fid in sorted(set(head) | set(before)):
+        if (fid in head) != (fid in before) or head.get(fid) != before.get(fid):
+            return fid
+    return None
+
+
+# The escape-hatch rule (spec Terms), the conductor's copy. verification-skill-forge's
+# forge.py check-proof holds the other copy, and both pass the one shared vector list,
+# verification-skill-forge/assets/escape_hatch_vectors.json (test_conductor_escape_hatch).
+# On a line that a diff adds to a .rs file: `assume(` or `admit(` not preceded by an
+# identifier character or by `::` (so `prop_assume(`, `my_assume(` and `kani::assume(`
+# are not escapes, `x.assume(` is), or `external_body` inside `#[verifier ...]` on the
+# same line. Comments and strings are not skipped: a token there is still reported.
+ESCAPE_CALL_RE = re.compile(r"(?<!\w)(?<!::)(assume|admit)\(")
+ESCAPE_ATTR_RE = re.compile(r"#\[verifier\b[^\]]*\bexternal_body\b")
+# The diff flags. Like forge's DIFF_FLAGS: renames are off, so every line of a moved .rs
+# file counts as added (the scan errs towards a reject); no external diff, no textconv,
+# fixed prefixes. Unlike forge, also --text and --no-relative: a .gitattributes that the
+# task itself commits (`*.rs -diff` or `binary`) cannot hide its added lines as "Binary
+# files differ", and a diff.relative config cannot narrow the diff. GIT_SAFE and
+# git_env() come with every call (_escape_git).
+ESCAPE_DIFF = ("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
+               "--no-textconv", "--no-renames", "--text", "--no-relative",
+               "--src-prefix=a/", "--dst-prefix=b/")
+
+
+def escape_hatches(line):
+    """[(column, token)] for every escape hatch on one added source line, sorted by
+    column. The token is `assume(`, `admit(` or `external_body`; the column is where the
+    match starts (for external_body, the `#[verifier` that holds it)."""
+    hits = [(m.start(), m.group(1) + "(") for m in ESCAPE_CALL_RE.finditer(line)]
+    hits += [(m.start(), "external_body") for m in ESCAPE_ATTR_RE.finditer(line)]
+    return sorted(hits)
+
+
+def _added_lines(diff_text):
+    """[(head line number, text)] for every line a unified diff of one file adds."""
+    out, cur, in_hunk = [], 0, False
+    for line in diff_text.split("\n"):
+        if line.startswith("@@"):
+            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            in_hunk, cur = bool(m), int(m.group(1)) if m else 0
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
+            out.append((cur, line[1:]))
+            cur += 1
+        elif line.startswith(" "):
+            cur += 1
+    return out
+
+
+def _escape_git(root, *args):
+    """git with GIT_SAFE and git_env(), as bytes (a path need not be UTF-8), with
+    pathspecs read literally. A CompletedProcess, or None when git cannot run."""
+    env = git_env()
+    for k in ("GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+        env.pop(k, None)
+    env["GIT_LITERAL_PATHSPECS"] = "1"
+    try:
+        return subprocess.run(["git", "-C", root, *GIT_SAFE, *args], capture_output=True,
+                              timeout=300, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def escape_hatch_hits(root, base, head):
+    """([(path, head line, token)], None) for every escape hatch that the diff from base
+    to head adds to a .rs file: files in git's path order, then line, then column. Or
+    (None, why) when git cannot show the diff, so the caller fails closed."""
+    def err(r):
+        return "git is not runnable" if r is None else \
+            r.stderr.decode("utf-8", "replace").strip()
+    r = _escape_git(root, *ESCAPE_DIFF, "--name-only", "-z", base, head, "--")
+    if r is None or r.returncode != 0:
+        return None, "cannot diff %s..%s: %s" % (base[:12], head[:12], err(r))
+    names = [n for n in r.stdout.split(b"\0") if n.endswith(b".rs")]
+    hits = []
+    for name in names:
+        path = name.decode("utf-8", "surrogateescape")
+        r = _escape_git(root, *ESCAPE_DIFF, "-U0", base, head, "--", name)
+        if r is None or r.returncode != 0:
+            return None, "cannot diff %s in %s..%s: %s" % (path, base[:12], head[:12],
+                                                           err(r))
+        for lineno, text in _added_lines(r.stdout.decode("utf-8", "replace")):
+            hits += [(path, lineno, tok) for _col, tok in escape_hatches(text)]
+    return hits, None
+
+
+def escape_hatch_check(st, sha):
+    """(None, None) when the diff from the run base (git merge-base <run branch> sha) to
+    sha adds no escape hatch to a .rs file; ("escape-hatch", "<path>:<line>") for the
+    first hit in git's path order; ("evidence-diff-unreadable", why) when the merge base
+    or the diff cannot be read."""
+    ok, r = _git_ok(st.root, "merge-base", st.run_branch, sha)
+    base = r.stdout.strip() if ok else None
+    if not base:
+        return "evidence-diff-unreadable", "no merge base of %s and %s" % (
+            st.run_branch, sha)
+    hits, why = escape_hatch_hits(st.root, base, sha)
+    if hits is None:
+        return "evidence-diff-unreadable", why
+    if hits:
+        return "escape-hatch", "%s:%d" % hits[0][:2]
+    return None, None
 
 
 def cmd_evidence(args):
@@ -2534,12 +3039,57 @@ def cmd_evidence(args):
     if not _gated(st, "local_reversible"):  # clause 5: the grant is live at verdict time
         return 3
     verifier = (args.verifier or "").strip() or None
-    v = evidence_verdict(st, t, pinned, verifier)
+    # Every task in a tiered plan, before the verdict: a head that changes a contract
+    # parks, whatever its records say (an ungated task too, so it cannot merge a contract
+    # edit that parks later tiered tasks).
+    changed = contract_changed(st, pinned) if _tiered_plan(st) else None
+    if changed:
+        record = {"verdict": "reject", "reason": "contract-changed", "feature": changed,
+                  "observed": None, "verifier": verifier, "verified_head": pinned,
+                  "features": [], "paths": [], "doctor": [], "at": _rfc3339(_now())}
+        st.log("evidence", task=args.task, ok=False, reason="contract-changed",
+               feature=changed, verifier=verifier, verified_head=pinned, features=[],
+               paths=[])
+        print("EVIDENCE: %s reject contract-changed %s" % (args.task, changed))
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "contract-changed")
+        return 3
+    # Then, for every task in a tiered plan, the escape-hatch scan (spec Terms): a head
+    # whose diff from the run base adds one to a .rs file goes back to its executor as a
+    # repair; a diff git cannot show parks (fail closed).
+    hatch, where = escape_hatch_check(st, pinned) if _tiered_plan(st) else (None, None)
+    if hatch:
+        record = {"verdict": "reject", "reason": hatch,
+                  "feature": where if hatch == "escape-hatch" else None,
+                  "observed": None, "verifier": verifier, "verified_head": pinned,
+                  "features": [], "paths": [], "doctor": [], "at": _rfc3339(_now())}
+        st.log("evidence", task=args.task, ok=False, reason=hatch, feature=record["feature"],
+               verifier=verifier, verified_head=pinned, features=[], paths=[])
+        if hatch == "escape-hatch":
+            print("EVIDENCE: %s reject escape-hatch %s" % (args.task, where))
+            sys.stderr.write("task %s adds a Rust escape hatch at %s (assume(, admit( or "
+                             "#[verifier::external_body]): remove it and commit again\n"
+                             % (args.task, where))
+            st.set_status(args.task, "verifying", review=None, evidence=record)
+            _count_failure(st, args.task)
+            st.save()
+            _send_back(st, args.task)
+            return 3
+        print("EVIDENCE: %s reject evidence-diff-unreadable" % args.task)
+        sys.stderr.write("task %s: %s; the escape-hatch scan cannot run, so the task "
+                         "parks: repair the repository and resume\n" % (args.task, where))
+        st.set_status(args.task, "reviewing", evidence=record)
+        _park(st, args.task, "evidence-diff-unreadable")
+        return 3
+    v = evidence_verdict(st, t, pinned, verifier, args.task)
     record = {"verdict": "pass" if v["ok"] else "reject", "reason": v["reason"],
               "feature": v["feature"], "observed": v["observed"], "verifier": verifier,
               "verified_head": pinned,
               "features": v["features"], "paths": v["paths"], "doctor": v["doctor"],
               "at": _rfc3339(_now())}
+    if v["ok"] and "clause_tiers" in v:
+        record["clause_tiers"] = v["clause_tiers"]
+        record["clause_records"] = v["clause_records"]
     st.log("evidence", task=args.task, ok=v["ok"], reason=v["reason"], feature=v["feature"],
            verifier=verifier, verified_head=pinned, features=v["features"], paths=v["paths"])
     if v["ok"]:
@@ -2557,8 +3107,9 @@ def cmd_evidence(args):
         _park(st, args.task, "feature-unmapped" if v["reason"] in (
             "feature-unmapped", "no-features") else v["reason"])
         return 3
-    if v["reason"] == "evidence-failed":
-        # The app did the wrong thing on this head: a repair, like a failing verify.
+    if v["reason"] in EVIDENCE_REPAIR:
+        # The app did the wrong thing on this head, or a clause has no record at its
+        # min_tier: a repair, like a failing verify.
         st.set_status(args.task, "verifying", review=None, evidence=record)
         _count_failure(st, args.task)
         st.save()
@@ -2689,7 +3240,7 @@ def cmd_merge(args):
         return 3
     if st.verification:
         # The records are re-read now: one removed or altered since the verdict blocks.
-        again = evidence_verdict(st, t, pinned, ev.get("verifier"))
+        again = evidence_verdict(st, t, pinned, ev.get("verifier"), args.task)
         if not again["ok"]:
             st.set_status(args.task, "reviewing", evidence=dict(
                 ev, verdict="reject", reason=again["reason"], feature=again["feature"],
@@ -3137,6 +3688,60 @@ def missing_commands(plan):
     return out
 
 
+def plan_tier_problems(plan):
+    """["task <id> <field>: <why>"] for every task whose proof-tier fields are malformed:
+    a `min_tier` that is not exactly one of TIERS, a `clauses` that is not a non-empty
+    list of distinct <feature>:C<n> refs whose feature the task names in `features`
+    (null is malformed for both), one key without the other, or either key in a plan
+    with no `verification` block. A task with neither key yields nothing. Reads only
+    the plan: no feature file."""
+    out = []
+    gated = plan.get("verification") is not None
+    for tid, t in _plan_tasks_by_id(plan).items():
+        present = [k for k in ("min_tier", "clauses") if k in t]
+        if not present:
+            continue
+        if not gated:
+            for k in present:
+                out.append("task %s %s: the plan declares no verification block, so no "
+                           "check reads tier fields; add one or remove the field" % (tid, k))
+            continue
+        if len(present) == 1:
+            missing = "clauses" if present[0] == "min_tier" else "min_tier"
+            out.append("task %s %s: missing; %s needs %s beside it (add it or remove %s)"
+                       % (tid, missing, present[0], missing, present[0]))
+        if "min_tier" in t and not (isinstance(t["min_tier"], str)
+                                    and t["min_tier"] in TIERS):
+            out.append("task %s min_tier: %s is not one of %s"
+                       % (tid, json.dumps(t["min_tier"]), ", ".join(TIERS)))
+        if "clauses" in t:
+            why = _clauses_problem(t["clauses"], t.get("features"))
+            if why:
+                out.append("task %s clauses: %s" % (tid, why))
+    return out
+
+
+def _clauses_problem(clauses, features):
+    """Why `clauses` is malformed for a task naming `features`, or None."""
+    if not isinstance(clauses, list) or not clauses:
+        return ("%s is not a non-empty list of <feature>:C<n> refs"
+                % json.dumps(clauses))
+    named = set(f for f in features if isinstance(f, str)) if isinstance(features, list) else set()
+    seen = set()
+    for c in clauses:
+        if not isinstance(c, str) or not re.fullmatch(CLAUSE_RE, c):
+            return ("%s is not a <feature>:C<n> ref (n from 1, no leading zero)"
+                    % json.dumps(c))
+        if c in seen:
+            return "%s is listed twice" % json.dumps(c)
+        seen.add(c)
+        feature = c.split(":", 1)[0]
+        if feature not in named:
+            return ("%s names feature %s, which is not in the task's features"
+                    % (json.dumps(c), feature))
+    return None
+
+
 def verify_command_problems(plan):
     """[(task id, command, why)] for every non-null verify command that breaks the
     skill-contract command rule (commandment 6: {python} rather than an interpreter name,
@@ -3220,6 +3825,7 @@ def run_result_payload(st, plan_doc=None, integration=None):
         s = st.stopped if isinstance(st.stopped, dict) else {"reason": st.stopped}
         stopped = {k: s[k] for k in ("reason", "at", "detail", "task", "previous") if k in s}
     grant_path = os.path.join(st.root, *_grant_rel(st).split("/")) if st.grant_id else None
+    assured = assurance(st, plan_doc, integration)
     return {
         "run_id": st.run_id,
         "plan": {"id": (pred or {}).get("id"), "path": plan_subject(st),
@@ -3235,7 +3841,8 @@ def run_result_payload(st, plan_doc=None, integration=None):
         "budget_note": budget_note_text(st.budget), "integration": integration,
         "tasks": tasks, "leftover_worktrees": _leftover_worktrees(st),
         "evidence_gate": bool(st.verification), "trail": trail(st)["units"],
-        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {})}
+        **({"usage": usage_summary(st)} if _enforced(st) or st.usage else {}),
+        **({"assurance": assured} if assured is not None else {})}
 
 
 def _run_result_assertions(st, plan_doc, integration=None):
@@ -3266,7 +3873,12 @@ def _run_result_assertions(st, plan_doc, integration=None):
                         "subject": [dict(plan_pin)]})
     elif runs:
         passed = bool(integration["passed"])
-        first = runs[0] if passed else next(r for r in runs if not r["ok"])
+        first = runs[0] if passed else next((r for r in runs if not r["ok"]), None)
+        if first is None:
+            # Every verify run passed and a proof re-run failed (R7): that proof's task's
+            # own check, as the plan wrote it (a proof argv is not a plan command).
+            bad = next(p for p in integration["proofs"] if p["outcome"] == "fail")
+            first = {"task": bad["task"], "command": None}
         cmd = first["command"]
         if not cmd:  # a symlink that escapes the checkout ran nothing: the task's own check
             cmd = ((steps.get(first["task"]) or [{}])[0] or {}).get("command")
@@ -3326,15 +3938,164 @@ def _integration(st, plan_doc):
             runs.append({"task": tid, "command": None, "ok": False, "returncode": None})
             continue
         runs += [dict(task=tid, **rec) for rec in _plan_form(done, steps)]
-    return {"head": head, "passed": all(x["ok"] for x in runs), "runs": runs}, None
+    result = {"head": head, "passed": all(x["ok"] for x in runs), "runs": runs}
+    # In a tiered plan, once every verify run passed, each proof tier is re-run on this
+    # head (R7). An untiered plan's result is unchanged: it has no `proofs` key.
+    if result["passed"] and _tiered_plan(st):
+        result["proofs"] = _integration_proofs(st, head)
+        result["passed"] = all(p["outcome"] != "fail" for p in result["proofs"])
+    return result, None
+
+
+PROOF_OUTCOMES = ("pass", "fail", "flaky", "unavailable", "stale-mutant", "uncaught")
+PROOF_RERUN_TIERS = ("proved", "bounded", "property")
+
+
+def _proof_sources(st):
+    """[(task, clause, tier, record path)] for each clause whose tier is a proof tier:
+    the proven task with the strongest clause_tiers value names the record (the first in
+    run order on a tie), in run order then clause number."""
+    chosen = {}  # clause -> (tier rank, run index, task)
+    for i, tid in enumerate(st.order):
+        t = st.tasks[tid]
+        ev = t.get("evidence") if t.get("status") == "proven" else None
+        met = ev.get("clause_tiers") if isinstance(ev, dict) else None
+        if not isinstance(met, dict):
+            continue
+        for c, tier in met.items():
+            if not (isinstance(c, str) and re.fullmatch(CLAUSE_RE, c)) or tier not in TIERS:
+                continue
+            if c not in chosen or TIERS.index(tier) < chosen[c][0]:
+                chosen[c] = (TIERS.index(tier), i, tid)
+    out = []
+    for c, (rank, i, tid) in chosen.items():
+        if TIERS[rank] not in PROOF_RERUN_TIERS:
+            continue
+        recs = st.tasks[tid]["evidence"].get("clause_records")
+        rel = recs.get(c) if isinstance(recs, dict) else None
+        feature, cid = c.split(":", 1)
+        out.append(((i, _clause_key(cid), feature), (tid, c, TIERS[rank],
+                                                     rel if isinstance(rel, str) else None)))
+    return [x for _, x in sorted(out)]
+
+
+def _integration_proofs(st, head):
+    """Re-run the source record of each proved, bounded or property clause on head
+    (_proof_sources): [{task, clause, tier, tool, argv, outcome, mutant_rechecked}].
+    It writes no record. `tier` is the record's tier on `pass`, `none` on `fail`, and
+    `runtime` on every other outcome: only a proof that held on head keeps its tier."""
+    out = []
+    for n, (tid, clause, tier, rel) in enumerate(_proof_sources(st)):
+        entry = {"task": tid, "clause": clause, "tier": tier, "tool": None, "argv": None,
+                 "outcome": None,
+                 "mutant_rechecked": False if tier in MUTANT_TIERS else None}
+        entry["outcome"] = _proof_rerun(st, head, rel, entry, "proof-%d" % n)
+        if entry["outcome"] == "fail":
+            entry["tier"] = "none"
+        elif entry["outcome"] != "pass":
+            entry["tier"] = "runtime"
+        out.append(entry)
+    return out
+
+
+def _proof_rerun(st, head, rel, entry, name):
+    """One clause's outcome (PROOF_OUTCOMES); fills entry's tool, argv and
+    mutant_rechecked. The stored argv runs, with the stored timeout, at the root of a
+    fresh checkout of head (as the recorder ran it, cwd "."), and once more when it
+    fails. For bounded and property, the record's mutant patch must apply (git apply
+    --check, then git apply) to a second fresh checkout, and the argv must fail there
+    with the tool's failure signature, once in two tries."""
+    base = _evidence_root(st)
+    doc = _load_record(os.path.join(st.root, *rel.split("/")), base) if rel else None
+    if not isinstance(doc, dict):
+        return "unavailable"
+    tool, argv = doc.get("tool"), doc.get("argv")
+    entry["tool"], entry["argv"] = tool, argv
+    if not runner_matches(tool, argv):
+        return "unavailable"
+    timeout = doc.get("timeout")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        timeout = VERIFY_TIMEOUT
+    if shutil.which(argv[0], path=verify_env().get("PATH")) is None:
+        return "unavailable"
+    rc = _proof_run(st, head, argv, timeout, name + "-head")
+    if rc is not None and rc[0] != 0:
+        rc = _proof_run(st, head, argv, timeout, name + "-head")
+        if rc is not None and rc[0] != 0:
+            return "fail"
+        if rc is not None:
+            return "flaky"
+    if rc is None:
+        return "unavailable"
+    if entry["tier"] not in MUTANT_TIERS:
+        return "pass"
+    # The patch is the record's own mutant.patch artifact, unaltered since it was recorded.
+    patch_name = os.path.splitext(os.path.basename(rel))[0] + ".mutant.patch"
+    patch = os.path.join(os.path.dirname(os.path.join(st.root, *rel.split("/"))),
+                         patch_name)
+    listed = {a.get("path"): a.get("sha256") for a in doc.get("artifacts") or []
+              if isinstance(a, dict)}
+    if not _inside(patch, base) or not os.path.isfile(patch) \
+            or CC.sha256_file(patch) != listed.get(patch_name):
+        return "stale-mutant"
+    for _ in range(2):
+        rc = _proof_run(st, head, argv, timeout, name + "-mutant", patch=patch)
+        if rc == "stale":
+            return "stale-mutant"
+        if rc is None:
+            return "unavailable"
+        if _mutant_caught(tool, *rc):
+            entry["mutant_rechecked"] = True
+            return "pass"
+    return "uncaught"
+
+
+def _proof_run(st, head, argv, timeout, name, patch=None):
+    """Run argv at the root of a fresh checkout of head, after applying patch when given:
+    (returncode or None on a timeout, stdout, stderr); None when the checkout cannot be
+    made or the tool cannot start; "stale" when patch does not apply. The checkout is
+    always removed."""
+    checkout, _ = _add_verify_checkout(st, name, head)
+    if checkout is None:
+        return None
+    try:
+        if patch is not None:
+            for args in (("apply", "--check", "--whitespace=nowarn", patch),
+                         ("apply", "--whitespace=nowarn", patch)):
+                if not _git_ok(checkout, *args, env=isolated_env())[0]:
+                    return "stale"
+        rc, out, err = _run_verify(argv, checkout, env=verify_env(), timeout=timeout)
+        if rc is None and err.startswith("cannot run:"):
+            return None
+        return rc, out, err
+    finally:
+        _remove_clone(st, checkout)
+
+
+def _mutant_caught(tool, rc, out, err):
+    """True when the mutant run failed with the tool's failure signature, as the recorder
+    requires: a mutant that only breaks the build, or a timeout, is not caught."""
+    if not isinstance(rc, int) or rc == 0:
+        return False
+    sig = FAILURE_SIGNATURES.get(tool)
+    if sig is None:
+        return False
+    text = (out or "") + "\n" + (err or "")
+    return all(re.search(p, text) for p in sig["require"]) and \
+        not any(re.search(p, text) for p in sig["reject"])
 
 
 def _print_integration(integration):
     """INTEGRATION: pass <sha>, INTEGRATION: skipped grant_ask, or one
-    INTEGRATION: fail <task> <command> per failing run."""
+    INTEGRATION: fail <task> <command> per failing run. In a tiered plan, first one
+    INTEGRATION: <outcome> <task> proof <clause> line per proof re-run that did not
+    pass, in run order then clause number; INTEGRATION: pass prints last."""
     if integration.get("skipped"):
         print("INTEGRATION: skipped grant_ask")
         return
+    for p in integration.get("proofs") or []:
+        if p["outcome"] != "pass":
+            print("INTEGRATION: %s %s proof %s" % (p["outcome"], p["task"], p["clause"]))
     if integration["passed"]:
         print("INTEGRATION: pass %s" % integration["head"])
         return
@@ -3622,6 +4383,10 @@ def _judge_and_write(st, plan_doc, covered=None, superseded=None):
         if not (stop_reason == "grant_ask" and prior and prior.get("reason") == "grant_ask"):
             if integration.get("skipped"):
                 detail = integration["skipped"]
+            elif all(x["ok"] for x in integration["runs"]):
+                # Every verify run passed, so a proof re-run failed twice (R7).
+                bad = next(p for p in integration["proofs"] if p["outcome"] == "fail")
+                detail = "%s proof %s" % (bad["task"], bad["clause"])
             else:
                 bad = next(x for x in integration["runs"] if not x["ok"])
                 detail = "%s %s" % (bad["task"], _shown(bad["command"]) if bad["command"]

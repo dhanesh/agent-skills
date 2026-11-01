@@ -29,6 +29,57 @@ git.
  "captured_at": "2026-09-29T10:00:00Z"}
 ```
 
+## Proof records (`record --tier`)
+
+```bash
+python3 verify_evidence.py record --instance a --feature notes-create --verifier "$VERIFIER" \
+  --tier proved --tool verus --clauses C1 --cmd "verus src/notes.rs" [--timeout 900]
+```
+
+The recorder runs the command itself. It splits `--cmd` with shlex, uses no shell, and
+runs from the worktree root with a timeout. It writes a record only when the command
+exits 0 and HEAD did not move. Otherwise it exits 1 and writes nothing. It refuses
+`--result`, `--action`, `--observed`, `--side-effect` and `--artifact` with `--tier`,
+because the tool's own output is the proof. All checks run before the first write.
+
+Each tier accepts only the tools in its allowlist, `TIER_TOOLS` in `verify_evidence.py`:
+
+| Tier | Allowed `--tool` |
+|---|---|
+| `proved` | `verus` |
+| `bounded` | `kani` |
+| `property` | `proptest`, `hypothesis`, `fast-check`, `rapid` |
+
+CrossHair is not on the `bounded` list, because its bound is a time budget and not an
+input bound. A record names exactly one clause in `--clauses`. The recorder refuses
+another tool, a list such as `C1,C2`, or an empty value. It exits 2, does not run the
+tool and writes nothing.
+
+The record is `<feature-id>/<sha>/proof-<tier>-<tool>-<clause>.json`. It has the
+evidence.json fields and artifact shape, so the conductor's artifact check applies to
+it. It adds `tier`, `tool`, `clauses`, `argv`, `cwd`, `ran_in`, `timeout` and
+`exit_status`. `cwd` is `"."` and `ran_in` is `"checkout"`: the tool ran at the root of a
+clean checkout of HEAD, and a worktree with tracked changes is refused. The
+artifacts are the pinned `proof-<tier>-<tool>-<clause>.stdout` and `.stderr` files.
+
+A `bounded` or `property` record also needs `--mutant-patch` and `--mutant-author`. The
+recorder runs the same command on a mutated copy of HEAD and writes the record only when
+that run fails with the tool's failure signature. The record then adds `mutant_author`,
+`mutant_exit_status` and the pinned `.mutant.patch`, `.mutant.exit`, `.mutant.stdout` and
+`.mutant.stderr` artifacts. The steps and the signatures are in `proof-tiers.md`.
+
+```json
+{"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
+ "feature": "notes-create", "sha": "<40 hex>", "verifier": "<agent id>",
+ "result": "pass", "tier": "proved", "tool": "verus", "clauses": ["C1"],
+ "argv": ["verus", "src/notes.rs"], "cwd": ".", "ran_in": "checkout",
+ "timeout": 900,
+ "exit_status": 0,
+ "artifacts": [{"path": "proof-proved-verus-C1.stdout", "sha256": "<64 hex>"},
+               {"path": "proof-proved-verus-C1.stderr", "sha256": "<64 hex>"}],
+ "captured_at": "…"}
+```
+
 ## doctor.json
 
 ```json

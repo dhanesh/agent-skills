@@ -19,6 +19,11 @@ Usage:
                                         [--worktree W] # FINDING: <path>
     python3 forge.py check-maintain <verify dir> --base <ref>
                                                        # MAINTAIN_RESULT: PASS|FAIL
+    python3 forge.py contract <feature file>           # one JSON object: clauses,
+                                                       #   trusted, sha256
+    python3 forge.py check-proof [--root <repo>] --base <ref> --head <ref>
+                                                       # ESCAPE: <path>:<line> <token>
+                                                       #   CHECK_PROOF_RESULT: PASS|FAIL
 
 A verify skill lives at <app root>/.claude/skills/verify-<app>/ and holds SKILL.md (five
 sections: Launch, Doctor, Drive, Evidence, Cleanup), scripts/verify_evidence.py (a
@@ -32,6 +37,7 @@ constraint.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -160,10 +166,51 @@ def feature_meta(text):
     for line in text.splitlines():
         if line.startswith("## "):
             break
-        m = re.match(r"^- (id|proven|anchors|constraints):\s*(.*)$", line.strip())
+        m = re.match(r"^- (id|proven|anchors|constraints|trusted):\s*(.*)$", line.strip())
         if m:
             meta[m.group(1)] = m.group(2).strip()
     return meta
+
+
+# A contract clause bullet: `- C<n> [kind]: statement`. The kind is captured as written
+# (not only pre|post|inv|trans) so lint can name an unknown kind instead of skipping it.
+CLAUSE_RE = re.compile(r"^- (C\d+)\s*\[([^\]]*)\]:\s*(.*)$")
+
+
+def contract_section(text):
+    """The `## Contract` section of a feature file, or None when it has none.
+
+    The section runs from the `## Contract` heading line up to, not including, the next
+    line that starts with `## ` (or the end of the file). Each line is right-stripped and
+    the lines are joined with a newline. This exact text is what `contract` hashes, so two
+    commits hold the same contract exactly when this function returns the same string."""
+    out = None
+    for line in text.splitlines():
+        line = line.rstrip()
+        if out is None:
+            if line == "## Contract":
+                out = [line]
+        elif line.startswith("## "):
+            break
+        else:
+            out.append(line)
+    return None if out is None else "\n".join(out)
+
+
+def parse_contract(text):
+    """{clauses: [{id, kind, text}], trusted: [..], sha256: hex or None} for a feature
+    file. sha256 is of contract_section() as UTF-8, None when there is no section."""
+    section = contract_section(text)
+    clauses = []
+    for line in (section or "").splitlines()[1:]:
+        m = CLAUSE_RE.match(line.strip())
+        if m:
+            clauses.append({"id": m.group(1), "kind": m.group(2).strip(),
+                            "text": m.group(3).strip()})
+    return {"clauses": clauses,
+            "trusted": split_list(feature_meta(text).get("trusted")),
+            "sha256": None if section is None else
+            hashlib.sha256(section.encode("utf-8")).hexdigest()}
 
 
 def split_list(value):
@@ -508,6 +555,45 @@ def lint_features(L, verify_dir):
                 claim = "claims proven at %s but " % proven[:12] if proven and proven != "no" \
                     else ""
                 L.fail("%s: %s%s: re-derive it from source (maintain mode)" % (rel, claim, why))
+        lint_contract(L, rel, text)
+
+
+CLAUSE_KINDS = ("pre", "post", "inv", "trans")
+
+
+def lint_contract(L, rel, text):
+    """Fail a malformed `## Contract`: every clause id C1..Cn once, in order, with a known
+    kind and a statement, and named in the same feature's `## Proof`. No section, no check."""
+    section = contract_section(text)
+    if section is None:
+        return
+    for line in section.splitlines()[1:]:
+        m = re.match(r"^- (C\d+)\b", line.strip())
+        if m and not CLAUSE_RE.match(line.strip()):
+            L.fail("%s: contract clause %s is not '- %s [kind]: statement': write it in "
+                   "that form" % (rel, m.group(1), m.group(1)))
+    proof = sections(text).get("Proof", "")
+    seen, last = set(), 0
+    for c in parse_contract(text)["clauses"]:
+        cid, n = c["id"], int(c["id"][1:])
+        if cid in seen:
+            L.fail("%s: contract clause %s is listed twice: give each clause its own id"
+                   % (rel, cid))
+            continue
+        if n != last + 1:
+            L.fail("%s: contract clause %s follows %s: number the clauses C1..Cn in order "
+                   "with no gap" % (rel, cid, "C%d" % last if last else "the heading"))
+        seen.add(cid)
+        last = max(last, n)
+        if c["kind"] not in CLAUSE_KINDS:
+            L.fail("%s: contract clause %s has the unknown kind %r: use one of %s"
+                   % (rel, cid, c["kind"], ", ".join(CLAUSE_KINDS)))
+        if not c["text"]:
+            L.fail("%s: contract clause %s has no statement: write what must hold after "
+                   "the colon" % (rel, cid))
+        if not re.search(r"\b%s\b" % cid, proof):
+            L.fail("%s: contract clause %s is not named in '## Proof': say there which "
+                   "observation proves %s" % (rel, cid, cid))
 
 
 def cmd_lint(a):
@@ -858,6 +944,103 @@ def cmd_check_maintain(a):
     return 1 if fails else 0
 
 
+def cmd_contract(a):
+    try:
+        text = read(a.feature_file)
+    except (OSError, UnicodeDecodeError) as e:
+        sys.stderr.write("cannot read feature file %s (%s): pass the path of a "
+                         "features/<id>.md file\n" % (a.feature_file, e))
+        return 2
+    _out(json.dumps(parse_contract(text), sort_keys=True))
+    return 0
+
+
+# ── check-proof: the escape-hatch rule ───────────────────────────────────────
+# The one escape-hatch rule (spec Terms). factory-conductor holds a copy, and both copies
+# pass the same vector list, escape_hatch_vectors.json. On a line that a diff adds to a
+# .rs file: `assume(` or `admit(` not preceded by an identifier character or by `::`
+# (so `prop_assume(`, `my_assume(` and `kani::assume(` are not escapes, `x.assume(` is),
+# or `external_body` inside `#[verifier ...]` on the same line. Comments and strings are
+# not skipped: a token there is still reported.
+ESCAPE_CALL_RE = re.compile(r"(?<!\w)(?<!::)(assume|admit)\(")
+ESCAPE_ATTR_RE = re.compile(r"#\[verifier\b[^\]]*\bexternal_body\b")
+
+
+def escape_hatches(line):
+    """[(column, token)] for every escape hatch on one source line, sorted by column.
+    The token is `assume(`, `admit(` or `external_body`; the column is where the match
+    starts (for external_body, the `#[verifier` that holds it)."""
+    hits = [(m.start(), m.group(1) + "(") for m in ESCAPE_CALL_RE.finditer(line)]
+    hits += [(m.start(), "external_body") for m in ESCAPE_ATTR_RE.finditer(line)]
+    return sorted(hits)
+
+
+def added_lines(diff_text):
+    """[(head line number, text)] for every line a unified diff of one file adds."""
+    out, cur, in_hunk = [], 0, False
+    for line in diff_text.split("\n"):
+        if line.startswith("@@"):
+            m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            in_hunk, cur = bool(m), int(m.group(1)) if m else 0
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
+            out.append((cur, line[1:]))
+            cur += 1
+        elif line.startswith(" "):
+            cur += 1
+    return out
+
+
+# Flags that keep the user's git config from changing what the diff shows. Renames are
+# off, so a moved file's lines all count as added: the scan errs towards a report.
+DIFF_FLAGS = ("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff",
+              "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/")
+
+
+def cmd_check_proof(a):
+    """Print every escape hatch that the diff from --base to --head adds to a .rs file."""
+    root = os.path.realpath(a.root)
+    r = git(root, "rev-parse", "--is-inside-work-tree") if os.path.isdir(root) else None
+    top = toplevel(root) if r is not None and r.stdout.strip() == "true" else None
+    if not top:
+        sys.stderr.write("--root %s is not a git work tree: pass the root of the "
+                         "repository whose diff to scan\n" % a.root)
+        return 2
+    shas = {}
+    for flag, ref in (("--base", a.base), ("--head", a.head)):
+        r = git(top, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                ref + "^{commit}")
+        if r.returncode != 0 or not SHA_RE.match(r.stdout.strip()):
+            sys.stderr.write("%s %s does not resolve to a commit in %s: pass a branch, "
+                             "tag or SHA that exists there\n" % (flag, ref, top))
+            return 2
+        shas[flag] = r.stdout.strip()
+    r = subprocess.run(["git", "-C", top, *DIFF_FLAGS, "--name-only", "-z",
+                        shas["--base"], shas["--head"], "--"], capture_output=True)
+    if r.returncode != 0:
+        sys.stderr.write("git diff %s %s failed in %s: %s\n" % (
+            a.base, a.head, top, r.stderr.decode("utf-8", "replace").strip()))
+        return 2
+    paths = sorted(p for p in r.stdout.decode("utf-8", "surrogateescape").split("\0")
+                   if p.endswith(".rs"))
+    hits = []
+    for path in paths:
+        r = subprocess.run(["git", "-C", top, *DIFF_FLAGS, "-U0", shas["--base"],
+                            shas["--head"], "--", ":(literal)" + path],
+                           capture_output=True)
+        if r.returncode != 0:
+            sys.stderr.write("git diff of %s failed in %s: %s\n" % (
+                path, top, r.stderr.decode("utf-8", "replace").strip()))
+            return 2
+        for lineno, text in added_lines(r.stdout.decode("utf-8", "replace")):
+            hits += [(path, lineno, col, tok) for col, tok in escape_hatches(text)]
+    for path, lineno, _col, tok in sorted(hits):
+        _out("ESCAPE: %s:%d %s" % (path, lineno, tok))
+    _out("CHECK_PROOF_RESULT: %s" % ("FAIL" if hits else "PASS"))
+    return 1 if hits else 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="forge.py")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -885,10 +1068,16 @@ def main(argv=None):
     s = sub.add_parser("check-maintain")
     s.add_argument("verify_dir")
     s.add_argument("--base", required=True)
+    sub.add_parser("contract").add_argument("feature_file")
+    s = sub.add_parser("check-proof")
+    s.add_argument("--root", default=".")
+    s.add_argument("--base", required=True)
+    s.add_argument("--head", required=True)
     a = p.parse_args(argv)
     return {"detect": cmd_detect, "scaffold": cmd_scaffold, "vendor": cmd_vendor,
             "lint": cmd_lint, "coverage": cmd_coverage, "seed": cmd_seed,
-            "finding": cmd_finding, "check-maintain": cmd_check_maintain}[a.cmd](a)
+            "finding": cmd_finding, "check-maintain": cmd_check_maintain,
+            "contract": cmd_contract, "check-proof": cmd_check_proof}[a.cmd](a)
 
 
 if __name__ == "__main__":

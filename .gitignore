@@ -11,3 +11,7 @@ __pycache__/
 
 # factory-conductor run state and worktrees (state.json, autonomy-log.jsonl, wt/)
 .skill-contract/runs/
+
+# verify-agent-skills evidence and per-instance run state
+.verify/
+.verify-run/

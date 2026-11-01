@@ -311,6 +311,14 @@ SINCE_TSN_PYTEST_REPORTER = "ae1a2dc"  # test-safety-net: pytest 9.2 reads os.en
 # it formats a failed assert; io_guard now treats _pytest/assertion/ as a reporter frame.
 SINCE_FORGE_PORT_STABLE = "cd595da"  # verification-skill-forge: port names the port an
 # instance holds, never an earlier one that freed since (a launch drove another checkout).
+SINCE_PROOF_TIER_GATE = "fe9ab44"  # factory-conductor 1.6.0, the proof-tier gate: the first
+# commit of `git rev-list --first-parent --reverse <run base>..HEAD`, where the run base is
+# `git merge-base factory/proof-tiers-work HEAD`. Repin it if that commit's sha changes on the
+# way into main (a rebase or a squash), or its rows stay live claims after they land.
+SINCE_PROOF_TIER_TRUST = "4f2f8fc"  # proof-tier trust: the first commit of
+# `git rev-list --first-parent --reverse <run base>..HEAD`, where the run base is
+# `git merge-base factory/proof-tiers-work HEAD`. Repin it if that commit's sha changes on
+# the way into main (a rebase or a squash), or its rows stay live claims after they land.
 
 
 def _git_out(*args):
@@ -9735,6 +9743,421 @@ def check_forge_port_stable(old, new):
         "preferring a held port must not hand one port to two instances", kind="guard")
 
 
+# ── the proof-tier gate ─────────────────────────────────────────────────────
+# Each probe drives the tree's conductor.py and spec_lint.py through the CLI, because the
+# baseline has no tier code to import: there, the tier fields are unknown task keys.
+_PT_TWO = ["notes-create:C1", "notes-create:C2"]
+_PT_CONTRACT = """
+## Contract
+
+- C1 [pre]: the title is a non-empty string
+- C2 [post]: the response is 201 with the stored note's id
+"""
+_PT_MUTANT = ("diff --git a/target.txt b/target.txt\n--- a/target.txt\n+++ b/target.txt\n"
+              "@@ -1 +1 @@\n-good\n+caught\n")
+
+
+def _pt_feature(contract):
+    """notes-create's feature file, with `contract` before its `## Proof` section."""
+    head, tail = _FC_FEATURE.format(fid="notes-create", anchors="t1.txt").split(
+        "\n## Proof\n", 1)
+    return head + contract + "\n## Proof\n" + tail
+
+
+# A runner argv per tool, so the stored argv runs the stored tool: a conductor that binds
+# records to their runner (proof-tier trust R2) counts these records.
+_PT_RUNNER_ARGV = {"verus": ["verus"], "kani": ["cargo", "kani"], "hypothesis": ["pytest"],
+                   "proptest": ["cargo", "test"], "fast-check": ["vitest"],
+                   "rapid": ["go", "test"]}
+
+
+def _pt_proof(root, clause, sha, tier="property", tool="hypothesis", verifier="verifier"):
+    """A proof record in the shape `verify_evidence.py record --tier` writes, with its
+    mutant artifacts (factory-conductor's test_conductor_tiers.py builds the same)."""
+    d = os.path.join(root, ".verify", "a", "notes-create", sha)
+    os.makedirs(d, exist_ok=True)
+    stem = "proof-%s-%s-%s" % (tier, tool, clause)
+    arts = []
+    for ext, data in (("stdout", b"1 passed in 0.01s\n"), ("stderr", b""),
+                      ("mutant.patch", _PT_MUTANT.encode()), ("mutant.exit", b"1\n"),
+                      ("mutant.stdout", b"Falsifying example\n1 failed\n"),
+                      ("mutant.stderr", b"")):
+        name = "%s.%s" % (stem, ext)
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(data)
+        arts.append({"path": name, "sha256": hashlib.sha256(data).hexdigest()})
+    with open(os.path.join(d, stem + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"schema": "verify-evidence/v1", "kind": "evidence", "instance": "a",
+                   "feature": "notes-create", "sha": sha, "verifier": verifier,
+                   "result": "pass", "tier": tier, "tool": tool, "clauses": [clause],
+                   "argv": list(_PT_RUNNER_ARGV.get(tool, [tool])), "cwd": "/x",
+                   "timeout": 900,
+                   "exit_status": 0, "artifacts": arts, "captured_at": _now_z(),
+                   "mutant_author": verifier, "mutant_exit_status": 1}, f)
+
+
+def _pt_run(tree, tasks, contract=False, edit=None, proofs=(), finish=False, files=None):
+    """Drive T1 of a gated plan (tasks: [(id, [features], extra task keys)]) through init,
+    start, a work commit (plus `edit`, the text of notes-create's feature file, and
+    `files`, {path: text}), verify, review, runtime evidence, the property proofs named in
+    `proofs`, `evidence` and `merge`, then `finish` when asked. `contract` commits
+    _PT_CONTRACT (or the contract text it holds, when it is a string) into notes-create's
+    feature file before init. Returns {init, evidence, merge, assurance}, or None when a
+    step that every tree runs the same way failed (the fixture, not the gate, is broken)."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    feature = os.path.join(root, ".claude", "skills", "verify-app", "features",
+                           "notes-create.md")
+    try:
+        plan_env = _eg_fixture(CC, root, tasks)
+        if contract:
+            with open(feature, "w", encoding="utf-8") as f:
+                f.write(_pt_feature(contract if isinstance(contract, str)
+                                    else _PT_CONTRACT))
+            subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", root, "commit", "-q", "-m", "contract"], check=True,
+                           capture_output=True, env=_FC_GENV)
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300)
+
+        out = {"init": run("init", "--plan", plan_env).returncode}
+        if out["init"] != 0:
+            return out
+        if not _fc_gated(run):
+            return None
+        started = run("start", "T1", "--owner", "writer")
+        if started.returncode != 0:
+            return None
+        wt = started.stdout.split(" ", 2)[2].strip()
+        with open(os.path.join(wt, "t1.txt"), "w") as f:
+            f.write("done\n")
+        for rel, text in (files or {}).items():
+            path = os.path.join(wt, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        if edit is not None:
+            with open(os.path.join(wt, os.path.relpath(feature, root)), "w",
+                      encoding="utf-8") as f:
+                f.write(edit)
+        subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w"], check=True,
+                       capture_output=True, env=_FC_GENV)
+        v = run("verify", "T1")
+        if v.returncode != 0:
+            return None
+        sha = v.stdout.split()[-1]
+        if run("review", "T1", "--verdict", "pass", "--reviewer", "reviewer").returncode:
+            return None
+        _fc_record(root, "notes-create", sha)
+        for clause in proofs:
+            _pt_proof(root, clause, sha)
+        lines = [x for x in run("evidence", "T1", "--verifier", "verifier").stdout.splitlines()
+                 if x.startswith("EVIDENCE: T1 ")]
+        if not lines:
+            return None
+        out["evidence"] = lines[0].split()[2:]
+        out["merge"] = run("merge", "T1").returncode
+        if finish:
+            done = [x for x in run("finish").stdout.splitlines() if x.startswith("FINISH: ")]
+            if not done:
+                return None
+            with open(done[0][len("FINISH: "):], encoding="utf-8") as f:
+                out["assurance"] = "assurance" in json.load(f)["predicate"]["payload"]
+        return out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _pt_rejects(result, reason):
+    """1 when the evidence verdict rejects with `reason`, 0 on any other verdict."""
+    return int(result["evidence"][:2] == ["reject", reason])
+
+
+_PT_SPEC = """# Spec: Notes
+
+## Problem
+Users lose notes they type because nothing saves them.
+
+## Users
+- People who take notes
+
+## Goals
+- Notes persist across reloads
+
+## Non-goals
+- Sharing notes
+
+## Constraints
+- B1 [invariant]: A saved note is never lost.
+
+## Required truths
+- RT1 [SPECIFICATION_READY]: Save and list both work. (parent: OUTCOME; maps_to: B1; reqs: R1, R2; confidence: 0.8; check: {python} tests/check_save.py)
+
+## Requirements
+- R1: The app must save a note when the user presses Save. %s
+- R2: The note list must show every saved note, newest first.
+
+## Acceptance criteria
+- R1: `{python} tests/check_save.py` exits 0. [cmd: {python} tests/check_save.py]
+- R2: `{python} tests/check_list.py` exits 0. [cmd: {python} tests/check_list.py]
+
+## Verification
+Verify skill: .claude/skills/verify-notes
+
+## Open questions
+- (none)
+"""
+
+
+def _pt_lint(tree, hints):
+    """PASS or FAIL: the tree's spec_lint.py on _PT_SPEC with `hints` on R1."""
+    lint = os.path.join(tree, "spec-first-planning", "assets", "spec_lint.py")
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "spec.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_PT_SPEC % hints)
+        r = subprocess.run([sys.executable, "-I", lint, path], capture_output=True,
+                           text=True, timeout=300)
+    for line in r.stdout.splitlines():
+        if line.startswith("LINT_RESULT: "):
+            return line.split()[1]
+    return None
+
+
+def check_proof_tier_gate(old, new):
+    """factory-conductor and spec-first-planning: does the gate refuse a malformed tier
+    field at init, a clause below its tier, an edited contract and a lone tier hint, while
+    a plan with no tier field runs exactly as before (O1)?"""
+    s = "factory-conductor"
+
+    def measured(tree, what, *args, **kw):
+        r = _pt_run(tree, *args, **kw)
+        if r is None or (what != "init" and what not in r):
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "proof-tier fixture did not reach `%s`: %r" % (what, r)))
+            return None
+        return r
+
+    tiered = [("T1", ["notes-create"], {"min_tier": "property", "clauses": _PT_TWO})]
+    # Each tiered probe commits _PT_CONTRACT, which defines C1 and C2: a clause counts at
+    # a tier only when its feature's contract defines it (proof-tier trust R6).
+    # Sanity:with property records for both clauses the new tree passes and merges, so a
+    # reject below is the gate, not a fixture the new tree cannot pass at all.
+    good = measured(new, "evidence", tiered, contract=True, proofs=("C1", "C2"))
+    if good is not None and (good["evidence"][:1] != ["pass"] or good["merge"] != 0):
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "proof-tier sanity check failed: property records for C1 and "
+                             "C2 did not pass and merge T1: %r" % good))
+
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1",))
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1",))
+    if a is not None and b is not None:
+        a, b = _pt_rejects(a, "tier-below-required"), _pt_rejects(b, "tier-below-required")
+        row(s, "tier-below-required rejects, C2 at runtime only under min_tier property "
+            "(higher=better)", a, b, a == 0 and b == 1,
+            "a C1 property record and runtime evidence alone: the baseline passes the task; "
+            "the gate rejects notes-create:C2 as a repair. Sanity-checked: property records "
+            "for both clauses DO pass and merge", since=SINCE_PROOF_TIER_GATE)
+
+    bad = [("T1", ["notes-create"], {"min_tier": None, "clauses": ["notes-create:C1"]})]
+    a, b = measured(old, "init", bad), measured(new, "init", bad)
+    if a is not None and b is not None:
+        row(s, "init exit on a plan with `min_tier: null` and clauses (2=refused)",
+            a["init"], b["init"], a["init"] == 0 and b["init"] == 2,
+            "the baseline starts the run; init refuses the malformed tier field before any "
+            "run state or branch exists (FAIL: task T1 min_tier: ...)",
+            since=SINCE_PROOF_TIER_GATE)
+
+    edited = _pt_feature(_PT_CONTRACT.replace("a non-empty string", "a string"))
+    a = measured(old, "evidence", tiered, contract=True, edit=edited, proofs=("C1", "C2"))
+    b = measured(new, "evidence", tiered, contract=True, edit=edited, proofs=("C1", "C2"))
+    if a is not None and b is not None:
+        a, b = _pt_rejects(a, "contract-changed"), _pt_rejects(b, "contract-changed")
+        row(s, "contract-changed rejects, a task that edits C1's text (higher=better)",
+            a, b, a == 0 and b == 1,
+            "every record passes; the baseline merges the edited contract, the gate parks "
+            "the task (EVIDENCE: T1 reject contract-changed notes-create)",
+            since=SINCE_PROOF_TIER_GATE)
+
+    plain = [("T1", ["notes-create"], {})]
+    a = measured(old, "assurance", plain, finish=True)
+    b = measured(new, "assurance", plain, finish=True)
+    if a is not None and b is not None:
+        a = (a["evidence"][0], a["merge"], a["assurance"])
+        b = (b["evidence"][0], b["merge"], b["assurance"])
+        row(s, "plan with no tier field: (evidence verdict, merge exit, assurance key)",
+            "%s/%s/%s" % a, "%s/%s/%s" % b, b == a == ("pass", 0, False),
+            "O1: a plan with no tier field gets no new refusal, reject or envelope key",
+            kind="guard")
+
+    a, b = _pt_lint(old, "[tier: property]"), _pt_lint(new, "[tier: property]")
+    if a is None or b is None or _pt_lint(new, "[tier: property] "
+                                               "[contract: notes-create:C1]") != "PASS":
+        PROBE_ERRORS.append((new, "spec-first-planning/assets/spec_lint.py",
+                             "lone-tier lint probe: %r -> %r, or the spec with a contract "
+                             "hint added did not lint PASS" % (a, b)))
+    else:
+        row("spec-first-planning", "lint result for a lone `tier:` hint (FAIL=refused)",
+            a, b, a == "PASS" and b == "FAIL",
+            "a [tier: ...] hint with no [contract: ...] hint gates nothing (D3), so lint "
+            "refuses it. Sanity-checked: the same spec with a contract hint lints PASS",
+            since=SINCE_PROOF_TIER_GATE)
+
+
+# ── proof-tier trust ────────────────────────────────────────────────────────
+# Each probe drives the tree's conductor.py through the CLI. The proof tool is a PATH
+# shim named after its runner (pytest) that runs the fixture's committed tool.py from its
+# cwd, so no proof dependency is needed.
+_PTT_SHIM = "#!%s\nimport runpy\nrunpy.run_path('tool.py', run_name='__main__')\n"
+# tool.py: target.txt "caught" (the recorded mutant) fails with Hypothesis's failure
+# report, "broken" fails, and any other text passes.
+_PTT_TOOL = ("import sys\nmode = open('target.txt').read().strip()\n"
+             "if mode == 'caught':\n"
+             "    print('Falsifying example: t(x=0)\\n1 failed in 0.01s')\n"
+             "    sys.exit(1)\n"
+             "if mode == 'broken':\n"
+             "    print('1 failed in 0.01s')\n"
+             "    sys.exit(1)\n"
+             "print('1 passed in 0.01s')\n")
+_PTT_EXTERNAL = "#[verifier::external_body]\npub fn f(x: u32) -> u32 {\n    x\n}\n"
+
+
+def _ptt_shims(d, *names):
+    """Write executable runner shims `names` into d; returns d."""
+    os.makedirs(d, exist_ok=True)
+    for name in names:
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_PTT_SHIM % sys.executable)
+        os.chmod(path, 0o755)
+    return d
+
+
+def _ptt_integration_red(tree):
+    """1 when the tree's `finish` prints `STOP: integration_red`, else 0. T1 (property on
+    notes-create:C1) commits tool.py and target.txt "good" with runtime evidence and a
+    property record whose argv is the pytest shim; T2 (untiered, after T1) sets target.txt
+    to "broken", which breaks T1's proof on the integration head. Every verify command
+    passes. None when a step that every tree runs the same way failed."""
+    conductor, CC = _fc_tree(tree)
+    if conductor is None:
+        return None
+    tmp = tempfile.mkdtemp()
+    root = os.path.join(tmp, "repo")
+    bin_dir = _ptt_shims(os.path.join(tmp, "bin"), "pytest")
+    env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+    try:
+        plan_env = _eg_fixture(CC, root, [
+            ("T1", ["notes-create"], {"min_tier": "property", "clauses": ["notes-create:C1"]}),
+            ("T2", ["notes-list"], {"depends_on": ["T1"]})])
+        feature = os.path.join(root, ".claude", "skills", "verify-app", "features",
+                               "notes-create.md")
+        with open(feature, "w", encoding="utf-8") as f:
+            f.write(_pt_feature(_PT_CONTRACT))
+        subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", root, "commit", "-q", "-m", "contract"], check=True,
+                       capture_output=True, env=_FC_GENV)
+
+        def run(*argv):
+            return subprocess.run([sys.executable, "-I", conductor, *argv, "--root", root],
+                                  capture_output=True, text=True, timeout=300, env=env)
+
+        if run("init", "--plan", plan_env).returncode != 0 or not _fc_gated(run):
+            return None
+        for tid, feat, files in (
+                ("T1", "notes-create", {"t1.txt": "done\n", "tool.py": _PTT_TOOL,
+                                        "target.txt": "good\n"}),
+                ("T2", "notes-list", {"t2.txt": "done\n", "target.txt": "broken\n"})):
+            started = run("start", tid, "--owner", "writer")
+            if started.returncode != 0:
+                return None
+            wt = started.stdout.split(" ", 2)[2].strip()
+            for name, text in files.items():
+                with open(os.path.join(wt, name), "w", encoding="utf-8") as f:
+                    f.write(text)
+            subprocess.run(["git", "-C", wt, "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", wt, "commit", "-q", "-m", "w " + tid], check=True,
+                           capture_output=True, env=_FC_GENV)
+            v = run("verify", tid)
+            if v.returncode != 0:
+                return None
+            sha = v.stdout.split()[-1]
+            if run("review", tid, "--verdict", "pass", "--reviewer", "reviewer").returncode:
+                return None
+            _fc_record(root, feat, sha)
+            if tid == "T1":
+                _pt_proof(root, "C1", sha)
+            ev = run("evidence", tid, "--verifier", "verifier")
+            if ("EVIDENCE: %s pass" % tid) not in ev.stdout:
+                return None
+            if run("merge", tid).returncode != 0:
+                return None
+        done = run("finish")
+        if "FINISH: " not in done.stdout:
+            return None
+        return int("STOP: integration_red" in done.stdout.splitlines())
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_proof_tier_trust(old, new):
+    """factory-conductor: does the gate reject an added escape hatch and a clause its
+    contract does not define, and does finish stop a run whose proof a later task broke?"""
+    s = "factory-conductor"
+
+    def measured(tree, what, *args, **kw):
+        r = _pt_run(tree, *args, **kw)
+        if r is None or what not in r:
+            PROBE_ERRORS.append((tree, "factory-conductor/assets/conductor.py",
+                                 "proof-tier trust fixture did not reach `%s`: %r"
+                                 % (what, r)))
+            return None
+        return r
+
+    tiered = [("T1", ["notes-create"], {"min_tier": "property", "clauses": _PT_TWO})]
+    hatch = {"src/lib.rs": _PTT_EXTERNAL}
+    a = measured(old, "evidence", tiered, contract=True, proofs=("C1", "C2"), files=hatch)
+    b = measured(new, "evidence", tiered, contract=True, proofs=("C1", "C2"), files=hatch)
+    if a is not None and b is not None:
+        a, b = _pt_rejects(a, "escape-hatch"), _pt_rejects(b, "escape-hatch")
+        row(s, "escape-hatch rejects, a tiered task that adds #[verifier::external_body] "
+            "(higher=better)", a, b, a == 0 and b == 1,
+            "property records for both clauses: the baseline passes the task, the gate "
+            "sends it back (EVIDENCE: T1 reject escape-hatch src/lib.rs:1)",
+            since=SINCE_PROOF_TIER_TRUST)
+
+    only_c1 = "\n## Contract\n\n- C1 [pre]: the title is a non-empty string\n"
+    undefined = [("T1", ["notes-create"], {"min_tier": "runtime",
+                                           "clauses": ["notes-create:C9"]})]
+    a = measured(old, "evidence", undefined, contract=only_c1)
+    b = measured(new, "evidence", undefined, contract=only_c1)
+    if a is not None and b is not None:
+        a = _pt_rejects(a, "tier-below-required")
+        b = _pt_rejects(b, "tier-below-required")
+        row(s, "tier-below-required rejects, notes-create:C9 at runtime, contract defines "
+            "only C1 (higher=better)", a, b, a == 0 and b == 1,
+            "runtime evidence alone: the baseline counts a clause the contract does not "
+            "define, the gate counts it at no tier", since=SINCE_PROOF_TIER_TRUST)
+
+    a, b = _ptt_integration_red(old), _ptt_integration_red(new)
+    if a is None or b is None:
+        PROBE_ERRORS.append((new, "factory-conductor/assets/conductor.py",
+                             "integration-red fixture did not reach `finish`: %r -> %r"
+                             % (a, b)))
+    else:
+        row(s, "`STOP: integration_red` in finish, T2 breaks T1's shim proof (1=present)",
+            a, b, a == 0 and b == 1,
+            "every verify command passes; the baseline finishes green, finish re-runs T1's "
+            "proof on the integration head and stops the run",
+            since=SINCE_PROOF_TIER_TRUST)
+
+
 def main():
     if "--self-test" in sys.argv[1:]:
         return self_test()
@@ -9836,6 +10259,8 @@ def main():
         check_mockstar_encoding(old, REPO)
         check_tsn_pytest_reporter(old, REPO)
         check_forge_port_stable(old, REPO)
+        check_proof_tier_gate(old, REPO)
+        check_proof_tier_trust(old, REPO)
     finally:
         subprocess.run(["git", "-C", REPO, "worktree", "remove", "--force", old],
                        capture_output=True)

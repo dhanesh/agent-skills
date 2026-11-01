@@ -32,16 +32,16 @@ An exit 3 does not always mean the run stopped. Read the lines: `STOP:` means it
 | `owner <task> --owner ID` | `OWNER: <task> <id>`: records the executor of a task started with `--owner-later`, once; `verify` refuses a gated task with no owner | 0; 2 not running, no id, or an owner already recorded |
 | `verify <task>` | `VERIFY: <task> ok\|fail <argv>` per command, then `VERIFY: <task> pass <sha>` or `VERIFY: <task> fail` | 0 pass; 3 fail, park or stop; 2 refused |
 | `review <task> --verdict pass\|fail [--detail T] [--reviewer ID]` | `REVIEW: <task> pass\|fail` (under the gate `--reviewer` is required; the owner's id is refused, exit 2) | 0 pass; 3 fail or park; 2 refused |
-| `evidence <task> --verifier ID` | `EVIDENCE: <task> pass <sha>` or `EVIDENCE: <task> reject <reason> [<feature>]` (see "Evidence gate") | 0 pass; 3 reject, park or gate; 2 refused (no gate, no passing review) |
+| `evidence <task> --verifier ID` | `EVIDENCE: <task> pass <sha>` or `EVIDENCE: <task> reject <reason> [<feature>\|<feature>:C<n>\|<field>]` (see "Evidence gate") | 0 pass; 3 reject, park or gate; 2 refused (no gate, no passing review) |
 | `merge <task>` | `MERGE: <task> <sha>` (under the gate: only with a passing evidence verdict on the pinned sha, whose records still hold) | 0; 3 conflict or no commits (parked), or stop; 2 refused, or a fast-forward git refused with the root unchanged (the task stays `reviewing`) |
 | `park <task> --reason R` | `PARK: <task> <reason>` | 0; 2 refused |
 | `decision <task> --question Q` | `PARK: <task> new_human_decision` | 0; 2 refused |
 | `trail [--out FILE]` | one `TRAIL: <json>` per task (dispatch time, owner, worktree, verified head, reviewer, verdict agent, evidence, merge outcome), `TRAIL_FILE: <path>` with `--out` | 0 |
-| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [evidence=pass\|reject:<reason>] [owner="…"] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (` evidence_gate=on skill=<dir>` or ` evidence_gate=off`, then ` derived=max_dispatches` when `init` derived the cap), the budget note | 0 |
+| `status` | one `STATUS: <task> <status> [verified_head=<sha>] [review=pass\|fail] [evidence=pass\|reject:<reason>] [owner="…"] [reason=…] [question=…]` per task (`verified_head` only while `reviewing`: the commit awaiting review; `review=` whenever a review is recorded), the budget line (` evidence_gate=on skill=<dir>` or ` evidence_gate=off`, then ` derived=max_dispatches` when `init` derived the cap), the budget note; when a task carries `clauses`, then one `ASSURANCE: <feature> <tier> <clause ids>` line per feature, ending ` @<integration head, 12 characters>` once `finish` re-ran the proofs (see "Evidence gate") | 0 |
 | `resume` | `STATUS: run=<id> last_event=<e> at=<t>`, then any `PARK: <task> worktree-missing\|budget_dispatches`, `READY: <ids>`, one `NEXT: <task> <action>` per in-flight task and `NEXT: run next`; or `STOP: <reason>` and `NEXT: run finish`; or `GATE: ASK`, `STOP: grant_ask` and `NEXT: run ask`; on a finished run, `FINISH: <envelope>` and `NEXT: run finish\|done` (or `run ask`) | 0, including a finished run; 3 stopped (now or before) or gate asks |
 | `watch` | exactly one line: `REENTRY: disabled`, `no-run`, `done`, `superseded`, `ask`, `waiting-human`, `live`, `not-stalled`, `exhausted`, `started <n> pid=<pid>` or `failed` | 0; 2 `failed` |
 | `reentry install\|uninstall\|status` | install: `REENTRY: installed every <n> min`, `REENTRY: disabled`, a `GATE: ASK` line, or `REENTRY: failed`; uninstall: `REENTRY: uninstalled` or `REENTRY: failed`; status: `REENTRY: timer <paths or crontab line\|none>`, `REENTRY: lease <json\|null>`, `REENTRY: count <n>`, `REENTRY: last <event json\|none>` | 0; 3 `disabled` or gate asks (install); 2 `failed`, or no run |
-| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
+| `finish [--push-cmd JSON] [--pr-cmd JSON] [--retry-remote]` | in a tiered plan first one `INTEGRATION: <fail\|flaky\|unavailable\|stale-mutant\|uncaught> <task> proof <feature>:C<n>` line per proof re-run that did not pass (see "finish"), then `INTEGRATION: pass <sha>`, `INTEGRATION: fail <task> <command>` lines or `INTEGRATION: skipped grant_ask`, `FINISH: <envelope>`, then `STOP: integration_red` or `STOP: grant_ask`, or any `GATE: ASK` or `REMOTE: pending push pr (run finish --retry-remote)` | 0 all done; 3 integration red or skipped, or a remote step asked, failed or is pending; 2 refused, including a run branch that moved since the integration re-run |
 
 ### init
 
@@ -58,6 +58,21 @@ grant's `branch_pattern` and must not exist yet, checks it out in the root, and 
 directory. When `refs/remotes/origin/<base>` is absent it prints a stderr `warning:`: the
 default PR's `--base` is the base branch, which the conductor never pushes, so push it first
 (`git push -u origin <base>`).
+
+**Proof-tier fields.** A task can carry `min_tier` and `clauses`. `init` checks them after it
+reads the plan's tasks and before it checks the verify commands and the grant. It refuses
+the plan in exactly four cases:
+
+| Case | `FAIL:` line names |
+|---|---|
+| `min_tier` is not one of the exact strings `proved`, `bounded`, `property` or `runtime` (null too) | `min_tier` |
+| `clauses` is not a non-empty list of distinct strings that each match `[a-z][a-z0-9]*(-[a-z0-9]+)*:C[1-9][0-9]*` in full, with the feature part in the task's `features` (null too) | `clauses` |
+| the task has only one of the two keys | the missing key |
+| the task has either key and the plan has no `verification` block | the key it has |
+
+Each case prints `FAIL: task <id> <field>: <why>` to stderr and exits 2. `init` then
+writes no run directory and creates no branch. This check reads the plan only, not a
+feature file. A plan with neither key on any task is not affected.
 
 **Budgets.** The run's budget is `{"max_parallel": 2, "max_repairs_per_task": 2}`, overlaid with the grant's `budget`,
 overlaid with `--budget`; then, if `max_dispatches` is still unset, `init` derives it. `--budget` can only tighten: a value above the grant's for the same
@@ -271,6 +286,26 @@ done or the integration was red, and, for an integration skipped because the gra
   envelope (a new id, whose log prefix covers that `integration` event), keeps the old path
   as `finished.superseded`, and goes on to the push and the PR. A red re-run stops with
   `integration_red` as above.
+- **Proof re-runs.** In a tiered plan, once every verify command passed, `finish` re-runs the
+  source proof record of each proved, bounded or property clause on the same head: the
+  stored argv, with its stored timeout, at the root of a fresh checkout. For bounded and
+  property it also applies the record's own `mutant.patch` to a second fresh checkout and
+  needs the tool's failure signature there. Each re-run has one outcome, printed as
+  `INTEGRATION: <outcome> <task> proof <feature>:C<n>` (in run order, then clause number)
+  unless it is `pass`:
+
+  | Outcome | Meaning | Clause tier |
+  |---|---|---|
+  | `pass` | the proof held on the head, and for bounded and property the mutant was caught | the recorded tier |
+  | `fail` | the proof failed, and failed again on one retry | `none`; the run stops `integration_red` |
+  | `flaky` | the proof failed, then passed on the retry | `runtime` |
+  | `unavailable` | the record cannot be read, its argv is not a runner of its tool, the tool is not on PATH, or the checkout cannot be made | `runtime` |
+  | `stale-mutant` | the mutant patch is missing, altered or no longer applies | `runtime` |
+  | `uncaught` | the mutant run passed, or did not match the failure signature, twice | `runtime` |
+
+  Only `fail` turns the run red. The re-run writes no record. The `integration` event and
+  the envelope's `integration` carry them as `proofs: [{task, clause, tier, tool, argv,
+  outcome, mutant_rechecked}]`.
 - **Recorded results.** A later plain `finish` reprints the recorded `INTEGRATION:` line(s)
   and never re-runs them. A stop that an earlier, crashed `finish` recorded (it keeps the
   stop it replaced under `prior`) is undone before the next attempt judges the run branch.
@@ -485,6 +520,9 @@ verified head. Checks, in order; the first that fails is the reject reason:
 | # | Check | Reject reason | What happens |
 |---|---|---|---|
 | 1 | the grant covers `local_reversible` | `GATE: ASK` | stop `grant_ask` (exit 3) |
+| 1a | in a tiered plan only (a task carries `min_tier`), for every task: the `## Contract` section of each `<skill>/features/<id>.md` other than `README.md` is the same at the verified head as at the run base (`git merge-base <run branch> <head>`); a file or section on one side only is a change | `contract-changed <first changed id, sorted>` | parked `contract-changed`: a human decides whether the contract moves |
+| 1b | in a tiered plan only, for every task: the diff from the run base to the verified head adds no Rust escape hatch: on an added line of a `.rs` file, `assume(` or `admit(` not after an identifier character or `::` (`prop_assume(` and `kani::assume(` pass), or `external_body` inside `#[verifier …]` on the same line; comments and strings are not skipped | `escape-hatch <path>:<line>` (the first hit, in git's path order) | back to `verifying`: a repair, as for `evidence-failed`; the executor can remove the token, and a task that truly needs one spends its repair budget and parks for a human |
+| 1c | git can show that diff (the merge base and every `.rs` file in it) | `evidence-diff-unreadable` | parked `evidence-diff-unreadable`: the scan cannot run, so the gate fails closed |
 | 2 | a verifier id was given | `verifier-missing` | a verifier dispatch is spent; stays `reviewing` |
 | 3 | verifier ≠ the owner recorded at `start` | `writer-is-verifier` | as above |
 | 4 | each declared feature has `features/<id>.md` (with a matching `- id:`) at the verified head, read from git | `feature-unmapped <id>` | parked `feature-unmapped` (maintain mode) |
@@ -496,6 +534,39 @@ verified head. Checks, in order; the first that fails is the reject reason:
 | 10 | every artifact exists inside the evidence dir with its sha256 | `evidence-artifact-missing`, `evidence-artifact-altered` | verifier dispatch |
 | 11 | `result` is `pass` | `evidence-failed` | back to `verifying`: a repair on the task's repair budget; the record keeps the verifier's `observed` text, `resume` prints `dispatch-repair evidence`, and `verify` refuses the same commit |
 | 12 | `<instance>/doctor/<head>/doctor.json` exists, kind `doctor`, same `sha`, `ok: true` | `doctor-missing`, `doctor-red` | verifier dispatch |
+| 13 | for a tiered task: `min_tier` and `clauses` in the pinned plan can be read (`state.json` is not read for them) | `tier-field-unreadable <min_tier\|clauses>` | parked `tier-field-unreadable`: no executor can repair a pinned plan |
+| 14 | for a tiered task: each clause, in `clauses` order, is met at `min_tier` or a stronger tier (proved > bounded > property > runtime) | `tier-below-required <feature>:C<n>` (the first clause not met) | back to `verifying`: a repair, as for `evidence-failed`; `resume` prints `dispatch-repair evidence`, and `verify` refuses the same commit |
+
+Checks 13 and 14 run only when every check before them passes. A clause `<f>:C<n>` is met
+at a tier X when one of these is true:
+
+- A file `<evidence dir>/*/<f>/<head>/proof-<tier>-<tool>-C<n>.json` passes the record
+  check of rows 7 to 11 for this verifier. Its `tier` field equals the tier in its file
+  name, and that tier is X or stronger. Its `tool` is on that tier's list (`proved`:
+  verus; `bounded`: kani; `property`: proptest, hypothesis, fast-check, rapid). Its
+  `clauses` is `["C<n>"]`. Its stored `argv` starts with one of the tool's runners on the
+  runner table (the conductor's copy of verification-skill-forge's, at most one leading
+  wrapper such as `uv run` stripped). For `bounded` and `property`, it also holds a non-zero mutant
+  exit status and its four mutant artifacts.
+- X is `runtime`, and the accepted `evidence.json` for `<f>` exists.
+
+The clause rule: a clause counts at any tier only when the `## Contract` section of
+`features/<f>.md` at the verified head defines `C<n>`. A clause that the contract does not
+define meets no tier, so it shows as `tier-below-required`.
+
+On a pass, a tiered task's evidence record also keeps `clause_tiers`: the tier each clause
+met. `status` and the run-result envelope report it. When at least one task carries
+`clauses`, `status` prints one `ASSURANCE: <feature> <tier> <clause ids>` line per feature
+after its last `STATUS:` line, in feature-id order. A clause's tier is the strongest tier
+that a merged task which names it recorded, or `none`. The feature's tier is the weakest
+of its clauses' tiers. The clause ids are the ones at that tier, in numeric order, joined by
+commas. Once `finish` re-ran the proofs, a proved, bounded or property clause takes its
+tier from its re-run on the integration head (see "finish"), and each line ends with
+` @<integration head, 12 characters>`. `finish` itself prints no `ASSURANCE:` line. The
+run-result envelope carries the same data as `assurance: [{feature, tier, clauses, proofs,
+sha?}]`: `sha` is the integration head (only after the re-run), and `proofs` holds one
+`{clause, tier, tool, argv, mutant_rechecked}` per clause of the feature that a task names. A plan where no task carries `clauses` prints no `ASSURANCE:` line, and its
+envelope has no `assurance` key.
 
 Every instance's record for a feature at the head is judged: a well-formed failing record blocks the head whoever recorded it (`evidence-failed`), and otherwise the first passing record by this verifier proves the feature. Records from other verifiers at the same head (a placeholder id, say) do not block a pass and are not cited.
 
@@ -587,7 +658,10 @@ run branch fails a proven task's own checks), and `reentry_exhausted` (from `wat
 
 Park reasons: `verify_red_after_repairs`, `budget_dispatches`, `unrunnable-verify`,
 `no-commits`, `merge-conflict`, `merge-inconsistent`, `new_human_decision`,
-`in_flight_at_stop`, `worktree-missing` (from `resume`), and any `park --reason` text.
+`in_flight_at_stop`, `worktree-missing` (from `resume`), `feature-unmapped`,
+`tier-field-unreadable` and `contract-changed` (from `evidence`), and any `park --reason`
+text. A parked task gets no `NEXT:` line from `resume`. `tier-below-required` is not a park
+reason: it is a repair.
 
 ## The run directory
 
@@ -633,7 +707,7 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `NEXT: <task> dispatch-repair review` | `verifying` after a failed review | send the executor `tasks.<task>.review.detail`, then `conductor verify <task>` on its report |
 | `NEXT: <task> dispatch-reviewer <sha>` | `reviewing`, no verdict | dispatch a reviewer on `<sha>`, the verified head, then `conductor review` |
 | `NEXT: <task> verify` | `verifying`, last verify passed, no review (merge found the branch moved) | `conductor verify <task>`; nothing is dispatched |
-| `NEXT: <task> dispatch-repair evidence` | `verifying` after an `evidence-failed` verdict | send the executor `tasks.<task>.evidence.feature` and `.observed` (what the verifier saw), then `conductor verify <task>` on its report; `verify` refuses the commit the evidence failed on (`unchanged since failed evidence`), so the repair is a new commit |
+| `NEXT: <task> dispatch-repair evidence` | `verifying` after an `evidence-failed` or `tier-below-required` verdict | send the executor `tasks.<task>.evidence.reason`, `.feature` (for `tier-below-required`, the clause `<feature>:C<n>`) and `.observed` (what the verifier saw), then `conductor verify <task>` on its report; `verify` refuses the commit the evidence failed on (`unchanged since failed evidence`), so the repair is a new commit |
 | `NEXT: <task> dispatch-verifier <sha>` | `reviewing`, review pass, evidence gate on, no passing evidence verdict on `<sha>` | dispatch the verifier brief on `<sha>`, then `conductor evidence <task> --verifier <id>` |
 | `NEXT: <task> merge` | `reviewing`, verdict pass (and, under the gate, a passing evidence verdict) | `conductor merge <task>`; a merge that already reached the run branch before the crash is found and recorded (`recovered: true` in the log) |
 | `NEXT: run next` | work is in flight, or a task is ready | carry on with the loop (`conductor next`) |
@@ -645,6 +719,7 @@ expired asks (`NEXT: run ask`) and stays stopped until a new grant covers it.
 | `PARK: <task> worktree-missing` | `running` or `verifying`, its worktree is gone | nothing: the task is done for this run |
 | `PARK: <task> budget_dispatches` | the dispatch this line would spend is past `max_dispatches` | nothing: the task is done for this run |
 | `PARK: <task> budget_unmetered`, `budget_tokens` or `budget_usd` | a spend stop fires, and this is a `dispatch-executor` or `dispatch-repair` line (see "Spend metering") | nothing: the task is done for this run |
+| no line for the task | `evidence` parked it with `feature-unmapped`, `tier-field-unreadable` or `contract-changed` | nothing: the task is done for this run; report its reason (`tasks.<task>.evidence`) to the human |
 
 Every line starts `NEXT: `, then a task id or `run`, then the action; that grammar is stable
 for tools that read it. Each `dispatch-executor`, `dispatch-repair` and `dispatch-reviewer`

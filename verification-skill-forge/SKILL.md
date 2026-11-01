@@ -182,6 +182,7 @@ visible. It does not stop an agent with a shell from forging a record by hand, s
 factory-conductor also requires that the recording verifier is not the agent that wrote
 the code, and merging to the default branch stays with a human. The evidence format and
 how the conductor checks it: `references/evidence.md`.
+Proof tiers, tool failure signatures and mutant records: `references/proof-tiers.md`.
 
 ## Boundaries
 
