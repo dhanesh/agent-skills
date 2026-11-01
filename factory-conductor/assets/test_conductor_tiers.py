@@ -403,6 +403,25 @@ class RecordsThatDoNotCount(TierGate):
     def test_an_argv_that_is_not_a_list(self):
         self.assert_c2_unmet(argv="pytest")
 
+    def test_a_record_that_runtime_evidence_copied_in_as_an_artifact(self):
+        # A recorder older than verification-skill-forge 1.1.0 copies an --artifact named
+        # proof-*.json beside evidence.json, where it reads as a proof record. The record
+        # then names it in its artifacts: a file the verifier copied, not one it proved.
+        sha = self.tiered_run()
+        self.proof("C1", sha)
+        d = self.proof("C2", sha)
+        name = "proof-property-hypothesis-C2.json"
+        ev = os.path.join(d, "evidence.json")
+        with open(ev) as f:
+            doc = json.load(f)
+        with open(os.path.join(d, name), "rb") as f:
+            doc["artifacts"].append({"path": name,
+                                     "sha256": hashlib.sha256(f.read()).hexdigest()})
+        with open(ev, "w") as f:
+            json.dump(doc, f)
+        self.assertEqual(self.evidence()[1].strip(),
+                         self.reject_line("tier-below-required notes-create:C2"))
+
     def test_a_record_at_another_head(self):
         sha = self.tiered_run()
         self.proof("C1", sha)
