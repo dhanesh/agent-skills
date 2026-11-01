@@ -25,8 +25,17 @@ What the tooling enforces:
 - **Maintain can't hide bugs.** `forge.py check-maintain` fails a feature whose
   documented behaviour changed while none of its source did; the mismatch is recorded as
   a product-bug finding instead.
+- **Proof tiers.** A feature can state a contract, and each clause can carry a proof
+  stronger than one drive: `proved` (Verus), `bounded` (Kani) or `property` (proptest,
+  Hypothesis, fast-check, rapid). `forge.py contract` prints the clauses and their hash.
+  `verify_evidence.py record --tier` runs the proof itself in a clean checkout, and for
+  `bounded` and `property` it also needs a mutant that the tool catches. `forge.py
+  check-proof` names every Rust escape hatch (`assume(`, `admit(`, `external_body`) that
+  a diff adds.
 
-factory-conductor's evidence gate reads the records this produces.
+factory-conductor's evidence gate reads the records this produces. Under a tiered plan it
+also refuses a clause below the plan's `[tier: ...]`, a changed contract and an added
+escape hatch.
 
 <!-- skill-graph:start -->
 ## Where it fits
@@ -46,7 +55,7 @@ flowchart LR
   self_verification_skill_forge["verification-skill-forge"]
   in_factory_conductor -->|"when: the evidence gate parks a task as feature-unmapped<br/>why: its maintain mode maps the feature"| self_verification_skill_forge
   in_release_conductor -->|"when: the recipe names no verify skill<br/>why: staging cannot be proven without one"| self_verification_skill_forge
-  in_spec_first_planning -->|"when: an unattended plan, but the app has no verify skill<br/>why: it writes the verify skill that proves each feature"| self_verification_skill_forge
+  in_spec_first_planning -->|"when: unattended, with no verify skill or no contract for a tiered clause<br/>why: it writes the verify skill and the feature contracts"| self_verification_skill_forge
   classDef self stroke-width:4px,font-weight:bold
   class self_verification_skill_forge self
 ```
@@ -94,6 +103,7 @@ join, the SHA-bound recorder and the maintain guard are this repo's.
 
 ## Changes
 
+- **1.1.1.** SKILL.md now has a Proof tiers section: the feature contract, `forge contract`, `record --tier` with its mutant flags, and `forge check-proof`. Before, only `references/` described them. The deliverable now lists each contract clause with its tier.
 - **1.1.0.** The recorder takes `record --tier`, `--tool`, `--clauses` and the mutant flags, and runs a proof only through a real runner for its tool, in a clean checkout. `forge contract` and `forge check-proof` are new. The recorder now refuses an artifact named `evidence.json`, `doctor.json` or `proof-*`, because a copied record could pose as one. `forge check-proof` now diffs with `--text` and `--no-relative`, so a committed `*.rs -diff` attribute cannot hide added lines.
 - **1.0.2.** The `compatibility` line now names `python3`, `python`, `py -3` or `$SKILL_PYTHON`, as the Python interpreter rule allows.
 - **1.0.1.** SKILL.md says how to find Python when `python3` is missing, too old or the macOS install stub.

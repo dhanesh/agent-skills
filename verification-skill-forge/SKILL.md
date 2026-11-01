@@ -9,14 +9,15 @@ description: >-
   evidence gate routes a task here because a touched feature has no map entry. Detects
   forge vs maintain mode itself. Ships a linter that rejects placeholder skills, a
   Manifold join that names every anchored constraint with no observable proof, a
-  vendored evidence recorder with per-instance port claims, and a maintain-mode guard
-  that fails a map edited to match buggy behaviour. Not the verifier itself (the
+  vendored evidence recorder with per-instance port claims, proof-tier records for a
+  feature's contract clauses (Verus, Kani, property tests with a caught mutant), and a
+  maintain-mode guard that fails a map edited to match buggy behaviour. Not the verifier itself (the
   generated skill is), not a test-suite generator (test-safety-net).
 license: MIT
 compatibility: Requires Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, and git; offline. The generated skill runs whatever the target app needs (a browser driver, a PTY, curl).
 metadata:
   author: dhanesh
-  version: "1.1.0"
+  version: "1.1.1"
   tags: "verification,runtime-evidence,feature-map,manifold,factory"
 ---
 
@@ -133,6 +134,45 @@ usable manifold the forge falls back to source-derived discovery and never abort
 because a broken planning artifact is no reason to leave the app with no way to prove it.
 Details: `references/manifold-join.md`.
 
+## Proof tiers
+
+A runtime drive shows that a feature worked once. Some clauses need more: that a rule
+holds for every input, or for every input up to a bound. A feature can state those
+clauses as a contract, and a clause can carry a stronger proof than the drive.
+
+1. **State the contract.** Add a `## Contract` section to the feature file, one bullet
+   per clause: `- C1 [pre|post|inv|trans]: <statement>`. Name each clause id in the
+   feature's `## Proof` section. List what the contract takes as given in an optional
+   `- trusted:` header line. The format is in `references/feature-map.md`.
+2. **Read it back.** `forge contract <feature file>` prints one JSON object: `clauses`
+   (`id`, `kind`, `text`), `trusted` and `sha256`, the hash of the section text.
+   factory-conductor compares that section between the run base and the head, and parks
+   a task whose contract changed (`contract-changed`), because a human decides whether a
+   contract moves. `forge lint` fails a duplicate or skipped clause id, an empty clause,
+   an unknown kind and a clause id that `## Proof` does not name.
+3. **Record a tier proof.** In the generated skill's Evidence step, run
+   `verify_evidence.py record --tier <proved|bounded|property> --tool <tool> --clauses C<n> --cmd "<argv>"`.
+   It prints `PROOF: <tier> <path>`. Each tier accepts only the tools in its allowlist,
+   and `--cmd` has to start with one of that tool's runners, because a label alone proves
+   nothing. The recorder runs the command itself, in a clean checkout of HEAD. `bounded`
+   and `property` also take `--mutant-patch <diff>` and `--mutant-author <verifier|forge>`:
+   the mutant run has to fail with the tool's failure signature, because a check that
+   tests nothing also passes. A clause with no tier record is proven at `runtime` by the
+   feature's passing `evidence.json`. The tiers, the allowlist, the runners, the failure
+   signatures and the exit codes are in `references/proof-tiers.md`.
+4. **Scan for escape hatches.** `forge check-proof --root <repo> --base <ref> --head <ref>`
+   prints `ESCAPE: <path>:<line> <token>` for each `assume(`, `admit(` or
+   `#[verifier::external_body]` that the diff adds to a `.rs` file, then
+   `CHECK_PROOF_RESULT: PASS` (exit 0) or `FAIL` (exit 1). Exit 2 means nothing was
+   scanned. A Verus proof that leans on one of these tokens skips the hard part, so the
+   evidence gate refuses it (`escape-hatch`). Run the scan before you record a `proved`
+   clause.
+
+The plan names the weakest tier each task accepts with spec-first-planning's
+`[tier: ...]` and `[contract: <feature>:C<n>, ...]` hints. Under factory-conductor's
+evidence gate, a clause below that tier rejects the task (`tier-below-required`), and
+`conductor status` prints one `ASSURANCE:` line per feature with its weakest tier.
+
 ## Maintain
 
 The full pass is in `references/maintain.md`. In short:
@@ -161,7 +201,8 @@ The full pass is in `references/maintain.md`. In short:
 
 A **verify skill report**: the verify skill path, `LINT_RESULT: PASS`, the features
 mapped and which are `proven` (with the commit), the live run's evidence paths, the
-Manifold `COVERAGE:` line with every `UNCOVERED:` constraint listed, the cold-run result,
+Manifold `COVERAGE:` line with every `UNCOVERED:` constraint listed, each contract clause
+with the tier it is proven at and its record path, the cold-run result,
 and, in maintain mode, the outcome (clean, changed or blocked), each drift fix and each
 product-bug finding path.
 
