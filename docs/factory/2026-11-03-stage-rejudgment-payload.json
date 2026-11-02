@@ -1,0 +1,163 @@
+{
+ "state": {
+  "repo": "dhanesh/agent-skills: a collection of agent skills that together form a software factory (idea, spec, design, build, verify, review, release, operate, support, growth, knowledge, governance). A human orchestrates the stages.",
+  "rubric": "Status rubric. A row's status judges the stage's core job only. How work passes from one stage to the next is judged in the Stage handoffs row.\n\n- `covered`: one or more skills do the stage's core job, and no limit weakens it.\n- `covered, with limits`: the skills do the core job. The row names each limit that weakens the proof or leaves a step to you. A limit that you chose (launch, pricing, spend, merge, deploy, external messages) does not lower a row.\n- `partly`: part of the core job has no skill. The row names that part after \"Limits:\".\n- `missing`: no skill does the core job.\n- `out of scope, by design`: the owner decided that the factory does not do this stage."
+ },
+ "questions": {
+  "s_idea_validation": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Idea validation' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `idea-validation` turns an idea into a brief whose riskiest assumptions each carry a test, a metric, pass and kill thresholds and a deadline, registers it before any result, computes GO, KILL, STALLED or PENDING from the results you report, flags a critical assumption you drop later, and hands a `go` to `spec-first-planning` as an `idea-brief/v1` envelope. Limits: you run every experiment (the agent never publishes, sends or spends); results are claimed, not proven; the stage cannot run unattended",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_requirements_spec": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Requirements / spec' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `spec-first-planning`",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_design_plan": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Design / plan' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `spec-first-planning` compares 2 to 4 solution options under typed constraints and compiles the plan into dependency waves with a critical path; `clean-code` (architecture), `ai-migration-operating-model` (migrations). Limits: architecture is advice, not a checked design artifact; the migration control pack covers migrations only",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_build_execute": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Build / execute' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `factory-conductor` runs an approved plan to an open PR under a grant; `crafting-self-prompting-loops` designs a loop but does not run it; `tmux-agent-herdr-lite` supervises agents; `mockstar-mock` mocks dependencies. Limits: you merge the PR; a crashed run resumes on its own only on an always-on host; the proof is as strong as each task's verify commands",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_test_verify": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Test / verify' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `verifier-installer`, `test-safety-net`; `verification-skill-forge` generates a verify skill that drives the running app and records SHA-bound evidence, which `factory-conductor`'s evidence gate requires before a merge. A feature can also state a contract whose clauses carry a stronger proof: `proved` (Verus), `bounded` (Kani) or `property` (proptest, Hypothesis, fast-check, rapid), with a caught mutant for the last two. A plan's `[tier: ...]` hint sets the weakest tier the gate accepts. Limits: no `proved` or `bounded` backend for Python, TypeScript or Go yet, and verifier-installer does not detect proof backends yet",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_review": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Review' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `factory-conductor` dispatches a fresh reviewer that judges each task's diff against its requirement and acceptance criteria; `clean-code`, `security-posture-audit`, `base-in-reality`. Limits: the spec-anchored review runs only inside a conductor run, so a PR written in an attended session gets no review against its spec",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_release_deploy": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Release / deploy' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `release-conductor` preps the release PR, stages the merged commit behind an independent verifier's evidence, deploys to production only on your explicit yes, proves production runs it, and rolls back only on your yes. Limits: the yes is claimed, not proven; production checks are only as good as your `prod_smoke` list; with a rebuild, staging verified the same source, not the same bytes; nothing starts `stage` after your merge",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_operate_planning": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Operate \u2192 planning' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `ops-intake` reads failed releases, failing CI on the default branch, GitHub issues and (through a JSON-lines transform) Jira or Linear, ranks them into a local queue, and hands the item you pick to `spec-first-planning` as an `intake-item/v1` envelope; a verified release that holds the fix marks it resolved. Limits: on demand only; it cannot enforce that MCP calls are read-only; squash merges and partial runs need your manual `resolve`; Jira and Linear come in through documented conversion recipes, not dedicated readers",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_operate_incident": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Operate / incident' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `bug-autopsy` (post-hoc only), `agent-ready-rails` Tier 2 (audit). Limits: no skill detects, triages or mitigates a live incident; whether the factory owns live incidents is not decided yet",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_support_feedback": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Support / feedback' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `ops-intake` reads support messages, app reviews and feedback-form answers through `feedback-jsonl`, groups them by topic into one counted item each, redacts email addresses and phone numbers, and hands the item you pick to `spec-first-planning` like any other. Limits: you export the messages and the agent transforms the export; the agent chooses the topics; redaction is a safety net, not a guarantee; nobody replies to a customer through the factory (the agent can draft a reply for you)",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_growth_monetise": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Growth / monetise' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `growth-review` checks the metrics you export against warn and breach thresholds you register before the data comes in, reports OK, WARN, BREACH or NO_DATA per metric for the last complete UTC period, keeps judging on the registered thresholds when the plan is edited afterwards (`+stale`), and sends each breach to `ops-intake` through `intake-signals-jsonl`. Limits: you export the data and set the thresholds; launch and pricing stay manual (the agent never publishes, emails, changes a price or spends); the money ledger is in `factory-conductor`; no forecasts or statistics",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_knowledge_docs": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Knowledge / docs' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `feynman-walkthrough`, `okf-site-kit`, `knowledge-gardener`, `starlight-handbook-kit`, `bug-autopsy`; agent memory: `world-model-ledger`, `context-hygiene-kit`",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_stage_handoffs": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Stage handoffs' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: skill-contract envelopes carry work from one stage to the next (`idea-brief`, `task-plan`, `intake-item`, `autonomy-grant`, `run-result`); `factory-conductor` runs the build stage from plan to PR unattended. Limits: you choose the next skill and confirm each handoff between stages; no skill moves work from one stage to the next on its own",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  },
+  "s_governance": {
+   "type": "choice",
+   "instructions": "Judge the status of the stage 'Governance' of a software factory built from agent skills, using only the rubric in `rubric`. What the skills do for this stage, and their limits: `security-posture-audit`, `base-in-reality`, `agent-ready-rails` (audit), `crafting-self-prompting-loops` (per-loop budget), `factory-conductor` (run token and dollar caps, enforced when the grant opts in, metered from the usage the agent claims from its harness; a project money ledger whose check only refuses a spend over the human's monthly caps and never approves one, so every spend stays the human's decision and recorded spend is a claim). The autonomy grant is the gate policy of skill-contract commandment 10, and six skills check it before they act. Limits: token and dollar caps are metered from usage that the agent claims",
+   "criteria": {
+    "covered": "One or more skills do the stage's core job, and no limit weakens it",
+    "covered_with_limits": "The skills do the core job; the row names limits that weaken the proof or leave a step to the human. Limits the owner chose (launch, pricing, spend, merge, deploy, external messages) do not lower a row",
+    "partly": "Part of the stage's core job has no skill",
+    "missing": "No skill does the stage's core job",
+    "out_of_scope": "The owner decided the factory does not do this stage"
+   }
+  }
+ },
+ "model": "jev-latest"
+}
