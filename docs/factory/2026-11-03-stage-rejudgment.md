@@ -59,9 +59,9 @@ Only README text changed. No skill code changed.
 ## Results for the idea brief
 
 - **A2** (critical): 8 of the 10 `partly` rows moved to `covered, with limits` under the most
-  conservative judge. The pass line is 3 or more. The agent ran this experiment, so it is not
-  recorded as an experiment result: the owner records it after reading this file, because the
-  skill counts only an experiment result that the human reports.
+  conservative judge. The pass line is 3 or more. The agent ran this experiment, and the skill
+  counts only an experiment result that the human reports. The owner read this file, accepted
+  the re-judgment, and recorded A2 = 8 as an experiment result on 2026-11-03. A2 passes.
 - **A6** (normal): Jev gave the same status in both runs on 13 of 14 rows. The pass line is
   13 or more. Recorded as desk evidence.
 
