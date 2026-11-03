@@ -489,3 +489,11 @@ New skill skeleton (factory-pipeline 0.0.1, autonomous-factory wave 0, 2026-11-0
 | id | line | sentence | Jev level (conf, harm) | final | departure reason |
 |---|---|---|---|---|---|
 | c1 | 29 | You MUST NOT tell the user that a `pipeline` command exists, and you MUST NOT try to run one, because… | not judged (new skill) | MUST | autonomous-factory wave 0 spec, constraint S1 (a scaffolded skill claims no command or capability that it does not yet have); the eval rejects a skeleton that names or ships a script, but only the rule stops the agent from inventing one in its reply |
+
+## incident-watch (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+New skill skeleton (incident-watch 0.0.1, autonomous-factory wave 0, 2026-11-04), written with BCP 14 from the start. In development: no command ships yet. Jev did not judge this row. The one rule keeps the skeleton honest until run 2 ships the tool.
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 32 | You MUST NOT tell the user that an `incident` command exists, and you MUST NOT try to run one, because… | not judged (new skill) | MUST | autonomous-factory wave 0 spec, constraint S1 (a scaffolded skill claims no command or capability that it does not yet have); the eval rejects a skeleton that names or ships a script, but only the rule stops the agent from inventing one in its reply |
