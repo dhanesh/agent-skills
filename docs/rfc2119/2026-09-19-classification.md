@@ -481,3 +481,11 @@ New skill (growth-review 0.1.0, roadmap step 6D part 1, 2026-10-12), written wit
 | c13 | 174 | You MUST NOT pass `--today` outside a test, because… | not judged (new skill) | MUST | design spec §3 (`--today` in tests only, with the same test-only guard as idea-validation 0.1.1); the tool refuses it outside the test suite; same rule as idea-validation c10 |
 | c14 | 177 | You MUST NOT edit or delete files under `.skill-contract/growth/` by hand, because… | not judged (new skill) | MUST | the frozen registrations and the append-only data log are what every review reads back; same rule as idea-validation c11 and ops-intake c7 |
 | c15 | 181 | You SHOULD run factory-conductor's money-ledger check (`ledger.py check`) before you put any spend to the human, when that skill is installed, because… | not judged (new in 0.1.1) | SHOULD | money-ledger review M5 (2026-10-12): same rule and level as idea-validation c13; the check lives in another skill that may not be installed, so it is conditional and SHOULD; the no-spend rule (c10) stays the hard rule. No amount or budget went to Jev |
+
+## factory-pipeline (1 candidates · 1 MUST · 0 SHOULD · 0 MAY · 0 plain · 0 departures)
+
+New skill skeleton (factory-pipeline 0.0.1, autonomous-factory wave 0, 2026-11-04), written with BCP 14 from the start. In development: no command ships yet. Jev did not judge this row. The one rule keeps the skeleton honest until run 2 ships the tool.
+
+| id | line | sentence | Jev level (conf, harm) | final | departure reason |
+|---|---|---|---|---|---|
+| c1 | 29 | You MUST NOT tell the user that a `pipeline` command exists, and you MUST NOT try to run one, because… | not judged (new skill) | MUST | autonomous-factory wave 0 spec, constraint S1 (a scaffolded skill claims no command or capability that it does not yet have); the eval rejects a skeleton that names or ships a script, but only the rule stops the agent from inventing one in its reply |
