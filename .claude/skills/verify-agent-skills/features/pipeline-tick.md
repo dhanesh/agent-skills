@@ -2,7 +2,7 @@
 
 - id: pipeline-tick
 - proven: no
-- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today
+- anchors: factory-pipeline/assets/pipeline.py:cmd_tick, factory-pipeline/assets/pipeline.py:STAGES, factory-pipeline/assets/pipeline.py:find_tool, factory-pipeline/assets/pipeline.py:check_grant, factory-pipeline/assets/pipeline.py:tick_lock, factory-pipeline/assets/pipeline.py:cap_gate, factory-pipeline/assets/pipeline.py:count_caps, factory-pipeline/assets/pipeline.py:dispatches_today, factory-pipeline/assets/pipeline.py:cmd_schedule, factory-pipeline/assets/pipeline.py:every_error, factory-conductor/assets/reentry_timer.py:cron_schedule
 
 ## What it is
 
@@ -28,7 +28,10 @@ the reason to `.skill-contract/pipeline/cap-stops.jsonl`, and skips every later 
 that the same cap gates. A count source that it cannot read gives `STOP: cap uncounted source=<what>
 reason=<why>`, never a zero. Sweep, growth review and autopick call ops-intake and growth-review for
 real. Derive grant calls spec-first-planning `write_grant.py --under-pipeline` for each plan
-that the plan stage hands on. The other five stages print `pending-R<n>`. The design is
+that the plan stage hands on. The other five stages print `pending-R<n>`.
+`pipeline schedule install --every <minutes>` (R16) installs one timer that runs the tick,
+with factory-conductor's own `reentry_timer.py`, at 15 to 1440 minutes; another interval
+exits 2 and installs nothing. The design is
 `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21).
 
 ## How to reach it
@@ -63,11 +66,17 @@ Shipped:
   release stage and digest still run after them. The tick exits 0 and ends
   `TICK: done stages=9 cap=<name>`.
 
+- The schedule (R16): `schedule install --every <minutes>` with 15 to 1440 installs one
+  timer through factory-conductor's `reentry_timer.py` (imported from where that skill is
+  installed, never copied), with the timer id `pipeline-<12 hex>` of the repo path. The
+  timer runs the absolute interpreter and the absolute `pipeline.py` with `tick`, as an
+  argv list, with the PATH install ran with. Any other interval, or one that is not a
+  whole number, prints `STOP: schedule every=<value> reason=<why>`, exits 2 and installs
+  nothing. No live pipeline grant gives `STOP: no-grant`, exit 2. `schedule status` and
+  `schedule uninstall` show and remove the timer.
+
 Planned (not yet shipped):
 
-- `pipeline schedule install`: installs a timer with factory-conductor's timer module at
-  an interval of 15 to 1440 minutes. An interval outside that range exits 2 and installs
-  nothing (R16).
 - The plan stage drafts a spec through an agent and hands the plan on only when
   `spec_lint.py` and `spec_to_tasks.py --allowlist` pass (R17).
 - The build stage runs `conductor init` with the derived grant, with the evidence gate on
@@ -174,14 +183,45 @@ cp "$CR/repo/.skill-contract/pipeline/cap-stops.jsonl" "$WT/.verify-run/$INSTANC
 - `pt-cap-stops.jsonl`: one JSON line with `"cap": "max_open_runs"`, `"count": 1`,
   `"limit": 1` and `"stage": "autopick"`.
 
-The R16 to R21 recipes join this section as each ships.
+The schedule (R16). Never install a real timer: set reentry_timer's dry-run hooks, so
+the timer files go to a temp home and no launchctl, systemctl or crontab runs. Force the
+kind, then install at 15 and 1440, and try 10 and 1500:
+
+```sh
+SC="$WT/.verify-run/$INSTANCE/sc"
+mkdir -p "$SC/repo" "$SC/timer-home"
+python3 factory-pipeline/assets/pipeline_testkit.py stubs "$SC/skills"
+python3 factory-pipeline/assets/pipeline_testkit.py grant "$SC/repo"
+export FACTORY_CONDUCTOR_TIMER_DRYRUN=1 FACTORY_CONDUCTOR_TIMER_HOME="$SC/timer-home" FACTORY_CONDUCTOR_TIMER_KIND=launchd
+for N in 15 1440 10 1500; do
+  python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-sched-$N -- \
+    python3 factory-pipeline/assets/pipeline.py --root "$SC/repo" --skills-dir "$SC/skills" schedule install --every $N
+done
+find "$SC/timer-home" -type f > "$WT/.verify-run/$INSTANCE/pt-sched-files.txt"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name pt-sched-uninstall -- \
+  python3 factory-pipeline/assets/pipeline.py --root "$SC/repo" --skills-dir "$SC/skills" schedule uninstall
+unset FACTORY_CONDUCTOR_TIMER_DRYRUN FACTORY_CONDUCTOR_TIMER_HOME FACTORY_CONDUCTOR_TIMER_KIND
+```
+
+- `pt-sched-15` and `pt-sched-1440`: exit 0, `SCHEDULE: installed every <n> min
+  kind=launchd id=pipeline-<12 hex>`, and a `SCHEDULE: runs` line that starts with an
+  absolute interpreter path and ends `tick`.
+- `pt-sched-10` and `pt-sched-1500`: exit 2, `STOP: schedule every=<n>
+  reason=out-of-range`, and no `SCHEDULE:` line.
+- `pt-sched-files.txt`: one plist, under `$SC/timer-home/Library/LaunchAgents/`, whose
+  `StartInterval` is 86400 (the 1440 install replaced the 15 one; the refusals changed
+  nothing). Nothing under the real `~/Library/LaunchAgents`.
+- `pt-sched-uninstall`: exit 0 and `SCHEDULE: uninstalled id pipeline-<12 hex>`.
+
+The R17 to R21 recipes join this section as each ships.
 
 ## Proof
 
-The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked` and
-`pt-cap` captures (their `STOP:` and `STAGE:` lines and exit codes), `pt-calls.jsonl`,
-`pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`, `pt-cap-stops.jsonl`, and the two queue
-hashes. After the planned parts ship: the schedule install results, and the content of `.skill-contract/pipeline/digest.md`.
+The `pt-no-grant`, `pt-tick`, `pt-missing`, `pt-revoked`, `pt-locked`, `pt-unlocked`,
+`pt-cap`, `pt-sched-15`, `pt-sched-1440`, `pt-sched-10`, `pt-sched-1500` and
+`pt-sched-uninstall` captures (their `STOP:`, `STAGE:` and `SCHEDULE:` lines and exit
+codes), `pt-calls.jsonl`, `pt-locked-calls.jsonl`, `pt-cap-calls.jsonl`,
+`pt-cap-stops.jsonl`, `pt-sched-files.txt` and the two queue hashes. After the planned parts ship: the content of `.skill-contract/pipeline/digest.md`.
 
 ## Gotchas
 
@@ -198,5 +238,8 @@ hashes. After the planned parts ship: the schedule install results, and the cont
 - The lock file stays on disk after a tick. That is correct: only a held `flock` blocks a
   tick, and the kernel drops it when the holder dies. Do not delete the file to "unlock".
 - `proven: no` stays until the recipe is driven with SHA-bound evidence.
-- The planned schedule installer only codes the timer. A run installs no timer and starts
-  no service.
+- The schedule installs a real timer unless reentry_timer's dry-run hooks are set. A
+  factory run installs no timer and starts no service (decision D9); drive it only with
+  `FACTORY_CONDUCTOR_TIMER_DRYRUN=1` and a temp `FACTORY_CONDUCTOR_TIMER_HOME`.
+- On cron, 60 minutes or more must be a whole number of hours that divides 24, or the
+  install gives `SCHEDULE: failed`.

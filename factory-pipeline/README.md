@@ -34,10 +34,15 @@ What runs today:
 - `autopick` runs ops-intake `intake autopick`.
 - `derive-grant` runs spec-first-planning `write_grant.py --under-pipeline` for each plan
   that the plan stage hands on. The plan stage is not built yet, so it hands on no plan.
+- `pipeline schedule install --every <minutes>` installs one timer that runs the tick
+  (R16). The interval is 15 to 1440 minutes. Another value exits 2 and installs nothing.
+  Install also needs a live pipeline grant. The timer is factory-conductor's own module
+  (`reentry_timer.py`): launchd, a systemd user timer or cron, on the owner's machine.
+  It runs the absolute interpreter and `pipeline.py` with the PATH that install ran with.
+  `schedule status` shows the timer and `schedule uninstall` removes it.
 
 What is still pending: the idea follow-up (R20), plan (R17), build (R18), release stage
-(R19) and digest (R21) stages, which print `pending-R<n>`. `pipeline schedule install`
-(R16) is also pending. A sibling skill that is not installed gives `unavailable`. The tick
+(R19) and digest (R21) stages, which print `pending-R<n>`. A sibling skill that is not installed gives `unavailable`. The tick
 removes no human gate.
 
 The design is in
@@ -56,10 +61,12 @@ flowchart LR
   self_factory_pipeline["factory-pipeline"]
   subgraph callees["Calls"]
     direction TB
+    out_factory_conductor["factory-conductor"]
     out_growth_review["growth-review"]
     out_ops_intake["ops-intake"]
     out_spec_first_planning["spec-first-planning"]
   end
+  self_factory_pipeline -.->|"when: the owner runs pipeline schedule install<br/>why: its timer module installs the timer that runs the tick"| out_factory_conductor
   self_factory_pipeline -->|"when: each tick, after the sweep<br/>why: its breaches go into the intake queue"| out_growth_review
   self_factory_pipeline -->|"when: each tick, after the grant check<br/>why: it sweeps sources, imports breaches and picks queue items"| out_ops_intake
   self_factory_pipeline -->|"when: before any stage, and for each plan<br/>why: it checks the pipeline grant and derives each plan grant"| out_spec_first_planning
@@ -80,6 +87,9 @@ npx skills add dhanesh/agent-skills --skill factory-pipeline
 
 ```sh
 python3 factory-pipeline/assets/pipeline.py --root <repo> tick
+python3 factory-pipeline/assets/pipeline.py --root <repo> schedule install --every 30
+python3 factory-pipeline/assets/pipeline.py --root <repo> schedule status
+python3 factory-pipeline/assets/pipeline.py --root <repo> schedule uninstall
 ```
 
 Or ask the agent to "tick the pipeline". The stages, the result words and the way the tick
@@ -89,11 +99,14 @@ finds each skill are in [`references/overview.md`](references/overview.md).
 
 - `SKILL.md`: the agent-facing prompt.
 - `references/overview.md`: the stages, the result words and the skill lookup.
-- `assets/pipeline.py`: the `pipeline tick` command.
+- `assets/pipeline.py`: the `pipeline tick` and `pipeline schedule` commands.
 - `assets/pipeline_testkit.py`: stub sibling skills for the tests, the eval and the
   feature-map recipe.
 - `assets/test_pipeline_tick.py`: the tick's unit suite.
 - `assets/test_pipeline_lock.py`: the one-tick lock's unit suite (R14).
+- `assets/test_pipeline_caps.py`: the caps' unit suite (R15).
+- `assets/test_pipeline_schedule.py`: the schedule's unit suite (R16). It installs only
+  through the timer module's dry-run hooks.
 - `assets/test_factory_pipeline_smoke.py`: shape and status checks.
 - `eval/run_eval.py`: an outcome eval that runs the tick on stub skills and grades its
   lines (see the repo's `docs/eval-standard.md`).

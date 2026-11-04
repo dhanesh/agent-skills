@@ -2,7 +2,11 @@
 """pipeline_testkit.py: stub sibling skills for the factory-pipeline tests, eval and
 feature-map recipe (stdlib only).
 
-stubs(dir) writes ops-intake, growth-review and spec-first-planning stubs under dir.
+stubs(dir) writes ops-intake, growth-review and spec-first-planning stubs under dir, and a
+factory-conductor that holds only a copy of the real `assets/reentry_timer.py` of the
+factory-conductor skill beside factory-pipeline, for `pipeline schedule` (R16). Run the
+schedule with that module's dry-run hooks set (FACTORY_CONDUCTOR_TIMER_DRYRUN=1 and
+FACTORY_CONDUCTOR_TIMER_HOME=<a temp dir>), so no real timer is ever installed.
 Each stub tool:
   - hands a key that REAL lists (spec-first-planning `--pipeline-caps`) to the real tool
     of the skill beside factory-pipeline, unless a behave file overrides that key;
@@ -46,6 +50,8 @@ import time
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PLANNING_ASSETS = os.path.join(os.path.dirname(SKILL_DIR), "spec-first-planning", "assets")
 CHECKER = os.path.join(PLANNING_ASSETS, "contract_check.py")
+TIMER = os.path.join(os.path.dirname(SKILL_DIR), "factory-conductor", "assets",
+                     "reentry_timer.py")
 
 STUB = r'''#!/usr/bin/env python3
 import json, os, sys, time
@@ -130,6 +136,14 @@ def stubs(d, skills=None):
             f.write(STUB % {"skill": skill, "real": REAL.get(skill)})
         if skill == "spec-first-planning":
             shutil.copyfile(CHECKER, os.path.join(d, skill, "assets", "contract_check.py"))
+    if skills is None or "factory-conductor" in skills:
+        os.makedirs(os.path.join(d, "factory-conductor", "assets"), exist_ok=True)
+        with open(os.path.join(d, "factory-conductor", "SKILL.md"), "w",
+                  encoding="utf-8") as f:
+            f.write("---\nname: factory-conductor\ndescription: stub for the pipeline "
+                    "tests\n---\n")
+        shutil.copyfile(TIMER, os.path.join(d, "factory-conductor", "assets",
+                                            "reentry_timer.py"))
     for (skill, key), b in DEFAULTS.items():
         behave(d, skill, key, **b)
     return d

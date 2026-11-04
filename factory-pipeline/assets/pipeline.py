@@ -2,6 +2,8 @@
 """factory-pipeline: one `pipeline tick` that walks the factory stages in order.
 
 Usage: pipeline.py [--root R] [--skills-dir D ...] tick [--grant G] [--growth-source NAME]
+       pipeline.py [--root R] [--skills-dir D ...] schedule install --every MINUTES
+       pipeline.py [--root R] [--skills-dir D ...] schedule status|uninstall
 
 Before any stage runs, the tick checks the pipeline grant (R13). It runs spec-first-planning's
 vendored `contract_check.py check-pipeline-grant --root R [--id G]`, which judges the newest
@@ -84,14 +86,35 @@ directory beside this skill, <root>/.agents/skills, <root>/.claude/skills,
 The tick runs every tool with sys.executable, an argv list and no shell. Stdlib only,
 Python 3.10+, POSIX. Exits: 0 every stage ran; 2 usage error, a state directory that is not
 git-ignored, or no live pipeline grant; 3 another tick holds the pipeline lock.
+
+`schedule install --every MINUTES` (R16) installs one OS timer that runs `pipeline tick` for
+this repo every MINUTES. It checks 15 <= MINUTES <= 1440 (a whole number) before it does
+anything else: out of range or not a whole number prints `STOP: schedule every=<value>
+reason=<why>`, installs nothing and exits 2. It then needs a live pipeline grant (the same
+check as the tick; else `STOP: no-grant reason=<reason>`, exit 2). The timer is
+factory-conductor's own module, assets/reentry_timer.py, found the same way as every other
+sibling tool and imported from there (not copied): launchd on macOS, a systemd user timer
+or a tagged crontab line on Linux. The timer id is `pipeline-<12 hex of sha256(the repo's
+real path)>`, so it is stable per repo and never one of the conductor's `run-...` ids. The
+timer runs [sys.executable, <abs pipeline.py>, --root <abs repo>, (--skills-dir D ...),
+tick] as an argv list, with the PATH that install ran with (a timer's own PATH is
+minimal). `schedule status` prints the timer it finds, and `schedule uninstall` removes
+it; neither needs a grant. A missing factory-conductor gives `SCHEDULE: unavailable
+factory-conductor`, and a timer that cannot be installed gives `SCHEDULE: failed`; both
+exit 2, and the second leaves any timer that was installed before in place. Tests set
+reentry_timer's own dry-run hooks (FACTORY_CONDUCTOR_TIMER_DRYRUN=1 and
+FACTORY_CONDUCTOR_TIMER_HOME), so no real launchctl, systemctl or crontab ever runs.
 """
 import argparse
 import contextlib
 import datetime
 import fcntl
+import hashlib
+import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -122,6 +145,10 @@ RUN_ID = re.compile(r"^run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}\Z")  # conductor's RUN
 RUN_STATE = "state.json"
 RUN_LOG = "autonomy-log.jsonl"
 TIME = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T")
+# The schedule (R16): factory-conductor's timer module, reused in place, never copied.
+TIMER = ("factory-conductor", "assets/reentry_timer.py")
+EVERY_MIN, EVERY_MAX = 15, 1440  # minutes
+WHOLE = re.compile(r"^[0-9]{1,6}\Z")
 
 # skill directory -> its tool, relative to the skill directory
 TOOLS = {
@@ -694,6 +721,90 @@ def run_tick(a):
     return 0
 
 
+# ── the schedule (R16) ──────────────────────────────────────────────────────────────────
+
+def every_error(value):
+    """Why `--every value` is refused, or None for a whole number of minutes in range."""
+    if not WHOLE.match(value or ""):
+        return "not-a-whole-number"
+    if not EVERY_MIN <= int(value) <= EVERY_MAX:
+        return "out-of-range"
+    return None
+
+
+def schedule_id(root):
+    """The timer id for this repo: stable, and never a factory-conductor `run-...` id."""
+    digest = hashlib.sha256(os.path.realpath(root).encode("utf-8")).hexdigest()
+    return "pipeline-%s" % digest[:12]
+
+
+def load_timer(roots):
+    """factory-conductor's reentry_timer module from where that skill is installed, or None."""
+    path = find_tool(roots, TIMER[0], TIMER[1])
+    if path is None:
+        return None
+    spec = importlib.util.spec_from_file_location("factory_conductor_reentry_timer", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def tick_argv(a):
+    """What the timer runs: absolute interpreter, absolute pipeline.py, an argv list."""
+    argv = [os.path.abspath(sys.executable), os.path.abspath(__file__), "--root", a.root]
+    for d in a.skills_dir or ():
+        argv += ["--skills-dir", os.path.abspath(d)]
+    return argv + ["tick"]
+
+
+def cmd_schedule(a):
+    roots = skill_roots(a.root, overrides=a.skills_dir)
+    sid = schedule_id(a.root)
+    if a.action == "install":
+        # the range was checked in main(), before anything else
+        gid, reason = check_grant(Tick(a.root, roots))
+        if gid is None:
+            print("STOP: no-grant reason=%s" % reason)
+            return 2
+    try:
+        T = load_timer(roots)
+    except Exception as e:  # a broken module is a missing one; never a traceback
+        echo("schedule", "cannot load reentry_timer.py: %s" % type(e).__name__)
+        T = None
+    if T is None:
+        print("SCHEDULE: unavailable factory-conductor")
+        return 2
+    try:
+        if a.action == "status":
+            print("SCHEDULE: id %s" % sid)
+            print("SCHEDULE: timer %s" % (", ".join(T.installed(sid)) or "none"))
+            return 0
+        if a.action == "uninstall":
+            T.uninstall(sid)
+            print("SCHEDULE: uninstalled id %s" % sid)
+            return 0
+        kind = T.platform_kind()
+        if kind is None:
+            raise OSError("no timer kind on this system (launchd, systemd or cron)")
+        every = int(a.every)
+        argv = tick_argv(a)
+        # A timer's own PATH is minimal (launchd /usr/bin:/bin:/usr/sbin:/sbin, cron
+        # /usr/bin:/bin). The tick finds Python by absolute path, but its stages run git
+        # and the owner's sweep commands, so the timer gets the PATH install ran with.
+        path = os.environ.get("PATH") or os.defpath
+        # render first: a timer that cannot be expressed is refused before install's
+        # sweep removes the timer that is there now.
+        T.render(kind, sid, argv, every, path=path)
+        T.install(sid, argv, every, kind=kind, path=path)
+    except OSError as e:
+        echo("schedule", str(e))
+        print("SCHEDULE: failed")
+        return 2
+    print("SCHEDULE: installed every %d min kind=%s id=%s grant=%s" % (every, kind, sid, gid))
+    print("SCHEDULE: runs %s" % shlex.join(argv))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="pipeline")
     p.add_argument("--root", default=".")
@@ -706,15 +817,30 @@ def main(argv=None):
                         "of the newest live one")
     s.add_argument("--growth-source", default="growth",
                    help="the intake source name for growth signals (default growth)")
+    s = sub.add_parser("schedule")
+    acts = s.add_subparsers(dest="action", required=True)
+    inst = acts.add_parser("install")
+    inst.add_argument("--every", required=True, metavar="MINUTES",
+                      help="minutes between ticks, %d to %d" % (EVERY_MIN, EVERY_MAX))
+    acts.add_parser("status")
+    acts.add_parser("uninstall")
     try:
         a = p.parse_args(argv)
     except SystemExit as e:
         return 2 if e.code else 0
+    # R16: the interval is checked before anything is read, checked or installed.
+    if a.cmd == "schedule" and a.action == "install":
+        why = every_error(a.every)
+        if why:
+            print("STOP: schedule every=%s reason=%s (a whole number of minutes, %d to %d)"
+                  % ("".join(c if c.isprintable() else "?" for c in a.every), why,
+                     EVERY_MIN, EVERY_MAX))
+            return 2
     a.root = os.path.abspath(a.root)
     if not os.path.isdir(a.root):
         print("STOP: --root %s is not a directory" % a.root)
         return 2
-    return {"tick": cmd_tick}[a.cmd](a)
+    return {"tick": cmd_tick, "schedule": cmd_schedule}[a.cmd](a)
 
 
 if __name__ == "__main__":

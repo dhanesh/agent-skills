@@ -9,8 +9,9 @@ description: >-
   (ops-intake, growth-review, spec-first-planning) with no shell, and reports a missing one
   as unavailable. With no live pipeline grant it prints `STOP: no-grant` and exits 2; a
   held repo lock gives `STOP: locked`, exit 3; a pipeline-grant cap gives `STOP: cap
-  <name>` and no new plan or run. Partly built: idea follow-up, plan, build, release stage
-  and digest report `pending-R<n>`, and the schedule is not built yet.
+  <name>` and no new plan or run. `pipeline schedule install` puts it on a timer.
+  Partly built: idea follow-up, plan, build, release stage and digest report
+  `pending-R<n>`.
   Every human gate stays with the owner. Not for running one approved plan to a PR (use
   factory-conductor), not for writing a plan (use spec-first-planning).
 license: MIT
@@ -40,7 +41,8 @@ stages for real, and runs derive grant for each plan that the plan stage hands o
 stage is not built yet, so it hands on no plan today. Before each stage that would start
 a plan or run, it checks the grant's caps (R15, shipped): at a cap it prints
 `STOP: cap <name>` and skips the stages that the cap gates. The idea follow-up, plan, build, release stage
-and digest stages report `pending-R<n>`. `pipeline schedule install` is not built yet. The
+and digest stages report `pending-R<n>`. `pipeline schedule install` (R16, shipped) puts
+the tick on a timer; see "The schedule" below. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
 
@@ -113,6 +115,38 @@ growth review runs `growth auto --source <name>` and hands its stdout to `intake
 by its directory name in the roots that skill-contract `discover` searches. A missing
 skill gives `STAGE: <name> unavailable`, and the tick goes on.
 
+## The schedule
+
+`python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> schedule install --every <minutes>`
+installs one timer on this machine that runs the tick every `<minutes>` (R16). The value
+is a whole number from 15 to 1440. Any other value prints `STOP: schedule every=<value>
+reason=<why>`, installs nothing and exits 2; the tool checks it before anything else.
+Install also needs a live pipeline grant (the same check as the tick, `STOP: no-grant`,
+exit 2), because a timer with no grant only prints `STOP: no-grant` at each run. The timer
+is factory-conductor's own module, its `reentry_timer.py`, found where the
+tick finds every sibling: launchd on macOS, a systemd user timer or a tagged crontab line
+on Linux. With no factory-conductor installed, the schedule prints `SCHEDULE: unavailable
+factory-conductor` and exits 2; the tick still works by hand. On cron, an interval of 60 or
+more is a whole number of hours that divides 24 (60, 120, 180, 240, 360, 480, 720 or
+1440); another one gives `SCHEDULE: failed` and keeps the timer that was there. The timer
+id is `pipeline-<12 hex>` from the repo's real path, so one repo has one timer and it never
+clashes with a conductor run's re-entry timer. The timer runs the absolute interpreter and
+the absolute `pipeline.py` as an argv list with no shell.
+
+A timer's own PATH is minimal (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`, cron:
+`/usr/bin:/bin`). The tick finds Python by its absolute path, but the checker calls git
+and the sweep runs the owner's own commands. So install captures the PATH it runs with,
+and reentry_timer writes it into the timer (launchd `EnvironmentVariables`, systemd
+`Environment=`, cron `/usr/bin/env PATH=...`). Install from a shell whose PATH finds git
+and the sweep's tools. `schedule status` prints `SCHEDULE: id <id>` and
+`SCHEDULE: timer <file or line | none>`. `schedule uninstall` removes the timer and needs
+no grant. Revoking the pipeline grant does not remove the timer: run `schedule uninstall`
+too.
+
+You MUST NOT run `schedule install` unless the owner asked for the schedule in this
+session, because the timer starts unattended ticks on the owner's machine until it is
+removed (decision D9 of the factory spec: a run installs no timer).
+
 ## Workflow
 
 1. **Run one tick.** Run `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Lines
@@ -164,5 +198,5 @@ each result that is not `ok` or `idle`, and the owner's next step for each `STOP
 
 The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
 `assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
-`assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py` and
-`assets/test_pipeline_caps.py`.
+`assets/test_pipeline_tick.py`, `assets/test_pipeline_lock.py`,
+`assets/test_pipeline_caps.py` and `assets/test_pipeline_schedule.py`.

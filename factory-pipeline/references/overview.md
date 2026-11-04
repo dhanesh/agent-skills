@@ -73,8 +73,7 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-Also not built yet: `pipeline schedule install` (R16). The one-tick lock (R14) and the
-caps (R15) ship; see their sections.
+The one-tick lock (R14), the caps (R15) and the schedule (R16) ship; see their sections.
 
 ## The caps, before each stage that starts a plan or run
 
@@ -133,6 +132,60 @@ A count that the tick cannot make is a stop, not a zero. The tick prints
 
 The stop stays until the owner fixes the file or a new UTC day starts.
 
+## The schedule
+
+`pipeline schedule install --every <minutes>` installs one timer on this machine. The
+timer runs `pipeline tick` for the repo every `<minutes>` (R16). The schedule runs on the
+owner's always-on machine. There is no hosted scheduler (decision D5).
+
+1. The tool checks `--every` first, before it reads or installs anything. The value must
+   be a whole number from 15 to 1440. Another value (for example `10`, `1500`, `15.0` or
+   `abc`) prints `STOP: schedule every=<value> reason=<why>` and exits 2. The reason is
+   `out-of-range` or `not-a-whole-number`. Nothing is installed.
+2. The tool checks the pipeline grant, as the tick does. With no live grant, it prints
+   `STOP: no-grant reason=<reason>`, installs nothing and exits 2.
+3. The tool loads factory-conductor's timer module, `reentry_timer.py`, from the
+   place where factory-conductor is installed. It finds that skill in the same roots as
+   the other siblings. It imports the module and does not copy it. When factory-conductor
+   is not installed, it prints `SCHEDULE: unavailable factory-conductor` and exits 2. The
+   tick still works when you run it by hand.
+4. The tool installs the timer with the timer kind of this machine: launchd on macOS, a
+   systemd user timer or a tagged crontab line on Linux. It prints
+   `SCHEDULE: installed every <n> min kind=<kind> id=<id> grant=<id>`, then
+   `SCHEDULE: runs <argv>`, and exits 0.
+
+The timer id is `pipeline-` and the first 12 hex digits of the SHA-256 of the repo's real
+path. One repo thus has one timer. A second install replaces it. The id never matches a
+factory-conductor run id (`run-...`), so the two timers never touch each other.
+
+The timer runs this argv, with no shell: the absolute path of the Python interpreter that
+ran install, the absolute path of `pipeline.py`, `--root <repo>`, each `--skills-dir`
+given to install, and `tick`.
+
+A timer has a minimal PATH of its own (launchd: `/usr/bin:/bin:/usr/sbin:/sbin`, cron:
+`/usr/bin:/bin`). The tick finds Python by its absolute path. But the grant checker calls
+git, and the sweep runs the owner's commands. Install thus captures the PATH that it runs
+with, and reentry_timer writes that PATH into the timer: `EnvironmentVariables` in the
+launchd plist, `Environment=` in the systemd unit, and `/usr/bin/env PATH=...` in the
+cron line. Run install from a shell whose PATH finds git and the sweep's tools.
+
+cron cannot step its minute field past 59. On cron, an interval under 60 is
+`*/<n> * * * *`. An interval of 60 or more must be a whole number of hours that divides
+24: 60, 120, 180, 240, 360, 480, 720 or 1440 (`0 0 * * *`). Another interval gives
+`SCHEDULE: failed` and exit 2. The tool tests the timer text before it changes anything,
+so the timer that was there stays. launchd and systemd take every interval from 15 to
+1440.
+
+`schedule status` prints `SCHEDULE: id <id>` and `SCHEDULE: timer <files or line>`, or
+`none`. `schedule uninstall` removes the timer and prints `SCHEDULE: uninstalled id <id>`.
+Neither needs a grant. When the owner revokes the pipeline grant, the timer stays, and
+each tick prints `STOP: no-grant`. Run `schedule uninstall` to stop the timer.
+
+The tests never install a real timer. They set reentry_timer's dry-run hooks
+(`FACTORY_CONDUCTOR_TIMER_DRYRUN=1` and `FACTORY_CONDUCTOR_TIMER_HOME=<temp dir>`). They
+also put fake `launchctl`, `systemctl` and `crontab` first on PATH, and fail when one of
+them is called.
+
 ## Result words
 
 | Result | Meaning |
@@ -149,7 +202,8 @@ The stop stays until the owner fixes the file or a new UTC day starts.
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
-a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`.
+a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`. The
+schedule's exits are in its section.
 
 ## How the tick finds a skill
 
