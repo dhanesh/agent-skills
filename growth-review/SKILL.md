@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool needs no network and no credentials; the human exports the data with their own login. Breaches go to ops-intake through its intake-signals-jsonl format.
 metadata:
   author: dhanesh
-  version: "0.1.3"
+  version: "0.2.0"
   tags: "factory,growth,metrics,ops-intake"
 ---
 
@@ -62,7 +62,7 @@ Every command below is `python3 "$SKILL_DIR/assets/growth.py" --root <repo> <com
 written `growth <command>` for short. `--root` comes before the command. The `NEXT:` lines the
 tool prints name a command without that prefix: expand them the same way before you run them.
 Each command prints machine lines (`LINT:`, `PROBLEM:`, `NOTE:`, `REGISTERED:`, `IMPORT:`,
-`METRIC:`, `CORRECTED:`, `REVIEW:`, `SIGNALS:`, `STOP:`, `NEXT:`) and exits **0** for OK, **2**
+`METRIC:`, `CORRECTED:`, `REVIEW:`, `SIGNALS:`, `WATCH:`, `SKIP:`, `STOP:`, `NEXT:`) and exits **0** for OK, **2**
 for refused input, a bad plan, an unreadable or symlinked state file, or a state directory
 that cannot be shown to be git-ignored (nothing changed), and **3** for attention: a BREACH, a
 STALE plan, a correction or an unjudged record for the latest period, or a registration record
@@ -215,6 +215,20 @@ can import, review and pipe the breaches into ops-intake without stopping. Regis
 changing thresholds, exporting with the human's login, and acting on a breach (picking,
 dismissing, launching, pricing) wait for the human. When the user wants little supervision,
 ask for those decisions upfront, then stop and report.
+
+For a scheduled run with no human present, the human first names the export file their own
+export job writes: `growth watch --by "<their name>" <file>` (it refuses an `agent:` name and
+a missing file, and needs a registered plan). Then the schedule runs one pipe:
+`set -o pipefail; growth auto --source growth | intake import --format intake-signals-jsonl --source growth`.
+`auto` compares the sha256 of the export file with the one recorded at the last `auto` review
+(the `auto` field of `.skill-contract/growth/plan.json`). When they are equal it prints
+`SKIP: export unchanged` on stderr, prints nothing on stdout, and exits 0. When they differ it
+imports the file, reviews it and prints the signal lines on stdout, exactly as `signals` does,
+so each breach reaches ops-intake by the same pipe. Every other line (`IMPORT:`, `METRIC:`,
+`REVIEW:`, `SIGNALS:`) goes to stderr. It exits 0 when breaches are the only attention, because
+the queue item is the alarm, 2 for a refusal (no registered plan, no watched export, a missing
+or unreadable export), and 3 when a `PROBLEM:`, `NOTE:` or `CORRECTED:` line waits for the
+human. `auto` never registers or changes a threshold.
 
 ## Deliverable
 
