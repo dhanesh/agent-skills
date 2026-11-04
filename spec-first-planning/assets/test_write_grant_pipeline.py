@@ -266,13 +266,37 @@ class TestPipelineWrite(PipelineBase):
 
 
 # ── --under-pipeline: per-plan grants derived from a pipeline grant (R4) ─────────────────
+import spec_lint  # noqa: E402
 import spec_to_tasks  # noqa: E402
 import test_idea_request  # noqa: E402
 import test_intake_request  # noqa: E402
 from test_spec_lint import FULL  # noqa: E402
 
 ITEM = test_intake_request.ITEM_ID
-ALLOWLIST = "{python} -m pytest tests\nmake test\n"
+
+
+def unattended_idea_spec():
+    """A go-idea spec that passes spec_lint.py --unattended: the idea skeleton, then FULL's
+    body without its own ## Problem and ## Users (the skeleton already holds them)."""
+    body = FULL.split("\n## Goals", 1)[1]
+    return test_idea_request.skeleton_for() + "\n## Goals" + body
+ALLOWLIST = "{python} -m pytest -k rows\n{python} -m pytest tests\nmake test\n"
+
+
+def unattended_intake_spec(cmd="{python} -m pytest -k rows"):
+    """An intake spec that passes spec_lint.py --unattended: the skeleton intake_request.py
+    prints for the fixture item, then FULL's body ([feature:], [proof:], an independence
+    marker, ## Verification with Verify skill:, ## Decisions and a converged loop), with
+    R1's command set to cmd."""
+    root = tempfile.mkdtemp()
+    try:
+        r = test_intake_request.run(test_intake_request.INTAKE_REQUEST,
+                                    test_intake_request.write_envelope(root))
+        assert r.returncode == 0, r.stderr
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+    return r.stdout + FULL.split("\n", 1)[1].replace(
+        "[cmd: {python} -m pytest -k rows]", "[cmd: %s]" % cmd)
 
 
 class UnderPipelineBase(PipelineBase):
@@ -309,9 +333,9 @@ class UnderPipelineBase(PipelineBase):
             f.write(json.dumps({"event": "pick", "id": ITEM, "by": by,
                                 "envelope": "x", "at": _in(0)}) + "\n")
 
-    def autopicked_plan(self, cmd="{python} -m pytest tests"):
+    def autopicked_plan(self, cmd="{python} -m pytest -k rows"):
         self.log_pick("policy:" + self.policy_sha)
-        return self.write_plan(test_intake_request.intake_spec(cmd=cmd))
+        return self.write_plan(unattended_intake_spec(cmd=cmd))
 
     def derive(self, plan_rel, ref=None):
         out, err = io.StringIO(), io.StringIO()
@@ -356,7 +380,7 @@ class TestUnderPipelineDerives(UnderPipelineBase):
 
     def test_go_idea_plan_gets_a_grant(self):
         test_idea_request.write_envelope(self.root)
-        rc, out, _ = self.derive(self.write_plan(test_idea_request.idea_spec()))
+        rc, out, _ = self.derive(self.write_plan(unattended_idea_spec()))
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.check(self.derived_path(out))["status"], "COVERED")
 
@@ -383,18 +407,17 @@ class TestUnderPipelineRefusals(UnderPipelineBase):
 
     def test_hand_picked_item_refused(self):
         self.log_pick("Dana")
-        self.assertRefused(self.write_plan(test_intake_request.intake_spec()),
+        self.assertRefused(self.write_plan(unattended_intake_spec()),
                            "was not picked by the pipeline's pick policy")
 
     def test_later_hand_pick_wins(self):
         self.log_pick("policy:" + self.policy_sha)
         self.log_pick("Dana")
-        self.assertRefused(self.write_plan(test_intake_request.intake_spec()),
-                           "was not picked")
+        self.assertRefused(self.write_plan(unattended_intake_spec()), "was not picked")
 
     def test_pick_under_another_policy_refused(self):
         self.log_pick("policy:" + "0" * 64)
-        self.assertRefused(self.write_plan(test_intake_request.intake_spec()), "was not picked")
+        self.assertRefused(self.write_plan(unattended_intake_spec()), "was not picked")
 
     def test_unreadable_intake_log_refused(self):
         plan = self.autopicked_plan()
@@ -404,22 +427,40 @@ class TestUnderPipelineRefusals(UnderPipelineBase):
         self.assertRefused(plan, "is not JSON")
 
     def test_idea_without_go_handoff_refused(self):
-        self.assertRefused(self.write_plan(test_idea_request.idea_spec()), "no go handoff")
+        self.assertRefused(self.write_plan(unattended_idea_spec()), "no go handoff")
 
     def test_unlisted_command_refused(self):
         self.assertRefused(self.autopicked_plan(cmd="{python} -m pytest other"),
                            "not on the allowlist")
 
     def test_step_with_no_command_refused(self):
-        text = test_intake_request.intake_spec().replace(" [cmd: {python} -m pytest tests]", "")
+        # The unattended lint already fails a criterion with no command, so this case
+        # reaches the allowlist check only through a spec the lint accepts. It is still
+        # refused: the lint names the missing command first.
+        text = unattended_intake_spec().replace(" [cmd: {python} -m pytest -k rows]", "")
         self.log_pick("policy:" + self.policy_sha)
-        self.assertRefused(self.write_plan(text), "not on the allowlist")
+        plan = self.write_plan(text)
+        before = self.envelopes()
+        rc, out, _ = self.derive(plan)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSED:", out)
+        self.assertEqual(self.envelopes(), before)
 
     def test_spec_failing_lint_refused(self):
         self.log_pick("policy:" + self.policy_sha)
-        text = test_intake_request.intake_spec().replace(
-            "- R1: The test job must pass on main.", "- R1: The test job passes on main.")
-        self.assertRefused(self.write_plan(text), "fails spec_lint.py")
+        text = unattended_intake_spec().replace(
+            "- R1: The export must include every row.", "- R1: The export includes every row.")
+        self.assertRefused(self.write_plan(text), "fails spec_lint.py --unattended")
+
+    def test_light_only_spec_refused(self):
+        # Passes the light lint but not --unattended: no [feature:], [proof:],
+        # ## Verification, ## Decisions or converged loop. A derived grant runs unattended.
+        text = test_intake_request.intake_spec(cmd="{python} -m pytest tests")
+        self.assertEqual(spec_lint.lint(text), [])
+        self.log_pick("policy:" + self.policy_sha)
+        self.assertRefused(self.write_plan(text), "fails spec_lint.py --unattended")
+        rc, out, _ = self.derive(self.write_plan(text, name="spec2.md"))
+        self.assertIn("\nFAIL: ", out)
 
     def test_stale_plan_refused(self):
         plan = self.autopicked_plan()

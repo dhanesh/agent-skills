@@ -447,7 +447,9 @@ The tool prints `REFUSED: <reason>`, exits 1 and writes nothing when one of thes
 
 - `check-pipeline-grant` does not answer VALID for the pipeline grant.
 - The allowlist file changed since the pipeline grant pinned it.
-- The plan is not a fresh task-plan envelope, or its spec fails `spec_lint.py`.
+- The plan is not a fresh task-plan envelope, or its spec fails
+  `spec_lint.py --unattended`. A derived grant runs unattended, so the light lint is not
+  enough. The tool prints each lint issue on a `FAIL:` line.
 - The plan did not come from an autopicked item or a `go` idea. An autopicked item has, as
   its latest `pick` in `.skill-contract/intake/intake-log.jsonl`, `by: policy:<sha256>`
   equal to the pipeline grant's pick-policy digest. A `go` idea has an `idea-brief/v1`

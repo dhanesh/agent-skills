@@ -75,7 +75,8 @@ Exit 2: usage error (an unreadable or malformed --answers file, or one missing a
     prints "REFUSED: <reason>" and exits 1, writing nothing, unless all of these hold:
       - check-pipeline-grant answers VALID for the pipeline grant, and the allowlist file's
         current sha256 equals the digest the pipeline grant pins;
-      - --plan is a fresh task-plan/v1 envelope, and its spec passes spec_lint.py;
+      - --plan is a fresh task-plan/v1 envelope, and its spec passes
+        `spec_lint.py --unattended` (each issue is printed as a FAIL: line);
       - the plan came from an autopicked item (every payload.intake_items id has, as its
         latest `pick` in .skill-contract/intake/intake-log.jsonl, `by: policy:<sha256>`
         equal to the pipeline grant's pick-policy digest) or from a go idea (its
@@ -1120,9 +1121,12 @@ def build_derived_grant(root, pipeline_ref, plan_rel, now=None):
             text = f.read()
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise GrantRefused("cannot read the spec %s: %s" % (spec_rel, exc))
-    issues = spec_lint.lint(text)
+    # A derived grant runs unattended, so the spec must pass the same decision-closed lint
+    # as any autonomy grant (build_grant): spec_lint.py --unattended, not the light pass.
+    issues = spec_lint.lint(text, mode="unattended")
     if issues:
-        raise GrantRefused("the spec fails spec_lint.py: " + issues[0])
+        raise GrantRefused("the spec fails spec_lint.py --unattended (%d issue(s))\n%s"
+                           % (len(issues), "\n".join("FAIL: " + i for i in issues)))
     _validate_plan(contract_check, root, spec_rel, spec_path, plan_rel)
     _check_origin(contract_check, root, plan_payload, pp["pick_policy"]["sha256"])
     _check_plan_allowlist(root, plan_payload, allow_rel)
