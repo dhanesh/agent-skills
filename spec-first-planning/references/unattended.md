@@ -16,6 +16,7 @@ The spec grammar for every section named here is in `references/spec-format.md`.
 - [answers.json](#answersjson)
 - [What a grant can never cover](#what-a-grant-can-never-cover)
 - [The pipeline grant: `--pipeline`](#the-pipeline-grant---pipeline)
+- [Per-plan grants: `--under-pipeline`](#per-plan-grants---under-pipeline)
 
 ## The full loop
 
@@ -358,8 +359,9 @@ Revoke this grant at any time with
 `python3 "$SKILL_DIR/assets/contract_check.py" revoke-grant --root <repo> --id <grant id>`
 (the id is the grant file's name without `.json`). From then on, `check-grant` answers ASK
 for it, and every step it gated asks again. The same command with no `--id` is the kill
-switch: it revokes every live grant in the repo, an in-flight release's grant included, so
-that release stops too and ends only with `release abandon`. It tries every grant and prints
+switch: it revokes every live grant in the repo, of both kinds. That is each pipeline grant
+and each autonomy grant, derived or not, an in-flight release's grant included, so that
+release stops too and ends only with `release abandon`. It tries every grant and prints
 `REVOKED: <id>` or `FAILED: <id> <why>` for each, exiting non-zero if any failed.
 
 ## The pipeline grant: `--pipeline`
@@ -421,3 +423,43 @@ when, for example:
 Without `--accepted-by`, it exits 2 and writes no file. On success it lists the grant in
 `.git/info/exclude`, prints a `REVOKE:` line (this grant alone) and a `KILL-SWITCH:` line
 (every live grant), and ends with `GRANT: <path>`.
+
+`revoke-grant --id <pipeline grant id>` revokes the pipeline grant. It also stops every grant
+derived from it: `check-grant` answers ASK with the reason `pipeline` for a derived grant
+whose pipeline grant is revoked, superseded, expired, stale, tracked or changed. The
+`KILL-SWITCH:` line revokes the pipeline grant and every derived grant.
+
+## Per-plan grants: `--under-pipeline`
+
+The pipeline derives one autonomy grant for each plan. No human is asked, because the owner
+already accepted the pipeline grant:
+
+```sh
+python3 "$SKILL_DIR/assets/write_grant.py" --under-pipeline <pipeline grant id or path> \
+  --root <repo> --plan <task-plan envelope>
+```
+
+The derived grant copies the pipeline grant's branch pattern, gate policy, budget, stop
+rules, expiry and re-entry block. Its `derived_from` field names the pipeline grant by id
+and sha256. Its `grant-accepted` assertion names the owner who accepted the pipeline grant.
+
+The tool prints `REFUSED: <reason>`, exits 1 and writes nothing when one of these is true:
+
+- `check-pipeline-grant` does not answer VALID for the pipeline grant.
+- The allowlist file changed since the pipeline grant pinned it.
+- The plan is not a fresh task-plan envelope, or its spec fails
+  `spec_lint.py --unattended`. A derived grant runs unattended, so the light lint is not
+  enough. The tool prints each lint issue on a `FAIL:` line.
+- The plan did not come from an autopicked item or a `go` idea. An autopicked item has, as
+  its latest `pick` in `.skill-contract/intake/intake-log.jsonl`, `by: policy:<sha256>`
+  equal to the pipeline grant's pick-policy digest. A `go` idea has an `idea-brief/v1`
+  envelope with a `go` decision under `.skill-contract/ideas/envelopes/`. A hand-written
+  plan and a hand-picked item wait for the owner.
+- A check command does not match the allowlist, or a verify step has no command. The
+  plan waits for the owner's read.
+- `max_plans_per_day` grants already derive from this pipeline grant on today's UTC date.
+- `max_open_runs` derived grants have no run-result envelope yet.
+
+Every check fails closed. A file that the tool cannot read (the intake log, an idea
+envelope, an envelope that it counts) is a refusal, never a pass. On success it prints the
+`REVOKE:` and `KILL-SWITCH:` lines and ends with `GRANT: <path>`.

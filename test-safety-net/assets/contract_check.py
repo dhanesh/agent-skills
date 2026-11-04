@@ -22,7 +22,9 @@ check-grant exits 0 COVERED, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is
 A caller proceeds only on exit 0. --subject selects the newest live grant that pins that
 path. revoke-grant with no id revokes every live grant (the kill switch) and prints one
 REVOKED: <id> line each; with --id (or a positional ID) it revokes that grant and prints
-REVOKED: <path>. It exits 0, or 1 when there is nothing to revoke.
+REVOKED: <path>. It exits 0, or 1 when there is nothing to revoke. Both forms take
+pipeline grants too: the kill switch revokes every live grant of both kinds, and a grant
+derived from a revoked pipeline grant covers nothing (check-grant answers ASK pipeline).
 
 check-pipeline-grant judges the newest live pipeline-grant/v1 (or the one named by --id).
 It exits 0 VALID, 3 ASK or NONE, 2 INVALID, 1 usage; its last line is PIPELINE-GRANT: ...
@@ -854,6 +856,13 @@ def grant_violations(st):
         out.append("payload.require_signature is not a grant field: grants are never signed (A8)")
     if "reentry" in p:
         out.extend("payload.reentry: " + v for v in reentry_problems(p["reentry"]))
+    if "derived_from" in p:  # a grant derived from a pipeline grant names it
+        df = p["derived_from"]
+        if not (isinstance(df, dict) and set(df) == {"id", "sha256"}
+                and isinstance(df.get("id"), str) and ID_RE.match(df["id"])
+                and isinstance(df.get("sha256"), str) and SHA256_RE.match(df["sha256"])):
+            out.append("payload.derived_from must be exactly {id: <pipeline grant id>,"
+                       " sha256: <64 lowercase hex>}")
     if "release" in p:  # a release grant (release-conductor) pins the version it releases
         rel = p["release"]
         if not (isinstance(rel, dict) and set(rel) == {"version"}
@@ -1034,11 +1043,16 @@ class RevokeAllFailed(Exception):
 
 def revoke_all(root, now=None):
     """Revoke every live grant under root (the kill switch); returns the revoked ids.
+    Every live grant of both kinds: each pipeline grant (pipeline-grant/v1) and each
+    autonomy grant, derived or not. Pipeline grants go first, so a derived grant is
+    stopped by its pipeline grant even if its own revocation then fails.
     Live means not superseded and not already a revocation. [] when nothing is live.
     One grant that cannot be revoked does not stop the rest: every live grant is tried,
     then RevokeAllFailed (carrying both lists) is raised if any failed."""
-    ids = sorted(st["predicate"]["id"] for _, _, st in _live_heads(root)
-                 if not (st["predicate"].get("payload") or {}).get("revoked"))
+    ids = []
+    for kind in (PIPELINE_GRANT_KIND, GRANT_KIND):
+        ids += sorted(st["predicate"]["id"] for _, _, st in _live_heads(root, kind)
+                      if not (st["predicate"].get("payload") or {}).get("revoked"))
     revoked, failed = [], []
     for gid in ids:
         try:
@@ -1433,11 +1447,17 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
         rep.update(status="ASK", reason=reason)
         return rep
 
+    now = now or utc_now()
+    if "derived_from" in p and derived_grant_problems(root, st, now):
+        # Its pipeline grant is revoked, superseded, expired, stale, tracked, changed or
+        # missing, or the derived grant is wider than it: it covers nothing (SPEC, "A grant
+        # derived from a pipeline grant"). Checked first, so the kill switch reads as
+        # `pipeline` on every derived grant, revoked or not.
+        return ask("pipeline")
     if p["revoked"]:
         return ask("revoked")
     if is_superseded(root, pred["id"]):
         return ask("superseded")
-    now = now or utc_now()
     expires = _parse_time(p["expires_at"])
     if now >= expires:
         return ask("expired")
@@ -1487,7 +1507,11 @@ def check_grant(root, action, path=None, now=None, branch=None, default_branches
 
 
 def revoke_grant(root, grant_id=None, now=None):
-    """Write a revision with revoked: true. Tightening is always allowed: no human needed."""
+    """Write a revision with revoked: true. Tightening is always allowed: no human needed.
+
+    With no grant_id it revokes the newest autonomy grant. A grant_id may name an
+    autonomy grant or a pipeline grant (pipeline-grant/v1); revoking a pipeline grant
+    stops every grant derived from it, since check-grant then answers ASK pipeline."""
     if grant_id is None:
         path = latest_grant(root)
     elif isinstance(grant_id, str) and ID_RE.match(grant_id):
@@ -1495,17 +1519,19 @@ def revoke_grant(root, grant_id=None, now=None):
     else:
         raise ValueError("%r is not an envelope id" % (grant_id,))
     st, err = load_envelope(path) if path and os.path.isfile(path) else (None, [(3, "no such grant")])
-    if st is None or err or check_statement(st) or st.get("predicateType") != GRANT_KIND:
+    kinds = (GRANT_KIND,) if grant_id is None else (GRANT_KIND, PIPELINE_GRANT_KIND)
+    if st is None or err or check_statement(st) or st.get("predicateType") not in kinds:
         raise ValueError("no valid grant to revoke under %s" % envelope_dir(root))
+    kind = st["predicateType"]
     if grant_id is not None and st["predicate"]["id"] != grant_id:
         raise ValueError("%s.json holds grant %s, not %s" % (grant_id, st["predicate"]["id"], grant_id))
-    if is_superseded(root, st["predicate"]["id"]):
+    if is_superseded(root, st["predicate"]["id"], kind):
         raise ValueError("%s is superseded; revoke the newest revision" % st["predicate"]["id"])
     now = now or utc_now()
     pred = st["predicate"]
     payload = dict(pred["payload"], revoked=True)
-    rev = {"_type": STATEMENT_TYPE, "subject": st["subject"], "predicateType": GRANT_KIND,
-           "predicate": {"skillContract": CONTRACT_VERSION, "id": new_id(GRANT_KIND, now),
+    rev = {"_type": STATEMENT_TYPE, "subject": st["subject"], "predicateType": kind,
+           "predicate": {"skillContract": CONTRACT_VERSION, "id": new_id(kind, now),
                          "wasAttributedTo": pred["wasAttributedTo"],
                          "generatedAtTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                          "wasRevisionOf": pred["id"], "payload": payload, "assertions": []}}
@@ -1696,6 +1722,74 @@ def check_pipeline_grant(root, grant_id=None, now=None):
 
 
 PIPELINE_GRANT_EXIT = {"VALID": 0, "ASK": 3, "NONE": 3, "INVALID": 2}
+GATE_RANK = {"ask": 0, "grant": 1, "auto": 2}
+
+
+def _branch_pattern_within(derived, pipeline):
+    """True when every glob of the derived branch_pattern matches only branches the
+    pipeline's branch_pattern matches: the same glob, or a literal branch name (no glob
+    character) that the pipeline's pattern matches."""
+    pats = _branch_patterns(derived)
+    base = _branch_patterns(pipeline)
+    return bool(pats) and bool(base) and all(
+        p in base or (not re.search(r"[*?\[]", p) and branch_matches(pipeline, p))
+        for p in pats)
+
+
+def derived_grant_problems(root, st, now=None):
+    """The rules a grant derived from a pipeline grant breaks ([] = none). SPEC, "A grant
+    derived from a pipeline grant": its pipeline grant (derived_from.id) exists, matches
+    derived_from.sha256 and is VALID under check_pipeline_grant (not revoked, superseded,
+    expired, stale or tracked); its branch_pattern, gate_policy, expires_at and budget are
+    no wider than the pipeline grant's; and its grant-accepted assertion names the same
+    human. Fails closed: an unreadable or malformed pipeline grant is a problem."""
+    p = (st.get("predicate") or {}).get("payload") or {}
+    df = p.get("derived_from")
+    if not (isinstance(df, dict) and isinstance(df.get("id"), str) and ID_RE.match(df["id"])
+            and isinstance(df.get("sha256"), str)):
+        return ["derived_from is malformed"]
+    path = os.path.join(envelope_dir(root), df["id"] + ".json")
+    try:
+        digest = sha256_file(path)
+    except OSError:
+        return ["the pipeline grant %s cannot be read" % df["id"]]
+    if digest != df["sha256"]:
+        return ["the pipeline grant %s changed since the grant was derived" % df["id"]]
+    rep = check_pipeline_grant(root, grant_id=df["id"], now=now)
+    if rep["status"] != "VALID":
+        return ["the pipeline grant %s is %s%s" % (df["id"], rep["status"],
+                                                   " (%s)" % rep["reason"] if rep["reason"]
+                                                   else "")]
+    pst, _ = load_envelope(path)
+    pp = pst["predicate"]["payload"]
+    out = []
+    if not _branch_pattern_within((p.get("scope") or {}).get("branch_pattern"),
+                                  pp["scope"]["branch_pattern"]):
+        out.append("branch_pattern is wider than the pipeline grant's")
+    gp = p.get("gate_policy") if isinstance(p.get("gate_policy"), dict) else {}
+    for cls in ACTION_CLASSES:
+        if GATE_RANK.get(gp.get(cls, "ask"), 3) > GATE_RANK[pp["gate_policy"].get(cls, "ask")]:
+            out.append("gate_policy[%r] is more permissive than the pipeline grant's" % cls)
+    try:
+        if _parse_time(p.get("expires_at")) > _parse_time(pp["expires_at"]):
+            out.append("expires_at is later than the pipeline grant's")
+    except (TypeError, ValueError):
+        out.append("expires_at cannot be compared with the pipeline grant's")
+    budget = p.get("budget") if isinstance(p.get("budget"), dict) else {}
+    for k, cap in pp["budget"].items():
+        if k == "enforce":
+            continue
+        v = budget.get(k)
+        if not (_is_number(v) and v <= cap):
+            out.append("budget.%s is missing or above the pipeline grant's %s" % (k, cap))
+
+    def human(s):
+        acc = [a for a in (s["predicate"].get("assertions") or [])
+               if isinstance(a, dict) and a.get("test") == "grant-accepted"]
+        return ((acc[0].get("assertedBy") or {}).get("human") if len(acc) == 1 else None)
+    if p.get("revoked") is not True and human(st) != human(pst):
+        out.append("grant-accepted names another human than the pipeline grant's")
+    return out
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

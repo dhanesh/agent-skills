@@ -166,7 +166,8 @@ command stops every run in the repository: it tries every live grant even when o
 revoked, prints `REVOKED: <id>` or `FAILED: <id> <why>` for each, and exits non-zero when any
 failed. `revoke-grant --id <id>` revokes one. A grant is superseded when any grant envelope names it in
 `wasRevisionOf`. `check-grant` runs, in order: envelope validity (commandments 3–6), human
-attribution (skipped for a revoked revision), the gate-policy floors, then not revoked, not
+attribution (skipped for a revoked revision), the gate-policy floors, then, for a grant with
+`derived_from`, the derived-grant rules below (`pipeline`), then not revoked, not
 superseded, not expired, not living past the 7-day floor, subjects not stale, the path given as
 `--subject` (when there is one) pinned among the grant's subjects, the path given as
 `--worktree` (when there is one) a worktree of the same repository (`worktree`), git can report the
@@ -178,7 +179,7 @@ touching CI configuration. With `--worktree`, the branch, default-branch, `ci-ta
 checks judge the worktree, while the grant is still found, and the tracked probe still runs, at
 `root`; a caller cannot name a branch any other way. The git checks other than `ci-tag` are skipped
 only when no `.git` exists in the judged directory or any parent. An `ASK` names the first failing
-check as its reason (`revoked`, `superseded`, `expired`, `lifetime`, `stale`, `subject`,
+check as its reason (`pipeline`, `revoked`, `superseded`, `expired`, `lifetime`, `stale`, `subject`,
 `worktree`, `branch-unknown`, `detached`, `default-branch`, `branch`, `tracked`, `gate-ask`,
 `ci-tag` or `ci-config`). The conformance vectors run outside git, so `tracked`, `worktree` and `ci-config` are proven
 by the reference checker's unit and end-to-end tests instead, and a `push_tag` vector answers
