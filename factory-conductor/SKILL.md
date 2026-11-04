@@ -470,7 +470,9 @@ trial the reviewer was the only check that noticed a pinned test filter matching
 `conductor brief reviewer <task> --plan <envelope> --base <ref> [--head <ref>] [--root <repo>]`
 prints this brief filled from the plan: the title, the requirement, every verify step with its
 pinned command, the plan's constraints and decisions, and the diff command against `--base`
-(`--head` is `HEAD` unless you name the `<sha>`; `--root` is the `-C` directory). It needs no
+(`--head` is `HEAD` unless you name the `<sha>`; `--root` is the `-C` directory). Plan text
+can come from an untrusted intake item, so each piece is printed as one inline code span with
+no line break, and each command as a JSON list. It needs no
 run and writes no file, so it also works outside a run. It exits 2 for an unknown task, a plan
 that fails check-envelope or is stale, or a ref git cannot resolve. In a run, pass
 `--base <run_branch> --head <sha> --root <worktree>`, then add the grant's decisions and

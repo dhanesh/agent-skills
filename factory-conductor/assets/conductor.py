@@ -2523,41 +2523,60 @@ def review_diff_argv(worktree, base, head):
             "--text", "--no-color", "%s...%s" % (base, head)]
 
 
+def _brief_text(value):
+    """Plan text for the reviewer brief: one inline code span (code()), with every control
+    character left after one_line() written as an \\xNN escape. Plans made from intake
+    items are untrusted, so no value can start a line of its own or a fake verdict."""
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f]", lambda m: "\\x%02x" % ord(m.group()),
+               one_line(value))
+    return code(s)
+
+
+def _brief_command(argv):
+    """A pinned command as one fenced JSON list: every argument keeps its bounds, and a
+    newline inside one stays the two characters \\n."""
+    return code(json.dumps(argv))
+
+
 def _brief_constraints(plan):
-    """The plan's constraints and decisions, one per line, or 'none in the plan'."""
+    """The plan's constraints and decisions, one fenced item per line, or 'none in the plan'."""
     lines = []
     for c in plan.get("constraints") or []:
         if isinstance(c, dict):
-            lines.append("%s [%s]: %s" % (c.get("id"), c.get("type"), one_line(c.get("text"))))
+            lines.append("%s %s: %s" % (_brief_text(c.get("id")), _brief_text(c.get("type")),
+                                        _brief_text(c.get("text"))))
     for d in plan.get("decisions") or []:
         if isinstance(d, dict):
-            src = " (source: %s)" % one_line(d.get("source")) if d.get("source") else ""
-            lines.append("%s: %s -> %s%s" % (d.get("id"), one_line(d.get("question")),
-                                              one_line(d.get("answer")), src))
+            src = (" (source: %s)" % _brief_text(d.get("source"))) if d.get("source") else ""
+            lines.append("%s: %s -> %s%s" % (_brief_text(d.get("id")),
+                                              _brief_text(d.get("question")),
+                                              _brief_text(d.get("answer")), src))
     if not lines:
         return "none in the plan"
     return "\n" + "\n".join("- " + ln for ln in lines)
 
 
 def fill_reviewer_brief(task, worktree, base, head, constraints):
-    """REVIEWER_BRIEF with every slot filled from one plan task."""
+    """REVIEWER_BRIEF with every slot filled from one plan task, in one pass: a value is
+    never searched for slots, so plan text that names a slot cannot take its place."""
     steps = task.get("verify") if isinstance(task.get("verify"), list) else []
     shown = []
     for n, step in enumerate(steps, 1):
         step = step if isinstance(step, dict) else {}
         shown.append("\n  %d. %s\n     command: %s"
-                     % (n, one_line(step.get("text")), _shown(step.get("command"))))
+                     % (n, _brief_text(step.get("text")), _brief_command(step.get("command"))))
     rids = task.get("requirement_ids") or []
-    requirement = "%s: %s" % (", ".join(str(r) for r in rids), one_line(task.get("title")))
+    requirement = _brief_text("%s: %s" % (", ".join(str(r) for r in rids),
+                                          one_line(task.get("title"))))
     diff = shlex.join(review_diff_argv(worktree, base, head))
-    text = REVIEWER_BRIEF
-    for slot, value in ((BRIEF_SLOT_ID, str(task.get("id"))),
-                        (BRIEF_SLOT_TITLE, one_line(task.get("title"))),
-                        (BRIEF_SLOT_REQUIREMENT, requirement),
-                        (BRIEF_SLOT_STEPS, "".join(shown) + "\n"),
-                        (BRIEF_SLOT_CONSTRAINTS, constraints),
-                        (BRIEF_SLOT_DIFF, "run this exact command; it only reads:\n" + diff)):
-        text = text.replace(slot, value, 1)
+    values = {BRIEF_SLOT_ID: _brief_text(task.get("id")),
+              BRIEF_SLOT_TITLE: _brief_text(task.get("title")),
+              BRIEF_SLOT_REQUIREMENT: requirement,
+              BRIEF_SLOT_STEPS: "".join(shown) + "\n",
+              BRIEF_SLOT_CONSTRAINTS: constraints,
+              BRIEF_SLOT_DIFF: "run this exact command; it only reads:\n" + diff}
+    slots = re.compile("|".join(re.escape(k) for k in sorted(values, key=len, reverse=True)))
+    text = slots.sub(lambda m: values[m.group(0)], REVIEWER_BRIEF)
     return "".join(ln.rstrip() + "\n" for ln in text.splitlines())
 
 
