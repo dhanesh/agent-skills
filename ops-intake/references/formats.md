@@ -292,8 +292,16 @@ The owner writes it and registers it with `register-policy --by <name>` before a
   names every format the item was imported from. Each item records these formats in its
   `formats` field. An item imported before this field existed has no recorded format, so it
   never matches. The format does not filter a normal-trust item.
-- In this version `autopick` lists the `new` items whose kind, rank and format are inside the
-  policy. It does not use `max_picks_per_day` yet, and it picks nothing.
+- `autopick` lists the `new` items whose kind, rank and format are inside the policy. Then it
+  picks them, highest rank first and by id on a tie, until `max_picks_per_day` is reached.
+  The maximum counts the picks of the UTC calendar day across runs: the intake log lines
+  with event `pick` and a `by` that starts with `policy:`. A hand `pick` does not count.
+- The count fails closed. A log line that is not a JSON record, or a `pick` line without a
+  string `by` and a UTC `at`, stops `autopick` with `STOP: log-unreadable: <log> line <n> …`
+  (exit 2). It picks nothing until the owner repairs that line. Each log append first ends
+  a torn last line, so a new record never merges onto it.
+- Each autopick writes the same intake-item/v1 envelope as `pick`. The log line has
+  `by: policy:<sha256>`, with the sha256 of the registration in force.
 
 ## Ranking
 
@@ -335,7 +343,7 @@ drops it flags `plan-superseded`.
 | `link <keep> <other>` | `NEXT: merged <other> into <keep>`; `STOP:` when `<other>` is `picked` or `planned`. Later signals for `<other>` go to `<keep>` |
 | `status` | `SYNC: <n> items … regressed=<r>` |
 | `register-policy --by NAME [--reason TEXT]` | `REGISTERED: <sha256> by <name> at <time>`, or `REGISTERED: <sha256> (no change since the last registration)`; logs a `register-policy` event; `STOP: policy: …` (exit 2) for a missing or invalid policy or an `agent` name |
-| `autopick` | `POLICY: <sha256> by <name> at <time>`, one `MATCH: <id> <flag> <rank> <title>` per item inside the policy, then `AUTOPICK: matched <n> picked 0`; `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2) when the file has no registration that matches it |
+| `autopick` | `POLICY: <sha256> by <name> at <time>`, one `MATCH: <id> <flag> <rank> <title>` per item inside the policy, then `ITEM:` and `NEXT: run spec-first-planning with <envelope path>` per pick, `DAILY: <UTC date> picked <k> of <max>` and `AUTOPICK: matched <n> picked <p>`; logs a `pick` event with `by: policy:<sha256>` per pick; `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2) when the file has no registration that matches it; `STOP: log-unreadable` (exit 2, no pick) when a log line cannot be counted |
 | `sweep` | for each sweep entry of an enabled source, in source-name order: the `IMPORT:` and `PROBLEM:` lines of its import, or `PROBLEM: sweep <source> <format>: <reason>` when the command cannot start, times out, exits non-zero or its import is refused; then `SWEEP: <n> commands ok <k> failed <f>`. Exit 3 when a command failed or an import had problems. `STOP:` (exit 2) when no enabled source has a sweep entry |
 | `formats` | `FORMAT:` lines (needs no config) |
 

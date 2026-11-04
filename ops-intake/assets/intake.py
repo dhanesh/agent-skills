@@ -27,7 +27,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -519,11 +519,21 @@ class Queue:
             os.close(fd)
 
     def log(self, event, **fields):
-        """Append one JSON line to the intake log."""
+        """Append one JSON line to the intake log. When a crash left the last line without
+        its newline, end that line first, so the new record never merges onto it."""
         d = _ensure_dir(self.root)
         rec = dict(fields, event=event, at=_now())
-        with open(os.path.join(d, LOG_FILE), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, sort_keys=True) + "\n")
+        path = os.path.join(d, LOG_FILE)
+        torn = False
+        try:
+            with open(path, "rb") as f:
+                if f.seek(0, os.SEEK_END):
+                    f.seek(-1, os.SEEK_END)
+                    torn = f.read(1) != b"\n"
+        except FileNotFoundError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(("\n" if torn else "") + json.dumps(rec, sort_keys=True) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -979,23 +989,93 @@ def policy_matches(item, policy):
             and _rank(item) >= policy["min_rank"] and _format_allowed(item, policy))
 
 
+POLICY_BY = "policy:"  # the `by` of an autopick: policy:<registered sha256>
+
+
+_LOG_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+
+
+class LogUnreadable(Exception):
+    """The intake log has a line the daily count cannot trust."""
+
+
+def policy_picks_on(root, day):
+    """How many picks the intake log records with a `policy:` by on the UTC date `day`
+    (YYYY-MM-DD). The daily maximum counts these, across runs and policy registrations.
+    It fails closed: a line that is not a JSON object with an `event`, or a `pick` line
+    without a string `by` and a UTC `at`, raises LogUnreadable, since a torn or edited
+    line could hide a pick and the count would let autopick pass the maximum."""
+    path = os.path.join(_intake_dir(root), LOG_FILE)
+    rel = "%s/%s" % (INTAKE_DIR, LOG_FILE)
+    n = 0
+    try:
+        with open(path, "rb") as f:
+            for no, raw in enumerate(f, 1):
+                try:
+                    rec = json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    raise LogUnreadable("%s line %d is not JSON" % (rel, no))
+                if not isinstance(rec, dict) or not isinstance(rec.get("event"), str):
+                    raise LogUnreadable("%s line %d is not an intake log record" % (rel, no))
+                if rec["event"] != "pick":
+                    continue
+                by, at = rec.get("by"), rec.get("at")
+                if not (isinstance(by, str) and isinstance(at, str) and _LOG_AT_RE.match(at)):
+                    raise LogUnreadable("%s line %d is a pick without a valid by and at"
+                                        % (rel, no))
+                if by.startswith(POLICY_BY) and at[:10] == day:
+                    n += 1
+    except FileNotFoundError:
+        pass
+    return n
+
+
 def cmd_autopick(a):
-    """Check the registered pick policy, then list the items inside it. Picking (with the
-    daily maximum, R10) is not built yet, so autopick picks nothing."""
+    """Check the registered pick policy, list the items inside it, then pick them highest
+    rank first (ties by id) until the policy's max_picks_per_day is reached for the UTC day
+    (R10). Each pick goes through pick_item, so it writes the same intake-item/v1 envelope
+    as `pick`, and logs `by: policy:<sha256>`."""
     if _need_config(a.root) is None:
         return 2
-    pol, reg = registered_policy(a.root)
-    if pol is None:
-        return 2
-    q = _load(a.root)
-    if q is None:
-        return 2
-    print("POLICY: %s by %s at %s" % (reg["sha256"], code(reg["by"]), reg["at"]))
-    shown = sorted((i for i in q.items.values() if policy_matches(i, pol)),
-                   key=lambda i: (-_rank(i), i["id"]))
-    for i in shown:
-        print("MATCH: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
-    print("AUTOPICK: matched %d picked 0" % len(shown))
+    try:
+        with run_lock(a.root):
+            pol, reg = registered_policy(a.root)
+            if pol is None:
+                return 2
+            q = _load(a.root)
+            if q is None:
+                return 2
+            print("POLICY: %s by %s at %s" % (reg["sha256"], code(reg["by"]), reg["at"]))
+            shown = sorted((i for i in q.items.values() if policy_matches(i, pol)),
+                           key=lambda i: (-_rank(i), i["id"]))
+            for i in shown:
+                print("MATCH: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+            day = _now()[:10]
+            try:
+                done = policy_picks_on(a.root, day)
+            except LogUnreadable as e:
+                print("STOP: log-unreadable: %s; autopick cannot count today's picks" % e)
+                print("NEXT: the owner repairs the line, then runs intake autopick again")
+                print("AUTOPICK: matched %d picked 0" % len(shown))
+                return 2
+            room = max(0, pol["max_picks_per_day"] - done)
+            by = POLICY_BY + reg["sha256"]
+            picked = 0
+            for i in shown[:room]:
+                try:
+                    env_rel = pick_item(a.root, q, i, by)
+                except PickRefused as e:
+                    print("STOP: %s" % e)
+                    print("AUTOPICK: matched %d picked %d" % (len(shown), picked))
+                    return 2
+                picked += 1
+                print("ITEM: %s %s %s %s" % (i["id"], _flag(i), _rank(i), code(i["title"])))
+                print("NEXT: run spec-first-planning with %s" % env_rel)
+            print("DAILY: %s picked %d of %d" % (day, done + picked, pol["max_picks_per_day"]))
+            print("AUTOPICK: matched %d picked %d" % (len(shown), picked))
+    except Locked:
+        print("STOP: the intake lock is held by another command")
+        return 3
     return 0
 
 
@@ -1731,10 +1811,47 @@ def item_payload(i):
             "evidence": evidence}
 
 
+class PickRefused(Exception):
+    """pick_item wrote nothing: the message is the STOP: line."""
+
+
+def pick_item(root, q, i, by):
+    """new -> picked, under the caller's run lock. Writes the item snapshot (the envelope's
+    subject) and the intake-item/v1 envelope, both under the git-ignored
+    .skill-contract/intake/, since the evidence can carry customer data. Logs the pick with
+    `by` and saves the queue. Returns the envelope path, or raises PickRefused."""
+    if i["state"] != "new" or not _ITEM_ID_RE.match(i["id"]):
+        raise PickRefused("only a new item can be picked; %s is %s" % (code(i["id"]), _flag(i)))
+    _ensure_dir(root)
+    payload = item_payload(i)
+    snap_rel = "%s/items/%s.json" % (INTAKE_DIR, i["id"])
+    _write_atomic(root, snap_rel, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, root, [snap_rel], payload)
+    viol = CC.check_statement(st)
+    env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
+    written = False
+    try:
+        if viol:
+            raise PickRefused("the intake-item envelope would be invalid (%s)"
+                              % ", ".join(sorted({"C%d" % n for n, _ in viol})))
+        _write_atomic(root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
+                      exclusive=True)
+        written = True
+    except FileExistsError:
+        raise PickRefused("an envelope already exists at %s; pick again" % env_rel)
+    finally:
+        if not written:  # no envelope: drop the snapshot it would have pinned
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(root, *snap_rel.split("/")))
+    transition(i, "picked", by=by)
+    i["envelope"] = env_rel
+    q.log("pick", id=i["id"], by=by, envelope=env_rel)
+    q.save()
+    return env_rel
+
+
 def cmd_pick(a):
-    """new -> picked. Writes the item snapshot (the envelope's subject) and the
-    intake-item/v1 envelope, both under the git-ignored .skill-contract/intake/, since
-    the evidence can carry customer data."""
+    """new -> picked by hand (see pick_item)."""
     if _need_config(a.root) is None:
         return 2
     try:
@@ -1743,37 +1860,11 @@ def cmd_pick(a):
             i = _find(q, a.id) if q else None
             if i is None:
                 return 2
-            if i["state"] != "new" or not _ITEM_ID_RE.match(i["id"]):
-                print("STOP: only a new item can be picked; %s is %s" % (code(i["id"]), _flag(i)))
-                return 2
-            _ensure_dir(a.root)
-            payload = item_payload(i)
-            snap_rel = "%s/items/%s.json" % (INTAKE_DIR, i["id"])
-            _write_atomic(a.root, snap_rel, json.dumps(payload, indent=2, sort_keys=True) + "\n")
-            st = CC.build_statement(INTAKE_ITEM_KIND, SKILL_NAME, VERSION, a.root, [snap_rel],
-                                    payload)
-            viol = CC.check_statement(st)
-            env_rel = "%s/envelopes/%s.json" % (INTAKE_DIR, st["predicate"]["id"])
-            written = False
             try:
-                if viol:
-                    print("STOP: the intake-item envelope would be invalid (%s)"
-                          % ", ".join(sorted({"C%d" % n for n, _ in viol})))
-                    return 2
-                _write_atomic(a.root, env_rel, json.dumps(st, indent=2, sort_keys=True) + "\n",
-                              exclusive=True)
-                written = True
-            except FileExistsError:
-                print("STOP: an envelope already exists at %s; pick again" % env_rel)
+                env_rel = pick_item(a.root, q, i, a.by)
+            except PickRefused as e:
+                print("STOP: %s" % e)
                 return 2
-            finally:
-                if not written:  # no envelope: drop the snapshot it would have pinned
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(os.path.join(a.root, *snap_rel.split("/")))
-            transition(i, "picked", by=a.by)
-            i["envelope"] = env_rel
-            q.log("pick", id=a.id, by=a.by, envelope=env_rel)
-            q.save()
     except Locked:
         print("STOP: the intake lock is held by another command")
         return 3
