@@ -664,6 +664,26 @@ py_case "a glued command with the rule passes" PASS "$(mkpy pipe-rule "x|python3
 # ── factory-status: the README stage table stays inside its status rubric ────
 # Each case is a temp copy of the committed README, broken in one way, so the
 # fixtures follow the real table instead of a hand-made one going stale.
+#
+# Each refusal in factory_status.py has one failing fixture below. When you add
+# a refusal to the script, add a row here and a fixture for it.
+#   refusal (where in factory_status.py)          -> fixture label
+#   wrong argument count (main, exit 2)           -> "no README argument ..."
+#   file cannot be read (main)                    -> "an unreadable README ..."
+#   heading not found (find_rows)                 -> "a README with no stage heading ..."
+#   rubric line not found (find_rows)             -> "a README with no status rubric ..."
+#   table header not found (find_rows)            -> "a README with no stage table ..."
+#   table has no rows (find_rows)                 -> "an empty stage table ..."
+#   row has fewer than 3 cells (check)            -> "a row with 2 cells ..."
+#   status outside the five values (check)        -> "a status outside the rubric (mostly) ..."
+#   non-covered row with no "Limits:" (check)     -> "a partly row with no Limits: text ..."
+#   limit item with no leading tag (limit_tags)   -> "an untagged limit item ..."
+#     same path, tag in the middle                -> "a limit item with its tag in the middle ..."
+#     same path, wrong case                       -> "a limit item tagged [Decision] ..."
+#     same path, empty item from a trailing ;     -> "an empty limit item from a trailing ; ..."
+#   tag with no text after it (limit_tags)        -> "a limit item that is only a tag ..."
+#   second tag in the item (limit_tags)           -> "a limit item with two tags ..."
+#   all [decision] but not covered (check_limits) -> "an all-[decision] row marked 'covered, with limits' ..."
 README_SRC="$GATES/../../README.md"
 fs_case() {  # $1 label, $2 expected exit, $3 file, $4 text the output must hold (optional)
   st=0; out="$(python3 -I "$GATES/factory_status.py" "$3" 2>&1)" || st=$?
@@ -682,13 +702,44 @@ awk '!d && /^\| .* \| partly \|$/ { sub(/Limits:/, "Gaps:"); d=1 } { print }' "$
 fs_case "a partly row with no Limits: text fails" 1 "$f" "has no 'Limits:' text"
 f="$WORK/fs-notable.md"
 sed 's/^| Stage | Skills | Status |$/| Stage | Skill | State |/' "$README_SRC" > "$f"
-fs_case "a README with no stage table fails closed" 1 "$f" "not found"
+fs_case "a README with no stage table fails closed" 1 "$f" "not found after the rubric"
+st=0; out="$(python3 -I "$GATES/factory_status.py" 2>&1)" || st=$?
+if [ "$st" -eq 2 ] && printf '%s\n' "$out" | grep -qF "usage: factory_status.py"; then
+  ok "factory-status: no README argument is a usage error (exit 2)"
+else
+  bad "factory-status: no README argument is a usage error (expected exit 2 and 'usage: factory_status.py'; got exit $st)"
+fi
+fs_case "an unreadable README fails closed" 1 "$WORK/fs-no-such-file.md" "FAIL: cannot read"
+f="$WORK/fs-noheading.md"
+sed 's/^### Which skills cover which stage$/### Stages/' "$README_SRC" > "$f"
+fs_case "a README with no stage heading fails closed" 1 "$f" "heading '### Which skills cover which stage' not found"
+f="$WORK/fs-norubric.md"
+sed 's/^\*\*Status rubric\.\*\*/**Rubric.**/' "$README_SRC" > "$f"
+fs_case "a README with no status rubric fails closed" 1 "$f" "list not found under"
+f="$WORK/fs-emptytable.md"
+awk 'h==1 { h=2; print; next } h==2 && /^\|/ { next } h==2 { h=3 } /^\| Stage \| Skills \| Status \|$/ { h=1 } { print }' "$README_SRC" > "$f"
+fs_case "an empty stage table fails closed" 1 "$f" "the stage table has no rows"
+f="$WORK/fs-shortrow.md"
+sed 's/^| Requirements \/ spec | .* | covered |$/| Requirements \/ spec | covered |/' "$README_SRC" > "$f"
+fs_case "a row with 2 cells fails" 1 "$f" "row has 2 cells, expected 3"
 f="$WORK/fs-untagged.md"
 awk '!d && /^\| Build \/ execute \|/ { sub(/Limits: \[decision\] /, "Limits: "); d=1 } { print }' "$README_SRC" > "$f"
 fs_case "an untagged limit item fails and names the row" 1 "$f" "FAIL: Build / execute"
 f="$WORK/fs-twotags.md"
 awk '!d && /^\| Build \/ execute \|/ { sub(/Limits: \[decision\] /, "Limits: [decision] [open] "); d=1 } { print }' "$README_SRC" > "$f"
 fs_case "a limit item with two tags fails" 1 "$f" "exactly one of"
+f="$WORK/fs-midtag.md"
+awk '!d && /^\| Build \/ execute \|/ { sub(/Limits: \[decision\] you merge/, "Limits: you [decision] merge"); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "a limit item with its tag in the middle fails" 1 "$f" "limit item 'you [decision] merge the PR'"
+f="$WORK/fs-wrongcase.md"
+awk '!d && /^\| Build \/ execute \|/ { sub(/Limits: \[decision\] /, "Limits: [Decision] "); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "a limit item tagged [Decision] (wrong case) fails" 1 "$f" "limit item '[Decision] you merge the PR'"
+f="$WORK/fs-onlytag.md"
+awk '!d && /^\| Build \/ execute \|/ { sub(/; \[decision\] a crashed run [^;]*;/, "; [decision];"); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "a limit item that is only a tag fails" 1 "$f" "limit item '[decision]' does not"
+f="$WORK/fs-trailingsemi.md"
+awk '!d && /^\| Build \/ execute \|/ { sub(/ \| covered, with limits \|$/, "; | covered, with limits |"); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "an empty limit item from a trailing ; fails" 1 "$f" "limit item '' does not"
 f="$WORK/fs-alldecision.md"
 awk '!d && /^\| Build \/ execute \|/ { gsub(/\[(trust|open)\]/, "[decision]"); d=1 } { print }' "$README_SRC" > "$f"
 fs_case "an all-[decision] row marked 'covered, with limits' fails" 1 "$f" "every limit is [decision]"
