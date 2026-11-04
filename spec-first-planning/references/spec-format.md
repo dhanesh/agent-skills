@@ -330,3 +330,65 @@ In unattended mode this envelope is the plan a grant pins:
 `assets/write_grant.py` takes it as `--plan`, refuses a plan that was
 derived from a different spec or is stale, and writes an
 `autonomy-grant/v1` envelope beside it (see `references/unattended.md`).
+
+## Check-command allowlist (`assets/allowlist.py`)
+
+A plan made from an intake item or an idea can run a check command
+unattended only when the command matches the owner's allowlist. The
+allowlist is the committed file `.factory/check-commands.txt`. The owner
+owns this file. A run task reads it and does not change it.
+
+### File format
+
+- Write one pattern on each line.
+- A line that starts with `#` is a comment. A blank line is a comment.
+- Split a pattern into tokens at whitespace.
+- The first token is the program. Use `{python}` or a bare program name.
+  Do not use a path (skill-contract C6).
+- Each other token is a literal argument or `*`.
+
+Example:
+
+```text
+# Repo make targets that take no argument.
+make test
+make gate-skill *
+{python} *
+bash scripts/gates/test_gates.sh
+```
+
+### Matching
+
+The matcher splits a command at whitespace. It does not process quotes.
+A command matches a pattern when all of these are true:
+
+1. The command and the pattern have the same number of tokens.
+2. Each literal token in the pattern is equal to the command token.
+3. Each `*` matches exactly one argument. The argument holds only letters,
+   digits and `_./=-`. It does not start with `-`. It holds no `..`.
+
+Thus `make gate-skill SKILL=$(shell id)` does not match `make gate-skill *`,
+and `{python} -mhttp.server` does not match `{python} *`.
+
+### Lint rules
+
+`allowlist.py lint <file>` fails a pattern when one of these is true:
+
+- The program is a path, for example `/usr/bin/python3` or `./run`.
+- The program is a bare interpreter, for example `python3` or `node`.
+  Use `{python}` for Python.
+- The program starts another program, for example `env`, `sudo` or `xargs`.
+- The program is a shell, for example `sh` or `bash`. One form is
+  permitted: a shell and one repo-relative `.sh` script path, with no flag
+  and no `*`. Thus `bash scripts/gates/test_gates.sh` passes and
+  `sh -c make` fails.
+- `*` is the program, or `{python}` is not the first token.
+- A literal token holds a character that is not a letter, a digit or one
+  of `_./=-`, starts with `/` or `~`, or holds `..`.
+
+The lint prints `ALLOWLIST-LINT: pass <n> patterns` and exits 0, or prints
+one `ALLOWLIST-LINT: fail line <n>: <reason>` line for each problem and
+exits 1. `allowlist.py match <file> <command>` prints `MATCH: <pattern>`
+(exit 0) or `NO-MATCH: <command>` (exit 1). A file that fails the lint
+matches no command. Other code imports `lint_text`, `load`, `matches`,
+`match_command` and `arg_ok` from the module.
