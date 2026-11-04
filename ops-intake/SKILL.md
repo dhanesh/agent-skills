@@ -17,7 +17,7 @@ license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only. The tool itself needs no network and no credentials; the agent runs gh, git, acli or MCP tools with the user's own logins.
 metadata:
   author: dhanesh
-  version: "0.3.0"
+  version: "0.3.1"
   skill-contract: "1"
   tags: "factory,operations,intake,skill-contract"
 ---
@@ -203,7 +203,9 @@ has the keys) and registers it with `intake register-policy --by "<owner name>"`
 registration pins the file's sha256 and the owner's name in the git-ignored intake directory.
 `intake autopick` stops with `STOP: policy-unregistered` or `STOP: policy-changed` (exit 2)
 when the file has no registration or changed after it; show that line to the owner, who reads
-the file and registers it again. Items outside the policy wait for the owner. In this version
+the file and registers it again. Items outside the policy wait for the owner. A low-trust
+item is inside the policy only when the policy's `formats` names every format it was imported
+from; an item imported before intake recorded formats is never inside it. In this version
 `autopick` prints a `MATCH:` line for each `new` item inside the policy and picks nothing.
 
 You MUST NOT write, edit or register the pick policy unless the owner told you to, because the
