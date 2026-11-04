@@ -1,7 +1,7 @@
 # incident-watch: steps
 
-Status: partly built. The `probe`, `refuse`, `open`, `signal` and `mitigate` steps ship.
-The `close` step is pending.
+Status: built. The `probe`, `refuse`, `open`, `signal`, `mitigate` and `close` steps
+ship.
 
 The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` in the agent-skills
 repository (requirements R22 to R26, decision D1).
@@ -15,7 +15,7 @@ repository (requirements R22 to R26, decision D1).
 | open | After 2 or more consecutive failed probes, open one incident record with the probe output, the last release record and the recent CI runs. A later failure while the record is open adds its probe to that record. It opens no second record. | ships (R24) |
 | signal | Write one `intake-signals-jsonl` line of kind `incident` to `signals.jsonl` for each record that it opens. | ships (R24) |
 | mitigate | Show the recipe's rollback command word for word, and the release-conductor command that asks the owner. The owner decides and runs it through `release-conductor`. incident-watch never runs it. | ships (R25) |
-| close | Close the record with `--by <name>` and hand it to `bug-autopsy`. | pending (R26) |
+| close | Close the record with `--by <name>` (a human's name) and hand it to `bug-autopsy`. | ships (R26) |
 
 ## The probe's output
 
@@ -48,6 +48,31 @@ repository (requirements R22 to R26, decision D1).
   runs this line. The next failed probe reads the file into the open record.
 - Exit 0 is a pass. Exit 3 is a failed probe, or another probe holds the lock.
 
+## The close command's output
+
+`incident.py --root <repo> close --by <name> [--reason <text>] [--id <record id>]`:
+
+- On success: `INCIDENT: closed <id> <record path> by <name> at <time>` and
+  `NEXT: run bug-autopsy with <record path>`. Exit 0. The record path is relative to
+  the repository root.
+- Closing is a human step. A missing or empty `--by`, a name with hidden characters, or
+  a name that starts with the word "agent" in any form (`agent:x`, `Agent Smith`,
+  Cyrillic or fullwidth letters) gives a `STOP:` line and exit 2. The check is the one
+  that growth-review and ops-intake use, copied byte for byte. The unit suite compares
+  the copies.
+- No open record, an `--id` that is not a record id, an unknown `--id`, or an `--id`
+  whose record is already closed: a `STOP:` line and exit 2.
+- More than one open record and no `--id`: a `STOP:` line that names the open ids, and
+  exit 2.
+- The command takes the same lock as `probe`. If another command holds it:
+  `STOP: locked: ...` and exit 3.
+- Every refusal changes nothing. Every line goes through the same escaping as the probe.
+
+bug-autopsy reads the record as evidence for its timeline: the probe times, the exit
+codes, the output tails, the last release and the CI runs. The record is in the
+git-ignored state directory and can hold production details. Quote from it only what the
+post-mortem needs.
+
 ## The state directory
 
 `<repo>/.skill-contract/incidents/` holds its own `.gitignore` with `*`. The tool checks
@@ -57,10 +82,11 @@ it before it runs a command.
   recipe's sha256 and, for each command, the time, the name, the argv, the exit code and
   the last 2000 characters of stdout and stderr.
 - `state.json`: the count of consecutive failed probes and the id of the open record. A
-  pass sets the count to 0. A pass does not close the record.
+  pass sets the count to 0. A pass does not close the record. `incident close` sets the
+  count to 0 and clears the open record, so a new failure streak opens a new record.
 - `records/<id>.json`: one incident record. The id is
   `inc-<UTC time of opening>-<6 hex characters>`. The record holds:
-  - `status` (`open`), `opened_at`, `updated_at` and `probe_count`;
+  - `status` (`open` or `closed`), `opened_at`, `updated_at` and `probe_count`;
   - `probes`: the failed probes of the streak, with their output tails (at most 20, the
     newest last);
   - `last_release`: the newest `release-result/v1` envelope from release-conductor under
@@ -80,7 +106,8 @@ it before it runs a command.
     states that release-conductor's rollback acts on (`prod_failed`, `outcome_unknown`)
     and the releases now in those states. If the recipe has no valid `rollback`,
     `available` is false and `reason` says why;
-  - `closed_at` and `closed_by` (null until R26).
+  - `closed_at`, `closed_by` and `close_reason`: null while the record is open.
+    `incident close` fills them (R26).
 - `signals.jsonl`: one `intake-signals-jsonl` line for each opened record. The source is
   `incident-watch`, the kind is `incident`, the severity is 4 and the `source_id` is the
   record id. The evidence names the failed commands, their exit codes and the record

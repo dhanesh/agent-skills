@@ -43,8 +43,17 @@ Commands:
           line-separator characters, so recipe or record text cannot forge a line. A recipe with no `rollback` field gives
           `"available": false` and `ROLLBACK: none: ...`; the probe still succeeds.
 
-Pending (not built here): `incident close --by <name>` (R26; the seams are
-find_open_record() and the record's `status`, `closed_at` and `closed_by` fields).
+  close   `close --by <name> [--reason <text>] [--id <record id>]` closes the open
+          incident record (R26). Closing is a human step: --by is required, and a name
+          that starts with the word "agent" in any form is refused with the same check
+          growth-review and ops-intake use (_is_agent, copied byte for byte). The record
+          gets `status` "closed", `closed_at`, `closed_by` and `close_reason`; state.json
+          gets no open incident and a failure count of 0, so a new failure streak opens a
+          NEW record. With more than one open record, --id names the one to close. It
+          takes the same lock as `probe` and prints `INCIDENT: closed <id> <path> by
+          <name> at <time>` and `NEXT: run bug-autopsy with <record path>`. No --by, an
+          agent name, a bad --id or no open record: a `STOP:` line, exit 2, and nothing
+          changes.
 
 This tool never runs `build`, `deploy_staging`, `deploy_prod`, `rollback` or
 `staging_checks`. The only commands it runs are the ones probe_commands() returns, through
@@ -76,8 +85,8 @@ searches: $SKILL_CONTRACT_PATH, the directory beside this skill, <root>/.agents/
 <root>/.claude/skills, ~/.agents/skills, ~/.claude/skills. `--skills-dir` (repeatable)
 replaces that list.
 
-Stdlib only, Python 3.10+, POSIX. Exits: 0 every command passed; 3 a command failed or
-another probe holds the lock; 2 refused (usage, no release-conductor, an invalid recipe, a
+Stdlib only, Python 3.10+, POSIX. Exits: 0 every command passed (or the record closed); 3
+a command failed or another command holds the lock; 2 refused (usage, no release-conductor, an invalid recipe, a
 missing token value, or a state directory that cannot be shown to be git-ignored).
 """
 import sys
@@ -335,6 +344,70 @@ def append_probe(d, record):
         f.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+# ── the human-name check for `incident close` (R26) ────────────────────────────────────
+
+# Characters that can hide or disguise text on a terminal or a rendered page: controls
+# (Cc: NUL, ESC, BEL), format characters (Cf: bidi overrides, zero-width spaces), line and
+# paragraph separators, private-use and surrogate code points, and every space separator
+# but U+0020. Copied from ops-intake's assets/intake.py (skills cannot import each other).
+_HIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cs"})
+
+
+def is_hidden_char(ch):
+    """True when ch can hide or disguise what a line shows."""
+    cat = unicodedata.category(ch)
+    return cat in _HIDDEN_CATEGORIES or (cat == "Zs" and ch != " ")
+
+
+def _name_ok(name):
+    """A name (--by) is non-empty after stripping and holds no hidden characters.
+    Copied from growth-review's assets/growth.py."""
+    return (isinstance(name, str) and name.strip() != "" and len(name) <= 200
+            and not any(is_hidden_char(c) for c in name))
+
+
+# The block from here to the end of _is_agent() is copied byte for byte from
+# growth-review's assets/growth.py (itself identical in idea-validation's assets/ideas.py,
+# factory-conductor's assets/ledger.py and ops-intake's assets/intake.py), because skills
+# cannot import each other. test_incident.py checks that the copy has not drifted.
+# Latin lookalikes of the letters in "agent" that NFKD does not fold: Cyrillic, Greek, the
+# IPA script g and alpha, and the small capitals.
+_CONFUSABLES = str.maketrans({"а": "a", "е": "e", "о": "o", "р": "p",
+                              "с": "c", "х": "x", "і": "i", "А": "a",
+                              "Е": "e", "О": "o", "Р": "p", "С": "c",
+                              "Х": "x", "І": "i", "α": "a", "ε": "e",
+                              "ο": "o", "Α": "a", "Ε": "e", "Ο": "o",
+                              "Ν": "n", "Τ": "t", "т": "t", "н": "n",
+                              "Т": "t", "Н": "n", "ɡ": "g", "ɑ": "a",
+                              "ᴀ": "a", "ɢ": "g", "ᴇ": "e", "ɴ": "n",
+                              "ᴛ": "t"})
+# Letters and digits stay; every other character (punctuation, a symbol, a modifier letter
+# such as U+02D0, whitespace) becomes one space, so it counts as a separator.
+_WORD_CATEGORIES = frozenset({"Lu", "Ll", "Lt", "Lo", "Nd"})
+# "agent" at the start, its letters apart or not, and no letter after it (a digit or a
+# space may follow: "agent2" and "agent x" are refused).
+_AGENT_RE = re.compile(r"^ *a *g *e *n *t(?![^\W\d_])")
+
+
+def _fold(name):
+    """name as lowercase Latin letters, digits and spaces: NFKD, combining marks dropped,
+    the lookalikes above folded, casefolded, and every other character a space."""
+    s = "".join(c for c in unicodedata.normalize("NFKD", name)
+                if unicodedata.category(c) != "Mn")
+    s = unicodedata.normalize("NFKC", s.translate(_CONFUSABLES).casefold())
+    return "".join(c if unicodedata.category(c) in _WORD_CATEGORIES else " " for c in s)
+
+
+def _is_agent(name):
+    """True for a name that starts with the word "agent" in any form: `agent:x`, a bare
+    `agent`, any separator (a space, `.`, `;`, `|`, a ratio or modifier-letter colon, a dash
+    or a middle dot), letters apart (`a gent:x`), fullwidth, Cyrillic, Greek or
+    small-capital letters. A human name that starts with that word ("Agent Smith") is
+    refused too: the check fails closed. "Agentha", "agentur" and "Reagent" pass."""
+    folded = _fold(name)
+    return bool(_AGENT_RE.match(folded))
+
+
 # ── the probe ───────────────────────────────────────────────────────────────────────────
 
 def run_probe(release, root, commands, timeout):
@@ -376,27 +449,41 @@ def _records_dir(d):
     return os.path.join(d, RECORDS_DIR)
 
 
-def find_open_record(d):
-    """(id, path, record) of the open incident record, or None. The records directory is
-    the truth, not state.json, so a crash between the record write and the state write can
-    never open a second record. Also the seam R26's `incident close` uses."""
+def read_record(path):
+    """The record dict at `path`, or None when it is a symlink, not a regular file,
+    unreadable or not a JSON object."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def open_records(d):
+    """[(id, path, record)] for every open incident record, oldest id first."""
     rd = _records_dir(d)
     try:
         names = sorted(n for n in os.listdir(rd) if n.endswith(".json"))
     except FileNotFoundError:
-        return None
+        return []
+    out = []
     for name in names:
         path = os.path.join(rd, name)
-        if os.path.islink(path) or not os.path.isfile(path):
-            continue
-        try:
-            with open(path, encoding="utf-8") as f:
-                rec = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if isinstance(rec, dict) and rec.get("status") == "open":
-            return name[:-len(".json")], path, rec
-    return None
+        rec = read_record(path)
+        if rec is not None and rec.get("status") == "open":
+            out.append((name[:-len(".json")], path, rec))
+    return out
+
+
+def find_open_record(d):
+    """(id, path, record) of the open incident record, or None. The records directory is
+    the truth, not state.json, so a crash between the record write and the state write can
+    never open a second record. `incident close` reads the same directory (R26)."""
+    found = open_records(d)
+    return found[0] if found else None
 
 
 def failing_streak(d, n):
@@ -637,9 +724,12 @@ def rollback_lines(view):
             "on their yes: %s" % (ask["command"], ask["on_owner_yes"])]
 
 
-def new_record_id(at, probes):
+def new_record_id(at, probes, salt=0):
+    """inc-<stamp>-<6 hex of the probes' digest>. `salt` (above 0) goes into the digest, so
+    open_record can pick another id when a closed record already holds this one."""
     stamp = at.replace("-", "").replace(":", "")
-    digest = hashlib.sha256(json.dumps(probes, sort_keys=True).encode("utf-8")).hexdigest()
+    text = json.dumps(probes, sort_keys=True) + ("" if not salt else "\n%d" % salt)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return "inc-%s-%s" % (stamp, digest[:6])
 
 
@@ -671,10 +761,17 @@ def open_record(root, d, release, recipe, state, record, rollback_problems=()):
     Returns (id, path, signal path, ci_runs, rollback view)."""
     probes = failing_streak(d, state["consecutive_failures"]) or [record]
     at = record["at"]
-    rid = new_record_id(at, probes)
     rd = _records_dir(d)
     os.makedirs(rd, exist_ok=True)
-    path = os.path.join(rd, rid + ".json")
+    # A new streak after a close (R26) can repeat the probe content and second of an older
+    # record; never overwrite that record.
+    for salt in range(1000):
+        rid = new_record_id(at, probes, salt)
+        path = os.path.join(rd, rid + ".json")
+        if not os.path.lexists(path):
+            break
+    else:
+        raise OSError("no free record id for %s" % at)
     ci = ci_runs(root, d)
     releases = release_states(root, release)
     rollback = rollback_view(recipe, releases, rollback_problems)
@@ -685,7 +782,7 @@ def open_record(root, d, release, recipe, state, record, rollback_problems=()):
            "releases": releases,
            "ci_runs": ci,
            "rollback": rollback,  # shown to the owner, never run (R25)
-           "closed_at": None, "closed_by": None,  # R26 fills these
+           "closed_at": None, "closed_by": None, "close_reason": None,  # R26 fills these
            "signal": {"path": "%s/%s" % (INCIDENTS_DIR, SIGNALS_FILE),
                       "source": SIGNAL_SOURCE, "source_id": rid}}
     _write_json(path, rec)
@@ -799,6 +896,98 @@ def cmd_probe(args):
     return 3 if failed else 0
 
 
+RECORD_ID_RE = re.compile(r"inc-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}")
+
+
+def close_record(root, d, found, by, reason):
+    """R26: mark the record closed by `by` (a human) at the current time, and clear the
+    open incident in state.json. The failure count goes back to 0, so a new failure streak
+    has to reach OPEN_AFTER again before it opens a NEW record. Called under the lock.
+    Returns (id, path, closed_at)."""
+    rid, path, rec = found
+    at = now_iso()
+    rec["status"] = "closed"
+    rec["closed_at"] = at
+    rec["closed_by"] = by
+    rec["close_reason"] = reason
+    rec["updated_at"] = at
+    _write_json(path, rec)
+    state = read_state(d)
+    if state.get("open_incident") in (rid, None) or not open_records(d):
+        state["open_incident"] = None
+    state["consecutive_failures"] = 0
+    write_state(d, state)
+    return rid, path, at
+
+
+def cmd_close(args):
+    """R26: close the open incident record as a human step and hand it to bug-autopsy.
+    Every refusal exits 2 before any write."""
+    root = os.path.abspath(args.root)
+    if args.extra:
+        emit("STOP: unexpected argument %r after close" % args.extra[0])
+        return 2
+    if args.by is None or not _name_ok(args.by):
+        emit("STOP: --by needs the name of the human who closes the incident record; "
+             "nothing changed")
+        return 2
+    if _is_agent(args.by):
+        emit("STOP: an agent: name cannot close an incident record; only a human decides "
+             "that the incident is over; nothing changed")
+        return 2
+    if args.reason is not None and not _name_ok(args.reason):
+        emit("STOP: --reason must be non-empty text without hidden characters")
+        return 2
+    if args.id is not None and not RECORD_ID_RE.fullmatch(args.id):
+        emit("STOP: --id %r is not an incident record id (inc-YYYYMMDDTHHMMSSZ-xxxxxx)"
+             % args.id)
+        return 2
+    if not os.path.isdir(_incidents_dir(root)):
+        emit("STOP: no open incident record: %s does not exist" % INCIDENTS_DIR)
+        return 2
+    try:
+        d = ensure_dir(root)
+        with probe_lock(d):
+            if args.id is not None:
+                path = os.path.join(_records_dir(d), args.id + ".json")
+                rec = read_record(path)
+                if rec is None:
+                    emit("STOP: no incident record %s in %s/%s"
+                         % (args.id, INCIDENTS_DIR, RECORDS_DIR))
+                    return 2
+                if rec.get("status") != "open":
+                    emit("STOP: incident record %s is not open (status %s, closed by %s at "
+                         "%s)" % (args.id, rec.get("status"), rec.get("closed_by"),
+                                  rec.get("closed_at")))
+                    return 2
+                found = (args.id, path, rec)
+            else:
+                found_all = open_records(d)
+                if not found_all:
+                    emit("STOP: no open incident record in %s/%s"
+                         % (INCIDENTS_DIR, RECORDS_DIR))
+                    return 2
+                if len(found_all) > 1:
+                    emit("STOP: %d incident records are open (%s); name one with --id"
+                         % (len(found_all), ", ".join(f[0] for f in found_all)))
+                    return 2
+                found = found_all[0]
+            rid, path, at = close_record(root, d, found, args.by.strip(), args.reason)
+    except Refused as e:
+        emit("STOP: refused: %s" % e)
+        return 2
+    except Locked:
+        emit("STOP: locked: another incident command holds %s/%s" % (INCIDENTS_DIR, LOCK_FILE))
+        return 3
+    except OSError as e:
+        emit("STOP: cannot write the incident record: %s" % e)
+        return 2
+    rel = _rel(root, path)
+    emit("INCIDENT: closed %s %s by %s at %s" % (rid, rel, args.by.strip(), at))
+    emit("NEXT: run bug-autopsy with %s" % rel)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="incident.py", description=__doc__.split("\n")[0])
     p.add_argument("--root", default=".", help="the repository that holds .release/recipe.json")
@@ -815,10 +1004,20 @@ def main(argv=None):
     pr.add_argument("--only", action="append", default=None, metavar="LIST",
                     help="run only this list: health, version_probe or prod_smoke "
                          "(repeatable); any other name is refused with exit 2")
+    cl = sub.add_parser("close", help="close the open incident record (a human step) and "
+                                      "hand it to bug-autopsy")
+    cl.add_argument("--by", default=None,
+                    help="the name of the human who closes the record (required; an "
+                         "agent: name is refused)")
+    cl.add_argument("--reason", default=None, help="why the incident is over (optional)")
+    cl.add_argument("--id", default=None,
+                    help="the record to close when more than one is open")
     args, extra = p.parse_known_args(argv)
     args.extra = extra
     if args.cmd == "probe":
         return cmd_probe(args)
+    if args.cmd == "close":
+        return cmd_close(args)
     return 2
 
 

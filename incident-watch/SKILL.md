@@ -10,15 +10,15 @@ description: >-
   with exit 2 and nothing runs. After 2 or more consecutive failed probes it opens one
   incident record and writes one `incident` signal line for ops-intake. The record shows
   the recipe's rollback argv word for word and the release-conductor command that asks
-  the owner. Partly built: `incident close` is not built yet. It never runs a rollback or
-  deploy: the owner mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
+  the owner. `incident close --by <name>` (a human) closes the record for bug-autopsy. It
+  never runs a rollback or deploy: the owner mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
   release-conductor).
 license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline, plus git. It reads the release recipe with the release-conductor skill, which has to be installed beside it.
 metadata:
   author: dhanesh
   version: "0.1.0"
-  tags: "software-factory,incident,triage,read-only-probe,partly-built"
+  tags: "software-factory,incident,triage,read-only-probe"
 ---
 
 # incident-watch
@@ -29,13 +29,14 @@ You watch production for incidents and triage them. The factory detects; the own
 mitigates (spec decision D1). A probe runs only the commands the release recipe lists as
 read-only: `health`, `version_probe` and each `prod_smoke` entry (spec constraint S4).
 
-**Status: partly built.** `incident probe` ships (R22): it runs the three read-only lists,
+**Status: built.** `incident probe` ships (R22): it runs the three read-only lists,
 records each result and prints one line per command. It refuses, with exit 2 and before
 anything runs, any requested command outside the three lists (R23). After 2 or more
 consecutive failed probes it opens one incident record and writes one `incident` line to
 the signals file that ops-intake imports (R24). The record shows the recipe's rollback
 argv word for word and the release-conductor command that asks the owner; incident-watch
-never runs either (R25). Not built yet: `incident close --by <name>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
+never runs either (R25). `incident close --by <name>` closes the record as a human step
+and prints `NEXT: run bug-autopsy with <record path>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
 R26, decision D1) in the agent-skills repository.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
@@ -75,6 +76,16 @@ is exactly `health`, `version_probe` or `prod_smoke`. Any other name (`rollback`
 whose program word holds a `{token}` exit 2 with `PROBE: refused: <reason>`, and nothing
 runs, not even the allowed lists (R23). `--skills-dir <dir>` (before `probe`, repeatable) makes the
 tool look for release-conductor only in that directory; it is for tests.
+
+The close command is `python3 "$SKILL_DIR/assets/incident.py" --root <repo> close --by
+"<the owner's name>" [--reason <text>] [--id <record id>]` (R26). It takes the same lock
+as `probe`, marks the open record `closed` with `closed_by`, `closed_at` and
+`close_reason`, sets the failure count back to 0 (so a new failure streak opens a new
+record) and prints `INCIDENT: closed <id> <path> by <name> at <time>` and
+`NEXT: run bug-autopsy with <record path>`. It exits 2 with a `STOP:` line and changes
+nothing when `--by` is missing, when the name starts with the word "agent" in any form
+(the check growth-review and ops-intake use), when no record is open, or when more than
+one is open and `--id` does not name one.
 
 ## When to use
 
@@ -127,23 +138,34 @@ is `ops-intake`.
    from them only what the owner needs. Tell the owner that mitigation is theirs, through
    release-conductor: the `release rollback` command shows the rollback and waits for
    their yes.
-5. **Verify the report.** Check it against the success criteria below, then re-check.
+5. **Close the record only on the owner's word.** When the owner says the incident is
+   over, run `python3 "$SKILL_DIR/assets/incident.py" --root <repo> close --by "<their
+   name>"`, with `--reason` if they gave one and `--id` if more than one record is open.
+   Report the `INCIDENT: closed` line and the `NEXT: run bug-autopsy with <record path>`
+   line as printed. bug-autopsy reads the record as timeline evidence: the probe times,
+   exit codes and output tails, the last release and the CI runs. A `STOP:` line means
+   nothing changed: report it.
+6. **Verify the report.** Check it against the success criteria below, then re-check.
 
 You MUST NOT run a rollback, a deploy or any other recipe command yourself, because
 rollback and production deploy are never-grantable human gates (spec decision D1 and
 constraint B1), and a wrong command against production does real harm.
 
 You MUST NOT say that an incident record was opened or that a signal was written unless
-the probe printed the `INCIDENT: opened` line, and you MUST NOT say that `incident close`
-exists, because that part is not built yet and a false claim hides an incident the owner
-has to handle.
+the probe printed the `INCIDENT: opened` line, because a false claim hides an incident the
+owner has to handle.
+
+You MUST NOT run `incident close` unless the owner said in this session that the incident
+is over, and `--by` MUST be the owner's own name, never yours, because closing ends the
+watch on that incident and is the owner's decision (spec decision D1).
 
 ## Deliverable
 
 A probe report: each `PROBE:` line as a table row (command, result, exit code), the
 `PROBE_RESULT:` line, the consecutive-failure count, any `INCIDENT:`, `SIGNAL:` and
 `NEXT:` lines as printed, any `ROLLBACK:` line as printed and, for a failure, the owner's next step (mitigate through
-release-conductor).
+release-conductor). After a close: the `INCIDENT: closed` line and the
+`NEXT: run bug-autopsy with <record path>` line as printed.
 
 ## Success criteria
 
@@ -151,6 +173,7 @@ release-conductor).
 - A failure is reported as a failure. A record or signal is claimed only from an
   `INCIDENT: opened` line, and no rollback is claimed: the rollback is shown, never run.
 - No command outside `health`, `version_probe` and `prod_smoke` was run.
+- A record is closed only on the owner's word, with the owner's name in `--by`.
 
 The outcome eval (`eval/run_eval.py`) runs the probe on a fixture recipe from
 `assets/incident_testkit.py`, whose commands are local stubs, and grades its lines and

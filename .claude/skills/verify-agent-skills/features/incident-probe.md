@@ -2,11 +2,11 @@
 
 - id: incident-probe
 - proven: no
-- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe, incident-watch/assets/incident.py:check_only, incident-watch/assets/incident.py:open_record, incident-watch/assets/incident.py:signal_line, incident-watch/assets/incident.py:rollback_view, incident-watch/assets/incident.py:safe_display
+- anchors: incident-watch/assets/incident.py:cmd_probe, incident-watch/assets/incident.py:probe_commands, incident-watch/assets/incident.py:run_probe, incident-watch/assets/incident.py:ensure_dir, incident-watch/assets/incident.py:after_probe, incident-watch/assets/incident.py:check_only, incident-watch/assets/incident.py:open_record, incident-watch/assets/incident.py:signal_line, incident-watch/assets/incident.py:rollback_view, incident-watch/assets/incident.py:safe_display, incident-watch/assets/incident.py:cmd_close, incident-watch/assets/incident.py:close_record
 
 ## What it is
 
-**Status: partly built.** `incident probe` ships (R22). It loads `.release/recipe.json`
+**Status: built.** `incident probe` ships (R22). It loads `.release/recipe.json`
 with release-conductor's own `load_recipe` (imported from the release-conductor skill
 beside incident-watch). It runs only the recipe's `health`, `version_probe` and each
 `prod_smoke` command, as argv lists with no shell and a timeout each. It appends each
@@ -17,14 +17,18 @@ command with exit 2 before anything runs (R23). After 2 or more consecutive fail
 it opens one incident record, `.skill-contract/incidents/records/<id>.json`, and appends one
 `intake-signals-jsonl` line of kind `incident` to `.skill-contract/incidents/signals.jsonl`
 (R24). The opened record shows the recipe's `rollback` argv word for word and the
-release-conductor command that asks the owner, and the tool never runs either (R25). The
+release-conductor command that asks the owner, and the tool never runs either (R25).
+`incident close --by <name>` closes the open record as a human step, under the same lock,
+and prints `NEXT: run bug-autopsy with <record path>` (R26). The
 design is
 `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to R26, D1, S4).
 
 ## How to reach it
 
 `python3 incident-watch/assets/incident.py --root <repo> [--skills-dir <dir>] probe
-[--version V] [--commit C] [--timeout S] [--only health|version_probe|prod_smoke]`. `--skills-dir` makes the tool look for
+[--version V] [--commit C] [--timeout S] [--only health|version_probe|prod_smoke]` and
+`python3 incident-watch/assets/incident.py --root <repo> close --by <name> [--reason R]
+[--id ID]`. `--skills-dir` makes the tool look for
 release-conductor only in that directory. `python3 incident-watch/assets/incident_testkit.py
 fixture <dir> [--fail NAME]` makes `<dir>` a git repo with a valid recipe whose every
 command runs a local stub (`<dir>/stubs/stub.py <name>`). Each stub call is logged to
@@ -60,10 +64,12 @@ Shipped:
   `rollback.argv` is the recipe's `rollback` list word for word. The rollback stub never
   runs, so `<dir>/stubs/ran/rollback` never exists (R25).
 
-Planned (not yet shipped):
-
-- `incident close --by <name>`: closes the record and prints
-  `NEXT: run bug-autopsy with <record path>`. Without `--by` it exits 2 (R26).
+- `incident close --by <name>` with one open record: `INCIDENT: closed <id> <path> by
+  <name> at <time>` and `NEXT: run bug-autopsy with <record path>`, exit 0. The record
+  gets `"status": "closed"`, `closed_by` and `closed_at`. Without `--by`, or with a name
+  that starts with the word "agent", it prints a `STOP:` line, exits 2 and changes
+  nothing. With no open record it prints `STOP: no open incident record ...` and exits 2.
+  After a close, a new streak of 2 failed probes opens a new record (R26).
 
 ## Drive it
 
@@ -149,7 +155,30 @@ ls -A "$IP/inc/stubs/ran" > "$WT/.verify-run/$INSTANCE/ip-inc-ran.txt"
 - `ip-inc-ran.txt`: only `health`, `prod_smoke_0`, `prod_smoke_1` and `version_probe`.
   No `rollback` and no `deploy_prod` marker: the rollback stub was never called (R25).
 
-The R26 recipe joins this section when it ships.
+Then close the `inc` record: first without `--by` and with an agent name, then as the
+owner, then once more with no open record.
+
+```sh
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-close-noby -- \
+  python3 incident-watch/assets/incident.py --root "$IP/inc" close
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-close-agent -- \
+  python3 incident-watch/assets/incident.py --root "$IP/inc" close --by agent:claude
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-close -- \
+  python3 incident-watch/assets/incident.py --root "$IP/inc" close --by Owner --reason "health is back"
+cp "$IP/inc/.skill-contract/incidents/records/"*.json "$WT/.verify-run/$INSTANCE/ip-close-record.json"
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name ip-close-again -- \
+  python3 incident-watch/assets/incident.py --root "$IP/inc" close --by Owner
+```
+
+- `ip-close-noby`: exit 2 and one line that starts `STOP: --by needs`. No `NEXT:` line.
+- `ip-close-agent`: exit 2 and one line that starts `STOP: an agent: name cannot close`.
+- `ip-close`: exit 0, `INCIDENT: closed <id> <path> by Owner at <time>` with the id from
+  `ip-inc-2`, and `NEXT: run bug-autopsy with .skill-contract/incidents/records/<id>.json`.
+- `ip-close-record.json`: `"status": "closed"`, `"closed_by": "Owner"`, a `closed_at`
+  time and `"close_reason": "health is back"`. The `probes` are the same as in
+  `ip-inc-record.json`.
+- `ip-close-again`: exit 2 and `STOP: no open incident record in
+  .skill-contract/incidents/records`.
 
 ## Proof
 
@@ -160,8 +189,10 @@ codes), `ip-pass-probes.jsonl`, `ip-pass-state.txt`, `ip-pass-ignored.txt` and b
 their records listings, `ip-inc-signals.jsonl`, `ip-inc-record.json` and `ip-inc-calls.log`
 (R24). The `ROLLBACK:` and `NEXT: release rollback cannot act` lines in `ip-inc-2`, the `rollback`
 field of `ip-inc-record.json` against `ip-inc-recipe.json`, and `ip-inc-ran.txt` with no
-`rollback` or `deploy_prod` marker (R25). After R26 ships: the `NEXT:` line from
-`incident close`.
+`rollback` or `deploy_prod` marker (R25). The `ip-close-noby` and `ip-close-agent`
+captures (exit 2, a `STOP:` line and no `NEXT:` line), the `ip-close` capture with its
+`NEXT: run bug-autopsy with <record path>` line, `ip-close-record.json` with `closed_by`
+and `closed_at`, and the `ip-close-again` capture (R26).
 
 ## Gotchas
 

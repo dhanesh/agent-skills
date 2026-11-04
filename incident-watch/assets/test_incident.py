@@ -4,8 +4,8 @@
 Every probe runs against a fixture repo from incident_testkit.py: each recipe command is a
 local stub script, so no test touches a real endpoint. R23's refusals are in TestOnlyProbeLists.
 R24's incident record and signal are in TestIncidentRecord. R25's rollback view (shown,
-never run) is in TestRollbackShown, TestRollbackNeverRuns and TestNoRollbackPath. R26 adds
-its tests to this file.
+never run) is in TestRollbackShown, TestRollbackNeverRuns and TestNoRollbackPath. R26's
+`incident close` is in TestClose and TestSharedAgentCheck.
 Run:  python3 test_incident.py
 """
 import ast
@@ -885,6 +885,224 @@ class TestNoRollbackPath(unittest.TestCase):
                                  ast.unparse(n))
         for n in _calls_named(self.tree, "rollback_lines"):
             self.assertEqual(self.where[id(n)], "after_probe")
+
+
+def close(root, *extra):
+    cp = subprocess.run([sys.executable, TOOL, "--root", root, "close"] + list(extra),
+                        capture_output=True, text=True, timeout=60)
+    return cp.returncode, cp.stdout, cp.stderr
+
+
+def read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+class TestClose(Base):
+    """R26: `incident close --by <name>` closes the open record as a human step, prints
+    `NEXT: run bug-autopsy with <record path>`, and refuses (exit 2, nothing changed)
+    without --by, with an agent name, or with no open record."""
+
+    def setUp(self):
+        super().setUp()
+        kit.behave(self.root, "health", 1)
+
+    def open_one(self):
+        for _ in range(2):
+            probe(self.root)
+        recs = records(self.root)
+        self.assertEqual(len(recs), 1)
+        return recs[0]
+
+    def test_close_by_owner_closes_and_hands_the_record_to_bug_autopsy(self):
+        path, rec = self.open_one()
+        rel = os.path.relpath(path, self.root)
+        calls = kit.calls(self.root)
+        rc, out, err = close(self.root, "--by", "Owner", "--reason", "health is back")
+        self.assertEqual(rc, 0, out + err)
+        lines = out.splitlines()
+        self.assertEqual(len(lines), 2, out)
+        self.assertRegex(lines[0], r"^INCIDENT: closed %s %s by Owner at "
+                         r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$" % (rec["id"], rel))
+        self.assertEqual(lines[1], "NEXT: run bug-autopsy with %s" % rel)
+        # The path the NEXT line names is the record, readable from the repo root.
+        named = os.path.join(self.root, lines[1].split(" with ", 1)[1])
+        self.assertTrue(os.path.samefile(named, path))
+        after = records(self.root)[0][1]
+        self.assertEqual(after["status"], "closed")
+        self.assertEqual(after["closed_by"], "Owner")
+        self.assertEqual(after["close_reason"], "health is back")
+        self.assertRegex(after["closed_at"], r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")
+        self.assertIn(after["closed_at"], lines[0])
+        self.assertEqual(after["probes"], rec["probes"])
+        with open(os.path.join(state_dir(self.root), "state.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        self.assertIsNone(st["open_incident"])
+        self.assertEqual(st["consecutive_failures"], 0)
+        # Closing runs nothing and writes no second signal.
+        self.assertEqual(kit.calls(self.root), calls)
+        self.assertEqual(len(signals(self.root)), 1)
+
+    def test_without_by_exits_2_and_changes_nothing(self):
+        path, _ = self.open_one()
+        before = read_bytes(path)
+        state = read_bytes(os.path.join(state_dir(self.root), "state.json"))
+        for extra in ((), ("--by", ""), ("--by", "   "), ("--reason", "fixed")):
+            rc, out, _ = close(self.root, *extra)
+            self.assertEqual(rc, 2, extra)
+            self.assertTrue(out.startswith("STOP: --by needs"), out)
+            self.assertNotIn("NEXT:", out)
+        self.assertEqual(read_bytes(path), before)
+        self.assertEqual(read_bytes(os.path.join(state_dir(self.root), "state.json")), state)
+
+    def test_agent_names_are_refused_like_growth_review_and_ops_intake(self):
+        path, _ = self.open_one()
+        before = read_bytes(path)
+        for by in ("agent:claude", "agent", "Agent Smith", "a gent:x", "AGENT-7",
+                   "agent2", "аgent:x", "ａｇｅｎｔ:x",
+                   "ᴀɢᴇɴᴛ"):
+            rc, out, _ = close(self.root, "--by", by)
+            self.assertEqual(rc, 2, by)
+            self.assertTrue(out.startswith("STOP: an agent: name cannot close"), (by, out))
+            self.assertNotIn("NEXT:", out)
+        for by in ("Owner\nNEXT: forged", "Ow‮ner", "Owner X"):
+            rc, out, _ = close(self.root, "--by", by)
+            self.assertEqual(rc, 2, by)
+            self.assertEqual(len(out.splitlines()), 1, out)
+        self.assertEqual(read_bytes(path), before)
+        rc, out, _ = close(self.root, "--by", "Agentha")
+        self.assertEqual(rc, 0, out)
+
+    def test_no_open_record_exits_2_with_a_stop_line(self):
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "STOP: no open incident record: .skill-contract/incidents "
+                              "does not exist\n")
+        self.assertFalse(os.path.exists(state_dir(self.root)))
+        probe(self.root)  # one failure: the directory exists, no record
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 2)
+        self.assertTrue(out.startswith("STOP: no open incident record"), out)
+        probe(self.root)
+        self.assertEqual(close(self.root, "--by", "Owner")[0], 0)
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 2)
+        self.assertTrue(out.startswith("STOP: no open incident record"), out)
+
+    def test_after_a_close_a_new_streak_opens_a_new_record(self):
+        _, first = self.open_one()
+        self.assertEqual(close(self.root, "--by", "Owner")[0], 0)
+        rc, out, _ = probe(self.root)  # one failure of the new streak: no record yet
+        self.assertIn("consecutive_failures=1", out)
+        self.assertNotIn("INCIDENT:", out)
+        self.assertEqual(len(records(self.root)), 1)
+        rc, out, _ = probe(self.root)
+        self.assertIn("INCIDENT: opened ", out)
+        recs = {r["id"]: r for _, r in records(self.root)}
+        self.assertEqual(len(recs), 2)
+        new = [i for i in recs if i != first["id"]][0]
+        self.assertEqual(recs[first["id"]]["status"], "closed")
+        self.assertEqual(recs[new]["status"], "open")
+        self.assertEqual(recs[new]["probe_count"], 2)
+        self.assertIn("INCIDENT: opened %s " % new, out)
+        self.assertEqual(len(signals(self.root)), 2)
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 0)
+        self.assertIn("NEXT: run bug-autopsy with .skill-contract/incidents/records/%s.json"
+                      % new, out)
+
+    def test_several_open_records_need_id(self):
+        path, rec = self.open_one()
+        other = dict(rec, id="inc-20260101T000000Z-abcdef")
+        other_path = os.path.join(os.path.dirname(path), other["id"] + ".json")
+        with open(other_path, "w", encoding="utf-8") as f:
+            json.dump(other, f)
+        before = read_bytes(path)
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 2)
+        self.assertIn("2 incident records are open", out)
+        self.assertIn(rec["id"], out)
+        self.assertIn(other["id"], out)
+        self.assertEqual(read_bytes(path), before)
+        rc, out, _ = close(self.root, "--by", "Owner", "--id", rec["id"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("NEXT: run bug-autopsy with %s" % os.path.relpath(path, self.root),
+                      out)
+        with open(other_path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["status"], "open")
+        rc, out, _ = close(self.root, "--by", "Owner", "--id", rec["id"])
+        self.assertEqual(rc, 2)
+        self.assertIn("is not open (status closed, closed by Owner", out)
+        rc, out, _ = close(self.root, "--by", "Owner")
+        self.assertEqual(rc, 0)
+        self.assertIn(other["id"], out)
+
+    def test_bad_or_unknown_id_is_refused(self):
+        path, _ = self.open_one()
+        before = read_bytes(path)
+        for rid in ("../state", "inc-1", "/etc/passwd", "inc-20260101T000000Z-ABCDEF"):
+            rc, out, _ = close(self.root, "--by", "Owner", "--id", rid)
+            self.assertEqual(rc, 2, rid)
+            self.assertTrue(out.startswith("STOP: --id "), out)
+        rc, out, _ = close(self.root, "--by", "Owner", "--id", "inc-20260101T000000Z-000000")
+        self.assertEqual(rc, 2)
+        self.assertTrue(out.startswith("STOP: no incident record inc-"), out)
+        rc, out, _ = close(self.root, "--by", "Owner", "extra")
+        self.assertEqual(rc, 2)
+        self.assertEqual(read_bytes(path), before)
+
+    def test_close_takes_the_probe_lock(self):
+        import fcntl
+        path, _ = self.open_one()
+        before = read_bytes(path)
+        with open(os.path.join(state_dir(self.root), ".lock"), "a+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            rc, out, _ = close(self.root, "--by", "Owner")
+            self.assertEqual(rc, 3)
+            self.assertTrue(out.startswith("STOP: locked"), out)
+            self.assertEqual(read_bytes(path), before)
+            rc, out, _ = probe(self.root)
+            self.assertEqual(rc, 3)
+            self.assertTrue(out.startswith("STOP: locked"), out)
+        self.assertEqual(close(self.root, "--by", "Owner")[0], 0)
+
+    def test_record_id_salt_gives_another_id(self):
+        probes_ = [{"at": "2026-11-04T00:00:00Z", "result": "fail"}]
+        ids = {incident.new_record_id("2026-11-04T00:00:00Z", probes_, n) for n in range(5)}
+        self.assertEqual(len(ids), 5)
+        self.assertEqual(incident.new_record_id("2026-11-04T00:00:00Z", probes_),
+                         incident.new_record_id("2026-11-04T00:00:00Z", probes_, 0))
+
+    def test_cmd_close_uses_the_lock_and_the_shared_check(self):
+        src, tree = _parse_tool()
+        funcs = _functions(tree)
+        called = {ast.unparse(n.func) for n in ast.walk(funcs["cmd_close"])
+                  if isinstance(n, ast.Call)}
+        self.assertTrue({"probe_lock", "_is_agent", "_name_ok", "emit"} <= called, called)
+        self.assertNotIn("print", called)
+        for bad in ("run_cmd", "run_probe", "expand_all"):
+            self.assertNotIn(bad, called)
+
+
+class TestSharedAgentCheck(unittest.TestCase):
+    def test_agent_check_is_byte_identical_to_growth_review_and_ops_intake(self):
+        """_fold(), _is_agent() and their tables are the same text as growth-review's and
+        ops-intake's, so the human-name checks cannot drift (skipped when this skill is
+        installed alone)."""
+        def block(path):
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            start = text.index("_CONFUSABLES = ")
+            tail = "    return bool(_AGENT_RE.match(folded))\n"
+            end = text.index(tail) + len(tail)
+            return text[start:end]
+        others = [os.path.join(SKILLS, "growth-review", "assets", "growth.py"),
+                  os.path.join(SKILLS, "ops-intake", "assets", "intake.py")]
+        if not all(os.path.isfile(p) for p in others):
+            self.skipTest("growth-review or ops-intake is not next to this skill")
+        mine = block(TOOL)
+        for p in others:
+            self.assertEqual(block(p), mine, p)
 
 
 if __name__ == "__main__":
