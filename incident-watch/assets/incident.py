@@ -30,12 +30,26 @@ Commands:
           runs are not on disk, the record says so and the probe prints the exact
           `NEXT: gh run list ...` command that fetches them (this tool never runs gh).
 
-Pending (not built here): the rollback command shown word for word in the record (R25;
-the seam is rollback_view() and the record's `rollback` field) and
-`incident close --by <name>` (R26; the seams are find_open_record() and the record's
-`status`, `closed_at` and `closed_by` fields). This tool never runs `build`,
-`deploy_staging`, `deploy_prod`, `rollback` or `staging_checks`: the only commands it
-reads from the recipe are the ones probe_commands() returns.
+          The opened record also shows the rollback, as data that is never run (R25):
+          its `rollback` field holds the recipe's `rollback` argv word for word (the list
+          exactly as the recipe holds it, {tokens} unfilled), a display form (shlex-joined,
+          control characters escaped) and the release-conductor command that asks the
+          owner (`release rollback`, which shows the rollback and waits for the owner's
+          yes). The probe prints `ROLLBACK: <display>` and
+          `NEXT: ask the owner to roll back: ...`; when no release is in a state that
+          command acts on (`prod_failed`, `outcome_unknown`), the NEXT line says instead
+          that `release rollback` cannot act and the owner rolls back by hand. Every line
+          the probe prints goes through emit(), which escapes control, format and
+          line-separator characters, so recipe or record text cannot forge a line. A recipe with no `rollback` field gives
+          `"available": false` and `ROLLBACK: none: ...`; the probe still succeeds.
+
+Pending (not built here): `incident close --by <name>` (R26; the seams are
+find_open_record() and the record's `status`, `closed_at` and `closed_by` fields).
+
+This tool never runs `build`, `deploy_staging`, `deploy_prod`, `rollback` or
+`staging_checks`. The only commands it runs are the ones probe_commands() returns, through
+run_probe(). rollback_view() is the one place that reads the recipe's `rollback`, and it
+only copies it into the record as data (the unit suite checks the source for this).
 
 State lives in <root>/.skill-contract/incidents/ (git-ignored by its own `*` .gitignore,
 checked before any command runs, the ops-intake and idea-validation pattern):
@@ -82,7 +96,9 @@ import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import shlex  # noqa: E402
 import tempfile  # noqa: E402
+import unicodedata  # noqa: E402
 
 SKILL_NAME = "incident-watch"
 VERSION = "0.1.0"
@@ -520,11 +536,105 @@ def ci_runs(root, d):
     return dict(out, available=True, fetched_at=fetched, runs=runs[:MAX_CI_RUNS])
 
 
-def rollback_view(root, release):
-    """The seam for R25: the recipe's rollback argv shown word for word and the
-    release-conductor command that asks the owner. Not built here; returns None. The
-    rollback is shown, never run (D1, B1)."""
-    return None
+# The release-conductor command that asks the owner to roll back (its SKILL.md step 7 and
+# references/release-protocol.md "rollback"): without --approved-by it shows the rollback
+# summary and waits; only the owner's in-session yes adds --approved-by. `release <cmd>` is
+# release-conductor's short form of `python3 "$SKILL_DIR/assets/release.py" <cmd> --root
+# <repo>`. incident-watch never runs either form (D1, B1).
+OWNER_ROLLBACK_ASK = "release rollback"
+OWNER_ROLLBACK_YES = 'release rollback --approved-by "<their name>"'
+# The release states release-conductor's rollback acts on.
+ROLLBACK_ACTS_ON = ("prod_failed", "outcome_unknown")
+
+
+def safe_text(text):
+    """`text` with every control, format and line-separator character (Unicode categories
+    Cc, Cf, Zl, Zp: newline, CR, U+0085, U+2028, U+2029, ESC, bidi overrides and the rest)
+    shown as an escape (\\xNN or \\uNNNN). The result is one line that cannot start a
+    second line, move the terminal cursor or reorder text."""
+    out = []
+    for ch in str(text):
+        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+            o = ord(ch)
+            out.append("\\x%02x" % o if o < 0x100 else "\\u%04x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def emit(line):
+    """Print one machine line through safe_text. Every line the probe prints goes through
+    here, because many of them quote recipe or record text (a refusal reason, the rollback
+    argv, a release status), and that text MUST NOT forge a `NEXT:` or `INCIDENT:` line."""
+    print(safe_text(line))
+
+
+def safe_display(argv):
+    """A one-line display form of an argv list, for a person to read: each word passed
+    through safe_text, then shlex-quoted the way release-conductor prints its own
+    `rollback:` line. It is data: nothing parses it back into a command, and the argv list
+    is the record's word-for-word form."""
+    return shlex.join(safe_text(w) for w in argv)
+
+
+def rollback_view(recipe, releases=(), problems=()):
+    """R25: the recipe's rollback shown, as data, and the release-conductor command that
+    asks the owner. Returns a dict for the record's `rollback` field:
+
+      available  True when the recipe has a well-formed `rollback` argv;
+      argv       a copy of that list, word for word ({tokens} unfilled);
+      display    safe_display(argv);
+      tokens     the {version}/{commit}/{env} tokens it holds (release-conductor fills
+                 them from the rollback target when the owner says yes);
+      ask_owner  the release-conductor command that shows the rollback and waits, the
+                 one the owner's yes adds, and whether a release is in a state it acts on.
+
+    This is the only function that reads the recipe's `rollback`. It returns data and runs
+    nothing; its result goes only into the record and the printed lines (D1, B1).
+    `problems` are release-conductor's recipe problems for the `rollback` field: a missing
+    or invalid rollback is recorded as not available, and the probe goes on."""
+    acting = [r.get("version") for r in releases if r.get("status") in ROLLBACK_ACTS_ON]
+    ask = {"command": OWNER_ROLLBACK_ASK, "on_owner_yes": OWNER_ROLLBACK_YES,
+           "acts_on": list(ROLLBACK_ACTS_ON), "releases_it_acts_on": acting,
+           "can_act": bool(acting), "run_by_incident_watch": False}
+    if not acting:
+        # release rollback refuses unless a release is in one of these states (release.py
+        # `rollback`: "rollback needs prod_failed or outcome_unknown").
+        shown = ", ".join("%s %s" % (r.get("version"), r.get("status"))
+                          for r in list(releases)[-3:])
+        ask["cannot_act_reason"] = (
+            "no release is %s (releases: %s)" % (" or ".join(ROLLBACK_ACTS_ON), shown)
+            if releases else "release-conductor has no release recorded")
+    argv = recipe.get("rollback") if isinstance(recipe, dict) else None
+    if argv is None:
+        reason = "the release recipe has no rollback field"
+    elif problems or not (isinstance(argv, list) and argv
+                          and all(isinstance(a, str) for a in argv)):
+        reason = "the release recipe's rollback field is invalid: %s" % (
+            "; ".join(problems) or "not an argv list")
+    else:
+        reason = None
+    if reason:
+        return {"available": False, "reason": reason, "argv": None, "display": None,
+                "tokens": [], "ask_owner": ask}
+    argv = list(argv)
+    tokens = sorted({m.group(1) for a in argv for m in _UNFILLED.finditer(a)})
+    return {"available": True, "field": "rollback", "argv": argv,
+            "display": safe_display(argv), "tokens": tokens, "ask_owner": ask}
+
+
+def rollback_lines(view):
+    """The lines the probe prints for a newly opened record's rollback view."""
+    if not view.get("available"):
+        return ["ROLLBACK: none: %s; the owner mitigates by hand" % safe_text(view["reason"])]
+    ask = view["ask_owner"]
+    if not ask.get("can_act"):
+        return ["ROLLBACK: %s" % view["display"],
+                "NEXT: release rollback cannot act: %s; the owner rolls back by hand with "
+                "the ROLLBACK command above" % safe_text(ask["cannot_act_reason"])]
+    return ["ROLLBACK: %s" % view["display"],
+            "NEXT: ask the owner to roll back: %s (shows the rollback and waits); "
+            "on their yes: %s" % (ask["command"], ask["on_owner_yes"])]
 
 
 def new_record_id(at, probes):
@@ -556,9 +666,9 @@ def signal_line(rid, record_rel, probes, opened_at):
             "evidence": [{"text": text, "key": "%s:open" % rid}]}
 
 
-def open_record(root, d, release, state, record):
+def open_record(root, d, release, recipe, state, record, rollback_problems=()):
     """Open one incident record for the current failing streak and write its signal.
-    Returns (id, path, signal path, ci_runs)."""
+    Returns (id, path, signal path, ci_runs, rollback view)."""
     probes = failing_streak(d, state["consecutive_failures"]) or [record]
     at = record["at"]
     rid = new_record_id(at, probes)
@@ -566,13 +676,15 @@ def open_record(root, d, release, state, record):
     os.makedirs(rd, exist_ok=True)
     path = os.path.join(rd, rid + ".json")
     ci = ci_runs(root, d)
+    releases = release_states(root, release)
+    rollback = rollback_view(recipe, releases, rollback_problems)
     rec = {"id": rid, "status": "open", "opened_at": at, "updated_at": at,
            "open_after": OPEN_AFTER, "consecutive_failures": state["consecutive_failures"],
            "probe_count": len(probes), "probes": probes,
            "last_release": last_release(root, release),
-           "releases": release_states(root, release),
+           "releases": releases,
            "ci_runs": ci,
-           "rollback": rollback_view(root, release),  # R25 fills this
+           "rollback": rollback,  # shown to the owner, never run (R25)
            "closed_at": None, "closed_by": None,  # R26 fills these
            "signal": {"path": "%s/%s" % (INCIDENTS_DIR, SIGNALS_FILE),
                       "source": SIGNAL_SOURCE, "source_id": rid}}
@@ -581,7 +693,7 @@ def open_record(root, d, release, state, record):
     sig = os.path.join(d, SIGNALS_FILE)
     with open(sig, "a", encoding="utf-8") as f:
         f.write(json.dumps(line, sort_keys=True) + "\n")
-    return rid, path, sig, ci
+    return rid, path, sig, ci, rollback
 
 
 def append_to_record(root, d, found, state, record):
@@ -602,7 +714,7 @@ def append_to_record(root, d, found, state, record):
     return rid, path, rec["probe_count"], ci
 
 
-def after_probe(root, d, release, state, record):
+def after_probe(root, d, release, recipe, state, record, rollback_problems=()):
     """R24: after OPEN_AFTER or more consecutive failed probes, open ONE incident record
     and write one `incident` signal; while a record is open, a later failure only appends
     its probe to it. Returns the lines to print after PROBE_RESULT (empty on a pass or on
@@ -615,12 +727,13 @@ def after_probe(root, d, release, state, record):
         state["open_incident"] = rid
         lines = ["INCIDENT: open %s %s probes=%d" % (rid, _rel(root, path), n)]
     else:
-        rid, path, sig, ci = open_record(root, d, release, state, record)
+        rid, path, sig, ci, rollback = open_record(root, d, release, recipe, state, record,
+                                                   rollback_problems)
         state["open_incident"] = rid
         lines = ["INCIDENT: opened %s %s" % (rid, _rel(root, path)),
                  "SIGNAL: %s kind incident" % _rel(root, sig),
                  "NEXT: intake import --format intake-signals-jsonl --source %s %s"
-                 % (SIGNAL_SOURCE, _rel(root, sig))]
+                 % (SIGNAL_SOURCE, _rel(root, sig))] + rollback_lines(rollback)
     if not ci.get("available"):
         lines.append("NEXT: %s" % ci["next"])
     return lines
@@ -641,6 +754,10 @@ def cmd_probe(args):
                           "recipe format")
         release = load_release_module(tool)
         recipe, problems = release.load_recipe(root)
+        # A missing or invalid `rollback` does not stop a probe, which never runs it: the
+        # record says the rollback is not available (R25). Any other problem refuses.
+        rollback_problems = [p for p in problems or () if p.startswith("rollback ")]
+        problems = [p for p in problems or () if not p.startswith("rollback ")]
         if recipe is None or problems:
             raise Refused("invalid recipe %s: %s" % (
                 getattr(release, "RECIPE_PATH", ".release/recipe.json"), "; ".join(problems)))
@@ -661,23 +778,24 @@ def cmd_probe(args):
             append_probe(d, record)
             write_state(d, state)
             try:
-                incident_lines = after_probe(root, d, release, state, record)
+                incident_lines = after_probe(root, d, release, recipe, state, record,
+                                             rollback_problems)
                 if incident_lines:
                     write_state(d, state)
             except OSError as e:
                 incident_lines = ["INCIDENT: error: cannot write the incident record: %s" % e]
     except Refused as e:
-        print("PROBE: refused: %s" % e)
+        emit("PROBE: refused: %s" % e)
         return 2
     except Locked:
-        print("STOP: locked: another incident probe holds %s/%s" % (INCIDENTS_DIR, LOCK_FILE))
+        emit("STOP: locked: another incident probe holds %s/%s" % (INCIDENTS_DIR, LOCK_FILE))
         return 3
     for r in results:
-        print("PROBE: %s %s rc=%s" % (r["name"], r["result"], r["rc"]))
-    print("PROBE_RESULT: %s commands=%d failed=%d consecutive_failures=%d"
+        emit("PROBE: %s %s rc=%s" % (r["name"], r["result"], r["rc"]))
+    emit("PROBE_RESULT: %s commands=%d failed=%d consecutive_failures=%d"
           % (word, len(results), len(failed), state["consecutive_failures"]))
     for ln in incident_lines:
-        print(ln)
+        emit(ln)
     return 3 if failed else 0
 
 

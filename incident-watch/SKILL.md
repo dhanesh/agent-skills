@@ -8,9 +8,10 @@ description: >-
   shell, a timeout each), records each result in a git-ignored state directory and prints
   one `PROBE:` line per command and a `PROBE_RESULT:` summary. Any other command is refused
   with exit 2 and nothing runs. After 2 or more consecutive failed probes it opens one
-  incident record and writes one `incident` signal line for ops-intake. Partly built: the
-  rollback command shown word for word and `incident close` are not built yet. It never runs a rollback or deploy: the owner
-  mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
+  incident record and writes one `incident` signal line for ops-intake. The record shows
+  the recipe's rollback argv word for word and the release-conductor command that asks
+  the owner. Partly built: `incident close` is not built yet. It never runs a rollback or
+  deploy: the owner mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
   release-conductor).
 license: MIT
 compatibility: Requires a POSIX system (macOS or Linux), Python 3.10+ (`python3`, `python`, `py -3` or `$SKILL_PYTHON`), stdlib only, offline, plus git. It reads the release recipe with the release-conductor skill, which has to be installed beside it.
@@ -32,8 +33,9 @@ read-only: `health`, `version_probe` and each `prod_smoke` entry (spec constrain
 records each result and prints one line per command. It refuses, with exit 2 and before
 anything runs, any requested command outside the three lists (R23). After 2 or more
 consecutive failed probes it opens one incident record and writes one `incident` line to
-the signals file that ops-intake imports (R24). Not built yet: the record's rollback
-command shown word for word (R25), and `incident close --by <name>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
+the signals file that ops-intake imports (R24). The record shows the recipe's rollback
+argv word for word and the release-conductor command that asks the owner; incident-watch
+never runs either (R25). Not built yet: `incident close --by <name>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
 R26, decision D1) in the agent-skills repository.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
@@ -104,13 +106,27 @@ is `ops-intake`.
    output tails, the last release record, the release statuses and the recent
    default-branch CI runs. When the CI runs are not on disk, the record says so and the
    probe prints `NEXT: gh run list ... > .skill-contract/incidents/ci-runs.json`; give
-   that line to the owner as printed. `references/overview.md` has the record fields
+   that line to the owner as printed.
+   The probe that opens the record also prints `ROLLBACK: <the recipe's rollback argv>`
+   and `NEXT: ask the owner to roll back: release rollback (shows the rollback and
+   waits); on their yes: release rollback --approved-by "<their name>"`. That command
+   acts only on a release in `prod_failed` or `outcome_unknown`; when no release is in
+   one of those states, the second line is instead
+   `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the
+   ROLLBACK command above`. Every printed line escapes control characters, so recipe
+   text cannot add a line. The record's
+   `rollback` field holds the same argv as a list, word for word, with any `{version}`
+   or `{commit}` unfilled (release-conductor fills them from the rollback target). A
+   recipe with no valid `rollback` prints `ROLLBACK: none: <reason>` instead. Give both
+   lines to the owner as printed. They are data for the owner's decision, not steps for
+   you. `references/overview.md` has the record fields
    and the ops-intake config the import needs.
 4. **Report a failure without acting on it.** For a failed probe, name each failed command
    and the consecutive-failure count, and the record path when one is open. The output
    tails are in `<repo>/.skill-contract/incidents/probes.jsonl` and in the record; quote
    from them only what the owner needs. Tell the owner that mitigation is theirs, through
-   release-conductor.
+   release-conductor: the `release rollback` command shows the rollback and waits for
+   their yes.
 5. **Verify the report.** Check it against the success criteria below, then re-check.
 
 You MUST NOT run a rollback, a deploy or any other recipe command yourself, because
@@ -118,22 +134,22 @@ rollback and production deploy are never-grantable human gates (spec decision D1
 constraint B1), and a wrong command against production does real harm.
 
 You MUST NOT say that an incident record was opened or that a signal was written unless
-the probe printed the `INCIDENT: opened` line, and you MUST NOT say that the record shows
-the rollback command or that `incident close` exists, because those parts are not built
-yet and a false claim hides an incident the owner has to handle.
+the probe printed the `INCIDENT: opened` line, and you MUST NOT say that `incident close`
+exists, because that part is not built yet and a false claim hides an incident the owner
+has to handle.
 
 ## Deliverable
 
 A probe report: each `PROBE:` line as a table row (command, result, exit code), the
 `PROBE_RESULT:` line, the consecutive-failure count, any `INCIDENT:`, `SIGNAL:` and
-`NEXT:` lines as printed and, for a failure, the owner's next step (mitigate through
+`NEXT:` lines as printed, any `ROLLBACK:` line as printed and, for a failure, the owner's next step (mitigate through
 release-conductor).
 
 ## Success criteria
 
 - The report lists every command the probe ran, with its result.
 - A failure is reported as a failure. A record or signal is claimed only from an
-  `INCIDENT: opened` line, and no rollback is claimed.
+  `INCIDENT: opened` line, and no rollback is claimed: the rollback is shown, never run.
 - No command outside `health`, `version_probe` and `prod_smoke` was run.
 
 The outcome eval (`eval/run_eval.py`) runs the probe on a fixture recipe from
