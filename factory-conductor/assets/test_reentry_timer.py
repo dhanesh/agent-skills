@@ -73,6 +73,20 @@ class TimerTests(unittest.TestCase):
         self.assertTrue(line.startswith("*/10 * * * * "))
         self.assertEqual(shlex.split(line.split(" # ")[0])[5:], ARGV)
 
+    def test_cron_writes_an_hour_or_more_in_the_hour_field(self):
+        # cron's minute field stops at 59, so `*/1440` would never mean once a day
+        for minutes, fields in ((15, "*/15 * * * *"), (59, "*/59 * * * *"),
+                                (60, "0 * * * *"), (120, "0 */2 * * *"),
+                                (720, "0 */12 * * *"), (1440, "0 0 * * *")):
+            with self.subTest(minutes=minutes):
+                self.assertEqual(T.cron_schedule(minutes), fields)
+                (_, line), = T.render("cron", RID, ARGV, minutes).items()
+                self.assertTrue(line.startswith(fields + " "))
+        for minutes in (0, 90, 300, 1500):  # not an even interval in cron
+            with self.subTest(minutes=minutes):
+                with self.assertRaises(OSError):
+                    T.render("cron", RID, ARGV, minutes)
+
     def test_install_then_uninstall_leaves_nothing(self):
         for kind in ("launchd", "systemd", "cron"):
             with self.subTest(kind=kind):
