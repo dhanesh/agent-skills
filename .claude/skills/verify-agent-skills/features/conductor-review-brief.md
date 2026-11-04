@@ -17,7 +17,9 @@ no reviewer id. A fail sends the task back for repair.
 ## How to reach it
 
 - The brief: the `text` block under "## The reviewer brief" in `factory-conductor/SKILL.md`.
-  No conductor command prints it today; the conducting session fills it in.
+  The conducting session fills it in, or prints it filled from a plan with
+  `python3 factory-conductor/assets/conductor.py brief reviewer <task> --plan <envelope> --base <ref> [--head <ref>] --root <repo>`.
+  That command needs no run and writes no file. It exits 2 for an unknown task.
 - The verdict: `python3 factory-conductor/assets/conductor.py review <task> --verdict pass|fail [--detail <text>] [--reviewer <id>] --root <run root>`.
 
 ## Drive it
