@@ -119,12 +119,21 @@ One JSON object per line:
  "evidence": [{"text": "p99 up", "key": "a"}]}
 ```
 
-- `source` must equal `--source`. `kind` is `release`, `ci` or `issue`. `severity` is 1 to 4.
+- `source` must equal `--source`. `kind` is `release`, `ci`, `issue` or `incident`. `severity`
+  is 1 to 4.
 - `evidence` is optional. A missing `key` becomes a hash of the text.
 - `trust` is always `low`. A `trust` field in the record is ignored.
 - Times: RFC 3339 with `Z`, `+HH:MM` or `+HHMM` (Jira's form), with or without fractions.
 - `kind` cannot be `feedback`. Only `feedback-jsonl` redacts customer text, so feedback comes
   in only through that format.
+- Kind `incident` was added on 2026-11-04 (an added value only, spec decision D8). incident-watch
+  writes one such line to `.skill-contract/incidents/signals.jsonl` when it opens an incident
+  record. Its `source` is `incident-watch`, its `source_id` is the record id and its severity
+  is 4. To read it, add the source `incident-watch` with the format `intake-signals-jsonl` to
+  the config. Then run
+  `intake import --format intake-signals-jsonl --source incident-watch .skill-contract/incidents/signals.jsonl`.
+  A second import of the same file adds no item and no count, because the item key and the
+  evidence key stay the same.
 
 ### feedback-jsonl
 
@@ -288,7 +297,8 @@ The owner writes it and registers it with `register-policy --by <name>` before a
 ```
 
 - All four keys are required. Any other key is refused.
-- `kinds` is a non-empty list of distinct kinds: `release`, `ci`, `issue`, `feedback`.
+- `kinds` is a non-empty list of distinct kinds: `release`, `ci`, `issue`, `feedback`,
+  `incident`.
 - `min_rank` is a number of 0 or more. An item matches only when its rank is at least this.
 - `formats` is a list of distinct source formats (`git-rev-list` is not one). It can be empty.
 - `max_picks_per_day` is a whole number from 1 to 100.

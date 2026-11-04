@@ -7,9 +7,9 @@ description: >-
   only its read-only `health`, `version_probe` and `prod_smoke` commands (argv lists, no
   shell, a timeout each), records each result in a git-ignored state directory and prints
   one `PROBE:` line per command and a `PROBE_RESULT:` summary. Any other command is refused
-  with exit 2 and nothing runs. Partly built: opening an incident record after 2 or more consecutive failed probes, the
-  `incident` signal for ops-intake, the rollback command shown word for word and
-  `incident close` are not built yet. It never runs a rollback or deploy: the owner
+  with exit 2 and nothing runs. After 2 or more consecutive failed probes it opens one
+  incident record and writes one `incident` signal line for ops-intake. Partly built: the
+  rollback command shown word for word and `incident close` are not built yet. It never runs a rollback or deploy: the owner
   mitigates. Not for a post-mortem (use bug-autopsy), not for a deploy or rollback (use
   release-conductor).
 license: MIT
@@ -30,12 +30,10 @@ read-only: `health`, `version_probe` and each `prod_smoke` entry (spec constrain
 
 **Status: partly built.** `incident probe` ships (R22): it runs the three read-only lists,
 records each result and prints one line per command. It refuses, with exit 2 and before
-anything runs, any requested command outside the three lists (R23). Not built yet: opening
-one incident record and writing
-an `incident` signal into ops-intake after 2 or more consecutive failed probes (R24), the
-record's rollback command shown word for word (R25), and `incident close --by <name>`
-(R26). The probe already keeps the consecutive-failure count, but today nothing opens a
-record from it. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
+anything runs, any requested command outside the three lists (R23). After 2 or more
+consecutive failed probes it opens one incident record and writes one `incident` line to
+the signals file that ops-intake imports (R24). Not built yet: the record's rollback
+command shown word for word (R25), and `incident close --by <name>` (R26). The design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R22 to
 R26, decision D1) in the agent-skills repository.
 
 **Locating this skill's helpers (do this first).** The steps below run bundled
@@ -97,30 +95,45 @@ is `ops-intake`.
    with the exit code. The last line is
    `PROBE_RESULT: <pass|fail> commands=<n> failed=<n> consecutive_failures=<n>`. Exit 0 is
    a pass; exit 3 is a failed probe (or another probe holds the lock).
-3. **Report a failure without acting on it.** For a failed probe, name each failed command
-   and the consecutive-failure count. The output tails are in
-   `<repo>/.skill-contract/incidents/probes.jsonl`; quote from them only what the owner
-   needs. Tell the owner that mitigation is theirs, through release-conductor.
-4. **Verify the report.** Check it against the success criteria below, then re-check.
+3. **Read the INCIDENT: lines.** After 2 or more consecutive failed probes the probe
+   prints `INCIDENT: opened <id> <record path>`, `SIGNAL: <signals path> kind incident`
+   and `NEXT: intake import --format intake-signals-jsonl --source incident-watch <signals path>`.
+   While that record is open, a later failure prints `INCIDENT: open <id> <record path>
+   probes=<n>` and opens no second record. The record
+   (`.skill-contract/incidents/records/<id>.json`) holds the failed probes with their
+   output tails, the last release record, the release statuses and the recent
+   default-branch CI runs. When the CI runs are not on disk, the record says so and the
+   probe prints `NEXT: gh run list ... > .skill-contract/incidents/ci-runs.json`; give
+   that line to the owner as printed. `references/overview.md` has the record fields
+   and the ops-intake config the import needs.
+4. **Report a failure without acting on it.** For a failed probe, name each failed command
+   and the consecutive-failure count, and the record path when one is open. The output
+   tails are in `<repo>/.skill-contract/incidents/probes.jsonl` and in the record; quote
+   from them only what the owner needs. Tell the owner that mitigation is theirs, through
+   release-conductor.
+5. **Verify the report.** Check it against the success criteria below, then re-check.
 
 You MUST NOT run a rollback, a deploy or any other recipe command yourself, because
 rollback and production deploy are never-grantable human gates (spec decision D1 and
 constraint B1), and a wrong command against production does real harm.
 
-You MUST NOT say that an incident record was opened, that a signal was written or that
-`incident close` exists, because those parts are not built yet and a false claim hides an
-incident the owner has to handle.
+You MUST NOT say that an incident record was opened or that a signal was written unless
+the probe printed the `INCIDENT: opened` line, and you MUST NOT say that the record shows
+the rollback command or that `incident close` exists, because those parts are not built
+yet and a false claim hides an incident the owner has to handle.
 
 ## Deliverable
 
 A probe report: each `PROBE:` line as a table row (command, result, exit code), the
-`PROBE_RESULT:` line, the consecutive-failure count and, for a failure, the owner's next
-step (mitigate through release-conductor).
+`PROBE_RESULT:` line, the consecutive-failure count, any `INCIDENT:`, `SIGNAL:` and
+`NEXT:` lines as printed and, for a failure, the owner's next step (mitigate through
+release-conductor).
 
 ## Success criteria
 
 - The report lists every command the probe ran, with its result.
-- A failure is reported as a failure; no record, signal or rollback is claimed.
+- A failure is reported as a failure. A record or signal is claimed only from an
+  `INCIDENT: opened` line, and no rollback is claimed.
 - No command outside `health`, `version_probe` and `prod_smoke` was run.
 
 The outcome eval (`eval/run_eval.py`) runs the probe on a fixture recipe from

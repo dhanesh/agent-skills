@@ -53,6 +53,8 @@ An arrow from A to B means A sends work or data to B. `==>` contract envelope, `
 - Jira, Linear or any other source, through one simple JSON-lines format that you or the agent
   write (`intake-signals-jsonl`). These items are marked lower trust.
   `references/conversion-recipes.md` has a short recipe for Jira and for Linear.
+- Production incidents from incident-watch. Its signals file holds one `intake-signals-jsonl`
+  line of kind `incident` for each incident record that it opens.
 - Support messages, app reviews and feedback-form answers, through `feedback-jsonl`. You
   export them, and you or the agent transform the export to one line per message, with a
   topic for each. Messages with the same topic become one item with a count. These items are

@@ -101,6 +101,7 @@ Read each command's output lines, not only its exit code.
    | CI jobs | the `NEXT: gh run view <id> --json jobs …` line sync prints | `gh-run-jobs-json --run <id>` |
    | Releases | release-conductor's `release status` | `release-status` (source `release`) |
    | Jira, Linear, anything else | your own transform to one signal per line | `intake-signals-jsonl` |
+   | Production incidents | incident-watch's `.skill-contract/incidents/signals.jsonl` (kind `incident`) | `intake-signals-jsonl` (source `incident-watch`) |
    | Support, app reviews, feedback forms | your transform of the human's export, one message per line (see "Support and customer feedback") | `feedback-jsonl` |
 
    Release-result envelopes need no import: sync reads them from `.skill-contract/envelopes/`
