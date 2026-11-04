@@ -13,13 +13,16 @@ values: `covered`, `covered, with limits`, `partly`, `missing` and
 themselves. `make gate` runs it first and stops when it fails; `make gate-selftest` runs
 it alone.
 
-Today no gate reads the stage table. A row with a status outside the rubric still passes
-`make gate`. This entry covers the table and the self-test suite, so a change that adds a
-check for the table has a feature to prove.
+`scripts/gates/factory_status.py` reads the stage table in `make gate` (`make factory-status`
+alone). It fails a status outside the rubric, a row that is not `covered` with no "Limits:"
+text, a limit item without exactly one tag (`[decision]`, `[trust]` or `[open]`; items are
+separated by `;`), and a row whose items are all `[decision]` but whose status is not
+`covered`. This entry covers the table, that check and the self-test suite.
 
 ## How to reach it
 
 - The table: `README.md`, under `### Which skills cover which stage`.
+- The table check: `make factory-status`, or `python3 scripts/gates/factory_status.py README.md`.
 - The self-tests: `make gate-selftest`, or `sh scripts/gates/test_gates.sh`, from the repo root.
 - The full gate: `make gate` (it prints `gate self-tests passed: <n>` near the start).
 
@@ -27,6 +30,7 @@ check for the table has a feature to prove.
 
 ```sh
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name fs-selftest -- make gate-selftest
+python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name fs-check -- python3 scripts/gates/factory_status.py README.md
 python3 "$SKILL/scripts/drive.py" capture --instance "$INSTANCE" --name fs-table -- python3 -c '
 import sys
 lines = open("README.md", encoding="utf-8").read().splitlines()
@@ -41,14 +45,16 @@ for ln in lines[i + 2:]:
 
 - `fs-selftest`: exit 0. Every stdout line starts with `PASS:`; there is no `FAIL:` line.
   It takes a few seconds.
+- `fs-check`: exit 0. The last line is `FACTORY_STATUS_RESULT: PASS (14 rows)`, or the
+  current row count. There is no `FAIL:` line.
 - `fs-table`: exit 0. One `STAGE: <stage> | <status>` line per row, 14 rows at the time
   of writing, from `Idea validation` to `Governance`. Each status is one of the five
   rubric values.
 
 ## Proof
 
-The self-test capture with no `FAIL:` line and exit 0, and the table capture with every
-status inside the rubric. Neither command writes a tracked file: `test_gates.sh` works in
+The self-test capture with no `FAIL:` line and exit 0, the check capture with a `PASS`
+result line, and the table capture with every status inside the rubric. No command writes a tracked file: `test_gates.sh` works in
 a `mktemp -d` directory that it removes on exit. `git status --short` shows no change
 outside `.verify-run/`.
 
