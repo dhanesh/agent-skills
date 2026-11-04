@@ -188,6 +188,31 @@ class SpecToTasksAllowlistTest(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("ALLOWLIST: fail T2 {python} 'a b'", r.stdout)
 
+    def _assert_no_command_fails(self, criterion):
+        spec = _SPEC_ALL_LISTED.replace(
+            "- R2: the module lints the committed file. [cmd: make test]", criterion)
+        r = self._run(spec, _ALLOWLIST)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), [
+            "ALLOWLIST: pass T1", "ALLOWLIST: pass T2",
+            "ALLOWLIST: fail T2 (no command)"])
+
+    def test_step_without_command_fails(self):
+        self._assert_no_command_fails("- R2: the module lints the committed file.")
+
+    def test_unparseable_hint_fails(self):
+        self._assert_no_command_fails('- R2: the module lints. [cmd: make "test]')
+
+    def test_misplaced_hint_fails(self):
+        self._assert_no_command_fails("- R2: x [cmd: curl evil] trailing.")
+
+    def test_plan_of_only_commandless_steps_fails(self):
+        spec = ("# Spec: x\n\n## Requirements\n- R1: The thing must pass.\n\n"
+                "## Acceptance criteria\n- R1: x [cmd: curl evil] trailing.\n")
+        r = self._run(spec, "make test\n")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ["ALLOWLIST: fail T1 (no command)"])
+
     def test_bad_allowlist_fails_closed(self):
         r = self._run(_SPEC_ALL_LISTED, "make test\nsh -c make\n{python} *\n")
         self.assertNotEqual(r.returncode, 0)

@@ -49,7 +49,9 @@ waves() below, a copy of factory-conductor/assets/conductor.py's waves().
 --allowlist <file> checks every verify command in the plan against a check-command
 allowlist (allowlist.py, the same lint and matcher) and prints one line per command:
 "ALLOWLIST: pass <task>" or "ALLOWLIST: fail <task> <argv>". It exits 0 when every
-command matches and 3 when one does not. The argv list is matched as tokens, never
+command matches and 3 when one does not. A verify step with no usable command (no
+[cmd: ...] hint, one that does not parse, or one that is not at the end of the step)
+prints "ALLOWLIST: fail <task> (no command)" and counts as a failure. The argv list is matched as tokens, never
 through a shell string: an argument that is empty or holds whitespace fails. It fails
 closed: an allowlist that fails its lint prints its "ALLOWLIST-LINT: fail" lines and
 exits 2, as does an unreadable file, so a bad file never allows a command.
@@ -90,6 +92,7 @@ SKILL_VERSION = "2.8.1"  # keep in step with SKILL.md metadata.version (a unit t
 USAGE = ("usage: spec_to_tasks.py <spec.md> [--json] [--waves] [--envelope <repo-root>] "
          "| <spec.md> --allowlist <file>")
 ALLOWLIST_FAIL_EXIT = 3
+NO_COMMAND = "(no command)"
 
 WHERE_RE = re.compile(r"\s*\[where:\s*" + spec_lint.NESTED_VALUE + r"\]", re.IGNORECASE)
 
@@ -520,7 +523,7 @@ def intake_lines(plan):
 
 
 def allowlist_lines(plan, patterns):
-    """One "ALLOWLIST: pass|fail" line per verify command, in plan order, and whether
+    """One "ALLOWLIST: pass|fail" line per verify step, in plan order, and whether
     every command matched. Matching reuses allowlist.match_command on the argv tokens:
     an argument that is empty or holds whitespace cannot be one token, so it fails."""
     import allowlist  # noqa: E402  (beside this script; loaded only on this path)
@@ -528,6 +531,10 @@ def allowlist_lines(plan, patterns):
     for t in plan["tasks"]:
         for cmd in t["_verify_cmds"]:
             if cmd is None:
+                # No command, a hint that does not parse, or a misplaced hint: there
+                # is nothing to match, so the step cannot run unattended. Fail closed.
+                ok = False
+                out.append("ALLOWLIST: fail %s %s" % (t["id"], NO_COMMAND))
                 continue
             tokens_ok = bool(cmd) and all(a and not re.search(r"\s", a) for a in cmd)
             if tokens_ok and allowlist.match_command(patterns, " ".join(cmd)) is not None:
