@@ -660,4 +660,28 @@ py_case "a command glued to an assignment (X=python3 -c) fails without the rule"
 py_case "a command opening a single-quoted string (sh -c 'python3 x.py') fails without the rule" FAIL "$(mkpy squote "sh -c 'python3 x.py'" '')"
 py_case "a glued command with the rule passes" PASS "$(mkpy pipe-rule "x|python3 -c 'print(1)'" rule)"
 
+
+# ── factory-status: the README stage table stays inside its status rubric ────
+# Each case is a temp copy of the committed README, broken in one way, so the
+# fixtures follow the real table instead of a hand-made one going stale.
+README_SRC="$GATES/../../README.md"
+fs_case() {  # $1 label, $2 expected exit, $3 file, $4 text the output must hold (optional)
+  st=0; out="$(python3 -I "$GATES/factory_status.py" "$3" 2>&1)" || st=$?
+  if [ "$st" -eq "$2" ] && { [ -z "${4:-}" ] || printf '%s\n' "$out" | grep -qF -- "$4"; }; then
+    ok "factory-status: $1"
+  else
+    bad "factory-status: $1 (expected exit $2${4:+ and output naming '$4'}; got exit $st)"
+  fi
+}
+fs_case "the committed README passes" 0 "$README_SRC"
+f="$WORK/fs-mostly.md"
+awk '!d && /^\| Idea validation \|/ { sub(/\| covered, with limits \|$/, "| mostly |"); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "a status outside the rubric (mostly) fails and names the row" 1 "$f" "FAIL: Idea validation"
+f="$WORK/fs-nolimits.md"
+awk '!d && /^\| .* \| partly \|$/ { sub(/Limits:/, "Gaps:"); d=1 } { print }' "$README_SRC" > "$f"
+fs_case "a partly row with no Limits: text fails" 1 "$f" "has no 'Limits:' text"
+f="$WORK/fs-notable.md"
+sed 's/^| Stage | Skills | Status |$/| Stage | Skill | State |/' "$README_SRC" > "$f"
+fs_case "a README with no stage table fails closed" 1 "$f" "not found"
+
 exit $rc
