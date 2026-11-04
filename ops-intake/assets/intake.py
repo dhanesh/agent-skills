@@ -25,7 +25,7 @@ import adapters
 import contract_check as CC  # the vendored skill-contract checker, same dir
 
 SKILL_NAME = "ops-intake"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 _KIND_BASE = "https://github.com/dhanesh/agent-skills/skill-contract/"
 INTAKE_ITEM_KIND = _KIND_BASE + "intake-item/v1"
 PLAN_KIND = _KIND_BASE + "task-plan/v1"
@@ -372,6 +372,8 @@ def _valid_item(it):
             and all(isinstance(k, str) for k in it.get("seen_keys", []))
             and isinstance(it.get("legacy_keys", []), list)
             and all(isinstance(k, str) for k in it.get("legacy_keys", []))
+            and isinstance(it.get("formats", []), list)
+            and all(isinstance(f, str) for f in it.get("formats", []))
             and all(it.get(k) is None or isinstance(it[k], str) for k in _ITEM_OPTIONAL_STRS))
 
 
@@ -685,6 +687,8 @@ def cmd_link(a):
             # item has with no key behind it (an item from before seen keys) (L3).
             _merge_keys(keep, drop)
             keep.setdefault("evidence", []).extend(drop.get("evidence", []))
+            for fmt in drop.get("formats", []):
+                _note_format(keep, fmt)  # R8: a low-trust kept item needs every format named
             keep.setdefault("linked", []).append(
                 {"id": drop["id"], "source": drop["source"], "source_id": drop["source_id"]})
             # The dropped item's own links come along, so every source merged into the
@@ -916,8 +920,13 @@ def registered_policy(root):
 
 
 def _format_allowed(item, policy):
-    """Seam for R8: whether the item's format may match. R7 does not filter by format."""
-    return True
+    """R8 (S3): a low-trust item matches only when the policy names every format it was
+    imported from. An item imported before formats were recorded has none, and fails
+    closed: no policy names its format. A normal-trust item is not filtered by format."""
+    if item.get("trust") != "low":
+        return True
+    fmts = item.get("formats") or []
+    return bool(fmts) and all(f in policy["formats"] for f in fmts)
 
 
 def policy_matches(item, policy):
@@ -1104,12 +1113,20 @@ def _note_recur_seen(item, sig):
         item["recur_seen"] = max(item.get("recur_seen") or "", sig["last_seen"])
 
 
-def apply_signals(queue, signals, now):
+def _note_format(item, fmt):
+    """Record the import format on the item (R8). An added field: the sorted, distinct
+    formats the item's signals came from."""
+    if fmt and fmt not in item.setdefault("formats", []):
+        item["formats"] = sorted(item["formats"] + [fmt])
+
+
+def apply_signals(queue, signals, now, fmt=None):
     """Merge signals into the queue (spec 1.3, 1.5). A dismissed or resolved item recurs
     when a signal's last_seen is later than its closed_at. Closing an issue upstream and
     a signal that cannot say when (release-status) never count as recurrence. A source id
     that `link` dropped goes to the kept item (queue.aliases), and an issue already closed
-    when intake first sees it makes no item (R27)."""
+    when intake first sees it makes no item (R27). `fmt` is the import format, recorded on
+    the item (R8)."""
     for sig in signals:
         iid = item_id(sig["source"], sig["source_id"])
         iid = queue.aliases.get(iid, iid)  # a linked item's signals go to the kept item
@@ -1131,6 +1148,7 @@ def apply_signals(queue, signals, now):
             it["seen_keys"] = sorted(ns_key(sig["source"], k) for k in seen)
             del it["evidence"][:-EVIDENCE_CAP]
             _note_recur_seen(it, sig)
+            _note_format(it, fmt)
             continue
         recurs = (it["state"] in ("dismissed", "resolved") and sig.get("recurrence", True)
                   and not sig.get("closed") and it.get("closed_at")
@@ -1150,6 +1168,7 @@ def apply_signals(queue, signals, now):
             it["closed"] = False
         if sig["trust"] == "low":
             it["trust"] = "low"
+        _note_format(it, fmt)
         if recurs:
             transition(it, "new", now=now)
 
@@ -1252,7 +1271,7 @@ def cmd_import(a):
             for run in ctx["runs_out"].values():
                 run["source"] = a.source  # the jobs NEXT line names this source (R18)
             q.runs.update(ctx["runs_out"])
-            apply_signals(q, signals, now)
+            apply_signals(q, signals, now, fmt)
             q.log("import", source=a.source, format=fmt, ok=len(signals), problems=len(problems))
             q.save()
     except Locked:
@@ -1587,7 +1606,7 @@ def cmd_sync(a):
                 for e in envs:
                     if e["kind"] == RELEASE_KIND:
                         sigs, probs = adapters.ADAPTERS["release-envelope"](e["raw"], ctx)
-                        apply_signals(q, sigs, now)
+                        apply_signals(q, sigs, now, "release-envelope")
                         problems.extend(probs)
             wanted, fetch = _close_loop(q, envs, now)
             problems.extend(_prune_runs(q, now))

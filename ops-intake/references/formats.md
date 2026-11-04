@@ -273,8 +273,12 @@ The owner writes it and registers it with `register-policy --by <name>` before a
   word "agent" (`agent:claude`) is refused.
 - Any edit to the file changes its sha256, a whitespace edit too. `autopick` then stops with
   `STOP: policy-changed` (exit 2) until the owner registers again.
-- In this version `autopick` lists the `new` items whose kind and rank are inside the policy.
-  It does not use `formats` or `max_picks_per_day` yet, and it picks nothing.
+- A low-trust item (`intake-signals-jsonl`, `feedback-jsonl`) matches only when `formats`
+  names every format the item was imported from. Each item records these formats in its
+  `formats` field. An item imported before this field existed has no recorded format, so it
+  never matches. The format does not filter a normal-trust item.
+- In this version `autopick` lists the `new` items whose kind, rank and format are inside the
+  policy. It does not use `max_picks_per_day` yet, and it picks nothing.
 
 ## Ranking
 

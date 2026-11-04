@@ -120,6 +120,9 @@ only when its source sees it again after the dismissal.
 
 ## Changes
 
+- **0.3.1.** The pick policy filters by format. A low-trust item matches only when the policy
+  names every format it was imported from. Each item now records its import formats. An item
+  imported before this change has none, so it never matches.
 - **0.3.0.** A pick policy. The owner writes `.intake/pick-policy.json` and registers it with
   `intake register-policy --by <name>`. A registration pins the file's sha256. `intake autopick`
   stops (exit 2) before a registration and after any edit, until the owner registers again.
