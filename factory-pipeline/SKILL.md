@@ -8,8 +8,9 @@ description: >-
   `STAGE: <name> <result>` line per stage. It calls each installed sibling skill's own tool
   (ops-intake, growth-review, spec-first-planning) with no shell, and reports a missing one
   as unavailable. With no live pipeline grant it runs no stage, prints `STOP: no-grant` and
-  exits 2. Partly built: idea follow-up, plan, build, release stage and digest report
-  `pending-R<n>`, and the lock, the caps and the schedule are not built yet.
+  exits 2. One tick at a time: a tick that finds the repo's pipeline lock held exits 3 with
+  `STOP: locked`. Partly built: idea follow-up, plan, build, release stage and digest report
+  `pending-R<n>`, and the caps and the schedule are not built yet.
   Every human gate stays with the owner. Not for running one approved plan to a PR (use
   factory-conductor), not for writing a plan (use spec-first-planning).
 license: MIT
@@ -30,12 +31,14 @@ mechanical part of each stage. It stops at the human gates: merge, production de
 rollback, spend, external messages, the release grant and idea decisions stay with the
 owner.
 
-**Status: partly built.** `pipeline tick` ships. Before any stage, it checks the standing
+**Status: partly built.** `pipeline tick` ships. First it takes the repo's pipeline lock
+(R14, shipped), so only one tick runs at a time: a tick that finds the lock held prints
+`STOP: locked: ...`, changes nothing and exits 3. Before any stage, it checks the standing
 pipeline grant (R13, shipped): with no live grant it runs no stage, prints
 `STOP: no-grant reason=<reason>` and exits 2. It runs the sweep, growth review and autopick
 stages for real, and runs derive grant for each plan that the plan stage hands on. The plan
 stage is not built yet, so it hands on no plan today. The idea follow-up, plan, build,
-release stage and digest stages report `pending-R<n>`. The one-tick lock, the caps and
+release stage and digest stages report `pending-R<n>`. The caps and
 `pipeline schedule install` are not built yet. The
 design is `docs/factory/2026-11-04-autonomous-factory-spec.md` (R12 to R21) in the
 agent-skills repository.
@@ -65,7 +68,11 @@ under a `Bash(...)` allowlist, skip this lookup and use the interpreter that the
 none passes, follow this skill's own fallback for running without Python where it gives one;
 otherwise stop and tell the user that this skill needs Python 3.10 or newer.
 
-The command is `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. Before any
+The command is `python3 "$SKILL_DIR/assets/pipeline.py" --root <repo> tick`. The tick first
+takes a non-blocking flock on `<repo>/.skill-contract/pipeline/.lock` and holds it until it
+exits; the kernel drops it when the tick dies, so a killed tick never blocks the next one.
+It proves that directory is git-ignored before it writes the lock file, and refuses with
+`STOP: state-dir reason=<reason>` and exit 2 when it cannot. Before any
 stage, the tick runs spec-first-planning's `contract_check.py check-pipeline-grant`. It goes
 on only when that answers VALID for the newest pipeline grant that no revision supersedes,
 and it prints `TICK: grant <id> expires_at <time>`. Derive grant then uses that grant id and
@@ -101,7 +108,9 @@ skill gives `STAGE: <name> unavailable`, and the tick goes on.
    prints `STOP: no-grant reason=<reason>` and exits 2, no stage ran: report the reason
    (`none`, `revoked`, `expired`, `stale`, `tracked` and so on), and tell the owner that a
    new pipeline grant is theirs to accept (`write_grant.py --pipeline` in
-   spec-first-planning).
+   spec-first-planning). When it prints `STOP: locked: ...` and exits 3, another tick is
+   still running in this repo: report that, and do not delete the lock file or start the
+   tick again in a loop. The running tick releases the lock when it exits.
 2. **Read every STAGE: line.** There are nine, in order. A result other than `ok` or `idle`
    needs a sentence in your report: `attention` (the tool exited 3), `refused` (exit 2, for
    example no intake config or no registered growth plan), `failed`, `timeout`,
@@ -131,5 +140,5 @@ each result that is not `ok` or `idle`, and the owner's next step for each `STOP
 - No stage that says `pending-R<n>` is called done or run.
 
 The outcome eval (`eval/run_eval.py`) runs the tick on stub skills from
-`assets/pipeline_testkit.py` and grades the nine lines; the unit suite is
-`assets/test_pipeline_tick.py`.
+`assets/pipeline_testkit.py` and grades the nine lines; the unit suites are
+`assets/test_pipeline_tick.py` and `assets/test_pipeline_lock.py`.

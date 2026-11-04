@@ -10,6 +10,11 @@ each stage. Each stage calls the tool of the skill that owns it. The tick uses n
 
 What runs today:
 
+- Only one tick runs at a time in one repository (R14). The tick first takes a
+  non-blocking lock on `.skill-contract/pipeline/.lock`. That directory is git-ignored.
+  When another tick holds the lock, the tick prints `STOP: locked: ...`, changes nothing
+  and exits 3. The lock stays held for the whole tick. When the tick stops or is killed,
+  the system releases the lock.
 - Before any stage, the tick checks the standing pipeline grant with spec-first-planning's
   `contract_check.py check-pipeline-grant` (R13). With no live grant (none, revoked,
   expired, stale or tracked by git), it runs no stage, prints
@@ -22,8 +27,8 @@ What runs today:
   that the plan stage hands on. The plan stage is not built yet, so it hands on no plan.
 
 What is still pending: the idea follow-up (R20), plan (R17), build (R18), release stage
-(R19) and digest (R21) stages, which print `pending-R<n>`. The one-tick lock (R14), the
-caps (R15) and `pipeline schedule install` (R16) are also pending. A sibling skill that is not installed gives `unavailable`. The tick
+(R19) and digest (R21) stages, which print `pending-R<n>`. The caps (R15) and
+`pipeline schedule install` (R16) are also pending. A sibling skill that is not installed gives `unavailable`. The tick
 removes no human gate.
 
 The design is in
@@ -70,6 +75,7 @@ finds each skill are in [`references/overview.md`](references/overview.md).
 - `assets/pipeline_testkit.py`: stub sibling skills for the tests, the eval and the
   feature-map recipe.
 - `assets/test_pipeline_tick.py`: the tick's unit suite.
+- `assets/test_pipeline_lock.py`: the one-tick lock's unit suite (R14).
 - `assets/test_factory_pipeline_smoke.py`: shape and status checks.
 - `eval/run_eval.py`: an outcome eval that runs the tick on stub skills and grades its
   lines (see the repo's `docs/eval-standard.md`).

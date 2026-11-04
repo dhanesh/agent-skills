@@ -4,6 +4,30 @@ Status: partly built. `pipeline tick` ships. Five of its nine stages are not bui
 report `pending-R<n>`. The design is `docs/factory/2026-11-04-autonomous-factory-spec.md`
 in the agent-skills repository (requirements R12 to R21).
 
+## The lock, before everything else
+
+Only one tick runs at a time in one repository (R14). A tick can last longer than the
+timer interval, because one tool call can run for up to 3600 seconds. The lock stops two
+ticks from running at the same time.
+
+1. The tick makes `<repo>/.skill-contract/pipeline/` with a `.gitignore` that holds `*`.
+   It writes the lock file only after it proves that this `.gitignore` is a regular file
+   with `*` and no `!` line. When it cannot prove this (for example, the directory is a
+   symlink), it prints `STOP: state-dir reason=<reason> dir=.skill-contract/pipeline` and
+   exits 2.
+2. The tick takes a non-blocking exclusive `flock` on `.skill-contract/pipeline/.lock`.
+   It does this before the grant check and before any stage.
+3. When another process holds the lock, the tick prints
+   `STOP: locked: another pipeline tick holds .skill-contract/pipeline/.lock` and exits 3.
+   It runs no grant check and no stage, so the queue does not change.
+4. The tick holds the lock until it exits, through every stage and every tool call.
+
+When the process that holds the lock dies, the system releases the lock. A killed tick
+thus never blocks the next tick. The lock file stays on disk, and that is correct: only
+the `flock` counts. The tools that the tick runs do not inherit the lock. ops-intake's own
+run lock is a different file (`.skill-contract/intake/.lock`), so the two locks never wait
+for each other.
+
 ## The grant check, before any stage
 
 Before the first stage, the tick runs spec-first-planning's vendored
@@ -49,8 +73,8 @@ A detail can follow the result, for example `exit=3` or `picked=2`.
 | `release-stage` | Not built yet (R19). Result: `pending-R19`. | (`release-conductor`, later) |
 | `digest` | Not built yet (R21). Result: `pending-R21`. | none |
 
-Also not built yet: the one-tick lock (R14), the caps (R15) and `pipeline schedule install`
-(R16).
+Also not built yet: the caps (R15) and `pipeline schedule install` (R16). The one-tick
+lock (R14) ships; see the lock section above.
 
 ## Result words
 
@@ -67,7 +91,7 @@ Also not built yet: the one-tick lock (R14), the caps (R15) and `pipeline schedu
 
 A result that is not `ok` does not stop the tick. The tick goes on to the next stage, and
 exits 0 when every stage ran. Exit 2 is a usage error (for example a `--root` that is not
-a directory) or `STOP: no-grant`.
+a directory), `STOP: state-dir` or `STOP: no-grant`. Exit 3 is `STOP: locked`.
 
 ## How the tick finds a skill
 
@@ -80,7 +104,7 @@ whole list. The tests use it to point at stub skills.
 
 ## Output
 
-The tick prints `TICK: start <time> root <repo>`, then `TICK: grant <id> expires_at <time>`,
+The tick prints `TICK: start <time> root <repo>`, then (when it holds the lock) `TICK: grant <id> expires_at <time>`,
 then the stages, then `TICK: done stages=<n>`. A line that starts with two spaces and `<stage>|` is the stage
 tool's own stdout or stderr. The prefix keeps a tool's `STOP:` line apart from the tick's
 own lines. The growth signals themselves are not printed: they go only to `intake import`.
