@@ -109,7 +109,12 @@ is `ops-intake`.
    that line to the owner as printed.
    The probe that opens the record also prints `ROLLBACK: <the recipe's rollback argv>`
    and `NEXT: ask the owner to roll back: release rollback (shows the rollback and
-   waits); on their yes: release rollback --approved-by "<their name>"`. The record's
+   waits); on their yes: release rollback --approved-by "<their name>"`. That command
+   acts only on a release in `prod_failed` or `outcome_unknown`; when no release is in
+   one of those states, the second line is instead
+   `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the
+   ROLLBACK command above`. Every printed line escapes control characters, so recipe
+   text cannot add a line. The record's
    `rollback` field holds the same argv as a list, word for word, with any `{version}`
    or `{commit}` unfilled (release-conductor fills them from the rollback target). A
    recipe with no valid `rollback` prints `ROLLBACK: none: <reason>` instead. Give both

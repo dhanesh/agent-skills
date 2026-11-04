@@ -30,8 +30,17 @@ repository (requirements R22 to R26, decision D1).
 - When a probe opens a record, two more lines show the rollback. They are
   `ROLLBACK: <the recipe's rollback argv>` and
   `NEXT: ask the owner to roll back: release rollback (shows the rollback and waits); on their yes: release rollback --approved-by "<their name>"`.
+  `release rollback` acts only on a release in `prod_failed` or `outcome_unknown`. If
+  no release is in one of those states (for example, the last release is `verified`),
+  the second line is
+  `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the ROLLBACK command above`
+  instead.
   If the recipe has no valid `rollback` field, the probe prints
-  `ROLLBACK: none: <reason>; the owner mitigates by hand` and no `NEXT: ask` line.
+  `ROLLBACK: none: <reason>; the owner mitigates by hand` and no rollback `NEXT:` line.
+- Every line that the probe prints escapes control, format and line-separator
+  characters (`\x0a`, `\x1b`, `\u2028` and so on). Recipe or record text in a line,
+  such as a refusal reason or the rollback argv, cannot add a line of its own. The
+  record keeps that text as data, unescaped.
 - When a record is already open: `INCIDENT: open <id> <record path> probes=<n>`. No new
   signal line.
 - When the CI runs are not on disk: `NEXT: gh run list --branch <branch> --limit 10 --json

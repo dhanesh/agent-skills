@@ -33,7 +33,11 @@ What ships now:
   release-conductor command that asks the owner: `release rollback` shows the rollback
   and waits, and `release rollback --approved-by "<their name>"` runs it after the
   owner's yes. The probe that opens the record prints a `ROLLBACK:` line and a
-  `NEXT: ask the owner to roll back: ...` line. If the recipe has no valid `rollback`
+  `NEXT: ask the owner to roll back: ...` line. `release rollback` acts only on a
+  release in `prod_failed` or `outcome_unknown`. If no release is in one of those states,
+  the `NEXT:` line says that `release rollback` cannot act and that the owner rolls back
+  by hand. Every printed line escapes control characters, so recipe text cannot add a
+  line. If the recipe has no valid `rollback`
   field, the record says so, and the probe goes on.
 - The probe never calls `gh` or the network. When the CI runs are not on disk, the record
   says so. The probe then prints the `NEXT: gh run list ...` line that you run to get

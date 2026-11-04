@@ -36,7 +36,11 @@ Commands:
           control characters escaped) and the release-conductor command that asks the
           owner (`release rollback`, which shows the rollback and waits for the owner's
           yes). The probe prints `ROLLBACK: <display>` and
-          `NEXT: ask the owner to roll back: ...`. A recipe with no `rollback` field gives
+          `NEXT: ask the owner to roll back: ...`; when no release is in a state that
+          command acts on (`prod_failed`, `outcome_unknown`), the NEXT line says instead
+          that `release rollback` cannot act and the owner rolls back by hand. Every line
+          the probe prints goes through emit(), which escapes control, format and
+          line-separator characters, so recipe or record text cannot forge a line. A recipe with no `rollback` field gives
           `"available": false` and `ROLLBACK: none: ...`; the probe still succeeds.
 
 Pending (not built here): `incident close --by <name>` (R26; the seams are
@@ -543,22 +547,34 @@ OWNER_ROLLBACK_YES = 'release rollback --approved-by "<their name>"'
 ROLLBACK_ACTS_ON = ("prod_failed", "outcome_unknown")
 
 
+def safe_text(text):
+    """`text` with every control, format and line-separator character (Unicode categories
+    Cc, Cf, Zl, Zp: newline, CR, U+0085, U+2028, U+2029, ESC, bidi overrides and the rest)
+    shown as an escape (\\xNN or \\uNNNN). The result is one line that cannot start a
+    second line, move the terminal cursor or reorder text."""
+    out = []
+    for ch in str(text):
+        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
+            o = ord(ch)
+            out.append("\\x%02x" % o if o < 0x100 else "\\u%04x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def emit(line):
+    """Print one machine line through safe_text. Every line the probe prints goes through
+    here, because many of them quote recipe or record text (a refusal reason, the rollback
+    argv, a release status), and that text MUST NOT forge a `NEXT:` or `INCIDENT:` line."""
+    print(safe_text(line))
+
+
 def safe_display(argv):
-    """A one-line display form of an argv list, for a person to read: each word shlex-quoted
-    the way release-conductor prints its own `rollback:` line, with every control, format
-    and line-separator character shown as an escape (\\xNN or \\uNNNN), so the display can
-    hold no newline, no terminal escape and no bidi override. It is data: nothing parses
-    it back into a command, and the argv list is the record's word-for-word form."""
-    def esc(word):
-        out = []
-        for ch in word:
-            if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp"):
-                o = ord(ch)
-                out.append("\\x%02x" % o if o < 0x100 else "\\u%04x" % o)
-            else:
-                out.append(ch)
-        return "".join(out)
-    return shlex.join(esc(str(w)) for w in argv)
+    """A one-line display form of an argv list, for a person to read: each word passed
+    through safe_text, then shlex-quoted the way release-conductor prints its own
+    `rollback:` line. It is data: nothing parses it back into a command, and the argv list
+    is the record's word-for-word form."""
+    return shlex.join(safe_text(w) for w in argv)
 
 
 def rollback_view(recipe, releases=(), problems=()):
@@ -580,7 +596,15 @@ def rollback_view(recipe, releases=(), problems=()):
     acting = [r.get("version") for r in releases if r.get("status") in ROLLBACK_ACTS_ON]
     ask = {"command": OWNER_ROLLBACK_ASK, "on_owner_yes": OWNER_ROLLBACK_YES,
            "acts_on": list(ROLLBACK_ACTS_ON), "releases_it_acts_on": acting,
-           "run_by_incident_watch": False}
+           "can_act": bool(acting), "run_by_incident_watch": False}
+    if not acting:
+        # release rollback refuses unless a release is in one of these states (release.py
+        # `rollback`: "rollback needs prod_failed or outcome_unknown").
+        shown = ", ".join("%s %s" % (r.get("version"), r.get("status"))
+                          for r in list(releases)[-3:])
+        ask["cannot_act_reason"] = (
+            "no release is %s (releases: %s)" % (" or ".join(ROLLBACK_ACTS_ON), shown)
+            if releases else "release-conductor has no release recorded")
     argv = recipe.get("rollback") if isinstance(recipe, dict) else None
     if argv is None:
         reason = "the release recipe has no rollback field"
@@ -602,8 +626,12 @@ def rollback_view(recipe, releases=(), problems=()):
 def rollback_lines(view):
     """The lines the probe prints for a newly opened record's rollback view."""
     if not view.get("available"):
-        return ["ROLLBACK: none: %s; the owner mitigates by hand" % view["reason"]]
+        return ["ROLLBACK: none: %s; the owner mitigates by hand" % safe_text(view["reason"])]
     ask = view["ask_owner"]
+    if not ask.get("can_act"):
+        return ["ROLLBACK: %s" % view["display"],
+                "NEXT: release rollback cannot act: %s; the owner rolls back by hand with "
+                "the ROLLBACK command above" % safe_text(ask["cannot_act_reason"])]
     return ["ROLLBACK: %s" % view["display"],
             "NEXT: ask the owner to roll back: %s (shows the rollback and waits); "
             "on their yes: %s" % (ask["command"], ask["on_owner_yes"])]
@@ -757,17 +785,17 @@ def cmd_probe(args):
             except OSError as e:
                 incident_lines = ["INCIDENT: error: cannot write the incident record: %s" % e]
     except Refused as e:
-        print("PROBE: refused: %s" % e)
+        emit("PROBE: refused: %s" % e)
         return 2
     except Locked:
-        print("STOP: locked: another incident probe holds %s/%s" % (INCIDENTS_DIR, LOCK_FILE))
+        emit("STOP: locked: another incident probe holds %s/%s" % (INCIDENTS_DIR, LOCK_FILE))
         return 3
     for r in results:
-        print("PROBE: %s %s rc=%s" % (r["name"], r["result"], r["rc"]))
-    print("PROBE_RESULT: %s commands=%d failed=%d consecutive_failures=%d"
+        emit("PROBE: %s %s rc=%s" % (r["name"], r["result"], r["rc"]))
+    emit("PROBE_RESULT: %s commands=%d failed=%d consecutive_failures=%d"
           % (word, len(results), len(failed), state["consecutive_failures"]))
     for ln in incident_lines:
-        print(ln)
+        emit(ln)
     return 3 if failed else 0
 
 

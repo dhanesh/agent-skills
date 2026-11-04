@@ -21,7 +21,8 @@ local stub scripts (no real endpoint), and checks:
     output) and writes one `incident` signal line; a third failure opens no second record;
   - R25: that record holds the recipe's rollback argv word for word and the
     release-conductor command that asks the owner, the probe that opened it printed the
-    `ROLLBACK:` and `NEXT: ask the owner` lines, and the rollback stub never ran;
+    `ROLLBACK:` line and the `NEXT:` line about `release rollback`, and the rollback stub
+    never ran;
   - SKILL.md and README.md say "partly built", not the old skeleton line, and every
     skill-relative path they name exists.
 
@@ -225,8 +226,10 @@ def grade_opening(out):
     errors = []
     if not any(ln.startswith("ROLLBACK: ") and ln.endswith(" rollback") for ln in lines):
         errors.append("no ROLLBACK: line with the recipe's rollback")
-    if not any(ln.startswith("NEXT: ask the owner to roll back: release rollback ")
-               for ln in lines):
+    # The fixture records no release, so release rollback cannot act and the line says
+    # so; with a prod_failed release it names the command (the unit suite covers both).
+    if not any(ln.startswith(("NEXT: ask the owner to roll back: release rollback ",
+                              "NEXT: release rollback cannot act: ")) for ln in lines):
         errors.append("no NEXT: line with the release-conductor command")
     return errors
 

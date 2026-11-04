@@ -53,7 +53,10 @@ Shipped:
   second record: `INCIDENT: open <id> <path> probes=3` (R24).
 - The probe that opens the record also prints `ROLLBACK: <the recipe's rollback argv>`
   and `NEXT: ask the owner to roll back: release rollback (shows the rollback and
-  waits); on their yes: release rollback --approved-by "<their name>"`. The record's
+  waits); on their yes: release rollback --approved-by "<their name>"`. When no release
+  is `prod_failed` or `outcome_unknown`, that line is instead
+  `NEXT: release rollback cannot act: <reason>; the owner rolls back by hand with the
+  ROLLBACK command above`. Every printed line escapes control characters. The record's
   `rollback.argv` is the recipe's `rollback` list word for word. The rollback stub never
   runs, so `<dir>/stubs/ran/rollback` never exists (R25).
 
@@ -128,7 +131,8 @@ ls -A "$IP/inc/stubs/ran" > "$WT/.verify-run/$INSTANCE/ip-inc-ran.txt"
 - `ip-inc-2`: exit 3, `consecutive_failures=2`, `INCIDENT: opened <id> <path>`,
   `SIGNAL: .skill-contract/incidents/signals.jsonl kind incident`, the
   `NEXT: intake import ...` line, the `ROLLBACK: ... stubs/stub.py rollback` line, the
-  `NEXT: ask the owner to roll back: release rollback ...` line and the
+  `NEXT: release rollback cannot act: release-conductor has no release recorded; ...`
+  line (the fixture has no release) and the
   `NEXT: gh run list ...` line (the fixture has no CI runs on disk).
   `ip-inc-2-records.txt` holds one `<id>.json`.
 - `ip-inc-3`: exit 3, `INCIDENT: open <id> <path> probes=3` with the same id, and no
@@ -154,7 +158,7 @@ codes), `ip-pass-probes.jsonl`, `ip-pass-state.txt`, `ip-pass-ignored.txt` and b
 `calls.log` copies. The `ip-refuse-only` and `ip-refuse-argv` captures (exit 2 and the
 `PROBE: refused:` line) and `ip-refuse-stubs.txt` with no `calls.log` (R23). The `ip-inc-1` to `ip-inc-3` captures,
 their records listings, `ip-inc-signals.jsonl`, `ip-inc-record.json` and `ip-inc-calls.log`
-(R24). The `ROLLBACK:` and `NEXT: ask the owner` lines in `ip-inc-2`, the `rollback`
+(R24). The `ROLLBACK:` and `NEXT: release rollback cannot act` lines in `ip-inc-2`, the `rollback`
 field of `ip-inc-record.json` against `ip-inc-recipe.json`, and `ip-inc-ran.txt` with no
 `rollback` or `deploy_prod` marker (R25). After R26 ships: the `NEXT:` line from
 `incident close`.
