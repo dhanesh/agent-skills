@@ -796,7 +796,7 @@ def cmd_status(a):
 POLICY_PATH = ".intake/pick-policy.json"
 POLICY_STATE = "policy-registration.json"
 POLICY_KEYS = ("kinds", "min_rank", "formats", "max_picks_per_day")
-POLICY_KINDS = ("release", "ci", "issue", "feedback")
+POLICY_KINDS = ("release", "ci", "issue", "feedback", "incident")
 MAX_PICKS_PER_DAY = 100
 
 

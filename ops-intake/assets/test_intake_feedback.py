@@ -124,12 +124,12 @@ class AdapterTests(unittest.TestCase):
 
     def test_signals_jsonl_cannot_claim_feedback(self):
         # feedback text is redacted only by feedback-jsonl, so the generic format keeps its
-        # three kinds and cannot carry unredacted feedback in.
+        # own kinds and cannot carry unredacted feedback in.
         rec = {"source": "jira", "source_id": "X-1", "kind": "feedback", "title": "t",
                "severity": 2, "first_seen": NOW, "last_seen": NOW}
         sigs, problems = AD.ADAPTERS["intake-signals-jsonl"](json.dumps(rec),
                                                             dict(CTX, source="jira"))
-        self.assertEqual((sigs, problems), ([], ["line 1: kind must be release, ci or issue"]))
+        self.assertEqual((sigs, problems), ([], ["line 1: kind must be release, ci, issue or incident"]))
         self.assertIn("feedback", AD.KINDS)
 
     def test_text_is_capped_after_redaction(self):

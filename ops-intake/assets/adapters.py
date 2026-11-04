@@ -23,10 +23,12 @@ _SEMVER_RE = re.compile(
 _RELEASE_RE = re.compile(r"^RELEASE: (\S+) (\S+)\Z")
 _RELEASE_SEVERITY = {"prod_failed": 4, "outcome_unknown": 4, "rolled_back": 3,
                      "stage_failed": 3, "abandoned": 2}
-KINDS = ("release", "ci", "issue", "feedback")
-# intake-signals-jsonl keeps the first three: feedback text is redacted only by
+KINDS = ("release", "ci", "issue", "feedback", "incident")
+# intake-signals-jsonl takes every kind but feedback: feedback text is redacted only by
 # feedback-jsonl, so the generic format cannot carry unredacted customer text in.
-SIGNAL_KINDS = ("release", "ci", "issue")
+# `incident` (added by addition only, spec decision D8) is incident-watch's signal for an
+# incident record it opened after repeated failed production probes.
+SIGNAL_KINDS = ("release", "ci", "issue", "incident")
 
 
 def parse_time(s):
@@ -135,7 +137,7 @@ def _one_jsonl(rec, ctx):
     if len(rec["source_id"]) > SOURCE_ID_CAP:
         raise ValueError("source_id longer than %d characters" % SOURCE_ID_CAP)
     if rec.get("kind") not in SIGNAL_KINDS:
-        raise ValueError("kind must be release, ci or issue")
+        raise ValueError("kind must be release, ci, issue or incident")
     sev = rec.get("severity")
     if not isinstance(sev, int) or isinstance(sev, bool) or not 1 <= sev <= 4:
         raise ValueError("severity must be 1 to 4")

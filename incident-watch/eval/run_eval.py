@@ -17,6 +17,8 @@ local stub scripts (no real endpoint), and checks:
   - in both, no non-probe stub (build, deploy, rollback, staging check) was called;
   - R23: `probe --only rollback` and `probe rollback` exit 2 with `PROBE: refused:` and
     call no stub at all, not even the allowed ones;
+  - R24: a failing health stub probed twice opens one incident record (with the probe
+    output) and writes one `incident` signal line; a third failure opens no second record;
   - SKILL.md and README.md say "partly built", not the old skeleton line, and every
     skill-relative path they name exists.
 
@@ -160,6 +162,48 @@ def grade_probe(root, rc, out, expect):
     return errors
 
 
+def grade_incident(root, out):
+    """Model-free grader for R24 after 2 or more failed probes: exactly one open record
+    that holds the failing probe output, exactly one `incident` signal line naming it, an
+    INCIDENT: line, and no non-probe stub called."""
+    errors = []
+    d = os.path.join(root, ".skill-contract", "incidents")
+    rdir = os.path.join(d, "records")
+    names = sorted(os.listdir(rdir)) if os.path.isdir(rdir) else []
+    if len(names) != 1:
+        errors.append("%d incident records, want 1" % len(names))
+    else:
+        try:
+            with open(os.path.join(rdir, names[0]), encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            rec = {}
+        if rec.get("status") != "open":
+            errors.append("record is not open")
+        tails = [c.get("out_tail", "") for p in rec.get("probes", [])
+                 for c in p.get("commands", [])]
+        if not any("stub health production exit 1" in t for t in tails):
+            errors.append("record lacks the failing probe output")
+        for key in ("last_release", "ci_runs"):
+            if key not in rec:
+                errors.append("record lacks %s" % key)
+    try:
+        with open(os.path.join(d, "signals.jsonl"), encoding="utf-8") as f:
+            sigs = [json.loads(ln) for ln in f if ln.strip()]
+    except (OSError, ValueError):
+        sigs = []
+    if len(sigs) != 1 or sigs[0].get("kind") != "incident":
+        errors.append("signals.jsonl does not hold one incident line")
+    elif names and sigs[0].get("source_id") + ".json" != names[0]:
+        errors.append("signal does not name the record")
+    if not any(ln.startswith("INCIDENT: ") for ln in out.splitlines()):
+        errors.append("no INCIDENT: line")
+    bad = [c[0] for c in kit.calls(root) if c[0] in kit.NON_PROBE]
+    if bad:
+        errors.append("non-probe command ran: %s" % bad)
+    return errors
+
+
 def main():
     text = read(os.path.join(SKILL, "SKILL.md"))
     fm = frontmatter_errors(text)
@@ -187,6 +231,17 @@ def main():
         errs = grade_probe(bad, brc, bout, "fail")
         check("failing health: failure recorded, nothing else run", not errs,
               "; ".join(errs)[:120])
+
+        inc = kit.fixture(os.path.join(tmp, "incident"), fail=["health"])
+        run_probe(inc)
+        errs = []
+        if os.path.isdir(os.path.join(inc, ".skill-contract", "incidents", "records")):
+            errs.append("a record after one failure")
+        run_probe(inc)
+        _, iout = run_probe(inc)
+        errs += grade_incident(inc, iout)
+        check("two failed probes: one record and one incident signal; a third adds none "
+              "(R24)", not errs, "; ".join(errs)[:120])
 
         ref = kit.fixture(os.path.join(tmp, "refuse"))
         errs = []
@@ -218,6 +273,20 @@ def main():
         os.remove(os.path.join(good, ".skill-contract", "incidents", "probes.jsonl"))
         check("grader rejects negative fixture nothing-recorded",
               any("probes.jsonl" in e for e in grade_probe(good, rc, out, "pass")))
+
+        rdir = os.path.join(inc, ".skill-contract", "incidents", "records")
+        dup = os.path.join(rdir, "inc-copy.json")
+        shutil.copy(os.path.join(rdir, sorted(os.listdir(rdir))[0]), dup)
+        check("grader rejects negative fixture second-record-opened",
+              any("2 incident records" in e for e in grade_incident(inc, iout)))
+        os.remove(dup)
+        sig = os.path.join(inc, ".skill-contract", "incidents", "signals.jsonl")
+        with open(sig, encoding="utf-8") as f:
+            first_sig = f.read()
+        with open(sig, "a", encoding="utf-8") as f:
+            f.write(first_sig)
+        check("grader rejects negative fixture second-signal-line",
+              any("one incident line" in e for e in grade_incident(inc, iout)))
 
         stale = os.path.join(tmp, "stale")
         shutil.copytree(SKILL, stale, ignore=shutil.ignore_patterns("__pycache__"))

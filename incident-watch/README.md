@@ -1,7 +1,8 @@
 # incident-watch
 
-**Status: partly built.** `incident probe` ships. The incident record, the `incident`
-signal and `incident close` are not built yet.
+**Status: partly built.** `incident probe` ships. It opens an incident record and writes
+an `incident` signal. The rollback command in the record and `incident close` are not
+built yet.
 
 This skill finds and triages live incidents for the software factory. The factory
 detects, and the owner fixes (decision D1).
@@ -19,11 +20,19 @@ What ships now:
   runs nothing (R23). `--only health|version_probe|prod_smoke` runs one list. Any other
   name, an extra argument after `probe`, or a probe entry whose program word holds a
   `{token}` is refused.
+- After 2 or more consecutive failed probes, the probe opens one incident record (R24).
+  The record is `.skill-contract/incidents/records/<id>.json`. It holds the failed probes
+  with their output, the last release record from release-conductor and the recent CI
+  runs on the default branch. The probe also writes one line of kind `incident` to
+  `.skill-contract/incidents/signals.jsonl`. ops-intake imports that file with
+  `intake import --format intake-signals-jsonl --source incident-watch`. A third failure
+  opens no second record. It adds the probe to the open record.
+- The probe never calls `gh` or the network. When the CI runs are not on disk, the record
+  says so. The probe then prints the `NEXT: gh run list ...` line that you run to get
+  them.
 
 What is pending:
 
-- After 2 or more consecutive failed probes, open one incident record with evidence and
-  write one `incident` signal into ops-intake (R24).
 - Show the recipe's rollback command word for word in the record (R25).
 - `incident close --by <name>` hands the record to bug-autopsy (R26).
 
@@ -64,6 +73,9 @@ Install release-conductor too. incident-watch reads the recipe with its loader.
 ```bash
 python3 incident-watch/assets/incident.py --root <repo> probe [--version V] [--commit C] [--timeout S]
 ```
+
+After the second consecutive failure, the output also has `INCIDENT: opened <id> <path>`,
+`SIGNAL: ...` and `NEXT:` lines. `references/overview.md` lists the record fields.
 
 Exit 0 means every command passed. Exit 3 means a command failed or timed out. Exit 2
 means the tool refused and ran nothing.

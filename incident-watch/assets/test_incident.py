@@ -2,10 +2,14 @@
 """Unit suite for incident-watch's incident.py. Stdlib unittest; offline, deterministic.
 
 Every probe runs against a fixture repo from incident_testkit.py: each recipe command is a
-local stub script, so no test touches a real endpoint. R23's refusals are in TestOnlyProbeLists. Later
-requirements (R24 to R26) add their tests to this file.
+local stub script, so no test touches a real endpoint. R23's refusals are in TestOnlyProbeLists.
+R24's incident record and signal are in TestIncidentRecord. Later requirements (R25, R26)
+add their tests to this file.
 Run:  python3 test_incident.py
 """
+import datetime
+import glob
+import importlib.util
 import json
 import os
 import shutil
@@ -82,8 +86,9 @@ class TestProbePass(Base):
             self.assertIsInstance(c["argv"], list)
             self.assertEqual(c["rc"], 0)
         self.assertEqual(counter(self.root), 0)
-        # No incident record and no signal: only the probe log, the counter, the lock
-        # and the ignore file exist.
+        # No incident record and no signal: a pass leaves only the probe log, the
+        # counter, the lock and the ignore file (R24 adds records/ and signals.jsonl only
+        # after 2 consecutive failures; TestIncidentRecord covers that).
         self.assertEqual(sorted(os.listdir(state_dir(self.root))),
                          [".gitignore", ".lock", "probes.jsonl", "state.json"])
 
@@ -279,6 +284,195 @@ class TestOnlyProbeLists(Base):
                          ("health", "prod_smoke"))
         with self.assertRaises(incident.Refused):
             incident.check_only(["rollback"])
+
+
+def load_skill_module(name, rel):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(SKILLS, *rel.split("/")))
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, os.path.dirname(spec.origin))
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.pop(0)
+    return mod
+
+
+def records(root):
+    out = []
+    for path in sorted(glob.glob(os.path.join(state_dir(root), "records", "*.json"))):
+        with open(path, encoding="utf-8") as f:
+            out.append((path, json.load(f)))
+    return out
+
+
+def signals(root):
+    try:
+        with open(os.path.join(state_dir(root), "signals.jsonl"), encoding="utf-8") as f:
+            return [ln for ln in f.read().splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+class TestIncidentRecord(Base):
+    """R24: no record after one failed probe; one record, with the probe output, the last
+    release record and the CI runs, and one `incident` signal line after the second; a
+    third failure opens no second record."""
+
+    def setUp(self):
+        super().setUp()
+        kit.behave(self.root, "health", 1)
+
+    def test_one_failure_opens_no_record(self):
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3)
+        self.assertNotIn("INCIDENT:", out)
+        self.assertEqual(records(self.root), [])
+        self.assertEqual(signals(self.root), [])
+        self.assertFalse(os.path.exists(os.path.join(state_dir(self.root), "records")))
+
+    def test_second_failure_opens_one_record_with_probe_output_and_one_signal(self):
+        probe(self.root)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3, out)
+        recs = records(self.root)
+        self.assertEqual(len(recs), 1)
+        path, rec = recs[0]
+        rel = os.path.relpath(path, self.root)
+        self.assertIn("INCIDENT: opened %s %s" % (rec["id"], rel), out)
+        self.assertIn("SIGNAL: .skill-contract/incidents/signals.jsonl kind incident", out)
+        self.assertIn("NEXT: intake import --format intake-signals-jsonl --source "
+                      "incident-watch .skill-contract/incidents/signals.jsonl", out)
+        self.assertRegex(rec["id"], r"^inc-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+        self.assertEqual(os.path.basename(path), rec["id"] + ".json")
+        self.assertEqual(rec["status"], "open")
+        self.assertEqual(len(rec["probes"]), 2)
+        for p in rec["probes"]:
+            self.assertEqual(p["result"], "fail")
+            self.assertIn("stub health production exit 1", p["commands"][0]["out_tail"])
+            self.assertLessEqual(len(p["commands"][0]["out_tail"]), incident.TAIL)
+        for key in ("last_release", "releases", "ci_runs", "rollback", "closed_at",
+                    "closed_by"):
+            self.assertIn(key, rec)
+        lines = signals(self.root)
+        self.assertEqual(len(lines), 1)
+        sig = json.loads(lines[0])
+        self.assertEqual((sig["kind"], sig["source"], sig["source_id"], sig["severity"]),
+                         ("incident", "incident-watch", rec["id"], 4))
+        self.assertIn(rel, sig["evidence"][0]["text"])
+        with open(os.path.join(state_dir(self.root), "state.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["open_incident"], rec["id"])
+        self.assertEqual(self.non_probe_calls(), [])
+        for f in (path, os.path.join(state_dir(self.root), "signals.jsonl")):
+            cp = subprocess.run(["git", "-C", self.root, "check-ignore", "-q", f])
+            self.assertEqual(cp.returncode, 0, f)
+
+    def test_third_failure_opens_no_second_record(self):
+        for _ in range(2):
+            probe(self.root)
+        first = records(self.root)[0][1]["id"]
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 3)
+        self.assertNotIn("INCIDENT: opened", out)
+        recs = records(self.root)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0][1]["id"], first)
+        self.assertIn("INCIDENT: open %s " % first, out)
+        self.assertIn("probes=3", out)
+        self.assertEqual(recs[0][1]["probe_count"], 3)
+        self.assertEqual(len(recs[0][1]["probes"]), 3)
+        self.assertEqual(len(signals(self.root)), 1)
+        self.assertEqual(self.non_probe_calls(), [])
+
+    def test_a_pass_between_failures_keeps_the_one_open_record(self):
+        for _ in range(2):
+            probe(self.root)
+        kit.behave(self.root, "health", 0)
+        rc, out, _ = probe(self.root)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("INCIDENT:", out)
+        kit.behave(self.root, "health", 1)
+        probe(self.root)
+        rc, out, _ = probe(self.root)
+        self.assertNotIn("INCIDENT: opened", out)
+        self.assertEqual(len(records(self.root)), 1)
+        self.assertEqual(len(signals(self.root)), 1)
+
+    def test_signal_line_is_accepted_by_ops_intake(self):
+        for _ in range(2):
+            probe(self.root)
+        adapters = load_skill_module("incident_test_adapters", "ops-intake/assets/adapters.py")
+        ctx = {"source": "incident-watch", "now": "2026-11-04T00:00:00Z"}
+        sigs, problems = adapters.ADAPTERS["intake-signals-jsonl"](
+            "\n".join(signals(self.root)), ctx)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(sigs), 1)
+        self.assertEqual(sigs[0]["kind"], "incident")
+
+    def test_ci_runs_unavailable_prints_the_gh_next_line(self):
+        for _ in range(2):
+            rc, out, _ = probe(self.root)
+        ci = records(self.root)[0][1]["ci_runs"]
+        self.assertFalse(ci["available"])
+        want = ("NEXT: gh run list --branch main --limit 10 --json databaseId,workflowName,"
+                "headBranch,headSha,event,status,conclusion,createdAt,updatedAt,url,attempt"
+                " > .skill-contract/incidents/ci-runs.json")
+        self.assertIn(want, out.splitlines())
+        self.assertEqual("NEXT: " + ci["next"], want)
+
+    def test_ci_runs_are_read_from_disk_for_the_default_branch(self):
+        os.makedirs(os.path.join(self.root, ".intake"))
+        with open(os.path.join(self.root, ".intake", "config.json"), "w") as f:
+            json.dump({"ci": {"default_branch": "trunk"}}, f)
+        os.makedirs(state_dir(self.root))
+        runs = [{"databaseId": i, "workflowName": "gate", "headBranch": b,
+                 "headSha": "a" * 40, "event": "push", "status": "completed",
+                 "conclusion": "failure" if i % 2 else "success",
+                 "createdAt": "2026-11-0%dT00:00:00Z" % i, "updatedAt": "x", "url": "u",
+                 "attempt": 1, "secret": "dropped"}
+                for i, b in ((1, "trunk"), (2, "feature"), (3, "trunk"))]
+        with open(os.path.join(state_dir(self.root), "ci-runs.json"), "w") as f:
+            json.dump(runs, f)
+        for _ in range(2):
+            rc, out, _ = probe(self.root)
+        self.assertNotIn("NEXT: gh run list", out)
+        ci = records(self.root)[0][1]["ci_runs"]
+        self.assertTrue(ci["available"])
+        self.assertEqual(ci["branch"], "trunk")
+        self.assertEqual([r["databaseId"] for r in ci["runs"]], [3, 1])
+        self.assertNotIn("secret", ci["runs"][0])
+
+    def test_last_release_comes_from_the_newest_release_result_envelope(self):
+        release = load_skill_module("incident_test_release", "release-conductor/assets/release.py")
+        cc = release.CC
+        with open(os.path.join(self.root, "recipe-copy.json"), "w") as f:
+            f.write("{}\n")
+
+        def env(version, outcome, day, skill="release-conductor"):
+            payload = {"version": version, "commit": "b" * 40, "outcome": outcome,
+                       "rollback_target": {"version": "0.9.0", "commit": None}}
+            when = datetime.datetime(2026, 11, day, tzinfo=datetime.timezone.utc)
+            st = cc.build_statement(release.RESULT_KIND, skill, "1.0.0", self.root,
+                                    ["recipe-copy.json"], payload, now=when)
+            return cc.write_envelope(self.root, st)
+        env("1.0.0", "verified", 1)
+        newest = env("1.1.0", "rolled_back", 2)
+        env("9.9.9", "verified", 3, skill="someone-else")  # wrong producer: ignored
+        os.makedirs(os.path.join(self.root, ".skill-contract", "releases", "1.2.0"))
+        for _ in range(2):
+            probe(self.root)
+        rec = records(self.root)[0][1]
+        last = rec["last_release"]
+        self.assertTrue(last["available"])
+        self.assertEqual((last["version"], last["outcome"]), ("1.1.0", "rolled_back"))
+        self.assertEqual(last["path"], os.path.relpath(newest, self.root))
+        self.assertEqual(rec["releases"], [{"version": "1.2.0", "status": "unreadable"}])
+
+    def test_no_release_envelope_is_recorded_as_unavailable(self):
+        for _ in range(2):
+            probe(self.root)
+        last = records(self.root)[0][1]["last_release"]
+        self.assertFalse(last["available"])
+        self.assertIn("no release-result/v1 envelope", last["reason"])
 
 
 class TestNoRollbackPath(unittest.TestCase):
